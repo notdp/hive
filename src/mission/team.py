@@ -22,6 +22,7 @@ class Team:
     lead_name: str = "team-lead"
     agents: dict[str, Agent] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    lead_pane_id: str = ""
 
     @property
     def teams_dir(self) -> Path:
@@ -48,12 +49,19 @@ class Team:
         description: str = "",
         cwd: str = "",
     ) -> Team:
-        """Create a new team with a tmux session."""
-        if tmux.has_session(name):
-            raise ValueError(f"Team '{name}' already exists")
+        """Create a new team.
 
-        initial_pane = tmux.new_session(name)
+        If inside tmux: use current window (split panes in-place).
+        If outside tmux: create a new detached session.
+        """
         team = cls(name=name, description=description)
+
+        if tmux.is_inside_tmux():
+            team.lead_pane_id = tmux.get_current_pane_id() or ""
+        else:
+            if tmux.has_session(name):
+                raise ValueError(f"Team '{name}' already exists")
+            tmux.new_session(name)
 
         # Create directories
         team.teams_dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +86,7 @@ class Team:
             description=data.get("description", ""),
             lead_name=data.get("leadName", "team-lead"),
             created_at=data.get("createdAt", 0),
+            lead_pane_id=data.get("leadPaneId", ""),
         )
 
         for member in data.get("members", []):
@@ -102,6 +111,7 @@ class Team:
             "name": self.name,
             "description": self.description,
             "leadName": self.lead_name,
+            "leadPaneId": self.lead_pane_id,
             "createdAt": self.created_at,
             "members": [a.to_dict() for a in self.agents.values()],
         }
@@ -127,10 +137,26 @@ class Team:
             idx = len(self.agents) % len(COLORS)
             color = COLORS[idx]
 
-        # Find a pane to split from
-        panes = tmux.list_panes(self.name)
         is_first = len(self.agents) == 0
-        target = panes[0] if panes else f"{self.name}:0"
+        in_tmux = tmux.is_inside_tmux()
+
+        if in_tmux:
+            if is_first:
+                # First agent: split from lead pane, 70% for agent
+                target = self.lead_pane_id or tmux.get_current_pane_id() or ""
+                split_horizontal = True
+                split_size = "70%"
+            else:
+                # Subsequent: split from last agent pane vertically
+                last_agent = list(self.agents.values())[-1]
+                target = last_agent.pane_id
+                split_horizontal = False
+                split_size = None
+        else:
+            panes = tmux.list_panes(self.name)
+            target = panes[0] if panes else f"{self.name}:0"
+            split_horizontal = True
+            split_size = None
 
         agent = Agent.spawn(
             name=name,
@@ -141,6 +167,8 @@ class Team:
             color=color,
             cwd=cwd or os.getcwd(),
             is_first=is_first,
+            split_horizontal=split_horizontal,
+            split_size=split_size,
         )
 
         self.agents[name] = agent
@@ -150,8 +178,15 @@ class Team:
         if not inbox_file.exists():
             inbox_file.write_text("[]")
 
-        # Rebalance layout
-        if len(self.agents) > 1:
+        # Rebalance: main-vertical with lead at 30%
+        if in_tmux:
+            window_target = tmux.get_current_window_target()
+            if window_target:
+                tmux.select_layout(window_target, "main-vertical")
+                lead = self.lead_pane_id or tmux.get_current_pane_id() or ""
+                if lead:
+                    tmux.resize_pane(lead, width="30%")
+        elif len(self.agents) > 1:
             tmux.select_layout(self.name, "tiled")
 
         self.save()
@@ -191,5 +226,9 @@ class Team:
             agent.shutdown()
 
     def cleanup(self) -> None:
-        """Kill the entire team session."""
-        tmux.kill_session(self.name)
+        """Kill all agent panes (not the session itself if in-place)."""
+        for agent in self.agents.values():
+            agent.kill()
+        # Only kill session if it was created by mission (not the user's session)
+        if not tmux.is_inside_tmux():
+            tmux.kill_session(self.name)

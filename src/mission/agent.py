@@ -40,14 +40,16 @@ class Agent:
         cwd: str = "",
         session_id: str | None = None,
         is_first: bool = False,
+        split_horizontal: bool = True,
+        split_size: str | None = None,
     ) -> Agent:
         """Spawn a droid in a tmux pane."""
         cwd = cwd or os.getcwd()
 
-        if is_first:
+        if is_first and not tmux.is_inside_tmux():
             pane_id = target_pane
         else:
-            pane_id = tmux.split_window(target_pane)
+            pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
 
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.set_pane_border_color(pane_id, color)

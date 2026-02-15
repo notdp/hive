@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 
 import click
 
-from .team import Team
+from .team import Team, MISSION_HOME
 from . import inbox as inbox_mod
 from .inbox import Message
 
@@ -176,3 +177,25 @@ def shutdown(team: str, agent: str | None, force: bool):
     else:
         t.shutdown()
         click.echo(f"All agents shutting down.")
+
+
+# --- Clean ---
+
+@cli.command()
+@click.argument("name")
+def clean(name: str):
+    """Clean up a team: kill all agent panes and remove team data."""
+    try:
+        t = Team.load(name)
+        t.cleanup()
+    except FileNotFoundError:
+        pass
+
+    # Remove team data
+    teams_dir = MISSION_HOME / "teams" / name
+    tasks_dir = MISSION_HOME / "tasks" / name
+    for d in [teams_dir, tasks_dir]:
+        if d.exists():
+            shutil.rmtree(d)
+
+    click.echo(f"Team '{name}' cleaned up.")

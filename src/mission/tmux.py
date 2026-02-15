@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
 
 
-def _run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["tmux", *args],
-        capture_output=True, text=True, check=check,
-    )
+def _run(args: list[str], check: bool = True, timeout: int = 5) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["tmux", *args],
+            capture_output=True, text=True, check=check, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["tmux", *args], 1, "", "timeout")
 
 
 def _run_output(args: list[str]) -> str:
@@ -125,6 +129,30 @@ def list_panes(target: str) -> list[str]:
     """List all pane ids in a window/session."""
     r = _run(["list-panes", "-t", target, "-F", "#{pane_id}"], check=False)
     return [p for p in r.stdout.strip().split("\n") if p]
+
+
+# --- Context detection ---
+
+def is_inside_tmux() -> bool:
+    return bool(os.environ.get("TMUX"))
+
+
+def get_current_pane_id() -> str | None:
+    """Get the pane id of the calling process (per-pane env var)."""
+    return os.environ.get("TMUX_PANE")
+
+
+def get_current_window_target() -> str | None:
+    """Get the window target that contains the calling pane."""
+    pane_id = get_current_pane_id()
+    if not pane_id:
+        return None
+    # Query which window this pane belongs to
+    r = _run(
+        ["display-message", "-t", pane_id, "-p", "#{session_name}:#{window_index}"],
+        check=False,
+    )
+    return r.stdout.strip() or None
 
 
 # --- Utility ---
