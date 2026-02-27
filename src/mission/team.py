@@ -19,6 +19,7 @@ COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 class Team:
     name: str
     description: str = ""
+    workspace: str = ""
     lead_name: str = "team-lead"
     agents: dict[str, Agent] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -32,14 +33,6 @@ class Team:
     def config_path(self) -> Path:
         return self.teams_dir / "config.json"
 
-    @property
-    def inboxes_dir(self) -> Path:
-        return self.teams_dir / "inboxes"
-
-    @property
-    def tasks_dir(self) -> Path:
-        return MISSION_HOME / "tasks" / self.name
-
     # --- Lifecycle ---
 
     @classmethod
@@ -48,13 +41,14 @@ class Team:
         name: str,
         description: str = "",
         cwd: str = "",
+        workspace: str = "",
     ) -> Team:
         """Create a new team.
 
         If inside tmux: use current window (split panes in-place).
         If outside tmux: create a new detached session.
         """
-        team = cls(name=name, description=description)
+        team = cls(name=name, description=description, workspace=workspace)
 
         if tmux.is_inside_tmux():
             team.lead_pane_id = tmux.get_current_pane_id() or ""
@@ -63,10 +57,7 @@ class Team:
                 raise ValueError(f"Team '{name}' already exists")
             tmux.new_session(name)
 
-        # Create directories
         team.teams_dir.mkdir(parents=True, exist_ok=True)
-        team.inboxes_dir.mkdir(parents=True, exist_ok=True)
-        team.tasks_dir.mkdir(parents=True, exist_ok=True)
 
         team.save()
         return team
@@ -84,6 +75,7 @@ class Team:
         team = cls(
             name=data["name"],
             description=data.get("description", ""),
+            workspace=data.get("workspace", ""),
             lead_name=data.get("leadName", "team-lead"),
             created_at=data.get("createdAt", 0),
             lead_pane_id=data.get("leadPaneId", ""),
@@ -110,6 +102,7 @@ class Team:
         data = {
             "name": self.name,
             "description": self.description,
+            "workspace": self.workspace,
             "leadName": self.lead_name,
             "leadPaneId": self.lead_pane_id,
             "createdAt": self.created_at,
@@ -128,6 +121,8 @@ class Team:
         prompt: str = "",
         color: str = "",
         cwd: str = "",
+        skill: str = "mission",
+        extra_env: dict[str, str] | None = None,
     ) -> Agent:
         """Spawn a new agent in the team."""
         if name in self.agents:
@@ -142,21 +137,20 @@ class Team:
 
         if in_tmux:
             if is_first:
-                # First agent: split from lead pane, 70% for agent
                 target = self.lead_pane_id or tmux.get_current_pane_id() or ""
                 split_horizontal = True
-                split_size = "70%"
+                split_size = "50%"
             else:
                 # Subsequent: split from last agent pane vertically
                 last_agent = list(self.agents.values())[-1]
                 target = last_agent.pane_id
                 split_horizontal = False
-                split_size = None
+                split_size = "50%"
         else:
             panes = tmux.list_panes(self.name)
             target = panes[0] if panes else f"{self.name}:0"
             split_horizontal = True
-            split_size = None
+            split_size = "50%"
 
         agent = Agent.spawn(
             name=name,
@@ -169,23 +163,18 @@ class Team:
             is_first=is_first,
             split_horizontal=split_horizontal,
             split_size=split_size,
+            skill=skill,
+            extra_env=extra_env,
         )
 
         self.agents[name] = agent
 
-        # Create inbox
-        inbox_file = self.inboxes_dir / f"{name}.json"
-        if not inbox_file.exists():
-            inbox_file.write_text("[]")
-
-        # Rebalance: main-vertical with lead at 30%
+        # Layout and pane borders
         if in_tmux:
             window_target = tmux.get_current_window_target()
             if window_target:
+                tmux.enable_pane_border_status(window_target)
                 tmux.select_layout(window_target, "main-vertical")
-                lead = self.lead_pane_id or tmux.get_current_pane_id() or ""
-                if lead:
-                    tmux.resize_pane(lead, width="30%")
         elif len(self.agents) > 1:
             tmux.select_layout(self.name, "tiled")
 
@@ -208,12 +197,14 @@ class Team:
         return {
             "name": self.name,
             "description": self.description,
+            "workspace": self.workspace,
             "agents": {
                 name: {
                     "alive": agent.is_alive(),
                     "pane": agent.pane_id,
                     "model": agent.model,
                     "color": agent.color,
+                    "sessionId": agent.session_id,
                 }
                 for name, agent in self.agents.items()
             },

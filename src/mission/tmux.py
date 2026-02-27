@@ -50,9 +50,15 @@ def split_window(
     target: str,
     horizontal: bool = True,
     size: str | None = None,
+    detach: bool = True,
 ) -> str:
-    """Split a window/pane. Returns the new pane id."""
+    """Split a window/pane. Returns the new pane id.
+
+    detach=True (default) keeps focus on the original pane (-d flag).
+    """
     args = ["split-window", "-t", target]
+    if detach:
+        args.append("-d")
     args.append("-h" if horizontal else "-v")
     if size:
         args.extend(["-l", size])
@@ -62,7 +68,11 @@ def split_window(
 
 
 def send_keys(pane_id: str, text: str, enter: bool = True) -> None:
-    """Send text to a pane (literal mode)."""
+    """Send literal text to a pane, then optionally press Enter.
+
+    Uses two separate tmux invocations to avoid command-chaining (;)
+    interfering with literal text parsing, which caused truncation.
+    """
     _run(["send-keys", "-t", pane_id, "-l", text])
     if enter:
         _run(["send-keys", "-t", pane_id, "Enter"])
@@ -113,6 +123,19 @@ def set_pane_title(pane_id: str, title: str) -> None:
     _run([
         "select-pane", "-t", pane_id,
         "-T", title,
+    ], check=False)
+
+
+def enable_pane_border_status(target: str) -> None:
+    """Enable pane border labels (shows pane titles at top of each pane)."""
+    _run([
+        "set-window-option", "-t", target,
+        "pane-border-status", "top",
+    ], check=False)
+    _run([
+        "set-window-option", "-t", target,
+        "pane-border-format",
+        " #{pane_title} ",
     ], check=False)
 
 
