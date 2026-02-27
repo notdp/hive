@@ -174,6 +174,7 @@ class Team:
             window_target = tmux.get_current_window_target()
             if window_target:
                 tmux.enable_pane_border_status(window_target)
+                tmux.set_window_option(window_target, "main-pane-width", "50%")
                 tmux.select_layout(window_target, "main-vertical")
         elif len(self.agents) > 1:
             tmux.select_layout(self.name, "tiled")

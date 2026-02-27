@@ -139,6 +139,10 @@ def enable_pane_border_status(target: str) -> None:
     ], check=False)
 
 
+def set_window_option(target: str, option: str, value: str) -> None:
+    _run(["set-window-option", "-t", target, option, value], check=False)
+
+
 def resize_pane(pane_id: str, width: str | None = None, height: str | None = None) -> None:
     args = ["resize-pane", "-t", pane_id]
     if width:
