@@ -7,6 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import tmux
 
@@ -21,25 +22,42 @@ def _shell_escape(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def _set_model_in_settings(model: str) -> str | None:
-    """Set model in settings.json, return previous model value for restore."""
+def _resolve_model_id(model: str, settings: dict[str, Any]) -> str:
+    """Resolve model alias/displayName to canonical model ID from settings.json."""
+    if not model:
+        return model
+
+    base = model.replace("custom:", "", 1)
+    for m in settings.get("customModels", []):
+        model_id = m.get("id")
+        if not model_id:
+            continue
+        if (
+            model_id == model
+            or m.get("model", "") == base
+            or m.get("displayName", "") == base
+        ):
+            return model_id
+    return model
+
+
+def _set_model_in_settings(model: str) -> tuple[bool, str | None, str]:
+    """Set model in settings.json, returning restore state and resolved model ID."""
     if not model or not SETTINGS_FILE.is_file():
-        return None
+        return False, None, model
+
     with open(SETTINGS_FILE) as f:
         settings = json.load(f)
-    base = model.replace("custom:", "", 1)
-    target_id = model
-    for m in settings.get("customModels", []):
-        if m.get("model", "") == base or m.get("displayName", "") == base:
-            target_id = m["id"]
-            break
+
+    target_id = _resolve_model_id(model, settings)
     defaults = settings.setdefault("sessionDefaultSettings", {})
+    had_model_key = "model" in defaults
     prev_model = defaults.get("model")
-    if defaults.get("model") != target_id:
+    if prev_model != target_id:
         defaults["model"] = target_id
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-    return prev_model
+    return had_model_key, prev_model, target_id
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -78,22 +96,33 @@ def _detect_new_session(cwd: str, before: set[str], model: str = "") -> str | No
     if len(new) == 1:
         return new.pop()
     if model:
-        for sid in new:
+        for sid in sorted(new):
             m = _read_session_model(cwd, sid)
-            if m and model in m:
+            if m == model:
                 return sid
     return new.pop()
 
 
-def _restore_model_in_settings(prev_model: str | None) -> None:
+def _restore_model_in_settings(had_model_key: bool, prev_model: str | None) -> None:
     """Restore previous model in settings.json."""
-    if prev_model is None or not SETTINGS_FILE.is_file():
+    if not SETTINGS_FILE.is_file():
         return
+
     with open(SETTINGS_FILE) as f:
         settings = json.load(f)
+
     defaults = settings.setdefault("sessionDefaultSettings", {})
-    if defaults.get("model") != prev_model:
-        defaults["model"] = prev_model
+    changed = False
+
+    if had_model_key:
+        if defaults.get("model") != prev_model:
+            defaults["model"] = prev_model
+            changed = True
+    elif "model" in defaults:
+        defaults.pop("model", None)
+        changed = True
+
+    if changed:
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
 
@@ -136,7 +165,7 @@ class Agent:
         sessions_before = _list_sessions(cwd)
 
         # Set model in settings.json before starting droid
-        prev_model = _set_model_in_settings(model)
+        had_model_key, prev_model, resolved_model = _set_model_in_settings(model)
 
         if is_first and not tmux.is_inside_tmux():
             pane_id = target_pane
@@ -175,11 +204,11 @@ class Agent:
 
         if tmux.wait_for_text(pane_id, "for help", timeout=DROID_STARTUP_TIMEOUT):
             # Droid is ready — detect session ID and restore model
-            detected_session = _detect_new_session(cwd, sessions_before, model=model)
+            detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model)
             if detected_session:
                 agent.session_id = detected_session
 
-            _restore_model_in_settings(prev_model)
+            _restore_model_in_settings(had_model_key, prev_model)
             time.sleep(1)
 
             if skill and skill != "none":
@@ -194,7 +223,7 @@ class Agent:
                 )
         else:
             # Droid didn't start in time — still restore settings
-            _restore_model_in_settings(prev_model)
+            _restore_model_in_settings(had_model_key, prev_model)
 
         return agent
 
