@@ -3,20 +3,20 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from mission.cli import cli
+from hive.cli import cli
 
 
-def _set_mission_home(monkeypatch, tmp_path: Path) -> Path:
-    mission_home = tmp_path / ".mission"
-    monkeypatch.setattr("mission.team.MISSION_HOME", mission_home)
-    monkeypatch.setattr("mission.cli.MISSION_HOME", mission_home)
-    monkeypatch.setattr("mission.team.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("mission.team.tmux.get_current_pane_id", lambda: "%0")
-    return mission_home
+def _set_hive_home(monkeypatch, tmp_path: Path) -> Path:
+    hive_home = tmp_path / ".hive"
+    monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)
+    monkeypatch.setattr("hive.cli.HIVE_HOME", hive_home)
+    monkeypatch.setattr("hive.team.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.team.tmux.get_current_pane_id", lambda: "%0")
+    return hive_home
 
 
 def test_create_initializes_workspace_and_state(monkeypatch, tmp_path):
-    mission_home = _set_mission_home(monkeypatch, tmp_path)
+    hive_home = _set_hive_home(monkeypatch, tmp_path)
     runner = CliRunner()
     workspace = tmp_path / "ws"
 
@@ -38,12 +38,12 @@ def test_create_initializes_workspace_and_state(monkeypatch, tmp_path):
     assert (workspace / "state" / "repo").read_text() == "owner/repo"
     assert (workspace / "state" / "pr-number").read_text() == "123"
 
-    config = json.loads((mission_home / "teams" / "team-a" / "config.json").read_text())
+    config = json.loads((hive_home / "teams" / "team-a" / "config.json").read_text())
     assert config["workspace"] == str(workspace)
 
 
 def test_delete_removes_workspace(monkeypatch, tmp_path):
-    _set_mission_home(monkeypatch, tmp_path)
+    _set_hive_home(monkeypatch, tmp_path)
     runner = CliRunner()
     workspace = tmp_path / "ws"
 
@@ -89,7 +89,7 @@ def test_wait_fails_when_agent_dead(monkeypatch, tmp_path):
         def get(self, _name: str):
             return _FakeAgent()
 
-    monkeypatch.setattr("mission.cli._load_team", lambda _team: _FakeTeam())
+    monkeypatch.setattr("hive.cli._load_team", lambda _team: _FakeTeam())
 
     result = runner.invoke(
         cli,
@@ -112,7 +112,7 @@ def test_comment_post_reads_workspace_state(monkeypatch, tmp_path):
         assert input_text is None
         return json.dumps({"data": {"addComment": {"commentEdge": {"node": {"id": "C_1"}}}}})
 
-    monkeypatch.setattr("mission.cli._gh", _fake_gh)
+    monkeypatch.setattr("hive.cli._gh", _fake_gh)
     result = runner.invoke(cli, ["comment", "post", "hello", "--workspace", str(workspace)])
     assert result.exit_code == 0
     assert result.output.strip() == "C_1"
@@ -137,7 +137,7 @@ def test_comment_list_filters_cr_markers(monkeypatch, tmp_path):
             }
         )
 
-    monkeypatch.setattr("mission.cli._gh", _fake_gh)
+    monkeypatch.setattr("hive.cli._gh", _fake_gh)
     result = runner.invoke(cli, ["comment", "list", "--workspace", str(workspace)])
     assert result.exit_code == 0
     rows = json.loads(result.output)

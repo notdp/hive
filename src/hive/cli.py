@@ -1,4 +1,4 @@
-"""CLI entry point for mission."""
+"""CLI entry point for hive."""
 
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ from pathlib import Path
 
 import click
 
-from .team import Team, MISSION_HOME
+from .team import Team, HIVE_HOME
 
 
 def _default_team() -> str | None:
-    return os.environ.get("MISSION_TEAM_NAME")
+    return os.environ.get("HIVE_TEAM_NAME")
 
 
 def _require_team(team: str | None) -> str:
     if team:
         return team
-    click.echo("Error: --team/-t required (or set MISSION_TEAM_NAME)", err=True)
+    click.echo("Error: --team/-t required (or set HIVE_TEAM_NAME)", err=True)
     sys.exit(1)
 
 
@@ -122,7 +122,7 @@ def _resolve_comment_context(
 
 @click.group()
 def cli():
-    """Mission: multi-agent collaboration for droid."""
+    """Hive: multi-agent collaboration for droid."""
     pass
 
 
@@ -178,10 +178,10 @@ def delete(name: str, workspace: str, keep_workspace: bool):
     except FileNotFoundError:
         pass
 
-    team_dir = MISSION_HOME / "teams" / name
+    team_dir = HIVE_HOME / "teams" / name
     if team_dir.exists():
         shutil.rmtree(team_dir)
-    legacy_tasks_dir = MISSION_HOME / "tasks" / name
+    legacy_tasks_dir = HIVE_HOME / "tasks" / name
     if legacy_tasks_dir.exists():
         shutil.rmtree(legacy_tasks_dir)
 
@@ -199,12 +199,12 @@ def delete(name: str, workspace: str, keep_workspace: bool):
 
 @cli.command()
 @click.argument("agent_name")
-@click.option("--team", "-t", default=None, help="Team name (default: $MISSION_TEAM_NAME)")
+@click.option("--team", "-t", default=None, help="Team name (default: $HIVE_TEAM_NAME)")
 @click.option("--model", "-m", default="", help="Model ID")
 @click.option("--prompt", "-p", default="", help="Initial prompt (typed into TUI after startup)")
 @click.option("--color", "-c", default="", help="Pane border color")
 @click.option("--cwd", default="", help="Working directory")
-@click.option("--skill", default="mission", help="Skill to load after startup ('none' to skip)")
+@click.option("--skill", default="hive", help="Skill to load after startup ('none' to skip)")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
 def spawn(agent_name: str, team: str | None, model: str, prompt: str,
           color: str, cwd: str, skill: str, env: tuple[str, ...]):
@@ -228,7 +228,7 @@ def spawn(agent_name: str, team: str | None, model: str, prompt: str,
 @cli.command()
 @click.argument("agent_name")
 @click.argument("stage_tag")
-@click.option("--team", "-t", default=None, help="Team name (default: $MISSION_TEAM_NAME)")
+@click.option("--team", "-t", default=None, help="Team name (default: $HIVE_TEAM_NAME)")
 @click.option("--workspace", "-w", default="", help="Workspace path")
 @click.option("--timeout", default=600, type=int, show_default=True, help="Timeout in seconds")
 @click.option("--interval", default=1.0, type=float, show_default=True, help="Poll interval in seconds")

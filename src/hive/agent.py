@@ -155,7 +155,7 @@ class Agent:
         is_first: bool = False,
         split_horizontal: bool = True,
         split_size: str | None = None,
-        skill: str = "mission",
+        skill: str = "hive",
         extra_env: dict[str, str] | None = None,
     ) -> Agent:
         """Spawn a droid in a tmux pane."""
@@ -180,8 +180,8 @@ class Agent:
             cmd_parts.extend(["-r", session_id])
 
         env_parts = [
-            f"MISSION_TEAM_NAME={_shell_escape(team_name)}",
-            f"MISSION_AGENT_NAME={_shell_escape(name)}",
+            f"HIVE_TEAM_NAME={_shell_escape(team_name)}",
+            f"HIVE_AGENT_NAME={_shell_escape(name)}",
         ]
         if extra_env:
             for k, v in extra_env.items():
@@ -215,11 +215,11 @@ class Agent:
                 tmux.send_keys(pane_id, f"/skill {skill}")
                 time.sleep(2)
 
-            # Only send mission bootstrap if using mission skill with a prompt
-            if skill == "mission" and prompt:
+            # Only send hive bootstrap if using hive skill with a prompt
+            if skill == "hive" and prompt:
                 tmux.send_keys(pane_id,
-                    "I am a mission teammate. "
-                    "Run `mission read` to get my task, then execute it."
+                    "I am a hive teammate. "
+                    "Run `hive read` to get my task, then execute it."
                 )
         else:
             # Droid didn't start in time — still restore settings

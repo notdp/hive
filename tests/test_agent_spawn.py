@@ -1,6 +1,6 @@
 """Tests for Agent.spawn model/skill/env handling."""
 
-from mission.agent import (
+from hive.agent import (
     Agent,
     _detect_new_session,
     _restore_model_in_settings,
@@ -12,12 +12,12 @@ import json
 def _setup_tmux_mocks(monkeypatch):
     calls: list[str] = []
 
-    monkeypatch.setattr("mission.agent.tmux.is_inside_tmux", lambda: False)
-    monkeypatch.setattr("mission.agent.tmux.set_pane_title", lambda *_: None)
-    monkeypatch.setattr("mission.agent.tmux.set_pane_border_color", lambda *_: None)
-    monkeypatch.setattr("mission.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
-    monkeypatch.setattr("mission.agent.tmux.send_keys", lambda _pane, text: calls.append(text))
-    monkeypatch.setattr("mission.agent.time.sleep", lambda *_: None)
+    monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
+    monkeypatch.setattr("hive.agent.tmux.set_pane_border_color", lambda *_: None)
+    monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
+    monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text: calls.append(text))
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
 
     return calls
 
@@ -32,8 +32,8 @@ def test_spawn_loads_specified_skill(monkeypatch):
     )
 
     assert "/skill cross-review" in calls
-    # Should NOT send mission bootstrap message
-    assert not any("mission teammate" in c for c in calls)
+    # Should NOT send hive bootstrap message
+    assert not any("hive teammate" in c for c in calls)
 
 
 def test_spawn_skips_skill_when_none(monkeypatch):
@@ -69,7 +69,7 @@ def test_set_model_in_settings(monkeypatch, tmp_path):
             {"model": "claude-opus-4-6", "displayName": "Claude Opus 4.6", "id": "custom:Claude-Opus-4.6-0"}
         ],
     }))
-    monkeypatch.setattr("mission.agent.SETTINGS_FILE", settings_file)
+    monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
 
     had_model_key, prev, resolved = _set_model_in_settings("custom:claude-opus-4-6")
     assert had_model_key is True
@@ -89,7 +89,7 @@ def test_set_model_noop_when_already_correct(monkeypatch, tmp_path):
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {"model": "custom:my-model"},
     }))
-    monkeypatch.setattr("mission.agent.SETTINGS_FILE", settings_file)
+    monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
 
     mtime_before = settings_file.stat().st_mtime_ns
     had_model_key, prev, resolved = _set_model_in_settings("custom:my-model")
@@ -106,7 +106,7 @@ def test_restore_model_removes_temp_model_when_no_previous_key(monkeypatch, tmp_
     settings_file.write_text(json.dumps({
         "sessionDefaultSettings": {},
     }))
-    monkeypatch.setattr("mission.agent.SETTINGS_FILE", settings_file)
+    monkeypatch.setattr("hive.agent.SETTINGS_FILE", settings_file)
 
     had_model_key, prev, _ = _set_model_in_settings("custom:temp-model")
     assert had_model_key is False
@@ -121,7 +121,7 @@ def test_detect_new_session_matches_resolved_model_id(monkeypatch, tmp_path):
     sessions_dir = tmp_path / "sessions"
     project_dir = sessions_dir / "-tmp-test"
     project_dir.mkdir(parents=True)
-    monkeypatch.setattr("mission.agent.SESSIONS_DIR", sessions_dir)
+    monkeypatch.setattr("hive.agent.SESSIONS_DIR", sessions_dir)
 
     old_sid = "11111111-1111-1111-1111-111111111111"
     old_path = project_dir / f"{old_sid}.settings.json"

@@ -1,4 +1,4 @@
-"""Team: a tmux session with a group of droid agents."""
+"""Team: a tmux window with a group of droid agents."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from . import tmux
 from .agent import Agent
 
-MISSION_HOME = Path(os.environ.get("MISSION_HOME", str(Path.home() / ".mission")))
+HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 
 
@@ -27,7 +27,7 @@ class Team:
 
     @property
     def teams_dir(self) -> Path:
-        return MISSION_HOME / "teams" / self.name
+        return HIVE_HOME / "teams" / self.name
 
     @property
     def config_path(self) -> Path:
@@ -65,7 +65,7 @@ class Team:
     @classmethod
     def load(cls, name: str) -> Team:
         """Load an existing team from config."""
-        config_path = MISSION_HOME / "teams" / name / "config.json"
+        config_path = HIVE_HOME / "teams" / name / "config.json"
         if not config_path.exists():
             raise FileNotFoundError(f"Team '{name}' not found")
 
@@ -121,7 +121,7 @@ class Team:
         prompt: str = "",
         color: str = "",
         cwd: str = "",
-        skill: str = "mission",
+        skill: str = "hive",
         extra_env: dict[str, str] | None = None,
     ) -> Agent:
         """Spawn a new agent in the team."""
@@ -221,6 +221,6 @@ class Team:
         """Kill all agent panes (not the session itself if in-place)."""
         for agent in self.agents.values():
             agent.kill()
-        # Only kill session if it was created by mission (not the user's session)
+        # Only kill session if it was created by hive (not the user's session)
         if not tmux.is_inside_tmux():
             tmux.kill_session(self.name)
