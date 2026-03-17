@@ -209,6 +209,10 @@ def get_current_window_index() -> str | None:
 class PaneInfo:
     pane_id: str
     title: str
+    command: str = ""
+    role: str = ""
+    agent: str = ""
+    team: str = ""
 
 
 def list_panes_with_titles(target: str) -> list[PaneInfo]:
@@ -226,6 +230,58 @@ def list_panes_with_titles(target: str) -> list[PaneInfo]:
         title = parts[1] if len(parts) > 1 else ""
         result.append(PaneInfo(pane_id=pane_id, title=title))
     return result
+
+
+_HIVE_FMT = "\t".join([
+    "#{pane_id}", "#{pane_title}", "#{pane_current_command}",
+    "#{@hive-role}", "#{@hive-agent}", "#{@hive-team}",
+])
+
+
+def list_panes_full(target: str) -> list[PaneInfo]:
+    """List all panes with command and hive identity (@hive-role/agent/team)."""
+    r = _run(["list-panes", "-t", target, "-F", _HIVE_FMT], check=False)
+    result = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 6:
+            parts.append("")
+        result.append(PaneInfo(
+            pane_id=parts[0], title=parts[1], command=parts[2],
+            role=parts[3], agent=parts[4], team=parts[5],
+        ))
+    return result
+
+
+# --- Per-pane user options (@hive-*) ---
+
+def set_pane_option(pane_id: str, key: str, value: str) -> None:
+    _run(["set-option", "-p", "-t", pane_id, f"@{key}", value], check=False)
+
+
+def get_pane_option(pane_id: str, key: str) -> str | None:
+    r = _run(["display-message", "-t", pane_id, "-p", f"#{{@{key}}}"], check=False)
+    val = r.stdout.strip()
+    return val or None
+
+
+def clear_pane_option(pane_id: str, key: str) -> None:
+    _run(["set-option", "-p", "-t", pane_id, "-u", f"@{key}"], check=False)
+
+
+def tag_pane(pane_id: str, role: str, agent: str, team: str) -> None:
+    """Set all hive identity options on a pane."""
+    set_pane_option(pane_id, "hive-role", role)
+    set_pane_option(pane_id, "hive-agent", agent)
+    set_pane_option(pane_id, "hive-team", team)
+
+
+def clear_pane_tags(pane_id: str) -> None:
+    """Remove all hive identity options from a pane."""
+    for key in ("hive-role", "hive-agent", "hive-team"):
+        clear_pane_option(pane_id, key)
 
 
 # --- Utility ---

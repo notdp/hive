@@ -16,12 +16,29 @@ COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 
 
 @dataclass
+class Terminal:
+    name: str
+    pane_id: str
+
+    def is_alive(self) -> bool:
+        return tmux.is_pane_alive(self.pane_id)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "tmuxPaneId": self.pane_id,
+            "isActive": self.is_alive(),
+        }
+
+
+@dataclass
 class Team:
     name: str
     description: str = ""
     workspace: str = ""
     lead_name: str = "orchestrator"
     agents: dict[str, Agent] = field(default_factory=dict)
+    terminals: dict[str, Terminal] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     lead_pane_id: str = ""
     lead_session_id: str | None = None
@@ -60,6 +77,8 @@ class Team:
         if tmux.is_inside_tmux():
             team.lead_pane_id = tmux.get_current_pane_id() or ""
             team.lead_session_id = detect_current_session_id(resolved_cwd)
+            if team.lead_pane_id:
+                tmux.tag_pane(team.lead_pane_id, "lead", "orchestrator", name)
         else:
             if tmux.has_session(name):
                 raise ValueError(f"Team '{name}' already exists")
@@ -105,6 +124,10 @@ class Team:
             )
             team.agents[agent.name] = agent
 
+        for term in data.get("terminals", []):
+            terminal = Terminal(name=term["name"], pane_id=term.get("tmuxPaneId", ""))
+            team.terminals[terminal.name] = terminal
+
         return team
 
     def is_tmux_alive(self) -> bool:
@@ -133,6 +156,7 @@ class Team:
             "tmuxSession": self.tmux_session,
             "createdAt": self.created_at,
             "members": [a.to_dict() for a in self.agents.values()],
+            "terminals": [t.to_dict() for t in self.terminals.values()],
         }
         self.teams_dir.mkdir(parents=True, exist_ok=True)
         with open(self.config_path, "w") as f:
@@ -208,6 +232,7 @@ class Team:
         if workflow:
             agent.load_skill(workflow)
 
+        tmux.tag_pane(agent.pane_id, "agent", name, self.name)
         self.agents[name] = agent
 
         # Layout and pane borders
@@ -266,6 +291,13 @@ class Team:
                     for name, agent in self.agents.items()
                 },
             },
+            "terminals": {
+                name: {
+                    "alive": terminal.is_alive(),
+                    "pane": terminal.pane_id,
+                }
+                for name, terminal in self.terminals.items()
+            },
         }
 
     def shutdown(self, name: str | None = None) -> None:
@@ -278,6 +310,10 @@ class Team:
         """Kill all agent panes (not the session itself if in-place)."""
         for agent in self.agents.values():
             agent.kill()
-        # Only kill session if it was created by hive (not the user's session)
+        for terminal in self.terminals.values():
+            if tmux.is_pane_alive(terminal.pane_id):
+                tmux.clear_pane_tags(terminal.pane_id)
+        if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
+            tmux.clear_pane_tags(self.lead_pane_id)
         if not tmux.is_inside_tmux():
             tmux.kill_session(self.name)

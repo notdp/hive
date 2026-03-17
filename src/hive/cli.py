@@ -15,7 +15,7 @@ from . import bus
 from . import context as hive_context
 from . import tmux
 from .agent import Agent
-from .team import HIVE_HOME, Team
+from .team import HIVE_HOME, Team, Terminal
 
 
 def _discover_tmux_binding() -> dict[str, str]:
@@ -42,6 +42,9 @@ def _discover_tmux_binding() -> dict[str, str]:
         for name, agent in team.agents.items():
             if agent.pane_id == current_pane:
                 return {"team": team.name, "workspace": team.workspace, "agent": name}
+        for name, terminal in team.terminals.items():
+            if terminal.pane_id == current_pane:
+                return {"team": team.name, "workspace": team.workspace, "agent": name, "role": "terminal"}
     return {}
 
 
@@ -240,12 +243,21 @@ def current_cmd():
         session_name = tmux.get_current_session_name()
         window_target = tmux.get_current_window_target()
         current_pane = tmux.get_current_pane_id()
-        panes = tmux.list_panes_with_titles(window_target) if window_target else []
+        panes = tmux.list_panes_full(window_target) if window_target else []
         result["tmux"] = {
             "session": session_name,
             "window": window_target,
             "currentPane": current_pane,
-            "panes": [{"id": p.pane_id, "title": p.title} for p in panes],
+            "panes": [
+                {
+                    "id": p.pane_id,
+                    "command": p.command,
+                    "role": p.role or ("agent" if p.command == "droid" else "terminal"),
+                    "agent": p.agent,
+                    "team": p.team,
+                }
+                for p in panes
+            ],
             "paneCount": len(panes),
         }
         result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
@@ -324,7 +336,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
     team_name = name or session_name
     ws = workspace or f"/tmp/hive-{session_name}-{window_index}"
 
-    panes = tmux.list_panes_with_titles(window_target) if window_target else []
+    panes = tmux.list_panes_full(window_target) if window_target else []
     current_pane = tmux.get_current_pane_id()
 
     try:
@@ -340,38 +352,63 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     _remember_context(team=team_name, workspace=str(ws_path), agent="orchestrator")
 
+    _SHELL_CMDS = {"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"}
+
     seen_names: set[str] = {"orchestrator"}
     discovered = []
     agent_index = 0
-    for idx, pane in enumerate(panes):
+    term_index = 0
+    for pane in panes:
         is_current = pane.pane_id == current_pane
         if is_current:
             discovered.append({
                 "paneId": pane.pane_id,
-                "title": pane.title,
-                "agent": "orchestrator",
+                "role": "lead",
+                "name": "orchestrator",
+                "command": pane.command,
                 "isSelf": True,
             })
             continue
 
-        agent_name = _derive_agent_name(pane.title, agent_index, seen_names)
-        agent_index += 1
-        agent = Agent(
-            name=agent_name,
-            team_name=team_name,
-            pane_id=pane.pane_id,
-            cwd=os.getcwd(),
-        )
-        t.agents[agent_name] = agent
-        hive_context.save_context_for_pane(
-            pane.pane_id, team=team_name, workspace=str(ws_path), agent=agent_name,
-        )
-        discovered.append({
-            "paneId": pane.pane_id,
-            "title": pane.title,
-            "agent": agent_name,
-            "isSelf": False,
-        })
+        is_agent = pane.command not in _SHELL_CMDS
+        if is_agent:
+            agent_name = _derive_agent_name(pane.title, agent_index, seen_names)
+            agent_index += 1
+            agent = Agent(
+                name=agent_name,
+                team_name=team_name,
+                pane_id=pane.pane_id,
+                cwd=os.getcwd(),
+            )
+            t.agents[agent_name] = agent
+            tmux.tag_pane(pane.pane_id, "agent", agent_name, team_name)
+            hive_context.save_context_for_pane(
+                pane.pane_id, team=team_name, workspace=str(ws_path), agent=agent_name,
+            )
+            discovered.append({
+                "paneId": pane.pane_id,
+                "role": "agent",
+                "name": agent_name,
+                "command": pane.command,
+                "isSelf": False,
+            })
+        else:
+            term_index += 1
+            term_name = f"term-{term_index}"
+            while term_name in seen_names:
+                term_index += 1
+                term_name = f"term-{term_index}"
+            seen_names.add(term_name)
+            terminal = Terminal(name=term_name, pane_id=pane.pane_id)
+            t.terminals[term_name] = terminal
+            tmux.tag_pane(pane.pane_id, "terminal", term_name, team_name)
+            discovered.append({
+                "paneId": pane.pane_id,
+                "role": "terminal",
+                "name": term_name,
+                "command": pane.command,
+                "isSelf": False,
+            })
 
     t.save()
 
@@ -389,7 +426,6 @@ def init_cmd(name: str, workspace: str, notify: bool):
         "team": team_name,
         "workspace": str(ws_path),
         "window": window_target,
-        "agents": {d["agent"]: d["paneId"] for d in discovered},
         "panes": discovered,
     }
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
@@ -712,3 +748,69 @@ def interrupt(agent_name: str, team: str | None):
     t = _load_team(team)
     t.get(agent_name).interrupt()
     click.echo(f"Interrupted {agent_name}.")
+
+
+# --- Terminal commands ---
+
+def _resolve_terminal(t: Team, name: str) -> Terminal:
+    if name not in t.terminals:
+        _fail(f"terminal '{name}' not found in team '{t.name}'")
+    terminal = t.terminals[name]
+    if not terminal.is_alive():
+        _fail(f"terminal '{name}' pane is no longer alive")
+    return terminal
+
+
+@cli.command("exec")
+@click.argument("terminal_name")
+@click.argument("command")
+@click.option("--team", "-t", default=None, help="Team name")
+def exec_cmd(terminal_name: str, command: str, team: str | None):
+    """Send a command to a terminal pane (for interactive tools: htop, ssh, docker exec, etc.)."""
+    team_name = _require_team(team or _default_team())
+    t = _load_team(team_name)
+    terminal = _resolve_terminal(t, terminal_name)
+    tmux.send_keys(terminal.pane_id, command)
+    click.echo(f"Sent to {terminal_name} ({terminal.pane_id}).")
+
+
+@cli.group()
+def terminal():
+    """Manage terminal panes in the team."""
+    pass
+
+
+@terminal.command("add")
+@click.argument("name", required=False, default="")
+@click.option("--team", "-t", default=None, help="Team name")
+@click.option("--pane", "pane_id", default="", help="Pane ID (default: current pane)")
+def terminal_add(name: str, team: str | None, pane_id: str):
+    """Register a pane as a terminal."""
+    team_name = _require_team(team or _default_team())
+    t = _load_team(team_name)
+    resolved_pane = pane_id or tmux.get_current_pane_id()
+    if not resolved_pane:
+        _fail("cannot determine pane ID (are you in tmux?)")
+    term_name = name or f"term-{len(t.terminals) + 1}"
+    if term_name in t.terminals:
+        _fail(f"terminal '{term_name}' already exists")
+    t.terminals[term_name] = Terminal(name=term_name, pane_id=resolved_pane)
+    tmux.tag_pane(resolved_pane, "terminal", term_name, team_name)
+    t.save()
+    click.echo(f"Terminal '{term_name}' registered ({resolved_pane}).")
+
+
+@terminal.command("remove")
+@click.argument("name")
+@click.option("--team", "-t", default=None, help="Team name")
+def terminal_remove(name: str, team: str | None):
+    """Unregister a terminal pane."""
+    team_name = _require_team(team or _default_team())
+    t = _load_team(team_name)
+    if name not in t.terminals:
+        _fail(f"terminal '{name}' not found")
+    terminal_obj = t.terminals.pop(name)
+    if tmux.is_pane_alive(terminal_obj.pane_id):
+        tmux.clear_pane_tags(terminal_obj.pane_id)
+    t.save()
+    click.echo(f"Terminal '{name}' removed.")
