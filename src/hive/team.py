@@ -15,6 +15,7 @@ from .agent import Agent, detect_current_session_id
 HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 LEAD_AGENT_NAME = "orch"
+_TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
 
 def _member_role(command: str) -> str:
@@ -84,30 +85,23 @@ class Team:
         cwd: str = "",
         workspace: str = "",
     ) -> Team:
-        """Create a new team.
-
-        If inside tmux: use current window (split panes in-place).
-        If outside tmux: create a new detached session.
-        """
+        """Create a new team in the current tmux window."""
         config_path = HIVE_HOME / "teams" / name / "config.json"
         if config_path.exists():
             raise ValueError(f"Team '{name}' already exists")
+        if not tmux.is_inside_tmux():
+            raise ValueError(_TMUX_REQUIRED_MESSAGE)
 
         resolved_cwd = cwd or os.getcwd()
         team = cls(name=name, description=description, workspace=workspace)
 
-        if tmux.is_inside_tmux():
-            team.lead_pane_id = tmux.get_current_pane_id() or ""
-            team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
-            team.tmux_session = tmux.get_current_session_name() or ""
-            team.tmux_window = tmux.get_current_window_target() or ""
-            if team.lead_pane_id:
-                lead_command = tmux.get_pane_current_command(team.lead_pane_id) or ""
-                tmux.tag_pane(team.lead_pane_id, _member_role(lead_command), team.lead_name, name)
-        else:
-            if tmux.has_session(name):
-                raise ValueError(f"Team '{name}' already exists")
-            tmux.new_session(name)
+        team.lead_pane_id = tmux.get_current_pane_id() or ""
+        team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
+        team.tmux_session = tmux.get_current_session_name() or ""
+        team.tmux_window = tmux.get_current_window_target() or ""
+        if team.lead_pane_id:
+            lead_command = tmux.get_pane_current_command(team.lead_pane_id) or ""
+            tmux.tag_pane(team.lead_pane_id, _member_role(lead_command), team.lead_name, name)
 
         team.teams_dir.mkdir(parents=True, exist_ok=True)
 
@@ -216,29 +210,23 @@ class Team:
         """Spawn a new agent in the team."""
         if name in self.agents:
             raise ValueError(f"Agent '{name}' already exists in team '{self.name}'")
+        if not tmux.is_inside_tmux():
+            raise ValueError(_TMUX_REQUIRED_MESSAGE)
 
         if not color:
             idx = len(self.agents) % len(COLORS)
             color = COLORS[idx]
 
         is_first = len(self.agents) == 0
-        in_tmux = tmux.is_inside_tmux()
-
-        if in_tmux:
-            if is_first:
-                target = self.lead_pane_id or tmux.get_current_pane_id() or ""
-                split_horizontal = True
-                split_size = "50%"
-            else:
-                # Subsequent: split from last agent pane vertically
-                last_agent = list(self.agents.values())[-1]
-                target = last_agent.pane_id
-                split_horizontal = False
-                split_size = "50%"
-        else:
-            panes = tmux.list_panes(self.name)
-            target = panes[0] if panes else f"{self.name}:0"
+        if is_first:
+            target = self.lead_pane_id or tmux.get_current_pane_id() or ""
             split_horizontal = True
+            split_size = "50%"
+        else:
+            # Subsequent: split from last agent pane vertically
+            last_agent = list(self.agents.values())[-1]
+            target = last_agent.pane_id
+            split_horizontal = False
             split_size = "50%"
 
         agent = Agent.spawn(
@@ -263,14 +251,11 @@ class Team:
         self.agents[name] = agent
 
         # Layout and pane borders
-        if in_tmux:
-            window_target = tmux.get_current_window_target()
-            if window_target:
-                tmux.enable_pane_border_status(window_target)
-                tmux.set_window_option(window_target, "main-pane-width", "50%")
-                tmux.select_layout(window_target, "main-vertical")
-        elif len(self.agents) > 1:
-            tmux.select_layout(self.name, "tiled")
+        window_target = tmux.get_current_window_target()
+        if window_target:
+            tmux.enable_pane_border_status(window_target)
+            tmux.set_window_option(window_target, "main-pane-width", "50%")
+            tmux.select_layout(window_target, "main-vertical")
 
         self.save()
         return agent
@@ -359,5 +344,3 @@ class Team:
                 tmux.clear_pane_tags(terminal.pane_id)
         if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
             tmux.clear_pane_tags(self.lead_pane_id)
-        if not tmux.is_inside_tmux() and not self.tmux_session:
-            tmux.kill_session(self.name)

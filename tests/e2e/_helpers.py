@@ -4,6 +4,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import uuid
 from pathlib import Path
 
 
@@ -49,7 +50,7 @@ def send_tmux_command(pane_id: str, text: str) -> None:
     run_tmux(["send-keys", "-t", pane_id, "Enter"])
 
 
-def wait_for(predicate, *, timeout: float = 5.0, interval: float = 0.05) -> None:
+def wait_for(predicate, *, timeout: float = 10.0, interval: float = 0.05) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
@@ -59,7 +60,7 @@ def wait_for(predicate, *, timeout: float = 5.0, interval: float = 0.05) -> None
 
 
 def wait_for_file(path: Path) -> str:
-    wait_for(lambda: path.exists() and path.read_text().strip() != "")
+    wait_for(lambda: path.exists() and path.read_text().strip() != "", timeout=15.0)
     return path.read_text()
 
 
@@ -95,3 +96,37 @@ def hive_shell_command(args: list[str], *, env: dict[str, str], cwd: Path, stdou
         *(shlex.quote(arg) for arg in args),
     ])
     return f"cd {shlex.quote(str(cwd))} && {cmd} > {shlex.quote(str(stdout_path))} 2>&1"
+
+
+def run_hive_in_tmux_pane(
+    pane_id: str,
+    args: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    timeout: float = 20.0,
+    capture_lines: int = 200,
+) -> subprocess.CompletedProcess[str]:
+    marker = f"__HIVE_DONE_{uuid.uuid4().hex}__"
+    output_path = cwd / f".hive-tmux-{uuid.uuid4().hex}.out"
+    send_tmux_command(pane_id, f"{hive_shell_command(args, env=env, cwd=cwd, stdout_path=output_path)}; printf '\\n{marker}:%s\\n' $?")
+
+    def capture() -> str:
+        return run_tmux(["capture-pane", "-t", pane_id, "-p", "-S", f"-{capture_lines}"]).stdout
+
+    def status_line() -> str | None:
+        for line in reversed(capture().splitlines()):
+            if line.strip().startswith(f"{marker}:"):
+                return line.strip()
+        return None
+
+    try:
+        wait_for(lambda: status_line() is not None, timeout=timeout)
+    except AssertionError as exc:
+        raise AssertionError(f"timed out waiting for tmux command completion:\n{capture()}") from exc
+    status_line_value = status_line()
+    assert status_line_value is not None
+    returncode = int(status_line_value.rsplit(":", 1)[1])
+    stdout = output_path.read_text() if output_path.exists() else ""
+    output_path.unlink(missing_ok=True)
+    return subprocess.CompletedProcess([sys.executable, "-c", CLI_CODE, *args], returncode, stdout, "")

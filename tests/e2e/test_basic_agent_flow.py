@@ -1,59 +1,89 @@
 import json
 import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
 
-from tests.e2e._helpers import base_env, run_hive, wait_for, write_fake_droid
+from tests.e2e._helpers import (
+    base_env,
+    run_hive_in_tmux_pane,
+    run_tmux,
+    wait_for,
+    write_fake_droid,
+)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
 def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
-    fake_droid = write_fake_droid(tmp_path)
-    env = base_env(tmp_path, fake_droid)
+    workdir = Path(tempfile.mkdtemp(prefix="hive-e2e-", dir="/tmp"))
+    fake_droid = write_fake_droid(workdir)
+    env = base_env(workdir, fake_droid)
     team = f"e2e-{uuid.uuid4().hex[:8]}"
-    workspace = tmp_path / "ws"
+    session = f"hive-e2e-{uuid.uuid4().hex[:8]}"
+    workspace = workdir / "ws"
 
-    result = run_hive(["create", team, "--workspace", str(workspace)], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
+    pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}"]).stdout.strip()
 
-    result = run_hive(["teams"], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-    payload = json.loads(result.stdout)
-    assert any(row["name"] == team for row in payload)
+    def run_in_pane(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return run_hive_in_tmux_pane(pane_a, args, env=env, cwd=workdir)
 
-    result = run_hive(["spawn", "claude", "--team", team, "--cwd", str(tmp_path), "--skill", "none"], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
+    def capture_claude() -> str:
+        return run_tmux(["capture-pane", "-t", claude_pane, "-p", "-S", "-80"]).stdout
 
-    wait_for(lambda: "for help" in run_hive(["capture", "claude", "--team", team], env=env, cwd=tmp_path).stdout)
+    try:
+        create_result = run_in_pane(["create", team, "--workspace", str(workspace)])
+        assert create_result.returncode == 0, create_result.stdout
+        assert f"Team '{team}' created." in create_result.stdout
 
-    assert run_hive(["inject", "claude", "plain ping", "--team", team], env=env, cwd=tmp_path).returncode == 0
-    assert run_hive(["send", "claude", "hello envelope", "--team", team], env=env, cwd=tmp_path).returncode == 0
+        teams_result = run_in_pane(["teams"])
+        assert teams_result.returncode == 0, teams_result.stdout
+        teams_payload = json.loads(teams_result.stdout)
+        assert any(row["name"] == team for row in teams_payload)
 
-    def capture() -> str:
-        return run_hive(["capture", "claude", "--team", team, "--lines", "80"], env=env, cwd=tmp_path).stdout
+        spawn_result = run_in_pane(["spawn", "claude", "--cwd", str(workdir), "--skill", "none"])
+        assert spawn_result.returncode == 0, spawn_result.stdout
+        assert "Agent 'claude' spawned in pane" in spawn_result.stdout
 
-    wait_for(lambda: "plain ping" in capture() and "hello envelope" in capture())
-    captured = capture()
-    assert "<HIVE from=orch to=claude>" in captured
-    assert "plain ping" in captured
+        team_result = run_in_pane(["team"])
+        assert team_result.returncode == 0, team_result.stdout
+        team_payload = json.loads(team_result.stdout)
+        claude_pane = next(member["pane"] for member in team_payload["members"] if member["name"] == "claude")
+        wait_for(lambda: "for help" in capture_claude())
 
-    result = run_hive(["status-set", "busy", "working", "--team", team, "--workspace", str(workspace), "--agent", "orch"], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-    payload = json.loads(result.stdout)
-    assert payload["agent"] == "orch"
-    assert payload["state"] == "busy"
+        inject_result = run_in_pane(["inject", "claude", "plain ping"])
+        assert inject_result.returncode == 0, inject_result.stdout
+        assert "Injected raw input into claude." in inject_result.stdout
+        send_result = run_in_pane(["send", "claude", "hello envelope"])
+        assert send_result.returncode == 0, send_result.stdout
+        assert "Sent HIVE message to claude." in send_result.stdout
 
-    result = run_hive(["status", "--team", team, "--workspace", str(workspace)], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-    payload = json.loads(result.stdout)
-    assert payload["orch"]["state"] == "busy"
+        wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
+        captured = capture_claude()
+        assert "<HIVE from=orch to=claude>" in captured
+        assert "plain ping" in captured
 
-    result = run_hive(["wait-status", "orch", "--team", team, "--workspace", str(workspace), "--state", "busy", "--timeout", "1"], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-    assert '"state": "busy"' in result.stdout
+        status_set_result = run_in_pane(["status-set", "busy", "working", "--agent", "orch"])
+        assert status_set_result.returncode == 0, status_set_result.stdout
+        payload = json.loads(status_set_result.stdout)
+        assert payload["agent"] == "orch"
+        assert payload["state"] == "busy"
 
-    result = run_hive(["delete", team], env=env, cwd=tmp_path)
-    assert result.returncode == 0, result.stderr or result.stdout
-    assert not ((tmp_path / ".hive" / "teams" / team).exists())
+        status_result = run_in_pane(["status"])
+        assert status_result.returncode == 0, status_result.stdout
+        payload = json.loads(status_result.stdout)
+        assert payload["orch"]["state"] == "busy"
+
+        wait_result = run_in_pane(["wait-status", "orch", "--state", "busy", "--timeout", "1"])
+        assert wait_result.returncode == 0, wait_result.stdout
+        assert '"state": "busy"' in wait_result.stdout
+
+        delete_result = run_in_pane(["delete", team])
+        assert delete_result.returncode == 0, delete_result.stdout
+        assert f"Team '{team}' deleted." in delete_result.stdout
+        assert not ((workdir / ".hive" / "teams" / team).exists())
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)
+        shutil.rmtree(workdir, ignore_errors=True)

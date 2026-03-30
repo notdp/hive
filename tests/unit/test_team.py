@@ -26,26 +26,13 @@ def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_ho
     assert tagged == [("%7", "agent", "orch", "team-a")]
 
 
-def test_team_create_outside_tmux_creates_session(configure_hive_home, monkeypatch):
+def test_team_create_rejects_outside_tmux(configure_hive_home):
     configure_hive_home(tmux_inside=False)
-    calls = []
-    monkeypatch.setattr("hive.team.tmux.has_session", lambda _name: False)
-    monkeypatch.setattr("hive.team.tmux.new_session", lambda name: calls.append(name) or "%0")
-
-    team = Team.create("team-a")
-
-    assert team.lead_pane_id == ""
-    assert calls == ["team-a"]
-
-
-def test_team_create_rejects_duplicate_outside_tmux(configure_hive_home, monkeypatch):
-    configure_hive_home(tmux_inside=False)
-    monkeypatch.setattr("hive.team.tmux.has_session", lambda _name: True)
 
     try:
         Team.create("team-a")
     except ValueError as exc:
-        assert "already exists" in str(exc)
+        assert "requires tmux" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 
@@ -211,11 +198,10 @@ def test_team_status_backfills_missing_session_ids_from_map(configure_hive_home,
 
 
 def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
-    configure_hive_home(tmux_inside=False)
+    configure_hive_home()
     calls = []
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
     monkeypatch.setattr("hive.team.tmux.clear_pane_tags", lambda pane: calls.append(("clear", pane)))
-    monkeypatch.setattr("hive.team.tmux.kill_session", lambda name: calls.append(("kill-session", name)))
     a1 = Agent(name="claude", team_name="team-a", pane_id="%1")
     a2 = Agent(name="gpt", team_name="team-a", pane_id="%2")
     monkeypatch.setattr(a1, "shutdown", lambda: calls.append(("shutdown", "%1")))
@@ -233,4 +219,3 @@ def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
     assert calls[:3] == [("shutdown", "%1"), ("shutdown", "%1"), ("shutdown", "%2")]
     assert ("kill", "%1") in calls and ("kill", "%2") in calls
     assert ("clear", "%3") in calls and ("clear", "%0") in calls
-    assert ("kill-session", "team-a") in calls

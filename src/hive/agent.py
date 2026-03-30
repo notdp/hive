@@ -15,6 +15,7 @@ from . import tmux
 
 DROID_BIN = os.environ.get("DROID_PATH", str(Path.home() / ".local" / "bin" / "droid"))
 DROID_STARTUP_TIMEOUT = 30
+_TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
 
 def _factory_home() -> Path:
@@ -200,15 +201,14 @@ class Agent:
     ) -> Agent:
         """Spawn a droid in a tmux pane."""
         cwd = cwd or os.getcwd()
+        if not tmux.is_inside_tmux():
+            raise ValueError(_TMUX_REQUIRED_MESSAGE)
 
         # Snapshot existing sessions to detect the new one after startup
         sessions_before = _list_sessions(cwd)
         runtime_settings_path, resolved_model = _write_runtime_settings_override(model)
 
-        if is_first and not tmux.is_inside_tmux():
-            pane_id = target_pane
-        else:
-            pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
+        pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
 
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.set_pane_border_color(pane_id, color)
@@ -219,16 +219,15 @@ class Agent:
         if session_id:
             cmd_parts.extend(["-r", _shell_escape(session_id)])
 
-        env_parts = [
-            f"HIVE_TEAM_NAME={_shell_escape(team_name)}",
-            f"HIVE_AGENT_NAME={_shell_escape(name)}",
-        ]
+        env_parts: list[str] = []
         if extra_env:
             for k, v in extra_env.items():
                 env_parts.append(f"{k}={_shell_escape(v)}")
-        env_vars = " ".join(env_parts)
 
-        cmd = f"cd {_shell_escape(cwd)} && export {env_vars} && {' '.join(cmd_parts)}"
+        cmd = f"cd {_shell_escape(cwd)}"
+        if env_parts:
+            cmd = f"{cmd} && export {' '.join(env_parts)}"
+        cmd = f"{cmd} && {' '.join(cmd_parts)}"
         tmux.send_keys(pane_id, cmd)
 
         agent = cls(

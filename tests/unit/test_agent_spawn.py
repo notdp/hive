@@ -13,7 +13,8 @@ import json
 def _setup_tmux_mocks(monkeypatch):
     calls: list[str] = []
 
-    monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.agent.tmux.split_window", lambda target, horizontal=True, size=None: target)
     monkeypatch.setattr("hive.agent.tmux.get_pane_tty", lambda _pane: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_border_color", lambda *_: None)
@@ -23,6 +24,17 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
 
     return calls
+
+
+def test_spawn_rejects_outside_tmux(monkeypatch):
+    monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: False)
+
+    try:
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none")
+    except ValueError as exc:
+        assert "requires tmux" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_spawn_loads_specified_skill(monkeypatch):
@@ -62,6 +74,22 @@ def test_spawn_passes_extra_env(monkeypatch):
     startup_cmd = calls[0]
     assert "CR_WORKSPACE=" in startup_cmd
     assert "/tmp/cr-test" in startup_cmd
+    assert "HIVE_TEAM_NAME=" not in startup_cmd
+    assert "HIVE_AGENT_NAME=" not in startup_cmd
+
+
+def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
+    calls = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none",
+    )
+
+    startup_cmd = calls[0]
+    assert "HIVE_TEAM_NAME=" not in startup_cmd
+    assert "HIVE_AGENT_NAME=" not in startup_cmd
+    assert "export " not in startup_cmd
 
 
 def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):

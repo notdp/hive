@@ -118,11 +118,8 @@ def test_current_no_tmux_no_team(runner, configure_hive_home, monkeypatch):
 
     result = runner.invoke(cli, ["current"])
 
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["team"] is None
-    assert payload["tmux"] is None
-    assert "tmux" in payload["hint"]
+    assert result.exit_code != 0
+    assert "requires tmux" in result.output
 
 
 def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hive_home, monkeypatch, tmp_path):

@@ -75,7 +75,7 @@ def test_delete_clears_terminal_tags(runner, configure_hive_home, monkeypatch, t
     monkeypatch.setattr("hive.team.tmux.clear_pane_tags", lambda pane_id: cleared.append(pane_id))
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-d2", "--workspace", str(workspace)]).exit_code == 0
-    assert runner.invoke(cli, ["terminal", "add", "t1", "-t", "team-d2", "--pane", "%88"]).exit_code == 0
+    assert runner.invoke(cli, ["terminal", "add", "t1", "--pane", "%88"]).exit_code == 0
 
     result = runner.invoke(cli, ["delete", "team-d2"])
 
