@@ -96,7 +96,8 @@ capture_session_seed_to_file() {
   local droid_pid="${3:-}"
   local droid_tty="${4:-}"
   local droid_args="${5:-}"
-  "$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args"
+  local seed_offset="${6:-0}"
+  "$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args" "$seed_offset"
 }
 
 resolve_current_droid_process_info() {
@@ -637,6 +638,19 @@ open_vim_window() {
   esac
 }
 
+# Parse offset from args: /cvim -1 → offset=1, /cvim -2 → offset=2, /cvim → offset=0
+vim_offset=0
+remaining_args=()
+for arg in "$@"; do
+  if [[ "$arg" =~ ^-([0-9]+)$ ]]; then
+    vim_offset="${BASH_REMATCH[1]}"
+  else
+    remaining_args+=("$arg")
+  fi
+done
+set -- "${remaining_args[@]+"${remaining_args[@]}"}"
+printf '%s\n' "$vim_offset" > "$tmpdir/offset"
+
 if [[ $# -gt 0 ]]; then
   printf '%s\n' "$*" > "$msg_file"
 elif [[ "$seed_mode" == "session" ]]; then
@@ -645,7 +659,7 @@ elif [[ "$seed_mode" == "session" ]]; then
     transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "")"
   fi
   if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path"
+    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
   else
   droid_pid=""
   droid_tty=""
@@ -653,7 +667,7 @@ elif [[ "$seed_mode" == "session" ]]; then
   if info="$(resolve_current_droid_process_info 2>/dev/null)" && [[ -n "$info" ]]; then
     IFS=$'\t' read -r droid_pid droid_tty droid_args <<<"$info"
   fi
-  capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args"
+  capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args" "$vim_offset"
   fi
 else
   : > "$msg_file"

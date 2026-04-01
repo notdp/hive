@@ -19,22 +19,22 @@ def _run_seed_helper(
     cwd: str,
     preferred: Path | None = None,
     factory_home: Path | None = None,
+    offset: int = 0,
 ) -> str:
     dst = tmp_path / "seed.txt"
     env = os.environ.copy()
     if factory_home is not None:
         env["FACTORY_HOME"] = str(factory_home)
-    subprocess.run(
-        [
-            sys.executable,
-            str(SEED_HELPER),
-            cwd,
-            str(dst),
-            str(preferred) if preferred is not None else "",
-        ],
-        check=True,
-        env=env,
-    )
+    args = [
+        sys.executable,
+        str(SEED_HELPER),
+        cwd,
+        str(dst),
+        str(preferred) if preferred is not None else "",
+    ]
+    if offset:
+        args.append(str(offset))
+    subprocess.run(args, check=True, env=env)
     return dst.read_text()
 
 
@@ -140,6 +140,25 @@ def test_seed_helper_scans_factory_sessions_when_preferred_missing(tmp_path):
     )
 
     assert _run_seed_helper(tmp_path, cwd="/repo", factory_home=factory_home) == "from session dir\n"
+
+
+def test_seed_helper_offset_returns_earlier_assistant_message(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "first"}]}},
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "ok"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "second"}]}},
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "more"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "third"}]}},
+        ],
+    )
+
+    assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript, offset=0) == "third\n"
+    assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript, offset=1) == "second\n"
+    assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript, offset=2) == "first\n"
+    assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript, offset=3) == ""
 
 
 def test_seed_helper_session_mode_resolves_transcript_before_extracting(tmp_path):

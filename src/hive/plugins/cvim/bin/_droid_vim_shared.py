@@ -32,11 +32,13 @@ def iter_candidate_files(path: str):
         yield from sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
 
 
-def extract_last_assistant_text(file_path: Path) -> str:
+def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
+    """Return the Nth assistant message from the end (0=last, 1=second-to-last, ...)."""
     try:
         lines = file_path.read_text(errors="ignore").splitlines()
     except OSError:
         return ""
+    skip = offset
     for line in reversed(lines):
         try:
             obj = json.loads(line)
@@ -59,23 +61,28 @@ def extract_last_assistant_text(file_path: Path) -> str:
                 plan = tool_input.get("plan") if isinstance(tool_input, dict) else ""
                 if isinstance(plan, str) and plan.strip():
                     fallback_plan = plan.strip()
+        text_result = ""
         if parts:
-            return "\n\n".join(parts).strip()
-        if fallback_plan:
-            return fallback_plan
+            text_result = "\n\n".join(parts).strip()
+        elif fallback_plan:
+            text_result = fallback_plan
+        if text_result:
+            if skip <= 0:
+                return text_result
+            skip -= 1
     return ""
 
 
-def write_seed(cwd: str, dst: Path, preferred: Path | None = None) -> None:
+def write_seed(cwd: str, dst: Path, preferred: Path | None = None, offset: int = 0) -> None:
     if preferred is not None:
-        text = extract_last_assistant_text(preferred)
+        text = extract_last_assistant_text(preferred, offset=offset)
         dst.write_text(text + "\n" if text else "")
         return
 
     for index, file_path in enumerate(iter_candidate_files(cwd)):
         if index >= 10:
             break
-        text = extract_last_assistant_text(file_path)
+        text = extract_last_assistant_text(file_path, offset=offset)
         if text:
             dst.write_text(text + "\n")
             return
@@ -187,6 +194,7 @@ def capture_session_seed(
     pid: str = "",
     tty: str = "",
     droid_args: str = "",
+    offset: int = 0,
 ) -> None:
     transcript_path = resolve_transcript_path(
         session_map_file=session_map_file,
@@ -195,4 +203,4 @@ def capture_session_seed(
         tty=tty,
         droid_args=droid_args,
     )
-    write_seed(cwd, dst, Path(transcript_path) if transcript_path else None)
+    write_seed(cwd, dst, Path(transcript_path) if transcript_path else None, offset=offset)

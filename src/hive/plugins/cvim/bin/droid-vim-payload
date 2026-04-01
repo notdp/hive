@@ -13,7 +13,23 @@ def _protocol(script_path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def _build_payload(orig: str, edited: str, mode: str, protocol: dict[str, Any]) -> str:
+def _resolve_diff_target(protocol: dict[str, Any], offset: int) -> str:
+    if offset <= 0:
+        return protocol["diffTarget"]
+    return f"assistant_message[-{offset + 1}]"
+
+
+def _resolve_diff_note(protocol: dict[str, Any], offset: int) -> str:
+    if offset <= 0:
+        return protocol["diffNote"]
+    nth = offset + 1
+    return (
+        f"请把下面的 diff 视为用户对倒数第 {nth} 条 assistant message 的修改。"
+        f"先把该条 assistant message 当作 diff 的基底；新增、删除、替换以及 diff 里的行内注释都表达用户意图。"
+    )
+
+
+def _build_payload(orig: str, edited: str, mode: str, protocol: dict[str, Any], offset: int = 0) -> str:
     if mode == "diff":
         diff = "".join(
             difflib.unified_diff(
@@ -24,8 +40,8 @@ def _build_payload(orig: str, edited: str, mode: str, protocol: dict[str, Any]) 
             )
         ).rstrip("\n")
         payload = "<droid_edit mode=\"diff\">\n"
-        payload += f"<edit_target>{protocol['diffTarget']}</edit_target>\n"
-        payload += f"<edit_note>{protocol['diffNote']}</edit_note>\n"
+        payload += f"<edit_target>{_resolve_diff_target(protocol, offset)}</edit_target>\n"
+        payload += f"<edit_note>{_resolve_diff_note(protocol, offset)}</edit_note>\n"
         payload += "<edit_diff>\n"
         payload += diff
         payload += "\n</edit_diff>\n</droid_edit>"
@@ -44,7 +60,15 @@ def main() -> int:
     edited = Path(sys.argv[2]).read_text(errors="ignore")
     dst = Path(sys.argv[3])
     mode = sys.argv[4]
-    payload = _build_payload(orig, edited, mode, _protocol(Path(__file__)))
+    offset = 0
+    tmpdir = dst.parent
+    offset_file = tmpdir / "offset"
+    if offset_file.is_file():
+        try:
+            offset = int(offset_file.read_text().strip())
+        except (ValueError, OSError):
+            pass
+    payload = _build_payload(orig, edited, mode, _protocol(Path(__file__)), offset=offset)
     dst.write_text(payload[:-1] if payload.endswith("\n") else payload)
     return 0
 
