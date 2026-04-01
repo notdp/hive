@@ -93,13 +93,13 @@ def test_team_spawn_tags_agent_and_loads_workflow(configure_hive_home, monkeypat
     monkeypatch.setattr("hive.agent.Agent.load_skill", lambda self, workflow: setattr(self, "loaded_workflow", workflow))
 
     team = Team(name="team-a", lead_pane_id="%0")
-    result = team.spawn("claude", workflow="cross-review")
+    result = team.spawn("claude", workflow="code-review")
 
     assert result is agent
     assert spawned[0]["target_pane"] == "%0"
     assert spawned[0]["color"] == "green"
     assert tagged == [("%9", "agent", "claude", "team-a")]
-    assert getattr(agent, "loaded_workflow") == "cross-review"
+    assert getattr(agent, "loaded_workflow") == "code-review"
     assert ("border", "dev:1") in layouts
 
 

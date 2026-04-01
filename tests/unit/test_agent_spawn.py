@@ -43,10 +43,10 @@ def test_spawn_loads_specified_skill(monkeypatch):
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
         model="", cwd="/tmp", is_first=True,
-        skill="cross-review",
+        skill="code-review",
     )
 
-    assert "/skill cross-review" in calls
+    assert "/skill code-review" in calls
     # Should NOT send hive bootstrap message
     assert not any("hive teammate" in c for c in calls)
 
@@ -111,9 +111,9 @@ def test_load_skill_sends_slash_command(monkeypatch):
     calls = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0")
 
-    agent.load_skill("cross-review")
+    agent.load_skill("code-review")
 
-    assert calls == ["/skill cross-review"]
+    assert calls == ["/skill code-review"]
 
 
 def test_spawn_uses_runtime_settings_override(monkeypatch):

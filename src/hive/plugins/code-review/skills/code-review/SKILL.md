@@ -1,5 +1,5 @@
 ---
-name: cross-review
+name: code-review
 description: 基于 Hive 协作面做交叉代码审查。支持 PR 分支比较、工作区变更、历史 commit 三种模式。
 disable-model-invocation: true
 ---

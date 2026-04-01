@@ -42,7 +42,7 @@ def test_spawn_forwards_cli_options_to_team(runner, configure_hive_home, monkeyp
             "--skill",
             "none",
             "--workflow",
-            "cross-review",
+            "code-review",
             "--env",
             "CR_WORKSPACE=/tmp/cr",
             "--env",
@@ -58,7 +58,7 @@ def test_spawn_forwards_cli_options_to_team(runner, configure_hive_home, monkeyp
         "color": "cyan",
         "cwd": "/tmp/project",
         "skill": "none",
-        "workflow": "cross-review",
+        "workflow": "code-review",
         "extra_env": {"CR_WORKSPACE": "/tmp/cr", "MODE": "test"},
     }
     payload = json.loads((hive_home / "contexts" / "pane-55.json").read_text())
@@ -115,9 +115,9 @@ def test_workflow_load_loads_skill_and_optional_prompt(runner, configure_hive_ho
 
     result = runner.invoke(
         cli,
-        ["workflow", "load", "claude", "cross-review", "--prompt", "start now"],
+        ["workflow", "load", "claude", "code-review", "--prompt", "start now"],
     )
 
     assert result.exit_code == 0
-    assert calls == ["skill:cross-review", "send:start now"]
-    assert "Workflow 'cross-review' loaded into claude." in result.output
+    assert calls == ["skill:code-review", "send:start now"]
+    assert "Workflow 'code-review' loaded into claude." in result.output

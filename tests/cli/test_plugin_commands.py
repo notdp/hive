@@ -30,7 +30,7 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     listed_json = runner.invoke(cli, ["plugin", "list", "--json"])
     assert listed_json.exit_code == 0
     names = {item["name"]: item for item in json.loads(listed_json.output)}
-    assert {"cvim", "notify", "cross-review", "fork"}.issubset(names)
+    assert {"cvim", "notify", "code-review", "fork"}.issubset(names)
     assert names["cvim"]["enabled"] is False
 
     enabled = runner.invoke(cli, ["plugin", "enable", "cvim"])
@@ -109,15 +109,15 @@ def test_plugin_enable_cross_review_materializes_skill(runner, configure_hive_ho
     hive_home = configure_hive_home(tmux_inside=False)
     factory_home = hive_home.parent / ".factory"
 
-    enabled = runner.invoke(cli, ["plugin", "enable", "cross-review"])
+    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
 
     assert enabled.exit_code == 0
-    assert "Plugin 'cross-review' enabled." in enabled.output
-    assert "skills: cross-review" in enabled.output
-    assert (factory_home / "skills" / "cross-review").is_symlink()
-    assert (hive_home / "plugins" / "installed" / "cross-review" / "skills" / "cross-review" / "SKILL.md").exists()
+    assert "Plugin 'code-review' enabled." in enabled.output
+    assert "skills: code-review" in enabled.output
+    assert (factory_home / "skills" / "code-review").is_symlink()
+    assert (hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md").exists()
 
-    enabled_json = runner.invoke(cli, ["plugin", "enable", "cross-review", "--json"])
+    enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
     assert enabled_json.exit_code == 0
     assert json.loads(enabled_json.output)["enabled"] is True
 
