@@ -45,7 +45,7 @@ def test_spawn_loads_specified_skill(monkeypatch):
         skill="code-review",
     )
 
-    assert "/skill code-review" in calls
+    assert "/code-review" in calls
     # Should NOT send hive bootstrap message
     assert not any("hive teammate" in c for c in calls)
 
@@ -58,7 +58,7 @@ def test_spawn_skips_skill_when_none(monkeypatch):
         cwd="/tmp", is_first=True, skill="none",
     )
 
-    assert not any(c.startswith("/skill") for c in calls)
+    assert not any(c.startswith("/") and not c.startswith("/tmp") for c in calls)
 
 
 def test_spawn_passes_extra_env(monkeypatch):
@@ -100,7 +100,7 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
         prompt="Please check your inbox.",
     )
 
-    assert "/skill hive" in calls
+    assert "/hive" in calls
     assert any("Use `hive team`, `hive send`, and `hive status-set`" in c for c in calls)
     assert any("<HIVE ...> ... </HIVE>" in c for c in calls)
     assert "Please check your inbox." in calls
@@ -112,7 +112,7 @@ def test_load_skill_sends_slash_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["/skill code-review"]
+    assert calls == ["/code-review"]
 
 
 def test_spawn_droid_uses_process_substitution_for_model(monkeypatch):

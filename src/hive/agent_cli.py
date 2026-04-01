@@ -55,7 +55,7 @@ PROFILES: dict[str, CLIProfile] = {
         resume_cmd="droid -r {session_id}",
         fork_cmd="/fork",
         fork_needs_tui=True,
-        skill_cmd="/skill {name}",
+        skill_cmd="/{name}",
     ),
     "claude": CLIProfile(
         name="claude",
@@ -63,7 +63,7 @@ PROFILES: dict[str, CLIProfile] = {
         resume_cmd="claude -r {session_id} --fork-session",
         fork_cmd=None,
         fork_needs_tui=False,
-        skill_cmd="/skill {name}",
+        skill_cmd="/{name}",
     ),
     "codex": CLIProfile(
         name="codex",
@@ -71,7 +71,7 @@ PROFILES: dict[str, CLIProfile] = {
         resume_cmd="codex fork {session_id}",
         fork_cmd=None,
         fork_needs_tui=False,
-        skill_cmd="/skill {name}",
+        skill_cmd="/{name}",
     ),
 }
 

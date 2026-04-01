@@ -279,10 +279,15 @@ class Agent:
         tmux.send_keys(self.pane_id, text)
 
     def load_skill(self, skill_name: str) -> None:
-        """Load one additional droid skill in the pane."""
+        """Load a skill in the pane using the CLI-specific command."""
         if not skill_name or skill_name == "none":
             return
-        tmux.send_keys(self.pane_id, f"/skill {skill_name}")
+        from .agent_cli import get_profile
+        profile = get_profile(self.cli)
+        if profile:
+            tmux.send_keys(self.pane_id, profile.skill_cmd.format(name=skill_name))
+        else:
+            tmux.send_keys(self.pane_id, f"/{skill_name}")
         time.sleep(2)
 
     def interrupt(self) -> None:
