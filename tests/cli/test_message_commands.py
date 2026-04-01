@@ -182,13 +182,12 @@ def test_notify_uses_current_pane_by_default(runner, monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%72")
     monkeypatch.setattr(
         "hive.cli.notify_ui.notify",
-        lambda message, pane_id, seconds, highlight, window_status, native_banner: {
+        lambda message, pane_id, seconds, highlight, window_status: {
             "message": message,
             "paneId": pane_id,
             "seconds": seconds,
             "highlight": highlight,
             "windowStatus": window_status,
-            "nativeBanner": native_banner,
         },
     )
 
@@ -202,7 +201,6 @@ def test_notify_uses_current_pane_by_default(runner, monkeypatch):
         "seconds": 12,
         "highlight": False,
         "windowStatus": True,
-        "nativeBanner": True,
     }
 
 

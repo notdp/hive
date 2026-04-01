@@ -1044,13 +1044,11 @@ def interrupt(agent_name: str):
 @click.option("--seconds", default=12, type=int, show_default=True, help="Overlay/highlight duration")
 @click.option("--highlight/--no-highlight", default=False, help="Flash target pane border")
 @click.option("--window-status/--no-window-status", default=True, help="Flash tmux window status")
-@click.option("--banner/--no-banner", default=True, help="Post native macOS notification")
 def notify_cmd(
     message: str,
     seconds: int,
     highlight: bool,
     window_status: bool,
-    banner: bool,
 ):
     """Notify the user for the current pane."""
     target_pane = _resolve_target_pane()
@@ -1060,7 +1058,6 @@ def notify_cmd(
         seconds=max(1, seconds),
         highlight=highlight,
         window_status=window_status,
-        native_banner=banner,
     )
     click.echo(json.dumps(payload))
 

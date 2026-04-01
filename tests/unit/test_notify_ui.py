@@ -21,7 +21,6 @@ def test_notify_uses_tmux_popup_for_terminal_clients(monkeypatch):
     monkeypatch.setattr("hive.notify_ui.tmux.supports_popup", lambda: True)
     monkeypatch.setattr("hive.notify_ui.tmux.flash_pane_border", lambda pane, seconds=12: calls.append(("flash", pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.tmux.flash_window_status", lambda target, seconds=12: calls.append(("window", target, seconds)))
-    monkeypatch.setattr("hive.notify_ui.post_native_notification", lambda message, subtitle: calls.append(("banner", message, subtitle)))
     monkeypatch.setattr("hive.notify_ui.show_tmux_popup", lambda message, pane, seconds=12: calls.append(("popup", message, pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.show_overlay", lambda message, pane, seconds=12: calls.append(("overlay", message, pane, seconds)))
 
@@ -42,7 +41,6 @@ def test_notify_uses_overlay_for_control_clients(monkeypatch):
     monkeypatch.setattr("hive.notify_ui.tmux.supports_popup", lambda: True)
     monkeypatch.setattr("hive.notify_ui.tmux.flash_pane_border", lambda pane, seconds=12: calls.append(("flash", pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.tmux.flash_window_status", lambda target, seconds=12: calls.append(("window", target, seconds)))
-    monkeypatch.setattr("hive.notify_ui.post_native_notification", lambda message, subtitle: calls.append(("banner", message, subtitle)))
     monkeypatch.setattr("hive.notify_ui.show_tmux_popup", lambda message, pane, seconds=12: calls.append(("popup", message, pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.show_overlay", lambda message, pane, seconds=12: calls.append(("overlay", message, pane, seconds)))
 
@@ -63,7 +61,6 @@ def test_notify_is_suppressed_when_user_is_already_in_target_window(monkeypatch)
     monkeypatch.setattr("hive.notify_ui.tmux.get_most_recent_client_window", lambda _session: "dev:1")
     monkeypatch.setattr("hive.notify_ui.tmux.flash_pane_border", lambda pane, seconds=12: calls.append(("flash", pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.tmux.flash_window_status", lambda target, seconds=12: calls.append(("window", target, seconds)))
-    monkeypatch.setattr("hive.notify_ui.post_native_notification", lambda message, subtitle: calls.append(("banner", message, subtitle)))
     monkeypatch.setattr("hive.notify_ui.show_tmux_popup", lambda message, pane, seconds=12: calls.append(("popup", message, pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.show_overlay", lambda message, pane, seconds=12: calls.append(("overlay", message, pane, seconds)))
     monkeypatch.setattr("hive.notify_ui.notify_state.record_notification", lambda *args, **kwargs: calls.append(("record", args, kwargs)))

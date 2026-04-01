@@ -575,16 +575,6 @@ def _popup_position(pane_id: str, popup_width: int) -> tuple[str, str]:
     return str(x), "1"
 
 
-def post_native_notification(message: str, subtitle: str) -> None:
-    script = (
-        "on run argv\n"
-        "display notification (item 1 of argv) with title \"Hive notify\" subtitle (item 2 of argv) sound name \"Ping\"\n"
-        "end run\n"
-    )
-    subprocess.run([
-        "osascript", "-e", script, message, subtitle,
-    ], check=False, capture_output=True, text=True)
-
 
 def show_overlay(message: str, pane_id: str, seconds: int = 12) -> None:
     script_path = _write_temp_swift()
@@ -669,7 +659,6 @@ def notify(
     *,
     highlight: bool = False,
     window_status: bool = True,
-    native_banner: bool = True,
     source: str = notify_state.SOURCE_AGENT_CLI,
     kind: str = "agent_attention",
 ) -> dict[str, object]:
@@ -695,7 +684,6 @@ def notify(
             "surface": "suppressed",
             "highlight": highlight,
             "windowStatus": window_status,
-            "nativeBanner": native_banner,
             "suppressed": True,
             "suppressionReason": "same_window",
         }
@@ -705,8 +693,6 @@ def notify(
         tmux.flash_pane_border(pane_id, seconds=seconds)
     if window_status and window_target:
         tmux.flash_window_status(window_target, seconds=seconds)
-    if native_banner:
-        post_native_notification(message, f"切到 tab {window_name}")
     surface = "overlay"
     if client_mode == "terminal" and tmux.supports_popup():
         show_tmux_popup(message, pane_id, seconds=seconds)
@@ -724,6 +710,5 @@ def notify(
         "surface": surface,
         "highlight": highlight,
         "windowStatus": window_status,
-        "nativeBanner": native_banner,
         "suppressed": False,
     }
