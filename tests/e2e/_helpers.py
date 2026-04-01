@@ -1,4 +1,5 @@
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -108,25 +109,26 @@ def run_hive_in_tmux_pane(
     capture_lines: int = 200,
 ) -> subprocess.CompletedProcess[str]:
     marker = f"__HIVE_DONE_{uuid.uuid4().hex}__"
+    marker_pattern = re.compile(rf"^{re.escape(marker)}:(\d+)$")
     output_path = cwd / f".hive-tmux-{uuid.uuid4().hex}.out"
     send_tmux_command(pane_id, f"{hive_shell_command(args, env=env, cwd=cwd, stdout_path=output_path)}; printf '\\n{marker}:%s\\n' $?")
 
     def capture() -> str:
         return run_tmux(["capture-pane", "-t", pane_id, "-p", "-S", f"-{capture_lines}"]).stdout
 
-    def status_line() -> str | None:
+    def status_code() -> int | None:
         for line in reversed(capture().splitlines()):
-            if line.strip().startswith(f"{marker}:"):
-                return line.strip()
+            match = marker_pattern.fullmatch(line.strip())
+            if match:
+                return int(match.group(1))
         return None
 
     try:
-        wait_for(lambda: status_line() is not None, timeout=timeout)
+        wait_for(lambda: status_code() is not None, timeout=timeout)
     except AssertionError as exc:
         raise AssertionError(f"timed out waiting for tmux command completion:\n{capture()}") from exc
-    status_line_value = status_line()
-    assert status_line_value is not None
-    returncode = int(status_line_value.rsplit(":", 1)[1])
+    returncode = status_code()
+    assert returncode is not None
     stdout = output_path.read_text() if output_path.exists() else ""
     output_path.unlink(missing_ok=True)
     return subprocess.CompletedProcess([sys.executable, "-c", CLI_CODE, *args], returncode, stdout, "")

@@ -145,7 +145,7 @@ def test_team_get_and_broadcast(configure_hive_home, monkeypatch):
 def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     configure_hive_home()
     monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: None)
-    monkeypatch.setattr("hive.team.core_hooks.resolve_session_record", lambda **_kwargs: None)
+    monkeypatch.setattr("hive.team.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.team.tmux.has_session", lambda name: name == "dev")
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane: pane != "%dead")
     monkeypatch.setattr(
@@ -178,10 +178,9 @@ def test_team_status_backfills_missing_session_ids_from_map(configure_hive_home,
     configure_hive_home()
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
     monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "droid" if pane == "%1" else "zsh")
-    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda pane: {"%0": "/dev/ttys010", "%1": "/dev/ttys011"}.get(pane))
     monkeypatch.setattr(
-        "hive.team.core_hooks.resolve_session_record",
-        lambda **kwargs: {"session_id": {"%0": "lead-sess", "%1": "agent-sess"}[kwargs["pane_id"]]},
+        "hive.team.resolve_session_id_for_pane",
+        lambda pane_id: {"%0": "lead-sess", "%1": "agent-sess"}.get(pane_id),
     )
 
     team = Team(name="team-a", lead_pane_id="%0")

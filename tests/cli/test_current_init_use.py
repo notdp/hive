@@ -189,6 +189,38 @@ def test_current_shows_terminal_role_for_orch_shell(runner, configure_hive_home,
     assert payload["role"] == "terminal"
 
 
+def test_current_detects_claude_role_from_title_and_tty(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%0", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%0")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "2.1.88")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_title", lambda _pane: "✳ Claude Code")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.cli.tmux.list_tty_commands", lambda _tty: ["-zsh", "claude"])
+
+    team_dir = tmp_path / ".hive" / "teams" / "dev"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(json.dumps({
+        "name": "dev",
+        "description": "",
+        "workspace": str(tmp_path / "ws"),
+        "leadName": "orch",
+        "leadPaneId": "%0",
+        "leadSessionId": None,
+        "tmuxSession": "dev",
+        "tmuxWindow": "dev:0",
+        "createdAt": 0,
+        "members": [],
+        "terminals": [],
+    }))
+
+    result = runner.invoke(cli, ["current"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["role"] == "agent"
+
+
 def test_init_returns_existing_team_for_registered_member(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%9", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)

@@ -71,3 +71,6 @@ def test_resolve_session_record_prefers_pane_then_pid_then_tty(configure_hive_ho
         "session_id": "tty-sess",
         "transcript_path": "/tmp/tty.jsonl",
     }
+
+
+

@@ -21,7 +21,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import tmux
 from .agent import Agent
-from .agent_cli import SHELL_NAMES, detect_profile_from_pane_command, is_agent_command, member_role
+from .agent_cli import SHELL_NAMES, detect_profile_for_pane, member_role, member_role_for_pane, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -140,12 +140,11 @@ def _discover_tmux_binding() -> dict[str, str]:
         if team.tmux_window and current_window and team.tmux_window != current_window:
             continue
         if team.lead_pane_id == current_pane:
-            current_command = tmux.get_pane_current_command(current_pane) or ""
             return {
                 "team": team.name,
                 "workspace": team.workspace,
                 "agent": team.lead_name,
-                "role": member_role(current_command),
+                "role": member_role_for_pane(current_pane),
                 "pane": current_pane,
                 "tmuxSession": team.tmux_session,
                 "tmuxWindow": team.tmux_window,
@@ -435,8 +434,9 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
     if not current_pane:
         _fail("cannot determine current pane (pass --pane explicitly)")
 
-    pane_command = tmux.get_pane_current_command(current_pane) or ""
-    profile = detect_profile_from_pane_command(pane_command)
+    profile = detect_profile_for_pane(current_pane)
+    if not profile:
+        _fail(f"unsupported agent pane '{current_pane}'")
 
     if split == "auto":
         width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
@@ -445,20 +445,16 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
     else:
         horizontal = split == "h"
 
-    record = core_hooks.resolve_session_record(
-        pane_id=current_pane,
-        tty=tmux.get_pane_tty(current_pane) or "",
-    )
-    session_id = record.get("session_id") if record else None
+    session_id = resolve_session_id_for_pane(current_pane, profile=profile)
+    if not session_id:
+        _fail(f"cannot determine session id for pane '{current_pane}'")
 
-    new_pane = tmux.split_window(current_pane, horizontal=horizontal)
+    source_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
+    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
     fork_ok = False
 
     try:
-        if session_id:
-            tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
-        else:
-            tmux.send_keys(new_pane, f"{profile.name} -r")
+        tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
 
         if profile.fork_needs_tui:
             if tmux.wait_for_text(new_pane, profile.ready_text, timeout=timeout):

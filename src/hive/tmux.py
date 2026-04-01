@@ -52,6 +52,7 @@ def split_window(
     horizontal: bool = True,
     size: str | None = None,
     detach: bool = True,
+    cwd: str | None = None,
 ) -> str:
     """Split a window/pane. Returns the new pane id.
 
@@ -63,6 +64,8 @@ def split_window(
     args.append("-h" if horizontal else "-v")
     if size:
         args.extend(["-l", size])
+    if cwd:
+        args.extend(["-c", cwd])
     args.extend(["-P", "-F", "#{pane_id}"])
     r = _run(args)
     return r.stdout.strip()
@@ -294,6 +297,70 @@ def get_pane_title(pane_id: str) -> str | None:
 
 def get_pane_current_command(pane_id: str) -> str | None:
     return display_value(pane_id, "#{pane_current_command}")
+
+
+@dataclass(frozen=True)
+class TTYProcessInfo:
+    pid: str
+    command: str
+    argv: str
+
+
+def list_tty_processes(tty: str) -> list[TTYProcessInfo]:
+    tty_name = (tty or "").strip()
+    if not tty_name:
+        return []
+    if tty_name.startswith("/dev/"):
+        tty_name = tty_name[5:]
+    try:
+        result = subprocess.run(
+            ["ps", "-t", tty_name, "-o", "pid=,comm=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    processes: list[TTYProcessInfo] = []
+    for line in result.stdout.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        parts = row.split(None, 2)
+        if len(parts) < 2:
+            continue
+        processes.append(TTYProcessInfo(
+            pid=parts[0],
+            command=parts[1],
+            argv=parts[2] if len(parts) > 2 else parts[1],
+        ))
+    return processes
+
+
+def list_open_files(pid: str) -> list[str]:
+    """Return file paths held open by *pid* via ``lsof -p <pid> -Fn``."""
+    if not pid:
+        return []
+    try:
+        result = subprocess.run(
+            ["lsof", "-p", str(pid), "-Fn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and line[1:].startswith("/"):
+            paths.append(line[1:])
+    return paths
+
+
+def list_tty_commands(tty: str) -> list[str]:
+    return [process.command for process in list_tty_processes(tty)]
 
 
 def get_pane_window_target(pane_id: str) -> str | None:

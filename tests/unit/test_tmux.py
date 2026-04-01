@@ -139,6 +139,27 @@ def test_client_window_helpers_resolve_most_recent_client(monkeypatch):
     assert tmux.get_most_recent_client_window("dev") == "dev:5"
 
 
+def test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output(monkeypatch):
+    calls = []
+
+    def _fake_run(args, capture_output=True, text=True, check=False, timeout=5):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args, 0, "35214 -zsh -zsh\n35988 claude claude --verbose\n", "")
+
+    monkeypatch.setattr("hive.tmux.subprocess.run", _fake_run)
+
+    processes = tmux.list_tty_processes("/dev/ttys012")
+    assert processes == [
+        tmux.TTYProcessInfo(pid="35214", command="-zsh", argv="-zsh"),
+        tmux.TTYProcessInfo(pid="35988", command="claude", argv="claude --verbose"),
+    ]
+    assert tmux.list_tty_commands("/dev/ttys012") == ["-zsh", "claude"]
+    assert calls == [
+        ("ps", "-t", "ttys012", "-o", "pid=,comm=,command="),
+        ("ps", "-t", "ttys012", "-o", "pid=,comm=,command="),
+    ]
+
+
 def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
     monkeypatch.delenv("TMUX_PANE", raising=False)
 

@@ -150,18 +150,43 @@ def install_or_update_session_locator_hooks(script_path: Path | None = None) -> 
     return {"removed": removed, "installed": added}
 
 
+def _install_hooks_in_json_file(config_path: Path, script_path: Path) -> dict[str, int]:
+    try:
+        data = json.loads(config_path.read_text()) if config_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    hooks = data.setdefault("hooks", {})
+    target_group = core_session_hook_defs(script_path)["SessionStart"][0]
+    removed = 0
+    added = 0
+    for event in SESSION_LOCATOR_EVENTS:
+        existing = hooks.get(event, [])
+        if not isinstance(existing, list):
+            existing = []
+        filtered = [g for g in existing if not _is_session_locator_group(g, script_path=script_path)]
+        removed += len(existing) - len(filtered)
+        filtered.append(target_group)
+        hooks[event] = filtered
+        added += 1
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return {"removed": removed, "installed": added}
+
+
 def ensure_session_locator_hook_installed() -> dict[str, object]:
     script_path = session_hook_script_path()
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(_session_hook_resource_text())
     script_path.chmod(0o755)
-    sync_result = install_or_update_session_locator_hooks(script_path)
+    factory_result = install_or_update_session_locator_hooks(script_path)
     return {
         "script": str(script_path),
         "settings": str(settings_path()),
         "sessionMap": str(session_map_path()),
-        "hooksInstalled": sync_result["installed"],
-        "hooksRemoved": sync_result["removed"],
+        "hooksInstalled": factory_result["installed"],
+        "hooksRemoved": factory_result["removed"],
     }
 
 

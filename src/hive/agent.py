@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import core_hooks
 from . import tmux
+from .agent_cli import resolve_session_id_for_pane
 
 DROID_BIN = os.environ.get("DROID_PATH", str(Path.home() / ".local" / "bin" / "droid"))
 DROID_STARTUP_TIMEOUT = 30
@@ -113,23 +113,16 @@ def _select_session_id(cwd: str, session_ids: set[str], model: str = "") -> str 
     return ordered[0]
 
 
-def _resolve_session_id_from_map(pane_id: str = "") -> str | None:
+def _resolve_session_id_from_runtime(pane_id: str = "") -> str | None:
     resolved_pane = pane_id or tmux.get_current_pane_id() or ""
     if not resolved_pane:
         return None
-    record = core_hooks.resolve_session_record(
-        pane_id=resolved_pane,
-        tty=tmux.get_pane_tty(resolved_pane) or "",
-    )
-    if not record:
-        return None
-    session_id = record.get("session_id")
-    return str(session_id) if session_id else None
+    return resolve_session_id_for_pane(resolved_pane)
 
 
 def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> str | None:
     """Best-effort lookup for the current droid session ID in a cwd."""
-    mapped_session = _resolve_session_id_from_map(pane_id)
+    mapped_session = _resolve_session_id_from_runtime(pane_id)
     if mapped_session:
         return mapped_session
     return _select_session_id(cwd, _list_sessions(cwd), model=model)
@@ -137,7 +130,7 @@ def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> s
 
 def _detect_new_session(cwd: str, before: set[str], model: str = "", pane_id: str = "") -> str | None:
     """Find a session UUID that appeared after spawn."""
-    mapped_session = _resolve_session_id_from_map(pane_id)
+    mapped_session = _resolve_session_id_from_runtime(pane_id)
     if mapped_session:
         return mapped_session
     after = _list_sessions(cwd)

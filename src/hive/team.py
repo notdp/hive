@@ -8,10 +8,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import core_hooks
 from . import tmux
 from .agent import Agent, detect_current_session_id
-from .agent_cli import member_role as _member_role
+from .agent_cli import member_role_for_pane, resolve_session_id_for_pane
 
 HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
@@ -24,14 +23,7 @@ def _session_id_for_pane(pane_id: str, current_session_id: str | None = None) ->
         return current_session_id
     if not pane_id:
         return current_session_id
-    record = core_hooks.resolve_session_record(
-        pane_id=pane_id,
-        tty=tmux.get_pane_tty(pane_id) or "",
-    )
-    if not record:
-        return current_session_id
-    session_id = record.get("session_id")
-    return str(session_id) if session_id else current_session_id
+    return resolve_session_id_for_pane(pane_id) or current_session_id
 
 
 @dataclass
@@ -97,8 +89,7 @@ class Team:
         team.tmux_session = tmux.get_current_session_name() or ""
         team.tmux_window = tmux.get_current_window_target() or ""
         if team.lead_pane_id:
-            lead_command = tmux.get_pane_current_command(team.lead_pane_id) or ""
-            tmux.tag_pane(team.lead_pane_id, _member_role(lead_command), team.lead_name, name)
+            tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
 
         team.teams_dir.mkdir(parents=True, exist_ok=True)
 
@@ -282,10 +273,9 @@ class Team:
                 lead.session_id = refreshed_lead_session
                 self.lead_session_id = refreshed_lead_session
                 changed = True
-            lead_command = tmux.get_pane_current_command(lead.pane_id) or ""
             members.append({
                 "name": lead.name,
-                "role": _member_role(lead_command),
+                "role": member_role_for_pane(lead.pane_id),
                 "alive": lead.is_alive(),
                 "pane": lead.pane_id,
                 "model": lead.model,
