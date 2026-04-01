@@ -486,7 +486,7 @@ def current_cmd():
             {
                 "id": p.pane_id,
                 "command": p.command,
-                "role": p.role or member_role(p.command),
+                "role": p.role or member_role_for_pane(p.pane_id),
                 "agent": p.agent,
                 "team": p.team,
             }
