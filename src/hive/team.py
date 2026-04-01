@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from . import tmux
-from .agent import Agent, detect_current_session_id
+from .agent import Agent
 from .agent_cli import member_role_for_pane, resolve_session_id_for_pane
 
-HIVE_HOME = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
+HIVE_HOME = __import__("pathlib").Path(os.environ.get("HIVE_HOME", str(__import__("pathlib").Path.home() / ".hive")))
 COLORS = ["green", "blue", "yellow", "red", "magenta", "cyan"]
 LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
@@ -56,13 +54,17 @@ class Team:
     tmux_session: str = ""
     tmux_window: str = ""
 
-    @property
-    def teams_dir(self) -> Path:
-        return HIVE_HOME / "teams" / self.name
+    # --- Window-level tmux options ---
 
-    @property
-    def config_path(self) -> Path:
-        return self.teams_dir / "config.json"
+    def _write_window_options(self) -> None:
+        target = self.tmux_window
+        if not target:
+            return
+        tmux.set_window_option(target, "@hive-team", self.name)
+        tmux.set_window_option(target, "@hive-workspace", self.workspace)
+        if self.description:
+            tmux.set_window_option(target, "@hive-desc", self.description)
+        tmux.set_window_option(target, "@hive-created", str(self.created_at))
 
     # --- Lifecycle ---
 
@@ -75,78 +77,75 @@ class Team:
         workspace: str = "",
     ) -> Team:
         """Create a new team in the current tmux window."""
-        config_path = HIVE_HOME / "teams" / name / "config.json"
-        if config_path.exists():
-            raise ValueError(f"Team '{name}' already exists")
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
+
+        window_target = tmux.get_current_window_target() or ""
+        existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
+        if existing_team:
+            raise ValueError(f"Team '{existing_team}' already exists in this window")
 
         resolved_cwd = cwd or os.getcwd()
         team = cls(name=name, description=description, workspace=workspace)
 
         team.lead_pane_id = tmux.get_current_pane_id() or ""
+        from .agent import detect_current_session_id
         team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
         team.tmux_session = tmux.get_current_session_name() or ""
-        team.tmux_window = tmux.get_current_window_target() or ""
+        team.tmux_window = window_target
         if team.lead_pane_id:
             tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
 
-        team.teams_dir.mkdir(parents=True, exist_ok=True)
-
-        team.save()
+        team._write_window_options()
         return team
 
     @classmethod
     def load(cls, name: str) -> Team:
-        """Load an existing team from config."""
-        config_path = HIVE_HOME / "teams" / name / "config.json"
-        if not config_path.exists():
+        """Load a team by scanning tmux window options and pane tags.
+
+        Searches all windows in all sessions for a window with @hive-team == name.
+        """
+        window_target, window_data = _find_team_window(name)
+        if not window_target:
             raise FileNotFoundError(f"Team '{name}' not found")
 
-        with open(config_path) as f:
-            data = json.load(f)
-
         team = cls(
-            name=data["name"],
-            description=data.get("description", ""),
-            workspace=data.get("workspace", ""),
-            lead_name=data.get("leadName", LEAD_AGENT_NAME),
-            created_at=data.get("createdAt", 0),
-            lead_pane_id=data.get("leadPaneId", ""),
-            lead_session_id=data.get("leadSessionId"),
-            tmux_session=data.get("tmuxSession", ""),
-            tmux_window=data.get("tmuxWindow", ""),
+            name=name,
+            description=window_data.get("desc", ""),
+            workspace=window_data.get("workspace", ""),
+            created_at=float(window_data.get("created", 0)),
+            tmux_session=window_target.split(":")[0] if ":" in window_target else "",
+            tmux_window=window_target,
         )
 
-        for member in data.get("members", []):
-            agent = Agent(
-                name=member["name"],
-                team_name=name,
-                pane_id=member.get("tmuxPaneId", ""),
-                model=member.get("model", ""),
-                prompt=member.get("prompt", ""),
-                color=member.get("color", "green"),
-                cwd=member.get("cwd", ""),
-                session_id=member.get("sessionId"),
-                spawned_at=member.get("spawnedAt", 0),
-                cli=member.get("cli", "droid"),
-            )
-            team.agents[agent.name] = agent
-
-        for term in data.get("terminals", []):
-            terminal = Terminal(name=term["name"], pane_id=term.get("tmuxPaneId", ""))
-            team.terminals[terminal.name] = terminal
+        panes = tmux.list_panes_full(window_target)
+        for pane in panes:
+            if pane.team != name:
+                continue
+            if pane.role in ("lead", "orchestrator", "agent", "terminal"):
+                if pane.role in ("lead", "orchestrator"):
+                    team.lead_pane_id = pane.pane_id
+                    team.lead_name = pane.agent or LEAD_AGENT_NAME
+                elif pane.role == "agent":
+                    agent = Agent(
+                        name=pane.agent,
+                        team_name=name,
+                        pane_id=pane.pane_id,
+                        model=pane.model,
+                        color=pane.color or "green",
+                        cli=pane.cli or "droid",
+                        cwd="",
+                    )
+                    team.agents[pane.agent] = agent
+                elif pane.role == "terminal":
+                    terminal = Terminal(name=pane.agent, pane_id=pane.pane_id)
+                    team.terminals[pane.agent] = terminal
 
         return team
 
     def is_tmux_alive(self) -> bool:
-        """Check if the tmux environment this team was created in still exists.
-
-        Checks both session existence and lead pane liveness, because the same
-        session may outlive the window/panes where the team was created.
-        """
         if not self.tmux_session:
-            return True  # Legacy teams without session binding are always "alive"
+            return True
         if not tmux.has_session(self.tmux_session):
             return False
         if self.lead_pane_id and not tmux.is_pane_alive(self.lead_pane_id):
@@ -154,23 +153,8 @@ class Team:
         return True
 
     def save(self) -> None:
-        """Save team config to disk."""
-        data = {
-            "name": self.name,
-            "description": self.description,
-            "workspace": self.workspace,
-            "leadName": self.lead_name,
-            "leadPaneId": self.lead_pane_id,
-            "leadSessionId": self.lead_session_id,
-            "tmuxSession": self.tmux_session,
-            "tmuxWindow": self.tmux_window,
-            "createdAt": self.created_at,
-            "members": [a.to_dict() for a in self.agents.values()],
-            "terminals": [t.to_dict() for t in self.terminals.values()],
-        }
-        self.teams_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, "w") as f:
-            json.dump(data, f, indent=2)
+        """Write team state to tmux options (window + pane level)."""
+        self._write_window_options()
 
     def lead_agent(self) -> Agent | None:
         if not self.lead_pane_id:
@@ -237,17 +221,16 @@ class Team:
         if workflow:
             agent.load_skill(workflow)
 
-        tmux.tag_pane(agent.pane_id, "agent", name, self.name)
+        tmux.tag_pane(agent.pane_id, "agent", name, self.name,
+                      model=model, cli=cli, color=color)
         self.agents[name] = agent
 
-        # Layout and pane borders
         window_target = tmux.get_current_window_target()
         if window_target:
             tmux.enable_pane_border_status(window_target)
             tmux.set_window_option(window_target, "main-pane-width", "50%")
             tmux.select_layout(window_target, "main-vertical")
 
-        self.save()
         return agent
 
     def get(self, name: str) -> Agent:
@@ -267,14 +250,12 @@ class Team:
     def status(self) -> dict:
         """Get team status."""
         members: list[dict[str, object]] = []
-        changed = False
         lead = self.lead_agent()
         if lead is not None:
             refreshed_lead_session = _session_id_for_pane(lead.pane_id, lead.session_id)
             if refreshed_lead_session != lead.session_id:
                 lead.session_id = refreshed_lead_session
                 self.lead_session_id = refreshed_lead_session
-                changed = True
             members.append({
                 "name": lead.name,
                 "role": member_role_for_pane(lead.pane_id),
@@ -289,7 +270,6 @@ class Team:
             refreshed_session = _session_id_for_pane(agent.pane_id, agent.session_id)
             if refreshed_session != agent.session_id:
                 agent.session_id = refreshed_session
-                changed = True
             members.append({
                 "name": name,
                 "role": "agent",
@@ -307,8 +287,6 @@ class Team:
                 "alive": terminal.is_alive(),
                 "pane": terminal.pane_id,
             })
-        if changed:
-            self.save()
         return {
             "name": self.name,
             "description": self.description,
@@ -333,3 +311,47 @@ class Team:
                 tmux.clear_pane_tags(terminal.pane_id)
         if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
             tmux.clear_pane_tags(self.lead_pane_id)
+
+
+def _find_team_window(name: str) -> tuple[str, dict[str, str]]:
+    """Find the tmux window that hosts team *name* by scanning window options."""
+    r = tmux._run([
+        "list-windows", "-a", "-F",
+        "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
+    ], check=False)
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 5:
+            parts.append("")
+        if parts[1] == name:
+            return parts[0], {
+                "workspace": parts[2],
+                "desc": parts[3],
+                "created": parts[4],
+            }
+    return "", {}
+
+
+def list_teams() -> list[dict[str, str]]:
+    """List all teams by scanning tmux window options."""
+    r = tmux._run([
+        "list-windows", "-a", "-F",
+        "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}",
+    ], check=False)
+    teams = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 3:
+            parts.append("")
+        if parts[1]:
+            teams.append({
+                "name": parts[1],
+                "tmuxWindow": parts[0],
+                "tmuxSession": parts[0].split(":")[0] if ":" in parts[0] else "",
+                "workspace": parts[2],
+            })
+    return teams

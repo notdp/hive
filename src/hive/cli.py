@@ -121,57 +121,25 @@ def _discover_tmux_binding() -> dict[str, str]:
     if not tmux.is_inside_tmux():
         return {}
     current_pane = tmux.get_current_pane_id()
-    current_session = tmux.get_current_session_name()
-    current_window = tmux.get_current_window_target()
     if not current_pane:
         return {}
-    root = HIVE_HOME / "teams"
-    if not root.is_dir():
+    team_name = tmux.get_pane_option(current_pane, "hive-team")
+    if not team_name:
         return {}
-    for path in sorted(root.iterdir()):
-        if not path.is_dir():
-            continue
-        try:
-            team = Team.load(path.name)
-        except FileNotFoundError:
-            continue
-        if team.tmux_session and current_session and team.tmux_session != current_session:
-            continue
-        if team.tmux_window and current_window and team.tmux_window != current_window:
-            continue
-        if team.lead_pane_id == current_pane:
-            return {
-                "team": team.name,
-                "workspace": team.workspace,
-                "agent": team.lead_name,
-                "role": member_role_for_pane(current_pane),
-                "pane": current_pane,
-                "tmuxSession": team.tmux_session,
-                "tmuxWindow": team.tmux_window,
-            }
-        for name, agent in team.agents.items():
-            if agent.pane_id == current_pane:
-                return {
-                    "team": team.name,
-                    "workspace": team.workspace,
-                    "agent": name,
-                    "role": "agent",
-                    "pane": current_pane,
-                    "tmuxSession": team.tmux_session,
-                    "tmuxWindow": team.tmux_window,
-                }
-        for name, terminal in team.terminals.items():
-            if terminal.pane_id == current_pane:
-                return {
-                    "team": team.name,
-                    "workspace": team.workspace,
-                    "agent": name,
-                    "role": "terminal",
-                    "pane": current_pane,
-                    "tmuxSession": team.tmux_session,
-                    "tmuxWindow": team.tmux_window,
-                }
-    return {}
+    agent_name = tmux.get_pane_option(current_pane, "hive-agent") or ""
+    role = tmux.get_pane_option(current_pane, "hive-role") or ""
+    window_target = tmux.get_current_window_target() or ""
+    session_name = tmux.get_current_session_name() or ""
+    workspace = tmux.get_window_option(window_target, "hive-workspace") if window_target else ""
+    return {
+        "team": team_name,
+        "workspace": workspace or "",
+        "agent": agent_name,
+        "role": role,
+        "pane": current_pane,
+        "tmuxSession": session_name,
+        "tmuxWindow": window_target,
+    }
 
 
 def _default_team() -> str | None:
@@ -400,25 +368,23 @@ def cli(ctx: click.Context):
 
 
 def _gc_dead_teams() -> None:
-    """Remove teams whose tmux session no longer exists."""
+    """Clean up workspaces for teams whose tmux window no longer exists.
+
+    With tmux-only storage, team state dies with the window. This only
+    handles leftover workspace directories and persisted context files.
+    """
+    from .team import list_teams
+    live_names = {t["name"] for t in list_teams()}
     root = HIVE_HOME / "teams"
-    if not root.is_dir():
-        return
-    for path in sorted(root.iterdir()):
-        if not path.is_dir():
-            continue
-        try:
-            team = Team.load(path.name)
-        except FileNotFoundError:
-            continue
-        if not team.is_tmux_alive():
-            if _team_uses_default_auto_workspace(team):
-                bus.reset_workspace(team.workspace)
-            import shutil
-            shutil.rmtree(path, ignore_errors=True)
-            ctx = hive_context.load_current_context()
-            if ctx.get("team") == team.name:
-                hive_context.clear_current_context()
+    if root.is_dir():
+        for path in sorted(root.iterdir()):
+            if not path.is_dir():
+                continue
+            if path.name not in live_names:
+                shutil.rmtree(path, ignore_errors=True)
+    ctx = hive_context.load_current_context()
+    if ctx.get("team") and ctx["team"] not in live_names:
+        hive_context.clear_current_context()
 
 
 @cli.command("fork")
@@ -474,23 +440,20 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
 def teams_cmd():
     """List known teams."""
     _gc_dead_teams()
-    root = HIVE_HOME / "teams"
+    from .team import list_teams
     rows = []
-    if root.is_dir():
-        for path in sorted(root.iterdir()):
-            if not path.is_dir():
-                continue
-            try:
-                team = Team.load(path.name)
-            except FileNotFoundError:
-                continue
-            rows.append({
-                "name": team.name,
-                "workspace": team.workspace,
-                "tmuxSession": team.tmux_session,
-                "tmuxWindow": team.tmux_window,
-                "members": sorted({team.lead_name, *team.agents.keys()}),
-            })
+    for entry in list_teams():
+        try:
+            team = Team.load(entry["name"])
+        except FileNotFoundError:
+            continue
+        rows.append({
+            "name": team.name,
+            "workspace": team.workspace,
+            "tmuxSession": team.tmux_session,
+            "tmuxWindow": team.tmux_window,
+            "members": sorted({team.lead_name, *team.agents.keys()}),
+        })
     click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
@@ -612,19 +575,15 @@ def init_cmd(name: str, workspace: str, notify: bool):
     panes = tmux.list_panes_full(window_target) if window_target else []
     current_pane = tmux.get_current_pane_id()
 
-    try:
-        t = Team.create(team_name, description=f"auto-init from tmux {session_name}:{window_index}", workspace=ws)
-    except ValueError as e:
-        _fail(str(e))
-
     if workspace:
         bus.init_workspace(ws_path)
     else:
         bus.reset_workspace(ws_path)
-    t.workspace = str(ws_path)
-    t.tmux_session = session_name
-    t.tmux_window = window_target or ""
-    t.lead_name = LEAD_AGENT_NAME
+
+    try:
+        t = Team.create(team_name, description=f"auto-init from tmux {session_name}:{window_index}", workspace=str(ws_path))
+    except ValueError as e:
+        _fail(str(e))
 
     _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
 
@@ -685,8 +644,6 @@ def init_cmd(name: str, workspace: str, notify: bool):
                 "isSelf": False,
             })
 
-    t.save()
-
     if notify:
         for agent in t.agents.values():
             agent.load_skill("hive")
@@ -719,7 +676,8 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
     if reset_workspace and not workspace:
         _fail("--reset-workspace requires --workspace")
     try:
-        t = Team.create(name, description=desc, workspace=workspace)
+        ws_str = str(Path(workspace).expanduser()) if workspace else ""
+        t = Team.create(name, description=desc, workspace=ws_str)
         if workspace:
             ws = Path(workspace).expanduser()
             if ws.exists() and reset_workspace:
@@ -727,8 +685,6 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
             bus.init_workspace(ws)
             for key, value in _parse_entries(state_entries).items():
                 (ws / "state" / key).write_text(value)
-            t.workspace = str(ws)
-            t.save()
             _remember_context(team=name, workspace=str(ws), agent=LEAD_AGENT_NAME)
         else:
             _remember_context(team=name, agent=LEAD_AGENT_NAME)
@@ -747,16 +703,22 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
 def delete(name: str, workspace: str, keep_workspace: bool):
     """Delete a team and clean up."""
     team_workspace = ""
+    team_window = ""
     try:
         t = Team.load(name)
         team_workspace = t.workspace
+        team_window = t.tmux_window
         t.cleanup()
     except FileNotFoundError:
         pass
 
-    team_dir = HIVE_HOME / "teams" / name
-    if team_dir.exists():
-        shutil.rmtree(team_dir)
+    if team_window:
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+            tmux.clear_window_option(team_window, f"@{key}")
+
+    legacy_team_dir = HIVE_HOME / "teams" / name
+    if legacy_team_dir.exists():
+        shutil.rmtree(legacy_team_dir)
     legacy_tasks_dir = HIVE_HOME / "tasks" / name
     if legacy_tasks_dir.exists():
         shutil.rmtree(legacy_tasks_dir)
@@ -1188,7 +1150,6 @@ def terminal_add(name: str, pane_id: str):
         _fail(f"terminal '{term_name}' already exists")
     t.terminals[term_name] = Terminal(name=term_name, pane_id=resolved_pane)
     tmux.tag_pane(resolved_pane, "terminal", term_name, team_name)
-    t.save()
     click.echo(f"Terminal '{term_name}' registered ({resolved_pane}).")
 
 
@@ -1203,5 +1164,4 @@ def terminal_remove(name: str):
     terminal_obj = t.terminals.pop(name)
     if tmux.is_pane_alive(terminal_obj.pane_id):
         tmux.clear_pane_tags(terminal_obj.pane_id)
-    t.save()
     click.echo(f"Terminal '{name}' removed.")

@@ -5,7 +5,8 @@ from hive.cli import cli
 
 def test_status_exposes_lead_session_id(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
+    monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "orch-session-456")
+    monkeypatch.setattr("hive.team.resolve_session_id_for_pane", lambda _pane: "orch-session-456")
     workspace = tmp_path / "ws"
 
     assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0

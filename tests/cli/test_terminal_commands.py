@@ -12,14 +12,17 @@ def test_terminal_add_and_remove(runner, configure_hive_home, tmp_path):
     assert result.exit_code == 0
     assert "my-term" in result.output
 
-    config = json.loads((tmp_path / ".hive" / "teams" / "team-t" / "config.json").read_text())
-    assert any(t["name"] == "my-term" for t in config["terminals"])
+    # Verify terminal was added via Team.load (no more config.json)
+    from hive.team import Team
+    team = Team.load("team-t")
+    assert "my-term" in team.terminals
 
     result = runner.invoke(cli, ["terminal", "remove", "my-term"])
     assert result.exit_code == 0
 
-    config = json.loads((tmp_path / ".hive" / "teams" / "team-t" / "config.json").read_text())
-    assert len(config["terminals"]) == 0
+    # After remove, pane tags are cleared so Team.load won't find the terminal
+    team = Team.load("team-t")
+    assert "my-term" not in team.terminals
 
 
 def test_exec_sends_to_terminal(runner, configure_hive_home, mock_tmux_send, tmp_path):

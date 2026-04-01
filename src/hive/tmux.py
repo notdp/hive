@@ -147,6 +147,12 @@ def set_window_option(target: str, option: str, value: str) -> None:
     _run(["set-window-option", "-t", target, option, value], check=False)
 
 
+def get_window_option(target: str, key: str) -> str | None:
+    r = _run(["display-message", "-t", target, "-p", f"#{{@{key}}}"], check=False)
+    val = r.stdout.strip()
+    return val or None
+
+
 def clear_window_option(target: str, option: str) -> None:
     _run(["set-window-option", "-t", target, "-u", option], check=False)
 
@@ -413,6 +419,9 @@ class PaneInfo:
     role: str = ""
     agent: str = ""
     team: str = ""
+    model: str = ""
+    cli: str = ""
+    color: str = ""
 
 
 def list_panes_with_titles(target: str) -> list[PaneInfo]:
@@ -435,22 +444,26 @@ def list_panes_with_titles(target: str) -> list[PaneInfo]:
 _HIVE_FMT = "\t".join([
     "#{pane_id}", "#{pane_title}", "#{pane_current_command}",
     "#{@hive-role}", "#{@hive-agent}", "#{@hive-team}",
+    "#{@hive-model}", "#{@hive-cli}", "#{@hive-color}",
 ])
+
+_HIVE_FMT_FIELD_COUNT = 9
 
 
 def list_panes_full(target: str) -> list[PaneInfo]:
-    """List all panes with command and hive identity (@hive-role/agent/team)."""
+    """List all panes with command and hive identity (@hive-*)."""
     r = _run(["list-panes", "-t", target, "-F", _HIVE_FMT], check=False)
     result = []
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
         parts = line.split("\t")
-        while len(parts) < 6:
+        while len(parts) < _HIVE_FMT_FIELD_COUNT:
             parts.append("")
         result.append(PaneInfo(
             pane_id=parts[0], title=parts[1], command=parts[2],
             role=parts[3], agent=parts[4], team=parts[5],
+            model=parts[6], cli=parts[7], color=parts[8],
         ))
     return result
 
@@ -471,16 +484,26 @@ def clear_pane_option(pane_id: str, key: str) -> None:
     _run(["set-option", "-p", "-t", pane_id, "-u", f"@{key}"], check=False)
 
 
-def tag_pane(pane_id: str, role: str, agent: str, team: str) -> None:
+_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-model", "hive-cli", "hive-color")
+
+
+def tag_pane(pane_id: str, role: str, agent: str, team: str,
+             *, model: str = "", cli: str = "", color: str = "") -> None:
     """Set all hive identity options on a pane."""
     set_pane_option(pane_id, "hive-role", role)
     set_pane_option(pane_id, "hive-agent", agent)
     set_pane_option(pane_id, "hive-team", team)
+    if model:
+        set_pane_option(pane_id, "hive-model", model)
+    if cli:
+        set_pane_option(pane_id, "hive-cli", cli)
+    if color:
+        set_pane_option(pane_id, "hive-color", color)
 
 
 def clear_pane_tags(pane_id: str) -> None:
     """Remove all hive identity options from a pane."""
-    for key in ("hive-role", "hive-agent", "hive-team"):
+    for key in _PANE_TAG_KEYS:
         clear_pane_option(pane_id, key)
 
 

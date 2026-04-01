@@ -1,3 +1,4 @@
+from hive import tmux as _tmux
 from hive.agent import Agent
 from hive.team import Team, Terminal
 
@@ -12,7 +13,7 @@ def test_terminal_to_dict_uses_liveness(monkeypatch):
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=True, current_pane="%7")
     tagged = []
-    monkeypatch.setattr("hive.team.detect_current_session_id", lambda _cwd, model="", pane_id="": "sess-123")
+    monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": "sess-123")
     monkeypatch.setattr("hive.team.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args: tagged.append(args))
@@ -53,12 +54,18 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     team.save()
+
+    # Set up pane tags for load to find (in real usage, set during create/spawn)
+    _tmux.tag_pane("%0", "lead", "orch", "team-a")
+    _tmux.tag_pane("%1", "agent", "claude", "team-a", model="m1", color="cyan")
+    _tmux.tag_pane("%2", "terminal", "shell", "team-a")
+
     loaded = Team.load("team-a")
 
     assert loaded.name == "team-a"
     assert loaded.description == "demo"
-    assert loaded.lead_session_id == "sess-1"
     assert loaded.tmux_window == "dev:0"
+    assert loaded.lead_pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
     assert loaded.terminals["shell"].pane_id == "%2"
 
@@ -85,7 +92,7 @@ def test_team_spawn_tags_agent_and_loads_workflow(configure_hive_home, monkeypat
         "hive.team.Agent.spawn",
         lambda **kwargs: spawned.append(kwargs) or agent,
     )
-    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args: tagged.append(args))
+    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *args, **kwargs: tagged.append(args))
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: "dev:1")
     monkeypatch.setattr("hive.team.tmux.enable_pane_border_status", lambda target: layouts.append(("border", target)))
     monkeypatch.setattr("hive.team.tmux.set_window_option", lambda target, option, value: layouts.append((target, option, value)))
@@ -110,7 +117,7 @@ def test_team_spawn_second_agent_splits_from_last_agent(configure_hive_home, mon
         "hive.team.Agent.spawn",
         lambda **kwargs: calls.append(kwargs) or Agent(name=kwargs["name"], team_name="team-a", pane_id=f"%{len(calls)+8}", color=kwargs["color"]),
     )
-    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *_args: None)
+    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: None)
 
     team = Team(name="team-a", lead_pane_id="%0")
