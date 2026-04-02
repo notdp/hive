@@ -3,7 +3,6 @@
 from hive.agent import (
     Agent,
     _build_droid_model_settings,
-    _detect_new_session,
     detect_current_session_id,
 )
 import json
@@ -256,72 +255,22 @@ def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
 
 def test_spawn_claude_skips_droid_session_detection(monkeypatch):
     calls = _setup_tmux_mocks(monkeypatch)
-    scanned: list[str] = []
-    monkeypatch.setattr("hive.agent._list_sessions", lambda cwd: scanned.append(cwd) or set())
+    resolved: list[str] = []
+    monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda pane_id: resolved.append(pane_id) or None)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
         cwd="/tmp", is_first=True, skill="none", cli="claude",
     )
 
-    assert scanned == [], "should not scan droid sessions for claude"
+    assert resolved == [], "should not resolve session for claude"
 
 
-def test_detect_new_session_matches_resolved_model_id(monkeypatch, tmp_path):
-    sessions_dir = tmp_path / "sessions"
-    project_dir = sessions_dir / "-tmp-test"
-    project_dir.mkdir(parents=True)
-    monkeypatch.setattr("hive.agent._sessions_dir", lambda: sessions_dir)
-    monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
-
-    old_sid = "11111111-1111-1111-1111-111111111111"
-    old_path = project_dir / f"{old_sid}.settings.json"
-    old_path.write_text(json.dumps({"model": "custom:Other-1"}))
-
-    before = {old_sid}
-
-    sid_a = "22222222-2222-2222-2222-222222222222"
-    sid_b = "33333333-3333-3333-3333-333333333333"
-    (project_dir / f"{sid_a}.settings.json").write_text(json.dumps({"model": "custom:Claude-Opus-4.6-0"}))
-    (project_dir / f"{sid_b}.settings.json").write_text(json.dumps({"model": "custom:GPT-5.3-Codex-1"}))
-
-    detected = _detect_new_session("/tmp/test", before, model="custom:Claude-Opus-4.6-0")
-    assert detected == sid_a
-
-
-def test_detect_current_session_prefers_newest_session(monkeypatch):
-    monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
-    monkeypatch.setattr("hive.agent._list_sessions", lambda _cwd: {"old", "new"})
-    monkeypatch.setattr("hive.agent._session_timestamp", lambda _cwd, sid: {"old": 1, "new": 2}[sid])
-
-    assert detect_current_session_id("/tmp/test") == "new"
-
-
-def test_detect_current_session_prefers_matching_model(monkeypatch):
-    monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
-    monkeypatch.setattr("hive.agent._list_sessions", lambda _cwd: {"a", "b"})
-    monkeypatch.setattr("hive.agent._session_timestamp", lambda _cwd, sid: {"a": 1, "b": 2}[sid])
-    monkeypatch.setattr(
-        "hive.agent._read_session_model",
-        lambda _cwd, sid: {"a": "custom:Claude-Opus-4.6-0", "b": "custom:GPT-5.4-1"}[sid],
-    )
-
-    assert detect_current_session_id("/tmp/test", model="custom:Claude-Opus-4.6-0") == "a"
-
-
-def test_detect_current_session_prefers_session_map(monkeypatch):
+def test_detect_current_session_id_delegates_to_resolve(monkeypatch):
     monkeypatch.setattr(
         "hive.agent.resolve_session_id_for_pane",
         lambda pane_id: "map-sess-1" if pane_id == "%11" else None,
     )
 
     assert detect_current_session_id("/tmp/test", pane_id="%11") == "map-sess-1"
-
-
-def test_detect_new_session_prefers_session_map(monkeypatch):
-    monkeypatch.setattr(
-        "hive.agent.resolve_session_id_for_pane",
-        lambda pane_id: "map-sess-2" if pane_id == "%12" else None,
-    )
-
-    assert _detect_new_session("/tmp/test", {"older"}, pane_id="%12") == "map-sess-2"
+    assert detect_current_session_id("/tmp/test", pane_id="%99") is None

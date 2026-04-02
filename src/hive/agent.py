@@ -31,9 +31,6 @@ def _settings_file() -> Path:
     return _factory_home() / "settings.json"
 
 
-def _sessions_dir() -> Path:
-    return _factory_home() / "sessions"
-
 
 def _shell_escape(s: str) -> str:
     """Escape a string for safe shell use."""
@@ -67,56 +64,6 @@ def _load_settings() -> dict[str, Any]:
         return json.load(f)
 
 
-def _encode_cwd(cwd: str) -> str:
-    """Encode a CWD path to the factory sessions directory name format."""
-    return "-" + cwd.lstrip("/").replace("/", "-")
-
-
-def _list_sessions(cwd: str) -> set[str]:
-    """List existing session UUIDs for a given CWD."""
-    sessions_path = _sessions_dir() / _encode_cwd(cwd)
-    if not sessions_path.is_dir():
-        return set()
-    return {
-        f.name.removesuffix(".settings.json")
-        for f in sessions_path.iterdir()
-        if f.name.endswith(".settings.json")
-    }
-
-
-def _session_settings_path(cwd: str, session_id: str) -> Path:
-    return _sessions_dir() / _encode_cwd(cwd) / f"{session_id}.settings.json"
-
-
-def _session_timestamp(cwd: str, session_id: str) -> float:
-    path = _session_settings_path(cwd, session_id)
-    try:
-        stat = path.stat()
-    except OSError:
-        return -1
-    return getattr(stat, "st_birthtime", stat.st_mtime)
-
-
-def _read_session_model(cwd: str, session_id: str) -> str | None:
-    """Read the model from a session's settings.json."""
-    path = _session_settings_path(cwd, session_id)
-    try:
-        with open(path) as f:
-            return json.load(f).get("model")
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _select_session_id(cwd: str, session_ids: set[str], model: str = "") -> str | None:
-    ordered = sorted(session_ids, key=lambda sid: (_session_timestamp(cwd, sid), sid), reverse=True)
-    if not ordered:
-        return None
-    if model:
-        for sid in ordered:
-            if _read_session_model(cwd, sid) == model:
-                return sid
-    return ordered[0]
-
 
 def _resolve_session_id_from_runtime(pane_id: str = "") -> str | None:
     resolved_pane = pane_id or tmux.get_current_pane_id() or ""
@@ -126,20 +73,8 @@ def _resolve_session_id_from_runtime(pane_id: str = "") -> str | None:
 
 
 def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> str | None:
-    """Best-effort lookup for the current droid session ID in a cwd."""
-    mapped_session = _resolve_session_id_from_runtime(pane_id)
-    if mapped_session:
-        return mapped_session
-    return _select_session_id(cwd, _list_sessions(cwd), model=model)
-
-
-def _detect_new_session(cwd: str, before: set[str], model: str = "", pane_id: str = "") -> str | None:
-    """Find a session UUID that appeared after spawn."""
-    mapped_session = _resolve_session_id_from_runtime(pane_id)
-    if mapped_session:
-        return mapped_session
-    after = _list_sessions(cwd)
-    return _select_session_id(cwd, after - before, model=model)
+    """Best-effort lookup for the current droid session ID."""
+    return _resolve_session_id_from_runtime(pane_id)
 
 
 def _build_droid_model_settings(model: str) -> tuple[str, str]:
@@ -198,7 +133,6 @@ class Agent:
         profile = get_profile(cli)
         ready_text = profile.ready_text if profile else "for help"
 
-        sessions_before = _list_sessions(cwd) if cli == "droid" else set()
         resolved_model = model
 
         pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
@@ -252,7 +186,7 @@ class Agent:
 
         if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             if cli == "droid":
-                detected_session = _detect_new_session(cwd, sessions_before, model=resolved_model, pane_id=pane_id)
+                detected_session = resolve_session_id_for_pane(pane_id)
                 if detected_session:
                     agent.session_id = detected_session
 
