@@ -17,11 +17,11 @@ disable-model-invocation: true
 3. 若没有 team 但在 tmux 中，执行 `hive init`
 4. 然后执行 `hive team`
 
-不要依赖 `HIVE_TEAM_NAME`、`HIVE_AGENT_NAME`、`HIVE_WORKSPACE` 之类环境变量；以 `hive current` 为准。
+始终以 `hive current` 的输出为准绳。
 
 ## 2. Review 模式
 
-支持三种 review 模式。Orchestrator 在阶段 1 的 request 里必须明确写出模式与 diff 命令，reviewer 不得自行猜测：
+支持三种 review 模式。Orchestrator 在阶段 1 的 request 里必须明确写出模式与 diff 命令，reviewer 严格按 request 执行：
 
 1. **PR / base branch compare**
    - `git -C <repo> diff <base>...<branch>`
@@ -108,7 +108,7 @@ hive send codex "请阅读 /tmp/hive-xxx/artifacts/codex-request.md"
 hive send opus "交叉确认 C1/C2，见 artifact: /tmp/hive-xxx/artifacts/s3-input.md"
 ```
 
-完成态优先用 status + artifact 回传，不要机械地再补一条 “complete”。
+完成态只用 status + artifact 回传，一条 `status-set done` 即可。
 
 ## 6. Request 契约
 
@@ -123,7 +123,7 @@ hive send opus "交叉确认 C1/C2，见 artifact: /tmp/hive-xxx/artifacts/s3-in
 - （PR 模式可选）PR Number / Base / Branch
 - （Fix 阶段可选）Validator Commands
 
-reviewer 只执行 request 里明确写出的 diff 命令，不再自行推断 review 对象。
+reviewer 只执行 request 里明确写出的 diff 命令。
 
 ## 7. Orchestrator 行为规范
 
@@ -134,17 +134,17 @@ reviewer 只执行 request 里明确写出的 diff 命令，不再自行推断 r
 - 在阶段 2 决定是直接修复还是进入交叉确认
 - 在阶段 4 控制修复/验证轮次
 
-**禁止：**
+**边界：**
 
-- 在阶段 1-4 自己下场审 diff 充当 reviewer
-- 在 reviewer 尚未完成时擅自改写 reviewer artifact
-- 把“需要别人回复”的内容塞进自己的 status 文本
+- 阶段 1-4 只做编排和仲裁，审 diff 的事交给 reviewer
+- reviewer artifact 只有 reviewer 自己写
+- “需要别人回复”的内容走 `hive send`，status 只放自身状态
 
-**必须：**
+**职责：**
 
 - 阶段切换时更新自己的 status
-- 等待 reviewer 时优先使用 `hive wait-status`，不要发无意义 ping
-- 最终只在阶段 5 汇总时生成统一结论
+- 等待 reviewer 时用 `hive wait-status`
+- 只在阶段 5 汇总时生成统一结论
 
 ## 8. CLI 命令
 

@@ -32,11 +32,11 @@ hive status-set failed "invalid request" --task code-review --activity request-i
 
 ## 2. 读取 REVIEW.md / 规范
 
-若 `Repo Path/REVIEW.md` 存在，先读它；若不存在，继续执行，不要自造规范。
+若 `Repo Path/REVIEW.md` 存在，先读它；若不存在，直接按变更审查。
 
 ## 3. 获取 diff
 
-只执行 request 里明确列出的 diff 命令；不要自己替换成别的对象。
+只执行 request 里明确列出的 diff 命令。
 
 ## 4. 审查代码
 
@@ -107,4 +107,4 @@ Only flag an issue as a bug if:
 - `artifact=<artifact path>`
 - `verdict=ok|issues`
 
-非必要不要再补一条重复的 `hive send orchestrator "done"`。
+Done Command 已包含全部信号，一条即可。

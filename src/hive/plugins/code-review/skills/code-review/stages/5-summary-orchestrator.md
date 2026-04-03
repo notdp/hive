@@ -21,7 +21,7 @@ flowchart TD
 - `s3-consensus.md`（若存在）
 - `s4-fix-round-*.md` / `s4-verify-round-*.md`（若存在）
 
-只有在需要校准最终措辞时，才回看代码或 diff；不要在阶段 1-4 越权充当 reviewer。
+此阶段可回看代码或 diff 来校准最终措辞；审查本身已在阶段 1-4 由 reviewer 完成。
 
 ## 2. 生成 summary artifact
 

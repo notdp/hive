@@ -41,7 +41,7 @@ flowchart TD
 
 ## 2. 发起对话
 
-首条消息只讨论“存在分歧的 finding”，不要重新做整轮 review。
+首条消息只讨论“存在分歧的 finding”，范围限于争议点本身。
 
 ```bash
 hive send codex "阶段 3：读取 ~/.factory/skills/code-review/stages/3-cross-confirm-codex.md。我们需要确认以下问题：..."
@@ -52,7 +52,7 @@ hive send codex "阶段 3：读取 ~/.factory/skills/code-review/stages/3-cross-
 - 每轮只处理有限个争议点
 - 每条回复明确写 `Fix` / `Skip` / `Deadlock`
 - 最多 5 轮
-- 不要引入全新 finding，除非它是当前争议点的直接前提
+- 讨论范围限于当前争议点及其直接前提
 
 ## 4. 通知 Orchestrator
 

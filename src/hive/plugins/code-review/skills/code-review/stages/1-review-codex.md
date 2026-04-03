@@ -15,7 +15,7 @@ flowchart TD
 
 ## 1. 读取 request
 
-读取 orchestrator 指定的 request artifact。若缺少关键字段，立即失败回传，不要自己补默认值。
+读取 orchestrator 指定的 request artifact。若缺少关键字段，立即失败回传。
 
 ## 2. 读取 REVIEW.md / 规范
 
@@ -23,14 +23,14 @@ flowchart TD
 
 ## 3. 获取 diff
 
-只执行 request 中写明的 diff 命令；不要擅自更换 base / branch / commit。
+只执行 request 中写明的 diff 命令。
 
 ## 4. 审查代码
 
 ### Review 原则
 
 - 只提作者知道后大概率会修的问题
-- 不要因为风格偏好制造 findings
+- findings 只针对行为/正确性/安全/性能，风格偏好不算
 - 结论要能指向具体文件/行为
 - 若没有离散且可操作的问题，宁可给出 `No issues found`
 
@@ -85,4 +85,4 @@ flowchart TD
 - `artifact=<artifact path>`
 - `verdict=ok|issues`
 
-非必要不要再补一条重复的完成消息。
+Done Command 已包含全部信号，一条即可。
