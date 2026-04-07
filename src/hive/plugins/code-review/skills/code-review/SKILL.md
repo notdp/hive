@@ -8,7 +8,7 @@ disable-model-invocation: false
 
 这个 skill 直接承接 Droid 内置 `/review`，不要依赖中间转发 alias。
 
-Dependency: this skill depends on `hive`. Your first action after entering this skill MUST be `/hive`. Do nothing else before that.
+Dependency: this skill depends on the `hive` skill. Your first action after entering this skill MUST be to load the `hive` skill (use the Skill tool with skill="hive"). Do nothing else before loading hive.
 
 你在 Hive runtime 中执行 Orchestrator 角色，编排一个线性 5 阶段 code review workflow。
 

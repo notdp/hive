@@ -122,8 +122,8 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     skill_text = skill.read_text()
     assert "disable-model-invocation: false" in skill_text
     assert "MANDATORY when the current conversation already contains Droid's built-in review system notification" in skill_text
-    assert "this skill depends on `hive`" in skill_text
-    assert "Your first action after entering this skill MUST be `/hive`" in skill_text
+    assert "depends on the `hive` skill" in skill_text
+    assert "load the `hive` skill" in skill_text
     assert "3 Reviewer + Evidence Verification" in skill_text
     assert "reviewer-a" in skill_text
     assert "Evidence" in skill_text
