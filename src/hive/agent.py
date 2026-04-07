@@ -204,22 +204,32 @@ class Agent:
             if skill and skill != "none":
                 agent.load_skill(skill)
 
+            needs_extra_enter = profile.extra_enter if profile else False
+
             if skill == "hive" and send_bootstrap_prompt:
                 tmux.send_keys(pane_id,
                     "I am a hive teammate. "
                     "Use `hive team`, `hive send`, and `hive status-set` to collaborate. "
                     "Hive messages arrive inline as `<HIVE ...> ... </HIVE>` blocks."
                 )
+                if needs_extra_enter:
+                    tmux.send_key(pane_id, "Enter")
             if prompt:
                 tmux.send_keys(pane_id, prompt)
+                if needs_extra_enter:
+                    tmux.send_key(pane_id, "Enter")
 
         return agent
 
     # --- Control ---
 
     def send(self, text: str) -> None:
-        """Send a prompt to the droid TUI."""
+        """Send a prompt to the agent TUI."""
+        from .agent_cli import get_profile
+        profile = get_profile(self.cli)
         tmux.send_keys(self.pane_id, text)
+        if profile and profile.extra_enter:
+            tmux.send_key(self.pane_id, "Enter")
 
     def load_skill(self, skill_name: str) -> None:
         """Load a skill in the pane using the CLI-specific command."""
@@ -229,6 +239,8 @@ class Agent:
         profile = get_profile(self.cli)
         if profile:
             tmux.send_keys(self.pane_id, profile.skill_cmd.format(name=skill_name))
+            if profile.extra_enter:
+                tmux.send_key(self.pane_id, "Enter")
         else:
             tmux.send_keys(self.pane_id, f"/{skill_name}")
         time.sleep(2)

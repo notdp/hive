@@ -21,6 +21,7 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text: calls.append(text))
+    monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
 
@@ -138,7 +139,25 @@ def test_load_skill_uses_cli_specific_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["$code-review"]
+    assert calls == ["$code-review", "<Enter>"]
+
+
+def test_send_adds_extra_enter_for_codex(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
+
+    agent.send("hello world")
+
+    assert calls == ["hello world", "<Enter>"]
+
+
+def test_send_no_extra_enter_for_droid(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="droid")
+
+    agent.send("hello world")
+
+    assert calls == ["hello world"]
 
 
 def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):

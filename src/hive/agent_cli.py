@@ -46,6 +46,7 @@ class CLIProfile:
     fork_cmd: str | None
     fork_needs_tui: bool
     skill_cmd: str
+    extra_enter: bool = False
 
 
 PROFILES: dict[str, CLIProfile] = {
@@ -72,6 +73,7 @@ PROFILES: dict[str, CLIProfile] = {
         fork_cmd=None,
         fork_needs_tui=False,
         skill_cmd="${name}",
+        extra_enter=True,
     ),
 }
 
