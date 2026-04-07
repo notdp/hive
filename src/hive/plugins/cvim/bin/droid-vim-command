@@ -74,6 +74,8 @@ case "$cursor_mode" in
     ;;
 esac
 
+if [[ "$seed_mode" == "session" ]]; then popup_title="hive-cvim"; else popup_title="hive-vim"; fi
+
 case "$output_mode" in
   text|diff)
     ;;
@@ -624,14 +626,14 @@ open_vim_tmux_popup() {
   target_client="$(resolve_tmux_target_client)" || return 1
   read -r popup_x popup_y popup_w popup_h < <(resolve_tmux_popup_geometry "$target_client")
   helper_cmd="$(build_helper_cmd)"
-  tmux display-popup -c "$target_client" -t "$src_pane" -d "$src_cwd" -x "$popup_x" -y "$popup_y" -w "$popup_w" -h "$popup_h" -T droid-vim -E "$helper_cmd"
+  tmux display-popup -c "$target_client" -t "$src_pane" -d "$src_cwd" -x "$popup_x" -y "$popup_y" -w "$popup_w" -h "$popup_h" -T "$popup_title" -E "$helper_cmd"
 }
 
 open_vim_tmux_window() {
   local helper_cmd
   local window_id
   helper_cmd="$(build_helper_cmd)"
-  window_id="$(tmux new-window -d -P -F '#{window_id}' -t "$src_session" -c "$src_cwd" -n droid-vim "$helper_cmd")"
+  window_id="$(tmux new-window -d -P -F '#{window_id}' -t "$src_session" -c "$src_cwd" -n "$popup_title" "$helper_cmd")"
   tmux select-window -t "$window_id"
 }
 
