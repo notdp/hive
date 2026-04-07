@@ -58,7 +58,7 @@ Output Artifact: $WORKSPACE/artifacts/s4-fix-round-${ROUND}.md
 Done Command: hive status-set done "fix complete" --task code-review --meta stage=s4 --meta role=fix --meta round=$ROUND --meta artifact=$WORKSPACE/artifacts/s4-fix-round-${ROUND}.md
 EOF
 
-hive send fixer "阶段 4：读取 ~/.factory/skills/code-review/stages/4-fix-verify.md（fixer 部分），再执行 $WORKSPACE/artifacts/s4-fix-task.md。完成时仅用 Done Command 回传。"
+hive send fixer "阶段 4 fix：执行 fix task $WORKSPACE/artifacts/s4-fix-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 ### 等待修复完成
@@ -82,7 +82,7 @@ Output Artifact: $WORKSPACE/artifacts/s4-verify-round-${ROUND}.md
 Done Command: hive status-set done "verify complete" --task code-review --meta stage=s4 --meta role=verify --meta round=$ROUND --meta result=<pass|fail> --meta artifact=$WORKSPACE/artifacts/s4-verify-round-${ROUND}.md
 EOF
 
-hive send checker "阶段 4：读取 ~/.factory/skills/code-review/stages/4-fix-verify.md（checker 部分），再执行 $WORKSPACE/artifacts/s4-verify-task.md。完成时仅用 Done Command 回传。"
+hive send checker "阶段 4 verify：执行 verify task $WORKSPACE/artifacts/s4-verify-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 ### 等待验证完成

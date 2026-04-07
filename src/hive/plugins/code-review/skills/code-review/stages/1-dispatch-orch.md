@@ -62,14 +62,18 @@ hive layout main-vertical
 hive team
 ```
 
-执行 `hive spawn` 时给至少 90s timeout。若超时但 `hive team` 已能看到 reviewer，用 `hive capture <reviewer> --lines 10` 确认 pane 是否启动成功。若 capture 显示 agent 未就绪，先执行 `hive workflow load <reviewer> code-review`。
+执行 `hive spawn` 时给至少 90s timeout。若超时但 `hive team` 已能看到 reviewer，说明 spawn 成功但 ready 检测超时，可继续发送 request。若 `hive team` 看不到 reviewer，重新 spawn。
+
+不要使用 `hive capture` 去窥探 reviewer pane 内容。Orch 只通过 `hive team`（成员列表）和 `hive wait-status`（状态回传）获取 reviewer 信息。
 
 ## 发送 request
 
+reviewer 已通过 `--workflow code-review` spawn，会自动加载 code-review skill。send 消息只需引用 request artifact 路径，不需要指定 stage doc 路径（reviewer 自己知道去哪读）。
+
 ```bash
-hive send reviewer-a "阶段 1：读取 ~/.factory/skills/code-review/stages/1-review-reviewer.md，再读取并执行 $WORKSPACE/artifacts/reviewer-a-request.md。完成时仅用 Done Command 回传。"
-hive send reviewer-b "阶段 1：读取 ~/.factory/skills/code-review/stages/1-review-reviewer.md，再读取并执行 $WORKSPACE/artifacts/reviewer-b-request.md。完成时仅用 Done Command 回传。"
-hive send reviewer-c "阶段 1：读取 ~/.factory/skills/code-review/stages/1-review-reviewer.md，再读取并执行 $WORKSPACE/artifacts/reviewer-c-request.md。完成时仅用 Done Command 回传。"
+hive send reviewer-a "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-a-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-b "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-b-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 若 reviewer 只回复泛化的 ready / 自我介绍而没有进入审查，立刻重发更明确的执行指令。

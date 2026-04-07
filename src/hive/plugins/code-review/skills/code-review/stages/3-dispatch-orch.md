@@ -68,9 +68,9 @@ done
 ## 发送
 
 ```bash
-hive send verifier-a "阶段 3：读取 ~/.factory/skills/code-review/stages/3-verify-verifier.md，再执行 $WORKSPACE/artifacts/verifier-a-verify-task.md。完成时仅用 Done Command 回传。"
-hive send verifier-b "阶段 3：读取 ~/.factory/skills/code-review/stages/3-verify-verifier.md，再执行 $WORKSPACE/artifacts/verifier-b-verify-task.md。完成时仅用 Done Command 回传。"
-hive send verifier-c "阶段 3：读取 ~/.factory/skills/code-review/stages/3-verify-verifier.md，再执行 $WORKSPACE/artifacts/verifier-c-verify-task.md。完成时仅用 Done Command 回传。"
+hive send verifier-a "阶段 3 evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
+hive send verifier-b "阶段 3 evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-b-verify-task.md，完成时仅用其中的 Done Command 回传。"
+hive send verifier-c "阶段 3 evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-c-verify-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 ## 等待
