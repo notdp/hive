@@ -100,12 +100,15 @@ class Team:
         return team
 
     @classmethod
-    def load(cls, name: str) -> Team:
+    def load(cls, name: str, *, prefer_pane: str = "") -> Team:
         """Load a team by scanning tmux window options and pane tags.
 
         Searches all windows in all sessions for a window with @hive-team == name.
+        When *prefer_pane* is given, its window is preferred when multiple
+        windows claim the same team name.
         """
-        window_target, window_data = _find_team_window(name)
+        hint = prefer_pane or tmux.get_current_pane_id() or ""
+        window_target, window_data = _find_team_window(name, prefer_pane=hint)
         if not window_target:
             raise FileNotFoundError(f"Team '{name}' not found")
 
@@ -313,12 +316,21 @@ class Team:
             tmux.clear_pane_tags(self.lead_pane_id)
 
 
-def _find_team_window(name: str) -> tuple[str, dict[str, str]]:
-    """Find the tmux window that hosts team *name* by scanning window options."""
+def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[str, str]]:
+    """Find the tmux window that hosts team *name* by scanning window options.
+
+    When multiple windows claim the same team name (e.g. after a window
+    move/reorder leaves stale tags), the window containing *prefer_pane*
+    wins.  If *prefer_pane* is not supplied we fall back to the window
+    that actually has panes tagged for the team.  Stale duplicates get
+    their ``@hive-team`` tag stripped automatically.
+    """
     r = tmux._run([
         "list-windows", "-a", "-F",
         "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
     ], check=False)
+
+    candidates: list[tuple[str, dict[str, str]]] = []
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
@@ -326,12 +338,45 @@ def _find_team_window(name: str) -> tuple[str, dict[str, str]]:
         while len(parts) < 5:
             parts.append("")
         if parts[1] == name:
-            return parts[0], {
+            candidates.append((parts[0], {
                 "workspace": parts[2],
                 "desc": parts[3],
                 "created": parts[4],
-            }
-    return "", {}
+            }))
+
+    if not candidates:
+        return "", {}
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Multiple windows claim this team — resolve the conflict.
+    # 1) Prefer the window that contains *prefer_pane*.
+    if prefer_pane:
+        pane_window = tmux.get_pane_window_target(prefer_pane)
+        if pane_window:
+            for wt, data in candidates:
+                if wt == pane_window:
+                    _gc_stale_team_windows(name, keep=wt, all_windows=[c[0] for c in candidates])
+                    return wt, data
+
+    # 2) Prefer the window that has panes actually tagged for this team.
+    for wt, data in candidates:
+        panes = tmux.list_panes_full(wt)
+        if any(p.team == name and p.role for p in panes):
+            _gc_stale_team_windows(name, keep=wt, all_windows=[c[0] for c in candidates])
+            return wt, data
+
+    # 3) Fall back to first match (shouldn't normally happen).
+    return candidates[0]
+
+
+def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> None:
+    """Remove @hive-team from windows that are stale duplicates."""
+    for wt in all_windows:
+        if wt == keep:
+            continue
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+            tmux.clear_window_option(wt, f"@{key}")
 
 
 def list_teams() -> list[dict[str, str]]:

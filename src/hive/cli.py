@@ -592,6 +592,15 @@ def init_cmd(name: str, workspace: str, notify: bool):
             tmux.clear_window_option(window_target, f"@{key}")
 
     team_name = name or f"{session_name}-{window_index}"
+
+    # Global duplicate check: another window may already own this team name
+    # (e.g. stale tag left after a window move).
+    from .team import _find_team_window, _gc_stale_team_windows
+    existing_wt, _ = _find_team_window(team_name, prefer_pane=tmux.get_current_pane_id() or "")
+    if existing_wt and existing_wt != window_target:
+        # Stale tag on another window — clean it up so we can claim the name.
+        _gc_stale_team_windows(team_name, keep=window_target or "", all_windows=[existing_wt])
+
     default_ws_path = _default_auto_workspace_path(session_name, window_index)
     ws_path = Path(workspace).expanduser() if workspace else default_ws_path
     ws = str(ws_path)

@@ -1,6 +1,6 @@
 from hive import tmux as _tmux
 from hive.agent import Agent
-from hive.team import Team, Terminal
+from hive.team import Team, Terminal, _find_team_window, _gc_stale_team_windows
 
 
 def test_terminal_to_dict_uses_liveness(monkeypatch):
@@ -231,3 +231,61 @@ def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
     assert calls[:3] == [("shutdown", "%1"), ("shutdown", "%1"), ("shutdown", "%2")]
     assert ("kill", "%1") in calls and ("kill", "%2") in calls
     assert ("clear", "%3") in calls and ("clear", "%0") in calls
+
+
+def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, monkeypatch):
+    """When two windows claim the same team, the one containing prefer_pane wins."""
+    configure_hive_home()
+
+    list_output = "dev:2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\tmy-team\t/tmp/ws\tdesc\t0\n"
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
+    )
+    monkeypatch.setattr("hive.team.tmux.get_pane_window_target", lambda pane: "dev:3" if pane == "%99" else None)
+    cleared: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
+
+    wt, data = _find_team_window("my-team", prefer_pane="%99")
+
+    assert wt == "dev:3"
+    assert any(wt_c == "dev:2" for wt_c, _ in cleared)
+
+
+def test_find_team_window_falls_back_to_tagged_panes(configure_hive_home, monkeypatch):
+    """Without prefer_pane, pick the window that actually has tagged panes."""
+    configure_hive_home()
+
+    list_output = "dev:2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\tmy-team\t/tmp/ws\tdesc\t0\n"
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
+    )
+    monkeypatch.setattr("hive.team.tmux.get_pane_window_target", lambda _pane: None)
+
+    from hive.tmux import PaneInfo
+    def fake_list_panes(target):
+        if target == "dev:3":
+            return [PaneInfo("%50", "", "droid", role="agent", agent="rev-a", team="my-team")]
+        return [PaneInfo("%40", "", "droid", role="", agent="", team="")]
+
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
+
+    wt, _ = _find_team_window("my-team")
+
+    assert wt == "dev:3"
+    assert "dev:2" in cleared
+
+
+def test_gc_stale_team_windows_clears_non_kept(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    cleared: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
+
+    _gc_stale_team_windows("my-team", keep="dev:3", all_windows=["dev:2", "dev:3", "dev:4"])
+
+    stale_windows = {wt for wt, _ in cleared}
+    assert stale_windows == {"dev:2", "dev:4"}
+    assert ("dev:3", "@hive-team") not in cleared

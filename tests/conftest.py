@@ -47,7 +47,7 @@ class FakeTmuxState:
     def clear_pane_tags(self, pane_id: str) -> None:
         self.pane_options.pop(pane_id, None)
 
-    def find_team_window(self, name: str) -> tuple[str, dict[str, str]]:
+    def find_team_window(self, name: str, *, prefer_pane: str = "") -> tuple[str, dict[str, str]]:
         for target, opts in self.window_options.items():
             if opts.get("hive-team") == name:
                 return target, {
@@ -117,6 +117,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.team.tmux.clear_pane_tags", state.clear_pane_tags)
         monkeypatch.setattr("hive.team.tmux.set_window_option", state.set_window_option)
         monkeypatch.setattr("hive.team.tmux.get_window_option", state.get_window_option)
+        monkeypatch.setattr("hive.team.tmux.clear_window_option", state.clear_window_option)
         monkeypatch.setattr("hive.team.tmux.list_panes_full", state.list_panes_full)
         monkeypatch.setattr("hive.team._find_team_window", state.find_team_window)
         monkeypatch.setattr("hive.team.list_teams", state.list_teams)
