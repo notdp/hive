@@ -21,7 +21,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import tmux
 from .agent import Agent
-from .agent_cli import SHELL_NAMES, detect_profile_for_pane, member_role, member_role_for_pane, resolve_session_id_for_pane
+from .agent_cli import SHELL_NAMES, detect_profile_for_pane, member_role, member_role_for_pane, normalize_command, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -562,7 +562,7 @@ def _derive_agent_name(seen: set[str]) -> str:
 @cli.command("init")
 @click.option("--name", "-n", default="", help="Team name (default: tmux session name)")
 @click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
-@click.option("--notify/--no-notify", default=True, help="Push /skill hive + context to other panes")
+@click.option("--notify/--no-notify", default=True, help="Push hive skill + context to other panes")
 def init_cmd(name: str, workspace: str, notify: bool):
     """Initialize a team from the current tmux window."""
     if not tmux.is_inside_tmux():
@@ -646,9 +646,11 @@ def init_cmd(name: str, workspace: str, notify: bool):
                 team_name=team_name,
                 pane_id=pane.pane_id,
                 cwd=os.getcwd(),
+                cli=normalize_command(pane.command),
             )
             t.agents[agent_name] = agent
-            tmux.tag_pane(pane.pane_id, "agent", agent_name, team_name)
+            tmux.tag_pane(pane.pane_id, "agent", agent_name, team_name,
+                         cli=normalize_command(pane.command))
             hive_context.save_context_for_pane(
                 pane.pane_id, team=team_name, workspace=str(ws_path), agent=agent_name,
             )

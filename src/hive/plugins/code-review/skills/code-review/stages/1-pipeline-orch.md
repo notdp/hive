@@ -80,18 +80,25 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 
 ## 流水线处理
 
-依次 wait-status 每个 reviewer。当一个完成时：
+**严格按以下循环执行。每个 reviewer 完成后，必须立即 spawn verifier 再去等下一个 reviewer。禁止等完所有 reviewer 再统一处理。**
 
-1. 读取其 artifact，丢弃缺少 File/Code/Verify 的 finding
-2. 若有合格 finding，生成 verify task artifact
-3. Kill 该 reviewer，spawn verifier 接手验证
-4. 继续等下一个 reviewer
+对 reviewer-a、reviewer-b、reviewer-c **逐个**执行下面 4 步：
+
+### 步骤 1: 等待该 reviewer 完成
 
 ```bash
-# reviewer-a 完成
 hive wait-status reviewer-a --state done --meta stage=s1 --timeout 1800
+```
 
-# 读取 findings，格式校验，生成 verify task
+### 步骤 2: 读取 findings + 格式校验
+
+读取该 reviewer 的 artifact，丢弃缺少 File/Code/Verify 的 finding。
+
+### 步骤 3: Kill reviewer，spawn verifier
+
+如果有 ≥1 条合格 finding，生成 verify task artifact 并立即 spawn verifier：
+
+```bash
 cat > "$WORKSPACE/artifacts/verifier-a-verify-task.md" <<EOF
 # Verification Task
 (reviewer-a 的合格 findings，包含 File/Code/Verify)
@@ -102,21 +109,37 @@ EOF
 hive kill reviewer-a
 hive spawn verifier-a --cli droid --model custom:GPT-5.4-1 --workflow code-review
 hive send verifier-a "evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
-
-# reviewer-b 完成（可能此时 verifier-a 已经在跑了）
-hive wait-status reviewer-b --state done --meta stage=s1 --timeout 1800
-# ... 同样处理 ...
-
-# reviewer-c 完成
-hive wait-status reviewer-c --state done --meta stage=s1 --timeout 1800
-# ... 同样处理 ...
-
-hive layout main-vertical
 ```
 
-如果某个 reviewer 的 findings 全部格式不合格（0 条合格），跳过该 reviewer 的 verifier spawn。
+如果 0 条合格 finding，只 kill reviewer，不 spawn verifier。
+
+### 步骤 4: 立即回到步骤 1，等下一个 reviewer
+
+**不要等 verifier 完成。** verifier 在后台运行，与下一个 reviewer 的 wait 并行。
+
+---
+
+**示例时序**（正确行为）：
+
+```
+wait reviewer-a → done → kill reviewer-a → spawn verifier-a → 【立刻】
+wait reviewer-b → done → kill reviewer-b → spawn verifier-b → 【立刻】
+wait reviewer-c → done → kill reviewer-c → spawn verifier-c
+→ 此时 verifier-a / verifier-b 可能已经完成
+```
+
+**错误行为**（禁止）：
+
+```
+wait reviewer-a → kill
+wait reviewer-b → kill
+wait reviewer-c → kill
+然后才 spawn verifier    ← 禁止！这不是流水线
+```
 
 ## 等待全部 verifier
+
+在所有 reviewer 处理完毕后，等待实际 spawn 了的 verifier：
 
 ```bash
 hive wait-status verifier-a --state done --meta stage=s1-verify --timeout 1800
