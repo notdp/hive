@@ -170,7 +170,7 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     # --- S3 dispatch ---
     s3_dispatch = (stages_dir / "3-dispatch-orch.md").read_text()
     assert "hive spawn verifier-a" in s3_dispatch
-    assert "tmux kill-pane" in s3_dispatch
+    assert "hive kill reviewer-a" in s3_dispatch
     assert "hive layout main-vertical" in s3_dispatch
 
     # --- S3 verifier ---

@@ -1102,6 +1102,19 @@ def interrupt(agent_name: str):
     click.echo(f"Interrupted {agent_name}.")
 
 
+@cli.command()
+@click.argument("agent_name")
+def kill(agent_name: str):
+    """Kill an agent pane and remove it from the team."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    agent = t.get(agent_name)
+    agent.kill()
+    if agent_name in t.agents:
+        del t.agents[agent_name]
+    click.echo(f"Killed {agent_name}.")
+
+
 @cli.command("notify")
 @click.argument("message")
 @click.option("--seconds", default=12, type=int, show_default=True, help="Overlay/highlight duration")

@@ -206,8 +206,8 @@ flowchart TB
 | `hive status-set ...` | 发布状态 |
 | `hive wait-status <agent> ...` | 等待状态 |
 | `hive capture <agent>` | 查看 agent pane 输出 |
+| `hive kill <agent>` | kill agent pane 并移除 |
 | `hive layout <preset>` | 调整 tmux 布局（main-vertical / tiled 等） |
-| `tmux kill-pane -t <id>` | kill agent pane |
 
 ## 10. Workspace Keys
 

@@ -20,9 +20,9 @@ flowchart TD
 ## Kill 旧 verifier
 
 ```bash
-tmux kill-pane -t <verifier-a-pane-id>
-tmux kill-pane -t <verifier-b-pane-id>
-tmux kill-pane -t <verifier-c-pane-id>
+hive kill verifier-a
+hive kill verifier-b
+hive kill verifier-c
 ```
 
 ## Spawn

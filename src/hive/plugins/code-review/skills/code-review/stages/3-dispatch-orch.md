@@ -20,12 +20,10 @@ flowchart TD
 ## Kill 旧 reviewer
 
 ```bash
-tmux kill-pane -t <reviewer-a-pane-id>
-tmux kill-pane -t <reviewer-b-pane-id>
-tmux kill-pane -t <reviewer-c-pane-id>
+hive kill reviewer-a
+hive kill reviewer-b
+hive kill reviewer-c
 ```
-
-用 `hive team` 查看各 reviewer 的 pane id。
 
 ## Spawn 新 verifier
 

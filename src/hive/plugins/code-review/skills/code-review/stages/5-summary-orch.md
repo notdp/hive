@@ -19,7 +19,7 @@ flowchart TD
 
 ```bash
 # kill 当前阶段残留的 agent pane（fixer/checker 或 verifier）
-# 用 hive team 查看 pane id，逐个 tmux kill-pane
+# 用 hive team 查看成员列表，逐个 hive kill <agent>
 ```
 
 ## 汇总

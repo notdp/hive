@@ -246,6 +246,31 @@ def test_interrupt_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     assert calls == ["interrupt"]
 
 
+def test_kill_removes_agent(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    killed: list[str] = []
+
+    class _FakeAgent:
+        def kill(self) -> None:
+            killed.append("killed")
+
+    class _FakeTeam:
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+        agents = {"opus": _FakeAgent()}
+
+        def get(self, name: str):
+            return self.agents[name]
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+
+    result = runner.invoke(cli, ["kill", "opus"])
+    assert result.exit_code == 0
+    assert killed == ["killed"]
+    assert "Killed opus." in result.output
+    assert "opus" not in _FakeTeam.agents
+
+
 def test_notify_uses_current_pane_by_default(runner, monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%72")
     monkeypatch.setattr(
