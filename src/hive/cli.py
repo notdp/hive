@@ -21,7 +21,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import tmux
 from .agent import Agent
-from .agent_cli import SHELL_NAMES, detect_profile_for_pane, member_role, member_role_for_pane, normalize_command, resolve_session_id_for_pane
+from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, member_role_for_pane, normalize_command, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -559,6 +559,68 @@ def _derive_agent_name(seen: set[str]) -> str:
     return candidate
 
 
+def _derive_terminal_name(seen: set[str]) -> str:
+    suffix = 1
+    candidate = f"term-{suffix}"
+    while candidate in seen:
+        suffix += 1
+        candidate = f"term-{suffix}"
+    seen.add(candidate)
+    return candidate
+
+
+def _resolve_pane_cli(pane: tmux.PaneInfo) -> str:
+    pane_cli = normalize_command(pane.cli or pane.command)
+    if pane_cli not in AGENT_CLI_NAMES:
+        profile = detect_profile_for_pane(pane.pane_id)
+        if profile:
+            pane_cli = profile.name
+    return pane_cli
+
+
+def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
+    pane_cli = _resolve_pane_cli(pane)
+    return ("agent" if pane_cli in AGENT_CLI_NAMES else "terminal", pane_cli)
+
+
+def _hive_join_message(agent_name: str, team_name: str) -> str:
+    return (
+        f"You are '{agent_name}' in hive team '{team_name}'. "
+        "Context is pre-bound. Hive messages will arrive inline as "
+        "`<HIVE ...> ... </HIVE>` blocks. "
+        "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
+    )
+
+
+def _register_existing_pane(
+    t: Team,
+    pane: tmux.PaneInfo,
+    *,
+    team_name: str,
+    seen_names: set[str],
+) -> tuple[str, str, Agent | Terminal]:
+    role, pane_cli = _classify_pane(pane)
+    tmux.clear_pane_tags(pane.pane_id)
+    if role == "agent":
+        agent_name = _derive_agent_name(seen_names)
+        agent = Agent(
+            name=agent_name,
+            team_name=team_name,
+            pane_id=pane.pane_id,
+            cwd=os.getcwd(),
+            cli=pane_cli,
+        )
+        t.agents[agent_name] = agent
+        tmux.tag_pane(pane.pane_id, "agent", agent_name, team_name, cli=pane_cli)
+        return role, agent_name, agent
+
+    terminal_name = _derive_terminal_name(seen_names)
+    terminal = Terminal(name=terminal_name, pane_id=pane.pane_id)
+    t.terminals[terminal_name] = terminal
+    tmux.tag_pane(pane.pane_id, "terminal", terminal_name, team_name)
+    return role, terminal_name, terminal
+
+
 @cli.command("init")
 @click.option("--name", "-n", default="", help="Team name (default: tmux session name)")
 @click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
@@ -573,6 +635,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
     session_name = tmux.get_current_session_name() or "hive"
     window_index = tmux.get_current_window_index() or "0"
     window_target = tmux.get_current_window_target()
+    current_pane = tmux.get_current_pane_id()
     existing = _discover_tmux_binding()
     if existing.get("team"):
         click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
@@ -580,10 +643,42 @@ def init_cmd(name: str, workspace: str, notify: bool):
     bound_team = tmux.get_window_option(window_target, "hive-team") if window_target else ""
     if bound_team:
         try:
-            loaded = Team.load(bound_team)
+            loaded = Team.load(bound_team, prefer_pane=current_pane or "")
         except FileNotFoundError:
             loaded = None
         if loaded and loaded.tmux_window == window_target and loaded.status().get("members"):
+            panes = tmux.list_panes_full(window_target) if window_target else []
+            current_info = next((pane for pane in panes if pane.pane_id == current_pane), None)
+            if current_info and (not current_info.team or current_info.team == bound_team):
+                seen_names = _names_used_in_window(panes)
+                seen_names.add(loaded.lead_name or LEAD_AGENT_NAME)
+                role, member_name, member = _register_existing_pane(
+                    loaded,
+                    current_info,
+                    team_name=bound_team,
+                    seen_names=seen_names,
+                )
+                workspace_str = loaded.workspace or ""
+                hive_context.save_context_for_pane(
+                    current_pane or "",
+                    team=bound_team,
+                    workspace=workspace_str,
+                    agent=member_name,
+                )
+                _remember_context(team=bound_team, workspace=workspace_str, agent=member_name)
+                if notify and isinstance(member, Agent):
+                    member.load_skill("hive")
+                    member.send(_hive_join_message(member_name, bound_team))
+                click.echo(json.dumps({
+                    "team": bound_team,
+                    "workspace": workspace_str,
+                    "agent": member_name,
+                    "role": role,
+                    "pane": current_pane,
+                    "tmuxSession": session_name,
+                    "tmuxWindow": window_target,
+                }, indent=2, ensure_ascii=False))
+                return
             _fail(
                 f"tmux window '{window_target}' already belongs to team '{bound_team}'; "
                 "current pane is not registered"
@@ -606,7 +701,6 @@ def init_cmd(name: str, workspace: str, notify: bool):
     ws = str(ws_path)
 
     panes = tmux.list_panes_full(window_target) if window_target else []
-    current_pane = tmux.get_current_pane_id()
 
     if workspace:
         bus.init_workspace(ws_path)
@@ -623,71 +717,41 @@ def init_cmd(name: str, workspace: str, notify: bool):
     seen_names = _names_used_in_window(panes)
     seen_names.add(LEAD_AGENT_NAME)
     discovered = []
-    term_index = 0
     for pane in panes:
         if pane.team and pane.team != team_name:
             _fail(f"pane '{pane.pane_id}' already belongs to team '{pane.team}'")
-        is_agent = pane.command not in SHELL_NAMES
+        role, _pane_cli = _classify_pane(pane)
         is_current = pane.pane_id == current_pane
         if is_current:
             discovered.append({
                 "paneId": pane.pane_id,
-                "role": "agent" if is_agent else "terminal",
+                "role": role,
                 "name": LEAD_AGENT_NAME,
                 "command": pane.command,
                 "isSelf": True,
             })
             continue
 
-        if is_agent:
-            agent_name = _derive_agent_name(seen_names)
-            agent = Agent(
-                name=agent_name,
-                team_name=team_name,
-                pane_id=pane.pane_id,
-                cwd=os.getcwd(),
-                cli=normalize_command(pane.command),
-            )
-            t.agents[agent_name] = agent
-            tmux.tag_pane(pane.pane_id, "agent", agent_name, team_name,
-                         cli=normalize_command(pane.command))
+        role, member_name, member = _register_existing_pane(
+            t,
+            pane,
+            team_name=team_name,
+            seen_names=seen_names,
+        )
+        if isinstance(member, Agent):
             hive_context.save_context_for_pane(
-                pane.pane_id, team=team_name, workspace=str(ws_path), agent=agent_name,
+                pane.pane_id, team=team_name, workspace=str(ws_path), agent=member_name,
             )
-            discovered.append({
-                "paneId": pane.pane_id,
-                "role": "agent",
-                "name": agent_name,
-                "command": pane.command,
-                "isSelf": False,
-            })
-        else:
-            term_index += 1
-            term_name = f"term-{term_index}"
-            while term_name in seen_names:
-                term_index += 1
-                term_name = f"term-{term_index}"
-            seen_names.add(term_name)
-            terminal = Terminal(name=term_name, pane_id=pane.pane_id)
-            t.terminals[term_name] = terminal
-            tmux.tag_pane(pane.pane_id, "terminal", term_name, team_name)
-            discovered.append({
-                "paneId": pane.pane_id,
-                "role": "terminal",
-                "name": term_name,
-                "command": pane.command,
-                "isSelf": False,
-            })
-
-    if notify:
-        for agent in t.agents.values():
-            agent.load_skill("hive")
-            agent.send(
-                f"You are '{agent.name}' in hive team '{team_name}'. "
-                "Context is pre-bound. Hive messages will arrive inline as "
-                "`<HIVE ...> ... </HIVE>` blocks. "
-                "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
-            )
+            if notify:
+                member.load_skill("hive")
+                member.send(_hive_join_message(member_name, team_name))
+        discovered.append({
+            "paneId": pane.pane_id,
+            "role": role,
+            "name": member_name,
+            "command": pane.command,
+            "isSelf": False,
+        })
 
     result = {
         "team": team_name,

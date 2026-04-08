@@ -44,7 +44,7 @@ def test_e2e_init_current_exec_and_terminal_management(tmp_path: Path):
         window_index = str(init_payload["window"]).split(":")[-1]
         assert team_name == f"{session}-{window_index}"
         assert any(p["role"] == "terminal" for p in init_payload["panes"])
-        assert any(p["role"] == "agent" for p in init_payload["panes"])
+        assert not any(p["role"] == "agent" for p in init_payload["panes"])
 
         who_result = run_in_pane(["who"])
         assert who_result.returncode == 0, who_result.stdout

@@ -212,6 +212,71 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
     }
 
 
+def test_init_registers_current_unbound_pane_into_existing_team(
+    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
+):
+    configure_hive_home(current_pane="%2", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "5")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:5")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%2")
+    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
+
+    from hive import tmux
+    from hive.tmux import PaneInfo
+
+    tmux.set_window_option("dev:5", "@hive-team", "dev-5")
+    tmux.set_window_option("dev:5", "@hive-workspace", str(tmp_path / "ws"))
+    tmux.set_window_option("dev:5", "@hive-created", "0")
+
+    def fake_get_pane_option(pane_id: str, key: str):
+        if pane_id == "%2" and key == "hive-team":
+            return "dev-5"
+        return None
+
+    monkeypatch.setattr("hive.cli.tmux.get_pane_option", fake_get_pane_option)
+    monkeypatch.setattr("hive.tmux.get_pane_option", fake_get_pane_option)
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%1", "orch", command="droid", role="agent", agent="orch", team="dev-5"),
+            PaneInfo("%2", "Codex", command="zsh", team="dev-5"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%1", "orch", command="droid", role="agent", agent="orch", team="dev-5"),
+            PaneInfo("%2", "Codex", command="zsh", team="dev-5"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda pane_id: type("P", (), {"name": "codex"})() if pane_id == "%2" else None,
+    )
+
+    result = runner.invoke(cli, ["init"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload == {
+        "team": "dev-5",
+        "workspace": str(tmp_path / "ws"),
+        "agent": "dodo",
+        "role": "agent",
+        "pane": "%2",
+        "tmuxSession": "dev",
+        "tmuxWindow": "dev:5",
+    }
+    pane_events = [text for pane, text in mock_tmux_send if pane == "%2"]
+    assert "$hive" in pane_events
+    assert any("You are 'dodo' in hive team 'dev-5'." in text for text in pane_events)
+    current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
+    assert current["team"] == "dev-5"
+    assert current["agent"] == "dodo"
+
+
 def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%9", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
@@ -246,6 +311,7 @@ def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
     monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "nini")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
 
     from hive.tmux import PaneInfo
 
@@ -282,6 +348,47 @@ def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_
     current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
     assert current["team"] == "dev-2"
     assert current["agent"] == "orch"
+
+
+def test_init_detects_preopened_codex_cli_and_uses_codex_commands(
+    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
+):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "5")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:5")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%10")
+    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%10", "shell", command="zsh"),
+            PaneInfo("%11", "Codex", command="zsh"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda pane_id: type("P", (), {"name": "codex"})() if pane_id == "%11" else None,
+    )
+
+    workspace = tmp_path / "ws"
+    result = runner.invoke(cli, ["init", "--workspace", str(workspace)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-5"
+    roles = {p["name"]: p["role"] for p in payload["panes"]}
+    assert roles["orch"] == "terminal"
+    assert roles["dodo"] == "agent"
+
+    codex_events = [text for pane, text in mock_tmux_send if pane == "%11"]
+    assert "$hive" in codex_events
+    assert "/hive" not in codex_events
+    assert codex_events.count("<Enter>") == 4
 
 
 def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
@@ -495,6 +602,7 @@ def test_init_classifies_terminals(runner, configure_hive_home, monkeypatch, moc
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%10")
     monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
 
     from hive.tmux import PaneInfo
 
