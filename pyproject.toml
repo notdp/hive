@@ -1,6 +1,6 @@
 [project]
 name = "hive"
-version = "0.1.0"
+version = "0.1.1"
 description = "tmux-based multi-agent collaboration framework for Factory's droid CLI"
 requires-python = ">=3.11"
 dependencies = [
