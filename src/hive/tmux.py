@@ -293,6 +293,10 @@ def get_pane_window_name(pane_id: str) -> str | None:
     return display_value(pane_id, "#{window_name}")
 
 
+def rename_window(window_target: str, name: str) -> None:
+    _run(["rename-window", "-t", window_target, name], check=False)
+
+
 def get_pane_tty(pane_id: str) -> str | None:
     return display_value(pane_id, "#{pane_tty}")
 
