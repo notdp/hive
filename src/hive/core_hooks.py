@@ -215,6 +215,10 @@ def core_session_hook_defs(script_path: Path | None = None) -> dict[str, list[di
     }
 
 
+SESSION_HOOK_BASENAME = "droid-session-map-hook"
+_MANAGED_PATH_MARKERS = (".hive/", "/tmp/hive-")
+
+
 def _is_session_locator_group(group: Any, *, script_path: Path | None = None) -> bool:
     if not isinstance(group, dict):
         return False
@@ -227,9 +231,9 @@ def _is_session_locator_group(group: Any, *, script_path: Path | None = None) ->
     command = str(hook.get("command", "") or "")
     if not command:
         return False
-    normalized = str(Path(command).expanduser())
-    managed_command = str((script_path or session_hook_script_path()).expanduser())
-    return normalized == managed_command
+    if Path(command).name != SESSION_HOOK_BASENAME:
+        return False
+    return any(marker in command for marker in _MANAGED_PATH_MARKERS)
 
 
 def install_or_update_session_locator_hooks(script_path: Path | None = None) -> dict[str, int]:
