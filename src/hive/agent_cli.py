@@ -40,8 +40,6 @@ class CLIProfile:
     name: str
     ready_text: str
     resume_cmd: str
-    fork_cmd: str | None
-    fork_needs_tui: bool
     skill_cmd: str
     extra_enter: bool = False
 
@@ -51,24 +49,18 @@ PROFILES: dict[str, CLIProfile] = {
         name="droid",
         ready_text="for help",
         resume_cmd="droid --fork {session_id}",
-        fork_cmd=None,
-        fork_needs_tui=False,
         skill_cmd="/{name}",
     ),
     "claude": CLIProfile(
         name="claude",
         ready_text="for help",
         resume_cmd="claude -r {session_id} --fork-session",
-        fork_cmd=None,
-        fork_needs_tui=False,
         skill_cmd="/{name}",
     ),
     "codex": CLIProfile(
         name="codex",
         ready_text="for help",
         resume_cmd="codex fork {session_id}",
-        fork_cmd=None,
-        fork_needs_tui=False,
         skill_cmd="${name}",
         extra_enter=True,
     ),

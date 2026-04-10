@@ -500,8 +500,7 @@ def _exec_plugin_helper(plugin_name: str, command_name: str, args: tuple[str, ..
 @cli.command("fork")
 @click.option("--pane", "pane_id", default="", help="Source pane ID (default: auto-detect)")
 @click.option("--split", "-s", type=click.Choice(["auto", "h", "v"]), default="auto", help="Split direction (default: auto-detect from pane dimensions)")
-@click.option("--timeout", default=30, type=int, show_default=True, help="Seconds to wait for agent startup")
-def fork_cmd(pane_id: str, split: str, timeout: int):
+def fork_cmd(pane_id: str, split: str):
     """Fork the current agent session into a new split pane."""
     if not tmux.is_inside_tmux():
         _fail("hive fork requires tmux")
@@ -527,27 +526,7 @@ def fork_cmd(pane_id: str, split: str, timeout: int):
 
     source_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
-    fork_ok = False
-
-    try:
-        tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
-
-        if profile.fork_needs_tui:
-            if (
-                tmux.wait_for_texts(new_pane, profile.ready_text, timeout=timeout)
-                if isinstance(profile.ready_text, tuple)
-                else tmux.wait_for_text(new_pane, profile.ready_text, timeout=timeout)
-            ):
-                time.sleep(1)
-                tmux.send_keys(new_pane, profile.fork_cmd)
-                fork_ok = True
-            else:
-                _fail(f"{profile.name} startup timed out, fork not sent")
-        else:
-            fork_ok = True
-    finally:
-        if not fork_ok:
-            tmux.kill_pane(new_pane)
+    tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
 
 
 @cli.command("teams")
