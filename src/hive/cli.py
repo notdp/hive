@@ -497,6 +497,30 @@ def _exec_plugin_helper(plugin_name: str, command_name: str, args: tuple[str, ..
     os.execvp("bash", ["bash", str(script), *args])
 
 
+_FORK_MIN_COLS = 80
+_FORK_MIN_ROWS = 20
+
+
+def _choose_fork_split(width: int, height: int) -> bool:
+    """Return True for horizontal (left/right) split, False for vertical (top/bottom).
+
+    Accounts for the 1-cell tmux separator consumed by the split.
+    """
+    h_half = (width - 1) // 2
+    v_half = (height - 1) // 2
+    can_h = h_half >= _FORK_MIN_COLS
+    can_v = v_half >= _FORK_MIN_ROWS
+    if can_h and can_v:
+        return width >= height * 2.5
+    if can_h:
+        return True
+    if can_v:
+        return False
+    h_score = min(h_half / _FORK_MIN_COLS, height / _FORK_MIN_ROWS)
+    v_score = min(width / _FORK_MIN_COLS, v_half / _FORK_MIN_ROWS)
+    return h_score >= v_score
+
+
 @cli.command("fork")
 @click.option("--pane", "pane_id", default="", help="Source pane ID (default: auto-detect)")
 @click.option("--split", "-s", type=click.Choice(["auto", "h", "v"]), default="auto", help="Split direction (default: auto-detect from pane dimensions)")
@@ -516,7 +540,7 @@ def fork_cmd(pane_id: str, split: str):
     if split == "auto":
         width = int(tmux.display_value(current_pane, "#{pane_width}") or "80")
         height = int(tmux.display_value(current_pane, "#{pane_height}") or "24")
-        horizontal = width >= height * 3
+        horizontal = _choose_fork_split(width, height)
     else:
         horizontal = split == "h"
 

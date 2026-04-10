@@ -1,4 +1,6 @@
-from hive.cli import cli
+import pytest
+
+from hive.cli import _choose_fork_split, cli
 
 
 def test_fork_uses_claude_profile_from_runtime_session(runner, configure_hive_home, monkeypatch):
@@ -35,3 +37,17 @@ def test_fork_falls_back_to_codex_resume_command(runner, configure_hive_home, mo
 
     assert result.exit_code == 0
     assert sent == [("%145", "codex fork sess-codex", True)]
+
+
+@pytest.mark.parametrize("width,height,expected_horizontal", [
+    (161, 41, True),    # both ok, wide enough for bias
+    (160, 40, True),    # neither ok; h_score(79/80=0.99) > v_score(19/20=0.95)
+    (100, 38, False),   # neither ok; v_score(100/80=1.25, 18/20=0.9 -> 0.9) > h_score(49/80=0.6, 38/20=1.9 -> 0.6)
+    (170, 30, True),    # only horizontal works (v_half=14 < 20)
+    (100, 41, False),   # only vertical works (h_half=49 < 80)
+    (200, 50, True),    # both ok, 200 >= 50*2.5=125
+    (120, 50, False),   # h_half=59 < 80, only vertical
+    (80, 24, False),    # neither ok; v_score better than h_score
+])
+def test_choose_fork_split(width, height, expected_horizontal):
+    assert _choose_fork_split(width, height) == expected_horizontal
