@@ -39,20 +39,12 @@ def _factory_skills_dir() -> Path:
     return core_hooks.factory_home() / "skills"
 
 
-def _claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
-
-
 def _claude_skills_dir() -> Path:
-    return _claude_home() / "skills"
-
-
-def _codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return core_hooks.claude_home() / "skills"
 
 
 def _codex_skills_dir() -> Path:
-    return _codex_home() / "skills"
+    return core_hooks.codex_home() / "skills"
 
 
 def _skill_install_dirs() -> list[Path]:
