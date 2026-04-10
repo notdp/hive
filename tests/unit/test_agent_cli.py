@@ -1,5 +1,3 @@
-import json
-
 from hive import agent_cli, tmux
 
 
@@ -52,85 +50,32 @@ def test_detect_profile_for_pane_falls_back_to_tty_processes(monkeypatch):
     assert profile.name == "codex"
 
 
-def test_resolve_session_id_for_pane_reads_claude_pid_file(tmp_path, monkeypatch):
-    sessions_dir = tmp_path / ".claude" / "sessions"
-    sessions_dir.mkdir(parents=True)
-    (sessions_dir / "98989.json").write_text(json.dumps({"sessionId": "sess-claude"}))
-
-    monkeypatch.setattr("hive.agent_cli.Path.home", lambda: tmp_path)
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "2.1.89")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "\u2733 Claude Code")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
-    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
-        tmux.TTYProcessInfo(pid="98989", command="claude", argv="claude --verbose"),
-    ])
-
-    session_id = agent_cli.resolve_session_id_for_pane("%138")
-    assert session_id == "sess-claude"
-
-
-def test_resolve_codex_session_id_prefers_session_map(tmp_path, monkeypatch, configure_hive_home):
-    configure_hive_home()
-    from hive import core_hooks
-
-    session_map = core_hooks.session_map_path()
-    session_map.parent.mkdir(parents=True, exist_ok=True)
-    session_map.write_text(json.dumps({
-        "by_pane": {"%141": {"session_id": "sess-from-map"}},
-        "by_tty": {},
-        "by_pid": {},
-    }))
-
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "codex")
+def test_resolve_session_id_for_pane_dispatches_to_adapter(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "claude")
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys015")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "")
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
 
-    session_id = agent_cli.resolve_session_id_for_pane("%141")
-    assert session_id == "sess-from-map"
+    calls: list[str] = []
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            calls.append(pane_id)
+            return "fake-sess"
+
+    monkeypatch.setattr("hive.agent_cli.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+
+    assert agent_cli.resolve_session_id_for_pane("%138") == "fake-sess"
+    assert calls == ["%138"]
 
 
-def test_resolve_codex_session_id_via_lsof(tmp_path, monkeypatch, configure_hive_home):
-    configure_hive_home()
-
-    sessions_dir = tmp_path / ".codex" / "sessions"
-    sessions_dir.mkdir(parents=True)
-    jsonl_name = "rollout-2026-04-01T17-33-44-019d4864-462c-7d41-bbb1-b00b17cdd0b2.jsonl"
-    (sessions_dir / jsonl_name).write_text("")
-
-    monkeypatch.setattr("hive.agent_cli.Path.home", lambda: tmp_path)
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "codex")
+def test_resolve_session_id_for_pane_returns_none_when_no_profile(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "zsh")
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys015")
-    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
-        tmux.TTYProcessInfo(pid="5555", command="codex", argv="codex"),
-    ])
-    monkeypatch.setattr("hive.agent_cli.tmux.list_open_files", lambda _pid: [
-        str(sessions_dir / jsonl_name),
-    ])
-
-    session_id = agent_cli.resolve_session_id_for_pane("%141")
-    assert session_id == "019d4864-462c-7d41-bbb1-b00b17cdd0b2"
-
-
-def test_resolve_codex_session_id_falls_back_to_jsonl(tmp_path, monkeypatch, configure_hive_home):
-    configure_hive_home()
-
-    sessions_dir = tmp_path / ".codex" / "sessions" / "sub"
-    sessions_dir.mkdir(parents=True)
-    (sessions_dir / "session.jsonl").write_text(
-        json.dumps({"type": "session_meta", "payload": {"id": "sess-jsonl", "cwd": "/work"}}) + "\n"
-    )
-
-    monkeypatch.setattr("hive.agent_cli.Path.home", lambda: tmp_path)
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "codex")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys015")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "")
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
-    monkeypatch.setattr("hive.agent_cli.tmux.display_value", lambda _pane, _fmt: "/work")
 
-    session_id = agent_cli.resolve_session_id_for_pane("%141")
-    assert session_id == "sess-jsonl"
+    assert agent_cli.resolve_session_id_for_pane("%2") is None
 
 
 def test_member_role_for_pane_returns_agent_when_profile_detected(monkeypatch):

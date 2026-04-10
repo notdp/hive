@@ -93,8 +93,12 @@ def configure_hive_home(monkeypatch, tmp_path):
     def _configure(*, tmux_inside: bool = True, current_pane: str = "%0", session_name: str = "dev"):
         hive_home = tmp_path / ".hive"
         factory_home = tmp_path / ".factory"
+        codex_home = tmp_path / ".codex"
+        claude_home = tmp_path / ".claude"
         monkeypatch.setenv("HIVE_HOME", str(hive_home))
         monkeypatch.setenv("FACTORY_HOME", str(factory_home))
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
         monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": None)
