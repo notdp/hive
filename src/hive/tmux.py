@@ -117,10 +117,7 @@ def select_layout(target: str, layout: str = "tiled") -> None:
 
 
 def set_pane_border_color(pane_id: str, color: str) -> None:
-    _run([
-        "select-pane", "-t", pane_id,
-        "-P", f"fg={color}",
-    ], check=False)
+    pass
 
 
 def set_pane_title(pane_id: str, title: str) -> None:
