@@ -2,7 +2,7 @@
 
 ## 概述
 
-Spawn 3 个 reviewer 并行审查。orch 发完 request 后 **idle 等消息**。每个 reviewer / verifier 完成后主动 `hive send orch` 通知，orch 被唤醒后处理并再次 idle。
+Spawn 3 个 reviewer 并行审查。orch 发完 request 后 **idle 等消息**。每个 reviewer / verifier 完成后主动 `hive reply orch` 通知，orch 被唤醒后处理并再次 idle。
 
 **关键**：orch 不 `wait-status`，不轮询。控制流由消息驱动。
 
@@ -43,8 +43,8 @@ CTX_JSON=$(hive current)
 WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
 
 # 清理上次残留（必须在生成新 artifact 之前）
-rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/status"
-mkdir -p "$WORKSPACE/artifacts" "$WORKSPACE/state"
+rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"
+mkdir -p "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"
 
 # 记录 review 上下文（按实际情况替换）
 printf '%s' 'pr' > "$WORKSPACE/state/review-mode"
@@ -55,6 +55,7 @@ printf '%s' 'PR #123' > "$WORKSPACE/state/review-subject"
 for reviewer in reviewer-a reviewer-b reviewer-c; do
   out="$WORKSPACE/artifacts/${reviewer}-r1.md"
   req="$WORKSPACE/artifacts/${reviewer}-request.md"
+  request_id="review-request-${reviewer}-r1"
   cat > "$req" <<EOF
 Mode: pr
 Repo Path: /absolute/path/to/repo
@@ -63,7 +64,8 @@ Diff Commands:
 - git -C /absolute/path/to/repo fetch origin main
 - git -C /absolute/path/to/repo diff origin/main...HEAD
 Output Artifact: $out
-Done Command: hive send orch "review done reviewer=${reviewer} verdict=<ok|issues> artifact=$out"
+Reply To Message ID: $request_id
+Done Command: hive reply orch "review done reviewer=${reviewer} verdict=<ok|issues> artifact=$out" --reply-to $request_id --artifact $out
 Validator Commands:
 - PYTHONPATH=src python -m pytest tests/ -q
 EOF
@@ -83,9 +85,9 @@ hive layout main-vertical
 ## 发送 request
 
 ```bash
-hive send reviewer-a "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-a-request.md，完成时仅用其中的 Done Command 回传。"
-hive send reviewer-b "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-b-request.md，完成时仅用其中的 Done Command 回传。"
-hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-a "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-a-request.md，完成时仅用其中的 Done Command 回传。" --message-id review-request-reviewer-a-r1
+hive send reviewer-b "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-b-request.md，完成时仅用其中的 Done Command 回传。" --message-id review-request-reviewer-b-r1
+hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。" --message-id review-request-reviewer-c-r1
 ```
 
 发完后 **立即结束当前 response，什么都不做**。
@@ -97,7 +99,7 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 - 不要写任何 python 脚本来检查文件
 - 不要做 git diff / git show
 
-你的 response 到这里结束。下一次 response 会由 reviewer 的 `hive send orch` 消息触发。
+你的 response 到这里结束。下一次 response 会由 reviewer 的 `hive reply orch` 消息触发。
 
 ---
 
@@ -106,7 +108,7 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 orch 会收到形如以下的 `<HIVE>` 消息：
 
 ```
-<HIVE from=reviewer-c to=orch>
+<HIVE protocol=2 id=msg-... from=reviewer-c to=orch intent=reply replyTo=review-request-reviewer-c-r1 artifact=/tmp/.../reviewer-c-r1.md>
 review done reviewer=reviewer-c verdict=issues artifact=/tmp/.../reviewer-c-r1.md
 </HIVE>
 ```
@@ -114,7 +116,7 @@ review done reviewer=reviewer-c verdict=issues artifact=/tmp/.../reviewer-c-r1.m
 或来自 verifier：
 
 ```
-<HIVE from=verifier-a to=orch>
+<HIVE protocol=2 id=msg-... from=verifier-a to=orch intent=reply replyTo=verify-request-verifier-a-r1 artifact=/tmp/.../verifier-a-verify-result.md>
 verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
 </HIVE>
 ```
@@ -139,12 +141,13 @@ cat > "$WORKSPACE/artifacts/verifier-a-verify-task.md" <<EOF
 # Verification Task
 (reviewer-a 的合格 findings，包含 File/Code/Verify)
 Output Artifact: $WORKSPACE/artifacts/verifier-a-verify-result.md
-Done Command: hive send orch "verify done verifier=verifier-a artifact=$WORKSPACE/artifacts/verifier-a-verify-result.md"
+Reply To Message ID: verify-request-verifier-a-r1
+Done Command: hive reply orch "verify done verifier=verifier-a artifact=$WORKSPACE/artifacts/verifier-a-verify-result.md" --reply-to verify-request-verifier-a-r1 --artifact $WORKSPACE/artifacts/verifier-a-verify-result.md
 EOF
 
 hive kill reviewer-a
 hive spawn verifier-a --cli droid --model custom:GPT-5.4-1 --workflow code-review
-hive send verifier-a "evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
+hive send verifier-a "evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。" --message-id verify-request-verifier-a-r1
 ```
 
 ### 收到 verifier done 消息时
