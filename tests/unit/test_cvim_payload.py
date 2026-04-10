@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -54,3 +55,49 @@ def test_diff_payload_with_offset_2_uses_indexed_target(tmp_path):
 
     assert "<edit_target>assistant_message[-3]</edit_target>" in payload
     assert "倒数第 3 条" in payload
+
+
+def test_diff_payload_uses_effective_offset_from_transcript(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"type": "session_meta", "payload": {"id": "sess-codex", "cwd": "/repo"}},
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "真正要编辑的回答"}],
+                    },
+                },
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-2"}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "$cvim"}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "使用 `cvim` skill，按要求直接启动外部编辑器助手。"}],
+                    },
+                },
+            ]
+        )
+    )
+    (tmp_path / "transcript_path").write_text(str(transcript))
+
+    payload = _build_payload(tmp_path, orig="真正要编辑的回答\n", edited="真正要编辑的回答\n\n补一行\n", mode="diff")
+
+    assert "<edit_target>assistant_message[-2]</edit_target>" in payload
+    assert "倒数第 2 条" in payload

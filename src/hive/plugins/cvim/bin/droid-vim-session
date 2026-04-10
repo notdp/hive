@@ -3,16 +3,23 @@ from __future__ import annotations
 
 import sys
 
-from _droid_vim_shared import resolve_transcript_path
+from _droid_vim_shared import resolve_transcript_path_for_pane
 
 
 def main() -> int:
-    transcript_path = resolve_transcript_path(
-        session_map_file=sys.argv[1],
-        cwd=sys.argv[2],
-        pid=sys.argv[3],
-        tty=sys.argv[4],
-        droid_args=sys.argv[5],
+    args = sys.argv[1:]
+    if len(args) not in {5, 6}:
+        raise SystemExit(
+            "usage: droid-vim-session <session_map_file> <cwd> <pid> <tty> <droid_args> [pane_id]"
+        )
+
+    transcript_path = resolve_transcript_path_for_pane(
+        session_map_file=args[0],
+        cwd=args[1],
+        pid=args[2],
+        tty=args[3],
+        droid_args=args[4],
+        pane_id=args[5] if len(args) == 6 else "",
     )
     if transcript_path:
         print(transcript_path)

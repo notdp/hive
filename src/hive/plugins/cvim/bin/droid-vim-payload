@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from _droid_vim_shared import resolve_assistant_offset
+
 
 def _protocol(script_path: Path) -> dict[str, Any]:
     path = script_path.resolve().parent.parent / "resources" / "droid_edit_protocol.json"
@@ -63,10 +65,16 @@ def main() -> int:
     offset = 0
     tmpdir = dst.parent
     offset_file = tmpdir / "offset"
+    transcript_path_file = tmpdir / "transcript_path"
     if offset_file.is_file():
         try:
             offset = int(offset_file.read_text().strip())
         except (ValueError, OSError):
+            pass
+    if transcript_path_file.is_file():
+        try:
+            offset = resolve_assistant_offset(Path(transcript_path_file.read_text().strip()), offset=offset)
+        except OSError:
             pass
     payload = _build_payload(orig, edited, mode, _protocol(Path(__file__)), offset=offset)
     dst.write_text(payload[:-1] if payload.endswith("\n") else payload)
