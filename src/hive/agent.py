@@ -89,19 +89,11 @@ def _build_droid_model_settings(model: str) -> tuple[str, str]:
     return json.dumps({"sessionDefaultSettings": {"model": target_id}}), target_id
 
 
-_EXTRA_ENTER_SETTLE_SECONDS = 0.05
-
-
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
     """Submit text to an interactive agent TUI."""
-    from .agent_cli import get_profile
-
-    profile = get_profile(cli)
     tmux.send_keys(pane_id, text, enter=False)
+    time.sleep(0.05)
     tmux.send_key(pane_id, "Enter")
-    if profile and profile.extra_enter:
-        time.sleep(_EXTRA_ENTER_SETTLE_SECONDS)
-        tmux.send_key(pane_id, "Enter")
 
 
 @dataclass

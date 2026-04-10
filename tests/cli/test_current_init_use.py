@@ -388,7 +388,7 @@ def test_init_detects_preopened_codex_cli_and_uses_codex_commands(
     codex_events = [text for pane, text in mock_tmux_send if pane == "%11"]
     assert "$hive" in codex_events
     assert "/hive" not in codex_events
-    assert codex_events.count("<Enter>") == 4
+    assert codex_events.count("<Enter>") == 2
 
 
 def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):

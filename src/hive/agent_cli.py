@@ -41,7 +41,6 @@ class CLIProfile:
     ready_text: str
     resume_cmd: str
     skill_cmd: str
-    extra_enter: bool = False
 
 
 PROFILES: dict[str, CLIProfile] = {
@@ -62,7 +61,6 @@ PROFILES: dict[str, CLIProfile] = {
         ready_text="for help",
         resume_cmd="codex fork {session_id}",
         skill_cmd="${name}",
-        extra_enter=True,
     ),
 }
 

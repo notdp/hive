@@ -121,7 +121,7 @@ def test_spawn_codex_hive_bootstraps_and_sends_prompt(monkeypatch):
     assert "$hive" in calls
     assert any("Use `hive team`, `hive send`, and `hive reply`" in c for c in calls)
     assert "Please check your inbox." in calls
-    assert calls.count("<Enter>") == 6
+    assert calls.count("<Enter>") == 3
 
 
 def test_spawn_hive_can_skip_bootstrap_message(monkeypatch):
@@ -154,19 +154,19 @@ def test_load_skill_uses_cli_specific_command(monkeypatch):
 
     agent.load_skill("code-review")
 
-    assert calls == ["$code-review", "<Enter>", "<Enter>"]
+    assert calls == ["$code-review", "<Enter>"]
 
 
-def test_send_adds_extra_enter_for_codex(monkeypatch):
+def test_send_submits_text_with_enter(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
 
     agent.send("hello world")
 
-    assert calls == ["hello world", "<Enter>", "<Enter>"]
+    assert calls == ["hello world", "<Enter>"]
 
 
-def test_send_no_extra_enter_for_droid(monkeypatch):
+def test_send_same_for_droid(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0", cli="droid")
 
