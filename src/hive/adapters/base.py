@@ -91,3 +91,96 @@ def safe_json_loads(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+# --- ACK helpers ---
+# These operate on raw JSONL lines to detect whether a sent message was
+# accepted by the receiver's CLI session transcript.  The _is_user_turn
+# matcher knows the raw record shapes of all three supported CLIs
+# (droid, claude, codex) so the wait helper can stay CLI-agnostic.
+
+
+def get_transcript_baseline(path: Path) -> int:
+    """Return current file size in bytes, or 0 if the file does not exist."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _is_user_turn(payload: dict[str, Any]) -> bool:
+    """Check whether a raw JSONL record represents a user turn.
+
+    Checks all three CLI formats; only one will match for any given file.
+    """
+    record_type = payload.get("type", "")
+    # droid: {"type": "message", "message": {"role": "user", ...}}
+    if record_type == "message":
+        msg = payload.get("message")
+        return isinstance(msg, dict) and msg.get("role") == "user"
+    # claude: {"type": "user", ...}
+    if record_type == "user":
+        return True
+    # codex: {"type": "response_item", "payload": {"type": "message", "role": "user", ...}}
+    if record_type == "response_item":
+        inner = payload.get("payload")
+        return isinstance(inner, dict) and inner.get("type") == "message" and inner.get("role") == "user"
+    return False
+
+
+def _poll_interval(elapsed: float) -> float:
+    if elapsed < 5.0:
+        return 0.2
+    if elapsed < 15.0:
+        return 0.5
+    return 1.0
+
+
+def wait_for_nonce_in_transcript(
+    path: Path,
+    nonce: str,
+    baseline: int,
+    timeout: float = 45.0,
+) -> bool:
+    """Block until *nonce* appears in a new user turn after *baseline* bytes.
+
+    Returns True if confirmed, False on timeout.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    handle = None
+    remainder = ""
+
+    while time.monotonic() < deadline:
+        # (Re)open file if needed — it may not exist yet at baseline time.
+        if handle is None:
+            try:
+                handle = path.open("r")
+                handle.seek(baseline)
+            except OSError:
+                time.sleep(_poll_interval(time.monotonic() - (deadline - timeout)))
+                continue
+
+        chunk = handle.read()
+        if chunk:
+            data = remainder + chunk
+            lines = data.split("\n")
+            # Last element is either "" (if data ended with \n) or a partial line.
+            remainder = lines.pop()
+            for line in lines:
+                if not line:
+                    continue
+                if nonce not in line:
+                    continue
+                parsed = safe_json_loads(line)
+                if parsed is not None and _is_user_turn(parsed):
+                    handle.close()
+                    return True
+        else:
+            elapsed = time.monotonic() - (deadline - timeout)
+            time.sleep(_poll_interval(elapsed))
+
+    if handle is not None:
+        handle.close()
+    return False

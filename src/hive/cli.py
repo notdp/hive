@@ -349,6 +349,35 @@ def _resolve_artifact_path(artifact: str) -> str:
     return resolved_artifact
 
 
+def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
+    """Locate the target agent's transcript and snapshot its current size.
+
+    Returns (transcript_path, baseline_bytes).
+    Raises RuntimeError if any step fails.
+    """
+    from . import adapters
+    from .adapters.base import get_transcript_baseline
+
+    profile = detect_profile_for_pane(target.pane_id)
+    if not profile:
+        raise RuntimeError("cannot detect CLI profile for target pane")
+
+    adapter = adapters.get(profile.name)
+    if not adapter:
+        raise RuntimeError(f"no adapter for CLI '{profile.name}'")
+
+    session_id = adapter.resolve_current_session_id(target.pane_id)
+    if not session_id:
+        raise RuntimeError("cannot resolve session id for target pane")
+
+    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
+    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+    if not transcript:
+        raise RuntimeError(f"transcript file not found for session {session_id}")
+
+    return transcript, get_transcript_baseline(transcript)
+
+
 def _send_recorded_message(
     *,
     team: Team,
@@ -368,12 +397,23 @@ def _send_recorded_message(
     target = _resolve_live_agent(team, to_agent)
     resolved_artifact = _resolve_artifact_path(artifact)
     normalized_body = body.strip()
+
+    # ACK preparation — resolve transcript baseline before injection.
+    nonce = secrets.token_hex(2)
+    transcript_path: Path | None = None
+    baseline: int = 0
+    try:
+        transcript_path, baseline = _resolve_ack_baseline(target)
+    except Exception:
+        transcript_path = None
+
     envelope = _format_hive_envelope(
         from_agent=sender,
         to_agent=to_agent,
         body=body,
         artifact=resolved_artifact,
         intent=intent,
+        nonce=nonce,
     )
     target.send(envelope)
     path = bus.write_event(
@@ -390,12 +430,23 @@ def _send_recorded_message(
         blocked_by=blocked_by,
         metadata=metadata,
     )
+
+    # ACK wait — block until transcript confirms the user turn.
+    ack_status = "skipped"
+    if transcript_path is not None:
+        from .adapters.base import wait_for_nonce_in_transcript
+        if wait_for_nonce_in_transcript(transcript_path, nonce, baseline):
+            ack_status = "confirmed"
+        else:
+            ack_status = "unconfirmed"
+
     payload: dict[str, object] = {
         "intent": intent,
         "from": sender,
         "to": to_agent,
         "artifact": resolved_artifact,
         "path": str(path),
+        "ack": ack_status,
     }
     if normalized_body:
         payload["summary"] = normalized_body
@@ -428,6 +479,7 @@ def _format_hive_envelope(
     body: str,
     artifact: str = "",
     intent: str = "",
+    nonce: str = "",
 ) -> str:
     attrs: list[tuple[str, str]] = [
         ("from", from_agent),
@@ -437,6 +489,8 @@ def _format_hive_envelope(
         attrs.append(("intent", intent))
     if artifact:
         attrs.append(("artifact", artifact))
+    if nonce:
+        attrs.append(("nonce", nonce))
     header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
     payload = body.strip() if body.strip() else "(no message)"
     return f"{header}\n{payload}\n</HIVE>"

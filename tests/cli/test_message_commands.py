@@ -3,9 +3,22 @@ import json
 from hive import bus
 from hive.cli import cli
 
+FIXED_NONCE = "ab12"
+
+
+def _patch_ack(monkeypatch):
+    """Disable ACK resolution so tests don't need a real transcript."""
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr(
+        "hive.cli._resolve_ack_baseline",
+        lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
+        raising=False,
+    )
+
 
 def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
+    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     artifact = tmp_path / "review.md"
     artifact.write_text("review request")
@@ -14,6 +27,8 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     sent: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%99"
+
         def is_alive(self) -> bool:
             return True
 
@@ -55,21 +70,25 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
         "artifact": str(artifact),
         "path": payload["path"],
         "summary": "please review this",
+        "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == [f"<HIVE from=claude to=gpt intent=send artifact={artifact}>\nplease review this\n</HIVE>"]
+    assert sent == [f"<HIVE from=claude to=gpt intent=send artifact={artifact} nonce={FIXED_NONCE}>\nplease review this\n</HIVE>"]
     assert len(bus.read_all_events(workspace)) == 1
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
 
 
 def test_send_supports_structured_intent(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
+    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
     sent: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%99"
+
         def is_alive(self) -> bool:
             return True
 
@@ -111,9 +130,10 @@ def test_send_supports_structured_intent(runner, configure_hive_home, monkeypatc
         "artifact": "",
         "path": payload["path"],
         "summary": "please choose",
+        "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == ["<HIVE from=claude to=gpt intent=ask>\nplease choose\n</HIVE>"]
+    assert sent == [f"<HIVE from=claude to=gpt intent=ask nonce={FIXED_NONCE}>\nplease choose\n</HIVE>"]
 
 
 
@@ -159,6 +179,7 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
 
 def test_reply_writes_event_and_projects_status(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
+    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     artifact = tmp_path / "review.md"
     artifact.write_text("review result")
@@ -167,6 +188,8 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
     sent: list[str] = []
 
     class _FakeAgent:
+        pane_id = "%99"
+
         def is_alive(self) -> bool:
             return True
 
@@ -214,9 +237,10 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
         "summary": "review complete",
         "state": "done",
         "metadata": {"verdict": "issues"},
+        "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == [f"<HIVE from=claude to=orch intent=reply artifact={artifact}>\nreview complete\n</HIVE>"]
+    assert sent == [f"<HIVE from=claude to=orch intent=reply artifact={artifact} nonce={FIXED_NONCE}>\nreview complete\n</HIVE>"]
     assert bus.read_status(workspace, "claude") == {
         "agent": "claude",
         "state": "done",
@@ -229,6 +253,7 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
 
 def test_reply_validates_structured_waiting_and_blocked_states(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
+    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -399,3 +424,173 @@ def test_internal_notify_hook_command_delegates_to_notify_hook_main(runner, monk
     result = runner.invoke(cli, ["_notify-hook"])
 
     assert result.exit_code == 0
+
+
+# --- ACK-specific tests ---
+
+
+def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
+    """ACK returns confirmed when nonce appears in transcript."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    sent: list[str] = []
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+            # Simulate CLI accepting input — write a user turn with the nonce.
+            nonce = FIXED_NONCE
+            transcript.write_text(
+                '{"type": "user", "message": {"role": "user", "content": "'
+                + f"<HIVE from=claude to=gpt intent=send nonce={nonce}>"
+                + '"}}\n'
+            )
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+
+    result = runner.invoke(cli, ["send", "gpt", "test", "--from", "claude"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ack"] == "confirmed"
+
+
+def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatch, tmp_path):
+    """ACK returns unconfirmed when transcript never shows the nonce."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr("hive.cli.wait_for_nonce_in_transcript", lambda path, nonce, baseline, timeout=45.0: False, raising=False)
+
+    result = runner.invoke(cli, ["send", "gpt", "test", "--from", "claude"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ack"] == "unconfirmed"
+
+
+def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
+    """ACK gracefully degrades to skipped when transcript cannot be found."""
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+
+    result = runner.invoke(cli, ["send", "gpt", "test", "--from", "claude"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ack"] == "skipped"
+
+
+def test_reply_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Reply also gets ACK — confirmed when nonce found in transcript."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            nonce = FIXED_NONCE
+            transcript.write_text(
+                '{"type": "message", "message": {"role": "user", "content": "'
+                + f"<HIVE from=worker to=orch intent=reply nonce={nonce}>"
+                + '"}}\n'
+            )
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+
+    result = runner.invoke(cli, ["reply", "orch", "done", "--from", "worker", "--state", "done"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ack"] == "confirmed"
