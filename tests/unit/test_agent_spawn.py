@@ -104,7 +104,7 @@ def test_spawn_hive_bootstraps_and_sends_prompt(monkeypatch):
 
     assert "/hive" in calls
     assert any("Use `hive team`, `hive send`, and `hive reply`" in c for c in calls)
-    assert any("HIVE fenced blocks" in c for c in calls)
+    assert any("<HIVE ...> ... </HIVE>" in c for c in calls)
     assert "Please check your inbox." in calls
 
 

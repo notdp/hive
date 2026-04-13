@@ -473,19 +473,6 @@ def _status_migration_failure(command_name: str) -> None:
     )
 
 
-def _resolve_fence(body: str) -> str:
-    """Pick a fence string that doesn't collide with *body* content."""
-    import re
-    max_backticks = max((len(m.group()) for m in re.finditer(r"`+", body)), default=0)
-    if max_backticks < 3:
-        return "```"
-    max_tildes = max((len(m.group()) for m in re.finditer(r"~+", body)), default=0)
-    if max_tildes < 3:
-        return "~~~"
-    # Both characters appear — use longer backtick fence.
-    return "`" * (max_backticks + 1)
-
-
 def _format_hive_envelope(
     *,
     from_agent: str,
@@ -495,22 +482,19 @@ def _format_hive_envelope(
     intent: str = "",
     message_id: str = "",
 ) -> str:
-    """Build a HIVE envelope as a markdown code fence with frontmatter."""
-    payload = body.strip() if body.strip() else "(no message)"
-    fence = _resolve_fence(payload)
-    lines = [f"{fence}HIVE"]
-    if message_id:
-        lines.append(f"id: {message_id}")
-    lines.append(f"from: {from_agent}")
-    lines.append(f"to: {to_agent}")
+    attrs: list[tuple[str, str]] = [
+        ("from", from_agent),
+        ("to", to_agent),
+    ]
     if intent:
-        lines.append(f"intent: {intent}")
+        attrs.append(("intent", intent))
     if artifact:
-        lines.append(f"artifact: {artifact}")
-    lines.append("---")
-    lines.append(payload)
-    lines.append(fence)
-    return "\n".join(lines)
+        attrs.append(("artifact", artifact))
+    if message_id:
+        attrs.append(("id", message_id))
+    header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
+    payload = body.strip() if body.strip() else "(no message)"
+    return f"{header}\n{payload}\n</HIVE>"
 
 
 def _tmux_runtime_required(argv: list[str]) -> bool:
@@ -740,7 +724,7 @@ def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
         "Context is pre-bound. Hive messages will arrive inline as "
-        "HIVE fenced blocks with frontmatter headers. "
+        "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
     )
 

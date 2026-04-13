@@ -215,7 +215,7 @@ class Agent:
                     pane_id,
                     "I am a hive teammate. "
                     "Use `hive team`, `hive send`, and `hive reply` to collaborate. "
-                    "Hive messages arrive inline as HIVE fenced blocks with frontmatter headers.",
+                    "Hive messages arrive inline as <HIVE ...> ... </HIVE> blocks.",
                     cli,
                 )
             if prompt:

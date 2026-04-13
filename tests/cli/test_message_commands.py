@@ -17,30 +17,6 @@ def _patch_ack(monkeypatch):
     )
 
 
-def _assert_frontmatter_envelope(
-    envelope: str,
-    *,
-    message_id: str,
-    from_agent: str,
-    to_agent: str,
-    intent: str,
-    body: str,
-    artifact: str = "",
-) -> None:
-    assert envelope.startswith("```HIVE\n")
-    assert envelope.endswith("\n```")
-    assert f"id: {message_id}" in envelope
-    assert f"from: {from_agent}" in envelope
-    assert f"to: {to_agent}" in envelope
-    if intent:
-        assert f"intent: {intent}" in envelope
-    if artifact:
-        assert f"artifact: {artifact}" in envelope
-    else:
-        assert "artifact:" not in envelope
-    assert "---\n" in envelope
-    assert body in envelope
-
 
 def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
@@ -100,15 +76,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
-    envelope = sent[0]
-    assert envelope.startswith("```HIVE\n")
-    assert envelope.endswith("\n```")
-    assert f"id: {FIXED_ID}" in envelope
-    assert "from: claude" in envelope
-    assert "to: gpt" in envelope
-    assert "intent: send" in envelope
-    assert f"artifact: {artifact}" in envelope
-    assert "please review this" in envelope
+    assert sent == [f"<HIVE from=claude to=gpt intent=send artifact={artifact} id={FIXED_ID}>\nplease review this\n</HIVE>"]
     assert len(bus.read_all_events(workspace)) == 1
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
 
@@ -169,10 +137,7 @@ def test_send_supports_structured_intent(runner, configure_hive_home, monkeypatc
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
-    envelope = sent[0]
-    assert "```HIVE" in envelope
-    assert "intent: ask" in envelope
-    assert "please choose" in envelope
+    assert sent == [f"<HIVE from=claude to=gpt intent=ask id={FIXED_ID}>\nplease choose\n</HIVE>"]
 
 
 
@@ -280,11 +245,7 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
     }
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
-    envelope = sent[0]
-    assert "```HIVE" in envelope
-    assert "intent: reply" in envelope
-    assert f"artifact: {artifact}" in envelope
-    assert "review complete" in envelope
+    assert sent == [f"<HIVE from=claude to=orch intent=reply artifact={artifact} id={FIXED_ID}>\nreview complete\n</HIVE>"]
     assert bus.read_status(workspace, "claude") == {
         "agent": "claude",
         "state": "done",
