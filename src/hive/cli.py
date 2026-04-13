@@ -443,8 +443,9 @@ def _send_recorded_message(
         intent=intent,
         message_id=message_id,
     )
-    if gate_status != "waiting":
-        target.send(envelope)
+
+    # Write event BEFORE pane injection so status projection is never lost,
+    # even if tmux send-keys fails or gate blocks the injection.
     path = bus.write_event(
         ws,
         from_agent=sender,
@@ -460,6 +461,9 @@ def _send_recorded_message(
         metadata=metadata,
         message_id=message_id,
     )
+
+    if gate_status != "waiting":
+        target.send(envelope)
 
     # ACK wait — block until transcript confirms the user turn.
     ack_status = "skipped"
