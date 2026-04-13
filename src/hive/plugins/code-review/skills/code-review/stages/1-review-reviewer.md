@@ -11,7 +11,7 @@ flowchart TD
     S2 --> S3[3. 执行 diff 命令]
     S3 --> S4[4. 审查代码]
     S4 --> S5[5. 写 artifact]
-    S5 --> S6[6. hive reply orch]
+    S5 --> S6[6. hive send orch]
 ```
 
 ## 1. 读取 request
@@ -28,7 +28,7 @@ flowchart TD
 失败示例：
 
 ```bash
-hive reply orch "review done reviewer=<自己的名字> verdict=error artifact=none"
+hive send orch "review done reviewer=<自己的名字> verdict=error artifact=none"
 ```
 
 ## 2. 读取 REVIEW.md
@@ -105,7 +105,7 @@ hive reply orch "review done reviewer=<自己的名字> verdict=error artifact=n
 用 request 里的 Done Command 回传。这条消息会直接发送到 orch 的 pane：
 
 ```bash
-hive reply orch "review done reviewer=<自己的名字> verdict=<ok|issues> artifact=<artifact path>" --artifact <artifact path>
+hive send orch "review done reviewer=<自己的名字> verdict=<ok|issues> artifact=<artifact path>" --artifact <artifact path>
 ```
 
 **只发这一条，不要发其他消息。**

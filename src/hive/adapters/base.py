@@ -223,6 +223,109 @@ def check_input_gate(path: Path) -> GateResult:
     return GateResult("unknown", "no relevant record found")
 
 
+def _extract_question_from_ask(record: dict[str, Any]) -> str | None:
+    """Extract the pending question text from an AskUserQuestion record.
+
+    - claude/droid: tool_use block → input.question
+    - codex: function_call → arguments.questions[].question
+    """
+    import json as _json
+
+    record_type = record.get("type", "")
+
+    # droid / claude: content blocks with tool_use
+    if record_type in ("message", "assistant"):
+        for block in _extract_content_blocks(record):
+            if block.get("type") == "tool_use" and block.get("name") in _ASK_TOOL_NAMES:
+                tool_input = block.get("input")
+                if isinstance(tool_input, dict):
+                    q = tool_input.get("question")
+                    if isinstance(q, str) and q:
+                        return q
+        return None
+
+    # codex: function_call with arguments.questions[]
+    if record_type == "response_item":
+        inner = record.get("payload")
+        if not isinstance(inner, dict) or inner.get("type") != "function_call":
+            return None
+        if inner.get("name") not in _ASK_TOOL_NAMES:
+            return None
+        args_raw = inner.get("arguments")
+        if isinstance(args_raw, str):
+            try:
+                args_raw = _json.loads(args_raw)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(args_raw, dict):
+            return None
+        questions = args_raw.get("questions")
+        if isinstance(questions, list):
+            parts = []
+            for q in questions:
+                if isinstance(q, dict):
+                    text = q.get("question", "")
+                    if text:
+                        parts.append(str(text))
+            return "\n".join(parts) if parts else None
+        # Fallback: check for prompt field
+        prompt = args_raw.get("prompt")
+        if isinstance(prompt, str) and prompt:
+            return prompt
+        return None
+
+    return None
+
+
+def extract_pending_question(path: Path) -> str | None:
+    """Extract the pending question text from the transcript tail.
+
+    Returns None if no pending AskUserQuestion is found.
+    """
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        return None
+    if file_size == 0:
+        return None
+
+    chunk = 8192
+    while chunk <= _MAX_TAIL_BYTES:
+        offset = max(0, file_size - chunk)
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                raw = f.read()
+            data = raw.decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+        lines = data.split("\n")
+        if offset > 0:
+            lines = lines[1:]
+
+        records: list[dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parsed = safe_json_loads(line)
+            if parsed is not None:
+                records.append(parsed)
+
+        for record in reversed(records):
+            if _is_user_turn(record) or _is_function_call_output(record):
+                return None  # Question already answered
+            if _is_assistant_ask(record):
+                return _extract_question_from_ask(record)
+
+        if offset == 0:
+            break
+        chunk *= 2
+
+    return None
+
+
 # --- ACK helpers ---
 # These operate on raw JSONL lines to detect whether a sent message was
 # accepted by the receiver's CLI session transcript.  The _is_user_turn

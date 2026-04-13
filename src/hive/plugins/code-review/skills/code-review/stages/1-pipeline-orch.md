@@ -2,7 +2,7 @@
 
 ## 概述
 
-Spawn 3 个 reviewer 并行审查。orch 发完 request 后 **idle 等消息**。每个 reviewer / verifier 完成后主动 `hive reply orch` 通知，orch 被唤醒后处理并再次 idle。
+Spawn 3 个 reviewer 并行审查。orch 发完 request 后 **idle 等消息**。每个 reviewer / verifier 完成后主动 `hive send orch` 通知，orch 被唤醒后处理并再次 idle。
 
 **关键**：orch 不轮询。控制流由消息驱动。
 
@@ -64,7 +64,7 @@ Diff Commands:
 - git -C /absolute/path/to/repo fetch origin main
 - git -C /absolute/path/to/repo diff origin/main...HEAD
 Output Artifact: $out
-Done Command: hive reply orch "review done reviewer=${reviewer} verdict=<ok|issues> artifact=$out" --artifact $out
+Done Command: hive send orch "review done reviewer=${reviewer} verdict=<ok|issues> artifact=$out" --artifact $out
 Validator Commands:
 - PYTHONPATH=src python -m pytest tests/ -q
 EOF
@@ -98,7 +98,7 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 - 不要写任何 python 脚本来检查文件
 - 不要做 git diff / git show
 
-你的 response 到这里结束。下一次 response 会由 reviewer 的 `hive reply orch` 消息触发。
+你的 response 到这里结束。下一次 response 会由 reviewer 的 `hive send orch` 消息触发。
 
 ---
 
@@ -107,7 +107,7 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 orch 会收到形如以下的 `<HIVE>` 消息：
 
 ```
-<HIVE from=reviewer-c to=orch intent=reply artifact=/tmp/.../reviewer-c-r1.md>
+<HIVE from=reviewer-c to=orch artifact=/tmp/.../reviewer-c-r1.md>
 review done reviewer=reviewer-c verdict=issues artifact=/tmp/.../reviewer-c-r1.md
 </HIVE>
 ```
@@ -115,7 +115,7 @@ review done reviewer=reviewer-c verdict=issues artifact=/tmp/.../reviewer-c-r1.m
 或来自 verifier：
 
 ```
-<HIVE from=verifier-a to=orch intent=reply artifact=/tmp/.../verifier-a-verify-result.md>
+<HIVE from=verifier-a to=orch artifact=/tmp/.../verifier-a-verify-result.md>
 verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
 </HIVE>
 ```
@@ -140,7 +140,7 @@ cat > "$WORKSPACE/artifacts/verifier-a-verify-task.md" <<EOF
 # Verification Task
 (reviewer-a 的合格 findings，包含 File/Code/Verify)
 Output Artifact: $WORKSPACE/artifacts/verifier-a-verify-result.md
-Done Command: hive reply orch "verify done verifier=verifier-a artifact=$WORKSPACE/artifacts/verifier-a-verify-result.md" --artifact $WORKSPACE/artifacts/verifier-a-verify-result.md
+Done Command: hive send orch "verify done verifier=verifier-a artifact=$WORKSPACE/artifacts/verifier-a-verify-result.md" --artifact $WORKSPACE/artifacts/verifier-a-verify-result.md
 EOF
 
 hive kill reviewer-a

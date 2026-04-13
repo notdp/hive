@@ -14,11 +14,13 @@ def test_init_workspace_creates_expected_directories(tmp_path):
 def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
     workspace = bus.init_workspace(tmp_path / "ws")
     (workspace / "events" / "old.json").write_text('{"intent":"send"}')
-    (workspace / "presence" / "team.json").write_text('{"team":"dev"}')
     (workspace / "artifacts" / "note.txt").write_text("artifact")
     (workspace / "state" / "mode").write_text("busy")
+    # Legacy dirs are cleaned up on reset.
     (workspace / "status" / "legacy.json").parent.mkdir(parents=True, exist_ok=True)
     (workspace / "status" / "legacy.json").write_text('{"state":"done"}')
+    (workspace / "presence" / "team.json").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "presence" / "team.json").write_text('{"team":"dev"}')
     (workspace / "keep.txt").write_text("keep")
 
     bus.reset_workspace(workspace)
@@ -28,6 +30,7 @@ def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
         assert root.is_dir()
         assert list(root.iterdir()) == []
     assert not (workspace / "status").exists()
+    assert not (workspace / "presence").exists()
     assert (workspace / "keep.txt").read_text() == "keep"
 
 
@@ -53,7 +56,7 @@ def test_parse_key_value_rejects_invalid_entries():
         raise AssertionError("expected ValueError")
 
 
-def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
+def test_write_event_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
     monkeypatch.setattr("hive.bus.time.time_ns", lambda: 1001)
     workspace = bus.init_workspace(tmp_path / "ws")
@@ -62,11 +65,10 @@ def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
         workspace,
         from_agent="claude",
         to_agent="orch",
-        intent="reply",
+        intent="send",
         message_id="ab12",
         body="review complete",
         artifact="/tmp/review.md",
-        state="done",
         metadata={"verdict": "issues"},
     )
 
@@ -75,57 +77,15 @@ def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
         "id": "ab12",
         "from": "claude",
         "to": "orch",
-        "intent": "reply",
+        "intent": "send",
         "body": "review complete",
         "artifact": "/tmp/review.md",
-        "state": "done",
         "metadata": {"verdict": "issues"},
         "createdAt": "2026-03-17T10:00:00Z",
     }]
-    payload = bus.read_status(workspace, "claude")
-    assert payload == {
-        "agent": "claude",
-        "state": "done",
-        "summary": "review complete",
-        "artifact": "/tmp/review.md",
-        "metadata": {"verdict": "issues"},
-        "updatedAt": "2026-03-17T10:00:00Z",
-    }
 
 
-def test_reply_projection_preserves_structured_fields(tmp_path, monkeypatch):
-    monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
-    monkeypatch.setattr("hive.bus.time.time_ns", lambda: 1002)
-    workspace = bus.init_workspace(tmp_path / "ws")
-
-    bus.write_event(
-        workspace,
-        from_agent="claude",
-        to_agent="orch",
-        intent="reply",
-        message_id="beef",
-        body="wait-reply",
-        state="waiting_input",
-        task="protocol-redesign",
-        waiting_on="orch",
-        waiting_for="msg-request-2",
-        metadata={"artifact": "/tmp/review.md"},
-    )
-
-    payload = bus.read_status(workspace, "claude")
-    assert payload == {
-        "agent": "claude",
-        "state": "waiting_input",
-        "summary": "wait-reply",
-        "task": "protocol-redesign",
-        "waitingOn": "orch",
-        "waitingFor": "msg-request-2",
-        "metadata": {"artifact": "/tmp/review.md"},
-        "updatedAt": "2026-03-17T10:00:00Z",
-    }
-
-
-def test_send_events_project_target_busy_status(tmp_path, monkeypatch):
+def test_write_event_multiple_events(tmp_path, monkeypatch):
     times = iter(["2026-03-17T10:00:00Z", "2026-03-17T10:00:01Z"])
     seq = iter([1003, 1004])
     monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
@@ -144,86 +104,12 @@ def test_send_events_project_target_busy_status(tmp_path, monkeypatch):
         workspace,
         from_agent="orch",
         to_agent="gpt",
-        intent="ask",
+        intent="send",
         message_id="bb02",
         body="pick a strategy",
     )
 
     events = bus.read_all_events(workspace)
     assert [event["id"] for event in events] == ["aa01", "bb02"]
-
-    payload = bus.read_all_statuses(workspace)
-    assert payload == {
-        "claude": {
-            "agent": "claude",
-            "state": "busy",
-            "summary": "review this diff",
-            "metadata": {},
-            "updatedAt": "2026-03-17T10:00:00Z",
-        },
-        "gpt": {
-            "agent": "gpt",
-            "state": "busy",
-            "summary": "pick a strategy",
-            "metadata": {},
-            "updatedAt": "2026-03-17T10:00:01Z",
-        },
-    }
-
-
-def test_read_status_returns_none_when_missing(tmp_path):
-    assert bus.read_status(tmp_path / "missing", "claude") is None
-
-
-def test_write_presence_snapshot_writes_team_and_agent_files(tmp_path, monkeypatch):
-    times = iter([
-        "2026-03-17T10:00:00Z",
-        "2026-03-17T10:00:01Z",
-        "2026-03-17T10:00:02Z",
-    ])
-    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
-    workspace = tmp_path / "ws"
-    team_status = {
-        "name": "team-a",
-        "description": "demo",
-        "workspace": str(workspace),
-        "tmuxSession": "dev",
-        "tmuxWindow": "dev:0",
-        "members": [
-            {"name": "orch", "role": "agent", "alive": True, "pane": "%0"},
-            {"name": "claude", "role": "agent", "alive": False, "pane": "%9"},
-        ],
-    }
-
-    bus.write_presence_snapshot(workspace, team_status)
-
-    team_payload = json.loads((workspace / "presence" / "team.json").read_text())
-    assert team_payload == {
-        "updatedAt": "2026-03-17T10:00:00Z",
-        "team": "team-a",
-        "description": "demo",
-        "workspace": str(workspace),
-        "tmuxSession": "dev",
-        "tmuxWindow": "dev:0",
-        "members": team_status["members"],
-    }
-
-    orch_payload = json.loads((workspace / "presence" / "orch.json").read_text())
-    assert orch_payload == {
-        "updatedAt": "2026-03-17T10:00:01Z",
-        "agent": "orch",
-        "name": "orch",
-        "role": "agent",
-        "alive": True,
-        "pane": "%0",
-    }
-
-    claude_payload = json.loads((workspace / "presence" / "claude.json").read_text())
-    assert claude_payload == {
-        "updatedAt": "2026-03-17T10:00:02Z",
-        "agent": "claude",
-        "name": "claude",
-        "role": "agent",
-        "alive": False,
-        "pane": "%9",
-    }
+    assert events[0]["body"] == "review this diff"
+    assert events[1]["body"] == "pick a strategy"

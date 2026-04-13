@@ -15,7 +15,7 @@ tmux window
 hive current/init ─→ discover or bind the current tmux window
 hive spawn/fork ──→ add more agent panes when needed
 hive send ───────→ inject inline <HIVE ...> messages via tmux
-hive reply ──────→ reply to task messages and publish projected state
+hive answer ─────→ answer a pending AskUserQuestion remotely
 workspace ───────→ artifacts/ + events/ for durable coordination
 ```
 
@@ -40,10 +40,13 @@ hive current
 hive init
 hive team
 
-# Send work to another pane and inspect projected progress
+# Send work to another pane
 hive send dodo "Review the staged diff and write findings to an artifact"
-hive reply orch "review complete" --state done --artifact /tmp/review.md
-hive team   # inspect projected progress via the `statuses` field
+hive send orch "review complete" --artifact /tmp/review.md
+hive team   # inspect runtime input state per agent
+
+# Answer a pending question in another agent's pane
+hive answer dodo "yes"
 
 # Fork the current agent into a new split pane (auto-picks direction)
 hive fork              # or: hive vfork / hive hfork
@@ -67,9 +70,10 @@ hive send claude "Review the PR diff and write findings to the workspace artifac
 |---------|-------------|
 | `hive current` | Inspect the current tmux/Hive binding and get the next-step hint |
 | `hive init` / `hive create <team>` | Bind the current tmux window or create a fresh team |
-| `hive team` / `hive teams` | Show the current team, including projected status in `statuses`, or list known teams |
+| `hive team` / `hive teams` | Show the current team with runtime `inputState` per agent, or list known teams |
 | `hive spawn <agent>` | Spawn a new agent pane |
-| `hive send <agent> "text"` / `hive reply <agent> "text"` | Deliver structured `<HIVE ...>` messages and publish projected state |
+| `hive send <agent> "text"` | Deliver structured `<HIVE ...>` messages |
+| `hive answer <agent> "text"` | Answer a pending AskUserQuestion in another agent's pane |
 | `hive capture <agent>` / `hive interrupt <agent>` | Inspect or interrupt an agent pane |
 | `hive exec <terminal> "cmd"` / `hive terminal ...` | Drive registered terminal panes |
 | `hive plugin enable|disable|list` | Materialize first-party plugin scripts under `~/.factory/commands/` and link plugin skills |
@@ -86,7 +90,6 @@ When created with `--workspace`, hive initializes a workspace for durable workfl
 ```
 workspace/
 ├── state/          # Shared key-value state files
-├── presence/       # Team presence snapshots from `hive team`
 ├── events/         # Append-only Hive message/event log
 └── artifacts/      # Large payloads exchanged by path
 ```
@@ -149,7 +152,7 @@ PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_
 
 ## How It Works
 
-Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`, while projected collaboration state is surfaced in `hive team` under the `statuses` field. No JSON-RPC, no daemon — just tmux + workspace files.
+Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`. Runtime input state (whether each agent can accept messages or is waiting for a user answer) is probed directly from session transcripts and surfaced in `hive team`. No JSON-RPC, no daemon — just tmux + workspace files.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 

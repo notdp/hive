@@ -171,7 +171,7 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "hive kill reviewer-a" in s1_pipeline
     assert "hive spawn verifier-a" in s1_pipeline
     assert "hive layout main-vertical" in s1_pipeline
-    assert "hive reply orch" in s1_pipeline
+    assert "hive send orch" in s1_pipeline
     assert "idle" in s1_pipeline.lower()
 
     # --- S1 reviewer ---

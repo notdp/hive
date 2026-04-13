@@ -38,7 +38,7 @@ _COMMAND_HELP_SECTIONS = {
     "layout": "Team Setup",
     "workflow": "Team Setup",
     "send": "Communication",
-    "reply": "Communication",
+    "answer": "Communication",
     "inject": "Pane Control",
     "capture": "Pane Control",
     "interrupt": "Pane Control",
@@ -71,23 +71,20 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
     "User Attention": "Bring the human back to the right pane at the right time.",
 }
-_ROOT_HELP_EXAMPLES = '''# Inspect your team and current member
-hive team
-
-# Create a team from the current tmux window
+_ROOT_HELP_EXAMPLES = '''# Create a team from the current tmux window
 hive init
 
-# Show team overview
+# Show team overview with runtime input state
 hive team
 
-# Inspect projected progress in the team payload
-hive team
-
-# Send a structured Hive task to another member
+# Send a message to another member
 hive send <peer-name> "review this diff"
 
-# Reply to a task with a projected completion state
-hive reply orch "review complete" --state done --artifact /tmp/review.md
+# Send with an artifact
+hive send orch "done" --artifact /tmp/review.md
+
+# Answer an agent's pending question
+hive answer <agent-name> "yes"
 
 # Run a command in a registered terminal pane
 hive exec term-1 "tail -f app.log"
@@ -97,8 +94,6 @@ hive notify "处理完成了，回来确认一下"'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
-_STATUS_STATES = ("idle", "busy", "waiting_input", "blocked", "done", "failed")
-_MESSAGE_INTENTS = ("send", "notify", "ask", "reply")
 
 
 class SectionedHelpGroup(click.Group):
@@ -285,18 +280,72 @@ def _read_state(workspace: str, key: str, required: bool = True) -> str:
     return path.read_text().strip()
 
 
-def _filter_statuses_to_members(
-    statuses: dict[str, dict[str, object]],
-    members: list[dict[str, object]] | None,
-    *,
-    lead_name: str = "",
-) -> dict[str, dict[str, object]]:
-    if not members:
-        return statuses
-    names = {str(member.get("name", "")) for member in members if member.get("name")}
-    if lead_name:
-        names.add(lead_name)
-    return {name: payload for name, payload in statuses.items() if name in names}
+def _probe_member_input_state(member: dict[str, object]) -> None:
+    """Annotate a member dict with runtime input state by running a gate check.
+
+    Adds ``inputState``, ``inputReason``, and optionally ``pendingQuestion``.
+    Only probes ``role=agent`` members that are alive.
+    """
+    role = str(member.get("role", ""))
+    if role != "agent":
+        return
+
+    alive = bool(member.get("alive"))
+    if not alive:
+        member["inputState"] = "offline"
+        member["inputReason"] = "pane_dead"
+        return
+
+    pane_id = str(member.get("pane", ""))
+    if not pane_id:
+        member["inputState"] = "unknown"
+        member["inputReason"] = "no_pane"
+        return
+
+    try:
+        profile = detect_profile_for_pane(pane_id)
+        if not profile:
+            member["inputState"] = "unknown"
+            member["inputReason"] = "no_session"
+            return
+
+        from . import adapters
+        adapter = adapters.get(profile.name)
+        if not adapter:
+            member["inputState"] = "unknown"
+            member["inputReason"] = "no_session"
+            return
+
+        session_id = adapter.resolve_current_session_id(pane_id)
+        if not session_id:
+            member["inputState"] = "unknown"
+            member["inputReason"] = "no_session"
+            return
+
+        cwd_hint = tmux.display_value(pane_id, "#{pane_current_path}")
+        transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+        if not transcript:
+            member["inputState"] = "unknown"
+            member["inputReason"] = "transcript_missing"
+            return
+
+        from .adapters.base import check_input_gate, extract_pending_question
+        result = check_input_gate(transcript)
+        if result.status == "waiting":
+            member["inputState"] = "waiting_user"
+            member["inputReason"] = "ask_pending"
+            question = extract_pending_question(transcript)
+            if question:
+                member["pendingQuestion"] = question
+        elif result.status == "clear":
+            member["inputState"] = "ready"
+            member["inputReason"] = ""
+        else:
+            member["inputState"] = "unknown"
+            member["inputReason"] = result.reason or "read_error"
+    except Exception:
+        member["inputState"] = "unknown"
+        member["inputReason"] = "read_error"
 
 
 def _team_status_payload(t: Team) -> dict[str, object]:
@@ -308,14 +357,18 @@ def _team_status_payload(t: Team) -> dict[str, object]:
         ctx = hive_context.load_current_context()
         if ctx.get("team") == t.name and ctx.get("agent"):
             payload["self"] = str(ctx["agent"])
-    ws = _resolve_workspace(t, required=False)
-    if ws:
-        payload["statuses"] = _filter_statuses_to_members(
-            bus.read_all_statuses(ws),
-            list(payload.get("members", [])),
-            lead_name=t.lead_name,
-        )
-        bus.write_presence_snapshot(ws, payload)
+
+    # Probe runtime input state for each agent member.
+    needs_answer: list[str] = []
+    for member in list(payload.get("members", [])):
+        _probe_member_input_state(member)
+        if member.get("inputState") == "waiting_user":
+            name = str(member.get("name", ""))
+            if name:
+                needs_answer.append(name)
+    if needs_answer:
+        payload["needsAnswer"] = needs_answer
+
     return payload
 
 
@@ -379,24 +432,21 @@ def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
     return transcript, get_transcript_baseline(transcript)
 
 
-def _check_send_gate(target: Agent, transcript_path: Path | None, *, is_reply: bool = False) -> str:
+def _check_send_gate(target: Agent, transcript_path: Path | None) -> str:
     """Check if the target agent can accept input. Returns gate status string.
 
-    For ``send``, blocks with an error when the target is waiting.
-    For ``reply``, returns "waiting" without blocking so the event/status
-    is still written — only the pane injection is skipped.
+    Blocks with an error when the target is waiting for a user answer.
+    Use ``hive answer`` to respond to pending questions instead.
     """
     if transcript_path is None:
         return "skipped"
     from .adapters.base import check_input_gate
     result = check_input_gate(transcript_path)
     if result.status == "waiting":
-        if is_reply:
-            return "waiting"
         _fail(
             f"agent '{target.name}' is waiting for a user answer — "
             "there is no prompt input to receive messages. "
-            "Answer the question in the target pane first."
+            "Use `hive answer` to respond, or answer in the target pane directly."
         )
     return result.status  # "clear" | "unknown"
 
@@ -407,14 +457,7 @@ def _send_recorded_message(
     sender: str,
     to_agent: str,
     body: str,
-    intent: str,
     artifact: str = "",
-    state: str = "",
-    task: str = "",
-    waiting_on: str = "",
-    waiting_for: str = "",
-    blocked_by: str = "",
-    metadata: dict[str, str] | None = None,
 ) -> dict[str, object]:
     ws = _resolve_workspace(team, required=True)
     target = _resolve_live_agent(team, to_agent)
@@ -431,43 +474,33 @@ def _send_recorded_message(
         transcript_path = None
 
     # Send gate — block if target is waiting for a user answer.
-    # For reply, always write the event first (status projection must not be
-    # lost), then gate only blocks the pane injection.
-    gate_status = _check_send_gate(target, transcript_path, is_reply=(intent == "reply"))
+    gate_status = _check_send_gate(target, transcript_path)
 
     envelope = _format_hive_envelope(
         from_agent=sender,
         to_agent=to_agent,
         body=body,
         artifact=resolved_artifact,
-        intent=intent,
         message_id=message_id,
     )
 
-    # Write event BEFORE pane injection so status projection is never lost,
-    # even if tmux send-keys fails or gate blocks the injection.
+    # Write event BEFORE pane injection so the collaboration log is never
+    # lost, even if tmux send-keys fails.
     path = bus.write_event(
         ws,
         from_agent=sender,
         to_agent=to_agent,
-        intent=intent,
+        intent="send",
         body=normalized_body,
         artifact=resolved_artifact,
-        state=state,
-        task=task,
-        waiting_on=waiting_on,
-        waiting_for=waiting_for,
-        blocked_by=blocked_by,
-        metadata=metadata,
         message_id=message_id,
     )
 
-    if gate_status != "waiting":
-        target.send(envelope)
+    target.send(envelope)
 
     # ACK wait — block until transcript confirms the user turn.
     ack_status = "skipped"
-    if transcript_path is not None and gate_status != "waiting":
+    if transcript_path is not None:
         from .adapters.base import wait_for_id_in_transcript
         if wait_for_id_in_transcript(transcript_path, message_id, baseline):
             ack_status = "confirmed"
@@ -475,7 +508,6 @@ def _send_recorded_message(
             ack_status = "unconfirmed"
 
     payload: dict[str, object] = {
-        "intent": intent,
         "from": sender,
         "to": to_agent,
         "artifact": resolved_artifact,
@@ -485,25 +517,14 @@ def _send_recorded_message(
     }
     if normalized_body:
         payload["summary"] = normalized_body
-    if intent == "reply":
-        payload["state"] = state or "done"
-        payload["metadata"] = metadata or {}
-        if task:
-            payload["task"] = task
-        if waiting_on:
-            payload["waitingOn"] = waiting_on
-        if waiting_for:
-            payload["waitingFor"] = waiting_for
-        if blocked_by:
-            payload["blockedBy"] = blocked_by
     return payload
 
 
 def _status_migration_failure(command_name: str) -> None:
     _fail(
-        f"`hive {command_name}` was removed; use `hive send` to assign work, "
-        "`hive reply <agent> --state ... [--artifact ...]` to report progress, "
-        "and `hive team` to inspect projected state under the `statuses` field"
+        f"`hive {command_name}` was removed; use `hive send` to send messages, "
+        "`hive answer` to respond to pending questions, "
+        "and `hive team` to inspect runtime input state"
     )
 
 
@@ -513,19 +534,16 @@ def _format_hive_envelope(
     to_agent: str,
     body: str,
     artifact: str = "",
-    intent: str = "",
     message_id: str = "",
 ) -> str:
     attrs: list[tuple[str, str]] = [
         ("from", from_agent),
         ("to", to_agent),
     ]
-    if intent:
-        attrs.append(("intent", intent))
-    if artifact:
-        attrs.append(("artifact", artifact))
     if message_id:
         attrs.append(("id", message_id))
+    if artifact:
+        attrs.append(("artifact", artifact))
     header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
     payload = body.strip() if body.strip() else "(no message)"
     return f"{header}\n{payload}\n</HIVE>"
@@ -1233,90 +1251,119 @@ def status_show(legacy_args: tuple[str, ...]):
 @cli.command()
 @click.argument("to_agent")
 @click.argument("body", required=False, default="")
-@click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
-@click.option("--intent", type=click.Choice(_MESSAGE_INTENTS, case_sensitive=False), default="send", show_default=True, help="Structured message intent")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 def send(
     to_agent: str,
     body: str,
-    from_agent: str | None,
-    intent: str,
     artifact: str,
 ):
-    """Send a Hive message envelope."""
+    """Send a Hive message to another agent."""
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
-    sender = _resolve_sender(from_agent)
-    normalized_intent = intent.lower()
+    sender = _resolve_sender(None)
     payload = _send_recorded_message(
         team=t,
         sender=sender,
         to_agent=to_agent,
         body=body,
-        intent=normalized_intent,
         artifact=artifact,
-    )
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-@cli.command("reply")
-@click.argument("to_agent")
-@click.argument("body", required=False, default="")
-@click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
-@click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option("--state", "reply_state", type=click.Choice(_STATUS_STATES, case_sensitive=False), default="done", show_default=True, help="Projected status to publish from this reply")
-@click.option("--task", default="", help="Structured task identifier")
-@click.option("--waiting-on", default="", help="Agent or dependency currently being waited on")
-@click.option("--waiting-for", default="", help="Message or dependency ID currently being waited on")
-@click.option("--blocked-by", default="", help="Short blocker identifier")
-@click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
-def reply_cmd(
-    to_agent: str,
-    body: str,
-    from_agent: str | None,
-    artifact: str,
-    reply_state: str,
-    task: str,
-    waiting_on: str,
-    waiting_for: str,
-    blocked_by: str,
-    metadata_entries: tuple[str, ...],
-):
-    """Reply to a prior Hive message and publish projected state."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    sender = _resolve_sender(from_agent)
-    normalized_state = reply_state.lower()
-    if normalized_state == "waiting_input" and not (waiting_on or waiting_for):
-        _fail("waiting_input requires --waiting-on or --waiting-for")
-    if normalized_state == "blocked" and not blocked_by:
-        _fail("blocked requires --blocked-by")
-    metadata = _parse_entries(metadata_entries)
-    payload = _send_recorded_message(
-        team=t,
-        sender=sender,
-        to_agent=to_agent,
-        body=body,
-        intent="reply",
-        artifact=artifact,
-        state=normalized_state,
-        task=task,
-        waiting_on=waiting_on,
-        waiting_for=waiting_for,
-        blocked_by=blocked_by,
-        metadata=metadata,
     )
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()
 @click.argument("agent_name")
+@click.argument("text")
+def answer(agent_name: str, text: str):
+    """Answer a pending AskUserQuestion in another agent's pane.
+
+    Only works when the target agent is waiting for a user answer.
+    Use ``hive team`` to see which agents need answers.
+    """
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    sender = _resolve_sender(None)
+    target = _resolve_live_agent(t, agent_name)
+    ws = _resolve_workspace(t, required=True)
+
+    # Gate check — require waiting state.
+    transcript_path: Path | None = None
+    try:
+        transcript_path, _ = _resolve_ack_baseline(target)
+    except Exception:
+        pass
+
+    if transcript_path is None:
+        _fail(f"cannot detect session transcript for agent '{agent_name}'")
+
+    from .adapters.base import check_input_gate, extract_pending_question
+    gate = check_input_gate(transcript_path)
+    if gate.status != "waiting":
+        _fail(
+            f"agent '{agent_name}' is not waiting for an answer "
+            f"(inputState: {gate.status})"
+        )
+
+    # Show what question we're answering.
+    pending = extract_pending_question(transcript_path)
+
+    # Write event before injection.
+    path = bus.write_event(
+        ws,
+        from_agent=sender,
+        to_agent=agent_name,
+        intent="answer",
+        body=text.strip(),
+    )
+
+    # Inject the answer text.
+    from .agent import _submit_interactive_text
+    _submit_interactive_text(target.pane_id, text, target.cli)
+
+    # ACK: wait for gate to clear (question answered → new user turn appears).
+    ack_status = "unconfirmed"
+    import time as _time
+    deadline = _time.monotonic() + 15.0
+    while _time.monotonic() < deadline:
+        _time.sleep(0.5)
+        result = check_input_gate(transcript_path)
+        if result.status == "clear":
+            ack_status = "confirmed"
+            break
+        if result.status == "unknown":
+            # Transient read error or file rotation — don't treat as confirmed.
+            continue
+
+    payload: dict[str, object] = {
+        "from": sender,
+        "to": agent_name,
+        "path": str(path),
+        "ack": ack_status,
+    }
+    if pending:
+        payload["question"] = pending
+    if text.strip():
+        payload["answer"] = text.strip()
+
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command()
+@click.argument("member_name")
 @click.option("--lines", "-n", default=30)
-def capture(agent_name: str, lines: int):
-    """Debug: capture raw pane output."""
+def capture(member_name: str, lines: int):
+    """Debug: capture raw pane output from any member (agent or terminal)."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
-    click.echo(t.get(agent_name).capture(lines))
+    try:
+        agent = t.get(member_name)
+        click.echo(agent.capture(lines))
+    except KeyError:
+        if member_name in t.terminals:
+            pane_id = t.terminals[member_name].pane_id
+            click.echo(tmux.capture_pane(pane_id, lines))
+        else:
+            _fail(f"member '{member_name}' not found in team '{t.name}'")
 
 
 @cli.command()

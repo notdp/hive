@@ -142,28 +142,28 @@ flowchart TB
     S4F[Fixer] & S4V[Checker]
 
     Orch -->|spawn + send task| S1A & S1B & S1C
-    S1A & S1B & S1C -->|hive reply orch ...| Orch
+    S1A & S1B & S1C -->|hive send orch ...| Orch
     Orch -->|spawn + send task| S3A & S3B & S3C
-    S3A & S3B & S3C -->|hive reply orch ...| Orch
+    S3A & S3B & S3C -->|hive send orch ...| Orch
     Orch -->|spawn + send task| S4F & S4V
-    S4F & S4V -->|hive reply orch ...| Orch
+    S4F & S4V -->|hive send orch ...| Orch
 
     Workspace[(workspace/artifacts)]
     Orch --> Workspace
 ```
 
-- **消息驱动**：Orch → Agent（`hive send`），Agent → Orch（`hive reply orch ...`）
-- Orch 发完任务后 idle；agent 完成后主动 `hive reply orch` 通知
-- 多行内容先写 artifact，再用 `hive send ... --artifact <path>` 或 `hive reply ... --artifact <path>` 发送
+- **消息驱动**：Orch → Agent（`hive send`），Agent → Orch（`hive send orch ...`）
+- Orch 发完任务后 idle；agent 完成后主动 `hive send orch` 通知
+- 多行内容先写 artifact，再用 `hive send ... --artifact <path>` 发送
 - Agent 之间不直接通信，所有协调由 Orch 完成
-- 不使用 `status` 轮询做同步；完成信号统一走 `reply`
+- 不使用 `status` 轮询做同步；完成信号统一走 `hive send orch`
 
 ## 7. Orchestrator 行为规范
 
 **角色：纯编排者，消息驱动**
 
 - 启动流程，分配任务，发完后 **结束当前 response**
-- 收到 agent 的 `hive reply orch` 消息后被唤醒，处理后再结束 response
+- 收到 agent 的 `hive send orch` 消息后被唤醒，处理后再结束 response
 - S1 做 findings 格式校验 + verifier 管理
 - S2 做修复验证循环
 - S3 做最终汇总
@@ -194,7 +194,7 @@ flowchart TB
 - Subject
 - Diff Commands
 - Output Artifact
-- Done Command（`hive reply orch "review done reviewer=... verdict=... artifact=..." --artifact <artifact path>`）
+- Done Command（`hive send orch "review done reviewer=... verdict=... artifact=..." --artifact <artifact path>`）
 - （PR 模式可选）PR Number / Base / Branch
 - （Fix 阶段可选）Validator Commands
 
@@ -207,7 +207,7 @@ flowchart TB
 | `hive init` | 初始化 team |
 | `hive spawn <agent>` | 启动 agent pane |
 | `hive send <agent> <msg>` | 发任务 |
-| `hive reply <agent> <msg> --state done` | 对任务回传完成状态 |
+| `hive send <agent> <msg> --artifact <path>` | 回传完成消息 |
 | `hive kill <agent>` | kill agent pane 并移除 |
 | `hive layout <preset>` | 调整 tmux 布局（main-vertical / tiled 等） |
 

@@ -10,12 +10,11 @@ import time
 
 
 WORKSPACE_DIRS = (
-    "presence",
     "events",
     "artifacts",
     "state",
 )
-LEGACY_WORKSPACE_DIRS = ("status",)
+LEGACY_WORKSPACE_DIRS = ("status", "presence")
 
 
 def _now_iso() -> str:
@@ -62,11 +61,6 @@ def write_event(
     intent: str,
     body: str = "",
     artifact: str = "",
-    state: str = "",
-    task: str = "",
-    waiting_on: str = "",
-    waiting_for: str = "",
-    blocked_by: str = "",
     metadata: dict[str, str] | None = None,
     message_id: str = "",
 ) -> Path:
@@ -86,16 +80,6 @@ def write_event(
         payload["body"] = normalized_body
     if artifact:
         payload["artifact"] = artifact
-    if state:
-        payload["state"] = state
-    if task:
-        payload["task"] = task
-    if waiting_on:
-        payload["waitingOn"] = waiting_on
-    if waiting_for:
-        payload["waitingFor"] = waiting_for
-    if blocked_by:
-        payload["blockedBy"] = blocked_by
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return path
 
@@ -110,100 +94,3 @@ def read_all_events(workspace: str | Path) -> list[dict[str, object]]:
     return rows
 
 
-def _event_summary(event: dict[str, object]) -> str:
-    body = str(event.get("body", "")).strip()
-    return body
-
-
-def _project_event_status(event: dict[str, object]) -> tuple[str, dict[str, object]] | None:
-    intent = str(event.get("intent", "")).strip()
-    if intent not in {"send", "ask", "reply"}:
-        return None
-
-    metadata = {str(k): str(v) for k, v in dict(event.get("metadata", {})).items()}
-    created_at = str(event.get("createdAt", ""))
-    summary = _event_summary(event)
-    artifact = str(event.get("artifact", "")).strip()
-
-    if intent == "reply":
-        agent_name = str(event.get("from", "")).strip()
-        state = str(event.get("state", "")).strip() or "done"
-        if not agent_name:
-            return None
-        payload: dict[str, object] = {
-            "agent": agent_name,
-            "state": state,
-            "metadata": metadata,
-            "updatedAt": created_at,
-        }
-        if summary:
-            payload["summary"] = summary
-        if artifact:
-            payload["artifact"] = artifact
-        for event_key, payload_key in (
-            ("task", "task"),
-            ("waitingOn", "waitingOn"),
-            ("waitingFor", "waitingFor"),
-            ("blockedBy", "blockedBy"),
-        ):
-            value = str(event.get(event_key, "")).strip()
-            if value:
-                payload[payload_key] = value
-        return agent_name, payload
-
-    agent_name = str(event.get("to", "")).strip()
-    if not agent_name:
-        return None
-    payload = {
-        "agent": agent_name,
-        "state": "busy",
-        "metadata": metadata,
-        "updatedAt": created_at,
-    }
-    if summary:
-        payload["summary"] = summary
-    if artifact:
-        payload["artifact"] = artifact
-    return agent_name, payload
-
-
-def read_status(workspace: str | Path, agent_name: str) -> dict[str, object] | None:
-    return read_all_statuses(workspace).get(agent_name)
-
-
-def read_all_statuses(workspace: str | Path) -> dict[str, dict[str, object]]:
-    rows: dict[str, dict[str, object]] = {}
-    for event in read_all_events(workspace):
-        projected = _project_event_status(event)
-        if projected is None:
-            continue
-        agent_name, payload = projected
-        rows[agent_name] = payload
-    return {name: rows[name] for name in sorted(rows)}
-
-
-def write_presence_snapshot(workspace: str | Path, team_status: dict[str, object]) -> None:
-    root = Path(workspace).expanduser() / "presence"
-    root.mkdir(parents=True, exist_ok=True)
-
-    team_snapshot = {
-        "updatedAt": _now_iso(),
-        "team": team_status.get("name"),
-        "description": team_status.get("description"),
-        "workspace": team_status.get("workspace"),
-        "tmuxSession": team_status.get("tmuxSession", ""),
-        "tmuxWindow": team_status.get("tmuxWindow", ""),
-        "members": team_status.get("members", []),
-    }
-    (root / "team.json").write_text(json.dumps(team_snapshot, indent=2, ensure_ascii=False) + "\n")
-
-    for member in list(team_status.get("members", [])):
-        member_name = str(member.get("name", ""))
-        if not member_name:
-            continue
-        payload = {
-            "updatedAt": _now_iso(),
-            "agent": member_name,
-            **dict(member),
-        }
-        (root / f"{member_name}.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")

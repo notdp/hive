@@ -49,7 +49,7 @@ Validator Commands:
 
 Output Artifact: $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
 Reply To Message ID: $fix_request_id
-Done Command: hive reply orch "fix done round=$ROUND artifact=$WORKSPACE/artifacts/s2-fix-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
+Done Command: hive send orch "fix done round=$ROUND artifact=$WORKSPACE/artifacts/s2-fix-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
 EOF
 
 hive send fixer "阶段 2 fix：执行 fix task $WORKSPACE/artifacts/s2-fix-task.md，完成时仅用其中的 Done Command 回传。"
@@ -74,7 +74,7 @@ Confirmed Findings: $WORKSPACE/artifacts/confirmed-findings.md
 
 Output Artifact: $WORKSPACE/artifacts/s2-verify-round-${ROUND}.md
 Reply To Message ID: $verify_request_id
-Done Command: hive reply orch "verify done round=$ROUND result=<pass|fail> artifact=$WORKSPACE/artifacts/s2-verify-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-verify-round-${ROUND}.md
+Done Command: hive send orch "verify done round=$ROUND result=<pass|fail> artifact=$WORKSPACE/artifacts/s2-verify-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-verify-round-${ROUND}.md
 EOF
 
 hive send checker "阶段 2 verify：执行 verify task $WORKSPACE/artifacts/s2-verify-task.md，完成时仅用其中的 Done Command 回传。"

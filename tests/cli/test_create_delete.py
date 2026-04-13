@@ -26,7 +26,6 @@ def test_create_initializes_workspace_and_state(runner, configure_hive_home, tmp
     assert (workspace / "state" / "pr-number").read_text() == "123"
     assert (workspace / "artifacts").is_dir()
     assert (workspace / "events").is_dir()
-    assert (workspace / "presence").is_dir()
 
     # Team state now lives in tmux window options, not config.json
     from hive.team import Team
