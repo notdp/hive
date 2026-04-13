@@ -97,7 +97,7 @@ def safe_json_loads(line: str) -> dict[str, Any] | None:
 # Detect whether the target agent is waiting for a user answer
 # (AskUserQuestion) before allowing message injection.
 
-_ASK_TOOL_NAMES = frozenset({"AskUserQuestion"})
+_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "request_user_input"})
 
 _MAX_TAIL_BYTES = 128 * 1024  # 128KB upper bound for tail reads
 
@@ -155,6 +155,15 @@ def _is_assistant_ask(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _is_function_call_output(payload: dict[str, Any]) -> bool:
+    """Check whether a raw JSONL record is a function_call_output (codex tool result)."""
+    if payload.get("type") == "response_item":
+        inner = payload.get("payload")
+        if isinstance(inner, dict) and inner.get("type") == "function_call_output":
+            return True
+    return False
+
+
 def check_input_gate(path: Path) -> GateResult:
     """Check if the agent owning *path* is waiting for a user answer.
 
@@ -201,8 +210,8 @@ def check_input_gate(path: Path) -> GateResult:
 
         # Scan in reverse for the last relevant record
         for record in reversed(records):
-            if _is_user_turn(record):
-                return GateResult("clear", "last record is user turn")
+            if _is_user_turn(record) or _is_function_call_output(record):
+                return GateResult("clear", "last record is user response")
             if _is_assistant_ask(record):
                 return GateResult("waiting", "AskUserQuestion pending")
 

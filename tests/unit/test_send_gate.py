@@ -63,6 +63,19 @@ def test_is_assistant_ask_codex():
 
 # --- rejects other tools ---
 
+def test_is_assistant_ask_codex_request_user_input():
+    """Codex uses request_user_input instead of AskUserQuestion."""
+    payload = {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "request_user_input",
+            "arguments": '{"prompt": "choose option"}',
+        },
+    }
+    assert _is_assistant_ask(payload) is True
+
+
 def test_rejects_other_tools():
     payload = {
         "type": "assistant",
@@ -118,6 +131,50 @@ def test_not_waiting_when_answered(tmp_path):
     ])
     result = check_input_gate(path)
     assert result.status == "clear"
+
+
+def test_clear_after_codex_function_call_output(tmp_path):
+    """Codex answers come as function_call_output, not user messages."""
+    path = tmp_path / "session.jsonl"
+    _write_jsonl(path, [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "request_user_input",
+                "call_id": "call_123",
+                "arguments": '{"prompt": "choose"}',
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "option A",
+            },
+        },
+    ])
+    result = check_input_gate(path)
+    assert result.status == "clear"
+
+
+def test_waiting_codex_request_user_input(tmp_path):
+    """Codex request_user_input without answer should block."""
+    path = tmp_path / "session.jsonl"
+    _write_jsonl(path, [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "request_user_input",
+                "call_id": "call_456",
+                "arguments": '{"prompt": "choose"}',
+            },
+        },
+    ])
+    result = check_input_gate(path)
+    assert result.status == "waiting"
 
 
 def test_clear_when_no_ask(tmp_path):
