@@ -34,6 +34,7 @@ _COMMAND_HELP_SECTIONS = {
     "delete": "Team Setup",
     "fork": "Team Setup",
     "spawn": "Team Setup",
+    "register": "Team Setup",
     "layout": "Team Setup",
     "workflow": "Team Setup",
     "send": "Communication",
@@ -897,6 +898,77 @@ def init_cmd(name: str, workspace: str, notify: bool):
         "panes": discovered,
     }
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+@cli.command("register")
+@click.argument("pane_id")
+@click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
+@click.option("--notify/--no-notify", default=True, help="Push hive skill + join message to the pane")
+def register_cmd(pane_id: str, name_override: str, notify: bool):
+    """Register an external pane into the current team."""
+    if not tmux.is_inside_tmux():
+        _fail("hive register requires a tmux session.")
+
+    binding = _discover_tmux_binding()
+    team_name = binding.get("team")
+    if not team_name:
+        _fail("no team bound to the current window. Run `hive init` first.")
+
+    t = Team.load(team_name, prefer_pane=tmux.get_current_pane_id() or "")
+    window_target = t.tmux_window or tmux.get_current_window_target() or ""
+    panes = tmux.list_panes_full(window_target) if window_target else []
+
+    target_pane = None
+    for pane in panes:
+        if pane.pane_id == pane_id:
+            target_pane = pane
+            break
+    if target_pane is None:
+        _fail(f"pane '{pane_id}' not found in window '{window_target}'")
+
+    if target_pane.team == team_name and target_pane.agent:
+        _fail(f"pane '{pane_id}' is already registered as '{target_pane.agent}'")
+
+    seen_names = _names_used_in_window(panes)
+    seen_names.add(t.lead_name or LEAD_AGENT_NAME)
+
+    if name_override:
+        if name_override in seen_names:
+            _fail(f"name '{name_override}' is already taken in this window")
+        seen_names.add(name_override)
+
+    role, pane_cli = _classify_pane(target_pane)
+    if role == "agent":
+        agent_name = name_override or _derive_agent_name(seen_names)
+        agent = Agent(
+            name=agent_name,
+            team_name=team_name,
+            pane_id=pane_id,
+            cwd=tmux.display_value(pane_id, "#{pane_current_path}") or os.getcwd(),
+            cli=pane_cli,
+        )
+        t.agents[agent_name] = agent
+        tmux.tag_pane(pane_id, "agent", agent_name, team_name, cli=pane_cli)
+        ws = _resolve_workspace(t, required=False)
+        if ws:
+            hive_context.save_context_for_pane(pane_id, team=team_name, workspace=ws, agent=agent_name)
+        if notify:
+            agent.load_skill("hive")
+            agent.send(_hive_join_message(agent_name, team_name))
+        member_name = agent_name
+    else:
+        terminal_name = name_override or _derive_terminal_name(seen_names)
+        terminal = Terminal(name=terminal_name, pane_id=pane_id)
+        t.terminals[terminal_name] = terminal
+        tmux.tag_pane(pane_id, "terminal", terminal_name, team_name)
+        member_name = terminal_name
+
+    click.echo(json.dumps({
+        "registered": member_name,
+        "role": role,
+        "pane": pane_id,
+        "team": team_name,
+    }, indent=2, ensure_ascii=False))
 
 
 @cli.command()
