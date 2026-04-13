@@ -671,28 +671,7 @@ def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path
 
     assert result.exit_code != 0
     assert "waiting for a user answer" in result.output
-    assert "--force" in result.output
-
-
-def test_send_force_bypasses_gate(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
-                ],
-            },
-        },
-    ])
-
-    result = runner.invoke(cli, ["send", "gpt", "hello", "--from", "claude", "--force"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["gate"] == "forced"
+    assert "Answer the question" in result.output
 
 
 def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -749,22 +728,3 @@ def test_reply_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_pat
     assert "waiting for a user answer" in result.output
 
 
-def test_reply_force_bypasses_gate(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "sure?"}},
-                ],
-            },
-        },
-    ])
-
-    result = runner.invoke(cli, ["reply", "gpt", "done", "--from", "claude", "--state", "done", "--force"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["gate"] == "forced"

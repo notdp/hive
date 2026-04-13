@@ -379,18 +379,17 @@ def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
     return transcript, get_transcript_baseline(transcript)
 
 
-def _check_send_gate(target: Agent, transcript_path: Path | None, *, force: bool = False) -> str:
+def _check_send_gate(target: Agent, transcript_path: Path | None) -> str:
     """Check if the target agent can accept input. Returns gate status string."""
-    if force:
-        return "forced"
     if transcript_path is None:
         return "skipped"
     from .adapters.base import check_input_gate
     result = check_input_gate(transcript_path)
     if result.status == "waiting":
         _fail(
-            f"agent '{target.name}' is waiting for a user answer (AskUserQuestion). "
-            "Use --force to override."
+            f"agent '{target.name}' is waiting for a user answer — "
+            "there is no prompt input to receive messages. "
+            "Answer the question in the target pane first."
         )
     return result.status  # "clear" | "unknown"
 
@@ -409,7 +408,6 @@ def _send_recorded_message(
     waiting_for: str = "",
     blocked_by: str = "",
     metadata: dict[str, str] | None = None,
-    force: bool = False,
 ) -> dict[str, object]:
     ws = _resolve_workspace(team, required=True)
     target = _resolve_live_agent(team, to_agent)
@@ -426,7 +424,7 @@ def _send_recorded_message(
         transcript_path = None
 
     # Send gate — block if target is waiting for a user answer.
-    gate_status = _check_send_gate(target, transcript_path, force=force)
+    gate_status = _check_send_gate(target, transcript_path)
 
     envelope = _format_hive_envelope(
         from_agent=sender,
@@ -1224,14 +1222,12 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.option("--from", "from_agent", default=None, help=f"Sender agent name (default: current tmux binding or {LEAD_AGENT_NAME})")
 @click.option("--intent", type=click.Choice(_MESSAGE_INTENTS, case_sensitive=False), default="send", show_default=True, help="Structured message intent")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option("--force", is_flag=True, default=False, help="Bypass send gate")
 def send(
     to_agent: str,
     body: str,
     from_agent: str | None,
     intent: str,
     artifact: str,
-    force: bool,
 ):
     """Send a Hive message envelope."""
     team_name, t = _resolve_scoped_team(None, required=True)
@@ -1245,7 +1241,6 @@ def send(
         body=body,
         intent=normalized_intent,
         artifact=artifact,
-        force=force,
     )
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -1261,7 +1256,6 @@ def send(
 @click.option("--waiting-for", default="", help="Message or dependency ID currently being waited on")
 @click.option("--blocked-by", default="", help="Short blocker identifier")
 @click.option("--meta", "metadata_entries", multiple=True, help="Metadata KEY=VALUE")
-@click.option("--force", is_flag=True, default=False, help="Bypass send gate")
 def reply_cmd(
     to_agent: str,
     body: str,
@@ -1273,7 +1267,6 @@ def reply_cmd(
     waiting_for: str,
     blocked_by: str,
     metadata_entries: tuple[str, ...],
-    force: bool,
 ):
     """Reply to a prior Hive message and publish projected state."""
     team_name, t = _resolve_scoped_team(None, required=True)
@@ -1298,7 +1291,6 @@ def reply_cmd(
         waiting_for=waiting_for,
         blocked_by=blocked_by,
         metadata=metadata,
-        force=force,
     )
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
