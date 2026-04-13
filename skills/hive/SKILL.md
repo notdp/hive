@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive 基础 skill。让 agent 作为 Hive runtime 成员工作：发现上下文、查看成员、接收 `<HIVE ...>` 消息、发布状态、发送消息，并加载更高层 workflow skill。
+description: Hive 基础 skill。让 agent 作为 Hive runtime 成员工作：发现上下文、查看成员、接收 ```HIVE 消息、发布状态、发送消息，并加载更高层 workflow skill。
 metadata: {"hive-bot":{"emoji":"💬","os":["darwin","linux"],"requires":{"bins":["tmux","droid","python3","hive"]}}}
 ---
 
@@ -53,7 +53,7 @@ hive teams                            # 列出已知 team
 
 1. 先 `hive current`（无 team 时跑 `hive init`）
 2. 再 `hive team`
-3. 其他 agent 发来的消息会直接以 `<HIVE ...> ... </HIVE>` 形式出现在当前 pane
+3. 其他 agent 发来的消息会直接以 ` ```HIVE ` fenced block 形式出现在当前 pane
 4. 发任务用 `hive send <name> "<message>"`
 5. 回传完成 / blocker / 等待输入时，用 `hive reply <name> "<message>" [--state ...] [--artifact ...]`
 6. 大内容或多行结构化内容先写 artifact，再通过 `hive send` / `hive reply --artifact <path>` 发送；不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`

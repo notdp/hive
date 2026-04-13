@@ -14,7 +14,7 @@ tmux window
 
 hive current/init ─→ discover or bind the current tmux window
 hive spawn/fork ──→ add more agent panes when needed
-hive send ───────→ inject inline <HIVE ...> messages via tmux
+hive send ───────→ inject ```HIVE fenced messages via tmux
 hive reply ──────→ reply to task messages and publish projected state
 workspace ───────→ artifacts/ + events/ for durable coordination
 ```
@@ -69,7 +69,7 @@ hive send claude "Review the PR diff and write findings to the workspace artifac
 | `hive init` / `hive create <team>` | Bind the current tmux window or create a fresh team |
 | `hive team` / `hive teams` | Show the current team, including projected status in `statuses`, or list known teams |
 | `hive spawn <agent>` | Spawn a new agent pane |
-| `hive send <agent> "text"` / `hive reply <agent> "text"` | Deliver structured `<HIVE ...>` messages and publish projected state |
+| `hive send <agent> "text"` / `hive reply <agent> "text"` | Deliver ` ```HIVE ` fenced messages and publish projected state |
 | `hive capture <agent>` / `hive interrupt <agent>` | Inspect or interrupt an agent pane |
 | `hive exec <terminal> "cmd"` / `hive terminal ...` | Drive registered terminal panes |
 | `hive plugin enable|disable|list` | Materialize first-party plugin scripts under `~/.factory/commands/` and link plugin skills |
@@ -149,7 +149,7 @@ PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_
 
 ## How It Works
 
-Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`, while projected collaboration state is surfaced in `hive team` under the `statuses` field. No JSON-RPC, no daemon — just tmux + workspace files.
+Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as ` ```HIVE ` fenced blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`, while projected collaboration state is surfaced in `hive team` under the `statuses` field. No JSON-RPC, no daemon — just tmux + workspace files.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 

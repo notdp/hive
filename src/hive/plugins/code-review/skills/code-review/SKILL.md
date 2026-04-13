@@ -177,7 +177,7 @@ flowchart TB
 - 写 python 脚本检查文件是否出现
 - 做 git diff / git show
 
-下一次 response 由 `<HIVE>` 消息触发。
+下一次 response 由 ` ```HIVE ` 消息触发。
 
 **边界：**
 

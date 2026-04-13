@@ -22,8 +22,8 @@ def _is_user_turn(payload: dict) -> bool:
     return getattr(base_module, "_is_user_turn")(payload)
 
 
-def _wait_for_nonce_in_transcript(path: Path, nonce: str, baseline: int, timeout: float = 45.0) -> bool:
-    return getattr(base_module, "wait_for_nonce_in_transcript")(path, nonce, baseline, timeout=timeout)
+def _wait_for_id_in_transcript(path: Path, message_id: str, baseline: int, timeout: float = 45.0) -> bool:
+    return getattr(base_module, "wait_for_id_in_transcript")(path, message_id, baseline, timeout=timeout)
 
 
 def test_get_transcript_baseline_returns_file_size(tmp_path):
@@ -81,14 +81,14 @@ def test_is_user_turn_codex():
             "type": "message",
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "nonce-a1b2"}],
+                "content": [{"type": "text", "text": "id: a1b2"}],
             },
         },
         {
             "type": "assistant",
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "nonce-a1b2"}],
+                "content": [{"type": "text", "text": "id: a1b2"}],
             },
         },
         {
@@ -96,7 +96,7 @@ def test_is_user_turn_codex():
             "payload": {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "nonce-a1b2"}],
+                "content": [{"type": "output_text", "text": "id: a1b2"}],
             },
         },
         {
@@ -104,7 +104,7 @@ def test_is_user_turn_codex():
             "payload": {
                 "type": "function_call_output",
                 "call_id": "call-1",
-                "output": "nonce-a1b2",
+                "output": "id: a1b2",
             },
         },
     ],
@@ -113,7 +113,7 @@ def test_is_user_turn_rejects_assistant_turn(payload):
     assert _is_user_turn(payload) is False
 
 
-def test_wait_finds_nonce_after_baseline(tmp_path):
+def test_wait_finds_id_after_baseline(tmp_path):
     path = tmp_path / "session.jsonl"
     _write_jsonl(
         path,
@@ -138,7 +138,7 @@ def test_wait_finds_nonce_after_baseline(tmp_path):
                         "type": "message",
                         "message": {
                             "role": "user",
-                            "content": [{"type": "text", "text": "nonce-a1b2 hello"}],
+                            "content": [{"type": "text", "text": "id: a1b2 hello"}],
                         },
                     }
                 )
@@ -148,7 +148,7 @@ def test_wait_finds_nonce_after_baseline(tmp_path):
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
     try:
-        assert _wait_for_nonce_in_transcript(path, "nonce-a1b2", baseline, timeout=1.0) is True
+        assert _wait_for_id_in_transcript(path, "a1b2", baseline, timeout=1.0) is True
     finally:
         thread.join(timeout=1.0)
 
@@ -169,10 +169,10 @@ def test_wait_times_out(tmp_path):
     )
     baseline = path.stat().st_size
 
-    assert _wait_for_nonce_in_transcript(path, "nonce-a1b2", baseline, timeout=0.2) is False
+    assert _wait_for_id_in_transcript(path, "a1b2", baseline, timeout=0.2) is False
 
 
-def test_wait_ignores_before_baseline(tmp_path):
+def test_wait_ignores_id_before_baseline(tmp_path):
     path = tmp_path / "session.jsonl"
     _write_jsonl(
         path,
@@ -181,14 +181,14 @@ def test_wait_ignores_before_baseline(tmp_path):
                 "type": "message",
                 "message": {
                     "role": "user",
-                    "content": [{"type": "text", "text": "nonce-a1b2 before"}],
+                    "content": [{"type": "text", "text": "id: a1b2 before"}],
                 },
             }
         ],
     )
     baseline = path.stat().st_size
 
-    assert _wait_for_nonce_in_transcript(path, "nonce-a1b2", baseline, timeout=0.2) is False
+    assert _wait_for_id_in_transcript(path, "a1b2", baseline, timeout=0.2) is False
 
 
 def test_wait_handles_partial_line(tmp_path):
@@ -200,7 +200,7 @@ def test_wait_handles_partial_line(tmp_path):
         "type": "message",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": "nonce-a1b2 partial"}],
+            "content": [{"type": "text", "text": "id: a1b2 partial"}],
         },
     }
     encoded = json.dumps(payload)
@@ -217,7 +217,7 @@ def test_wait_handles_partial_line(tmp_path):
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
     try:
-        assert _wait_for_nonce_in_transcript(path, "nonce-a1b2", baseline, timeout=1.0) is True
+        assert _wait_for_id_in_transcript(path, "a1b2", baseline, timeout=1.0) is True
     finally:
         thread.join(timeout=1.0)
 
@@ -236,7 +236,7 @@ def test_wait_file_appears_during_poll(tmp_path):
                     "payload": {
                         "type": "message",
                         "role": "user",
-                        "content": [{"type": "input_text", "text": "nonce-a1b2 hello"}],
+                        "content": [{"type": "input_text", "text": "id: a1b2 hello"}],
                     },
                 }
             ],
@@ -245,6 +245,6 @@ def test_wait_file_appears_during_poll(tmp_path):
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
     try:
-        assert _wait_for_nonce_in_transcript(path, "nonce-a1b2", baseline, timeout=1.0) is True
+        assert _wait_for_id_in_transcript(path, "a1b2", baseline, timeout=1.0) is True
     finally:
         thread.join(timeout=1.0)

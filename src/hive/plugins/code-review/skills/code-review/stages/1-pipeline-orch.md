@@ -104,21 +104,31 @@ hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artif
 
 ## 消息处理（收到 HIVE 消息后才执行以下内容）
 
-orch 会收到形如以下的 `<HIVE>` 消息：
+orch 会收到形如以下的 ` ```HIVE ` 消息：
 
-```
-<HIVE from=reviewer-c to=orch intent=reply artifact=/tmp/.../reviewer-c-r1.md>
+````
+```HIVE
+from: reviewer-c
+to: orch
+intent: reply
+artifact: /tmp/.../reviewer-c-r1.md
+---
 review done reviewer=reviewer-c verdict=issues artifact=/tmp/.../reviewer-c-r1.md
-</HIVE>
 ```
+````
 
 或来自 verifier：
 
-```
-<HIVE from=verifier-a to=orch intent=reply artifact=/tmp/.../verifier-a-verify-result.md>
+````
+```HIVE
+from: verifier-a
+to: orch
+intent: reply
+artifact: /tmp/.../verifier-a-verify-result.md
+---
 verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
-</HIVE>
 ```
+````
 
 ### 收到 reviewer done 消息时
 

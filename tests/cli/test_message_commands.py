@@ -1,19 +1,45 @@
 import json
 
 from hive import bus
+import hive.cli as cli_module
 from hive.cli import cli
 
-FIXED_NONCE = "ab12"
+FIXED_ID = "ab12"
 
 
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript."""
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
     monkeypatch.setattr(
         "hive.cli._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
+
+
+def _assert_frontmatter_envelope(
+    envelope: str,
+    *,
+    message_id: str,
+    from_agent: str,
+    to_agent: str,
+    intent: str,
+    body: str,
+    artifact: str = "",
+) -> None:
+    assert envelope.startswith("```HIVE\n")
+    assert envelope.endswith("\n```")
+    assert f"id: {message_id}" in envelope
+    assert f"from: {from_agent}" in envelope
+    assert f"to: {to_agent}" in envelope
+    if intent:
+        assert f"intent: {intent}" in envelope
+    if artifact:
+        assert f"artifact: {artifact}" in envelope
+    else:
+        assert "artifact:" not in envelope
+    assert "---\n" in envelope
+    assert body in envelope
 
 
 def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -73,7 +99,16 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
         "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == [f"<HIVE from=claude to=gpt intent=send artifact={artifact} nonce={FIXED_NONCE}>\nplease review this\n</HIVE>"]
+    assert len(sent) == 1
+    envelope = sent[0]
+    assert envelope.startswith("```HIVE\n")
+    assert envelope.endswith("\n```")
+    assert f"id: {FIXED_ID}" in envelope
+    assert "from: claude" in envelope
+    assert "to: gpt" in envelope
+    assert "intent: send" in envelope
+    assert f"artifact: {artifact}" in envelope
+    assert "please review this" in envelope
     assert len(bus.read_all_events(workspace)) == 1
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
 
@@ -133,7 +168,11 @@ def test_send_supports_structured_intent(runner, configure_hive_home, monkeypatc
         "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == [f"<HIVE from=claude to=gpt intent=ask nonce={FIXED_NONCE}>\nplease choose\n</HIVE>"]
+    assert len(sent) == 1
+    envelope = sent[0]
+    assert "```HIVE" in envelope
+    assert "intent: ask" in envelope
+    assert "please choose" in envelope
 
 
 
@@ -240,7 +279,12 @@ def test_reply_writes_event_and_projects_status(runner, configure_hive_home, mon
         "ack": "skipped",
     }
     assert payload["path"].endswith(".json")
-    assert sent == [f"<HIVE from=claude to=orch intent=reply artifact={artifact} nonce={FIXED_NONCE}>\nreview complete\n</HIVE>"]
+    assert len(sent) == 1
+    envelope = sent[0]
+    assert "```HIVE" in envelope
+    assert "intent: reply" in envelope
+    assert f"artifact: {artifact}" in envelope
+    assert "review complete" in envelope
     assert bus.read_status(workspace, "claude") == {
         "agent": "claude",
         "state": "done",
@@ -448,11 +492,10 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
 
         def send(self, text: str) -> None:
             sent.append(text)
-            # Simulate CLI accepting input — write a user turn with the nonce.
-            nonce = FIXED_NONCE
+            # Simulate CLI accepting input — write a user turn with the id.
             transcript.write_text(
                 '{"type": "user", "message": {"role": "user", "content": "'
-                + f"<HIVE from=claude to=gpt intent=send nonce={nonce}>"
+                + f"id: {FIXED_ID}"
                 + '"}}\n'
             )
 
@@ -467,7 +510,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--from", "claude"])
@@ -506,9 +549,9 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli.wait_for_nonce_in_transcript", lambda path, nonce, baseline, timeout=45.0: False, raising=False)
+    monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--from", "claude"])
 
@@ -568,10 +611,9 @@ def test_reply_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path)
             return True
 
         def send(self, text: str) -> None:
-            nonce = FIXED_NONCE
             transcript.write_text(
                 '{"type": "message", "message": {"role": "user", "content": "'
-                + f"<HIVE from=worker to=orch intent=reply nonce={nonce}>"
+                + f"id: {FIXED_ID}"
                 + '"}}\n'
             )
 
@@ -586,7 +628,7 @@ def test_reply_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path)
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_NONCE)
+    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
 
     result = runner.invoke(cli, ["reply", "orch", "done", "--from", "worker", "--state", "done"])

@@ -399,7 +399,7 @@ def _send_recorded_message(
     normalized_body = body.strip()
 
     # ACK preparation — resolve transcript baseline before injection.
-    nonce = secrets.token_hex(2)
+    message_id = secrets.token_hex(2)
     transcript_path: Path | None = None
     baseline: int = 0
     try:
@@ -413,7 +413,7 @@ def _send_recorded_message(
         body=body,
         artifact=resolved_artifact,
         intent=intent,
-        nonce=nonce,
+        message_id=message_id,
     )
     target.send(envelope)
     path = bus.write_event(
@@ -429,13 +429,14 @@ def _send_recorded_message(
         waiting_for=waiting_for,
         blocked_by=blocked_by,
         metadata=metadata,
+        message_id=message_id,
     )
 
     # ACK wait — block until transcript confirms the user turn.
     ack_status = "skipped"
     if transcript_path is not None:
-        from .adapters.base import wait_for_nonce_in_transcript
-        if wait_for_nonce_in_transcript(transcript_path, nonce, baseline):
+        from .adapters.base import wait_for_id_in_transcript
+        if wait_for_id_in_transcript(transcript_path, message_id, baseline):
             ack_status = "confirmed"
         else:
             ack_status = "unconfirmed"
@@ -472,6 +473,19 @@ def _status_migration_failure(command_name: str) -> None:
     )
 
 
+def _resolve_fence(body: str) -> str:
+    """Pick a fence string that doesn't collide with *body* content."""
+    import re
+    max_backticks = max((len(m.group()) for m in re.finditer(r"`+", body)), default=0)
+    if max_backticks < 3:
+        return "```"
+    max_tildes = max((len(m.group()) for m in re.finditer(r"~+", body)), default=0)
+    if max_tildes < 3:
+        return "~~~"
+    # Both characters appear — use longer backtick fence.
+    return "`" * (max_backticks + 1)
+
+
 def _format_hive_envelope(
     *,
     from_agent: str,
@@ -479,21 +493,24 @@ def _format_hive_envelope(
     body: str,
     artifact: str = "",
     intent: str = "",
-    nonce: str = "",
+    message_id: str = "",
 ) -> str:
-    attrs: list[tuple[str, str]] = [
-        ("from", from_agent),
-        ("to", to_agent),
-    ]
-    if intent:
-        attrs.append(("intent", intent))
-    if artifact:
-        attrs.append(("artifact", artifact))
-    if nonce:
-        attrs.append(("nonce", nonce))
-    header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
+    """Build a HIVE envelope as a markdown code fence with frontmatter."""
     payload = body.strip() if body.strip() else "(no message)"
-    return f"{header}\n{payload}\n</HIVE>"
+    fence = _resolve_fence(payload)
+    lines = [f"{fence}HIVE"]
+    if message_id:
+        lines.append(f"id: {message_id}")
+    lines.append(f"from: {from_agent}")
+    lines.append(f"to: {to_agent}")
+    if intent:
+        lines.append(f"intent: {intent}")
+    if artifact:
+        lines.append(f"artifact: {artifact}")
+    lines.append("---")
+    lines.append(payload)
+    lines.append(fence)
+    return "\n".join(lines)
 
 
 def _tmux_runtime_required(argv: list[str]) -> bool:
@@ -723,7 +740,7 @@ def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
         "Context is pre-bound. Hive messages will arrive inline as "
-        "`<HIVE ...> ... </HIVE>` blocks. "
+        "```HIVE fenced blocks with frontmatter headers. "
         "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
     )
 

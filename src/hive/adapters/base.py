@@ -136,13 +136,13 @@ def _poll_interval(elapsed: float) -> float:
     return 1.0
 
 
-def wait_for_nonce_in_transcript(
+def wait_for_id_in_transcript(
     path: Path,
-    nonce: str,
+    message_id: str,
     baseline: int,
     timeout: float = 45.0,
 ) -> bool:
-    """Block until *nonce* appears in a new user turn after *baseline* bytes.
+    """Block until *message_id* appears in a new user turn after *baseline* bytes.
 
     Returns True if confirmed, False on timeout.
     """
@@ -171,7 +171,7 @@ def wait_for_nonce_in_transcript(
             for line in lines:
                 if not line:
                     continue
-                if nonce not in line:
+                if message_id not in line:
                     continue
                 parsed = safe_json_loads(line)
                 if parsed is not None and _is_user_turn(parsed):

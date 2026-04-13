@@ -63,6 +63,7 @@ def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
         from_agent="claude",
         to_agent="orch",
         intent="reply",
+        message_id="ab12",
         body="review complete",
         artifact="/tmp/review.md",
         state="done",
@@ -71,6 +72,7 @@ def test_write_event_and_project_reply_status_round_trip(tmp_path, monkeypatch):
 
     assert path == workspace / "events" / "1001.json"
     assert bus.read_all_events(workspace) == [{
+        "id": "ab12",
         "from": "claude",
         "to": "orch",
         "intent": "reply",
@@ -101,6 +103,7 @@ def test_reply_projection_preserves_structured_fields(tmp_path, monkeypatch):
         from_agent="claude",
         to_agent="orch",
         intent="reply",
+        message_id="beef",
         body="wait-reply",
         state="waiting_input",
         task="protocol-redesign",
@@ -134,6 +137,7 @@ def test_send_events_project_target_busy_status(tmp_path, monkeypatch):
         from_agent="orch",
         to_agent="claude",
         intent="send",
+        message_id="aa01",
         body="review this diff",
     )
     bus.write_event(
@@ -141,8 +145,12 @@ def test_send_events_project_target_busy_status(tmp_path, monkeypatch):
         from_agent="orch",
         to_agent="gpt",
         intent="ask",
+        message_id="bb02",
         body="pick a strategy",
     )
+
+    events = bus.read_all_events(workspace)
+    assert [event["id"] for event in events] == ["aa01", "bb02"]
 
     payload = bus.read_all_statuses(workspace)
     assert payload == {

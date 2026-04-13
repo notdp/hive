@@ -68,6 +68,7 @@ def write_event(
     waiting_for: str = "",
     blocked_by: str = "",
     metadata: dict[str, str] | None = None,
+    message_id: str = "",
 ) -> Path:
     path = Path(workspace).expanduser() / "events" / f"{time.time_ns()}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,8 @@ def write_event(
         "metadata": metadata or {},
         "createdAt": _now_iso(),
     }
+    if message_id:
+        payload["id"] = message_id
     normalized_body = body.strip()
     if normalized_body:
         payload["body"] = normalized_body

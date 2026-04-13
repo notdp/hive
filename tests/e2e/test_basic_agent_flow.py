@@ -64,7 +64,7 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
 
         wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
         captured = capture_claude()
-        assert "<HIVE from=orch to=claude intent=send nonce=" in captured
+        assert "```HIVE" in captured and "from: orch" in captured and "to: claude" in captured
         assert "plain ping" in captured
 
         status_result = run_in_pane(["team"])

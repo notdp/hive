@@ -341,7 +341,7 @@ def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_
     assert payload["panes"][2]["role"] == "terminal"
 
     assert [text for _, text in mock_tmux_send if text == "/hive"] == ["/hive"]
-    assert len([text for _, text in mock_tmux_send if "<HIVE ...>" in text]) == 1
+    assert len([text for _, text in mock_tmux_send if "```HIVE fenced blocks" in text]) == 1
 
     ctx_alpha = json.loads((tmp_path / ".hive" / "contexts" / "pane-6.json").read_text())
     assert ctx_alpha == {"team": "dev-2", "workspace": str(workspace), "agent": "nini"}
