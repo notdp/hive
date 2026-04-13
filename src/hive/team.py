@@ -143,7 +143,7 @@ class Team:
                         model=pane.model,
                         color=pane.color or "green",
                         cli=resolved_cli,
-                        cwd="",
+                        cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
                     team.agents[pane.agent] = agent
                 elif pane.role == "terminal":

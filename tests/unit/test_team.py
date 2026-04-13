@@ -76,6 +76,28 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.terminals["shell"].pane_id == "%2"
 
 
+def test_team_load_restores_agent_cwd_from_pane_current_path(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.team._find_team_window",
+        lambda name, prefer_pane="": ("dev:0", {"desc": "", "workspace": "/tmp/ws", "created": "0"}),
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%1", "", "claude", role="agent", agent="claude", team="team-a", cli="claude")],
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux.display_value",
+        lambda pane_id, fmt: "/repo" if pane_id == "%1" and fmt == "#{pane_current_path}" else None,
+    )
+
+    loaded = Team.load("team-a")
+
+    assert loaded.agents["claude"].cwd == "/repo"
+
+
 def test_team_lead_agent_uses_persisted_session_id(configure_hive_home):
     configure_hive_home()
     team = Team(name="team-a", lead_pane_id="%0", lead_session_id="sess-1")
