@@ -740,7 +740,7 @@ def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
         "Context is pre-bound. Hive messages will arrive inline as "
-        "```HIVE fenced blocks with frontmatter headers. "
+        "HIVE fenced blocks with frontmatter headers. "
         "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
     )
 
