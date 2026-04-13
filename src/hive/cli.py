@@ -379,13 +379,20 @@ def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
     return transcript, get_transcript_baseline(transcript)
 
 
-def _check_send_gate(target: Agent, transcript_path: Path | None) -> str:
-    """Check if the target agent can accept input. Returns gate status string."""
+def _check_send_gate(target: Agent, transcript_path: Path | None, *, is_reply: bool = False) -> str:
+    """Check if the target agent can accept input. Returns gate status string.
+
+    For ``send``, blocks with an error when the target is waiting.
+    For ``reply``, returns "waiting" without blocking so the event/status
+    is still written — only the pane injection is skipped.
+    """
     if transcript_path is None:
         return "skipped"
     from .adapters.base import check_input_gate
     result = check_input_gate(transcript_path)
     if result.status == "waiting":
+        if is_reply:
+            return "waiting"
         _fail(
             f"agent '{target.name}' is waiting for a user answer — "
             "there is no prompt input to receive messages. "
@@ -424,7 +431,9 @@ def _send_recorded_message(
         transcript_path = None
 
     # Send gate — block if target is waiting for a user answer.
-    gate_status = _check_send_gate(target, transcript_path)
+    # For reply, always write the event first (status projection must not be
+    # lost), then gate only blocks the pane injection.
+    gate_status = _check_send_gate(target, transcript_path, is_reply=(intent == "reply"))
 
     envelope = _format_hive_envelope(
         from_agent=sender,
@@ -434,7 +443,8 @@ def _send_recorded_message(
         intent=intent,
         message_id=message_id,
     )
-    target.send(envelope)
+    if gate_status != "waiting":
+        target.send(envelope)
     path = bus.write_event(
         ws,
         from_agent=sender,
@@ -453,7 +463,7 @@ def _send_recorded_message(
 
     # ACK wait — block until transcript confirms the user turn.
     ack_status = "skipped"
-    if transcript_path is not None:
+    if transcript_path is not None and gate_status != "waiting":
         from .adapters.base import wait_for_id_in_transcript
         if wait_for_id_in_transcript(transcript_path, message_id, baseline):
             ack_status = "confirmed"

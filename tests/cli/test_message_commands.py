@@ -708,9 +708,10 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     assert payload["gate"] == "skipped"
 
 
-def test_reply_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_reply_writes_event_even_when_gate_waiting(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Reply must write the event (status projection) even when gate is waiting."""
     configure_hive_home()
-    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
+    workspace, transcript, sent = _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
         {
             "type": "assistant",
             "message": {
@@ -724,7 +725,14 @@ def test_reply_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_pat
 
     result = runner.invoke(cli, ["reply", "gpt", "done", "--from", "claude", "--state", "done"])
 
-    assert result.exit_code != 0
-    assert "waiting for a user answer" in result.output
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["gate"] == "waiting"
+    assert payload["ack"] == "skipped"  # no injection, no ACK
+    # Event was written — status projection works
+    assert len(bus.read_all_events(workspace)) == 1
+    assert bus.read_status(workspace, "claude")["state"] == "done"
+    # Message was NOT injected into the pane
+    assert len(sent) == 0
 
 
