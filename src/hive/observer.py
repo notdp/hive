@@ -19,7 +19,7 @@ def find_observation(workspace: str, message_id: str) -> dict | None:
         if (
             data.get("intent") == "observation"
             and isinstance(data.get("metadata"), dict)
-            and data["metadata"].get("messageId") == message_id
+            and data["metadata"].get("msgId") == message_id
         ):
             result = data  # Keep scanning — return the latest observation
     return result

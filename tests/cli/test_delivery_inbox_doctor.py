@@ -48,6 +48,81 @@ def _setup_team(monkeypatch, workspace, sent=None):
     return _FakeTeam()
 
 
+# --- delivery ---
+
+
+def test_delivery_reports_primary_state_and_raw_details(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr("hive.sidecar.check_stale_sidecar", lambda *_args, **_kw: None)
+
+    path = bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="queued msg",
+        message_id="q1",
+    )
+    data = json.loads(path.read_text())
+    data["injectStatus"] = "submitted"
+    data["turnObserved"] = "pending"
+    data["runtimeQueueState"] = "queued"
+    data["queueSource"] = "capture"
+    path.write_text(json.dumps(data) + "\n")
+
+    result = runner.invoke(cli, ["delivery", "q1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["msgId"] == "q1"
+    assert payload["state"] == "queued"
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "pending"
+    assert payload["runtimeQueueState"] == "queued"
+    assert payload["queueSource"] == "capture"
+
+
+def test_delivery_prefers_observation_result(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    path = bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="done msg",
+        message_id="c1",
+    )
+    data = json.loads(path.read_text())
+    data["injectStatus"] = "submitted"
+    data["turnObserved"] = "pending"
+    data["runtimeQueueState"] = "queued"
+    path.write_text(json.dumps(data) + "\n")
+
+    bus.write_event(
+        workspace,
+        from_agent="_system",
+        to_agent="",
+        intent="observation",
+        metadata={"msgId": "c1", "result": "confirmed", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+
+    result = runner.invoke(cli, ["delivery", "c1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["msgId"] == "c1"
+    assert payload["state"] == "confirmed"
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "confirmed"
+    assert payload["runtimeQueueState"] == "queued"
+    assert payload["observedAt"] == "2026-04-14T00:00:00Z"
+
+
 # --- inbox ---
 
 

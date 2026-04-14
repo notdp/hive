@@ -68,12 +68,14 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["to"] == "gpt"
     assert payload["artifact"] == str(artifact)
     assert "summary" not in payload
-    assert payload["injectStatus"] == "submitted"
-    assert payload["turnObserved"] == "unavailable"
+    assert payload["state"] == "unavailable"
+    assert "injectStatus" not in payload
+    assert "turnObserved" not in payload
     assert "followUp" not in payload
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
-    assert sent == [f"<HIVE from=claude to=gpt id={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
+    assert payload["msgId"] == FIXED_ID
+    assert sent == [f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
     assert len(bus.read_all_events(workspace)) == 1
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
 
@@ -299,7 +301,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["turnObserved"] == "confirmed"
+    assert payload["state"] == "confirmed"
     assert "followUp" not in payload
 
 
@@ -341,7 +343,7 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["turnObserved"] == "unconfirmed"
+    assert payload["state"] == "unconfirmed"
     assert "followUp" not in payload
 
 
@@ -378,8 +380,8 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["turnObserved"] == "unavailable"
-    assert payload["injectStatus"] == "submitted"
+    assert payload["state"] == "unavailable"
+    assert "injectStatus" not in payload
     assert "followUp" not in payload
 
 
@@ -426,8 +428,8 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["turnObserved"] == "pending"
-    assert payload["runtimeQueueState"] == "unknown"
+    assert payload["state"] == "pending"
+    assert "runtimeQueueState" not in payload
     assert "followUp" not in payload
     assert len(enqueued) == 1  # sidecar was asked to track this message
 
@@ -475,8 +477,8 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["turnObserved"] == "pending"
-    assert payload["runtimeQueueState"] == "queued"
+    assert payload["state"] == "queued"
+    assert "runtimeQueueState" not in payload
     assert len(enqueued) == 1
     assert enqueued[0][1]["runtime_queue_state"] == "queued"
     assert enqueued[0][1]["queue_source"] == "capture"
@@ -486,6 +488,7 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     assert len(send_events) == 1
     assert send_events[0]["runtimeQueueState"] == "queued"
     assert send_events[0]["queueSource"] == "capture"
+    assert send_events[0]["msgId"] == FIXED_ID
 
 
 def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -524,8 +527,9 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["injectStatus"] == "failed"
-    assert payload["turnObserved"] == "unavailable"
+    assert payload["state"] == "failed"
+    assert "injectStatus" not in payload
+    assert "turnObserved" not in payload
     assert "observerPid" not in payload
     assert "followUp" not in payload
 
@@ -630,8 +634,8 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["injectStatus"] == "submitted"
-    assert payload["turnObserved"] == "unavailable"
+    assert payload["state"] == "unavailable"
+    assert "injectStatus" not in payload
 
 
 # --- Answer command tests ---

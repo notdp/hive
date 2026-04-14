@@ -63,7 +63,7 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
 
         wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
         captured = capture_claude()
-        assert "<HIVE from=orch to=claude id=" in captured
+        assert "<HIVE from=orch to=claude msgId=" in captured
         assert "plain ping" in captured
 
         delete_result = run_in_pane(["delete", team])

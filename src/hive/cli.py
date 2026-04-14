@@ -421,6 +421,44 @@ def _build_queue_probe_text(body: str, *, limit: int = 48) -> str:
     return " ".join(text.split())[:limit]
 
 
+def _present_send_state(*, inject_status: str, turn_observed: str, runtime_queue_state: str) -> str:
+    """Collapse internal delivery details into one default send state."""
+    if inject_status == "failed":
+        return "failed"
+    if turn_observed == "confirmed":
+        return "confirmed"
+    if turn_observed == "unconfirmed":
+        return "unconfirmed"
+    if runtime_queue_state == "queued":
+        return "queued"
+    if turn_observed == "unavailable":
+        return "unavailable"
+    return "pending"
+
+
+def _present_delivery_state(
+    *,
+    inject_status: str,
+    turn_observed: str,
+    runtime_queue_state: str,
+    observation_result: str = "",
+) -> str:
+    """Collapse persisted delivery detail into one primary state."""
+    if inject_status == "failed":
+        return "failed"
+    if observation_result:
+        return observation_result
+    if turn_observed == "confirmed":
+        return "confirmed"
+    if turn_observed == "unconfirmed":
+        return "unconfirmed"
+    if runtime_queue_state == "queued":
+        return "queued"
+    if turn_observed == "unavailable":
+        return "unavailable"
+    return "pending"
+
+
 def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     if not artifact:
         return ""
@@ -606,14 +644,15 @@ def _send_recorded_message(
     payload: dict[str, object] = {
         "from": sender,
         "to": to_agent,
-        "id": message_id,
+        "msgId": message_id,
         "artifact": resolved_artifact,
         "path": str(path),
-        "injectStatus": inject_status,
-        "turnObserved": turn_observed,
+        "state": _present_send_state(
+            inject_status=inject_status,
+            turn_observed=turn_observed,
+            runtime_queue_state=runtime_queue_state,
+        ),
     }
-    if turn_observed == "pending":
-        payload["runtimeQueueState"] = runtime_queue_state
     return payload
 
 
@@ -639,7 +678,7 @@ def _format_hive_envelope(
         ("to", to_agent),
     ]
     if message_id:
-        attrs.append(("id", message_id))
+        attrs.append(("msgId", message_id))
     if reply_to:
         attrs.append(("reply-to", reply_to))
     if artifact:
@@ -1474,15 +1513,17 @@ def delivery(message_id: str):
 
     send_event = None
     for event in bus.read_all_events(ws):
-        if event.get("id") == message_id and event.get("intent") == "send":
+        if event.get("msgId") == message_id and event.get("intent") == "send":
             send_event = event
             break
 
     if send_event is None:
-        _fail(f"no send event found with id '{message_id}'")
+        _fail(f"no send event found with msgId '{message_id}'")
 
     persisted_inject = send_event.get("injectStatus", "unknown")
     persisted_turn = send_event.get("turnObserved", "unknown")
+    runtime_queue_state = send_event.get("runtimeQueueState", "unknown")
+    queue_source = send_event.get("queueSource", "")
 
     obs = find_observation(str(ws), message_id)
     if obs is None and persisted_turn == "pending":
@@ -1494,22 +1535,41 @@ def delivery(message_id: str):
         result = obs["metadata"]["result"]
         observed_at = obs["metadata"].get("observedAt", "")
         payload: dict[str, object] = {
-            "messageId": message_id,
+            "msgId": message_id,
             "to": send_event.get("to", ""),
+            "state": _present_delivery_state(
+                inject_status=persisted_inject,
+                turn_observed=persisted_turn,
+                runtime_queue_state=runtime_queue_state,
+                observation_result=result,
+            ),
             "injectStatus": persisted_inject,
             "turnObserved": result,
         }
+        if runtime_queue_state != "unknown":
+            payload["runtimeQueueState"] = runtime_queue_state
+        if queue_source:
+            payload["queueSource"] = queue_source
         if observed_at:
             payload["observedAt"] = observed_at
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
     payload = {
-        "messageId": message_id,
+        "msgId": message_id,
         "to": send_event.get("to", ""),
+        "state": _present_delivery_state(
+            inject_status=persisted_inject,
+            turn_observed=persisted_turn,
+            runtime_queue_state=runtime_queue_state,
+        ),
         "injectStatus": persisted_inject,
         "turnObserved": persisted_turn,
     }
+    if runtime_queue_state != "unknown":
+        payload["runtimeQueueState"] = runtime_queue_state
+    if queue_source:
+        payload["queueSource"] = queue_source
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1527,8 +1587,8 @@ def inbox():
     # Collect message IDs sent by self (for observation matching)
     my_sent_ids: set[str] = set()
     for _ns, ev in events:
-        if ev.get("from") == self_name and ev.get("intent") == "send" and ev.get("id"):
-            my_sent_ids.add(ev["id"])
+        if ev.get("from") == self_name and ev.get("intent") == "send" and ev.get("msgId"):
+            my_sent_ids.add(ev["msgId"])
 
     # Filter unread events relevant to self
     unread: list[dict[str, object]] = []
@@ -1545,7 +1605,7 @@ def inbox():
         if (
             ev.get("intent") == "observation"
             and isinstance(ev.get("metadata"), dict)
-            and ev["metadata"].get("messageId") in my_sent_ids
+            and ev["metadata"].get("msgId") in my_sent_ids
         ):
             result = ev["metadata"].get("result", "")
             if result in ("confirmed", "unconfirmed", "tracking_lost"):
@@ -1560,7 +1620,7 @@ def inbox():
             continue
         if _ns <= cursor:
             continue
-        msg_id = ev.get("id", "")
+        msg_id = ev.get("msgId", "")
         if not msg_id or ev.get("turnObserved") != "pending":
             continue
         obs = find_observation(str(ws), msg_id)

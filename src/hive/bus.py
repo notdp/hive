@@ -76,7 +76,7 @@ def write_event(
         "createdAt": _now_iso(),
     }
     if message_id:
-        payload["id"] = message_id
+        payload["msgId"] = message_id
     if reply_to:
         payload["inReplyTo"] = reply_to
     normalized_body = body.strip()
@@ -141,5 +141,4 @@ def write_cursor(workspace: str | Path, agent_name: str, ns_value: int) -> None:
     path = Path(workspace).expanduser() / "cursors" / agent_name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(ns_value) + "\n")
-
 

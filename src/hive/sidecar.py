@@ -39,7 +39,7 @@ def _write_observation(workspace: str, message_id: str, result: str) -> None:
         "to": "",
         "intent": "observation",
         "metadata": {
-            "messageId": message_id,
+            "msgId": message_id,
             "result": result,
             "observedAt": ts,
         },
@@ -58,7 +58,7 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
         body = f"Message {message_id} to {target_agent}: delivery tracking lost."
 
     block = (
-        f"<HIVE-SYSTEM type=delivery-exception message-id={message_id} "
+        f"<HIVE-SYSTEM type=delivery-exception msgId={message_id} "
         f"result={result} to={target_agent}>\n{body}\n</HIVE-SYSTEM>"
     )
     try:
@@ -79,7 +79,7 @@ def enqueue_pending(workspace: str, message_id: str, sender_agent: str,
     pending_dir = Path(workspace) / "state" / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     record = {
-        "messageId": message_id,
+        "msgId": message_id,
         "senderAgent": sender_agent,
         "senderPane": sender_pane,
         "targetAgent": target_agent,
@@ -400,7 +400,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
 
                 if result is not None:
                     # Write observation event
-                    msg_id = record["messageId"]
+                    msg_id = record["msgId"]
                     _write_observation(workspace, msg_id, result)
 
                     # Notify sender on exception
@@ -424,7 +424,7 @@ def _check_pending(record: dict) -> str | None:
     from .adapters.base import safe_json_loads
 
     transcript_path = Path(record.get("targetTranscript", ""))
-    message_id = record.get("messageId", "")
+    message_id = record.get("msgId", "")
     baseline = record.get("baseline", 0)
     deadline = _effective_deadline(record)
     now = time.time()

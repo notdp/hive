@@ -74,7 +74,7 @@ def test_write_event_round_trip(tmp_path, monkeypatch):
 
     assert path == workspace / "events" / "1001.json"
     assert bus.read_all_events(workspace) == [{
-        "id": "ab12",
+        "msgId": "ab12",
         "from": "claude",
         "to": "orch",
         "intent": "send",
@@ -110,6 +110,6 @@ def test_write_event_multiple_events(tmp_path, monkeypatch):
     )
 
     events = bus.read_all_events(workspace)
-    assert [event["id"] for event in events] == ["aa01", "bb02"]
+    assert [event["msgId"] for event in events] == ["aa01", "bb02"]
     assert events[0]["body"] == "review this diff"
     assert events[1]["body"] == "pick a strategy"

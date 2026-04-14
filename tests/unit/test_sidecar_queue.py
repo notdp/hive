@@ -10,7 +10,7 @@ def test_detect_runtime_queue_state_reads_claude_queue_event(tmp_path):
             {
                 "type": "queue-operation",
                 "operation": "enqueue",
-                "content": "<HIVE from=momo to=orch id=ab12>hello</HIVE>",
+                "content": "<HIVE from=momo to=orch msgId=ab12>hello</HIVE>",
             }
         )
         + "\n"
@@ -77,7 +77,7 @@ def test_check_pending_stays_pending_while_queue_visible(monkeypatch, tmp_path):
     )
 
     record = {
-        "messageId": "ab12",
+        "msgId": "ab12",
         "targetTranscript": str(transcript),
         "targetPane": "%1",
         "targetCli": "codex",
@@ -104,7 +104,7 @@ def test_check_pending_uses_post_queue_timeout_after_queue_disappears(monkeypatc
     )
 
     record = {
-        "messageId": "ab12",
+        "msgId": "ab12",
         "targetTranscript": str(transcript),
         "targetPane": "%1",
         "targetCli": "codex",
