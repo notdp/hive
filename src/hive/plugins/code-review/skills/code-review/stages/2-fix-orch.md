@@ -32,27 +32,35 @@ hive layout main-vertical
 
 ## 修复-验证循环
 
+以下示例中的 `ARTIFACT_DIR` / `STATE_DIR` 始终指向当前 review run：
+
+- 刚从阶段 1 进入阶段 2 时，沿用阶段 1 已确定的 run 目录
+- 后续轮次若由 `fix done` / `verify done` 消息唤醒，可从消息里的 `artifact` 路径反推：`ARTIFACT_DIR=$(dirname "$ARTIFACT_PATH")`，`RUN_NAME=$(basename "$ARTIFACT_DIR")`，`STATE_DIR="$WORKSPACE/state/${RUN_NAME}"`
+
 ### 发送修复任务
 
 ```bash
 ROUND=1
 fix_request_id="fix-request-round-${ROUND}"
+printf '%s' "$ROUND" > "$STATE_DIR/s2-round"
 
-cat > "$WORKSPACE/artifacts/s2-fix-task.md" <<EOF
+cat > "$ARTIFACT_DIR/s2-fix-task.md" <<EOF
 # Fix Task (Round $ROUND)
 
 修复以下 confirmed findings：
-(粘贴 $WORKSPACE/artifacts/confirmed-findings.md 内容)
+(粘贴 $ARTIFACT_DIR/confirmed-findings.md 内容)
 
 Validator Commands:
 (从 request artifact 中的 Validator Commands)
 
-Output Artifact: $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
+Run Artifact Root: $ARTIFACT_DIR
+Run State Root: $STATE_DIR
+Output Artifact: $ARTIFACT_DIR/s2-fix-round-${ROUND}.md
 Reply To Message ID: $fix_request_id
-Done Command: hive send orch "fix done round=$ROUND artifact=$WORKSPACE/artifacts/s2-fix-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
+Done Command: hive send orch "fix done round=$ROUND artifact=$ARTIFACT_DIR/s2-fix-round-${ROUND}.md" --artifact $ARTIFACT_DIR/s2-fix-round-${ROUND}.md
 EOF
 
-hive send fixer "阶段 2 fix：执行 fix task $WORKSPACE/artifacts/s2-fix-task.md，完成时仅用其中的 Done Command 回传。"
+hive send fixer "阶段 2 fix：执行 fix task $ARTIFACT_DIR/s2-fix-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 发完后 **idle 等消息**。
@@ -64,20 +72,22 @@ hive send fixer "阶段 2 fix：执行 fix task $WORKSPACE/artifacts/s2-fix-task
 ```bash
 verify_request_id="verify-request-round-${ROUND}"
 
-cat > "$WORKSPACE/artifacts/s2-verify-task.md" <<EOF
+cat > "$ARTIFACT_DIR/s2-verify-task.md" <<EOF
 # Verify Task (Round $ROUND)
 
 验证 fixer 的修复是否解决了全部 confirmed findings。
 
-Fix Artifact: $WORKSPACE/artifacts/s2-fix-round-${ROUND}.md
-Confirmed Findings: $WORKSPACE/artifacts/confirmed-findings.md
+Fix Artifact: $ARTIFACT_DIR/s2-fix-round-${ROUND}.md
+Confirmed Findings: $ARTIFACT_DIR/confirmed-findings.md
 
-Output Artifact: $WORKSPACE/artifacts/s2-verify-round-${ROUND}.md
+Run Artifact Root: $ARTIFACT_DIR
+Run State Root: $STATE_DIR
+Output Artifact: $ARTIFACT_DIR/s2-verify-round-${ROUND}.md
 Reply To Message ID: $verify_request_id
-Done Command: hive send orch "verify done round=$ROUND result=<pass|fail> artifact=$WORKSPACE/artifacts/s2-verify-round-${ROUND}.md" --artifact $WORKSPACE/artifacts/s2-verify-round-${ROUND}.md
+Done Command: hive send orch "verify done round=$ROUND result=<pass|fail> artifact=$ARTIFACT_DIR/s2-verify-round-${ROUND}.md" --artifact $ARTIFACT_DIR/s2-verify-round-${ROUND}.md
 EOF
 
-hive send checker "阶段 2 verify：执行 verify task $WORKSPACE/artifacts/s2-verify-task.md，完成时仅用其中的 Done Command 回传。"
+hive send checker "阶段 2 verify：执行 verify task $ARTIFACT_DIR/s2-verify-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 发完后 **idle 等消息**。

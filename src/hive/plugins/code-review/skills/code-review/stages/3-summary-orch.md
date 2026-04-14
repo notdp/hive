@@ -16,12 +16,14 @@ flowchart TD
 
 ## 汇总
 
+以下示例中的 `ARTIFACT_DIR` / `STATE_DIR` 仍然沿用当前 review run 的目录。
+
 读取：
 
-- `reviewer-a-r1.md`, `reviewer-b-r1.md`, `reviewer-c-r1.md`（S1 原始审查）
-- `verifier-*-verify-result.md`（S1 验证结果）
-- `confirmed-findings.md`（确认的 findings）
-- `s2-fix-round-*.md` / `s2-verify-round-*.md`（若存在）
+- `$ARTIFACT_DIR/reviewer-a-r1.md`, `$ARTIFACT_DIR/reviewer-b-r1.md`, `$ARTIFACT_DIR/reviewer-c-r1.md`（S1 原始审查）
+- `$ARTIFACT_DIR/verifier-*-verify-result.md`（S1 验证结果）
+- `$ARTIFACT_DIR/confirmed-findings.md`（确认的 findings）
+- `$ARTIFACT_DIR/s2-fix-round-*.md` / `$ARTIFACT_DIR/s2-verify-round-*.md`（若存在）
 
 ## 生成 summary artifact
 
@@ -53,7 +55,7 @@ flowchart TD
 写入：
 
 ```bash
-printf '%s' "$WORKSPACE/artifacts/review-summary.md" > "$WORKSPACE/state/review-summary-artifact"
+printf '%s' "$ARTIFACT_DIR/review-summary.md" > "$STATE_DIR/review-summary-artifact"
 ```
 
 ## 可选 PR 评论
@@ -61,7 +63,7 @@ printf '%s' "$WORKSPACE/artifacts/review-summary.md" > "$WORKSPACE/state/review-
 仅在 `Mode: pr` 且 `gh` 可用时：
 
 ```bash
-gh pr comment <number> --body-file "$WORKSPACE/artifacts/review-summary.md"
+gh pr comment <number> --body-file "$ARTIFACT_DIR/review-summary.md"
 ```
 
 ## 完成

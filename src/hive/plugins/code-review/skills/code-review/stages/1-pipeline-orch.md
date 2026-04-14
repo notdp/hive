@@ -41,22 +41,27 @@ flowchart TD
 ```bash
 CTX_JSON=$(hive current)
 WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_NAME="cr-${RUN_ID}"
+ARTIFACT_DIR="$WORKSPACE/artifacts/${RUN_NAME}"
+STATE_DIR="$WORKSPACE/state/${RUN_NAME}"
 
-# 清理上次残留（必须在生成新 artifact 之前）
-rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"
-mkdir -p "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"
+mkdir -p "$ARTIFACT_DIR" "$STATE_DIR" "$WORKSPACE/events"
 
-# 记录 review 上下文（按实际情况替换）
-printf '%s' 'pr' > "$WORKSPACE/state/review-mode"
-printf '%s' '/absolute/path/to/repo' > "$WORKSPACE/state/review-repo-path"
-printf '%s' 'PR #123' > "$WORKSPACE/state/review-subject"
+# 记录当前 review run 上下文（按实际情况替换）
+printf '%s' 'pr' > "$STATE_DIR/review-mode"
+printf '%s' '/absolute/path/to/repo' > "$STATE_DIR/review-repo-path"
+printf '%s' 'PR #123' > "$STATE_DIR/review-subject"
 
 # 生成 3 份 request artifact
 for reviewer in reviewer-a reviewer-b reviewer-c; do
-  out="$WORKSPACE/artifacts/${reviewer}-r1.md"
-  req="$WORKSPACE/artifacts/${reviewer}-request.md"
+  out="$ARTIFACT_DIR/${reviewer}-r1.md"
+  req="$ARTIFACT_DIR/${reviewer}-request.md"
   request_id="review-request-${reviewer}-r1"
   cat > "$req" <<EOF
+Run Name: $RUN_NAME
+Run Artifact Root: $ARTIFACT_DIR
+Run State Root: $STATE_DIR
 Mode: pr
 Repo Path: /absolute/path/to/repo
 Subject: PR #123
@@ -84,9 +89,9 @@ hive layout main-vertical
 ## 发送 request
 
 ```bash
-hive send reviewer-a "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-a-request.md，完成时仅用其中的 Done Command 回传。"
-hive send reviewer-b "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-b-request.md，完成时仅用其中的 Done Command 回传。"
-hive send reviewer-c "阶段 1 review：执行 request artifact $WORKSPACE/artifacts/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-a "阶段 1 review：执行 request artifact $ARTIFACT_DIR/reviewer-a-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-b "阶段 1 review：执行 request artifact $ARTIFACT_DIR/reviewer-b-request.md，完成时仅用其中的 Done Command 回传。"
+hive send reviewer-c "阶段 1 review：执行 request artifact $ARTIFACT_DIR/reviewer-c-request.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 发完后 **立即结束当前 response，什么都不做**。
@@ -120,6 +125,17 @@ verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
 </HIVE>
 ```
 
+### 从消息恢复当前 run 目录
+
+```bash
+CTX_JSON=$(hive current)
+WORKSPACE=$(printf '%s' "$CTX_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workspace",""))')
+ARTIFACT_PATH="/tmp/.../reviewer-c-r1.md"  # 用当前 HIVE 消息里的 artifact 路径替换
+ARTIFACT_DIR=$(dirname "$ARTIFACT_PATH")
+RUN_NAME=$(basename "$ARTIFACT_DIR")
+STATE_DIR="$WORKSPACE/state/${RUN_NAME}"
+```
+
 ### 收到 reviewer done 消息时
 
 1. 读取其 artifact，丢弃缺少 File/Code/Verify 的 finding
@@ -136,16 +152,19 @@ verify done verifier=verifier-a artifact=/tmp/.../verifier-a-verify-result.md
 ### Spawn verifier 示例
 
 ```bash
-cat > "$WORKSPACE/artifacts/verifier-a-verify-task.md" <<EOF
+cat > "$ARTIFACT_DIR/verifier-a-verify-task.md" <<EOF
 # Verification Task
 (reviewer-a 的合格 findings，包含 File/Code/Verify)
-Output Artifact: $WORKSPACE/artifacts/verifier-a-verify-result.md
-Done Command: hive send orch "verify done verifier=verifier-a artifact=$WORKSPACE/artifacts/verifier-a-verify-result.md" --artifact $WORKSPACE/artifacts/verifier-a-verify-result.md
+Run Name: $RUN_NAME
+Run Artifact Root: $ARTIFACT_DIR
+Run State Root: $STATE_DIR
+Output Artifact: $ARTIFACT_DIR/verifier-a-verify-result.md
+Done Command: hive send orch "verify done verifier=verifier-a artifact=$ARTIFACT_DIR/verifier-a-verify-result.md" --artifact $ARTIFACT_DIR/verifier-a-verify-result.md
 EOF
 
 hive kill reviewer-a
 hive spawn verifier-a --cli droid --model custom:GPT-5.4-1 --workflow code-review
-hive send verifier-a "evidence verification：执行 verify task $WORKSPACE/artifacts/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
+hive send verifier-a "evidence verification：执行 verify task $ARTIFACT_DIR/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 
 ### 收到 verifier done 消息时
@@ -163,12 +182,12 @@ hive send verifier-a "evidence verification：执行 verify task $WORKSPACE/arti
 读取所有 verifier 的 result artifact，提取 `confirmed` 的 findings。多个 reviewer 报了同一问题的，合并为一条。
 
 ```bash
-cat > "$WORKSPACE/artifacts/confirmed-findings.md" <<EOF
+cat > "$ARTIFACT_DIR/confirmed-findings.md" <<EOF
 # Confirmed Findings
 (去重后的 confirmed findings)
 EOF
 
-printf '%s' '<confirmed 数量>' > "$WORKSPACE/state/confirmed-count"
+printf '%s' '<confirmed 数量>' > "$STATE_DIR/confirmed-count"
 ```
 
 ## 分支

@@ -189,6 +189,9 @@ flowchart TB
 
 阶段 1 发给 reviewer 的 request 至少要写清：
 
+- Run Name
+- Run Artifact Root
+- Run State Root
 - Mode
 - Repo Path
 - Subject
@@ -214,15 +217,17 @@ flowchart TB
 ## 10. Workspace Keys
 
 ```plain
-review-mode
-review-subject
-review-base
-review-branch
-review-commit
-review-range
-review-repo-path
-review-pr
-confirmed-count
-s2-round
-review-summary-artifact
+state/cr-<run_id>/review-mode
+state/cr-<run_id>/review-subject
+state/cr-<run_id>/review-base
+state/cr-<run_id>/review-branch
+state/cr-<run_id>/review-commit
+state/cr-<run_id>/review-range
+state/cr-<run_id>/review-repo-path
+state/cr-<run_id>/review-pr
+state/cr-<run_id>/confirmed-count
+state/cr-<run_id>/s2-round
+state/cr-<run_id>/review-summary-artifact
 ```
+
+`events/` 仍然保持 workspace 级共享日志，不为 code-review 单独创建子目录。

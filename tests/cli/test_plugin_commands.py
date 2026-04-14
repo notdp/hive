@@ -170,6 +170,12 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "hive layout main-vertical" in s1_pipeline
     assert "hive send orch" in s1_pipeline
     assert "idle" in s1_pipeline.lower()
+    assert 'RUN_NAME="cr-${RUN_ID}"' in s1_pipeline
+    assert 'ARTIFACT_DIR="$WORKSPACE/artifacts/${RUN_NAME}"' in s1_pipeline
+    assert 'STATE_DIR="$WORKSPACE/state/${RUN_NAME}"' in s1_pipeline
+    assert 'Run Artifact Root: $ARTIFACT_DIR' in s1_pipeline
+    assert 'Run State Root: $STATE_DIR' in s1_pipeline
+    assert 'rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"' not in s1_pipeline
 
     # --- S1 reviewer ---
     s1_reviewer = (stages_dir / "1-review-reviewer.md").read_text()
@@ -187,10 +193,14 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "hive spawn fixer" in s2_fix
     assert "hive spawn checker" in s2_fix
     assert "hive kill fixer" in s2_fix
+    assert 'printf \'%s\' "$ROUND" > "$STATE_DIR/s2-round"' in s2_fix
+    assert "Run Artifact Root: $ARTIFACT_DIR" in s2_fix
+    assert "Run State Root: $STATE_DIR" in s2_fix
 
     # --- S3 summary ---
     s3_summary = (stages_dir / "3-summary-orch.md").read_text()
     assert "review-summary.md" in s3_summary
+    assert 'printf \'%s\' "$ARTIFACT_DIR/review-summary.md" > "$STATE_DIR/review-summary-artifact"' in s3_summary
 
     enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
     assert enabled_json.exit_code == 0
