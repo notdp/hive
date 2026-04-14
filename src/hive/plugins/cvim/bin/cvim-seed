@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from _cvim_shared import capture_session_seed, write_seed
+from _cvim_shared import write_seed
 
 
 def main() -> int:
@@ -21,22 +21,7 @@ def main() -> int:
         write_seed(cwd, dst, preferred, offset=offset)
         return 0
 
-    # 6-arg: cwd dst session_map_file pid tty droid_args
-    # 7-arg: cwd dst session_map_file pid tty droid_args offset
-    if len(args) in {6, 7}:
-        offset = int(args[6]) if len(args) >= 7 and args[6] else 0
-        capture_session_seed(
-            cwd=args[0],
-            dst=Path(args[1]),
-            session_map_file=args[2],
-            pid=args[3],
-            tty=args[4],
-            droid_args=args[5],
-            offset=offset,
-        )
-        return 0
-
-    raise SystemExit("usage: cvim-seed <cwd> <dst> [preferred] [offset] | <cwd> <dst> <session_map_file> <pid> <tty> <droid_args> [offset]")
+    raise SystemExit("usage: cvim-seed <cwd> <dst> [preferred] [offset]")
     return 0
 
 

@@ -15,7 +15,6 @@ import click
 
 from . import bus
 from . import context as hive_context
-from . import core_hooks
 from . import notify_hook
 from . import notify_ui
 from . import plugin_manager
@@ -566,7 +565,6 @@ def cli(ctx: click.Context):
         return
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
-    core_hooks.ensure_session_locator_hook_installed()
 
 
 def _gc_dead_teams() -> None:

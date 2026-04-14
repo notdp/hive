@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from .. import core_hooks, tmux
+from .. import tmux
 from .base import (
     Message,
     MessagePart,
@@ -47,15 +47,6 @@ class CodexAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        record = core_hooks.resolve_session_record(
-            pane_id=pane_id,
-            tty=tmux.get_pane_tty(pane_id) or "",
-        )
-        if record:
-            session_id = record.get("session_id")
-            if session_id:
-                return str(session_id)
-
         sessions_prefix = str(_codex_home() / "sessions") + "/"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):

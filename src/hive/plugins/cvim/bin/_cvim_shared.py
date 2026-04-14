@@ -243,30 +243,6 @@ def extract_resume_session_id(args: str) -> str | None:
         return None
     return match.group(1)
 
-
-def load_session_map(session_map_file: str | Path) -> dict[str, object]:
-    try:
-        return json.loads(Path(session_map_file).read_text())
-    except Exception:
-        return {}
-
-
-def lookup_map_transcript(session_map: dict[str, object], *, pid: str = "", tty: str = "") -> Path | None:
-    for bucket, key in (("by_pid", pid), ("by_tty", tty)):
-        if not key:
-            continue
-        record = (session_map.get(bucket) or {}).get(key)
-        if not isinstance(record, dict):
-            continue
-        transcript_path = record.get("transcript_path")
-        if not isinstance(transcript_path, str) or not transcript_path:
-            continue
-        path = Path(transcript_path)
-        if path.is_file():
-            return path
-    return None
-
-
 def find_resume_transcript(cwd: str, session_id: str) -> Path | None:
     root = sessions_root()
     seen: set[str] = set()
@@ -283,13 +259,7 @@ def find_resume_transcript(cwd: str, session_id: str) -> Path | None:
     return None
 
 
-def resolve_transcript_path(
-    *, session_map_file: str | Path, cwd: str, pid: str = "", tty: str = "", droid_args: str = ""
-) -> str | None:
-    transcript_path = lookup_map_transcript(load_session_map(session_map_file), pid=pid, tty=tty)
-    if transcript_path is not None:
-        return str(transcript_path)
-
+def resolve_transcript_path(*, cwd: str, droid_args: str = "") -> str | None:
     resume_session_id = extract_resume_session_id(droid_args)
     if resume_session_id:
         transcript_path = find_resume_transcript(cwd, resume_session_id)
@@ -301,10 +271,7 @@ def resolve_transcript_path(
 def resolve_transcript_path_for_pane(
     *,
     pane_id: str,
-    session_map_file: str | Path,
     cwd: str,
-    pid: str = "",
-    tty: str = "",
     droid_args: str = "",
 ) -> str | None:
     if pane_id:
@@ -326,15 +293,7 @@ def resolve_transcript_path_for_pane(
                         transcript_path = None
                     if transcript_path is not None and Path(transcript_path).is_file():
                         return str(transcript_path)
-            if profile.name != "droid":
-                return None
-    return resolve_transcript_path(
-        session_map_file=session_map_file,
-        cwd=cwd,
-        pid=pid,
-        tty=tty,
-        droid_args=droid_args,
-    )
+    return resolve_transcript_path(cwd=cwd, droid_args=droid_args)
 
 
 def resolve_current_droid_process_info(root_pid: int, pane_tty: str) -> tuple[str, str, str] | None:
@@ -371,23 +330,3 @@ def resolve_current_droid_process_info(root_pid: int, pane_tty: str) -> tuple[st
     if best is None:
         return None
     return (str(best[0]), best[2], best[4])
-
-
-def capture_session_seed(
-    *,
-    cwd: str,
-    dst: Path,
-    session_map_file: str | Path,
-    pid: str = "",
-    tty: str = "",
-    droid_args: str = "",
-    offset: int = 0,
-) -> None:
-    transcript_path = resolve_transcript_path(
-        session_map_file=session_map_file,
-        cwd=cwd,
-        pid=pid,
-        tty=tty,
-        droid_args=droid_args,
-    )
-    write_seed(cwd, dst, Path(transcript_path) if transcript_path else None, offset=offset)

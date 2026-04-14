@@ -55,3 +55,15 @@ def test_handle_hook_payload_emits_hook_notification(monkeypatch):
         "hook",
         "completed",
     )]
+
+
+def test_resolve_target_pane_returns_empty_without_tmux_pane(monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+    assert notify_hook.resolve_target_pane() == ""
+
+
+def test_resolve_target_pane_returns_tmux_pane(monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%11")
+
+    assert notify_hook.resolve_target_pane() == "%11"

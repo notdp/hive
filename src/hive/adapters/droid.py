@@ -10,10 +10,11 @@ schema (``content`` is a list of blocks with ``type`` in ``text``/``tool_use``/
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from .. import core_hooks, tmux
+from .. import tmux
 from .base import (
     Message,
     MessagePart,
@@ -29,14 +30,25 @@ class DroidAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        record = core_hooks.resolve_session_record(
-            pane_id=pane_id,
-            tty=tmux.get_pane_tty(pane_id) or "",
-        )
-        if not record:
+        tty = tmux.get_pane_tty(pane_id) or ""
+        for process in tmux.list_tty_processes(tty):
+            if not _is_droid_process(process.command, process.argv):
+                continue
+            session_id = _extract_session_id_from_args(process.argv)
+            if session_id:
+                return session_id
+
+        cwd = tmux.display_value(pane_id, "#{pane_current_path}") or ""
+        if not cwd:
             return None
-        session_id = record.get("session_id")
-        return str(session_id) if session_id else None
+        session_dir = self._sessions_root() / _cwd_slug(cwd)
+        if not session_dir.is_dir():
+            return None
+        for path in sorted(session_dir.glob("*.jsonl"), key=_safe_mtime, reverse=True):
+            meta = self.read_meta(path)
+            if meta and meta.session_id:
+                return meta.session_id
+        return None
 
     def _sessions_root(self) -> Path:
         return Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory"))) / "sessions"
@@ -178,6 +190,42 @@ def _safe_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return -1
+
+
+def _extract_session_id_from_args(argv: str) -> str | None:
+    try:
+        tokens = shlex.split(argv or "")
+    except ValueError:
+        tokens = (argv or "").split()
+    for index, token in enumerate(tokens):
+        if token.startswith("--resume=") or token.startswith("--fork="):
+            _, _, value = token.partition("=")
+            return value or None
+        if token in {"--resume", "--fork"} and index + 1 < len(tokens):
+            return tokens[index + 1] or None
+    return None
+
+
+def _is_droid_process(command: str, argv: str) -> bool:
+    if _normalize(command) == "droid":
+        return True
+    try:
+        tokens = shlex.split(argv or "")
+    except ValueError:
+        tokens = (argv or "").split()
+    for token in tokens:
+        if _normalize(token) == "droid":
+            return True
+    return False
+
+
+def _normalize(value: str) -> str:
+    value = (value or "").strip().lower().rsplit("/", 1)[-1]
+    return value.lstrip("-")
+
+
+def _cwd_slug(cwd: str) -> str:
+    return cwd.replace("/", "-")
 
 
 def _str_or_none(value: Any) -> str | None:

@@ -171,35 +171,6 @@ def test_seed_helper_offset_returns_earlier_assistant_message(tmp_path):
     assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript, offset=3) == ""
 
 
-def test_seed_helper_session_mode_resolves_transcript_before_extracting(tmp_path):
-    transcript = tmp_path / "mapped.jsonl"
-    _write_jsonl(
-        transcript,
-        [
-            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "from pid map"}]}},
-        ],
-    )
-    session_map_file = tmp_path / "session-map.json"
-    session_map_file.write_text(json.dumps({"by_pid": {"111": {"transcript_path": str(transcript)}}}))
-    dst = tmp_path / "seed.txt"
-
-    subprocess.run(
-        [
-            sys.executable,
-            str(SEED_HELPER),
-            "/repo",
-            str(dst),
-            str(session_map_file),
-            "111",
-            "ttys001",
-            "droid --resume 12345678-1234-1234-1234-123456789abc",
-        ],
-        check=True,
-    )
-
-    assert dst.read_text() == "from pid map\n"
-
-
 def test_extract_last_assistant_text_reads_claude_transcript(tmp_path):
     shared = _import_shared()
     transcript = tmp_path / "claude.jsonl"
@@ -298,8 +269,6 @@ def test_resolve_transcript_path_for_non_droid_pane_uses_adapter(monkeypatch, tm
     shared = _import_shared()
     transcript = tmp_path / "claude.jsonl"
     transcript.write_text("")
-    session_map_file = tmp_path / "session-map.json"
-    session_map_file.write_text("{}")
 
     class FakeAdapter:
         def resolve_current_session_id(self, pane_id: str) -> str | None:
@@ -316,18 +285,12 @@ def test_resolve_transcript_path_for_non_droid_pane_uses_adapter(monkeypatch, tm
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
-        session_map_file=session_map_file,
         cwd="/repo",
-        tty="ttys001",
     ) == str(transcript)
 
 
-def test_resolve_transcript_path_for_non_droid_pane_does_not_fallback_to_factory(monkeypatch, tmp_path):
+def test_resolve_transcript_path_for_non_droid_pane_returns_none_without_resume(monkeypatch, tmp_path):
     shared = _import_shared()
-    stale = tmp_path / "stale.jsonl"
-    stale.write_text("")
-    session_map_file = tmp_path / "session-map.json"
-    session_map_file.write_text(json.dumps({"by_tty": {"ttys001": {"transcript_path": str(stale)}}}))
 
     class MissingAdapter:
         def resolve_current_session_id(self, pane_id: str) -> str | None:
@@ -341,7 +304,33 @@ def test_resolve_transcript_path_for_non_droid_pane_does_not_fallback_to_factory
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
-        session_map_file=session_map_file,
         cwd="/repo",
-        tty="ttys001",
     ) is None
+
+
+def test_resolve_transcript_path_for_pane_falls_back_to_resume_transcript(monkeypatch, tmp_path):
+    shared = _import_shared()
+    factory_home = tmp_path / "factory"
+    monkeypatch.setenv("FACTORY_HOME", str(factory_home))
+    resumed = factory_home / "sessions" / "-repo" / "12345678-1234-1234-1234-123456789abc.jsonl"
+    resumed.parent.mkdir(parents=True)
+    resumed.write_text("")
+
+    class PartialAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%42"
+            return "sess-claude"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None) -> Path | None:
+            assert session_id == "sess-claude"
+            assert cwd == "/repo"
+            return tmp_path / "missing.jsonl"
+
+    monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr(shared, "_get_adapter", lambda name: PartialAdapter() if name == "claude" else None)
+
+    assert shared.resolve_transcript_path_for_pane(
+        pane_id="%42",
+        cwd="/repo",
+        droid_args="droid --resume 12345678-1234-1234-1234-123456789abc",
+    ) == str(resumed)

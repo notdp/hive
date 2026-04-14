@@ -1,76 +1,58 @@
 import json
-from pathlib import Path
 
 from hive import core_hooks
 
 
-def test_ensure_session_locator_hook_installed_is_idempotent(configure_hive_home):
+def test_merge_and_remove_hook_groups_round_trip(configure_hive_home):
     hive_home = configure_hive_home()
     factory_home = hive_home.parent / ".factory"
+    claude_home = hive_home.parent / ".claude"
+    codex_home = hive_home.parent / ".codex"
+    hook_defs = {
+        "Notification": [{"hooks": [{"type": "command", "command": "/tmp/notify-hook", "timeout": 5}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "/tmp/notify-hook", "timeout": 5}]}],
+    }
 
-    first = core_hooks.ensure_session_locator_hook_installed()
-    second = core_hooks.ensure_session_locator_hook_installed()
+    core_hooks.merge_hook_groups(hook_defs)
 
-    script_path = Path(first["script"])
-    settings = json.loads((factory_home / "settings.json").read_text())
+    factory_settings = json.loads((factory_home / "settings.json").read_text())
+    claude_settings = json.loads((claude_home / "settings.json").read_text())
+    codex_hooks = json.loads((codex_home / "hooks.json").read_text())
 
-    assert script_path.exists()
-    assert script_path == Path(second["script"])
-    assert first["sessionMap"].endswith("/hive/session-map.json")
-    for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):
-        groups = settings["hooks"][event]
-        assert len(groups) == 1
-        assert groups[0]["hooks"][0]["command"] == str(script_path)
+    assert factory_settings["hooks"]["Notification"] == hook_defs["Notification"]
+    assert factory_settings["hooks"]["Stop"] == hook_defs["Stop"]
+    assert claude_settings["hooks"]["Notification"] == hook_defs["Notification"]
+    assert claude_settings["hooks"]["Stop"] == hook_defs["Stop"]
+    assert codex_hooks["hooks"]["Stop"] == hook_defs["Stop"]
+    assert "Notification" not in codex_hooks["hooks"]
+
+    core_hooks.remove_hook_groups(hook_defs)
+
+    assert "hooks" not in json.loads((factory_home / "settings.json").read_text())
+    assert "hooks" not in json.loads((claude_home / "settings.json").read_text())
+    assert "hooks" not in json.loads((codex_home / "hooks.json").read_text())
 
 
-def test_ensure_session_locator_hook_preserves_unmanaged_hook_entries(configure_hive_home):
+def test_merge_hook_groups_preserves_unmanaged_entries(configure_hive_home):
     hive_home = configure_hive_home()
     factory_home = hive_home.parent / ".factory"
     settings_path = factory_home / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps({
         "hooks": {
-            "SessionStart": [{"hooks": [{"type": "command", "command": "~/.dotfiles/bin/droid-session-map-hook"}]}],
-            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/tmp/custom-hook"}]}],
-            "SessionEnd": [{"hooks": [{"type": "command", "command": str(hive_home / "core" / "bin" / "droid-session-map-hook")}]}],
+            "Notification": [{"hooks": [{"type": "command", "command": "~/.dotfiles/bin/notify-hook"}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "/tmp/custom-hook"}]}],
         }
     }))
+    hook_defs = {
+        "Notification": [{"hooks": [{"type": "command", "command": "/tmp/hive-notify-hook", "timeout": 5}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "/tmp/hive-notify-hook", "timeout": 5}]}],
+    }
 
-    result = core_hooks.ensure_session_locator_hook_installed()
+    core_hooks.merge_hook_groups(hook_defs)
     settings = json.loads(settings_path.read_text())
-    expected_hook = result["script"]
 
-    assert result["hooksRemoved"] == 1
-    assert result["hooksInstalled"] == 3
-    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "~/.dotfiles/bin/droid-session-map-hook"
-    assert settings["hooks"]["SessionStart"][1]["hooks"][0]["command"] == expected_hook
-    assert settings["hooks"]["SessionEnd"] == [{"hooks": [{"type": "command", "command": expected_hook}]}]
-    assert settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/tmp/custom-hook"
-    assert settings["hooks"]["UserPromptSubmit"][1]["hooks"][0]["command"] == expected_hook
-
-
-def test_resolve_session_record_prefers_pane_then_pid_then_tty(configure_hive_home):
-    configure_hive_home()
-    session_map = core_hooks.session_map_path()
-    session_map.parent.mkdir(parents=True, exist_ok=True)
-    session_map.write_text(json.dumps({
-        "by_pane": {"%9": {"session_id": "pane-sess", "transcript_path": "/tmp/pane.jsonl"}},
-        "by_pid": {"1234": {"session_id": "pid-sess", "transcript_path": "/tmp/pid.jsonl"}},
-        "by_tty": {"/dev/ttys009": {"session_id": "tty-sess", "transcript_path": "/tmp/tty.jsonl"}},
-    }))
-
-    assert core_hooks.resolve_session_record(pane_id="%9", pid="1234", tty="/dev/ttys009") == {
-        "session_id": "pane-sess",
-        "transcript_path": "/tmp/pane.jsonl",
-    }
-    assert core_hooks.resolve_session_record(pid="1234", tty="/dev/ttys009") == {
-        "session_id": "pid-sess",
-        "transcript_path": "/tmp/pid.jsonl",
-    }
-    assert core_hooks.resolve_session_record(tty="/dev/ttys009") == {
-        "session_id": "tty-sess",
-        "transcript_path": "/tmp/tty.jsonl",
-    }
-
-
-
+    assert settings["hooks"]["Notification"][0]["hooks"][0]["command"] == "~/.dotfiles/bin/notify-hook"
+    assert settings["hooks"]["Notification"][1]["hooks"][0]["command"] == "/tmp/hive-notify-hook"
+    assert settings["hooks"]["Stop"][0]["hooks"][0]["command"] == "/tmp/custom-hook"
+    assert settings["hooks"]["Stop"][1]["hooks"][0]["command"] == "/tmp/hive-notify-hook"

@@ -39,15 +39,19 @@ class ClaudeAdapter:
     def resolve_current_session_id(self, pane_id: str) -> str | None:
         sessions_dir = _claude_home() / "sessions"
         tty = tmux.get_pane_tty(pane_id) or ""
+        cwd = tmux.display_value(pane_id, "#{pane_current_path}") or None
         for process in tmux.list_tty_processes(tty):
             if not _is_claude_process(process.command, process.argv):
                 continue
             payload = _read_json_file(sessions_dir / f"{process.pid}.json")
             if not payload:
                 continue
-            session_id = payload.get("sessionId")
+            session_id = _str_or_none(payload.get("sessionId"))
             if session_id:
-                return str(session_id)
+                newer_session_id = self._resolve_newer_project_session_id(session_id, cwd=cwd)
+                if newer_session_id:
+                    return newer_session_id
+                return session_id
         return None
 
     def _projects_root(self) -> Path:
@@ -130,6 +134,31 @@ class ClaudeAdapter:
         except OSError:
             return iter(())
         return _claude_message_iter(handle)
+
+    def _resolve_newer_project_session_id(self, session_id: str, *, cwd: str | None = None) -> str | None:
+        current_path = self.find_session_file(session_id, cwd=cwd)
+        if current_path is None:
+            return None
+
+        current_mtime_ns = _safe_mtime_ns(current_path)
+        if current_mtime_ns < 0:
+            return None
+
+        project_dir = current_path.parent
+        try:
+            candidates = sorted(project_dir.glob("*.jsonl"), key=_safe_mtime_ns, reverse=True)
+        except OSError:
+            return None
+
+        for candidate in candidates:
+            if candidate == current_path:
+                continue
+            if _safe_mtime_ns(candidate) <= current_mtime_ns:
+                break
+            meta = self.read_meta(candidate)
+            if meta and meta.session_id:
+                return meta.session_id
+        return None
 
 
 _META_SCAN_LIMIT = 20
@@ -225,6 +254,13 @@ def _cwd_slug(cwd: str) -> str:
 def _safe_mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
+    except OSError:
+        return -1
+
+
+def _safe_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
     except OSError:
         return -1
 

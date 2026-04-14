@@ -26,10 +26,8 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert "disabled" in listed.output
 
     settings = json.loads((factory_home / "settings.json").read_text())
-    expected_hook = str(hive_home / "core" / "bin" / "droid-session-map-hook")
     for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):
         assert settings["hooks"][event][0]["hooks"][0]["command"] == "~/.dotfiles/bin/droid-session-map-hook"
-        assert settings["hooks"][event][1]["hooks"][0]["command"] == expected_hook
 
     listed_json = runner.invoke(cli, ["plugin", "list", "--json"])
     assert listed_json.exit_code == 0
@@ -75,17 +73,18 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert "from hive." not in installed_runner_text
     assert 'src_pane_pid="$(tmux display-message -p -t "$src_pane" \'#{pane_pid}\')"' in installed_runner_text
     assert 'src_pane_tty="$(tmux display-message -p -t "$src_pane" \'#{pane_tty}\')"' in installed_runner_text
-    assert 'src_pane_tty_key="${src_pane_tty#/dev/}"' in installed_runner_text
     assert 'seed_helper="$script_dir/cvim-seed"' in installed_runner_text
     assert 'session_helper="$script_dir/cvim-session"' in installed_runner_text
-    assert '"$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args"' in installed_runner_text
-    assert 'transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
+    assert "session_map_file=" not in installed_runner_text
+    assert 'transcript_path="$("$session_helper" "$src_cwd" "" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
+    assert 'transcript_path="$("$session_helper" "$src_cwd" "$droid_args" "$src_pane" 2>/dev/null || true)"' in installed_runner_text
     assert '"$seed_helper" "$src_cwd" "$msg_file" "$transcript_path"' in installed_runner_text
-    assert 'capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args"' in installed_runner_text
     assert '"$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode"' in installed_runner_text
     assert '"$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$payload_builder"' in installed_runner_text
     assert 'payload_builder="${14}"' in installed_runner_text
     assert "\"$payload_builder\" \"$orig_file\" \"$msg_file\" \"$send_file\" \"$send_mode\"" in installed_runner_text
+    installed_session_text = installed_session_helper.read_text()
+    assert "usage: cvim-session <cwd> <droid_args> [pane_id]" in installed_session_text
     payload_builder_text = installed_payload_builder.read_text()
     assert "cvim_edit_protocol.json" in payload_builder_text
     assert "<edit_target>" in payload_builder_text
@@ -104,7 +103,6 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     settings = json.loads((factory_home / "settings.json").read_text())
     for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):
         assert settings["hooks"][event][0]["hooks"][0]["command"] == "~/.dotfiles/bin/droid-session-map-hook"
-        assert settings["hooks"][event][1]["hooks"][0]["command"] == expected_hook
 
     relisted = runner.invoke(cli, ["plugin", "list", "--json"])
     assert relisted.exit_code == 0
@@ -120,7 +118,6 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert not (claude_home / "commands" / "cvim.md").exists()
     assert not (codex_home / "skills" / "vim").exists()
     assert not (codex_home / "skills" / "cvim").exists()
-    assert (hive_home / "core" / "bin" / "droid-session-map-hook").exists()
 
 
 def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_home):

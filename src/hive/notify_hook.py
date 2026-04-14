@@ -2,31 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from typing import Any
 
-from . import core_hooks
 from . import notify_state
 from . import notify_ui
 
 
-def _parent_tty(pid: int) -> str:
-    try:
-        return subprocess.check_output(["ps", "-o", "tty=", "-p", str(pid)], text=True).strip()
-    except Exception:
-        return ""
-
-
 def resolve_target_pane() -> str:
-    pane_id = os.environ.get("TMUX_PANE", "").strip()
-    if pane_id:
-        return pane_id
-    parent_pid = os.getppid()
-    record = core_hooks.resolve_session_record(pid=str(parent_pid), tty=_parent_tty(parent_pid))
-    if not record:
-        return ""
-    return str(record.get("pane_id", "") or "")
+    return os.environ.get("TMUX_PANE", "").strip()
 
 
 def classify_hook_payload(payload: dict[str, Any]) -> tuple[str, str] | None:

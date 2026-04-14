@@ -33,7 +33,6 @@ src_session="$(tmux display-message -p -t "$src_pane" '#{session_id}')"
 src_window="$(tmux display-message -p -t "$src_pane" '#{window_id}')"
 src_pane_pid="$(tmux display-message -p -t "$src_pane" '#{pane_pid}')"
 src_pane_tty="$(tmux display-message -p -t "$src_pane" '#{pane_tty}')"
-src_pane_tty_key="${src_pane_tty#/dev/}"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
 src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,7 +61,6 @@ transport="${DROID_VIM_TRANSPORT:-auto}"
 popup_width="${DROID_VIM_POPUP_WIDTH:-}"
 popup_height="${DROID_VIM_POPUP_HEIGHT:-}"
 split_direction="${DROID_VIM_SPLIT_DIRECTION:-right}"
-session_map_file="${HIVE_SESSION_MAP_FILE:-${DROID_VIM_SESSION_MAP_FILE:-${XDG_CACHE_HOME:-$HOME/.cache}/hive/session-map.json}}"
 output_mode="${DROID_VIM_OUTPUT_MODE:-text}"
 cursor_mode="${DROID_VIM_CURSOR_MODE:-start}"
 default_paste_delay="0.20"
@@ -111,16 +109,6 @@ case "$output_mode" in
     ;;
 esac
 
-capture_session_seed_to_file() {
-  local cwd="$1"
-  local dst="$2"
-  local droid_pid="${3:-}"
-  local droid_tty="${4:-}"
-  local droid_args="${5:-}"
-  local seed_offset="${6:-0}"
-  "$seed_helper" "$cwd" "$dst" "$session_map_file" "$droid_pid" "$droid_tty" "$droid_args" "$seed_offset"
-}
-
 resolve_current_droid_process_info() {
   python3 - "$src_pane_pid" "$src_pane_tty" <<'PY'
 import subprocess
@@ -162,23 +150,6 @@ while stack:
 if best is not None:
     print(f'{best[0]}\t{best[2]}\t{best[4]}')
 PY
-}
-
-resolve_current_droid_transcript_path() {
-  local info droid_pid="" droid_tty="" droid_args=""
-  local transcript_path=""
-
-  if info="$(resolve_current_droid_process_info 2>/dev/null)" && [[ -n "$info" ]]; then
-    IFS=$'\t' read -r droid_pid droid_tty droid_args <<<"$info"
-  fi
-
-  transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "$droid_pid" "$droid_tty" "$droid_args" "$src_pane" 2>/dev/null || true)"
-  if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-    printf '%s\n' "$transcript_path"
-    return 0
-  fi
-
-  return 1
 }
 
 detect_src_profile() {
@@ -266,7 +237,7 @@ queue_post_run() {
   tmux run-shell -b "$post_cmd"
 }
 
-debug_log "command.start transport=$transport seed_mode=$seed_mode output_mode=$output_mode src_pane=$src_pane reply_pane=$reply_pane profile=$src_profile clear_input=$clear_input_before_paste_default cwd=$src_cwd tmpdir=$tmpdir session_map=$session_map_file"
+debug_log "command.start transport=$transport seed_mode=$seed_mode output_mode=$output_mode src_pane=$src_pane reply_pane=$reply_pane profile=$src_profile clear_input=$clear_input_before_paste_default cwd=$src_cwd tmpdir=$tmpdir"
 
 tmux_supports_popup() {
   local commands
@@ -1015,7 +986,7 @@ if [[ $# -gt 0 ]]; then
   printf '%s\n' "$*" > "$msg_file"
   debug_log "seed.args bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
 elif [[ "$seed_mode" == "session" ]]; then
-  transcript_path="$("$session_helper" "$session_map_file" "$src_cwd" "" "$src_pane_tty_key" "" "$src_pane" 2>/dev/null || true)"
+  transcript_path="$("$session_helper" "$src_cwd" "" "$src_pane" 2>/dev/null || true)"
   if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
     "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
@@ -1027,8 +998,15 @@ elif [[ "$seed_mode" == "session" ]]; then
     if info="$(resolve_current_droid_process_info 2>/dev/null)" && [[ -n "$info" ]]; then
       IFS=$'\t' read -r droid_pid droid_tty droid_args <<<"$info"
     fi
-    capture_session_seed_to_file "$src_cwd" "$msg_file" "$droid_pid" "$droid_tty" "$droid_args" "$vim_offset"
-    debug_log "seed.capture profile=$src_profile pid=${droid_pid:-none} tty=${droid_tty:-none} offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
+    transcript_path="$("$session_helper" "$src_cwd" "$droid_args" "$src_pane" 2>/dev/null || true)"
+    if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
+      printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
+      "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
+      debug_log "seed.capture profile=$src_profile pid=${droid_pid:-none} tty=${droid_tty:-none} transcript_path=$transcript_path offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
+    else
+      : > "$msg_file"
+      debug_log "seed.blank profile=$src_profile reason=missing_droid_transcript pid=${droid_pid:-none} tty=${droid_tty:-none}"
+    fi
   else
     : > "$msg_file"
     debug_log "seed.blank profile=$src_profile reason=missing_session_transcript"
