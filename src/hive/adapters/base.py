@@ -373,7 +373,7 @@ def wait_for_id_in_transcript(
     path: Path,
     message_id: str,
     baseline: int,
-    timeout: float = 45.0,
+    timeout: float = 60.0,
 ) -> bool:
     """Block until *message_id* appears in a new user turn after *baseline* bytes.
 

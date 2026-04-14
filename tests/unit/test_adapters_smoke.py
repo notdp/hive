@@ -209,23 +209,42 @@ def test_codex_adapter_resolves_via_lsof(monkeypatch, configure_hive_home):
         assert adapter.resolve_current_session_id("%141") == "019d4864-462c-7d41-bbb1-b00b17cdd0b2"
 
 
-def test_codex_adapter_scans_by_cwd_when_lsof_empty(monkeypatch, configure_hive_home):
+def test_codex_adapter_resolves_wrapped_codex_process_from_argv(monkeypatch, configure_hive_home):
     configure_hive_home()
     import tempfile
     from pathlib import Path
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        sessions_dir = root / "sessions" / "sub"
+        sessions_dir = root / "sessions"
         sessions_dir.mkdir(parents=True)
-        (sessions_dir / "rollout.jsonl").write_text(
-            json.dumps({"type": "session_meta", "payload": {"id": "sess-jsonl", "cwd": "/work"}}) + "\n"
-        )
+        jsonl_name = "rollout-2026-04-01T17-33-44-019d4864-462c-7d41-bbb1-b00b17cdd0b2.jsonl"
+        (sessions_dir / jsonl_name).write_text("")
 
         monkeypatch.setenv("CODEX_HOME", str(root))
         monkeypatch.setattr("hive.adapters.codex.tmux.get_pane_tty", lambda _pane: "/dev/ttys015")
-        monkeypatch.setattr("hive.adapters.codex.tmux.list_tty_processes", lambda _tty: [])
-        monkeypatch.setattr("hive.adapters.codex.tmux.display_value", lambda _pane, _fmt: "/work")
+        monkeypatch.setattr("hive.adapters.codex.tmux.list_tty_processes", lambda _tty: [
+            tmux.TTYProcessInfo(
+                pid="5555",
+                command="/opt/homebrew/li",
+                argv=(
+                    "/opt/homebrew/lib/node_modules/@openai/codex/"
+                    "node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex"
+                ),
+            ),
+        ])
+        monkeypatch.setattr("hive.adapters.codex.tmux.list_open_files", lambda _pid: [
+            str(sessions_dir / jsonl_name),
+        ])
 
         adapter = adapters.get("codex")
-        assert adapter.resolve_current_session_id("%141") == "sess-jsonl"
+        assert adapter.resolve_current_session_id("%141") == "019d4864-462c-7d41-bbb1-b00b17cdd0b2"
+
+
+def test_codex_adapter_returns_none_when_no_process_opens_session(monkeypatch, configure_hive_home):
+    configure_hive_home()
+    monkeypatch.setattr("hive.adapters.codex.tmux.get_pane_tty", lambda _pane: "/dev/ttys015")
+    monkeypatch.setattr("hive.adapters.codex.tmux.list_tty_processes", lambda _tty: [])
+
+    adapter = adapters.get("codex")
+    assert adapter.resolve_current_session_id("%141") is None

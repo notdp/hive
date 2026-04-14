@@ -38,7 +38,6 @@ _COMMAND_HELP_SECTIONS = {
     "workflow": "Team Setup",
     "send": "Communication",
     "answer": "Communication",
-    "delivery": "Communication",
     "inbox": "Communication",
     "doctor": "Context",
     "inject": "Pane Control",
@@ -410,6 +409,18 @@ def _patch_event(path: Path, **fields: object) -> None:
         pass
 
 
+def _build_queue_probe_text(body: str, *, limit: int = 48) -> str:
+    """Build a short body-derived needle for runtime queue detection."""
+    text = body.strip()
+    if not text:
+        return ""
+    for line in text.splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            return collapsed[:limit]
+    return " ".join(text.split())[:limit]
+
+
 def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     if not artifact:
         return ""
@@ -428,63 +439,6 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     if not Path(resolved_artifact).exists():
         _fail(f"artifact not found: {resolved_artifact}")
     return resolved_artifact
-
-
-def _delivery_follow_up(
-    *,
-    to_agent: str,
-    message_id: str,
-    inject_status: str,
-    turn_observed: str,
-) -> dict[str, object] | None:
-    """Return structured next-step guidance for send/delivery results."""
-    if inject_status == "failed":
-        payload: dict[str, object] = {
-            "reason": "pane injection failed",
-        }
-        if to_agent:
-            payload["command"] = f"hive doctor {to_agent}"
-        return payload
-
-    if turn_observed == "pending":
-        payload = {
-            "reason": "delivery confirmation is still pending",
-            "suggestedAfterSec": 10,
-            "command": f"hive delivery {message_id}",
-        }
-        if to_agent:
-            payload["ifNotConfirmed"] = f"run hive doctor {to_agent} before considering resend"
-        return payload
-
-    if turn_observed == "observer_lost":
-        payload = {
-            "reason": "delivery observer exited without writing a result",
-        }
-        if to_agent:
-            payload["command"] = f"hive doctor {to_agent}"
-        return payload
-
-    if turn_observed == "unavailable":
-        payload = {
-            "reason": "delivery observation is unavailable",
-        }
-        if to_agent:
-            payload["command"] = f"hive doctor {to_agent}"
-        return payload
-
-    if turn_observed == "unconfirmed":
-        payload = {
-            "reason": "delivery was not confirmed",
-            "afterDiagnosis": (
-                "If the message is safe to repeat and duplicate side effects are "
-                "acceptable, consider resending."
-            ),
-        }
-        if to_agent:
-            payload["command"] = f"hive doctor {to_agent}"
-        return payload
-
-    return None
 
 
 def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
@@ -593,7 +547,8 @@ def _send_recorded_message(
 
     # Observation — async by default, blocking with --wait.
     turn_observed: str
-    observer_pid: int | None = None
+    runtime_queue_state = "unknown"
+    probe: dict[str, str] = {"source": "none"}
 
     if inject_status == "failed":
         turn_observed = "unavailable"
@@ -607,22 +562,46 @@ def _send_recorded_message(
         else:
             turn_observed = "unconfirmed"
     else:
-        # Grace window: short in-process wait, then fork observer if unconfirmed.
+        # Grace window: short in-process wait, then hand off to sidecar.
         from .adapters.base import wait_for_id_in_transcript
         if wait_for_id_in_transcript(transcript_path, message_id, baseline, timeout=1.0):
             turn_observed = "confirmed"
         else:
-            # Not confirmed within grace window — fork background observer.
-            from .observer import fork_observer
-            observer_pid = fork_observer(
-                str(ws), str(transcript_path), message_id, baseline,
+            # Not confirmed within grace window — probe queue, then enqueue for sidecar.
+            from .sidecar import detect_runtime_queue_state, enqueue_pending, ensure_sidecar
+            sender_pane = tmux.get_current_pane_id() or ""
+            profile = detect_profile_for_pane(target.pane_id)
+            queue_probe_text = _build_queue_probe_text(normalized_body)
+            probe = detect_runtime_queue_state(
+                pane_id=target.pane_id,
+                message_id=message_id,
+                queue_probe_text=queue_probe_text,
+                transcript_path=str(transcript_path),
+                baseline=baseline,
+                cli_name=profile.name if profile else "",
             )
+            if probe.get("state") == "queued":
+                runtime_queue_state = "queued"
+            enqueue_pending(
+                str(ws), message_id, sender, sender_pane, to_agent,
+                str(transcript_path), baseline,
+                target_pane=target.pane_id,
+                target_cli=profile.name if profile else "",
+                runtime_queue_state=runtime_queue_state,
+                queue_source=probe.get("source", "none"),
+                queue_probe_text=queue_probe_text,
+            )
+            ensure_sidecar(str(ws), team.name, team.tmux_window)
             turn_observed = "pending"
 
-    # Persist delivery metadata back into the send event so delivery/inbox
-    # can reconstruct state without guessing.
-    _patch_event(path, injectStatus=inject_status, turnObserved=turn_observed,
-                 observerPid=observer_pid)
+    # Persist delivery metadata back into the send event.
+    _patch_event(
+        path,
+        injectStatus=inject_status,
+        turnObserved=turn_observed,
+        runtimeQueueState=runtime_queue_state if turn_observed == "pending" else None,
+        queueSource=probe.get("source", "none") if turn_observed == "pending" else None,
+    )
 
     payload: dict[str, object] = {
         "from": sender,
@@ -633,16 +612,8 @@ def _send_recorded_message(
         "injectStatus": inject_status,
         "turnObserved": turn_observed,
     }
-    if observer_pid is not None:
-        payload["observerPid"] = observer_pid
-    follow_up = _delivery_follow_up(
-        to_agent=to_agent,
-        message_id=message_id,
-        inject_status=inject_status,
-        turn_observed=turn_observed,
-    )
-    if follow_up is not None:
-        payload["followUp"] = follow_up
+    if turn_observed == "pending":
+        payload["runtimeQueueState"] = runtime_queue_state
     return payload
 
 
@@ -1067,6 +1038,10 @@ def init_cmd(name: str, workspace: str, notify: bool):
             "isSelf": False,
         })
 
+    # Start team sidecar for pending send tracking.
+    from .sidecar import ensure_sidecar
+    ensure_sidecar(str(ws_path), team_name, window_target)
+
     result = {
         "team": team_name,
         "workspace": str(ws_path),
@@ -1209,6 +1184,12 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
         shutil.rmtree(legacy_tasks_dir)
 
     resolved_workspace = workspace or team_workspace or os.environ.get("HIVE_WORKSPACE", "") or os.environ.get("CR_WORKSPACE", "")
+
+    # Stop sidecar before workspace cleanup.
+    if resolved_workspace:
+        from .sidecar import stop_sidecar
+        stop_sidecar(resolved_workspace)
+
     if resolved_workspace and delete_workspace:
         ws = Path(resolved_workspace).expanduser()
         if ws.exists():
@@ -1480,17 +1461,17 @@ def answer(agent_name: str, text: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("message_id")
 def delivery(message_id: str):
-    """Check delivery status of a sent message by ID."""
+    """Debug: check delivery status of a sent message by ID."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
 
-    from .observer import find_observation, check_stale_observer
+    from .observer import find_observation
+    from .sidecar import check_stale_sidecar
 
-    # Find the original send event
     send_event = None
     for event in bus.read_all_events(ws):
         if event.get("id") == message_id and event.get("intent") == "send":
@@ -1502,14 +1483,10 @@ def delivery(message_id: str):
 
     persisted_inject = send_event.get("injectStatus", "unknown")
     persisted_turn = send_event.get("turnObserved", "unknown")
-    observer_pid = send_event.get("observerPid")
 
-    # Check for existing observation event
     obs = find_observation(str(ws), message_id)
-
-    # If no observation and we have an observer PID, check if it's stale
-    if obs is None and observer_pid is not None:
-        stale_result = check_stale_observer(str(ws), message_id, observer_pid)
+    if obs is None and persisted_turn == "pending":
+        stale_result = check_stale_sidecar(str(ws), message_id)
         if stale_result is not None:
             obs = find_observation(str(ws), message_id)
 
@@ -1524,32 +1501,15 @@ def delivery(message_id: str):
         }
         if observed_at:
             payload["observedAt"] = observed_at
-        follow_up = _delivery_follow_up(
-            to_agent=str(send_event.get("to", "")),
-            message_id=message_id,
-            inject_status=str(persisted_inject),
-            turn_observed=str(result),
-        )
-        if follow_up is not None:
-            payload["followUp"] = follow_up
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
-    # No observation — report persisted turnObserved from send time
     payload = {
         "messageId": message_id,
         "to": send_event.get("to", ""),
         "injectStatus": persisted_inject,
         "turnObserved": persisted_turn,
     }
-    follow_up = _delivery_follow_up(
-        to_agent=str(send_event.get("to", "")),
-        message_id=message_id,
-        inject_status=str(persisted_inject),
-        turn_observed=str(persisted_turn),
-    )
-    if follow_up is not None:
-        payload["followUp"] = follow_up
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -1587,27 +1547,25 @@ def inbox():
             and isinstance(ev.get("metadata"), dict)
             and ev["metadata"].get("messageId") in my_sent_ids
         ):
-            # Stale observer detection: if result is pending-like, check pid
             result = ev["metadata"].get("result", "")
-            if result in ("confirmed", "unconfirmed", "observer_lost"):
+            if result in ("confirmed", "unconfirmed", "tracking_lost"):
                 unread.append(ev)
             continue
 
-    # Detect stale observers for sent messages that have an observerPid
-    # but no observation event yet.
-    from .observer import find_observation, check_stale_observer
+    # Detect stale sidecar for pending sent messages with no observation yet.
+    from .observer import find_observation
+    from .sidecar import check_stale_sidecar
     for _ns, ev in events:
         if ev.get("from") != self_name or ev.get("intent") != "send":
             continue
         if _ns <= cursor:
             continue
         msg_id = ev.get("id", "")
-        observer_pid = ev.get("observerPid")
-        if not msg_id or observer_pid is None:
-            continue  # No observer was forked (--wait, unavailable, etc.)
+        if not msg_id or ev.get("turnObserved") != "pending":
+            continue
         obs = find_observation(str(ws), msg_id)
         if obs is None:
-            stale_result = check_stale_observer(str(ws), msg_id, observer_pid)
+            stale_result = check_stale_sidecar(str(ws), msg_id)
             if stale_result is not None:
                 obs = find_observation(str(ws), msg_id)
                 if obs is not None:

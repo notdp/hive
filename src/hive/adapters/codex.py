@@ -50,7 +50,7 @@ class CodexAdapter:
         sessions_prefix = str(_codex_home() / "sessions") + "/"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
-            if _normalize(process.command) != "codex":
+            if not _is_codex_process(process.command, process.argv):
                 continue
             for fpath in tmux.list_open_files(process.pid):
                 if not fpath.startswith(sessions_prefix) or not fpath.endswith(".jsonl"):
@@ -58,15 +58,6 @@ class CodexAdapter:
                 match = _CODEX_SESSION_UUID_RE.search(fpath)
                 if match:
                     return match.group(1)
-
-        sessions_dir = _codex_home() / "sessions"
-        cwd = tmux.display_value(pane_id, "#{pane_current_path}") or ""
-        if not cwd or not sessions_dir.is_dir():
-            return None
-        for path in sorted(sessions_dir.rglob("*.jsonl"), key=_safe_mtime, reverse=True):
-            meta = self.read_meta(path)
-            if meta and meta.cwd == cwd:
-                return meta.session_id
         return None
 
     def _sessions_root(self) -> Path:
@@ -287,6 +278,12 @@ def _extract_reasoning_text(body: dict[str, Any]) -> str | None:
 def _normalize(value: str) -> str:
     value = (value or "").strip().lower().rsplit("/", 1)[-1]
     return value.lstrip("-")
+
+
+def _is_codex_process(command: str, argv: str) -> bool:
+    if _normalize(command) == "codex":
+        return True
+    return any(_normalize(token) == "codex" for token in (argv or "").split())
 
 
 def _safe_mtime(path: Path) -> float:

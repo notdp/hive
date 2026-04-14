@@ -70,7 +70,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert "summary" not in payload
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "unavailable"
-    assert payload["followUp"]["command"] == "hive doctor gpt"
+    assert "followUp" not in payload
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
     assert sent == [f"<HIVE from=claude to=gpt id={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
@@ -342,8 +342,7 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "unconfirmed"
-    assert payload["followUp"]["command"] == "hive doctor gpt"
-    assert "consider resending" in payload["followUp"]["afterDiagnosis"]
+    assert "followUp" not in payload
 
 
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -381,10 +380,10 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "unavailable"
     assert payload["injectStatus"] == "submitted"
-    assert payload["followUp"]["command"] == "hive doctor gpt"
+    assert "followUp" not in payload
 
 
-def test_send_async_pending_includes_delivery_follow_up(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -411,10 +410,16 @@ def test_send_async_pending_includes_delivery_follow_up(runner, configure_hive_h
         def get(self, name: str):
             return _FakeAgent()
 
+    enqueued = []
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
     monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.observer.fork_observer", lambda *args, **kwargs: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.detect_runtime_queue_state",
+        lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append(a))
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
     result = runner.invoke(cli, ["send", "gpt", "test"])
@@ -422,13 +427,68 @@ def test_send_async_pending_includes_delivery_follow_up(runner, configure_hive_h
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "pending"
-    assert payload["observerPid"] == 4321
-    assert payload["followUp"]["command"] == f"hive delivery {FIXED_ID}"
-    assert payload["followUp"]["suggestedAfterSec"] == 10
-    assert payload["followUp"]["ifNotConfirmed"] == "run hive doctor gpt before considering resend"
+    assert payload["runtimeQueueState"] == "unknown"
+    assert "followUp" not in payload
+    assert len(enqueued) == 1  # sidecar was asked to track this message
 
 
-def test_send_inject_failure_advises_doctor_without_observer(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr(
+        "hive.sidecar.detect_runtime_queue_state",
+        lambda **_kw: {"state": "queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
+    )
+    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append((a, kw)))
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+
+    result = runner.invoke(cli, ["send", "gpt", "test"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["turnObserved"] == "pending"
+    assert payload["runtimeQueueState"] == "queued"
+    assert len(enqueued) == 1
+    assert enqueued[0][1]["runtime_queue_state"] == "queued"
+    assert enqueued[0][1]["queue_source"] == "capture"
+    assert enqueued[0][1]["queue_probe_text"] == "test"
+
+    send_events = [event for event in bus.read_all_events(workspace) if event.get("intent") == "send"]
+    assert len(send_events) == 1
+    assert send_events[0]["runtimeQueueState"] == "queued"
+    assert send_events[0]["queueSource"] == "capture"
+
+
+def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -467,7 +527,7 @@ def test_send_inject_failure_advises_doctor_without_observer(runner, configure_h
     assert payload["injectStatus"] == "failed"
     assert payload["turnObserved"] == "unavailable"
     assert "observerPid" not in payload
-    assert payload["followUp"]["command"] == "hive doctor gpt"
+    assert "followUp" not in payload
 
 
 # --- Send gate tests ---
