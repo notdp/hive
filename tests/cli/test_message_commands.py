@@ -70,6 +70,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["summary"] == "please review this"
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "unavailable"
+    assert payload["followUp"]["command"] == "hive doctor gpt"
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
     assert sent == [f"<HIVE from=claude to=gpt id={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
@@ -299,6 +300,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "confirmed"
+    assert "followUp" not in payload
 
 
 def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -340,6 +342,8 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "unconfirmed"
+    assert payload["followUp"]["command"] == "hive doctor gpt"
+    assert "consider resending" in payload["followUp"]["afterDiagnosis"]
 
 
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -377,6 +381,93 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "unavailable"
     assert payload["injectStatus"] == "submitted"
+    assert payload["followUp"]["command"] == "hive doctor gpt"
+
+
+def test_send_async_pending_includes_delivery_follow_up(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr("hive.observer.fork_observer", lambda *args, **kwargs: 4321)
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+
+    result = runner.invoke(cli, ["send", "gpt", "test"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["turnObserved"] == "pending"
+    assert payload["observerPid"] == 4321
+    assert payload["followUp"]["command"] == f"hive delivery {FIXED_ID}"
+    assert payload["followUp"]["suggestedAfterSec"] == 10
+    assert payload["followUp"]["ifNotConfirmed"] == "run hive doctor gpt before considering resend"
+
+
+def test_send_inject_failure_advises_doctor_without_observer(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _BrokenAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            raise RuntimeError("boom")
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _BrokenAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+
+    result = runner.invoke(cli, ["send", "gpt", "test"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["injectStatus"] == "failed"
+    assert payload["turnObserved"] == "unavailable"
+    assert "observerPid" not in payload
+    assert payload["followUp"]["command"] == "hive doctor gpt"
 
 
 # --- Send gate tests ---

@@ -1,6 +1,7 @@
 """Tests for hive delivery, inbox, and doctor commands."""
 
 import json
+import os
 
 from hive import bus
 from hive.cli import cli
@@ -83,6 +84,7 @@ def test_delivery_shows_persisted_status_no_observer(runner, configure_hive_home
     payload = json.loads(result.output)
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "confirmed"
+    assert "followUp" not in payload
 
 
 def test_delivery_detects_stale_observer(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -106,6 +108,7 @@ def test_delivery_detects_stale_observer(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "observer_lost"
+    assert payload["followUp"]["command"] == "hive doctor gpt"
 
 
 def test_delivery_finds_observation_event(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -126,6 +129,7 @@ def test_delivery_finds_observation_event(runner, configure_hive_home, monkeypat
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "confirmed"
+    assert "followUp" not in payload
 
 
 def test_delivery_latest_observation_wins(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -148,6 +152,54 @@ def test_delivery_latest_observation_wins(runner, configure_hive_home, monkeypat
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["turnObserved"] == "confirmed"  # latest wins, not earliest
+    assert "followUp" not in payload
+
+
+def test_delivery_pending_includes_follow_up(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    path = bus.write_event(
+        workspace, from_agent="claude", to_agent="gpt",
+        intent="send", body="hello", message_id=FIXED_ID,
+    )
+    data = json.loads(path.read_text())
+    data["injectStatus"] = "submitted"
+    data["turnObserved"] = "pending"
+    data["observerPid"] = os.getpid()
+    path.write_text(json.dumps(data) + "\n")
+
+    result = runner.invoke(cli, ["delivery", FIXED_ID])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["turnObserved"] == "pending"
+    assert payload["followUp"]["command"] == f"hive delivery {FIXED_ID}"
+    assert payload["followUp"]["suggestedAfterSec"] == 10
+
+
+def test_delivery_unconfirmed_includes_diagnose_then_resend_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+
+    path = bus.write_event(
+        workspace, from_agent="claude", to_agent="gpt",
+        intent="send", body="hello", message_id=FIXED_ID,
+    )
+    data = json.loads(path.read_text())
+    data["injectStatus"] = "submitted"
+    data["turnObserved"] = "unconfirmed"
+    path.write_text(json.dumps(data) + "\n")
+
+    result = runner.invoke(cli, ["delivery", FIXED_ID])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["turnObserved"] == "unconfirmed"
+    assert payload["followUp"]["command"] == "hive doctor gpt"
+    assert "consider resending" in payload["followUp"]["afterDiagnosis"]
 
 
 # --- inbox ---

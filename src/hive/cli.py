@@ -430,6 +430,63 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     return resolved_artifact
 
 
+def _delivery_follow_up(
+    *,
+    to_agent: str,
+    message_id: str,
+    inject_status: str,
+    turn_observed: str,
+) -> dict[str, object] | None:
+    """Return structured next-step guidance for send/delivery results."""
+    if inject_status == "failed":
+        payload: dict[str, object] = {
+            "reason": "pane injection failed",
+        }
+        if to_agent:
+            payload["command"] = f"hive doctor {to_agent}"
+        return payload
+
+    if turn_observed == "pending":
+        payload = {
+            "reason": "delivery confirmation is still pending",
+            "suggestedAfterSec": 10,
+            "command": f"hive delivery {message_id}",
+        }
+        if to_agent:
+            payload["ifNotConfirmed"] = f"run hive doctor {to_agent} before considering resend"
+        return payload
+
+    if turn_observed == "observer_lost":
+        payload = {
+            "reason": "delivery observer exited without writing a result",
+        }
+        if to_agent:
+            payload["command"] = f"hive doctor {to_agent}"
+        return payload
+
+    if turn_observed == "unavailable":
+        payload = {
+            "reason": "delivery observation is unavailable",
+        }
+        if to_agent:
+            payload["command"] = f"hive doctor {to_agent}"
+        return payload
+
+    if turn_observed == "unconfirmed":
+        payload = {
+            "reason": "delivery was not confirmed",
+            "afterDiagnosis": (
+                "If the message is safe to repeat and duplicate side effects are "
+                "acceptable, consider resending."
+            ),
+        }
+        if to_agent:
+            payload["command"] = f"hive doctor {to_agent}"
+        return payload
+
+    return None
+
+
 def _resolve_ack_baseline(target: Agent) -> tuple[Path, int]:
     """Locate the target agent's transcript and snapshot its current size.
 
@@ -538,22 +595,29 @@ def _send_recorded_message(
     turn_observed: str
     observer_pid: int | None = None
 
-    if transcript_path is None:
+    if inject_status == "failed":
+        turn_observed = "unavailable"
+    elif transcript_path is None:
         turn_observed = "unavailable"
     elif wait:
-        # Blocking mode: poll transcript in-process.
+        # Blocking mode: poll transcript in-process (full timeout).
         from .adapters.base import wait_for_id_in_transcript
         if wait_for_id_in_transcript(transcript_path, message_id, baseline):
             turn_observed = "confirmed"
         else:
             turn_observed = "unconfirmed"
     else:
-        # Default async: fork observer process.
-        from .observer import fork_observer
-        observer_pid = fork_observer(
-            str(ws), str(transcript_path), message_id, baseline,
-        )
-        turn_observed = "pending"
+        # Grace window: short in-process wait, then fork observer if unconfirmed.
+        from .adapters.base import wait_for_id_in_transcript
+        if wait_for_id_in_transcript(transcript_path, message_id, baseline, timeout=1.0):
+            turn_observed = "confirmed"
+        else:
+            # Not confirmed within grace window — fork background observer.
+            from .observer import fork_observer
+            observer_pid = fork_observer(
+                str(ws), str(transcript_path), message_id, baseline,
+            )
+            turn_observed = "pending"
 
     # Persist delivery metadata back into the send event so delivery/inbox
     # can reconstruct state without guessing.
@@ -573,6 +637,14 @@ def _send_recorded_message(
         payload["observerPid"] = observer_pid
     if normalized_body:
         payload["summary"] = normalized_body
+    follow_up = _delivery_follow_up(
+        to_agent=to_agent,
+        message_id=message_id,
+        inject_status=inject_status,
+        turn_observed=turn_observed,
+    )
+    if follow_up is not None:
+        payload["followUp"] = follow_up
     return payload
 
 
@@ -1454,6 +1526,14 @@ def delivery(message_id: str):
         }
         if observed_at:
             payload["observedAt"] = observed_at
+        follow_up = _delivery_follow_up(
+            to_agent=str(send_event.get("to", "")),
+            message_id=message_id,
+            inject_status=str(persisted_inject),
+            turn_observed=str(result),
+        )
+        if follow_up is not None:
+            payload["followUp"] = follow_up
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
@@ -1464,6 +1544,14 @@ def delivery(message_id: str):
         "injectStatus": persisted_inject,
         "turnObserved": persisted_turn,
     }
+    follow_up = _delivery_follow_up(
+        to_agent=str(send_event.get("to", "")),
+        message_id=message_id,
+        inject_status=str(persisted_inject),
+        turn_observed=str(persisted_turn),
+    )
+    if follow_up is not None:
+        payload["followUp"] = follow_up
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
