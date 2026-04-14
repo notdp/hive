@@ -458,7 +458,7 @@ def test_init_excludes_names_already_used_in_current_window(runner, configure_hi
     assert len(peer_names) == len(set(peer_names))
 
 
-def test_init_resets_default_auto_workspace_before_reuse(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_init_preserves_existing_auto_workspace(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -485,8 +485,9 @@ def test_init_resets_default_auto_workspace_before_reuse(runner, configure_hive_
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["workspace"] == str(auto_workspace)
-    assert list((auto_workspace / "events").iterdir()) == []
-    assert list((auto_workspace / "artifacts").iterdir()) == []
+    # Events and artifacts are preserved (P5: workspace not reset on init)
+    assert len(list((auto_workspace / "events").iterdir())) == 1
+    assert len(list((auto_workspace / "artifacts").iterdir())) == 1
 
 
 def test_init_with_explicit_workspace_does_not_reset_existing_managed_dirs(
@@ -631,7 +632,7 @@ def test_init_classifies_terminals(runner, configure_hive_home, monkeypatch, moc
 
 
 def test_legacy_commands_removed(runner):
-    for command in ("comment", "wait", "read", "inbox"):
+    for command in ("comment", "wait", "read"):
         result = runner.invoke(cli, [command, "--help"])
         assert result.exit_code != 0
         assert f"No such command '{command}'" in result.output
@@ -650,7 +651,7 @@ def test_root_help_groups_commands_by_area(runner):
     assert "User Attention:" in result.output
     assert "Examples:" in result.output
     assert "hive init" in result.output
-    assert "team   Show team overview." in result.output
+    assert "team" in result.output and "Show team overview." in result.output
     assert "status  Show projected collaboration statuses." not in result.output
     assert "inject     Debug: inject raw input into an agent pane." in result.output
     assert "plugin  Manage first-party Hive plugins." in result.output

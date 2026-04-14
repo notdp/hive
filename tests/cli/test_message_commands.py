@@ -9,7 +9,7 @@ FIXED_ID = "ab12"
 
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript."""
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr(
         "hive.cli._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
@@ -64,15 +64,12 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload == {
-        "from": "claude",
-        "to": "gpt",
-        "artifact": str(artifact),
-        "path": payload["path"],
-        "summary": "please review this",
-        "ack": "skipped",
-        "gate": "skipped",
-    }
+    assert payload["from"] == "claude"
+    assert payload["to"] == "gpt"
+    assert payload["artifact"] == str(artifact)
+    assert payload["summary"] == "please review this"
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "unavailable"
     assert payload["path"].endswith(".json")
     assert len(sent) == 1
     assert sent == [f"<HIVE from=claude to=gpt id={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
@@ -293,16 +290,15 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["ack"] == "confirmed"
-    assert payload["gate"] == "unknown"  # empty transcript at gate check time
+    assert payload["turnObserved"] == "confirmed"
 
 
 def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -334,17 +330,16 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["ack"] == "unconfirmed"
-    assert payload["gate"] == "unknown"
+    assert payload["turnObserved"] == "unconfirmed"
 
 
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -380,8 +375,8 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["ack"] == "skipped"
-    assert payload["gate"] == "skipped"
+    assert payload["turnObserved"] == "unavailable"
+    assert payload["injectStatus"] == "submitted"
 
 
 # --- Send gate tests ---
@@ -423,7 +418,7 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
             return _FakeAgent()
 
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli.secrets.token_hex", lambda _n=2: FIXED_ID)
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
     monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
     monkeypatch.setattr("hive.adapters.base.wait_for_id_in_transcript", lambda path, message_id, baseline, timeout=45.0: False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
@@ -484,7 +479,8 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["gate"] == "skipped"
+    assert payload["injectStatus"] == "submitted"
+    assert payload["turnObserved"] == "unavailable"
 
 
 # --- Answer command tests ---

@@ -59,7 +59,7 @@ def test_create_rejects_state_without_workspace(runner, configure_hive_home):
     assert "--state requires --workspace" in result.output
 
 
-def test_delete_removes_workspace(runner, configure_hive_home, tmp_path):
+def test_delete_preserves_workspace_by_default(runner, configure_hive_home, tmp_path):
     hive_home = configure_hive_home()
     workspace = tmp_path / "ws"
 
@@ -69,8 +69,20 @@ def test_delete_removes_workspace(runner, configure_hive_home, tmp_path):
 
     result = runner.invoke(cli, ["delete", "team-b"])
     assert result.exit_code == 0
-    assert not workspace.exists()
+    assert workspace.exists()  # workspace preserved by default
     assert not (hive_home / "contexts" / "default.json").exists()
+
+
+def test_delete_removes_workspace_with_flag(runner, configure_hive_home, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+
+    assert runner.invoke(cli, ["create", "team-b2", "--workspace", str(workspace)]).exit_code == 0
+    (workspace / "results").mkdir(parents=True, exist_ok=True)
+
+    result = runner.invoke(cli, ["delete", "team-b2", "--delete-workspace"])
+    assert result.exit_code == 0
+    assert not workspace.exists()
 
 
 def test_delete_clears_terminal_tags(runner, configure_hive_home, monkeypatch, tmp_path):

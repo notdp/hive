@@ -38,6 +38,9 @@ _COMMAND_HELP_SECTIONS = {
     "workflow": "Team Setup",
     "send": "Communication",
     "answer": "Communication",
+    "delivery": "Communication",
+    "inbox": "Communication",
+    "doctor": "Context",
     "inject": "Pane Control",
     "capture": "Pane Control",
     "interrupt": "Pane Control",
@@ -395,9 +398,34 @@ def _resolve_target_pane() -> str:
 
 
 
-def _resolve_artifact_path(artifact: str) -> str:
-    resolved_artifact = str(Path(artifact).expanduser()) if artifact else ""
-    if resolved_artifact and not Path(resolved_artifact).exists():
+def _patch_event(path: Path, **fields: object) -> None:
+    """Merge fields into an existing event JSON file."""
+    try:
+        data = json.loads(path.read_text())
+        for k, v in fields.items():
+            if v is not None:
+                data[k] = v
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
+    if not artifact:
+        return ""
+    if artifact == "-":
+        # Read from stdin, save to workspace artifacts
+        if not workspace:
+            _fail("--artifact - requires a workspace (run inside a team)")
+        content = sys.stdin.read()
+        ws_artifacts = Path(workspace) / "artifacts"
+        ws_artifacts.mkdir(parents=True, exist_ok=True)
+        filename = f"{time.time_ns()}-{secrets.token_hex(2)}.txt"
+        path = ws_artifacts / filename
+        path.write_text(content)
+        return str(path)
+    resolved_artifact = str(Path(artifact).expanduser())
+    if not Path(resolved_artifact).exists():
         _fail(f"artifact not found: {resolved_artifact}")
     return resolved_artifact
 
@@ -457,14 +485,16 @@ def _send_recorded_message(
     to_agent: str,
     body: str,
     artifact: str = "",
+    reply_to: str = "",
+    wait: bool = False,
 ) -> dict[str, object]:
     ws = _resolve_workspace(team, required=True)
     target = _resolve_live_agent(team, to_agent)
-    resolved_artifact = _resolve_artifact_path(artifact)
+    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     normalized_body = body.strip()
 
     # ACK preparation — resolve transcript baseline before injection.
-    message_id = secrets.token_hex(2)
+    message_id = secrets.token_urlsafe(4)  # 4 bytes = 32 bit, 6 chars base64url
     transcript_path: Path | None = None
     baseline: int = 0
     try:
@@ -481,6 +511,7 @@ def _send_recorded_message(
         body=body,
         artifact=resolved_artifact,
         message_id=message_id,
+        reply_to=reply_to,
     )
 
     # Write event BEFORE pane injection so the collaboration log is never
@@ -493,27 +524,53 @@ def _send_recorded_message(
         body=normalized_body,
         artifact=resolved_artifact,
         message_id=message_id,
+        reply_to=reply_to,
     )
 
-    target.send(envelope)
+    # Inject into target pane.
+    inject_status = "submitted"
+    try:
+        target.send(envelope)
+    except Exception:
+        inject_status = "failed"
 
-    # ACK wait — block until transcript confirms the user turn.
-    ack_status = "skipped"
-    if transcript_path is not None:
+    # Observation — async by default, blocking with --wait.
+    turn_observed: str
+    observer_pid: int | None = None
+
+    if transcript_path is None:
+        turn_observed = "unavailable"
+    elif wait:
+        # Blocking mode: poll transcript in-process.
         from .adapters.base import wait_for_id_in_transcript
         if wait_for_id_in_transcript(transcript_path, message_id, baseline):
-            ack_status = "confirmed"
+            turn_observed = "confirmed"
         else:
-            ack_status = "unconfirmed"
+            turn_observed = "unconfirmed"
+    else:
+        # Default async: fork observer process.
+        from .observer import fork_observer
+        observer_pid = fork_observer(
+            str(ws), str(transcript_path), message_id, baseline,
+        )
+        turn_observed = "pending"
+
+    # Persist delivery metadata back into the send event so delivery/inbox
+    # can reconstruct state without guessing.
+    _patch_event(path, injectStatus=inject_status, turnObserved=turn_observed,
+                 observerPid=observer_pid)
 
     payload: dict[str, object] = {
         "from": sender,
         "to": to_agent,
+        "id": message_id,
         "artifact": resolved_artifact,
         "path": str(path),
-        "ack": ack_status,
-        "gate": gate_status,
+        "injectStatus": inject_status,
+        "turnObserved": turn_observed,
     }
+    if observer_pid is not None:
+        payload["observerPid"] = observer_pid
     if normalized_body:
         payload["summary"] = normalized_body
     return payload
@@ -534,6 +591,7 @@ def _format_hive_envelope(
     body: str,
     artifact: str = "",
     message_id: str = "",
+    reply_to: str = "",
 ) -> str:
     attrs: list[tuple[str, str]] = [
         ("from", from_agent),
@@ -541,6 +599,8 @@ def _format_hive_envelope(
     ]
     if message_id:
         attrs.append(("id", message_id))
+    if reply_to:
+        attrs.append(("reply-to", reply_to))
     if artifact:
         attrs.append(("artifact", artifact))
     header = "<HIVE " + " ".join(f"{key}={value}" for key, value in attrs) + ">"
@@ -889,10 +949,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     panes = tmux.list_panes_full(window_target) if window_target else []
 
-    if workspace:
-        bus.init_workspace(ws_path)
-    else:
-        bus.reset_workspace(ws_path)
+    bus.init_workspace(ws_path)
 
     try:
         t = Team.create(team_name, description=f"auto-init from tmux {session_name}:{window_index}", workspace=str(ws_path))
@@ -1056,8 +1113,9 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
 @cli.command()
 @click.argument("name")
 @click.option("--workspace", "-w", default="", help="Workspace path to remove")
-@click.option("--keep-workspace", is_flag=True, help="Keep workspace directory")
-def delete(name: str, workspace: str, keep_workspace: bool):
+@click.option("--keep-workspace", is_flag=True, hidden=True, help="Deprecated no-op (workspace is now kept by default)")
+@click.option("--delete-workspace", is_flag=True, help="Also delete the workspace directory")
+def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bool):
     """Delete a team and clean up."""
     team_workspace = ""
     team_window = ""
@@ -1081,7 +1139,7 @@ def delete(name: str, workspace: str, keep_workspace: bool):
         shutil.rmtree(legacy_tasks_dir)
 
     resolved_workspace = workspace or team_workspace or os.environ.get("HIVE_WORKSPACE", "") or os.environ.get("CR_WORKSPACE", "")
-    if resolved_workspace and not keep_workspace:
+    if resolved_workspace and delete_workspace:
         ws = Path(resolved_workspace).expanduser()
         if ws.exists():
             shutil.rmtree(ws)
@@ -1250,10 +1308,14 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("to_agent")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
+@click.option("--reply-to", default="", help="Message ID this is replying to")
+@click.option("--wait", is_flag=True, help="Block until transcript confirms delivery")
 def send(
     to_agent: str,
     body: str,
     artifact: str,
+    reply_to: str,
+    wait: bool,
 ):
     """Send a Hive message to another agent."""
     team_name, t = _resolve_scoped_team(None, required=True)
@@ -1265,6 +1327,8 @@ def send(
         to_agent=to_agent,
         body=body,
         artifact=artifact,
+        reply_to=reply_to,
+        wait=wait,
     )
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -1344,6 +1408,206 @@ def answer(agent_name: str, text: str):
         payload["answer"] = text.strip()
 
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command()
+@click.argument("message_id")
+def delivery(message_id: str):
+    """Check delivery status of a sent message by ID."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+
+    from .observer import find_observation, check_stale_observer
+
+    # Find the original send event
+    send_event = None
+    for event in bus.read_all_events(ws):
+        if event.get("id") == message_id and event.get("intent") == "send":
+            send_event = event
+            break
+
+    if send_event is None:
+        _fail(f"no send event found with id '{message_id}'")
+
+    persisted_inject = send_event.get("injectStatus", "unknown")
+    persisted_turn = send_event.get("turnObserved", "unknown")
+    observer_pid = send_event.get("observerPid")
+
+    # Check for existing observation event
+    obs = find_observation(str(ws), message_id)
+
+    # If no observation and we have an observer PID, check if it's stale
+    if obs is None and observer_pid is not None:
+        stale_result = check_stale_observer(str(ws), message_id, observer_pid)
+        if stale_result is not None:
+            obs = find_observation(str(ws), message_id)
+
+    if obs is not None:
+        result = obs["metadata"]["result"]
+        observed_at = obs["metadata"].get("observedAt", "")
+        payload: dict[str, object] = {
+            "messageId": message_id,
+            "to": send_event.get("to", ""),
+            "injectStatus": persisted_inject,
+            "turnObserved": result,
+        }
+        if observed_at:
+            payload["observedAt"] = observed_at
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    # No observation — report persisted turnObserved from send time
+    payload = {
+        "messageId": message_id,
+        "to": send_event.get("to", ""),
+        "injectStatus": persisted_inject,
+        "turnObserved": persisted_turn,
+    }
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command()
+def inbox():
+    """Show unread messages and observation results."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    self_name = _resolve_sender(None)
+
+    cursor = bus.read_cursor(ws, self_name)
+    events = bus.read_events_with_ns(ws)
+
+    # Collect message IDs sent by self (for observation matching)
+    my_sent_ids: set[str] = set()
+    for _ns, ev in events:
+        if ev.get("from") == self_name and ev.get("intent") == "send" and ev.get("id"):
+            my_sent_ids.add(ev["id"])
+
+    # Filter unread events relevant to self
+    unread: list[dict[str, object]] = []
+    latest_ns = cursor
+    for ns, ev in events:
+        if ns <= cursor:
+            continue
+        latest_ns = max(latest_ns, ns)
+        # Messages sent TO self
+        if ev.get("to") == self_name:
+            unread.append(ev)
+            continue
+        # Observation events for messages self sent
+        if (
+            ev.get("intent") == "observation"
+            and isinstance(ev.get("metadata"), dict)
+            and ev["metadata"].get("messageId") in my_sent_ids
+        ):
+            # Stale observer detection: if result is pending-like, check pid
+            result = ev["metadata"].get("result", "")
+            if result in ("confirmed", "unconfirmed", "observer_lost"):
+                unread.append(ev)
+            continue
+
+    # Detect stale observers for sent messages that have an observerPid
+    # but no observation event yet.
+    from .observer import find_observation, check_stale_observer
+    for _ns, ev in events:
+        if ev.get("from") != self_name or ev.get("intent") != "send":
+            continue
+        if _ns <= cursor:
+            continue
+        msg_id = ev.get("id", "")
+        observer_pid = ev.get("observerPid")
+        if not msg_id or observer_pid is None:
+            continue  # No observer was forked (--wait, unavailable, etc.)
+        obs = find_observation(str(ws), msg_id)
+        if obs is None:
+            stale_result = check_stale_observer(str(ws), msg_id, observer_pid)
+            if stale_result is not None:
+                obs = find_observation(str(ws), msg_id)
+                if obs is not None:
+                    unread.append(obs)
+
+    # Advance cursor to the actual latest event (including any newly written observations)
+    actual_latest = bus.get_latest_event_ns(ws)
+    final_ns = max(latest_ns, actual_latest)
+    if final_ns > cursor:
+        bus.write_cursor(ws, self_name, final_ns)
+
+    payload = {
+        "agent": self_name,
+        "unread": len(unread),
+        "messages": unread,
+    }
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command()
+@click.argument("agent_name", required=False, default="")
+def doctor(agent_name: str):
+    """Diagnose agent connectivity and session state."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    self_name = _resolve_sender(None)
+
+    target_name = agent_name or self_name
+
+    # Find target agent
+    try:
+        target = t.get(target_name)
+    except KeyError:
+        _fail(f"agent '{target_name}' not registered in team '{t.name}'")
+
+    alive = target.is_alive()
+
+    diag: dict[str, object] = {
+        "agent": target_name,
+        "team": t.name,
+        "pane": target.pane_id,
+        "alive": alive,
+    }
+
+    # Team summary
+    members = list(t.agents.values())
+    diag["teamMembers"] = len(members)
+
+    if alive:
+        # Session detection
+        profile = detect_profile_for_pane(target.pane_id)
+        diag["cli"] = profile.name if profile else "unknown"
+
+        if profile:
+            from . import adapters
+            adapter = adapters.get(profile.name)
+            if adapter:
+                session_id = adapter.resolve_current_session_id(target.pane_id)
+                diag["sessionId"] = session_id or "unresolved"
+
+                if session_id:
+                    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
+                    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
+                    if transcript:
+                        diag["transcript"] = str(transcript)
+                        diag["transcriptExists"] = transcript.exists()
+                        if transcript.exists():
+                            diag["transcriptSize"] = transcript.stat().st_size
+                            from .adapters.base import check_input_gate
+                            gate = check_input_gate(transcript)
+                            diag["gate"] = gate.status
+                            diag["gateReason"] = gate.reason
+                    else:
+                        diag["transcript"] = None
+            else:
+                diag["adapter"] = "not found"
+
+    # Workspace info
+    diag["workspace"] = str(ws)
+    events_dir = Path(ws) / "events"
+    diag["eventCount"] = len(list(events_dir.glob("*.json"))) if events_dir.is_dir() else 0
+    cursor = bus.read_cursor(ws, target_name)
+    diag["cursor"] = cursor
+
+    click.echo(json.dumps(diag, indent=2, ensure_ascii=False))
 
 
 @cli.command()

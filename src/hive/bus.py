@@ -13,6 +13,7 @@ WORKSPACE_DIRS = (
     "events",
     "artifacts",
     "state",
+    "cursors",
 )
 LEGACY_WORKSPACE_DIRS = ("status", "presence")
 
@@ -63,6 +64,7 @@ def write_event(
     artifact: str = "",
     metadata: dict[str, str] | None = None,
     message_id: str = "",
+    reply_to: str = "",
 ) -> Path:
     path = Path(workspace).expanduser() / "events" / f"{time.time_ns()}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +77,8 @@ def write_event(
     }
     if message_id:
         payload["id"] = message_id
+    if reply_to:
+        payload["inReplyTo"] = reply_to
     normalized_body = body.strip()
     if normalized_body:
         payload["body"] = normalized_body
@@ -92,5 +96,50 @@ def read_all_events(workspace: str | Path) -> list[dict[str, object]]:
     for path in sorted(root.glob("*.json")):
         rows.append(json.loads(path.read_text()))
     return rows
+
+
+def read_events_with_ns(workspace: str | Path) -> list[tuple[int, dict[str, object]]]:
+    """Return sorted list of (ns_timestamp, event_data) tuples."""
+    root = Path(workspace).expanduser() / "events"
+    if not root.is_dir():
+        return []
+    rows: list[tuple[int, dict[str, object]]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            ns = int(path.stem)
+        except ValueError:
+            continue
+        rows.append((ns, json.loads(path.read_text())))
+    return rows
+
+
+def get_latest_event_ns(workspace: str | Path) -> int:
+    """Return the ns timestamp of the latest event, or 0 if no events."""
+    root = Path(workspace).expanduser() / "events"
+    if not root.is_dir():
+        return 0
+    files = sorted(root.glob("*.json"))
+    if not files:
+        return 0
+    try:
+        return int(files[-1].stem)
+    except ValueError:
+        return 0
+
+
+def read_cursor(workspace: str | Path, agent_name: str) -> int:
+    """Read the cursor value for an agent. Returns 0 if no cursor."""
+    path = Path(workspace).expanduser() / "cursors" / agent_name
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def write_cursor(workspace: str | Path, agent_name: str, ns_value: int) -> None:
+    """Write the cursor value for an agent."""
+    path = Path(workspace).expanduser() / "cursors" / agent_name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(ns_value) + "\n")
 
 
