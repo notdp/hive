@@ -9,11 +9,19 @@ def test_init_workspace_creates_expected_directories(tmp_path):
     assert workspace == tmp_path / "ws"
     for name in bus.WORKSPACE_DIRS:
         assert (workspace / name).is_dir()
+    assert (workspace / bus.DB_FILENAME).is_file()
 
 
 def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
     workspace = bus.init_workspace(tmp_path / "ws")
-    (workspace / "events" / "old.json").write_text('{"intent":"send"}')
+    bus.write_event(
+        workspace,
+        from_agent="orch",
+        to_agent="claude",
+        intent="send",
+        message_id="old1",
+        body="old",
+    )
     (workspace / "artifacts" / "note.txt").write_text("artifact")
     (workspace / "state" / "mode").write_text("busy")
     # Legacy dirs are cleaned up on reset.
@@ -29,8 +37,12 @@ def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
         root = workspace / name
         assert root.is_dir()
         assert list(root.iterdir()) == []
+    assert (workspace / bus.DB_FILENAME).is_file()
+    assert bus.read_all_events(workspace) == []
     assert not (workspace / "status").exists()
     assert not (workspace / "presence").exists()
+    assert not (workspace / "events").exists()
+    assert not (workspace / "cursors").exists()
     assert (workspace / "keep.txt").read_text() == "keep"
 
 
@@ -58,10 +70,9 @@ def test_parse_key_value_rejects_invalid_entries():
 
 def test_write_event_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
-    monkeypatch.setattr("hive.bus.time.time_ns", lambda: 1001)
     workspace = bus.init_workspace(tmp_path / "ws")
 
-    path = bus.write_event(
+    seq = bus.write_event(
         workspace,
         from_agent="claude",
         to_agent="orch",
@@ -72,7 +83,7 @@ def test_write_event_round_trip(tmp_path, monkeypatch):
         metadata={"verdict": "issues"},
     )
 
-    assert path == workspace / "events" / "1001.json"
+    assert seq == 1
     assert bus.read_all_events(workspace) == [{
         "msgId": "ab12",
         "from": "claude",
@@ -87,9 +98,7 @@ def test_write_event_round_trip(tmp_path, monkeypatch):
 
 def test_write_event_multiple_events(tmp_path, monkeypatch):
     times = iter(["2026-03-17T10:00:00Z", "2026-03-17T10:00:01Z"])
-    seq = iter([1003, 1004])
     monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
-    monkeypatch.setattr("hive.bus.time.time_ns", lambda: next(seq))
     workspace = bus.init_workspace(tmp_path / "ws")
 
     bus.write_event(

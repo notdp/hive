@@ -16,7 +16,7 @@ hive current/init ─→ discover or bind the current tmux window
 hive spawn/fork ──→ add more agent panes when needed
 hive send ───────→ inject inline <HIVE ...> messages via tmux
 hive answer ─────→ answer a pending AskUserQuestion remotely
-workspace ───────→ artifacts/ + events/ for durable coordination
+workspace ───────→ artifacts/ + hive.db for durable coordination
 ```
 
 ## Install
@@ -90,8 +90,9 @@ When created with `--workspace`, hive initializes a workspace for durable workfl
 ```
 workspace/
 ├── state/          # Shared key-value state files
-├── events/         # Append-only Hive message/event log
-└── artifacts/      # Large payloads exchanged by path
+├── run/            # Sidecar socket and runtime files
+├── artifacts/      # Large payloads exchanged by path
+└── hive.db         # Durable Hive message/event store
 ```
 
 ## Environment Variables
@@ -152,7 +153,7 @@ PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_
 
 ## How It Works
 
-Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `events/` and `artifacts/`. Runtime input state (whether each agent can accept messages or is waiting for a user answer) is probed directly from session transcripts and surfaced in `hive team`. No JSON-RPC, no daemon — just tmux + workspace files.
+Hive runs interactive `droid`/`claude`/`codex` sessions in tmux panes. Short coordination messages arrive inline as `<HIVE ...>` blocks via tmux `send_keys`; durable coordination lives in workspace `hive.db` and `artifacts/`. Runtime input state (whether each agent can accept messages or is waiting for a user answer) is probed directly from session transcripts and surfaced in `hive team`. A team-scoped sidecar handles pending-send tracking through a workspace-local socket.
 
 Each spawned agent is a full `droid` TUI session. You can `tmux select-pane` to interact with any agent directly.
 

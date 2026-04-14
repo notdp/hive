@@ -395,20 +395,8 @@ def _resolve_target_pane() -> str:
     _fail("cannot determine target pane (run inside tmux)")
     return ""
 
-
-
-
-
-def _patch_event(path: Path, **fields: object) -> None:
-    """Merge fields into an existing event JSON file."""
-    try:
-        data = json.loads(path.read_text())
-        for k, v in fields.items():
-            if v is not None:
-                data[k] = v
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    except (OSError, json.JSONDecodeError):
-        pass
+def _patch_event(workspace: str | Path, event_seq: int, **fields: object) -> None:
+    bus.patch_event(workspace, event_seq, **fields)
 
 
 def _build_queue_probe_text(body: str, *, limit: int = 48) -> str:
@@ -604,7 +592,7 @@ def _send_recorded_message(
 
     # Write event BEFORE pane injection so the collaboration log is never
     # lost, even if tmux send-keys fails.
-    path = bus.write_event(
+    event_seq = bus.write_event(
         ws,
         from_agent=sender,
         to_agent=to_agent,
@@ -658,7 +646,8 @@ def _send_recorded_message(
         else:
             if grace_state == "queued":
                 runtime_queue_state = "queued"
-            enqueue_pending(
+            ensure_sidecar(str(ws), team.name, team.tmux_window)
+            tracked = enqueue_pending(
                 str(ws), message_id, sender, sender_pane, to_agent,
                 str(transcript_path), baseline,
                 target_pane=target.pane_id,
@@ -667,12 +656,12 @@ def _send_recorded_message(
                 queue_source=probe.get("source", "none"),
                 queue_probe_text=queue_probe_text,
             )
-            ensure_sidecar(str(ws), team.name, team.tmux_window)
-            turn_observed = "pending"
+            turn_observed = "pending" if tracked else "unavailable"
 
     # Persist delivery metadata back into the send event.
     _patch_event(
-        path,
+        ws,
+        event_seq,
         injectStatus=inject_status,
         turnObserved=turn_observed,
         runtimeQueueState=runtime_queue_state if turn_observed == "pending" else None,
@@ -684,7 +673,6 @@ def _send_recorded_message(
         "to": to_agent,
         "msgId": message_id,
         "artifact": resolved_artifact,
-        "path": str(path),
         "state": _present_send_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
@@ -1498,7 +1486,7 @@ def answer(agent_name: str, text: str):
     pending = extract_pending_question(transcript_path)
 
     # Write event before injection.
-    path = bus.write_event(
+    bus.write_event(
         ws,
         from_agent=sender,
         to_agent=agent_name,
@@ -1527,7 +1515,6 @@ def answer(agent_name: str, text: str):
     payload: dict[str, object] = {
         "from": sender,
         "to": agent_name,
-        "path": str(path),
         "ack": ack_status,
     }
     if pending:
@@ -1549,11 +1536,7 @@ def delivery(message_id: str):
     from .observer import find_observation
     from .sidecar import check_stale_sidecar
 
-    send_event = None
-    for event in bus.read_all_events(ws):
-        if event.get("msgId") == message_id and event.get("intent") == "send":
-            send_event = event
-            break
+    send_event = bus.find_send_event(ws, message_id)
 
     if send_event is None:
         _fail(f"no send event found with msgId '{message_id}'")
@@ -1744,8 +1727,7 @@ def doctor(agent_name: str):
 
     # Workspace info
     diag["workspace"] = str(ws)
-    events_dir = Path(ws) / "events"
-    diag["eventCount"] = len(list(events_dir.glob("*.json"))) if events_dir.is_dir() else 0
+    diag["eventCount"] = bus.count_events(ws)
     cursor = bus.read_cursor(ws, target_name)
     diag["cursor"] = cursor
 

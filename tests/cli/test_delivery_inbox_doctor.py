@@ -58,7 +58,7 @@ def test_delivery_reports_primary_state_and_raw_details(runner, configure_hive_h
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr("hive.sidecar.check_stale_sidecar", lambda *_args, **_kw: None)
 
-    path = bus.write_event(
+    seq = bus.write_event(
         workspace,
         from_agent="claude",
         to_agent="gpt",
@@ -66,12 +66,14 @@ def test_delivery_reports_primary_state_and_raw_details(runner, configure_hive_h
         body="queued msg",
         message_id="q1",
     )
-    data = json.loads(path.read_text())
-    data["injectStatus"] = "submitted"
-    data["turnObserved"] = "pending"
-    data["runtimeQueueState"] = "queued"
-    data["queueSource"] = "capture"
-    path.write_text(json.dumps(data) + "\n")
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="submitted",
+        turnObserved="pending",
+        runtimeQueueState="queued",
+        queueSource="capture",
+    )
 
     result = runner.invoke(cli, ["delivery", "q1"])
     assert result.exit_code == 0
@@ -90,7 +92,7 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
 
-    path = bus.write_event(
+    seq = bus.write_event(
         workspace,
         from_agent="claude",
         to_agent="gpt",
@@ -98,17 +100,20 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
         body="done msg",
         message_id="c1",
     )
-    data = json.loads(path.read_text())
-    data["injectStatus"] = "submitted"
-    data["turnObserved"] = "pending"
-    data["runtimeQueueState"] = "queued"
-    path.write_text(json.dumps(data) + "\n")
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="submitted",
+        turnObserved="pending",
+        runtimeQueueState="queued",
+    )
 
     bus.write_event(
         workspace,
         from_agent="_system",
         to_agent="",
         intent="observation",
+        message_id="c1",
         metadata={"msgId": "c1", "result": "confirmed", "observedAt": "2026-04-14T00:00:00Z"},
     )
 
@@ -170,14 +175,16 @@ def test_inbox_does_not_misreport_tracking_lost(runner, configure_hive_home, mon
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
 
-    path = bus.write_event(
+    seq = bus.write_event(
         workspace, from_agent="claude", to_agent="gpt",
         intent="send", body="waited msg", message_id="w1",
     )
-    data = json.loads(path.read_text())
-    data["injectStatus"] = "submitted"
-    data["turnObserved"] = "confirmed"
-    path.write_text(json.dumps(data) + "\n")
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="submitted",
+        turnObserved="confirmed",
+    )
 
     result = runner.invoke(cli, ["inbox"])
     assert result.exit_code == 0
@@ -194,14 +201,16 @@ def test_inbox_tracking_lost_not_repeated(runner, configure_hive_home, monkeypat
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
 
-    path = bus.write_event(
+    seq = bus.write_event(
         workspace, from_agent="claude", to_agent="gpt",
         intent="send", body="pending msg", message_id="p1",
     )
-    data = json.loads(path.read_text())
-    data["injectStatus"] = "submitted"
-    data["turnObserved"] = "pending"
-    path.write_text(json.dumps(data) + "\n")
+    bus.patch_event(
+        workspace,
+        seq,
+        injectStatus="submitted",
+        turnObserved="pending",
+    )
 
     result1 = runner.invoke(cli, ["inbox"])
     assert result1.exit_code == 0

@@ -230,4 +230,4 @@ state/cr-<run_id>/s2-round
 state/cr-<run_id>/review-summary-artifact
 ```
 
-`events/` 仍然保持 workspace 级共享日志，不为 code-review 单独创建子目录。
+workspace 级共享持久状态仍然保留在 Hive 的 durable store 中，不为 code-review 单独创建子目录。

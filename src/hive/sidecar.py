@@ -1,12 +1,8 @@
 """Team-scoped sidecar for pending send lifecycle tracking.
 
-The sidecar is a background process that:
-1. Polls transcript for pending sends
-2. Writes observation events to events/
-3. Injects HIVE-SYSTEM exception blocks to sender panes on failure
-
-Lifecycle: starts with team (init/create), stops with team (delete),
-self-exits when team window/workspace is gone.
+The sidecar owns runtime pending-send state in memory and exposes a tiny
+workspace-local Unix socket for enqueue/status/shutdown. Durable facts still
+land in the workspace database as observation events.
 """
 
 from __future__ import annotations
@@ -14,38 +10,54 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import time
 from pathlib import Path
+from typing import Any
 
+from . import bus
 from .agent_cli import detect_profile_for_pane
 
-IDLE_SLEEP = 5.0  # seconds between scans when no pending work
-ACTIVE_SLEEP = 0.5  # seconds between scans when pending work exists
-OBSERVATION_TIMEOUT = 60.0  # max seconds to track a single message
-POST_QUEUE_TIMEOUT = 10.0  # extra wait after queue disappears
+IDLE_SLEEP = 5.0
+ACTIVE_SLEEP = 0.5
+OBSERVATION_TIMEOUT = 60.0
+POST_QUEUE_TIMEOUT = 10.0
+SOCKET_READY_TIMEOUT = 2.0
+SOCKET_RETRY_INTERVAL = 0.1
 
 
 def _now_iso() -> str:
     from datetime import UTC, datetime
+
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _run_dir(workspace: str) -> Path:
+    return Path(workspace) / "run"
+
+
+def _socket_path(workspace: str) -> Path:
+    return _run_dir(workspace) / "sidecar.sock"
+
+
+def _lock_path(workspace: str) -> Path:
+    return _run_dir(workspace) / "sidecar.lock"
 
 
 def _write_observation(workspace: str, message_id: str, result: str) -> None:
     ts = _now_iso()
-    path = Path(workspace) / "events" / f"{time.time_ns()}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "from": "_system",
-        "to": "",
-        "intent": "observation",
-        "metadata": {
+    bus.write_event(
+        workspace,
+        from_agent="_system",
+        to_agent="",
+        intent="observation",
+        message_id=message_id,
+        metadata={
             "msgId": message_id,
             "result": result,
             "observedAt": ts,
         },
-        "createdAt": ts,
-    }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    )
 
 
 def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: str) -> None:
@@ -53,7 +65,10 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
     from . import tmux
 
     if result == "unconfirmed":
-        body = f"Message {message_id} to {target_agent} was not confirmed within {int(OBSERVATION_TIMEOUT)}s. Do not assume delivery."
+        body = (
+            f"Message {message_id} to {target_agent} was not confirmed within "
+            f"{int(OBSERVATION_TIMEOUT)}s. Do not assume delivery."
+        )
     else:
         body = f"Message {message_id} to {target_agent}: delivery tracking lost."
 
@@ -64,20 +79,25 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
     try:
         tmux.send_keys(pane_id, block, enter=True)
     except Exception:
-        pass  # best-effort
+        pass
 
 
-def enqueue_pending(workspace: str, message_id: str, sender_agent: str,
-                    sender_pane: str, target_agent: str,
-                    transcript_path: str, baseline: int, *,
-                    target_pane: str = "",
-                    target_cli: str = "",
-                    runtime_queue_state: str = "unknown",
-                    queue_source: str = "none",
-                    queue_probe_text: str = "") -> None:
-    """Write a pending record for the sidecar to track."""
-    pending_dir = Path(workspace) / "state" / "pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
+def enqueue_pending(
+    workspace: str,
+    message_id: str,
+    sender_agent: str,
+    sender_pane: str,
+    target_agent: str,
+    transcript_path: str,
+    baseline: int,
+    *,
+    target_pane: str = "",
+    target_cli: str = "",
+    runtime_queue_state: str = "unknown",
+    queue_source: str = "none",
+    queue_probe_text: str = "",
+) -> bool:
+    """Queue a pending send for sidecar tracking."""
     record = {
         "msgId": message_id,
         "senderAgent": sender_agent,
@@ -98,9 +118,17 @@ def enqueue_pending(workspace: str, message_id: str, sender_agent: str,
         record["firstQueuedAt"] = now
         record["lastQueuedAt"] = now
     record["lastQueueProbeAt"] = time.time()
-    (pending_dir / f"{message_id}.json").write_text(
-        json.dumps(record, indent=2, ensure_ascii=False) + "\n"
-    )
+
+    for _ in range(int(SOCKET_READY_TIMEOUT / SOCKET_RETRY_INTERVAL)):
+        response = _request_sidecar(
+            workspace,
+            {"action": "enqueue", "record": record},
+            timeout=SOCKET_RETRY_INTERVAL,
+        )
+        if response and response.get("ok") is True:
+            return True
+        time.sleep(SOCKET_RETRY_INTERVAL)
+    return False
 
 
 def detect_runtime_queue_state(
@@ -205,7 +233,7 @@ def _detect_capture_queue_state(
     return "unknown"
 
 
-def _effective_deadline(record: dict) -> float:
+def _effective_deadline(record: dict[str, Any]) -> float:
     last_queued_at = record.get("lastQueuedAt")
     if isinstance(last_queued_at, (int, float)) and last_queued_at > 0:
         return last_queued_at + POST_QUEUE_TIMEOUT
@@ -213,7 +241,7 @@ def _effective_deadline(record: dict) -> float:
     return float(deadline) if isinstance(deadline, (int, float)) else 0.0
 
 
-def _apply_queue_probe(record: dict, probe: dict[str, str]) -> None:
+def _apply_queue_probe(record: dict[str, Any], probe: dict[str, str]) -> None:
     now = time.time()
     record["lastQueueProbeAt"] = now
 
@@ -238,112 +266,89 @@ def _apply_queue_probe(record: dict, probe: dict[str, str]) -> None:
         record["runtimeQueueState"] = "unknown"
 
 
-def _read_sidecar_state(workspace: str) -> dict | None:
-    path = Path(workspace) / "state" / "sidecar.json"
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
+def _socket_alive(workspace: str) -> bool:
+    response = _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
+    return bool(response and response.get("ok") is True)
 
 
-def _write_sidecar_state(workspace: str, pid: int, team: str, tmux_window: str) -> None:
-    path = Path(workspace) / "state" / "sidecar.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        "pid": pid,
-        "team": team,
-        "workspace": workspace,
-        "tmuxWindow": tmux_window,
-        "startedAt": _now_iso(),
-        "lastHeartbeat": _now_iso(),
-    }
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
-
-
-def _update_heartbeat(workspace: str) -> None:
-    path = Path(workspace) / "state" / "sidecar.json"
-    try:
-        state = json.loads(path.read_text())
-        state["lastHeartbeat"] = _now_iso()
-        path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
-    except (OSError, json.JSONDecodeError):
-        pass
-
-
-def _clear_sidecar_state(workspace: str) -> None:
-    path = Path(workspace) / "state" / "sidecar.json"
+def _cleanup_socket(workspace: str) -> None:
+    path = _socket_path(workspace)
     try:
         path.unlink()
     except OSError:
         pass
 
 
-def _is_pid_alive(pid: int) -> bool:
+def _request_sidecar(workspace: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
+    path = _socket_path(workspace)
+    if not path.exists():
+        return None
     try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(path))
+            client.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode())
+            client.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while True:
+                data = client.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+    except OSError:
+        return None
+    if not chunks:
+        return None
+    try:
+        response = json.loads(b"".join(chunks).decode())
+    except json.JSONDecodeError:
+        return None
+    return response if isinstance(response, dict) else None
 
 
 def _is_tmux_window_alive(tmux_window: str) -> bool:
     import subprocess
+
     try:
         session = tmux_window.split(":")[0] if ":" in tmux_window else tmux_window
         window_idx = tmux_window.split(":")[-1] if ":" in tmux_window else ""
         result = subprocess.run(
             ["tmux", "list-windows", "-t", session, "-F", "#{window_index}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return window_idx in result.stdout.strip().split("\n")
     except Exception:
         return False
 
 
-def _is_heartbeat_fresh(state: dict, max_age: float = 60.0) -> bool:
-    """Check if sidecar heartbeat is recent enough."""
-    from .adapters.base import parse_iso_timestamp
-    hb = parse_iso_timestamp(state.get("lastHeartbeat"))
-    if hb is None:
-        return False
-    from datetime import UTC, datetime
-    age = (datetime.now(UTC) - hb).total_seconds()
-    return age < max_age
-
-
 def ensure_sidecar(workspace: str, team: str, tmux_window: str) -> int | None:
-    """Ensure the team sidecar is running. Returns PID or None.
-
-    Uses a lockfile to prevent concurrent starts.
-    """
-    lock_path = Path(workspace) / "state" / "sidecar.lock"
+    """Ensure the team sidecar socket is alive."""
+    lock_path = _lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     import fcntl
-    try:
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError):
-        # Another process is starting a sidecar — just return
-        state = _read_sidecar_state(workspace)
-        return state.get("pid") if state else None
 
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
-        state = _read_sidecar_state(workspace)
-        if state is not None:
-            pid = state.get("pid", 0)
-            if _is_pid_alive(pid) and _is_heartbeat_fresh(state):
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if _socket_alive(workspace):
+            return None
+        _cleanup_socket(workspace)
+        pid = _start_sidecar(workspace, team, tmux_window)
+        deadline = time.monotonic() + SOCKET_READY_TIMEOUT
+        while time.monotonic() < deadline:
+            if _socket_alive(workspace):
                 return pid
-
-        # Sidecar not running or stale — start it
-        return _start_sidecar(workspace, team, tmux_window)
+            time.sleep(SOCKET_RETRY_INTERVAL)
+        return pid
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
 
 def _start_sidecar(workspace: str, team: str, tmux_window: str) -> int:
-    """Fork a detached sidecar process. Returns child PID."""
     pid = os.fork()
     if pid == 0:
         try:
@@ -354,72 +359,160 @@ def _start_sidecar(workspace: str, team: str, tmux_window: str) -> int:
             os.dup2(devnull, 2)
             os.close(devnull)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
-
             _sidecar_loop(workspace, team, tmux_window)
         except Exception:
             pass
         finally:
-            _clear_sidecar_state(workspace)
+            _cleanup_socket(workspace)
             os._exit(0)
-
-    _write_sidecar_state(workspace, pid, team, tmux_window)
     return pid
 
 
-def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
-    """Main sidecar loop. Runs until team/workspace is gone."""
-    _write_sidecar_state(workspace, os.getpid(), team, tmux_window)
-    last_window_check = 0.0
+def _open_server_socket(workspace: str) -> socket.socket:
+    _run_dir(workspace).mkdir(parents=True, exist_ok=True)
+    path = _socket_path(workspace)
+    _cleanup_socket(workspace)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen()
+    return server
 
+
+def _live_state(record: dict[str, Any]) -> str:
+    return "queued" if record.get("runtimeQueueState") == "queued" else "pending"
+
+
+def _handle_request(
+    *,
+    workspace: str,
+    pending: dict[str, dict[str, Any]],
+    request: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    action = request.get("action")
+    if action == "ping":
+        return {"ok": True}, True
+    if action == "enqueue":
+        record = request.get("record")
+        if not isinstance(record, dict) or not record.get("msgId"):
+            return {"ok": False, "error": "invalid record"}, True
+        pending[str(record["msgId"])] = record
+        return {"ok": True, "state": _live_state(record)}, True
+    if action == "status":
+        message_id = request.get("msgId", "")
+        if message_id in pending:
+            record = pending[message_id]
+            return {
+                "ok": True,
+                "tracked": True,
+                "state": _live_state(record),
+                "runtimeQueueState": record.get("runtimeQueueState", "unknown"),
+                "queueSource": record.get("queueSource", "none"),
+            }, True
+        obs = bus.find_latest_observation(workspace, str(message_id))
+        if obs is not None:
+            metadata = obs.get("metadata", {})
+            result = metadata.get("result", "") if isinstance(metadata, dict) else ""
+            return {"ok": True, "tracked": False, "result": result}, True
+        return {"ok": True, "tracked": False}, True
+    if action == "shutdown":
+        return {"ok": True}, False
+    return {"ok": False, "error": "unknown action"}, True
+
+
+def _serve_requests(
+    *,
+    server: socket.socket,
+    workspace: str,
+    pending: dict[str, dict[str, Any]],
+    timeout: float,
+) -> bool:
+    end = time.monotonic() + timeout
     while True:
-        # Check if workspace still exists
-        if not Path(workspace).is_dir():
-            return
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return True
+        server.settimeout(remaining)
+        try:
+            conn, _ = server.accept()
+        except socket.timeout:
+            return True
+        except OSError:
+            return True
 
-        # Check if tmux window still exists (every ~30s)
-        now = time.monotonic()
-        if now - last_window_check >= 30.0:
-            last_window_check = now
-            if not _is_tmux_window_alive(tmux_window):
+        keep_running = True
+        with conn:
+            conn.settimeout(timeout)
+            raw = b""
+            try:
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+            except OSError:
+                raw = b""
+
+            try:
+                request = json.loads(raw.decode()) if raw else {}
+            except json.JSONDecodeError:
+                request = {}
+            response, keep_running = _handle_request(
+                workspace=workspace,
+                pending=pending,
+                request=request if isinstance(request, dict) else {},
+            )
+            try:
+                conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode())
+            except OSError:
+                pass
+        if not keep_running:
+            return False
+
+
+def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
+    pending: dict[str, dict[str, Any]] = {}
+    last_window_check = 0.0
+    server = _open_server_socket(workspace)
+
+    try:
+        while True:
+            if not Path(workspace).is_dir():
                 return
 
-        # Process pending sends
-        pending_dir = Path(workspace) / "state" / "pending"
-        has_work = False
+            now = time.monotonic()
+            if now - last_window_check >= 30.0:
+                last_window_check = now
+                if not _is_tmux_window_alive(tmux_window):
+                    return
 
-        if pending_dir.is_dir():
-            for record_path in list(pending_dir.glob("*.json")):
-                try:
-                    record = json.loads(record_path.read_text())
-                except (OSError, json.JSONDecodeError):
-                    record_path.unlink(missing_ok=True)
-                    continue
+            if not _serve_requests(
+                server=server,
+                workspace=workspace,
+                pending=pending,
+                timeout=ACTIVE_SLEEP if pending else IDLE_SLEEP,
+            ):
+                return
 
-                has_work = True
+            for message_id, record in list(pending.items()):
                 result = _check_pending(record)
-
-                if result is not None:
-                    # Write observation event
-                    msg_id = record["msgId"]
-                    _write_observation(workspace, msg_id, result)
-
-                    # Notify sender on exception
-                    if result in ("unconfirmed", "tracking_lost"):
-                        sender_pane = record.get("senderPane", "")
-                        target_agent = record.get("targetAgent", "")
-                        if sender_pane:
-                            _inject_exception(sender_pane, msg_id, target_agent, result)
-
-                    # Remove pending record
-                    record_path.unlink(missing_ok=True)
-                else:
-                    record_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
-
-        _update_heartbeat(workspace)
-        time.sleep(ACTIVE_SLEEP if has_work else IDLE_SLEEP)
+                if result is None:
+                    continue
+                _write_observation(workspace, message_id, result)
+                if result in ("unconfirmed", "tracking_lost"):
+                    sender_pane = record.get("senderPane", "")
+                    target_agent = record.get("targetAgent", "")
+                    if sender_pane:
+                        _inject_exception(sender_pane, message_id, target_agent, result)
+                pending.pop(message_id, None)
+    finally:
+        try:
+            server.close()
+        except OSError:
+            pass
+        _cleanup_socket(workspace)
 
 
-def _check_pending(record: dict) -> str | None:
+def _check_pending(record: dict[str, Any]) -> str | None:
     """Check a single pending record. Returns result or None if still pending."""
     from .adapters.base import transcript_has_id_in_new_user_turn
 
@@ -466,44 +559,29 @@ def _check_pending(record: dict) -> str | None:
 
 
 def stop_sidecar(workspace: str) -> None:
-    """Best-effort stop the sidecar for a workspace."""
-    state = _read_sidecar_state(workspace)
-    if state is None:
-        return
-    pid = state.get("pid", 0)
-    if pid and _is_pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    _clear_sidecar_state(workspace)
+    _request_sidecar(workspace, {"action": "shutdown"}, timeout=SOCKET_READY_TIMEOUT)
+    deadline = time.monotonic() + SOCKET_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        if not _socket_path(workspace).exists():
+            return
+        time.sleep(SOCKET_RETRY_INTERVAL)
+    _cleanup_socket(workspace)
 
 
 def check_stale_sidecar(workspace: str, message_id: str) -> str | None:
-    """Check if sidecar is alive and tracking this message.
-
-    Returns observation result if available, "tracking_lost" if sidecar
-    is dead with no result, or None if still being tracked.
-    """
+    """Check whether a message is still actively tracked by the sidecar."""
     from .observer import find_observation
 
     obs = find_observation(workspace, message_id)
     if obs is not None:
-        return obs["metadata"]["result"]
+        metadata = obs.get("metadata", {})
+        if isinstance(metadata, dict):
+            return str(metadata.get("result", ""))
+        return None
 
-    # Check if pending record still exists
-    pending_path = Path(workspace) / "state" / "pending" / f"{message_id}.json"
-    if not pending_path.exists():
-        # No pending record and no observation — lost
-        _write_observation(workspace, message_id, "tracking_lost")
-        return "tracking_lost"
+    response = _request_sidecar(workspace, {"action": "status", "msgId": message_id}, timeout=SOCKET_RETRY_INTERVAL)
+    if response and response.get("tracked") is True:
+        return None
 
-    # Pending record exists — check if sidecar is alive and healthy
-    state = _read_sidecar_state(workspace)
-    if state is None or not _is_pid_alive(state.get("pid", 0)) or not _is_heartbeat_fresh(state):
-        # Sidecar dead or stale — write tracking_lost
-        _write_observation(workspace, message_id, "tracking_lost")
-        pending_path.unlink(missing_ok=True)
-        return "tracking_lost"
-
-    return None  # Still being tracked
+    _write_observation(workspace, message_id, "tracking_lost")
+    return "tracking_lost"

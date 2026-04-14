@@ -72,7 +72,6 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "followUp" not in payload
-    assert payload["path"].endswith(".json")
     assert len(sent) == 1
     assert payload["msgId"] == FIXED_ID
     assert sent == [f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
@@ -420,7 +419,11 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
         "hive.sidecar.detect_runtime_queue_state",
         lambda **_kw: {"state": "not_queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
     )
-    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append(a))
+    def _enqueue_pending(*a, **kw):
+        enqueued.append(a)
+        return True
+
+    monkeypatch.setattr("hive.sidecar.enqueue_pending", _enqueue_pending)
     monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 
@@ -469,7 +472,11 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
         "hive.sidecar.detect_runtime_queue_state",
         lambda **_kw: {"state": "queued", "source": "capture", "observedAt": "2026-04-14T00:00:00Z"},
     )
-    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append((a, kw)))
+    def _enqueue_pending(*a, **kw):
+        enqueued.append((a, kw))
+        return True
+
+    monkeypatch.setattr("hive.sidecar.enqueue_pending", _enqueue_pending)
     monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
 

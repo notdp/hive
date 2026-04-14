@@ -1,5 +1,6 @@
 import json
 
+from hive import bus
 from hive.cli import cli
 
 
@@ -475,9 +476,16 @@ def test_init_preserves_existing_auto_workspace(runner, configure_hive_home, mon
         lambda _target: [PaneInfo("%5", "", command="droid"), PaneInfo("%6", "GPT", command="droid")],
     )
 
-    (auto_workspace / "events").mkdir(parents=True, exist_ok=True)
+    bus.init_workspace(auto_workspace)
     (auto_workspace / "artifacts").mkdir(parents=True, exist_ok=True)
-    (auto_workspace / "events" / "100-msg-old.json").write_text(json.dumps({"intent": "send"}))
+    bus.write_event(
+        auto_workspace,
+        from_agent="orch",
+        to_agent="gpt",
+        intent="send",
+        message_id="old1",
+        body="stale",
+    )
     (auto_workspace / "artifacts" / "stale.txt").write_text("stale")
 
     result = runner.invoke(cli, ["init", "--no-notify"])
@@ -485,8 +493,8 @@ def test_init_preserves_existing_auto_workspace(runner, configure_hive_home, mon
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["workspace"] == str(auto_workspace)
-    # Events and artifacts are preserved (P5: workspace not reset on init)
-    assert len(list((auto_workspace / "events").iterdir())) == 1
+    # Durable store and artifacts are preserved (P5: workspace not reset on init)
+    assert bus.count_events(auto_workspace) == 1
     assert len(list((auto_workspace / "artifacts").iterdir())) == 1
 
 
@@ -508,14 +516,20 @@ def test_init_with_explicit_workspace_does_not_reset_existing_managed_dirs(
     )
 
     workspace = tmp_path / "custom-ws"
-    (workspace / "events").mkdir(parents=True, exist_ok=True)
-    stale = workspace / "events" / "100-msg-old.json"
-    stale.write_text(json.dumps({"intent": "send"}))
+    bus.init_workspace(workspace)
+    bus.write_event(
+        workspace,
+        from_agent="orch",
+        to_agent="gpt",
+        intent="send",
+        message_id="old1",
+        body="stale",
+    )
 
     result = runner.invoke(cli, ["init", "--workspace", str(workspace), "--no-notify"])
 
     assert result.exit_code == 0
-    assert stale.exists()
+    assert bus.count_events(workspace) == 1
 
 
 def test_init_custom_name(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
