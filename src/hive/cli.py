@@ -95,6 +95,8 @@ hive notify "处理完成了，回来确认一下"'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
+_SEND_GRACE_TIMEOUT = 3.0
+_SEND_GRACE_POLL_INTERVAL = 0.2
 
 
 class SectionedHelpGroup(click.Group):
@@ -421,6 +423,43 @@ def _build_queue_probe_text(body: str, *, limit: int = 48) -> str:
     return " ".join(text.split())[:limit]
 
 
+def _observe_send_grace(
+    *,
+    pane_id: str,
+    transcript_path: Path,
+    message_id: str,
+    baseline: int,
+    queue_probe_text: str,
+    cli_name: str,
+) -> tuple[str, dict[str, str]]:
+    """Observe a short grace window before handing delivery off to the sidecar."""
+    from .adapters.base import transcript_has_id_in_new_user_turn
+    from .sidecar import detect_runtime_queue_state
+
+    deadline = time.monotonic() + _SEND_GRACE_TIMEOUT
+    last_probe: dict[str, str] = {"state": "unknown", "source": "none", "observedAt": ""}
+
+    while True:
+        if transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
+            return "confirmed", last_probe
+
+        last_probe = detect_runtime_queue_state(
+            pane_id=pane_id,
+            message_id=message_id,
+            queue_probe_text=queue_probe_text,
+            transcript_path=str(transcript_path),
+            baseline=baseline,
+            cli_name=cli_name,
+        )
+        if last_probe.get("state") == "queued":
+            return "queued", last_probe
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "pending", last_probe
+        time.sleep(min(_SEND_GRACE_POLL_INTERVAL, remaining))
+
+
 def _present_send_state(*, inject_status: str, turn_observed: str, runtime_queue_state: str) -> str:
     """Collapse internal delivery details into one default send state."""
     if inject_status == "failed":
@@ -600,25 +639,24 @@ def _send_recorded_message(
         else:
             turn_observed = "unconfirmed"
     else:
-        # Grace window: short in-process wait, then hand off to sidecar.
-        from .adapters.base import wait_for_id_in_transcript
-        if wait_for_id_in_transcript(transcript_path, message_id, baseline, timeout=1.0):
+        # Grace window: short in-process wait for confirmed or queued,
+        # then hand off to sidecar if still unresolved.
+        from .sidecar import enqueue_pending, ensure_sidecar
+        sender_pane = tmux.get_current_pane_id() or ""
+        profile = detect_profile_for_pane(target.pane_id)
+        queue_probe_text = _build_queue_probe_text(normalized_body)
+        grace_state, probe = _observe_send_grace(
+            pane_id=target.pane_id,
+            transcript_path=transcript_path,
+            message_id=message_id,
+            baseline=baseline,
+            queue_probe_text=queue_probe_text,
+            cli_name=profile.name if profile else "",
+        )
+        if grace_state == "confirmed":
             turn_observed = "confirmed"
         else:
-            # Not confirmed within grace window — probe queue, then enqueue for sidecar.
-            from .sidecar import detect_runtime_queue_state, enqueue_pending, ensure_sidecar
-            sender_pane = tmux.get_current_pane_id() or ""
-            profile = detect_profile_for_pane(target.pane_id)
-            queue_probe_text = _build_queue_probe_text(normalized_body)
-            probe = detect_runtime_queue_state(
-                pane_id=target.pane_id,
-                message_id=message_id,
-                queue_probe_text=queue_probe_text,
-                transcript_path=str(transcript_path),
-                baseline=baseline,
-                cli_name=profile.name if profile else "",
-            )
-            if probe.get("state") == "queued":
+            if grace_state == "queued":
                 runtime_queue_state = "queued"
             enqueue_pending(
                 str(ws), message_id, sender, sender_pane, to_agent,

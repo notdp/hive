@@ -491,6 +491,74 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     assert send_events[0]["msgId"] == FIXED_ID
 
 
+def test_send_grace_window_waits_for_queue_before_falling_back(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    now = {"value": 0.0}
+
+    def _mono() -> float:
+        return now["value"]
+
+    def _sleep(delta: float) -> None:
+        now["value"] += delta
+
+    probe_states = iter(
+        [
+            {"state": "unknown", "source": "none", "observedAt": "2026-04-14T00:00:00Z"},
+            {"state": "queued", "source": "capture", "observedAt": "2026-04-14T00:00:01Z"},
+        ]
+    )
+
+    enqueued: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli.secrets.token_urlsafe", lambda _n=4: FIXED_ID)
+    monkeypatch.setattr("hive.cli._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr("hive.cli.time.monotonic", _mono)
+    monkeypatch.setattr("hive.cli.time.sleep", _sleep)
+    monkeypatch.setattr(
+        "hive.adapters.base.transcript_has_id_in_new_user_turn",
+        lambda *_args, **_kw: False,
+    )
+    monkeypatch.setattr("hive.sidecar.detect_runtime_queue_state", lambda **_kw: next(probe_states))
+    monkeypatch.setattr("hive.sidecar.enqueue_pending", lambda *a, **kw: enqueued.append((a, kw)))
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+
+    result = runner.invoke(cli, ["send", "gpt", "test"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "queued"
+    assert len(enqueued) == 1
+    assert enqueued[0][1]["runtime_queue_state"] == "queued"
+
+
 def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

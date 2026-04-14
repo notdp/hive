@@ -421,7 +421,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
 
 def _check_pending(record: dict) -> str | None:
     """Check a single pending record. Returns result or None if still pending."""
-    from .adapters.base import safe_json_loads
+    from .adapters.base import transcript_has_id_in_new_user_turn
 
     transcript_path = Path(record.get("targetTranscript", ""))
     message_id = record.get("msgId", "")
@@ -445,44 +445,8 @@ def _check_pending(record: dict) -> str | None:
             return "tracking_lost"
         return None
 
-    # Quick non-blocking check: read new content since baseline
-    try:
-        current_size = transcript_path.stat().st_size
-    except OSError:
-        probe = detect_runtime_queue_state(
-            pane_id=record.get("targetPane", ""),
-            message_id=message_id,
-            queue_probe_text=record.get("queueProbeText", ""),
-            transcript_path=str(transcript_path),
-            baseline=baseline,
-            cli_name=record.get("targetCli", ""),
-        )
-        _apply_queue_probe(record, probe)
-        if probe.get("state") == "queued":
-            return None
-        if now > deadline:
-            return "tracking_lost"
-        return None
-
-    if current_size > baseline:
-        # Scan new content for the message ID
-        try:
-            with transcript_path.open("r") as f:
-                f.seek(baseline)
-                new_content = f.read()
-        except OSError:
-            if now > deadline:
-                return "tracking_lost"
-            return None
-
-        from .adapters.base import _is_user_turn
-
-        for line in new_content.split("\n"):
-            if not line.strip() or message_id not in line:
-                continue
-            parsed = safe_json_loads(line)
-            if parsed is not None and _is_user_turn(parsed):
-                return "confirmed"
+    if transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
+        return "confirmed"
 
     probe = detect_runtime_queue_state(
         pane_id=record.get("targetPane", ""),

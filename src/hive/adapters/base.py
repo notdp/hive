@@ -369,6 +369,28 @@ def _poll_interval(elapsed: float) -> float:
     return 1.0
 
 
+def transcript_has_id_in_new_user_turn(
+    path: Path,
+    message_id: str,
+    baseline: int,
+) -> bool:
+    """Return whether *message_id* appears in a new user turn after *baseline*."""
+    try:
+        with path.open("r") as handle:
+            handle.seek(baseline)
+            data = handle.read()
+    except OSError:
+        return False
+
+    for line in data.splitlines():
+        if not line or message_id not in line:
+            continue
+        parsed = safe_json_loads(line)
+        if parsed is not None and _is_user_turn(parsed):
+            return True
+    return False
+
+
 def wait_for_id_in_transcript(
     path: Path,
     message_id: str,
@@ -382,38 +404,10 @@ def wait_for_id_in_transcript(
     import time
 
     deadline = time.monotonic() + timeout
-    handle = None
-    remainder = ""
 
     while time.monotonic() < deadline:
-        # (Re)open file if needed — it may not exist yet at baseline time.
-        if handle is None:
-            try:
-                handle = path.open("r")
-                handle.seek(baseline)
-            except OSError:
-                time.sleep(_poll_interval(time.monotonic() - (deadline - timeout)))
-                continue
-
-        chunk = handle.read()
-        if chunk:
-            data = remainder + chunk
-            lines = data.split("\n")
-            # Last element is either "" (if data ended with \n) or a partial line.
-            remainder = lines.pop()
-            for line in lines:
-                if not line:
-                    continue
-                if message_id not in line:
-                    continue
-                parsed = safe_json_loads(line)
-                if parsed is not None and _is_user_turn(parsed):
-                    handle.close()
-                    return True
-        else:
-            elapsed = time.monotonic() - (deadline - timeout)
-            time.sleep(_poll_interval(elapsed))
-
-    if handle is not None:
-        handle.close()
+        if transcript_has_id_in_new_user_turn(path, message_id, baseline):
+            return True
+        elapsed = time.monotonic() - (deadline - timeout)
+        time.sleep(_poll_interval(elapsed))
     return False
