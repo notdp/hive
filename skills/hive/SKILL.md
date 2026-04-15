@@ -46,7 +46,7 @@ hive send claude "see attachment" --artifact /tmp/file.md
 printf '%s\n' "# Findings" "- item" | hive send claude "see attachment" --artifact -
 hive fork                             # 当前任务忙时，先纯 fork 一个 pane
 hive fork --join-as orch-2 --prompt "先跑 hive thread Veh9 看原始内容，开始后先 reply-to lulu 说明接管，处理完再 reply-to lulu"
-hive send lulu "orch-2 is taking over Veh9 from orch because orch is still handling the original task" --reply-to Veh9
+# orch-2 处理完后沿同一条 thread 回结果
 hive send lulu "done: see attachment" --reply-to Veh9 --artifact /tmp/result.md
 hive answer claude "yes"              # 回答 agent 的 pending question
 hive suggest                          # hidden agent-facing：基于当前 runtime 建议优先协作对象
