@@ -62,6 +62,7 @@ hive answer dodo "yes"
 # Diagnose connectivity
 hive doctor
 hive doctor dodo
+hive doctor --skills
 
 # Fork session into a new split
 hive fork
@@ -79,7 +80,7 @@ hive notify "done, press Space to come back"
 | `hive team` / `hive teams` | Show team with runtime inputState, or list teams |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
-| `hive doctor [agent]` | Diagnose agent connectivity |
+| `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |
 | `hive spawn <agent>` | Spawn a new agent pane |
 | `hive fork` | Fork current session into a new split |
 | `hive notify "msg"` | Notify the human on the current pane |

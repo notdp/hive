@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 include = [
-    "src/hive/core_assets/*",
+    "src/hive/core_assets/**",
     "src/hive/plugins/**",
 ]
 

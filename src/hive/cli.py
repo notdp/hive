@@ -18,6 +18,7 @@ from . import context as hive_context
 from . import notify_hook
 from . import notify_ui
 from . import plugin_manager
+from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
 from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, member_role_for_pane, normalize_command, resolve_session_id_for_pane
@@ -179,6 +180,19 @@ def _load_team(team: str) -> Team:
     except FileNotFoundError:
         click.echo(f"Error: team '{team}' not found", err=True)
         sys.exit(1)
+
+
+def _resolve_member_cli_name(team: Team, member_name: str) -> str:
+    member = team.get(member_name)
+    cli_name = normalize_command(getattr(member, "cli", "") or "")
+    if cli_name in AGENT_CLI_NAMES:
+        return cli_name
+    pane_id = getattr(member, "pane_id", "") or ""
+    option_cli = normalize_command(tmux.get_pane_option(pane_id, "hive-cli") or "")
+    if option_cli in AGENT_CLI_NAMES:
+        return option_cli
+    profile = detect_profile_for_pane(pane_id) if pane_id else None
+    return profile.name if profile else "droid"
 
 
 def _ensure_team_matches_current_window(t: Team) -> None:
@@ -1325,7 +1339,8 @@ def thread(message_id: str):
 
 @cli.command()
 @click.argument("agent_name", required=False, default="")
-def doctor(agent_name: str):
+@click.option("--skills", "include_skills", is_flag=True, help="Include local hive skill installation diagnostics for the target CLI.")
+def doctor(agent_name: str, include_skills: bool):
     """Diagnose agent connectivity and session state."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
@@ -1342,6 +1357,8 @@ def doctor(agent_name: str):
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "doctor failed")))
     payload.pop("ok", None)
+    if include_skills:
+        payload["skills"] = skill_sync.diagnose_hive_skill(_resolve_member_cli_name(t, target_name))
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

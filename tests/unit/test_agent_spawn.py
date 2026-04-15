@@ -25,6 +25,7 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: None)
 
     return calls, tags
 
@@ -156,6 +157,18 @@ def test_load_skill_uses_cli_specific_command(monkeypatch):
     agent.load_skill("code-review")
 
     assert calls == ["$code-review", "<Enter>"]
+
+
+def test_load_hive_skill_checks_for_drift_before_loading(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    warned: list[str] = []
+    monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda cli: warned.append(cli))
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
+
+    agent.load_skill("hive")
+
+    assert warned == ["codex"]
+    assert calls == ["$hive", "<Enter>"]
 
 
 def test_send_submits_text_with_enter(monkeypatch):

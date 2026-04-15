@@ -316,6 +316,45 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
     assert payload["transcriptSize"] == 1234
 
 
+def test_doctor_with_skills_includes_local_skill_diagnostics(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr(
+        "hive.sidecar.request_doctor",
+        lambda _ws, *, team, target_agent, verbose=False: {
+            "ok": True,
+            "agent": target_agent,
+            "team": team,
+            "alive": True,
+            "model": "gpt-5.4",
+            "inputState": "ready",
+            "gate": "clear",
+        },
+    )
+    monkeypatch.setattr(
+        "hive.cli.skill_sync.diagnose_hive_skill",
+        lambda cli: {
+            "skill": "hive",
+            "cli": cli,
+            "state": "stale",
+            "recommendedAction": "refresh",
+        },
+    )
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+
+    result = runner.invoke(cli, ["doctor", "--skills"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["skills"] == {
+        "skill": "hive",
+        "cli": "claude",
+        "state": "stale",
+        "recommendedAction": "refresh",
+    }
+
+
 def test_doctor_unknown_agent(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

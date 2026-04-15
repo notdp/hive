@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import skill_sync
 from . import tmux
 from .agent_cli import resolve_session_id_for_pane
 
@@ -233,6 +234,8 @@ class Agent:
         """Load a skill in the pane using the CLI-specific command."""
         if not skill_name or skill_name == "none":
             return
+        if skill_name == "hive":
+            skill_sync.maybe_warn_hive_skill_drift(self.cli)
         from .agent_cli import get_profile
         profile = get_profile(self.cli)
         if profile:
