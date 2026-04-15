@@ -95,6 +95,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
         monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": None)
+        monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: {})
         monkeypatch.setattr("hive.cli.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.context.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.context.CONTEXT_DIR", hive_home / "contexts")
@@ -146,6 +147,28 @@ def mock_tmux_send(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: sent.append((pane, f"<{key}>")))
     monkeypatch.setattr("hive.agent.time.sleep", lambda _s: None)
     return sent
+
+
+@pytest.fixture(autouse=True)
+def _guard_global_zdotdir(request):
+    """Fail fast if tmux global env has ZDOTDIR — a leak from manual debugging."""
+    if "e2e" not in {m.name for m in request.node.iter_markers()}:
+        return
+    import shutil
+    import subprocess
+    if shutil.which("tmux") is None:
+        return
+    result = subprocess.run(
+        ["tmux", "show-environment", "-g", "ZDOTDIR"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip().startswith("ZDOTDIR="):
+        value = result.stdout.strip()
+        pytest.fail(
+            f"tmux global environment is polluted: {value}\n"
+            f"This is likely a leak from manual debugging (set-environment without -t).\n"
+            f"Fix: tmux set-environment -gr ZDOTDIR"
+        )
 
 
 def pytest_collection_modifyitems(items):
