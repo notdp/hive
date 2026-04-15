@@ -421,6 +421,57 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert "followUp" not in payload
 
 
+def test_send_wait_returns_queued_when_queue_visible(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")
+    bus.init_workspace(workspace)
+
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            pass
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            return _FakeAgent()
+
+    team = _FakeTeam()
+    pending = {}
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
+    monkeypatch.setattr(
+        "hive.sidecar._observe_send_grace",
+        lambda **_kw: ("queued", {"source": "capture", "observedAt": "2026-04-15T00:00:00Z"}),
+    )
+    monkeypatch.setattr(
+        "hive.adapters.base.wait_for_id_in_transcript",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not wait once queued")),
+    )
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team, pending=pending)
+
+    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "queued"
+    assert FIXED_ID in pending
+    assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
+    assert pending[FIXED_ID]["queueSource"] == "capture"
+
+
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
     """ACK gracefully degrades to skipped when transcript cannot be found."""
     configure_hive_home()

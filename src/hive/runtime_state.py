@@ -72,6 +72,36 @@ def delivery_guidance(state: str) -> dict[str, str] | None:
     return None
 
 
+def delivery_exception_body(
+    state: str,
+    *,
+    message_id: str,
+    target_agent: str,
+    timeout_seconds: float,
+) -> str | None:
+    guidance = delivery_guidance(state)
+    if guidance is None:
+        return None
+    meaning = guidance["meaning"]
+    if state == "failed":
+        return (
+            f"Message {message_id} to {target_agent}: {meaning} "
+            "Retry is reasonable."
+        )
+    if state == "tracking_lost":
+        return (
+            f"Message {message_id} to {target_agent}: {meaning} "
+            "Inspect before retrying."
+        )
+    if state == "unconfirmed":
+        return (
+            f"Message {message_id} to {target_agent} was not confirmed within "
+            f"{int(timeout_seconds)}s. {meaning} "
+            "Retry only if duplicate delivery is acceptable."
+        )
+    return None
+
+
 def project_inbox_event(event: dict[str, object]) -> dict[str, object]:
     """Project durable events into the smaller inbox-facing shape."""
     projected: dict[str, object] = {}

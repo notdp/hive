@@ -19,6 +19,7 @@ from . import bus
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
     build_queue_probe_text,
+    delivery_exception_body,
     delivery_guidance,
     format_hive_envelope,
     present_delivery_state,
@@ -85,26 +86,25 @@ def _write_observation(
 
 def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: str) -> None:
     """Inject a HIVE-SYSTEM exception block into the sender's pane."""
-    from . import tmux
+    from .agent import _submit_interactive_text
 
-    if result == "unconfirmed":
-        body = (
-            f"Message {message_id} to {target_agent} was not confirmed within "
-            f"{int(OBSERVATION_TIMEOUT)}s. Delivery is unconfirmed. "
-            "Retry only if duplicate delivery is acceptable."
-        )
-    else:
-        body = (
-            f"Message {message_id} to {target_agent}: delivery tracking was lost. "
-            "Final delivery is unknown; inspect before retrying."
-        )
+    body = delivery_exception_body(
+        result,
+        message_id=message_id,
+        target_agent=target_agent,
+        timeout_seconds=OBSERVATION_TIMEOUT,
+    )
+    if body is None:
+        return
 
     block = (
         f"<HIVE-SYSTEM type=delivery-exception msgId={message_id} "
         f"result={result} to={target_agent}>\n{body}\n</HIVE-SYSTEM>"
     )
     try:
-        tmux.send_keys(pane_id, block, enter=True)
+        profile = detect_profile_for_pane(pane_id)
+        cli_name = profile.name if profile else ""
+        _submit_interactive_text(pane_id, block, cli_name)
     except Exception:
         pass
 
@@ -360,10 +360,11 @@ def request_doctor(
     *,
     team: str,
     target_agent: str,
+    verbose: bool = False,
 ) -> dict[str, Any] | None:
     return _request_sidecar(
         workspace,
-        {"action": "doctor", "team": team, "agent": target_agent},
+        {"action": "doctor", "team": team, "agent": target_agent, "verbose": verbose},
         timeout=SOCKET_READY_TIMEOUT,
     )
 
@@ -549,6 +550,8 @@ def _send_payload(
     runtime_queue_state = "unknown"
     probe: dict[str, str] = {"source": "none"}
     turn_observed = "pending"
+    profile = detect_profile_for_pane(target.pane_id)
+    queue_probe_text = build_queue_probe_text(normalized_body)
 
     if inject_status == "failed":
         turn_observed = "unavailable"
@@ -561,10 +564,16 @@ def _send_payload(
                 "turnObserved": "unavailable",
             },
         )
-    elif wait and transcript_path is not None:
-        from .adapters.base import wait_for_id_in_transcript
-
-        if wait_for_id_in_transcript(transcript_path, message_id, baseline):
+    elif wait:
+        grace_state, probe = _observe_send_grace(
+            pane_id=target.pane_id,
+            transcript_path=transcript_path,
+            message_id=message_id,
+            baseline=baseline,
+            queue_probe_text=queue_probe_text,
+            cli_name=profile.name if profile else "",
+        )
+        if grace_state == "confirmed":
             turn_observed = "confirmed"
             _write_observation(
                 workspace,
@@ -575,20 +584,63 @@ def _send_payload(
                     "turnObserved": "confirmed",
                 },
             )
-        else:
-            turn_observed = "unconfirmed"
-            _write_observation(
-                workspace,
-                message_id,
-                "unconfirmed",
-                metadata={
-                    "injectStatus": "submitted",
-                    "turnObserved": "unconfirmed",
-                },
+        elif grace_state == "queued":
+            runtime_queue_state = "queued"
+            pending[message_id] = _pending_record(
+                message_id=message_id,
+                sender_agent=sender_agent,
+                sender_pane=sender_pane,
+                target_agent=target_agent,
+                target_pane=target.pane_id,
+                target_cli=profile.name if profile else "",
+                transcript_path=str(transcript_path) if transcript_path is not None else "",
+                baseline=baseline,
+                runtime_queue_state=runtime_queue_state,
+                queue_source=probe.get("source", "none"),
+                queue_probe_text=queue_probe_text,
             )
+            turn_observed = "pending"
+        elif transcript_path is not None:
+            from .adapters.base import wait_for_id_in_transcript
+
+            if wait_for_id_in_transcript(transcript_path, message_id, baseline):
+                turn_observed = "confirmed"
+                _write_observation(
+                    workspace,
+                    message_id,
+                    "confirmed",
+                    metadata={
+                        "injectStatus": "submitted",
+                        "turnObserved": "confirmed",
+                    },
+                )
+            else:
+                turn_observed = "unconfirmed"
+                _write_observation(
+                    workspace,
+                    message_id,
+                    "unconfirmed",
+                    metadata={
+                        "injectStatus": "submitted",
+                        "turnObserved": "unconfirmed",
+                    },
+                )
+        else:
+            pending[message_id] = _pending_record(
+                message_id=message_id,
+                sender_agent=sender_agent,
+                sender_pane=sender_pane,
+                target_agent=target_agent,
+                target_pane=target.pane_id,
+                target_cli=profile.name if profile else "",
+                transcript_path="",
+                baseline=baseline,
+                runtime_queue_state="unknown",
+                queue_source=probe.get("source", "none"),
+                queue_probe_text=queue_probe_text,
+            )
+            turn_observed = "pending"
     else:
-        profile = detect_profile_for_pane(target.pane_id)
-        queue_probe_text = build_queue_probe_text(normalized_body)
         grace_state, probe = _observe_send_grace(
             pane_id=target.pane_id,
             transcript_path=transcript_path,
@@ -840,7 +892,7 @@ def _inbox_payload(workspace: str, pending: dict[str, dict[str, Any]], agent_nam
     }
 
 
-def _doctor_payload(workspace: str, team_name: str, target_agent: str) -> dict[str, Any]:
+def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbose: bool = False) -> dict[str, Any]:
     from .team import Team
 
     team = Team.load(team_name)
@@ -854,8 +906,6 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str) -> dict[s
         "ok": True,
         "agent": target_agent,
         "team": team.name,
-        "pane": target.pane_id,
-        "teamMembers": len(list(team.agents.values())),
     }
     runtime = _member_runtime_payload(target.pane_id, role="agent")
     diag["alive"] = bool(runtime.get("alive", alive))
@@ -863,22 +913,30 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str) -> dict[s
         diag["model"] = runtime["model"]
     if runtime.get("sessionId"):
         diag["sessionId"] = runtime["sessionId"]
-    if runtime.get("_cli"):
-        diag["cli"] = runtime["_cli"]
-    if "_transcript" in runtime:
-        diag["transcript"] = runtime["_transcript"]
-    if "_transcriptExists" in runtime:
-        diag["transcriptExists"] = runtime["_transcriptExists"]
-    if "_transcriptSize" in runtime:
-        diag["transcriptSize"] = runtime["_transcriptSize"]
+    if runtime.get("inputState"):
+        diag["inputState"] = runtime["inputState"]
     if "_gate" in runtime:
         diag["gate"] = runtime["_gate"]
-    if "_gateReason" in runtime:
-        diag["gateReason"] = runtime["_gateReason"]
-
-    diag["workspace"] = str(workspace)
-    diag["eventCount"] = bus.count_events(workspace)
-    diag["cursor"] = bus.read_cursor(workspace, target_agent)
+    if verbose:
+        diag["pane"] = target.pane_id
+        diag["teamMembers"] = len(list(team.agents.values()))
+        if runtime.get("_cli"):
+            diag["cli"] = runtime["_cli"]
+        if "inputReason" in runtime:
+            diag["inputReason"] = runtime["inputReason"]
+        if "pendingQuestion" in runtime:
+            diag["pendingQuestion"] = runtime["pendingQuestion"]
+        if "_transcript" in runtime:
+            diag["transcript"] = runtime["_transcript"]
+        if "_transcriptExists" in runtime:
+            diag["transcriptExists"] = runtime["_transcriptExists"]
+        if "_transcriptSize" in runtime:
+            diag["transcriptSize"] = runtime["_transcriptSize"]
+        if "_gateReason" in runtime:
+            diag["gateReason"] = runtime["_gateReason"]
+        diag["workspace"] = str(workspace)
+        diag["eventCount"] = bus.count_events(workspace)
+        diag["cursor"] = bus.read_cursor(workspace, target_agent)
     return diag
 
 
@@ -1138,6 +1196,7 @@ def _handle_request(
                 workspace,
                 str(request.get("team") or team),
                 str(request.get("agent", "")),
+                verbose=bool(request.get("verbose", False)),
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}

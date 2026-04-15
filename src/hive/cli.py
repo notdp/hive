@@ -1237,7 +1237,7 @@ def doctor(agent_name: str):
     from .sidecar import ensure_sidecar, request_doctor
 
     ensure_sidecar(str(ws), t.name, t.tmux_window)
-    payload = request_doctor(str(ws), team=t.name, target_agent=target_name)
+    payload = request_doctor(str(ws), team=t.name, target_agent=target_name, verbose=True)
     if not payload:
         _fail("sidecar unavailable")
     if payload.get("ok") is False:

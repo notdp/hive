@@ -119,31 +119,43 @@ def test_check_pending_uses_post_queue_timeout_after_queue_disappears(monkeypatc
 
 
 def test_inject_exception_uses_honest_unconfirmed_wording(monkeypatch):
-    sent: list[tuple[str, str, bool]] = []
+    sent: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
-        "hive.tmux.send_keys",
-        lambda pane_id, text, enter=True: sent.append((pane_id, text, enter)),
+        sidecar,
+        "detect_profile_for_pane",
+        lambda _pane_id: type("Profile", (), {"name": "codex"})(),
+    )
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text",
+        lambda pane_id, text, cli: sent.append((pane_id, text, cli)),
     )
 
     sidecar._inject_exception("%1", "ab12", "orch", "unconfirmed")
 
     assert len(sent) == 1
-    assert "Delivery is unconfirmed" in sent[0][1]
+    assert "Delivery was not confirmed before the timeout window elapsed." in sent[0][1]
     assert "Retry only if duplicate delivery is acceptable." in sent[0][1]
+    assert sent[0][2] == "codex"
 
 
 def test_inject_exception_uses_tracking_lost_wording(monkeypatch):
-    sent: list[tuple[str, str, bool]] = []
+    sent: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
-        "hive.tmux.send_keys",
-        lambda pane_id, text, enter=True: sent.append((pane_id, text, enter)),
+        sidecar,
+        "detect_profile_for_pane",
+        lambda _pane_id: type("Profile", (), {"name": "claude"})(),
+    )
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text",
+        lambda pane_id, text, cli: sent.append((pane_id, text, cli)),
     )
 
     sidecar._inject_exception("%1", "ab12", "orch", "tracking_lost")
 
     assert len(sent) == 1
-    assert "delivery tracking was lost" in sent[0][1]
+    assert "Delivery tracking was lost" in sent[0][1]
     assert "Final delivery is unknown" in sent[0][1]
+    assert sent[0][2] == "claude"
 
 
 def test_socket_alive_requires_matching_api_version(monkeypatch):
