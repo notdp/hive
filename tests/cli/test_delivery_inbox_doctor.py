@@ -490,3 +490,69 @@ def test_doctor_unknown_agent(runner, configure_hive_home, monkeypatch, tmp_path
     result = runner.invoke(cli, ["doctor", "nobody"])
     assert result.exit_code != 0
     assert "not registered" in result.output
+
+
+# --- hidden agent-facing views ---
+
+
+def test_suggest_command_outputs_candidates(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.request_suggest",
+        lambda _ws, *, team, source_agent: {
+            "ok": True,
+            "team": team,
+            "source": {"name": source_agent, "cli": "codex", "model": "gpt-5.4"},
+            "candidates": [
+                {
+                    "name": "orch",
+                    "role": "agent",
+                    "pane": "%2",
+                    "cli": "claude",
+                    "model": "claude-opus-4-6",
+                    "alive": True,
+                    "inputState": "ready",
+                    "score": 140,
+                    "reasons": ["ready", "different_model", "different_cli"],
+                }
+            ],
+        },
+    )
+
+    result = runner.invoke(cli, ["suggest"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["source"]["name"] == "claude"
+    assert payload["candidates"][0]["name"] == "orch"
+    assert payload["candidates"][0]["score"] == 140
+
+
+def test_thread_command_outputs_thread_projection(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.request_thread",
+        lambda _ws, message_id: {
+            "ok": True,
+            "rootMsgId": "a001",
+            "focusMsgId": message_id,
+            "messages": [
+                {"msgId": "a001", "from": "momo", "to": "orch", "depth": 0},
+                {"msgId": "a002", "from": "orch", "to": "momo", "inReplyTo": "a001", "depth": 1, "focus": True},
+            ],
+        },
+    )
+
+    result = runner.invoke(cli, ["thread", "a002"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["rootMsgId"] == "a001"
+    assert payload["focusMsgId"] == "a002"
+    assert payload["messages"][1]["focus"] is True

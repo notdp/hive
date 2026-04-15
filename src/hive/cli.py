@@ -1204,6 +1204,45 @@ def delivery(message_id: str):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+@cli.command("suggest", hidden=True)
+@click.argument("source_agent", required=False, default="")
+def suggest(source_agent: str):
+    """Debug/agent helper: suggest likely collaboration candidates."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    resolved_source = source_agent or _resolve_sender(None)
+    from .sidecar import ensure_sidecar, request_suggest
+
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_suggest(str(ws), team=t.name, source_agent=resolved_source)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "suggest failed")))
+    payload.pop("ok", None)
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command(hidden=True)
+@click.argument("message_id")
+def thread(message_id: str):
+    """Debug/agent helper: show a reply thread rooted at a msgId."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    from .sidecar import ensure_sidecar, request_thread
+
+    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    payload = request_thread(str(ws), message_id)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "thread lookup failed")))
+    payload.pop("ok", None)
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 @cli.command()
 @click.option("--ack", is_flag=True, help="Advance the inbox cursor to the current latest event")
 def inbox(ack: bool):

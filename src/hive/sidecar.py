@@ -12,6 +12,7 @@ import os
 import signal
 import socket
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 SEND_GRACE_TIMEOUT = 3.0
 SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
-SIDECAR_API_VERSION = 3
+SIDECAR_API_VERSION = 4
 
 
 def _now_iso() -> str:
@@ -377,6 +378,27 @@ def request_team_runtime(
     return _request_sidecar(
         workspace,
         {"action": "team-runtime", "team": team},
+        timeout=SOCKET_READY_TIMEOUT,
+    )
+
+
+def request_suggest(
+    workspace: str,
+    *,
+    team: str,
+    source_agent: str,
+) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "suggest", "team": team, "sourceAgent": source_agent},
+        timeout=SOCKET_READY_TIMEOUT,
+    )
+
+
+def request_thread(workspace: str, message_id: str) -> dict[str, Any] | None:
+    return _request_sidecar(
+        workspace,
+        {"action": "thread", "msgId": message_id},
         timeout=SOCKET_READY_TIMEOUT,
     )
 
@@ -1060,6 +1082,230 @@ def _team_runtime_payload(team_name: str) -> dict[str, Any]:
     return payload
 
 
+def _team_member_bindings(team_name: str) -> dict[str, dict[str, Any]]:
+    from .team import Team
+    from .agent_cli import member_role_for_pane
+
+    team = Team.load(team_name)
+    members: dict[str, dict[str, Any]] = {}
+
+    lead = team.lead_agent()
+    if lead is not None:
+        members[lead.name] = {
+            "name": lead.name,
+            "role": member_role_for_pane(lead.pane_id),
+            "pane": lead.pane_id,
+            "cli": lead.cli,
+        }
+
+    for name in sorted(team.agents):
+        agent = team.agents[name]
+        members[name] = {
+            "name": name,
+            "role": "agent",
+            "pane": agent.pane_id,
+            "cli": agent.cli,
+        }
+
+    return members
+
+
+def _candidate_score(
+    *,
+    source_model: str,
+    source_cli: str,
+    candidate_model: str,
+    candidate_cli: str,
+    input_state: str,
+) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+
+    if input_state == "ready":
+        score += 100
+        reasons.append("ready")
+    elif input_state:
+        reasons.append(f"inputState={input_state}")
+
+    if source_model and candidate_model:
+        if source_model != candidate_model:
+            score += 30
+            reasons.append("different_model")
+        else:
+            reasons.append("same_model_fallback")
+
+    if source_cli and candidate_cli:
+        if source_cli != candidate_cli:
+            score += 10
+            reasons.append("different_cli")
+        else:
+            reasons.append("same_cli_fallback")
+
+    if not reasons:
+        reasons.append("alive")
+    return score, reasons
+
+
+def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
+    bindings = _team_member_bindings(team_name)
+    runtime_payload = _team_runtime_payload(team_name)
+    runtime_members = runtime_payload.get("members")
+    if not isinstance(runtime_members, dict):
+        runtime_members = {}
+
+    if source_agent not in bindings and source_agent not in runtime_members:
+        return {"ok": False, "error": f"agent '{source_agent}' is not registered in team '{team_name}'"}
+
+    source_binding = bindings.get(source_agent, {})
+    source_runtime = runtime_members.get(source_agent, {})
+    if not isinstance(source_runtime, dict):
+        source_runtime = {}
+    source_cli = str(source_runtime.get("_cli") or source_binding.get("cli") or "")
+    source_model = str(source_runtime.get("model") or "")
+
+    candidates: list[dict[str, Any]] = []
+    for name, binding in bindings.items():
+        if name == source_agent:
+            continue
+        runtime = runtime_members.get(name, {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        if not bool(runtime.get("alive", False)):
+            continue
+        candidate_cli = str(runtime.get("_cli") or binding.get("cli") or "")
+        candidate_model = str(runtime.get("model") or "")
+        input_state = str(runtime.get("inputState") or "unknown")
+        score, reasons = _candidate_score(
+            source_model=source_model,
+            source_cli=source_cli,
+            candidate_model=candidate_model,
+            candidate_cli=candidate_cli,
+            input_state=input_state,
+        )
+        candidate: dict[str, Any] = {
+            "name": name,
+            "role": binding.get("role", ""),
+            "pane": binding.get("pane", ""),
+            "alive": True,
+            "inputState": input_state,
+            "score": score,
+            "reasons": reasons,
+        }
+        if candidate_cli:
+            candidate["cli"] = candidate_cli
+        if candidate_model:
+            candidate["model"] = candidate_model
+        if runtime.get("sessionId"):
+            candidate["sessionId"] = runtime["sessionId"]
+        candidates.append(candidate)
+
+    candidates.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name", ""))))
+
+    source: dict[str, Any] = {"name": source_agent}
+    if source_cli:
+        source["cli"] = source_cli
+    if source_model:
+        source["model"] = source_model
+    if source_runtime.get("inputState"):
+        source["inputState"] = source_runtime["inputState"]
+
+    return {
+        "ok": True,
+        "team": team_name,
+        "source": source,
+        "candidates": candidates,
+    }
+
+
+def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
+    events = bus.read_events_with_ns(workspace)
+    send_events: dict[str, tuple[int, dict[str, object]]] = {}
+    children: dict[str, list[str]] = defaultdict(list)
+    latest_observations: dict[str, tuple[int, dict[str, object]]] = {}
+
+    for seq, event in events:
+        event_msg_id = str(event.get("msgId") or "")
+        intent = str(event.get("intent") or "")
+        if not event_msg_id:
+            continue
+        if intent == "send":
+            send_events[event_msg_id] = (seq, event)
+            parent = str(event.get("inReplyTo") or "")
+            if parent:
+                children[parent].append(event_msg_id)
+        elif intent == "observation":
+            latest_observations[event_msg_id] = (seq, event)
+
+    if message_id not in send_events:
+        return {"ok": False, "error": f"no send event found with msgId '{message_id}'"}
+
+    root_id = message_id
+    seen: set[str] = set()
+    while True:
+        _, event = send_events[root_id]
+        parent = str(event.get("inReplyTo") or "")
+        if not parent or parent not in send_events or parent in seen:
+            break
+        seen.add(root_id)
+        root_id = parent
+
+    depth_map: dict[str, int] = {}
+    thread_ids: set[str] = set()
+
+    def _walk(current_id: str, depth: int) -> None:
+        if current_id in thread_ids:
+            return
+        thread_ids.add(current_id)
+        depth_map[current_id] = depth
+        for child_id in sorted(children.get(current_id, []), key=lambda item: send_events[item][0]):
+            _walk(child_id, depth + 1)
+
+    _walk(root_id, 0)
+
+    items: list[dict[str, Any]] = []
+    for thread_msg_id in sorted(thread_ids, key=lambda item: send_events[item][0]):
+        _, event = send_events[thread_msg_id]
+        item = project_inbox_event(event)
+        item["depth"] = depth_map.get(thread_msg_id, 0)
+        if thread_msg_id == message_id:
+            item["focus"] = True
+
+        if thread_msg_id in pending:
+            record = pending[thread_msg_id]
+            delivery: dict[str, Any] = {
+                "state": present_delivery_state(
+                    inject_status="submitted",
+                    turn_observed="pending",
+                    runtime_queue_state=str(record.get("runtimeQueueState", "unknown")),
+                )
+            }
+            if record.get("queueSource"):
+                delivery["queueSource"] = record["queueSource"]
+            item["delivery"] = delivery
+        elif thread_msg_id in latest_observations:
+            _, observation = latest_observations[thread_msg_id]
+            metadata = observation.get("metadata", {})
+            if isinstance(metadata, dict):
+                delivery = {
+                    "state": str(metadata.get("result") or "pending"),
+                }
+                if metadata.get("observedAt"):
+                    delivery["observedAt"] = metadata["observedAt"]
+                guidance = delivery_guidance(delivery["state"])
+                if guidance is not None:
+                    delivery.update(guidance)
+                item["delivery"] = delivery
+
+        items.append(item)
+
+    return {
+        "ok": True,
+        "rootMsgId": root_id,
+        "focusMsgId": message_id,
+        "messages": items,
+    }
+
+
 def _is_tmux_window_alive(tmux_window: str) -> bool:
     import subprocess
 
@@ -1204,6 +1450,21 @@ def _handle_request(
     if action == "team-runtime":
         try:
             response = _team_runtime_payload(str(request.get("team") or team))
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "suggest":
+        try:
+            response = _suggest_payload(
+                str(request.get("team") or team),
+                str(request.get("sourceAgent", "")),
+            )
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "thread":
+        try:
+            response = _thread_payload(workspace, pending, str(request.get("msgId", "")))
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
