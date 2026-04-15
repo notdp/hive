@@ -107,6 +107,13 @@ workspace/
 
 The sender doesn't need to do anything — `send` is fire-and-forget.
 
+Immediate `hive send` states:
+
+- `queued`: accepted and now tracked in the background; continue working
+- `pending`: submit completed and background tracking continues; continue working
+- `confirmed`: delivery was confirmed in the initial send window
+- `failed`: local submit failed before tracking began; retry
+
 ## Plugins
 
 ```bash

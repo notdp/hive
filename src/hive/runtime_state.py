@@ -53,6 +53,40 @@ def present_delivery_state(
     return "pending"
 
 
+def send_guidance(state: str) -> dict[str, str] | None:
+    if state == "confirmed":
+        return {
+            "meaning": "Delivery was confirmed during the initial send window.",
+            "recommendedAction": "continue",
+        }
+    if state == "queued":
+        return {
+            "meaning": "Accepted for background delivery tracking; no action is needed now.",
+            "recommendedAction": "continue",
+        }
+    if state == "pending":
+        return {
+            "meaning": "Submit completed and background delivery tracking continues.",
+            "recommendedAction": "continue",
+        }
+    if state == "failed":
+        return {
+            "meaning": "Local submit attempt failed before background tracking began.",
+            "recommendedAction": "retry",
+        }
+    if state == "unconfirmed":
+        return {
+            "meaning": "Delivery was not confirmed within the synchronous wait window.",
+            "recommendedAction": "check_delivery",
+        }
+    if state == "unavailable":
+        return {
+            "meaning": "Delivery tracking is unavailable for this send result.",
+            "recommendedAction": "check_delivery",
+        }
+    return None
+
+
 def delivery_guidance(state: str) -> dict[str, str] | None:
     if state == "failed":
         return {

@@ -140,6 +140,8 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["artifact"] == str(artifact)
     assert "summary" not in payload
     assert payload["state"] == "pending"
+    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
+    assert payload["recommendedAction"] == "continue"
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "followUp" not in payload
@@ -375,6 +377,8 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "confirmed"
+    assert payload["meaning"] == "Delivery was confirmed during the initial send window."
+    assert payload["recommendedAction"] == "continue"
     assert "followUp" not in payload
 
 
@@ -418,6 +422,8 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "unconfirmed"
+    assert payload["meaning"] == "Delivery was not confirmed within the synchronous wait window."
+    assert payload["recommendedAction"] == "check_delivery"
     assert "followUp" not in payload
 
 
@@ -467,6 +473,8 @@ def test_send_wait_returns_queued_when_queue_visible(runner, configure_hive_home
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "queued"
+    assert payload["meaning"] == "Accepted for background delivery tracking; no action is needed now."
+    assert payload["recommendedAction"] == "continue"
     assert FIXED_ID in pending
     assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
     assert pending[FIXED_ID]["queueSource"] == "capture"
@@ -508,6 +516,8 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "pending"
+    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
+    assert payload["recommendedAction"] == "continue"
     assert "injectStatus" not in payload
     assert "followUp" not in payload
 
@@ -555,6 +565,8 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "pending"
+    assert payload["meaning"] == "Submit completed and background delivery tracking continues."
+    assert payload["recommendedAction"] == "continue"
     assert "runtimeQueueState" not in payload
     assert "followUp" not in payload
     assert len(pending) == 1
@@ -606,6 +618,8 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "queued"
+    assert payload["meaning"] == "Accepted for background delivery tracking; no action is needed now."
+    assert payload["recommendedAction"] == "continue"
     assert "runtimeQueueState" not in payload
     assert len(pending) == 1
     assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
@@ -682,6 +696,8 @@ def test_send_grace_window_waits_for_queue_before_falling_back(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "queued"
+    assert payload["meaning"] == "Accepted for background delivery tracking; no action is needed now."
+    assert payload["recommendedAction"] == "continue"
     assert len(pending) == 1
     assert pending[FIXED_ID]["runtimeQueueState"] == "queued"
 
@@ -724,10 +740,22 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["state"] == "failed"
+    assert payload["meaning"] == "Local submit attempt failed before background tracking began."
+    assert payload["recommendedAction"] == "retry"
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "observerPid" not in payload
     assert "followUp" not in payload
+
+
+def test_send_help_explains_queued_and_pending_states(runner):
+    result = runner.invoke(cli, ["send", "--help"])
+    help_text = " ".join(result.output.split())
+
+    assert result.exit_code == 0
+    assert "`queued` / `pending` mean the message was accepted" in help_text
+    assert "background tracking continues" in help_text
+    assert "state=queued and background tracking continues" in help_text
 
 
 # --- Send gate tests ---

@@ -1123,7 +1123,11 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
 @click.option("--reply-to", default="", help="Message ID this is replying to")
-@click.option("--wait", is_flag=True, help="Block until transcript confirms delivery")
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
+)
 def send(
     to_agent: str,
     body: str,
@@ -1131,7 +1135,12 @@ def send(
     reply_to: str,
     wait: bool,
 ):
-    """Send a Hive message to another agent."""
+    """Send a Hive message to another agent.
+
+    `queued` / `pending` mean the message was accepted and background tracking continues.
+    `confirmed` means delivery was confirmed in the initial send window.
+    `failed` means local submit failed and should be retried.
+    """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)

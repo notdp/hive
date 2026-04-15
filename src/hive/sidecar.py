@@ -26,6 +26,7 @@ from .runtime_state import (
     present_delivery_state,
     present_send_state,
     project_thread_event,
+    send_guidance,
 )
 
 IDLE_SLEEP = 5.0
@@ -691,7 +692,7 @@ def _send_payload(
             )
             turn_observed = "pending"
 
-    return {
+    payload = {
         "ok": True,
         "from": sender_agent,
         "to": target_agent,
@@ -703,6 +704,10 @@ def _send_payload(
             runtime_queue_state=runtime_queue_state,
         ),
     }
+    guidance = send_guidance(str(payload["state"]))
+    if guidance is not None:
+        payload.update(guidance)
+    return payload
 
 
 def _answer_payload(
