@@ -1,6 +1,12 @@
 import json
+import os
+from types import SimpleNamespace
 
+from hive.adapters.base import GateResult
+from hive import bus
 from hive.cli import cli
+import hive.sidecar as sidecar
+from hive import tmux
 
 
 def _patch_runtime(monkeypatch, runtime_payload):
@@ -139,3 +145,113 @@ def test_who_includes_terminals(runner, configure_hive_home, monkeypatch, tmp_pa
     terminal = next(member for member in payload["members"] if member["name"] == "term-1")
     assert terminal["role"] == "terminal"
     assert terminal["alive"] is False
+
+
+def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
+    runner, configure_hive_home, monkeypatch, tmp_path,
+):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    claude_home = tmp_path / "claude-home"
+    sessions_dir = claude_home / "sessions"
+    projects_dir = claude_home / "projects" / "-repo"
+    sessions_dir.mkdir(parents=True)
+    projects_dir.mkdir(parents=True)
+    (sessions_dir / "42424.json").write_text(json.dumps({"sessionId": "sess-old"}))
+    (sessions_dir / "52525.json").write_text(json.dumps({"sessionId": "sess-new"}))
+
+    stale = projects_dir / "sess-old.jsonl"
+    stale.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
+    fresh = projects_dir / "sess-new.jsonl"
+    fresh.write_text(json.dumps({"sessionId": "sess-new", "cwd": "/repo"}) + "\n")
+    stale_ns = 1_700_000_000_000_000_000
+    fresh_ns = stale_ns + 5_000
+    os.utime(stale, ns=(stale_ns, stale_ns))
+    os.utime(fresh, ns=(fresh_ns, fresh_ns))
+
+    class _FakeAgent:
+        def __init__(self, name: str, pane_id: str):
+            self.name = name
+            self.pane_id = pane_id
+            self.cli = "claude"
+
+        def is_alive(self) -> bool:
+            return True
+
+    class _FakeTeam:
+        def __init__(self):
+            self.name = "team-x"
+            self.description = "demo"
+            self.workspace = str(workspace)
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:4"
+            self.agents = {
+                "bobo": _FakeAgent("bobo", "%2000"),
+                "orch": _FakeAgent("orch", "%1070"),
+            }
+            self.terminals = {}
+
+        def lead_agent(self):
+            return None
+
+        def status(self):
+            return {
+                "name": self.name,
+                "description": self.description,
+                "workspace": self.workspace,
+                "tmuxSession": self.tmux_session,
+                "tmuxWindow": self.tmux_window,
+                "members": [
+                    {"name": "bobo", "role": "agent", "pane": "%2000"},
+                    {"name": "orch", "role": "agent", "pane": "%1070"},
+                ],
+            }
+
+    fake_team = _FakeTeam()
+
+    monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", fake_team))
+    monkeypatch.setattr("hive.cli._discover_tmux_binding", lambda: {"team": "team-x", "agent": "orch"})
+    monkeypatch.setattr("hive.team.Team.load", lambda _team_name: fake_team)
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.request_team_runtime",
+        lambda _ws, *, team: sidecar._team_runtime_payload(team),
+    )
+    monkeypatch.setattr("hive.sidecar.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_kw: "")
+    monkeypatch.setattr("hive.adapters.base.check_input_gate", lambda _path: GateResult("clear", ""))
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _target, _fmt: "/repo")
+    monkeypatch.setattr("hive.tmux.get_pane_window_target", lambda _pane_id: "dev:4")
+    monkeypatch.setattr(
+        "hive.tmux.list_panes_full",
+        lambda _target: [
+            tmux.PaneInfo("%1070", "orch", command="node"),
+            tmux.PaneInfo("%2000", "bobo", command="node"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.tmux.get_pane_tty",
+        lambda pane_id: "/dev/ttys001" if pane_id == "%1070" else "/dev/ttys002",
+    )
+
+    def _list_tty_processes(tty: str):
+        if tty == "/dev/ttys001":
+            return [tmux.TTYProcessInfo(pid="42424", command="claude", argv="claude --verbose")]
+        if tty == "/dev/ttys002":
+            return [tmux.TTYProcessInfo(pid="52525", command="claude", argv="claude --verbose")]
+        return []
+
+    monkeypatch.setattr("hive.tmux.list_tty_processes", _list_tty_processes)
+
+    result = runner.invoke(cli, ["team"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    bobo = next(member for member in payload["members"] if member["name"] == "bobo")
+    assert orch["sessionId"] == "sess-old"
+    assert bobo["sessionId"] == "sess-new"

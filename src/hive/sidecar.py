@@ -348,7 +348,7 @@ def request_delivery(workspace: str, message_id: str) -> dict[str, Any] | None:
     )
 
 
-def request_inbox(workspace: str, *, agent_name: str, ack: bool = False) -> dict[str, Any] | None:
+def request_inbox(workspace: str, *, agent_name: str, ack: bool = True) -> dict[str, Any] | None:
     return _request_sidecar(
         workspace,
         {"action": "inbox", "agent": agent_name, "ack": ack},
@@ -1434,7 +1434,7 @@ def _handle_request(
             workspace,
             pending,
             str(request.get("agent", "")),
-            bool(request.get("ack", False)),
+            bool(request["ack"]) if "ack" in request else True,
         ), True
     if action == "doctor":
         try:

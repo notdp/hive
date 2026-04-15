@@ -55,7 +55,7 @@ def _patch_sidecar_status_requests(monkeypatch):
 
         return _delivery_payload(workspace, {}, message_id)
 
-    def _request_inbox(workspace: str, *, agent_name: str, ack: bool = False):
+    def _request_inbox(workspace: str, *, agent_name: str, ack: bool = True):
         from hive.sidecar import _inbox_payload
 
         return _inbox_payload(workspace, {}, agent_name, ack)
@@ -279,7 +279,7 @@ def test_inbox_hides_sender_transport_fields_for_incoming_messages(
     assert "queueSource" not in message
 
 
-def test_inbox_does_not_advance_cursor_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_inbox_advances_cursor_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -296,10 +296,30 @@ def test_inbox_does_not_advance_cursor_by_default(runner, configure_hive_home, m
     result = runner.invoke(cli, ["inbox"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
+    assert payload["unread"] == 0
+
+
+def test_inbox_peek_preserves_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    _patch_sidecar_status_requests(monkeypatch)
+
+    bus.write_event(
+        workspace, from_agent="gpt", to_agent="claude",
+        intent="send", body="first", message_id="m1",
+    )
+
+    runner.invoke(cli, ["inbox", "--peek"])
+
+    result = runner.invoke(cli, ["inbox"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
     assert payload["unread"] == 1
 
 
-def test_inbox_ack_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_inbox_ack_explicitly_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -366,7 +386,7 @@ def test_inbox_does_not_synthesize_tracking_lost_for_self_sends(
         intent="send", body="pending msg", message_id="p1",
     )
 
-    result = runner.invoke(cli, ["inbox", "--ack"])
+    result = runner.invoke(cli, ["inbox"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["unread"] == 0

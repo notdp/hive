@@ -147,6 +147,56 @@ def test_claude_adapter_prefers_newer_project_transcript_over_stale_pid_mapping(
         assert adapter.resolve_current_session_id("%1070") == "sess-new"
 
 
+def test_claude_adapter_keeps_pid_mapping_when_newer_session_belongs_to_other_pane(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sessions_dir = root / "sessions"
+        projects_dir = root / "projects" / "-repo"
+        sessions_dir.mkdir(parents=True)
+        projects_dir.mkdir(parents=True)
+        (sessions_dir / "42424.json").write_text(json.dumps({"sessionId": "sess-old"}))
+        (sessions_dir / "52525.json").write_text(json.dumps({"sessionId": "sess-new"}))
+
+        stale = projects_dir / "sess-old.jsonl"
+        stale.write_text(json.dumps({"sessionId": "sess-old", "cwd": "/repo"}) + "\n")
+        fresh = projects_dir / "sess-new.jsonl"
+        fresh.write_text(json.dumps({"sessionId": "sess-new", "cwd": "/repo"}) + "\n")
+        stale_ns = 1_700_000_000_000_000_000
+        fresh_ns = stale_ns + 5_000
+        os.utime(stale, ns=(stale_ns, stale_ns))
+        os.utime(fresh, ns=(fresh_ns, fresh_ns))
+
+        monkeypatch.setenv("CLAUDE_HOME", str(root))
+        monkeypatch.setattr("hive.adapters.claude.tmux.display_value", lambda _pane, _fmt: "/repo")
+        monkeypatch.setattr("hive.adapters.claude.tmux.get_pane_window_target", lambda _pane: "dev:4")
+        monkeypatch.setattr(
+            "hive.adapters.claude.tmux.list_panes_full",
+            lambda _target: [
+                tmux.PaneInfo("%1070", "current", command="node"),
+                tmux.PaneInfo("%2000", "other", command="node"),
+            ],
+        )
+        monkeypatch.setattr(
+            "hive.adapters.claude.tmux.get_pane_tty",
+            lambda pane: "/dev/ttys001" if pane == "%1070" else "/dev/ttys002",
+        )
+
+        def _list_tty_processes(tty):
+            if tty == "/dev/ttys001":
+                return [tmux.TTYProcessInfo(pid="42424", command="claude", argv="claude --verbose")]
+            if tty == "/dev/ttys002":
+                return [tmux.TTYProcessInfo(pid="52525", command="claude", argv="claude --verbose")]
+            return []
+
+        monkeypatch.setattr("hive.adapters.claude.tmux.list_tty_processes", _list_tty_processes)
+
+        adapter = adapters.get("claude")
+        assert adapter.resolve_current_session_id("%1070") == "sess-old"
+
+
 def test_claude_adapter_keeps_pid_mapping_when_newer_project_transcript_has_no_meta(monkeypatch):
     import tempfile
     from pathlib import Path

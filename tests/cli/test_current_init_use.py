@@ -459,7 +459,7 @@ def test_init_excludes_names_already_used_in_current_window(runner, configure_hi
     assert len(peer_names) == len(set(peer_names))
 
 
-def test_init_preserves_existing_auto_workspace(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -493,9 +493,8 @@ def test_init_preserves_existing_auto_workspace(runner, configure_hive_home, mon
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["workspace"] == str(auto_workspace)
-    # Durable store and artifacts are preserved (P5: workspace not reset on init)
-    assert bus.count_events(auto_workspace) == 1
-    assert len(list((auto_workspace / "artifacts").iterdir())) == 1
+    assert bus.count_events(auto_workspace) == 0
+    assert len(list((auto_workspace / "artifacts").iterdir())) == 0
 
 
 def test_init_with_explicit_workspace_does_not_reset_existing_managed_dirs(

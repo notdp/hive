@@ -745,12 +745,18 @@ def init_cmd(name: str, workspace: str, notify: bool):
         _gc_stale_team_windows(team_name, keep=window_target or "", all_windows=[existing_wt])
 
     default_ws_path = _default_auto_workspace_path(session_name, window_index)
+    using_auto_workspace = not workspace
     ws_path = Path(workspace).expanduser() if workspace else default_ws_path
     ws = str(ws_path)
 
     panes = tmux.list_panes_full(window_target) if window_target else []
 
-    bus.init_workspace(ws_path)
+    if using_auto_workspace:
+        # A fresh `hive init` on the same tmux window should not inherit the
+        # previous team's event log or artifacts from the default auto workspace.
+        bus.reset_workspace(ws_path)
+    else:
+        bus.init_workspace(ws_path)
 
     try:
         t = Team.create(team_name, description=f"auto-init from tmux {session_name}:{window_index}", workspace=str(ws_path))
@@ -1244,9 +1250,13 @@ def thread(message_id: str):
 
 
 @cli.command()
-@click.option("--ack", is_flag=True, help="Advance the inbox cursor to the current latest event")
+@click.option(
+    "--ack/--peek",
+    default=True,
+    help="Advance the inbox cursor after reading (default: --ack)",
+)
 def inbox(ack: bool):
-    """Show unread messages and optionally acknowledge them."""
+    """Show unread messages and advance the cursor unless --peek is set."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)

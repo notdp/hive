@@ -53,7 +53,7 @@ hive answer dodo "yes"
 
 # Check unread messages
 hive inbox
-hive inbox --ack   # mark as read
+hive inbox --peek  # inspect without advancing the cursor
 
 # Diagnose connectivity
 hive doctor
@@ -75,7 +75,7 @@ hive notify "done, press Space to come back"
 | `hive team` / `hive teams` | Show team with runtime inputState, or list teams |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
-| `hive inbox` / `hive inbox --ack` | View unread messages / mark as read |
+| `hive inbox` / `hive inbox --peek` | View unread messages and mark as read / inspect without marking |
 | `hive doctor [agent]` | Diagnose agent connectivity |
 | `hive spawn <agent>` | Spawn a new agent pane |
 | `hive fork` | Fork current session into a new split |

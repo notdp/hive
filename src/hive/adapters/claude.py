@@ -48,7 +48,11 @@ class ClaudeAdapter:
                 continue
             session_id = _str_or_none(payload.get("sessionId"))
             if session_id:
-                newer_session_id = self._resolve_newer_project_session_id(session_id, cwd=cwd)
+                newer_session_id = self._resolve_newer_project_session_id(
+                    session_id,
+                    cwd=cwd,
+                    pane_id=pane_id,
+                )
                 if newer_session_id:
                     return newer_session_id
                 return session_id
@@ -141,7 +145,13 @@ class ClaudeAdapter:
             return iter(())
         return _claude_message_iter(handle)
 
-    def _resolve_newer_project_session_id(self, session_id: str, *, cwd: str | None = None) -> str | None:
+    def _resolve_newer_project_session_id(
+        self,
+        session_id: str,
+        *,
+        cwd: str | None = None,
+        pane_id: str = "",
+    ) -> str | None:
         current_path = self.find_session_file(session_id, cwd=cwd)
         if current_path is None:
             return None
@@ -163,7 +173,38 @@ class ClaudeAdapter:
                 break
             meta = self.read_meta(candidate)
             if meta and meta.session_id:
+                if pane_id and self._session_claimed_by_other_window_pane(
+                    pane_id,
+                    meta.session_id,
+                ):
+                    return None
                 return meta.session_id
+        return None
+
+    def _session_claimed_by_other_window_pane(self, pane_id: str, session_id: str) -> bool:
+        window_target = tmux.get_pane_window_target(pane_id) or ""
+        if not window_target:
+            return False
+        for pane in tmux.list_panes_full(window_target):
+            if pane.pane_id == pane_id:
+                continue
+            other_session_id = self._read_pid_mapped_session_id(pane.pane_id)
+            if other_session_id == session_id:
+                return True
+        return False
+
+    def _read_pid_mapped_session_id(self, pane_id: str) -> str | None:
+        sessions_dir = _claude_home() / "sessions"
+        tty = tmux.get_pane_tty(pane_id) or ""
+        for process in tmux.list_tty_processes(tty):
+            if not _is_claude_process(process.command, process.argv):
+                continue
+            payload = _read_json_file(sessions_dir / f"{process.pid}.json")
+            if not payload:
+                continue
+            session_id = _str_or_none(payload.get("sessionId"))
+            if session_id:
+                return session_id
         return None
 
 
