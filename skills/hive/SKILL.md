@@ -94,7 +94,7 @@ hive teams                            # 列出已知 team
 - `hive answer` 用于回答 agent 的 pending question（AskUserQuestion）；只有目标处于 `waiting_user` 时才允许
 - `hive team` 的 `inputState` 字段是从 agent session transcript 实时探测的 runtime 状态，不是事件投影
 - GitHub PR comment / review 属于 workflow 层职责；需要发评论时直接用 `gh` / `gh api`，不要把这类 API 混进 Hive kernel 命令
-- Hive 不是严格可靠消息队列：没有幂等性或 backpressure；需要恢复上下文时，应依赖 durable store 投影（如 `hive inbox` / hidden `hive delivery`）和 workspace artifact
+- Hive 不是严格可靠消息队列：没有幂等性或 backpressure；消息接收主通道是 pane 内联的 `<HIVE ...>` block，不要把 durable store 当收件箱。需要恢复上下文时，应依赖 hidden `hive delivery` / `hive thread` 和 workspace artifact
 
 ## 加载 workflow
 

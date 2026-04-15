@@ -98,11 +98,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq
             ON messages(msg_id, intent, seq);
-
-        CREATE TABLE IF NOT EXISTS cursors (
-            agent_name TEXT PRIMARY KEY,
-            last_seen_seq INTEGER NOT NULL
-        );
         """
     )
     _migrate_messages_table(conn)
@@ -319,13 +314,6 @@ def read_events_with_ns(workspace: str | Path) -> list[tuple[int, dict[str, obje
     return [(int(row["seq"]), _row_to_event(row)) for row in rows]
 
 
-def get_latest_event_ns(workspace: str | Path) -> int:
-    """Return the latest durable sequence number, or 0 if no events."""
-    with _connect(workspace) as conn:
-        row = conn.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM messages").fetchone()
-    return int(row["seq"]) if row is not None else 0
-
-
 def count_events(workspace: str | Path) -> int:
     with _connect(workspace) as conn:
         row = conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
@@ -358,25 +346,3 @@ def find_latest_observation(workspace: str | Path, message_id: str) -> dict[str,
             (message_id,),
         ).fetchone()
     return _row_to_event(row) if row is not None else None
-
-
-def read_cursor(workspace: str | Path, agent_name: str) -> int:
-    with _connect(workspace) as conn:
-        row = conn.execute(
-            "SELECT last_seen_seq FROM cursors WHERE agent_name = ?",
-            (agent_name,),
-        ).fetchone()
-    return int(row["last_seen_seq"]) if row is not None else 0
-
-
-def write_cursor(workspace: str | Path, agent_name: str, ns_value: int) -> None:
-    with _connect(workspace) as conn:
-        conn.execute(
-            """
-            INSERT INTO cursors(agent_name, last_seen_seq)
-            VALUES (?, ?)
-            ON CONFLICT(agent_name) DO UPDATE SET last_seen_seq = excluded.last_seen_seq
-            """,
-            (agent_name, ns_value),
-        )
-        conn.commit()

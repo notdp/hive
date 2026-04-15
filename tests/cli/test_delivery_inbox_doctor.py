@@ -1,4 +1,4 @@
-"""Tests for hive inbox and doctor commands."""
+"""Tests for hive delivery and doctor commands."""
 
 import json
 
@@ -55,13 +55,7 @@ def _patch_sidecar_status_requests(monkeypatch):
 
         return _delivery_payload(workspace, {}, message_id)
 
-    def _request_inbox(workspace: str, *, agent_name: str, ack: bool = True):
-        from hive.sidecar import _inbox_payload
-
-        return _inbox_payload(workspace, {}, agent_name, ack)
-
     monkeypatch.setattr("hive.sidecar.request_delivery", _request_delivery)
-    monkeypatch.setattr("hive.sidecar.request_inbox", _request_inbox)
 
 
 # --- delivery ---
@@ -225,177 +219,6 @@ def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_
     assert payload["state"] == "unconfirmed"
     assert payload["recommendedAction"] == "cautious_retry"
     assert "not confirmed" in payload["meaning"]
-
-
-# --- inbox ---
-
-
-def test_inbox_shows_messages_to_self(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="gpt", to_agent="claude",
-        intent="send", body="hello claude", message_id="m1",
-    )
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 1
-    assert payload["messages"][0]["body"] == "hello claude"
-
-
-def test_inbox_hides_sender_transport_fields_for_incoming_messages(
-    runner, configure_hive_home, monkeypatch, tmp_path
-):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace,
-        from_agent="gpt",
-        to_agent="claude",
-        intent="send",
-        body="transport details should stay hidden",
-        message_id="m2",
-    )
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    message = payload["messages"][0]
-    assert message["msgId"] == "m2"
-    assert message["body"] == "transport details should stay hidden"
-    assert "injectStatus" not in message
-    assert "turnObserved" not in message
-    assert "runtimeQueueState" not in message
-    assert "queueSource" not in message
-
-
-def test_inbox_advances_cursor_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="gpt", to_agent="claude",
-        intent="send", body="first", message_id="m1",
-    )
-
-    runner.invoke(cli, ["inbox"])
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 0
-
-
-def test_inbox_peek_preserves_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="gpt", to_agent="claude",
-        intent="send", body="first", message_id="m1",
-    )
-
-    runner.invoke(cli, ["inbox", "--peek"])
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 1
-
-
-def test_inbox_ack_explicitly_advances_cursor(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="gpt", to_agent="claude",
-        intent="send", body="first", message_id="m1",
-    )
-
-    runner.invoke(cli, ["inbox", "--ack"])
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 0
-
-
-def test_inbox_ignores_self_observations(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="claude", to_agent="gpt",
-        intent="send", body="waited msg", message_id="w1",
-    )
-    bus.write_event(
-        workspace,
-        from_agent="_system",
-        to_agent="",
-        intent="observation",
-        message_id="w1",
-        metadata={
-            "msgId": "w1",
-            "result": "confirmed",
-            "observedAt": "2026-04-14T00:00:00Z",
-            "injectStatus": "submitted",
-            "turnObserved": "confirmed",
-        },
-    )
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 0
-    assert payload["messages"] == []
-
-
-def test_inbox_does_not_synthesize_tracking_lost_for_self_sends(
-    runner, configure_hive_home, monkeypatch, tmp_path
-):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _setup_team(monkeypatch, workspace)
-    _patch_sidecar_status_requests(monkeypatch)
-
-    bus.write_event(
-        workspace, from_agent="claude", to_agent="gpt",
-        intent="send", body="pending msg", message_id="p1",
-    )
-
-    result = runner.invoke(cli, ["inbox"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["unread"] == 0
-    assert payload["messages"] == []
-
-    from hive.observer import find_observation
-
-    obs = find_observation(str(workspace), "p1")
-    assert obs is None
 
 
 # --- doctor ---

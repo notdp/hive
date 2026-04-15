@@ -25,7 +25,7 @@ from .runtime_state import (
     format_hive_envelope,
     present_delivery_state,
     present_send_state,
-    project_inbox_event,
+    project_thread_event,
 )
 
 IDLE_SLEEP = 5.0
@@ -344,14 +344,6 @@ def request_delivery(workspace: str, message_id: str) -> dict[str, Any] | None:
     return _request_sidecar(
         workspace,
         {"action": "delivery", "msgId": message_id},
-        timeout=SOCKET_RETRY_INTERVAL,
-    )
-
-
-def request_inbox(workspace: str, *, agent_name: str, ack: bool = True) -> dict[str, Any] | None:
-    return _request_sidecar(
-        workspace,
-        {"action": "inbox", "agent": agent_name, "ack": ack},
         timeout=SOCKET_RETRY_INTERVAL,
     )
 
@@ -888,32 +880,6 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
     return payload
 
 
-def _inbox_payload(workspace: str, pending: dict[str, dict[str, Any]], agent_name: str, ack: bool) -> dict[str, Any]:
-    cursor = bus.read_cursor(workspace, agent_name)
-    events = bus.read_events_with_ns(workspace)
-
-    unread: list[dict[str, object]] = []
-    latest_ns = cursor
-    for ns, ev in events:
-        if ns <= cursor:
-            continue
-        latest_ns = max(latest_ns, ns)
-        if ev.get("to") == agent_name:
-            unread.append(project_inbox_event(ev))
-
-    actual_latest = bus.get_latest_event_ns(workspace)
-    final_ns = max(latest_ns, actual_latest)
-    if ack and final_ns > cursor:
-        bus.write_cursor(workspace, agent_name, final_ns)
-
-    return {
-        "ok": True,
-        "agent": agent_name,
-        "unread": len(unread),
-        "messages": unread,
-    }
-
-
 def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbose: bool = False) -> dict[str, Any]:
     from .team import Team
 
@@ -958,7 +924,6 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbos
             diag["gateReason"] = runtime["_gateReason"]
         diag["workspace"] = str(workspace)
         diag["eventCount"] = bus.count_events(workspace)
-        diag["cursor"] = bus.read_cursor(workspace, target_agent)
     return diag
 
 
@@ -1265,7 +1230,7 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
     items: list[dict[str, Any]] = []
     for thread_msg_id in sorted(thread_ids, key=lambda item: send_events[item][0]):
         _, event = send_events[thread_msg_id]
-        item = project_inbox_event(event)
+        item = project_thread_event(event)
         item["depth"] = depth_map.get(thread_msg_id, 0)
         if thread_msg_id == message_id:
             item["focus"] = True
@@ -1429,13 +1394,6 @@ def _handle_request(
         return {"ok": True, "state": _live_state(record)}, True
     if action == "delivery":
         return _delivery_payload(workspace, pending, str(request.get("msgId", ""))), True
-    if action == "inbox":
-        return _inbox_payload(
-            workspace,
-            pending,
-            str(request.get("agent", "")),
-            bool(request["ack"]) if "ack" in request else True,
-        ), True
     if action == "doctor":
         try:
             response = _doctor_payload(

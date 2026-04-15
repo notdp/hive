@@ -12,6 +12,15 @@ def test_init_workspace_creates_expected_directories(tmp_path):
     assert (workspace / bus.DB_FILENAME).is_file()
 
 
+def test_init_workspace_does_not_create_cursor_table(tmp_path):
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    with sqlite3.connect(workspace / bus.DB_FILENAME) as conn:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+
+    assert "cursors" not in {str(name) for (name,) in rows}
+
+
 def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
     workspace = bus.init_workspace(tmp_path / "ws")
     bus.write_event(

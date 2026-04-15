@@ -38,7 +38,6 @@ _COMMAND_HELP_SECTIONS = {
     "workflow": "Team Setup",
     "send": "Communication",
     "answer": "Communication",
-    "inbox": "Communication",
     "doctor": "Context",
     "inject": "Pane Control",
     "capture": "Pane Control",
@@ -66,7 +65,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Context": "Inspect or bind the current tmux window to a Hive team.",
     "Team Setup": "Create teams and register panes for the current window.",
-    "Communication": "Exchange Hive messages and inspect projected collaboration state.",
+    "Communication": "Exchange Hive messages and inspect durable delivery or thread state.",
     "Pane Control": "Drive agent or terminal panes directly when needed.",
     "Plugin Helpers": "Human-only editor and split helpers backed by enabled plugin scripts. Droid exposes them as native slash commands (`/cvim`, `/vim`, ...); in Claude Code and Codex the human types them inline via the shell escape (e.g. `!hive cvim`). These are NOT meant for the model to call on its own.",
     "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
@@ -1245,30 +1244,6 @@ def thread(message_id: str):
         _fail("sidecar unavailable")
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "thread lookup failed")))
-    payload.pop("ok", None)
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-@cli.command()
-@click.option(
-    "--ack/--peek",
-    default=True,
-    help="Advance the inbox cursor after reading (default: --ack)",
-)
-def inbox(ack: bool):
-    """Show unread messages and advance the cursor unless --peek is set."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    self_name = _resolve_sender(None)
-    from .sidecar import ensure_sidecar, request_inbox
-
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
-    payload = request_inbox(str(ws), agent_name=self_name, ack=ack)
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "inbox failed")))
     payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 

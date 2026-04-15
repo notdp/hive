@@ -645,7 +645,7 @@ def test_init_classifies_terminals(runner, configure_hive_home, monkeypatch, moc
 
 
 def test_legacy_commands_removed(runner):
-    for command in ("comment", "wait", "read"):
+    for command in ("comment", "wait", "read", "inbox"):
         result = runner.invoke(cli, [command, "--help"])
         assert result.exit_code != 0
         assert f"No such command '{command}'" in result.output
@@ -665,6 +665,7 @@ def test_root_help_groups_commands_by_area(runner):
     assert "Examples:" in result.output
     assert "hive init" in result.output
     assert "team" in result.output and "Show team overview." in result.output
+    assert "inbox     " not in result.output
     assert "status  Show projected collaboration statuses." not in result.output
     assert "inject     Debug: inject raw input into an agent pane." in result.output
     assert "plugin  Manage first-party Hive plugins." in result.output

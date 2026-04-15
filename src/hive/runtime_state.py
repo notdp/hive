@@ -102,8 +102,8 @@ def delivery_exception_body(
     return None
 
 
-def project_inbox_event(event: dict[str, object]) -> dict[str, object]:
-    """Project durable events into the smaller inbox-facing shape."""
+def project_thread_event(event: dict[str, object]) -> dict[str, object]:
+    """Project durable send events into the smaller thread-facing shape."""
     projected: dict[str, object] = {}
     for key in (
         "from",
@@ -120,27 +120,6 @@ def project_inbox_event(event: dict[str, object]) -> dict[str, object]:
         if value in ("", None):
             continue
         projected[key] = value
-    return projected
-
-
-def project_inbox_observation(event: dict[str, object]) -> dict[str, object]:
-    """Project observation events into a smaller inbox-facing shape."""
-    projected: dict[str, object] = {}
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-    msg_id = event.get("msgId") or metadata.get("msgId")
-    if msg_id not in ("", None):
-        projected["msgId"] = msg_id
-    if event.get("intent"):
-        projected["intent"] = event["intent"]
-    if event.get("createdAt"):
-        projected["createdAt"] = event["createdAt"]
-    obs_meta: dict[str, object] = {}
-    if metadata.get("result") not in ("", None):
-        obs_meta["result"] = metadata["result"]
-    if metadata.get("observedAt") not in ("", None):
-        obs_meta["observedAt"] = metadata["observedAt"]
-    if obs_meta:
-        projected["metadata"] = obs_meta
     return projected
 
 

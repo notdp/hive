@@ -15,7 +15,6 @@ tmux window
 hive init ────→ bind current tmux window as a team
 hive send ────→ inject <HIVE msgId=... > message, track delivery
 hive answer ──→ answer a pending AskUserQuestion
-hive inbox ───→ check unread messages + delivery observations
 hive doctor ──→ diagnose agent connectivity
 workspace ────→ hive.db (SQLite) + artifacts/ + sidecar daemon
 ```
@@ -51,10 +50,6 @@ hive send orch "fixed" --reply-to aBc1
 # Answer a pending question
 hive answer dodo "yes"
 
-# Check unread messages
-hive inbox
-hive inbox --peek  # inspect without advancing the cursor
-
 # Diagnose connectivity
 hive doctor
 hive doctor dodo
@@ -75,7 +70,6 @@ hive notify "done, press Space to come back"
 | `hive team` / `hive teams` | Show team with runtime inputState, or list teams |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
-| `hive inbox` / `hive inbox --peek` | View unread messages and mark as read / inspect without marking |
 | `hive doctor [agent]` | Diagnose agent connectivity |
 | `hive spawn <agent>` | Spawn a new agent pane |
 | `hive fork` | Fork current session into a new split |
@@ -96,7 +90,7 @@ hive notify "done, press Space to come back"
 
 ```
 workspace/
-├── hive.db         # SQLite: messages, observations, cursors
+├── hive.db         # SQLite: messages + observations
 ├── artifacts/      # Large payloads exchanged by path
 ├── state/          # Shared key-value state files
 └── run/            # Sidecar socket and runtime files
