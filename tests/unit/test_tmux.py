@@ -102,7 +102,13 @@ def test_context_helpers_use_environment_and_display_message(monkeypatch):
         lambda args, check=False, timeout=5: subprocess.CompletedProcess(
             ["tmux", *args],
             0,
-            "dev:2\n" if "#{session_name}:#{window_index}" in args else ("dev\n" if "#{session_name}" in args else "2\n"),
+            (
+                "dev:2\n" if "#{session_name}:#{window_index}" in args else (
+                    "dev\n" if "#{session_name}" in args else (
+                        "@42\n" if "#{window_id}" in args else "2\n"
+                    )
+                )
+            ),
             "",
         ),
     )
@@ -112,6 +118,8 @@ def test_context_helpers_use_environment_and_display_message(monkeypatch):
     assert tmux.get_current_window_target() == "dev:2"
     assert tmux.get_current_session_name() == "dev"
     assert tmux.get_current_window_index() == "2"
+    assert tmux.get_current_window_id() == "@42"
+    assert tmux.get_window_id("dev:2") == "@42"
 
 
 def test_client_mode_and_popup_support_helpers(monkeypatch):
@@ -185,6 +193,7 @@ def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
     assert tmux.get_current_window_target() is None
     assert tmux.get_current_session_name() is None
     assert tmux.get_current_window_index() is None
+    assert tmux.get_current_window_id() is None
 
 
 def test_list_panes_with_titles_and_full_parse_rows(monkeypatch):

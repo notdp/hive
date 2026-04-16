@@ -55,6 +55,29 @@ def test_reset_workspace_recreates_managed_dirs_and_clears_contents(tmp_path):
     assert (workspace / "keep.txt").read_text() == "keep"
 
 
+def test_reset_workspace_removes_sqlite_trio_before_reconnect(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    db_path = workspace / bus.DB_FILENAME
+    wal_path = workspace / f"{bus.DB_FILENAME}-wal"
+    shm_path = workspace / f"{bus.DB_FILENAME}-shm"
+    db_path.write_text("db")
+    wal_path.write_text("wal")
+    shm_path.write_text("shm")
+
+    class _DummyConn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("hive.bus._connect", lambda _workspace: _DummyConn())
+
+    bus.reset_workspace(workspace)
+
+    assert not db_path.exists()
+    assert not wal_path.exists()
+    assert not shm_path.exists()
+
+
 def test_parse_key_value_parses_and_overwrites_later_values():
     payload = bus.parse_key_value(["repo=owner/repo", "stage=1", "stage=2"])
 

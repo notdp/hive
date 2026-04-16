@@ -26,6 +26,7 @@ def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_ho
     assert team.lead_session_id == "sess-123"
     assert team.tmux_session == "dev"
     assert team.tmux_window == "dev:0"
+    assert team.tmux_window_id == "@0"
     assert tagged == [("%7", "agent", "orch", "team-a")]
     assert borders == ["dev:0"]
 
@@ -71,6 +72,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.name == "team-a"
     assert loaded.description == "demo"
     assert loaded.tmux_window == "dev:0"
+    assert loaded.tmux_window_id == "@0"
     assert loaded.lead_pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
     assert loaded.terminals["shell"].pane_id == "%2"

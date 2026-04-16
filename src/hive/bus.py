@@ -200,8 +200,13 @@ def reset_workspace(workspace: str | Path) -> Path:
         if name in WORKSPACE_DIRS:
             root.mkdir(parents=True, exist_ok=True)
     db_path = _db_path(ws)
-    if db_path.exists():
-        db_path.unlink()
+    for path in (
+        db_path,
+        Path(str(db_path) + "-wal"),
+        Path(str(db_path) + "-shm"),
+    ):
+        if path.exists():
+            path.unlink()
     conn = _connect(ws)
     conn.close()
     return ws

@@ -43,6 +43,7 @@ class Team:
     lead_session_id: str | None = None
     tmux_session: str = ""
     tmux_window: str = ""
+    tmux_window_id: str = ""
 
     # --- Window-level tmux options ---
 
@@ -84,6 +85,7 @@ class Team:
         team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
         team.tmux_session = tmux.get_current_session_name() or ""
         team.tmux_window = window_target
+        team.tmux_window_id = tmux.get_current_window_id() or ""
         if team.lead_pane_id:
             tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
 
@@ -110,6 +112,7 @@ class Team:
             created_at=float(window_data.get("created") or 0),
             tmux_session=window_target.split(":")[0] if ":" in window_target else "",
             tmux_window=window_target,
+            tmux_window_id=window_data.get("window_id", ""),
         )
 
         panes = tmux.list_panes_full(window_target)
@@ -298,7 +301,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
     """
     r = tmux._run([
         "list-windows", "-a", "-F",
-        "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
+        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
     ], check=False)
 
     candidates: list[tuple[str, dict[str, str]]] = []
@@ -306,13 +309,16 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
         if not line:
             continue
         parts = line.split("\t")
-        while len(parts) < 5:
+        if len(parts) == 5:
+            parts.insert(1, "")
+        while len(parts) < 6:
             parts.append("")
-        if parts[1] == name:
+        if parts[2] == name:
             candidates.append((parts[0], {
-                "workspace": parts[2],
-                "desc": parts[3],
-                "created": parts[4],
+                "window_id": parts[1],
+                "workspace": parts[3],
+                "desc": parts[4],
+                "created": parts[5],
             }))
 
     if not candidates:

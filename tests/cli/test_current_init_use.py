@@ -213,6 +213,45 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
     }
 
 
+def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%5", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: "@2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
+    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda *_args, **_kwargs: None)
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%5", "", command="droid")],
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_stop(workspace: str) -> None:
+        calls.append(("stop", workspace))
+
+    def _fake_reset(workspace):
+        calls.append(("reset", str(workspace)))
+        return bus.init_workspace(workspace)
+
+    monkeypatch.setattr("hive.sidecar.stop_sidecar", _fake_stop)
+    monkeypatch.setattr("hive.cli.bus.reset_workspace", _fake_reset)
+
+    result = runner.invoke(cli, ["init", "--no-notify"])
+
+    assert result.exit_code == 0
+    assert calls[:2] == [
+        ("stop", "/tmp/hive-dev-2"),
+        ("reset", "/tmp/hive-dev-2"),
+    ]
+
+
 def test_init_registers_current_unbound_pane_into_existing_team(
     runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
 ):

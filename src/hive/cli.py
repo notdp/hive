@@ -297,15 +297,36 @@ def _read_state(workspace: str, key: str, required: bool = True) -> str:
     return path.read_text().strip()
 
 
+def _team_window_identity(t: Team) -> tuple[str, str]:
+    window_target = getattr(t, "tmux_window", "") or tmux.get_current_window_target() or ""
+    window_id = getattr(t, "tmux_window_id", "") or ""
+    if not window_id and window_target:
+        window_id = tmux.get_window_id(window_target) or ""
+    if not window_id:
+        window_id = tmux.get_current_window_id() or ""
+    if window_target and not getattr(t, "tmux_window", ""):
+        t.tmux_window = window_target
+    if window_id and not getattr(t, "tmux_window_id", ""):
+        t.tmux_window_id = window_id
+    return window_target, window_id
+
+
+def _ensure_team_sidecar(t: Team, workspace: str | Path) -> int | None:
+    from .sidecar import ensure_sidecar
+
+    window_target, window_id = _team_window_identity(t)
+    return ensure_sidecar(str(workspace), t.name, window_target, window_id)
+
+
 def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -> dict[str, object]:
     if not payload.get("agent"):
         return payload
-    from .sidecar import ensure_sidecar, request_team_runtime
+    from .sidecar import request_team_runtime
 
     ws = _resolve_workspace(t, required=False)
     if not ws:
         return payload
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     runtime = request_team_runtime(str(ws), team=t.name)
     if not runtime or runtime.get("ok") is False:
         return payload
@@ -322,12 +343,12 @@ def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -
 
 
 def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> dict[str, object]:
-    from .sidecar import ensure_sidecar, request_team_runtime
+    from .sidecar import request_team_runtime
 
     ws = _resolve_workspace(t, required=False)
     if not ws:
         return payload
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     runtime = request_team_runtime(str(ws), team=t.name)
     if not runtime or runtime.get("ok") is False:
         return payload
@@ -845,6 +866,9 @@ def init_cmd(name: str, workspace: str, notify: bool):
     if using_auto_workspace:
         # A fresh `hive init` on the same tmux window should not inherit the
         # previous team's event log or artifacts from the default auto workspace.
+        from .sidecar import stop_sidecar
+
+        stop_sidecar(str(ws_path))
         bus.reset_workspace(ws_path)
     else:
         bus.init_workspace(ws_path)
@@ -896,8 +920,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
         })
 
     # Start team sidecar for pending send tracking.
-    from .sidecar import ensure_sidecar
-    ensure_sidecar(str(ws_path), team_name, window_target)
+    _ensure_team_sidecar(t, ws_path)
 
     result = {
         "team": team_name,
@@ -1227,9 +1250,9 @@ def send(
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    from .sidecar import ensure_sidecar, request_send
+    from .sidecar import request_send
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_send(
         str(ws),
         team=t.name,
@@ -1262,9 +1285,9 @@ def answer(agent_name: str, text: str):
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
-    from .sidecar import ensure_sidecar, request_answer
+    from .sidecar import request_answer
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_answer(
         str(ws),
         team=t.name,
@@ -1287,9 +1310,9 @@ def delivery(message_id: str):
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
-    from .sidecar import ensure_sidecar, request_delivery
+    from .sidecar import request_delivery
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_delivery(str(ws), message_id)
     if not payload:
         _fail("sidecar unavailable")
@@ -1307,9 +1330,9 @@ def suggest(source_agent: str):
     assert t is not None
     ws = _resolve_workspace(t, required=True)
     resolved_source = source_agent or _resolve_sender(None)
-    from .sidecar import ensure_sidecar, request_suggest
+    from .sidecar import request_suggest
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_suggest(str(ws), team=t.name, source_agent=resolved_source)
     if not payload:
         _fail("sidecar unavailable")
@@ -1326,9 +1349,9 @@ def thread(message_id: str):
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
-    from .sidecar import ensure_sidecar, request_thread
+    from .sidecar import request_thread
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_thread(str(ws), message_id)
     if not payload:
         _fail("sidecar unavailable")
@@ -1349,9 +1372,9 @@ def doctor(agent_name: str, include_skills: bool):
     self_name = _resolve_sender(None)
 
     target_name = agent_name or self_name
-    from .sidecar import ensure_sidecar, request_doctor
+    from .sidecar import request_doctor
 
-    ensure_sidecar(str(ws), t.name, t.tmux_window)
+    _ensure_team_sidecar(t, ws)
     payload = request_doctor(str(ws), team=t.name, target_agent=target_name, verbose=True)
     if not payload:
         _fail("sidecar unavailable")

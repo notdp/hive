@@ -248,11 +248,30 @@ def _apply_queue_probe(record: dict[str, Any], probe: dict[str, str]) -> None:
 
 
 def _socket_alive(workspace: str) -> bool:
-    response = _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
+    response = request_ping(workspace)
     return bool(
         response
         and response.get("ok") is True
         and response.get("apiVersion") == SIDECAR_API_VERSION
+    )
+
+
+def request_ping(workspace: str) -> dict[str, Any] | None:
+    return _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
+
+
+def _sidecar_identity_matches(
+    response: dict[str, Any] | None,
+    *,
+    team: str,
+    tmux_window_id: str,
+) -> bool:
+    return bool(
+        response
+        and response.get("ok") is True
+        and response.get("apiVersion") == SIDECAR_API_VERSION
+        and response.get("team") == team
+        and response.get("tmuxWindowId") == tmux_window_id
     )
 
 
@@ -1281,24 +1300,25 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
     }
 
 
-def _is_tmux_window_alive(tmux_window: str) -> bool:
+def _is_tmux_window_alive(tmux_window_id: str) -> bool:
     import subprocess
 
+    if not tmux_window_id:
+        return False
     try:
-        session = tmux_window.split(":")[0] if ":" in tmux_window else tmux_window
-        window_idx = tmux_window.split(":")[-1] if ":" in tmux_window else ""
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", session, "-F", "#{window_index}"],
+            ["tmux", "display-message", "-t", tmux_window_id, "-p", "#{window_id}"],
             capture_output=True,
             text=True,
+            check=False,
             timeout=5,
         )
-        return window_idx in result.stdout.strip().split("\n")
+        return result.returncode == 0 and result.stdout.strip() == tmux_window_id
     except Exception:
         return False
 
 
-def ensure_sidecar(workspace: str, team: str, tmux_window: str) -> int | None:
+def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int | None:
     """Ensure the team sidecar socket is alive."""
     lock_path = _lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1308,13 +1328,17 @@ def ensure_sidecar(workspace: str, team: str, tmux_window: str) -> int | None:
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        if _socket_alive(workspace):
+        response = request_ping(workspace)
+        if _sidecar_identity_matches(response, team=team, tmux_window_id=tmux_window_id):
             return None
+        if response:
+            stop_sidecar(workspace)
         _cleanup_socket(workspace)
-        pid = _start_sidecar(workspace, team, tmux_window)
+        pid = _start_sidecar(workspace, team, tmux_window, tmux_window_id)
         deadline = time.monotonic() + SOCKET_READY_TIMEOUT
         while time.monotonic() < deadline:
-            if _socket_alive(workspace):
+            response = request_ping(workspace)
+            if _sidecar_identity_matches(response, team=team, tmux_window_id=tmux_window_id):
                 return pid
             time.sleep(SOCKET_RETRY_INTERVAL)
         return pid
@@ -1323,7 +1347,7 @@ def ensure_sidecar(workspace: str, team: str, tmux_window: str) -> int | None:
         os.close(lock_fd)
 
 
-def _start_sidecar(workspace: str, team: str, tmux_window: str) -> int:
+def _start_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int:
     pid = os.fork()
     if pid == 0:
         try:
@@ -1334,7 +1358,7 @@ def _start_sidecar(workspace: str, team: str, tmux_window: str) -> int:
             os.dup2(devnull, 2)
             os.close(devnull)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
-            _sidecar_loop(workspace, team, tmux_window)
+            _sidecar_loop(workspace, team, tmux_window, tmux_window_id)
         except Exception:
             pass
         finally:
@@ -1361,12 +1385,20 @@ def _handle_request(
     *,
     workspace: str,
     team: str,
+    tmux_window: str,
+    tmux_window_id: str,
     pending: dict[str, dict[str, Any]],
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     action = request.get("action")
     if action == "ping":
-        return {"ok": True, "apiVersion": SIDECAR_API_VERSION}, True
+        return {
+            "ok": True,
+            "apiVersion": SIDECAR_API_VERSION,
+            "team": team,
+            "tmuxWindow": tmux_window,
+            "tmuxWindowId": tmux_window_id,
+        }, True
     if action == "send":
         try:
             response = _send_payload(
@@ -1463,6 +1495,8 @@ def _serve_requests(
     server: socket.socket,
     workspace: str,
     team: str,
+    tmux_window: str,
+    tmux_window_id: str,
     pending: dict[str, dict[str, Any]],
     timeout: float,
 ) -> bool:
@@ -1499,6 +1533,8 @@ def _serve_requests(
             response, keep_running = _handle_request(
                 workspace=workspace,
                 team=team,
+                tmux_window=tmux_window,
+                tmux_window_id=tmux_window_id,
                 pending=pending,
                 request=request if isinstance(request, dict) else {},
             )
@@ -1510,7 +1546,7 @@ def _serve_requests(
             return False
 
 
-def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
+def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
     pending: dict[str, dict[str, Any]] = {}
     last_window_check = 0.0
     server = _open_server_socket(workspace)
@@ -1523,13 +1559,15 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str) -> None:
             now = time.monotonic()
             if now - last_window_check >= 30.0:
                 last_window_check = now
-                if not _is_tmux_window_alive(tmux_window):
+                if not _is_tmux_window_alive(tmux_window_id):
                     return
 
             if not _serve_requests(
                 server=server,
                 workspace=workspace,
                 team=team,
+                tmux_window=tmux_window,
+                tmux_window_id=tmux_window_id,
                 pending=pending,
                 timeout=ACTIVE_SLEEP if pending else IDLE_SLEEP,
             ):

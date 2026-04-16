@@ -161,14 +161,57 @@ def test_inject_exception_uses_tracking_lost_wording(monkeypatch):
 def test_socket_alive_requires_matching_api_version(monkeypatch):
     monkeypatch.setattr(
         sidecar,
-        "_request_sidecar",
+        "request_ping",
         lambda *_args, **_kwargs: {"ok": True},
     )
     assert sidecar._socket_alive("/tmp/ws") is False
 
     monkeypatch.setattr(
         sidecar,
-        "_request_sidecar",
+        "request_ping",
         lambda *_args, **_kwargs: {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
     )
     assert sidecar._socket_alive("/tmp/ws") is True
+
+
+def test_sidecar_identity_requires_matching_team_and_window_id():
+    assert sidecar._sidecar_identity_matches(
+        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
+        team="team-a",
+        tmux_window_id="@7",
+    ) is False
+    assert sidecar._sidecar_identity_matches(
+        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-b", "tmuxWindowId": "@7"},
+        team="team-a",
+        tmux_window_id="@7",
+    ) is False
+    assert sidecar._sidecar_identity_matches(
+        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-a", "tmuxWindowId": "@9"},
+        team="team-a",
+        tmux_window_id="@7",
+    ) is False
+    assert sidecar._sidecar_identity_matches(
+        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-a", "tmuxWindowId": "@7"},
+        team="team-a",
+        tmux_window_id="@7",
+    ) is True
+
+
+def test_handle_request_ping_returns_sidecar_identity():
+    response, keep_running = sidecar._handle_request(
+        workspace="/tmp/ws",
+        team="team-a",
+        tmux_window="dev:3",
+        tmux_window_id="@99",
+        pending={},
+        request={"action": "ping"},
+    )
+
+    assert keep_running is True
+    assert response == {
+        "ok": True,
+        "apiVersion": sidecar.SIDECAR_API_VERSION,
+        "team": "team-a",
+        "tmuxWindow": "dev:3",
+        "tmuxWindowId": "@99",
+    }

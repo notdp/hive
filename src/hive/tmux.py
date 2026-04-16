@@ -231,6 +231,14 @@ def get_current_window_index() -> str | None:
     return r.stdout.strip() or None
 
 
+def get_current_window_id() -> str | None:
+    """Get the stable tmux window id for the calling pane."""
+    pane_id = get_current_pane_id()
+    if not pane_id:
+        return None
+    return display_value(pane_id, "#{window_id}")
+
+
 def display_value(target: str, fmt: str) -> str | None:
     r = _run([
         "display-message", "-t", target, "-p", fmt,
@@ -387,6 +395,10 @@ def list_tty_commands(tty: str) -> list[str]:
 
 def get_pane_window_target(pane_id: str) -> str | None:
     return display_value(pane_id, "#{session_name}:#{window_index}")
+
+
+def get_window_id(target: str) -> str | None:
+    return display_value(target, "#{window_id}")
 
 
 def get_pane_session_name(pane_id: str) -> str | None:
