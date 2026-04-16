@@ -694,30 +694,29 @@ def test_root_help_groups_commands_by_area(runner):
     result = runner.invoke(cli, ["--help"])
 
     assert result.exit_code == 0
-    assert "Hive - tmux-first multi-agent collaboration runtime." in result.output
-    assert "Context:" in result.output
-    assert "Agent Workflow:" in result.output
-    assert "Team Setup:" in result.output
-    assert "Communication:" in result.output
-    assert "Pane Control:" in result.output
-    assert "Extensions:" in result.output
-    assert "User Attention:" in result.output
-    assert "Examples:" in result.output
-    assert "hive init" in result.output
-    assert "team" in result.output and "Show team overview." in result.output
-    assert "inbox     " not in result.output
-    assert "status  Show projected collaboration statuses." not in result.output
-    assert "inject     Debug: inject raw input into an agent pane." in result.output
-    assert "plugin  Manage first-party Hive plugins." in result.output
-    assert "who" not in result.output
-    assert "statuses     " not in result.output
-    assert "status-show" not in result.output
-    assert "  type " not in result.output
-    assert "current   Show current Hive context." in result.output
-    assert "delivery  Check delivery status of a sent message by ID." in result.output
-    assert "suggest   Suggest likely collaboration candidates." in result.output
-    assert "thread    Show a reply thread rooted at a msgId." in result.output
-    assert "activity  Classify transcript activity as active/idle/unknown." in result.output
+    output = result.output
+    assert "Hive - tmux-first multi-agent collaboration runtime." in output
+    for section in ("Daily:", "Handoff:", "Debug:", "Plugin Helpers:", "Extensions:", "Examples:"):
+        assert section in output
+
+    for short_help in (
+        "Show current Hive context.",
+        "Show team overview.",
+        "Initialize a team from the current tmux window.",
+        "Suggest likely collaboration candidates.",
+        "Check delivery status of a sent message by ID.",
+        "Show a reply thread rooted at a msgId.",
+        "Classify transcript activity as active/idle/unknown.",
+        "Manage first-party Hive plugins.",
+    ):
+        assert short_help in output
+
+    assert "Debug: inject raw input into an agent pane." in output
+
+    for hidden in ("inbox", "status-show", "statuses", "who"):
+        assert f"  {hidden} " not in output
+    assert "status  Show projected collaboration statuses." not in output
+    assert "  type " not in output
 
 
 def test_layout_applies_preset(runner, configure_hive_home, monkeypatch, tmp_path):

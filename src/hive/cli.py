@@ -26,79 +26,75 @@ from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
 _COMMAND_HELP_SECTIONS = {
-    "teams": "Context",
-    "team": "Context",
-    "use": "Context",
-    "current": "Agent Workflow",
-    "suggest": "Agent Workflow",
-    "thread": "Agent Workflow",
-    "delivery": "Agent Workflow",
-    "activity": "Agent Workflow",
-    "init": "Team Setup",
-    "create": "Team Setup",
-    "delete": "Team Setup",
-    "fork": "Team Setup",
-    "spawn": "Team Setup",
-    "register": "Team Setup",
-    "layout": "Team Setup",
-    "workflow": "Team Setup",
-    "send": "Communication",
-    "answer": "Communication",
-    "doctor": "Context",
-    "inject": "Pane Control",
-    "capture": "Pane Control",
-    "interrupt": "Pane Control",
-    "kill": "Pane Control",
-    "exec": "Pane Control",
-    "terminal": "Pane Control",
+    # Daily — the default agent collaboration path.
+    "current": "Daily",
+    "init": "Daily",
+    "team": "Daily",
+    "send": "Daily",
+    "answer": "Daily",
+    "suggest": "Daily",
+    "notify": "Daily",
+    # Handoff — spawn/fork a pane, load a workflow, or bring a pane into the team.
+    "fork": "Handoff",
+    "spawn": "Handoff",
+    "workflow": "Handoff",
+    "register": "Handoff",
+    # Debug — diagnostics, durable-store inspection, low-level pane control, rare admin.
+    "doctor": "Debug",
+    "delivery": "Debug",
+    "thread": "Debug",
+    "teams": "Debug",
+    "activity": "Debug",
+    "peer": "Debug",
+    "capture": "Debug",
+    "inject": "Debug",
+    "interrupt": "Debug",
+    "kill": "Debug",
+    "exec": "Debug",
+    "terminal": "Debug",
+    "create": "Debug",
+    "delete": "Debug",
+    "layout": "Debug",
+    # Plugin Helpers (human-only, unchanged).
     "cvim": "Plugin Helpers",
     "vim": "Plugin Helpers",
     "vfork": "Plugin Helpers",
     "hfork": "Plugin Helpers",
+    # Extensions (unchanged).
     "plugin": "Extensions",
-    "notify": "User Attention",
 }
 _COMMAND_HELP_SECTION_ORDER = [
-    "Context",
-    "Agent Workflow",
-    "Team Setup",
-    "Communication",
-    "Pane Control",
+    "Daily",
+    "Handoff",
+    "Debug",
     "Plugin Helpers",
     "Extensions",
-    "User Attention",
     "Other Commands",
 ]
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
-    "Context": "Inspect or bind the current tmux window to a Hive team.",
-    "Agent Workflow": "Inspect your bound agent context and the common collaboration views used during agent work.",
-    "Team Setup": "Create teams and register panes for the current window.",
-    "Communication": "Exchange Hive messages and inspect durable delivery or thread state.",
-    "Pane Control": "Drive agent or terminal panes directly when needed.",
+    "Daily": "Daily agent path — inspect context, talk to peers, and pull the human in when necessary.",
+    "Handoff": "Spawn or fork a pane, or load a workflow so another agent can pick up the work.",
+    "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
     "Plugin Helpers": "Human-only editor and split helpers backed by enabled plugin scripts. Droid exposes them as native slash commands (`/cvim`, `/vim`, ...); in Claude Code and Codex the human types them inline via the shell escape (e.g. `!hive cvim`). These are NOT meant for the model to call on its own.",
     "Extensions": "Manage first-party Hive plugins that materialize commands and skills for Factory, Claude Code, and Codex.",
-    "User Attention": "Bring the human back to the right pane at the right time.",
 }
-_ROOT_HELP_EXAMPLES = '''# Create a team from the current tmux window
-hive init
+_ROOT_HELP_EXAMPLES = '''# Inspect current tmux/Hive binding
+hive current
 
-# Show team overview with runtime input state
+# Show team members, peers, and runtime input/activity state
 hive team
 
-# Send a message to another member
-hive send <peer-name> "review this diff"
+# Send a short message to a peer
+hive send dodo "review this diff"
 
-# Send with an artifact
-hive send orch "done" --artifact /tmp/review.md
+# Answer a pending AskUserQuestion from another agent
+hive answer dodo "yes"
 
-# Answer an agent's pending question
-hive answer <agent-name> "yes"
+# Find a good collaborator
+hive suggest
 
-# Run a command in a registered terminal pane
-hive exec term-1 "tail -f app.log"
-
-# Notify the user with a clear action
-hive notify "处理完成了，回来确认一下"'''
+# Send detailed context via stdin artifact (preferred for long content)
+printf '%s\\n' "# Findings" "- item" | hive send dodo "see report" --artifact -'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "_notify-hook"}
