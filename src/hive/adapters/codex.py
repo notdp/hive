@@ -200,7 +200,7 @@ def _codex_message_iter(handle) -> Iterator[Message]:
                     timestamp=timestamp,
                     raw=raw_payload,
                 )
-            elif item_type == "function_call":
+            elif item_type in {"function_call", "custom_tool_call"}:
                 args = body.get("arguments")
                 tool_input: dict[str, Any] | None = None
                 if isinstance(args, dict):
@@ -224,7 +224,7 @@ def _codex_message_iter(handle) -> Iterator[Message]:
                     timestamp=timestamp,
                     raw=raw_payload,
                 )
-            elif item_type == "function_call_output":
+            elif item_type in {"function_call_output", "custom_tool_call_output"}:
                 output = body.get("output")
                 if isinstance(output, dict):
                     output_text = str_or_none(output.get("content") or output.get("text"))
@@ -297,5 +297,4 @@ def _is_codex_process(command: str, argv: str) -> bool:
     if normalize_command_token(command) == "codex":
         return True
     return any(normalize_command_token(token) == "codex" for token in (argv or "").split())
-
 

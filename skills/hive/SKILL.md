@@ -43,7 +43,8 @@ npx skills add "$PWD" -g --skill hive --agent '*' -y
 ```bash
 hive current                          # 当前上下文（无 team 时自动发现 tmux）
 hive init                             # 从 tmux window 创建 team，自动注册所有 pane
-hive team                             # 查看成员和 runtime inputState
+hive team                             # 查看成员、peer 关系和 runtime inputState/activityState
+hive peer show                        # 查看当前 team 的默认 peer 关系
 hive send claude "hello"              # 发短消息（第1个参数=收件人，第2个=简短正文）
 hive send claude "see attachment" --artifact /tmp/file.md
 printf '%s\n' "# Findings" "- item" | hive send claude "see attachment" --artifact -
@@ -71,12 +72,15 @@ hive teams                            # 列出已知 team
   - `model`
   - `cli`
   - `inputState`
+  - `activityState`
+  - `isPeer`
 - 当前排序规则偏向：
   - 排除自己
   - 排除 offline
   - 优先 `ready`
-  - 优先不同 `model`
-  - 其次不同 `cli`
+  - 其次优先 `activityState=idle`
+  - 再看默认 `peer`
+  - 最后再看不同 `model` / `cli`
 - `suggest` 只是建议，不会自动发消息；选中对象后仍然用 `hive send <name> "<message>"`
 - 默认决策模板：先判断这是不是团队内可以消化的问题；只要属于评审、设计分歧、风险判断、卡住、能力不匹配、或需要别人接手，就先 `hive suggest`，不要先把用户当传话筒
 - 默认分工启发：Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctness、约束检查和严谨 review。若当前项目已有更明确的人选或团队经验，以项目事实为准
@@ -89,7 +93,7 @@ hive teams                            # 列出已知 team
 4. `hive send` 的 message body 默认只放动作 + 摘要；只有在内容本身足够短、单行且不需要保留详细上下文时，才直接把正文塞进消息
 5. 发任务、回传结果、同步进度时，默认写成 `hive send <name> "<short summary>" --artifact <path>`；不要把长报告、长 checklist、详细设计讨论、长 diff 说明直接塞进消息正文
 6. 详细内容、多行结构化内容、需要后续引用的上下文一律先写 artifact。首选 stdin artifact：`... | hive send <name> "<message>" --artifact -`；只有已有现成文件时才传 `--artifact <path>`。不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
-7. `hive team` 显示每个 agent 的 runtime `inputState`（ready / waiting_user / unknown / offline）；如果某个 agent 的 `inputState` 是 `waiting_user`，说明它在等答案，用 `hive answer` 回答
+7. `hive team` 显示每个 agent 的默认 `peer`、runtime `inputState` 和 `activityState`；如果某个 agent 的 `inputState` 是 `waiting_user`，说明它在等答案，用 `hive answer` 回答；`activityState=idle` 说明从 transcript 已落盘状态看，它更像空闲可协作对象
 8. 当你准备做以下任一动作时，先暂停，不要直接找用户：向用户提问、请求用户确认技术方案、用 `hive notify` 打断用户、让用户决定下一步该找谁/是否该先找别人讨论。
 9. 遇到评审、设计分歧、风险判断、实现卡住、上下文不足、能力不匹配、需要接手、需要 review、或不确定该由谁继续时，默认这是团队内问题，不是用户问题；升级给用户前，必须先跑 `hive team`，若问题适合协作，再跑 `hive suggest`，并优先联系 **非同源模型 / 非同 CLI** 的 agent。
 10. 在未完成上面的协作检查前，禁止直接问用户 `要不要我先找别人讨论`、`要不要我先问 orch/xxx`、`下一步该找谁 review/接手`；也禁止因为自己暂时不确定，就直接把技术判断升级给用户。不要把用户当传话筒。
@@ -109,7 +113,7 @@ hive teams                            # 列出已知 team
 
 - `hive send` 是发送消息的唯一入口，会写入 workspace durable store（当前是 `hive.db`）
 - `hive answer` 用于回答 agent 的 pending question（AskUserQuestion）；只有目标处于 `waiting_user` 时才允许
-- `hive team` 的 `inputState` 字段是从 agent session transcript 实时探测的 runtime 状态，不是事件投影
+- `hive team` 的 `inputState` / `activityState` 字段都是从 agent session transcript 实时探测的 runtime 状态，不是事件投影
 - GitHub PR comment / review 属于 workflow 层职责；需要发评论时直接用 `gh` / `gh api`，不要把这类 API 混进 Hive kernel 命令
 - Hive 不是严格可靠消息队列：没有幂等性或 backpressure；消息接收主通道是 pane 内联的 `<HIVE ...>` block，不要把 durable store 当收件箱。消息正文应保持短小，详细上下文默认放 artifact；需要恢复上下文时，应依赖 hidden `hive delivery` / `hive thread` 和 workspace artifact
 

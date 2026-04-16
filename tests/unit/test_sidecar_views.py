@@ -22,12 +22,16 @@ class _FakeTeam:
             "offline": _FakeAgent("offline", "%4", "claude"),
         }
         self.terminals = {}
+        self._peer_map = {"momo": "peer", "peer": "momo"}
 
     def lead_agent(self):
         return None
 
+    def resolve_peer(self, name: str):
+        return self._peer_map.get(name)
 
-def test_suggest_prefers_ready_different_model_and_cli(monkeypatch):
+
+def test_suggest_prefers_idle_before_default_peer_bias(monkeypatch):
     monkeypatch.setattr("hive.team.Team.load", lambda _team_name: _FakeTeam())
     monkeypatch.setattr(
         sidecar,
@@ -40,6 +44,9 @@ def test_suggest_prefers_ready_different_model_and_cli(monkeypatch):
                     "model": "gpt-5.4",
                     "inputState": "ready",
                     "_cli": "codex",
+                    "activityState": "idle",
+                    "activityReason": "assistant_terminal_message",
+                    "activityObservedAt": "2026-04-16T05:00:00Z",
                 },
                 "orch": {
                     "alive": True,
@@ -47,6 +54,9 @@ def test_suggest_prefers_ready_different_model_and_cli(monkeypatch):
                     "inputState": "ready",
                     "_cli": "claude",
                     "sessionId": "sess-orch",
+                    "activityState": "idle",
+                    "activityReason": "assistant_terminal_message",
+                    "activityObservedAt": "2026-04-16T05:01:00Z",
                 },
                 "peer": {
                     "alive": True,
@@ -54,6 +64,9 @@ def test_suggest_prefers_ready_different_model_and_cli(monkeypatch):
                     "inputState": "ready",
                     "_cli": "codex",
                     "sessionId": "sess-peer",
+                    "activityState": "active",
+                    "activityReason": "last_role_user",
+                    "activityObservedAt": "2026-04-16T05:02:00Z",
                 },
                 "offline": {
                     "alive": False,
@@ -69,11 +82,25 @@ def test_suggest_prefers_ready_different_model_and_cli(monkeypatch):
 
     assert payload["ok"] is True
     assert payload["source"]["name"] == "momo"
+    assert payload["source"]["peer"] == "peer"
+    assert payload["source"]["activityState"] == "idle"
+    assert payload["source"]["activityReason"] == "assistant_terminal_message"
+    assert payload["source"]["activityObservedAt"] == "2026-04-16T05:00:00Z"
     assert [candidate["name"] for candidate in payload["candidates"]] == ["orch", "peer"]
     assert payload["candidates"][0]["score"] > payload["candidates"][1]["score"]
+    assert payload["candidates"][0].get("isPeer") is not True
     assert "different_model" in payload["candidates"][0]["reasons"]
     assert "different_cli" in payload["candidates"][0]["reasons"]
-    assert payload["candidates"][1]["reasons"] == ["ready", "same_model_fallback", "same_cli_fallback"]
+    assert "activity_idle" in payload["candidates"][0]["reasons"]
+    assert payload["candidates"][0]["activityState"] == "idle"
+    assert payload["candidates"][0]["activityReason"] == "assistant_terminal_message"
+    assert payload["candidates"][0]["activityObservedAt"] == "2026-04-16T05:01:00Z"
+    assert payload["candidates"][1]["isPeer"] is True
+    assert "default_peer" in payload["candidates"][1]["reasons"]
+    assert "activity_active" in payload["candidates"][1]["reasons"]
+    assert payload["candidates"][1]["activityState"] == "active"
+    assert payload["candidates"][1]["activityReason"] == "last_role_user"
+    assert payload["candidates"][1]["activityObservedAt"] == "2026-04-16T05:02:00Z"
 
 
 def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):

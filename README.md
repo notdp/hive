@@ -43,6 +43,7 @@ npx skills add "$PWD" -g --skill hive --agent '*' -y
 # Inside tmux, bind the current window as a team
 hive init
 hive team
+hive peer show
 
 # Send a message (fire-and-forget, delivery tracked by sidecar)
 hive send dodo "review the staged diff"
@@ -77,7 +78,8 @@ hive notify "done, press Space to come back"
 |---------|-------------|
 | `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
-| `hive team` / `hive teams` | Show team with runtime inputState, or list teams |
+| `hive team` / `hive teams` | Show team with runtime inputState/activity and peer info, or list teams |
+| `hive peer show\|set\|clear` | Inspect or persist default peer pairs |
 | `hive send <agent> "text"` | Send message (fire-and-forget with delivery tracking) |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
 | `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |
@@ -144,6 +146,8 @@ hive plugin enable code-review && hive plugin enable cvim && hive plugin enable 
 
 PYTHONPATH=src python -m pytest tests/ -q
 ```
+
+If a local code change affects sidecar-backed behavior, do not trust an already-running sidecar during manual verification. After the install + skill refresh + plugin re-enable step, stop the current workspace sidecar first, then rerun the verification command so it starts a fresh daemon from the updated code. This applies to checks like `hive doctor`, delivery tracking, `hive activity`, and other sidecar-derived runtime fields.
 
 ## License
 

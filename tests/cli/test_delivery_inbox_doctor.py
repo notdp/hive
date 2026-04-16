@@ -438,3 +438,49 @@ def test_thread_command_outputs_thread_projection(runner, configure_hive_home, m
     assert payload["rootMsgId"] == "a001"
     assert payload["focusMsgId"] == "a002"
     assert payload["messages"][1]["focus"] is True
+
+
+def test_activity_command_outputs_activity_probe(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr(
+        "hive.sidecar.request_doctor",
+        lambda _ws, *, team, target_agent, verbose=False: {
+            "ok": True,
+            "agent": target_agent,
+            "team": team,
+            "alive": True,
+            "inputState": "ready",
+            "cli": "claude",
+            "pane": "%99",
+            "transcript": "/tmp/session.jsonl",
+            "transcriptExists": True,
+            "transcriptSize": 1234,
+            "activityState": "active",
+            "activityReason": "assistant_tool_use_open",
+            "activityObservedAt": "2026-04-16T05:00:00Z",
+            "activityRole": "assistant",
+            "activityPartKinds": ["tool_use"],
+            "activityEvidence": {
+                "tail": [
+                    {
+                        "role": "assistant",
+                        "partKinds": ["tool_use"],
+                        "observedAt": "2026-04-16T05:00:00Z",
+                    }
+                ]
+            },
+        },
+    )
+
+    result = runner.invoke(cli, ["activity"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["agent"] == "claude"
+    assert payload["activityState"] == "active"
+    assert payload["activityReason"] == "assistant_tool_use_open"
+    assert payload["activityRole"] == "assistant"
+    assert payload["activityPartKinds"] == ["tool_use"]

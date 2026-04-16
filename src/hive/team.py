@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class Team:
     tmux_session: str = ""
     tmux_window: str = ""
     tmux_window_id: str = ""
+    peer_map: dict[str, str] = field(default_factory=dict)
 
     # --- Window-level tmux options ---
 
@@ -57,6 +59,14 @@ class Team:
         if self.description:
             tmux.set_window_option(target, "@hive-desc", self.description)
         tmux.set_window_option(target, "@hive-created", str(self.created_at))
+        if self.peer_map:
+            tmux.set_window_option(
+                target,
+                "@hive-peers",
+                json.dumps(self._canonical_peer_map(self.peer_map), sort_keys=True, separators=(",", ":")),
+            )
+        else:
+            tmux.clear_window_option(target, "@hive-peers")
 
     # --- Lifecycle ---
 
@@ -113,6 +123,9 @@ class Team:
             tmux_session=window_target.split(":")[0] if ":" in window_target else "",
             tmux_window=window_target,
             tmux_window_id=window_data.get("window_id", ""),
+            peer_map=cls._parse_peer_map(
+                window_data.get("peers", "") or tmux.get_window_option(window_target, "hive-peers") or "",
+            ),
         )
 
         panes = tmux.list_panes_full(window_target)
@@ -141,6 +154,7 @@ class Team:
                     terminal = Terminal(name=pane.agent, pane_id=pane.pane_id)
                     team.terminals[pane.agent] = terminal
 
+        team.peer_map = team._canonical_peer_map(team.peer_map)
         return team
 
     def is_tmux_alive(self) -> bool:
@@ -154,6 +168,7 @@ class Team:
 
     def save(self) -> None:
         """Write team state to tmux options (window + pane level)."""
+        self.peer_map = self._canonical_peer_map(self.peer_map)
         self._write_window_options()
 
     def lead_agent(self) -> Agent | None:
@@ -246,17 +261,25 @@ class Team:
         members: list[dict[str, object]] = []
         lead = self.lead_agent()
         if lead is not None:
-            members.append({
+            row = {
                 "name": lead.name,
                 "role": member_role_for_pane(lead.pane_id),
                 "pane": lead.pane_id,
-            })
+            }
+            peer_name = self.resolve_peer(lead.name)
+            if peer_name:
+                row["peer"] = peer_name
+            members.append(row)
         for name in sorted(self.agents):
-            members.append({
+            row = {
                 "name": name,
                 "role": "agent",
                 "pane": self.agents[name].pane_id,
-            })
+            }
+            peer_name = self.resolve_peer(name)
+            if peer_name:
+                row["peer"] = peer_name
+            members.append(row)
         for name in sorted(self.terminals):
             terminal = self.terminals[name]
             members.append({
@@ -272,6 +295,148 @@ class Team:
             "tmuxWindow": self.tmux_window,
             "members": members,
         }
+
+    # --- Peer mapping ---
+
+    @staticmethod
+    def _parse_peer_map(raw: str) -> dict[str, str]:
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        parsed: dict[str, str] = {}
+        for name, peer in payload.items():
+            if not isinstance(name, str) or not isinstance(peer, str):
+                continue
+            name = name.strip()
+            peer = peer.strip()
+            if not name or not peer or name == peer:
+                continue
+            parsed[name] = peer
+        return parsed
+
+    @staticmethod
+    def _canonical_pairs(peer_map: dict[str, str], valid_names: set[str]) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for name in sorted(peer_map):
+            peer = peer_map.get(name, "")
+            if (
+                not peer
+                or name not in valid_names
+                or peer not in valid_names
+                or name >= peer
+                or peer_map.get(peer) != name
+            ):
+                continue
+            pairs.append((name, peer))
+        return pairs
+
+    def _peer_member_names(self) -> list[str]:
+        names: list[str] = []
+        lead = self.lead_agent()
+        if lead is not None and member_role_for_pane(lead.pane_id) != "terminal":
+            names.append(lead.name)
+        names.extend(sorted(self.agents))
+        return list(dict.fromkeys(names))
+
+    def peer_members(self) -> list[str]:
+        return self._peer_member_names()
+
+    def _canonical_peer_map(self, peer_map: dict[str, str]) -> dict[str, str]:
+        valid_names = set(self._peer_member_names())
+        cleaned: dict[str, str] = {}
+        for left, right in self._canonical_pairs(peer_map, valid_names):
+            cleaned[left] = right
+            cleaned[right] = left
+        return cleaned
+
+    def peer_mode(self) -> str:
+        if self._canonical_peer_map(self.peer_map):
+            return "explicit"
+        return "implicit" if len(self._peer_member_names()) == 2 else "none"
+
+    def resolve_peer(self, name: str) -> str | None:
+        if name not in self._peer_member_names():
+            return None
+        explicit = self._canonical_peer_map(self.peer_map).get(name)
+        if explicit:
+            return explicit
+        members = self._peer_member_names()
+        if len(members) == 2:
+            for candidate in members:
+                if candidate != name:
+                    return candidate
+        return None
+
+    def peer_pairs(self) -> list[tuple[str, str]]:
+        explicit = self._canonical_peer_map(self.peer_map)
+        if explicit:
+            return self._canonical_pairs(explicit, set(self._peer_member_names()))
+        members = self._peer_member_names()
+        if len(members) == 2:
+            left, right = sorted(members)
+            return [(left, right)]
+        return []
+
+    def set_peer(self, left: str, right: str) -> tuple[str, str]:
+        if left == right:
+            raise ValueError("peer must reference two distinct agents")
+        valid_names = set(self._peer_member_names())
+        if left not in valid_names:
+            raise KeyError(f"agent '{left}' not found")
+        if right not in valid_names:
+            raise KeyError(f"agent '{right}' not found")
+        updated = dict(self._canonical_peer_map(self.peer_map))
+        self._clear_explicit_peer_from(updated, left)
+        self._clear_explicit_peer_from(updated, right)
+        updated[left] = right
+        updated[right] = left
+        self.peer_map = updated
+        self.save()
+        return left, right
+
+    def clear_peer(self, name: str) -> str | None:
+        valid_names = set(self._peer_member_names())
+        if name not in valid_names:
+            raise KeyError(f"agent '{name}' not found")
+        updated = dict(self._canonical_peer_map(self.peer_map))
+        peer = updated.get(name)
+        if not peer:
+            return None
+        self._clear_explicit_peer_from(updated, name)
+        self.peer_map = updated
+        self.save()
+        return peer
+
+    def peer_snapshot(self, name: str = "") -> dict[str, object]:
+        members: list[dict[str, str]] = []
+        for member_name in self._peer_member_names():
+            if name and member_name != name:
+                continue
+            row: dict[str, str] = {"name": member_name}
+            peer_name = self.resolve_peer(member_name)
+            if peer_name:
+                row["peer"] = peer_name
+            members.append(row)
+        payload: dict[str, object] = {
+            "team": self.name,
+            "mode": self.peer_mode(),
+            "members": members,
+        }
+        pairs = self.peer_pairs()
+        if pairs:
+            payload["pairs"] = [[left, right] for left, right in pairs]
+        return payload
+
+    @staticmethod
+    def _clear_explicit_peer_from(peer_map: dict[str, str], name: str) -> None:
+        peer = peer_map.pop(name, "")
+        if peer_map.get(peer) == name:
+            peer_map.pop(peer, None)
 
     def shutdown(self, name: str | None = None) -> None:
         """Shutdown one or all agents."""
@@ -301,7 +466,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
     """
     r = tmux._run([
         "list-windows", "-a", "-F",
-        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
+        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}\t#{@hive-peers}",
     ], check=False)
 
     candidates: list[tuple[str, dict[str, str]]] = []
@@ -311,7 +476,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
         parts = line.split("\t")
         if len(parts) == 5:
             parts.insert(1, "")
-        while len(parts) < 6:
+        while len(parts) < 7:
             parts.append("")
         if parts[2] == name:
             candidates.append((parts[0], {
@@ -319,6 +484,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
                 "workspace": parts[3],
                 "desc": parts[4],
                 "created": parts[5],
+                "peers": parts[6],
             }))
 
     if not candidates:
@@ -352,7 +518,7 @@ def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> N
     for wt in all_windows:
         if wt == keep:
             continue
-        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(wt, f"@{key}")
 
 

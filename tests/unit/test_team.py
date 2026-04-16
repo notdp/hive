@@ -55,6 +55,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
         lead_session_id="sess-1",
         tmux_session="dev",
         tmux_window="dev:0",
+        peer_map={"orch": "claude", "claude": "orch"},
     )
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", cwd="/tmp")
     team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
@@ -76,6 +77,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.lead_pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
     assert loaded.terminals["shell"].pane_id == "%2"
+    assert loaded.peer_map == {"orch": "claude", "claude": "orch"}
 
 
 def test_team_load_restores_agent_cwd_from_pane_current_path(configure_hive_home, monkeypatch):
@@ -109,6 +111,46 @@ def test_team_lead_agent_uses_persisted_session_id(configure_hive_home):
     assert lead is not None
     assert lead.name == "orch"
     assert lead.session_id == "sess-1"
+
+
+def test_team_resolve_peer_implicit_for_two_agent_team(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
+    team = Team(name="team-a", lead_pane_id="%0")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
+
+    assert team.peer_mode() == "implicit"
+    assert team.resolve_peer("orch") == "claude"
+    assert team.resolve_peer("claude") == "orch"
+    assert team.peer_pairs() == [("claude", "orch")]
+
+
+def test_team_set_peer_is_symmetric_and_clears_previous_mapping(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
+    team = Team(name="team-a", lead_pane_id="%0", tmux_window="dev:0")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
+    team.agents["gpt"] = Agent(name="gpt", team_name="team-a", pane_id="%2")
+
+    team.set_peer("orch", "claude")
+    assert team.peer_map == {"orch": "claude", "claude": "orch"}
+
+    team.set_peer("orch", "gpt")
+    assert team.peer_map == {"orch": "gpt", "gpt": "orch"}
+    assert team.resolve_peer("claude") is None
+    assert team.resolve_peer("gpt") == "orch"
+
+
+def test_team_clear_peer_only_removes_explicit_mapping(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
+    team = Team(name="team-a", lead_pane_id="%0", tmux_window="dev:0", peer_map={"orch": "claude", "claude": "orch"})
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
+    team.agents["gpt"] = Agent(name="gpt", team_name="team-a", pane_id="%2")
+
+    assert team.clear_peer("orch") == "claude"
+    assert team.peer_map == {}
+    assert team.peer_mode() == "none"
 
 
 def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hive_home, monkeypatch):

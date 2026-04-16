@@ -33,6 +33,9 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
                     "model": "gpt-5.4",
                     "inputState": "ready",
                     "inputReason": "",
+                    "activityState": "idle",
+                    "activityReason": "assistant_terminal_message",
+                    "activityObservedAt": "2026-04-16T05:00:00Z",
                 }
             }
         },
@@ -48,6 +51,9 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["sessionId"] == "orch-session-456"
     assert orch["model"] == "gpt-5.4"
     assert orch["inputState"] == "ready"
+    assert orch["activityState"] == "idle"
+    assert orch["activityReason"] == "assistant_terminal_message"
+    assert orch["activityObservedAt"] == "2026-04-16T05:00:00Z"
 
 
 def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch, tmp_path):

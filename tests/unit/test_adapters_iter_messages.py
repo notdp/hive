@@ -272,6 +272,43 @@ def test_codex_iter_messages_unknown_item_becomes_unknown_part(tmp_path):
     assert messages[0].parts[0].raw == {"type": "some_future_item", "detail": 42}
 
 
+def test_codex_iter_messages_normalizes_custom_tool_calls(tmp_path):
+    path = tmp_path / "codex-custom.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "call-2",
+                    "arguments": {"patch": "..."},
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-2",
+                    "output": {"text": "done"},
+                },
+            },
+        ],
+    )
+
+    messages = list(adapters.get("codex").iter_messages(path))
+    assert [m.role for m in messages] == ["assistant", "tool"]
+    assert messages[0].parts[0].kind == "tool_use"
+    assert messages[0].parts[0].tool_name == "apply_patch"
+    assert messages[0].parts[0].tool_input == {"patch": "..."}
+    assert messages[0].message_id == "call-2"
+    assert messages[1].parts[0].kind == "tool_result"
+    assert messages[1].parts[0].tool_output == "done"
+    assert messages[1].message_id == "call-2"
+
+
 # --- cross-CLI parity --------------------------------------------------------
 
 

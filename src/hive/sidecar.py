@@ -932,6 +932,10 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbos
         diag["sessionId"] = runtime["sessionId"]
     if runtime.get("inputState"):
         diag["inputState"] = runtime["inputState"]
+    if runtime.get("activityState"):
+        diag["activityState"] = runtime["activityState"]
+    if runtime.get("activityReason"):
+        diag["activityReason"] = runtime["activityReason"]
     if "_gate" in runtime:
         diag["gate"] = runtime["_gate"]
     if verbose:
@@ -951,6 +955,14 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbos
             diag["transcriptSize"] = runtime["_transcriptSize"]
         if "_gateReason" in runtime:
             diag["gateReason"] = runtime["_gateReason"]
+        if runtime.get("activityObservedAt"):
+            diag["activityObservedAt"] = runtime["activityObservedAt"]
+        if "activityRole" in runtime:
+            diag["activityRole"] = runtime["activityRole"]
+        if "activityPartKinds" in runtime:
+            diag["activityPartKinds"] = runtime["activityPartKinds"]
+        if "_activityEvidence" in runtime:
+            diag["activityEvidence"] = runtime["_activityEvidence"]
         diag["workspace"] = str(workspace)
         diag["eventCount"] = bus.count_events(workspace)
     return diag
@@ -959,6 +971,7 @@ def _doctor_payload(workspace: str, team_name: str, target_agent: str, *, verbos
 def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
     from . import adapters, tmux
     from .adapters.base import check_input_gate, extract_pending_question
+    from .activity import probe_transcript_activity
     from .agent_cli import resolve_model_for_pane
 
     runtime: dict[str, Any] = {
@@ -1013,6 +1026,17 @@ def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
         return runtime
 
     runtime["_transcriptSize"] = transcript.stat().st_size
+    activity = probe_transcript_activity(profile.name, transcript)
+    runtime["activityState"] = str(activity.get("activityState") or "unknown")
+    runtime["activityReason"] = str(activity.get("activityReason") or "unknown")
+    if activity.get("activityObservedAt"):
+        runtime["activityObservedAt"] = activity["activityObservedAt"]
+    if "activityRole" in activity:
+        runtime["activityRole"] = activity["activityRole"]
+    if "activityPartKinds" in activity:
+        runtime["activityPartKinds"] = activity["activityPartKinds"]
+    if "evidence" in activity:
+        runtime["_activityEvidence"] = activity["evidence"]
     gate = check_input_gate(transcript)
     runtime["_gate"] = gate.status
     runtime["_gateReason"] = gate.reason
@@ -1111,6 +1135,8 @@ def _candidate_score(
     candidate_model: str,
     candidate_cli: str,
     input_state: str,
+    activity_state: str,
+    is_default_peer: bool,
 ) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
@@ -1121,16 +1147,28 @@ def _candidate_score(
     elif input_state:
         reasons.append(f"inputState={input_state}")
 
+    if activity_state == "idle":
+        score += 20
+        reasons.append("activity_idle")
+    elif activity_state == "active":
+        reasons.append("activity_active")
+    elif activity_state:
+        reasons.append(f"activityState={activity_state}")
+
+    if is_default_peer:
+        score += 15
+        reasons.append("default_peer")
+
     if source_model and candidate_model:
         if source_model != candidate_model:
-            score += 30
+            score += 10
             reasons.append("different_model")
         else:
             reasons.append("same_model_fallback")
 
     if source_cli and candidate_cli:
         if source_cli != candidate_cli:
-            score += 10
+            score += 5
             reasons.append("different_cli")
         else:
             reasons.append("same_cli_fallback")
@@ -1141,6 +1179,9 @@ def _candidate_score(
 
 
 def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
+    from .team import Team
+
+    team = Team.load(team_name)
     bindings = _team_member_bindings(team_name)
     runtime_payload = _team_runtime_payload(team_name)
     runtime_members = runtime_payload.get("members")
@@ -1156,6 +1197,7 @@ def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
         source_runtime = {}
     source_cli = str(source_runtime.get("_cli") or source_binding.get("cli") or "")
     source_model = str(source_runtime.get("model") or "")
+    source_peer = team.resolve_peer(source_agent) or ""
 
     candidates: list[dict[str, Any]] = []
     for name, binding in bindings.items():
@@ -1169,12 +1211,16 @@ def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
         candidate_cli = str(runtime.get("_cli") or binding.get("cli") or "")
         candidate_model = str(runtime.get("model") or "")
         input_state = str(runtime.get("inputState") or "unknown")
+        activity_state = str(runtime.get("activityState") or "unknown")
+        is_default_peer = bool(source_peer and name == source_peer)
         score, reasons = _candidate_score(
             source_model=source_model,
             source_cli=source_cli,
             candidate_model=candidate_model,
             candidate_cli=candidate_cli,
             input_state=input_state,
+            activity_state=activity_state,
+            is_default_peer=is_default_peer,
         )
         candidate: dict[str, Any] = {
             "name": name,
@@ -1191,6 +1237,14 @@ def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
             candidate["model"] = candidate_model
         if runtime.get("sessionId"):
             candidate["sessionId"] = runtime["sessionId"]
+        if runtime.get("activityState"):
+            candidate["activityState"] = runtime["activityState"]
+        if runtime.get("activityReason"):
+            candidate["activityReason"] = runtime["activityReason"]
+        if runtime.get("activityObservedAt"):
+            candidate["activityObservedAt"] = runtime["activityObservedAt"]
+        if is_default_peer:
+            candidate["isPeer"] = True
         candidates.append(candidate)
 
     candidates.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name", ""))))
@@ -1202,6 +1256,14 @@ def _suggest_payload(team_name: str, source_agent: str) -> dict[str, Any]:
         source["model"] = source_model
     if source_runtime.get("inputState"):
         source["inputState"] = source_runtime["inputState"]
+    if source_peer:
+        source["peer"] = source_peer
+    if source_runtime.get("activityState"):
+        source["activityState"] = source_runtime["activityState"]
+    if source_runtime.get("activityReason"):
+        source["activityReason"] = source_runtime["activityReason"]
+    if source_runtime.get("activityObservedAt"):
+        source["activityObservedAt"] = source_runtime["activityObservedAt"]
 
     return {
         "ok": True,

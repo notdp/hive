@@ -372,6 +372,9 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             "inputState",
             "inputReason",
             "pendingQuestion",
+            "activityState",
+            "activityReason",
+            "activityObservedAt",
         ):
             value = runtime_fields.get(key)
             if value in ("", None):
@@ -849,7 +852,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
                 f"tmux window '{window_target}' already belongs to team '{bound_team}'; "
                 "current pane is not registered"
             )
-        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(window_target, f"@{key}")
 
     team_name = name or f"{session_name}-{window_index}"
@@ -1048,7 +1051,7 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
         pass
 
     if team_window:
-        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created"):
+        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(team_window, f"@{key}")
 
     legacy_team_dir = HIVE_HOME / "teams" / name
@@ -1392,6 +1395,52 @@ def doctor(agent_name: str, include_skills: bool):
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+@cli.command(hidden=True)
+@click.argument("agent_name", required=False, default="")
+def activity(agent_name: str):
+    """Debug/agent helper: classify transcript activity as active/idle/unknown."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    ws = _resolve_workspace(t, required=True)
+    self_name = _resolve_sender(None)
+    target_name = agent_name or self_name
+    from .sidecar import request_doctor
+
+    _ensure_team_sidecar(t, ws)
+    payload = request_doctor(str(ws), team=t.name, target_agent=target_name, verbose=True)
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "activity probe failed")))
+
+    activity_payload: dict[str, object] = {
+        "agent": payload.get("agent", target_name),
+        "team": payload.get("team", t.name),
+        "activityState": payload.get("activityState", "unknown"),
+        "activityReason": payload.get("activityReason", "unknown"),
+    }
+    for key in (
+        "alive",
+        "inputState",
+        "cli",
+        "model",
+        "sessionId",
+        "pane",
+        "transcript",
+        "transcriptExists",
+        "transcriptSize",
+        "activityObservedAt",
+        "activityRole",
+        "activityPartKinds",
+        "activityEvidence",
+    ):
+        value = payload.get(key)
+        if value in ("", None):
+            continue
+        activity_payload[key] = value
+    click.echo(json.dumps(activity_payload, indent=2, ensure_ascii=False))
+
+
 @cli.command()
 @click.argument("member_name")
 @click.option("--lines", "-n", default=30)
@@ -1646,3 +1695,56 @@ def terminal_remove(name: str):
     if tmux.is_pane_alive(terminal_obj.pane_id):
         tmux.clear_pane_tags(terminal_obj.pane_id)
     click.echo(f"Terminal '{name}' removed.")
+
+
+@cli.group()
+def peer():
+    """Manage default peer mapping inside the team."""
+    pass
+
+
+@peer.command("show")
+@click.argument("agent_name", required=False, default="")
+def peer_show(agent_name: str):
+    """Show resolved peer pairs for the current team."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    if agent_name and agent_name not in t.peer_members():
+        _fail(f"agent '{agent_name}' not found in team '{t.name}'")
+    click.echo(json.dumps(t.peer_snapshot(agent_name), indent=2, ensure_ascii=False))
+
+
+@peer.command("set")
+@click.argument("left")
+@click.argument("right")
+def peer_set(left: str, right: str):
+    """Persist a symmetric default peer pair."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    try:
+        left_name, right_name = t.set_peer(left, right)
+    except (KeyError, ValueError) as exc:
+        _fail(str(exc))
+    click.echo(f"Peer set: {left_name} <-> {right_name}.")
+
+
+@peer.command("clear")
+@click.argument("agent_name")
+def peer_clear(agent_name: str):
+    """Clear an explicit peer mapping for one agent."""
+    _, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    try:
+        peer_name = t.clear_peer(agent_name)
+    except KeyError as exc:
+        _fail(str(exc))
+    if not peer_name:
+        click.echo(f"No explicit peer mapping to clear for '{agent_name}'.")
+        return
+    if t.peer_mode() == "implicit":
+        click.echo(
+            f"Explicit peer mapping cleared for '{agent_name}' and '{peer_name}'. "
+            "Two-agent implicit peer resolution still applies."
+        )
+        return
+    click.echo(f"Peer cleared: {agent_name} <-> {peer_name}.")
