@@ -31,6 +31,7 @@ _COMMAND_HELP_SECTIONS = {
     "init": "Daily",
     "team": "Daily",
     "send": "Daily",
+    "reply": "Daily",
     "answer": "Daily",
     "suggest": "Daily",
     "notify": "Daily",
@@ -1310,6 +1311,83 @@ def send(
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "send failed")))
     payload.pop("ok", None)
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@cli.command()
+@click.argument("to_agent")
+@click.argument("body", required=False, default="")
+@click.option("--artifact", default="", help="Artifact path for large payloads")
+@click.option(
+    "--reply-to",
+    "reply_to_override",
+    default="",
+    help="Override the auto-resolved msgId. Required when the latest inbound has already been replied to.",
+)
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
+)
+def reply(
+    to_agent: str,
+    body: str,
+    artifact: str,
+    reply_to_override: str,
+    wait: bool,
+):
+    """Reply to the latest unanswered inbound message from another agent.
+
+    Without ``--reply-to``, hive picks the most recent send event from
+    ``to_agent`` to you that you have not already replied to. If there
+    is no such message, the command fails and asks you to pass
+    ``--reply-to`` explicitly; ``hive reply`` never guesses across
+    competing threads.
+    """
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    sender = _resolve_sender(None)
+    ws = _resolve_workspace(t, required=True)
+
+    resolved_reply_to = reply_to_override
+    if not resolved_reply_to:
+        latest = bus.latest_inbound_send_event(ws, sender=sender, target=to_agent)
+        if latest is None:
+            _fail(
+                f"no recent message from '{to_agent}' to '{sender}'; "
+                "use 'hive send' or pass --reply-to explicitly"
+            )
+        assert latest is not None
+        candidate = str(latest.get("msgId") or "")
+        if bus.has_send_reply_to(ws, msg_id=candidate, sender=sender, target=to_agent):
+            _fail(
+                f"already replied to {candidate} from '{to_agent}'; "
+                "pass --reply-to explicitly to target another thread"
+            )
+        resolved_reply_to = candidate
+
+    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
+    from .sidecar import request_send
+
+    _ensure_team_sidecar(t, ws)
+    payload = request_send(
+        str(ws),
+        team=t.name,
+        sender_agent=sender,
+        sender_pane=tmux.get_current_pane_id() or "",
+        target_agent=to_agent,
+        body=body,
+        artifact=resolved_artifact,
+        reply_to=resolved_reply_to,
+        wait=wait,
+    )
+    if not payload:
+        _fail("sidecar unavailable")
+    if payload.get("ok") is False:
+        _fail(str(payload.get("error", "reply failed")))
+    payload.pop("ok", None)
+    if not reply_to_override:
+        payload["autoReplyTo"] = resolved_reply_to
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

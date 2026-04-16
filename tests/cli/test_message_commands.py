@@ -152,6 +152,136 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
 
 
+def _reply_fake_team(workspace, *, sent_transcript):
+    class _FakeAgent:
+        pane_id = "%99"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent_transcript.append(text)
+
+    class _FakeTeam:
+        def __init__(self) -> None:
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, _name: str):
+            return _FakeAgent()
+
+    return _FakeTeam()
+
+
+def test_reply_auto_fills_reply_to_from_latest_inbound(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    inbound = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="see patch")
+
+    sent: list[str] = []
+    team = _reply_fake_team(workspace, sent_transcript=sent)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    result = runner.invoke(cli, ["reply", "dodo", "ack, looking"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["from"] == "orch"
+    assert payload["to"] == "dodo"
+    assert payload["autoReplyTo"] == inbound.msg_id
+    events = bus.read_all_events(workspace)
+    outbound = [event for event in events if event.get("from") == "orch" and event.get("to") == "dodo"]
+    assert len(outbound) == 1
+    assert outbound[0].get("inReplyTo") == inbound.msg_id
+
+
+def test_reply_fails_when_no_inbound_from_agent(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    sent: list[str] = []
+    team = _reply_fake_team(workspace, sent_transcript=sent)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    result = runner.invoke(cli, ["reply", "dodo", "late answer"])
+
+    assert result.exit_code != 0
+    assert "no recent message from 'dodo'" in result.output
+    assert sent == []
+
+
+def test_reply_fails_when_latest_inbound_already_replied(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    inbound = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="see patch")
+    bus.write_send_event(
+        workspace,
+        from_agent="orch",
+        to_agent="dodo",
+        body="thanks, looking",
+        reply_to=inbound.msg_id,
+    )
+
+    sent: list[str] = []
+    team = _reply_fake_team(workspace, sent_transcript=sent)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    result = runner.invoke(cli, ["reply", "dodo", "one more thing"])
+
+    assert result.exit_code != 0
+    assert "already replied to" in result.output
+    assert "pass --reply-to explicitly" in result.output
+
+
+def test_reply_honors_explicit_reply_to_override(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    first = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="older msg")
+    second = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="newer msg")
+    bus.write_send_event(
+        workspace,
+        from_agent="orch",
+        to_agent="dodo",
+        body="auto",
+        reply_to=second.msg_id,
+    )
+
+    sent: list[str] = []
+    team = _reply_fake_team(workspace, sent_transcript=sent)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    result = runner.invoke(cli, ["reply", "dodo", "on older thread", "--reply-to", first.msg_id])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "autoReplyTo" not in payload
+    events = bus.read_all_events(workspace)
+    latest_outbound = [
+        event for event in events if event.get("from") == "orch" and event.get("to") == "dodo"
+    ][-1]
+    assert latest_outbound.get("inReplyTo") == first.msg_id
+
+
 def test_send_requires_tmux(runner, monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 

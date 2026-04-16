@@ -339,6 +339,54 @@ def find_send_event(workspace: str | Path, message_id: str) -> dict[str, object]
     return _row_to_event(row) if row is not None else None
 
 
+def latest_inbound_send_event(
+    workspace: str | Path,
+    *,
+    sender: str,
+    target: str,
+) -> dict[str, object] | None:
+    """Return the latest send event from ``target`` to ``sender`` with a msgId."""
+    with _connect(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE intent = 'send'
+              AND from_agent = ?
+              AND to_agent = ?
+              AND msg_id != ''
+            ORDER BY seq DESC
+            LIMIT 1
+            """,
+            (target, sender),
+        ).fetchone()
+    return _row_to_event(row) if row is not None else None
+
+
+def has_send_reply_to(
+    workspace: str | Path,
+    *,
+    msg_id: str,
+    sender: str,
+    target: str,
+) -> bool:
+    """True if ``sender`` already wrote a send event to ``target`` with in_reply_to=msg_id."""
+    if not msg_id:
+        return False
+    with _connect(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM messages
+            WHERE intent = 'send'
+              AND from_agent = ?
+              AND to_agent = ?
+              AND in_reply_to = ?
+            LIMIT 1
+            """,
+            (sender, target, msg_id),
+        ).fetchone()
+    return row is not None
+
+
 def find_latest_observation(workspace: str | Path, message_id: str) -> dict[str, object] | None:
     with _connect(workspace) as conn:
         row = conn.execute(

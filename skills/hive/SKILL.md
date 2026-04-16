@@ -41,6 +41,7 @@ hive team                             # 看成员 + runtime inputState/activityS
 hive send dodo "hello"                # 发短消息（positional：收件人 + body，不要加 --to / --msg）
 hive send dodo "see attachment" --artifact /tmp/file.md
 printf '%s\n' "# Findings" "- item" | hive send dodo "see attachment" --artifact -
+hive reply dodo "ack, looking"        # 回复 dodo 最近一条给你的消息（自动 reply-to）
 hive answer claude "yes"              # 回答 agent 的 pending question
 hive suggest                          # 基于当前 runtime 建议协作对象
 hive suggest momo                     # 以指定 source agent 视角给出候选
@@ -56,6 +57,12 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 - 返回 `queued` / `pending` / `confirmed` 都代表已进后台追踪，直接继续工作
 - body 默认只放动作 + 摘要；长内容、多行结构化内容、需要后续引用的上下文一律先写 artifact
 - 首选 stdin artifact：`... | hive send <name> "<message>" --artifact -`；只有已有现成文件时才传 `--artifact <path>`。不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
+
+### `hive reply` vs `hive send --reply-to`
+
+- 刚收到某 agent 的消息、直接回复就用 `hive reply <agent> "..."`：它自动把 `reply-to` 填成"最近一条来自该 agent 且你还没回过的入站消息"
+- 没有入站消息、或最近一条已经回过，`hive reply` 会直接报错，要求你传 `--reply-to <msgId>`；它**不会**跨线程猜
+- 已经拿到了特定 `msgId`（例如 handoff 时 fork prompt 里带的），继续用 `hive send <agent> "..." --reply-to <msgId>`
 
 ### 协作升级（4 条足矣）
 

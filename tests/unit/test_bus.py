@@ -191,6 +191,58 @@ def test_write_send_event_assigns_msg_id_without_followup_patch(tmp_path, monkey
     }]
 
 
+def test_latest_inbound_send_event_returns_none_when_no_match(tmp_path, monkeypatch):
+    monkeypatch.setattr("hive.bus._now_iso", lambda: "2026-03-17T10:00:00Z")
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    bus.write_send_event(workspace, from_agent="orch", to_agent="claude", body="hi")
+
+    assert bus.latest_inbound_send_event(workspace, sender="orch", target="claude") is None
+
+
+def test_latest_inbound_send_event_picks_most_recent_matching(tmp_path, monkeypatch):
+    times = iter(f"2026-03-17T10:00:0{i}Z" for i in range(9))
+    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="first")
+    bus.write_send_event(workspace, from_agent="claude", to_agent="orch", body="other")
+    second = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="second")
+
+    event = bus.latest_inbound_send_event(workspace, sender="orch", target="dodo")
+
+    assert event is not None
+    assert event["msgId"] == second.msg_id
+    assert event["body"] == "second"
+
+
+def test_has_send_reply_to_detects_prior_reply(tmp_path, monkeypatch):
+    times = iter(f"2026-03-17T10:00:0{i}Z" for i in range(9))
+    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
+    workspace = bus.init_workspace(tmp_path / "ws")
+
+    inbound = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="review?")
+    bus.write_send_event(workspace, from_agent="orch", to_agent="dodo", body="fresh take", reply_to="")
+    assert bus.has_send_reply_to(workspace, msg_id=inbound.msg_id, sender="orch", target="dodo") is False
+
+    bus.write_send_event(
+        workspace,
+        from_agent="orch",
+        to_agent="dodo",
+        body="ack",
+        reply_to=inbound.msg_id,
+    )
+
+    assert bus.has_send_reply_to(workspace, msg_id=inbound.msg_id, sender="orch", target="dodo") is True
+    # Reply in the opposite direction must not count.
+    assert bus.has_send_reply_to(workspace, msg_id=inbound.msg_id, sender="dodo", target="orch") is False
+
+
+def test_has_send_reply_to_returns_false_for_empty_msg_id(tmp_path):
+    workspace = bus.init_workspace(tmp_path / "ws")
+    assert bus.has_send_reply_to(workspace, msg_id="", sender="orch", target="dodo") is False
+
+
 def test_init_workspace_migrates_legacy_runtime_columns(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
