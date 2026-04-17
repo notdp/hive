@@ -1411,6 +1411,17 @@ def handoff(
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
+
+    existing_target = _existing_team_agent(t, target_agent)
+    if existing_target is not None:
+        if spawn_target or fork_target:
+            _fail(f"agent '{target_agent}' already exists; direct handoff does not accept --spawn/--fork")
+        if target_agent == sender:
+            _fail("cannot hand off to yourself; use --spawn or --fork with a new agent name")
+    else:
+        if not spawn_target and not fork_target:
+            _fail(f"agent '{target_agent}' does not exist; pass --spawn or --fork explicitly")
+
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     anchor_event = _resolve_handoff_anchor_event(
         ws,
@@ -1422,17 +1433,10 @@ def handoff(
     if not anchor_msg_id or not original_sender:
         _fail("invalid anchor event for handoff")
 
-    existing_target = _existing_team_agent(t, target_agent)
     if existing_target is not None:
-        if spawn_target or fork_target:
-            _fail(f"agent '{target_agent}' already exists; direct handoff does not accept --spawn/--fork")
-        if target_agent == sender:
-            _fail("cannot hand off to yourself; use --spawn or --fork with a new agent name")
         mode = "direct"
         target_member = existing_target
     else:
-        if not spawn_target and not fork_target:
-            _fail(f"agent '{target_agent}' does not exist; pass --spawn or --fork explicitly")
         if spawn_target:
             mode = "spawn"
             target_member = _spawn_team_agent(

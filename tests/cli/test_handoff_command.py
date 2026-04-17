@@ -195,6 +195,29 @@ def test_handoff_rejects_spawn_or_fork_for_existing_target(runner, configure_hiv
     assert "direct handoff does not accept --spawn/--fork" in fork_result.output
 
 
+def test_handoff_target_exists_error_wins_over_missing_anchor(runner, configure_hive_home, monkeypatch, tmp_path):
+    """target-exists + --spawn/--fork must surface the dispatch error, not 'no unanswered inbound',
+    when both conditions apply. Exercises the guardrail ordering: dispatch check before anchor resolution.
+    """
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    # Deliberately do NOT write any inbound send event for orch, so anchor resolution would fail
+    # if it ran first.
+
+    team = _FakeTeam(str(workspace))
+    team.agents["dodo"] = _FakeAgent("dodo", "%21")
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    _patch_sidecar_requests(monkeypatch, team)
+
+    spawn_result = runner.invoke(cli, ["handoff", "dodo", "--spawn"])
+
+    assert spawn_result.exit_code != 0
+    assert "direct handoff does not accept --spawn/--fork" in spawn_result.output
+    assert "no unanswered inbound" not in spawn_result.output
+
+
 def test_handoff_spawn_mode_creates_worker_then_sends_delegate_and_announce(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     _patch_ack(monkeypatch)
