@@ -145,6 +145,9 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)
         monkeypatch.setattr("hive.cli.tmux.clear_pane_tags", state.clear_pane_tags)
         monkeypatch.delenv("TMUX_PANE", raising=False)
+        # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
+        # that want to observe sidecar startup patch this themselves.
+        monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *args, **kwargs: None, raising=False)
         return hive_home
 
     return _configure
