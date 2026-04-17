@@ -694,7 +694,6 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
             pane_id=pane_id,
             split=split,
             join_as=join_as,
-            wait_for_ready=bool(prompt),
             prompt=prompt,
         )
         del registered_agent
@@ -938,13 +937,30 @@ def _fork_source_details(pane_id: str, split: str) -> tuple[str, object, str, bo
     return current_pane, profile, session_id, horizontal, source_cwd
 
 
+def _fork_boundary_prompt(fork_name: str) -> str:
+    """A boundary message prepended to whatever prompt the fork receives.
+
+    The child pane resumes the parent's session, so its transcript starts
+    populated with the parent's conversation — including any pending tool
+    call or intended action that was mid-flight at fork time. Without a
+    boundary, the child happily re-executes that inherited action (e.g.
+    triggering another `hive fork` and recursing).
+    """
+    return (
+        f"FORK BOUNDARY: you are the fork '{fork_name}', cloned from the originating pane. "
+        "The prior transcript is read-only context only — every pending tool call, bash "
+        "command, or action in it belongs to the original agent and has either already "
+        "completed or is being handled on their side. Do NOT re-execute any inherited "
+        "action. Act only on new instructions that appear from this message onward."
+    )
+
+
 def _fork_registered_agent(
     *,
     t: Team,
     pane_id: str,
     split: str,
     join_as: str,
-    wait_for_ready: bool = False,
     prompt: str = "",
 ) -> tuple[Agent, str]:
     _ensure_pane_in_scope(t, pane_id)
@@ -966,12 +982,17 @@ def _fork_registered_agent(
         cwd=source_cwd or os.getcwd(),
         notify=False,
     )
-    if wait_for_ready or prompt:
-        if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
-            _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
-        time.sleep(1)
+    # Always wait for the forked pane to finish resuming before sending text into it.
+    # The boundary prompt must land before the child can re-execute any pending action
+    # inherited from the parent transcript, so we cannot skip the ready check even when
+    # no task prompt was provided.
+    if not tmux.wait_for_text(new_pane, profile.ready_text, timeout=AGENT_STARTUP_TIMEOUT):
+        _fail(f"forked pane '{new_pane}' did not become ready before sending prompt")
+    time.sleep(1)
+    composed = _fork_boundary_prompt(join_as)
     if prompt:
-        registered_agent.send(prompt)
+        composed = composed + "\n\n" + prompt
+    registered_agent.send(composed)
     return registered_agent, new_pane
 
 
@@ -1452,7 +1473,6 @@ def handoff(
                 pane_id="",
                 split="auto",
                 join_as=target_agent,
-                wait_for_ready=True,
             )
 
     delegate_body = _handoff_delegate_body(
