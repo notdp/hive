@@ -39,6 +39,37 @@ def _local_repo_root() -> Path | None:
     return None
 
 
+def _compare_versions(a: str, b: str) -> int | None:
+    """Return -1/0/1 for a<b / a==b / a>b, or None if either side is unparseable.
+
+    Parses a dotted numeric version like `0.4.5` into a tuple and compares
+    component-wise. Returns None for anything non-numeric (e.g. `0.4.5-dev`)
+    so the caller can pick neutral wording.
+    """
+    def parse(s: str) -> tuple[int, ...] | None:
+        parts = s.split(".")
+        try:
+            return tuple(int(p) for p in parts)
+        except ValueError:
+            return None
+    pa, pb = parse(a), parse(b)
+    if pa is None or pb is None:
+        return None
+    if pa < pb:
+        return -1
+    if pa > pb:
+        return 1
+    return 0
+
+
+def _version_change_direction(previous: str, current: str) -> str:
+    """Return 'upgraded' / 'downgraded' / 'changed' from version comparison."""
+    cmp = _compare_versions(previous, current)
+    if cmp is None or cmp == 0:
+        return "changed"
+    return "upgraded" if cmp < 0 else "downgraded"
+
+
 def _refresh_command() -> str:
     repo_root = _local_repo_root()
     source = shlex.quote(str(repo_root)) if repo_root is not None else _DEFAULT_REMOTE_SKILL_SOURCE
@@ -242,9 +273,10 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
 def render_version_upgrade_warning(payload: dict[str, Any]) -> str:
     previous = payload.get("previousVersion") or "(unknown)"
     current = payload.get("currentVersion") or "(unknown)"
+    direction = _version_change_direction(str(previous), str(current))
     hint_label, hint_command = _preferred_refresh_hint()
     return "\n".join([
-        f"Notice: hive upgraded from {previous} to {current}.",
+        f"Notice: hive {direction} from {previous} to {current}.",
         f"If this workspace uses the hive skill, {hint_label.lower().rstrip(':')}:",
         f"  {hint_command}",
         "Inspect details with:",
@@ -295,7 +327,7 @@ def check_version_upgrade(
         _write_seen_version(state_path, current_version)
     except OSError:
         pass
-    payload["state"] = "upgraded"
+    payload["state"] = _version_change_direction(previous_version, current_version)
     return payload
 
 
