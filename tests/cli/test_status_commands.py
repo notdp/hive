@@ -82,6 +82,52 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
     assert payload["model"] == "gpt-5.4"
 
 
+def test_current_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-current", "--workspace", str(workspace)]).exit_code == 0
+
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
+        calls.append((workspace_arg, team, tmux_window, tmux_window_id))
+        return 4321
+
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", _fake_ensure_sidecar)
+    monkeypatch.setattr(
+        "hive.sidecar.request_team_runtime",
+        lambda _ws, *, team: {"ok": True, "team": team, "members": {"orch": {"alive": True, "model": "gpt-5.4"}}},
+    )
+
+    result = runner.invoke(cli, ["current"])
+
+    assert result.exit_code == 0
+    assert calls == [(str(workspace), "team-current", "dev:0", "@0")]
+
+
+def test_team_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
+
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
+        calls.append((workspace_arg, team, tmux_window, tmux_window_id))
+        return 4321
+
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", _fake_ensure_sidecar)
+    monkeypatch.setattr(
+        "hive.sidecar.request_team_runtime",
+        lambda _ws, *, team: {"ok": True, "team": team, "members": {"orch": {"alive": True}}},
+    )
+
+    result = runner.invoke(cli, ["team"])
+
+    assert result.exit_code == 0
+    assert calls == [(str(workspace), "team-status", "dev:0", "@0")]
+
+
 def test_legacy_status_commands_show_migration_error(runner, configure_hive_home, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

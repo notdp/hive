@@ -458,6 +458,38 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
     assert mock_tmux_send == []
 
 
+def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: "@2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%5", "", command="droid")],
+    )
+
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
+        calls.append((workspace_arg, team, tmux_window, tmux_window_id))
+        return 4321
+
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", _fake_ensure_sidecar)
+
+    workspace = tmp_path / "ws"
+    result = runner.invoke(cli, ["init", "--workspace", str(workspace), "--no-notify"])
+
+    assert result.exit_code == 0
+    assert calls == [(str(workspace), "dev-2", "dev:2", "@2")]
+
+
 def test_init_excludes_names_already_used_in_current_window(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
