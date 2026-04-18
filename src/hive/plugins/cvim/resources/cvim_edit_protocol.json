@@ -1,11 +1,6 @@
 {
-  "diffTarget": "previous_assistant_message",
-  "diffNote": "请把下面的 diff 视为用户对紧邻上一条 assistant message 的修改。先把上一条 assistant message 当作 diff 的基底；新增、删除、替换以及 diff 里的行内注释都表达用户意图。",
-  "textNote": "请把下面内容视为用户在外部编辑器里整理后的最新正文。",
-  "wrapperDiffInstructions": [
-    "If mode=\"diff\", treat <edit_target>",
-    "previous_assistant_message</edit_target> as saying the diff applies to the immediately",
-    "preceding assistant message, and treat <edit_diff> additions, deletions, replacements,",
-    "and inline comments as user intent."
-  ]
+  "tag": "comment",
+  "onAttr": "on",
+  "defaultTarget": "previous_reply",
+  "offsetTargetFormat": "reply[-{n}]"
 }

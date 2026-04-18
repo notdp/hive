@@ -87,18 +87,15 @@ def test_plugin_list_enable_and_disable_cvim(runner, configure_hive_home):
     assert "usage: cvim-session <cwd> <droid_args> [pane_id]" in installed_session_text
     payload_builder_text = installed_payload_builder.read_text()
     assert "cvim_edit_protocol.json" in payload_builder_text
-    assert "<edit_target>" in payload_builder_text
     protocol_text = installed_protocol.read_text()
-    assert "紧邻上一条 assistant message" in protocol_text
-    assert "previous_assistant_message" in protocol_text
+    assert '"tag": "comment"' in protocol_text
+    assert '"defaultTarget": "previous_reply"' in protocol_text
     installed_cvim_text = (factory_commands_root / "cvim").read_text()
     installed_vim_text = (factory_commands_root / "vim").read_text()
     assert 'exec hive cvim "$@"' in installed_cvim_text
     assert 'exec hive vim "$@"' in installed_vim_text
-    assert "# DROID:" in installed_cvim_text
-    assert "immediately" in installed_cvim_text
-    assert "# DROID:" in installed_vim_text
-    assert "immediately" in installed_vim_text
+    assert "# DROID:" not in installed_cvim_text
+    assert "# DROID:" not in installed_vim_text
 
     settings = json.loads((factory_home / "settings.json").read_text())
     for event in ("SessionStart", "UserPromptSubmit", "SessionEnd"):

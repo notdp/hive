@@ -15,46 +15,31 @@ def _protocol(script_path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def _resolve_diff_target(protocol: dict[str, Any], offset: int) -> str:
+def _resolve_target(protocol: dict[str, Any], offset: int) -> str:
     if offset <= 0:
-        return protocol["diffTarget"]
-    return f"assistant_message[-{offset + 1}]"
+        return protocol["defaultTarget"]
+    return protocol["offsetTargetFormat"].replace("{n}", str(offset + 1))
 
 
-def _resolve_diff_note(protocol: dict[str, Any], offset: int) -> str:
-    if offset <= 0:
-        return protocol["diffNote"]
-    nth = offset + 1
-    return (
-        f"请把下面的 diff 视为用户对倒数第 {nth} 条 assistant message 的修改。"
-        f"先把该条 assistant message 当作 diff 的基底；新增、删除、替换以及 diff 里的行内注释都表达用户意图。"
+def _build_hunks_only_diff(orig: str, edited: str) -> str:
+    raw = difflib.unified_diff(
+        orig.splitlines(True),
+        edited.splitlines(True),
+        fromfile="",
+        tofile="",
     )
+    lines = [line for line in raw if not line.startswith("--- ") and not line.startswith("+++ ")]
+    return "".join(lines).rstrip("\n")
 
 
 def _build_payload(orig: str, edited: str, mode: str, protocol: dict[str, Any], offset: int = 0) -> str:
     if mode == "diff":
-        diff = "".join(
-            difflib.unified_diff(
-                orig.splitlines(True),
-                edited.splitlines(True),
-                fromfile="before",
-                tofile="after",
-            )
-        ).rstrip("\n")
-        payload = "<droid_edit mode=\"diff\">\n"
-        payload += f"<edit_target>{_resolve_diff_target(protocol, offset)}</edit_target>\n"
-        payload += f"<edit_note>{_resolve_diff_note(protocol, offset)}</edit_note>\n"
-        payload += "<edit_diff>\n"
-        payload += diff
-        payload += "\n</edit_diff>\n</droid_edit>"
-        return payload
-
-    payload = "<droid_edit mode=\"text\">\n"
-    payload += f"<edit_note>{protocol['textNote']}</edit_note>\n"
-    payload += "<edited_text>\n"
-    payload += edited.rstrip("\n")
-    payload += "\n</edited_text>\n</droid_edit>"
-    return payload
+        tag = protocol["tag"]
+        attr = protocol["onAttr"]
+        target = _resolve_target(protocol, offset)
+        diff = _build_hunks_only_diff(orig, edited)
+        return f"<{tag} {attr}=\"{target}\">\n{diff}\n</{tag}>"
+    return edited.rstrip("\n")
 
 
 def main() -> int:
@@ -72,8 +57,6 @@ def main() -> int:
             offset = int(offset_file.read_text().strip())
         except (ValueError, OSError):
             pass
-    # The popup picker writes the selected index directly; skip the codex
-    # commentary-turn shift since the user picked the exact message.
     if not menu_selected_file.is_file() and transcript_path_file.is_file():
         try:
             offset = resolve_assistant_offset(Path(transcript_path_file.read_text().strip()), offset=offset)

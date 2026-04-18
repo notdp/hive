@@ -473,7 +473,7 @@ def test_edited_save_interrupts_before_paste_and_submits(tmp_path):
         ],
         extra_env={
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
-            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<comment on=\"previous_reply\"> pasted]",
         },
     )
 
@@ -537,7 +537,7 @@ def test_claude_profile_clears_input_with_ctrl_u_before_paste(tmp_path):
         ],
         extra_env={
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
-            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<comment on=\"previous_reply\"> pasted]",
         },
     )
 
@@ -570,6 +570,7 @@ def test_claude_profile_accepts_pasted_placeholder_before_submit(tmp_path):
             },
         ],
         extra_env={
+            "DROID_VIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_TEXT": "❯ [Pasted text #1 +10 lines]",
             "XDG_CACHE_HOME": str(cache_dir),
@@ -626,7 +627,7 @@ def test_popup_schedules_post_after_popup_exits(tmp_path):
         ],
         extra_env={
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
-            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"text\"> pasted]",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<comment on=\"previous_reply\"> pasted]",
             "FAKE_TMUX_MARK_POPUP_CONTEXT": "1",
             "FAKE_TMUX_DROP_RUN_SHELL_IN_POPUP": "1",
         },
@@ -652,10 +653,11 @@ def test_edited_save_waits_for_structured_input_before_submit(tmp_path):
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
+            "DROID_VIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
                 "ready for input\n> still empty",
-                "ready for input\n> [<droid_edit mode=\"diff\"> pasted]",
+                "ready for input\n> [<comment on=\"previous_reply\"> pasted]",
             ]),
         },
         use_default_delays=True,
@@ -680,6 +682,7 @@ def test_edited_save_skips_submit_when_probe_never_finds_structured_input(tmp_pa
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
+            "DROID_VIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
             "FAKE_TMUX_CAPTURE_PANE_SEQUENCE": json.dumps([
                 "ready for input\n> still empty",
@@ -717,8 +720,9 @@ def test_popup_debug_log_records_sendback_stages(tmp_path):
             {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100},
         ],
         extra_env={
+            "DROID_VIM_OUTPUT_MODE": "diff",
             "FAKE_EDITOR_APPEND_TEXT": "new line added",
-            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<droid_edit mode=\"diff\"> pasted diff]",
+            "FAKE_TMUX_CAPTURE_PANE_TEXT": "ready for input\n> [<comment on=\"previous_reply\"> pasted diff]",
             "XDG_CACHE_HOME": str(cache_dir),
         },
         use_default_delays=True,

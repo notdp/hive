@@ -175,28 +175,8 @@ def _copy_text_with_plugin_root(src: Path, dst: Path, *, install_dir: Path) -> N
     _ensure_executable_if_script(dst)
 
 
-def _cvim_diff_comment_block(install_dir: Path) -> str:
-    path = install_dir / "resources" / "cvim_edit_protocol.json"
-    if not path.is_file():
-        return ""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return ""
-    lines = data.get("wrapperDiffInstructions")
-    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
-        return ""
-    return "\n# DROID: ".join(lines)
-
-
 def _render_plugin_text(content: str, *, install_dir: Path) -> str:
-    replacements = {
-        "${HIVE_PLUGIN_ROOT}": str(install_dir),
-        "${HIVE_DROID_EDIT_DIFF_INSTRUCTIONS}": _cvim_diff_comment_block(install_dir),
-    }
-    for old, new in replacements.items():
-        content = content.replace(old, new)
-    return content
+    return content.replace("${HIVE_PLUGIN_ROOT}", str(install_dir))
 
 
 def _materialize_installed_commands(install_dir: Path) -> list[Path]:

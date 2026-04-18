@@ -25,43 +25,36 @@ def _build_payload(tmp_path: Path, *, orig: str, edited: str, mode: str, offset:
     return send_file.read_text()
 
 
-def test_diff_payload_builder_uses_shared_protocol_target_and_note(tmp_path):
+def test_diff_payload_uses_comment_wrapper_with_default_target(tmp_path):
     payload = _build_payload(tmp_path, orig="旧内容\n", edited="旧内容\n\n貌似可以了哦\n", mode="diff")
 
-    assert "<droid_edit mode=\"diff\">" in payload
-    assert "<edit_target>previous_assistant_message</edit_target>" in payload
-    assert "紧邻上一条 assistant message" in payload
-    assert "--- before" in payload
-    assert "+++ after" in payload
+    assert payload.startswith('<comment on="previous_reply">')
+    assert payload.endswith("</comment>")
+    assert "--- " not in payload
+    assert "+++ " not in payload
+    assert "@@" in payload
 
 
-def test_text_payload_builder_uses_shared_protocol_note(tmp_path):
+def test_text_payload_is_bare_pass_through(tmp_path):
     payload = _build_payload(tmp_path, orig="", edited="整理后的正文\n", mode="text")
 
-    assert "<droid_edit mode=\"text\">" in payload
-    assert "用户在外部编辑器里整理后的最新正文" in payload
-    assert "<edited_text>\n整理后的正文\n</edited_text>" in payload
+    assert payload == "整理后的正文"
+    assert "<comment" not in payload
 
 
-def test_diff_payload_with_offset_uses_indexed_target(tmp_path):
+def test_diff_payload_with_offset_targets_indexed_reply(tmp_path):
     payload = _build_payload(tmp_path, orig="旧内容\n", edited="旧内容\n\n新增\n", mode="diff", offset=1)
 
-    assert "<edit_target>assistant_message[-2]</edit_target>" in payload
-    assert "倒数第 2 条" in payload
+    assert payload.startswith('<comment on="reply[-2]">')
 
 
-def test_diff_payload_with_offset_2_uses_indexed_target(tmp_path):
+def test_diff_payload_with_offset_2_targets_indexed_reply(tmp_path):
     payload = _build_payload(tmp_path, orig="旧内容\n", edited="旧内容\n\n新增\n", mode="diff", offset=2)
 
-    assert "<edit_target>assistant_message[-3]</edit_target>" in payload
-    assert "倒数第 3 条" in payload
+    assert payload.startswith('<comment on="reply[-3]">')
 
 
 def test_diff_payload_menu_selected_skips_codex_commentary_shift(tmp_path):
-    # When the popup picker writes `menu_selected`, the offset is taken verbatim
-    # (the user already saw and chose the exact message); the codex
-    # commentary-turn shift that normally fires via `resolve_assistant_offset`
-    # must be bypassed.
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(
         "".join(
@@ -104,11 +97,7 @@ def test_diff_payload_menu_selected_skips_codex_commentary_shift(tmp_path):
 
     payload = _build_payload(tmp_path, orig="a\n", edited="a\nb\n", mode="diff", offset=1)
 
-    # Without menu_selected, `resolve_assistant_offset` would add the commentary
-    # shift and the target would land on [-3]; with the sentinel present the
-    # offset passes through as-is.
-    assert "<edit_target>assistant_message[-2]</edit_target>" in payload
-    assert "倒数第 2 条" in payload
+    assert payload.startswith('<comment on="reply[-2]">')
 
 
 def test_diff_payload_uses_effective_offset_from_transcript(tmp_path):
@@ -143,7 +132,7 @@ def test_diff_payload_uses_effective_offset_from_transcript(tmp_path):
                         "type": "message",
                         "role": "assistant",
                         "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "使用 `cvim` skill，按要求直接启动外部编辑器助手。"}],
+                        "content": [{"type": "output_text", "text": "使用 `cvim` skill,按要求直接启动外部编辑器助手。"}],
                     },
                 },
             ]
@@ -153,5 +142,4 @@ def test_diff_payload_uses_effective_offset_from_transcript(tmp_path):
 
     payload = _build_payload(tmp_path, orig="真正要编辑的回答\n", edited="真正要编辑的回答\n\n补一行\n", mode="diff")
 
-    assert "<edit_target>assistant_message[-2]</edit_target>" in payload
-    assert "倒数第 2 条" in payload
+    assert payload.startswith('<comment on="reply[-2]">')

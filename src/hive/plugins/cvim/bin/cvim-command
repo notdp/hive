@@ -602,11 +602,11 @@ if [[ -s "$msg_file" ]] && ! cmp -s "$msg_file" "$orig_file"; then
   content_changed="1"
   "$payload_builder" "$orig_file" "$msg_file" "$send_file" "$send_mode"
   send_bytes="$(wc -c < "$send_file" | tr -d '[:space:]')"
-  has_droid_edit="0"
-  if grep -q '<droid_edit mode="' "$send_file" 2>/dev/null; then
-    has_droid_edit="1"
+  has_comment="0"
+  if grep -q '^<comment on="' "$send_file" 2>/dev/null; then
+    has_comment="1"
   fi
-  debug_log "helper.payload_ready content_changed=1 send_bytes=$send_bytes has_droid_edit=$has_droid_edit"
+  debug_log "helper.payload_ready content_changed=1 send_bytes=$send_bytes has_comment=$has_comment"
 else
   debug_log "helper.no_change content_changed=0"
 fi
@@ -685,7 +685,7 @@ reply_pane_ready_matcher() {
   local snapshot="$1"
   local profile="${2:-unknown}"
   case "$snapshot" in
-    *"> [<droid_edit"*|*"> <droid_edit"*|*"<droid_edit mode="*|*"> [<edited_text"*|*"> <edited_text"*|*"<edited_text>"*)
+    *"> [<comment on="*|*"> <comment on="*|*"<comment on=\""*)
       printf 'structured_payload\n'
       return 0
       ;;
@@ -768,7 +768,7 @@ else
   if [[ "$content_changed" == "1" ]]; then
     send_text="$(cat "$send_file")"
     submit_probe_required="0"
-    if [[ "$send_text" == *"<droid_edit"* || "$send_text" == *"<edited_text"* ]]; then
+    if [[ "$send_text" == "<comment on=\""* ]]; then
       submit_probe_required="1"
     fi
     if [[ "$send_text" != *$'\n'* && "$send_text" == /* ]]; then
