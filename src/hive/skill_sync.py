@@ -205,7 +205,7 @@ def _should_emit_warning(payload: dict[str, Any], *, now: float) -> bool:
 
 def render_hive_skill_warning(payload: dict[str, Any]) -> str:
     lines = [
-        f"Warning: installed hive skill for {payload.get('cli', 'unknown')} is {payload.get('state', 'unknown')}.",
+        f"installed hive skill for {payload.get('cli', 'unknown')} is {payload.get('state', 'unknown')}.",
         f"  installed: {payload.get('installedPath', '(missing)')}",
         f"  expected:  {payload.get('expectedHash', '(unknown)')}",
     ]

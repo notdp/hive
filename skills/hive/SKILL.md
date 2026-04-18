@@ -29,9 +29,7 @@ npx skills add "$PWD" -g --all
 
 ## 首次进入
 
-1. `hive current` — 看当前 tmux 绑定、pane 列表、是否已绑 team
-2. 没 team 但在 tmux 里 → `hive init` 从当前 window 创建 team + workspace，自动把其他 pane 注册成 agent
-3. 不要依赖 `HIVE_TEAM_NAME` / `HIVE_AGENT_NAME` / `HIVE_WORKSPACE` / `CR_WORKSPACE` 之类环境变量；`hive current` 和 tmux 绑定才是准绳
+加载 hive skill = 你要作为 hive 成员工作。**立刻跑 `hive init`**，按 CLI 输出走，不要自己先 `hive current` 猜状态，也不要问用户「要不要 init」。`hive init` 幂等，报错信息会告诉你缺什么。
 
 ## 日常（Daily）
 

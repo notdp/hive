@@ -102,6 +102,9 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": None)
         monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: {})
         monkeypatch.setattr("hive.cli.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: {})
+        # Default: skill is current so the root-hook hard-fail doesn't fire.
+        # Tests that want to assert the drift-fail path override this.
+        monkeypatch.setattr("hive.cli.skill_sync.diagnose_hive_skill", lambda *_args, **_kwargs: {"state": "current"})
         monkeypatch.setattr("hive.cli.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.context.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.context.CONTEXT_DIR", hive_home / "contexts")
