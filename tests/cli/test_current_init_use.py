@@ -279,12 +279,79 @@ def test_init_registers_current_unbound_pane_into_existing_team(
         "tmuxSession": "dev",
         "tmuxWindow": "dev:5",
     }
+    # Self-register must not inject `/hive` or join message into the pane
+    # that is currently running `hive init` — that lands in the pane's own
+    # input queue and causes the agent to re-trigger `/hive`.
     pane_events = [text for pane, text in mock_tmux_send if pane == "%2"]
-    assert "$hive" in pane_events
-    assert any("You are 'dodo' in hive team 'dev-5'." in text for text in pane_events)
+    assert pane_events == []
     current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
     assert current["team"] == "dev-5"
     assert current["agent"] == "dodo"
+
+
+def test_init_self_register_never_injects_hive_slash_into_own_input(
+    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
+):
+    """Regression: when an agent (e.g. Claude) runs `hive init` in its own
+    pane and the window is already bound to a team, `hive init` used to call
+    `member.load_skill("hive")` + `member.send(join_message)` on the self
+    pane. Those `tmux send-keys` calls landed in the pane's own input queue,
+    causing the agent to see a phantom second `/hive` trigger plus a stray
+    "You are '<name>'..." prompt once the current turn finished.
+
+    Any bytes sent to the self pane during init is a bug. Check the raw
+    `send` stream directly so future refactors of the rebind path cannot
+    re-introduce the regression without tripping this test.
+    """
+    configure_hive_home(current_pane="%42", session_name="main")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "main")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "3")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "main:3")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%42")
+    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "pipi")
+
+    from hive import tmux
+    from hive.tmux import PaneInfo
+
+    tmux.set_window_option("main:3", "@hive-team", "main-3")
+    tmux.set_window_option("main:3", "@hive-workspace", str(tmp_path / "ws"))
+    tmux.set_window_option("main:3", "@hive-created", "0")
+
+    def fake_get_pane_option(pane_id: str, key: str):
+        if pane_id == "%42" and key == "hive-team":
+            return "main-3"
+        return None
+
+    monkeypatch.setattr("hive.cli.tmux.get_pane_option", fake_get_pane_option)
+    monkeypatch.setattr("hive.tmux.get_pane_option", fake_get_pane_option)
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%40", "orch", command="droid", role="agent", agent="orch", team="main-3"),
+            PaneInfo("%42", "Claude", command="droid", team="main-3"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux.list_panes_full",
+        lambda _target: [
+            PaneInfo("%40", "orch", command="droid", role="agent", agent="orch", team="main-3"),
+            PaneInfo("%42", "Claude", command="droid", team="main-3"),
+        ],
+    )
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda pane_id: type("P", (), {"name": "claude"})() if pane_id == "%42" else None,
+    )
+
+    result = runner.invoke(cli, ["init"])
+    assert result.exit_code == 0
+
+    self_sends = [text for pane, text in mock_tmux_send if pane == "%42"]
+    assert self_sends == [], (
+        f"hive init must not send anything to the pane that launched it, "
+        f"but %42 received: {self_sends!r}"
+    )
 
 
 def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):

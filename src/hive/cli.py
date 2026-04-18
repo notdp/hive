@@ -1219,9 +1219,10 @@ def init_cmd(name: str, workspace: str, notify: bool):
                     agent=member_name,
                 )
                 _remember_context(team=bound_team, workspace=workspace_str, agent=member_name)
-                if notify and isinstance(member, Agent):
-                    member.load_skill("hive")
-                    member.send(_hive_join_message(member_name, bound_team))
+                # Self-register: `member` is the current pane, which already
+                # ran `/hive` and sees the JSON output below. Re-injecting
+                # `/hive` + join message here would land in the pane's own
+                # input queue.
                 click.echo(json.dumps({
                     "team": bound_team,
                     "workspace": workspace_str,
