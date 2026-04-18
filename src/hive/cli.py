@@ -1015,11 +1015,7 @@ def _maybe_route_busy_root_send(
     t: Team,
     workspace: str | Path,
     target_agent: str,
-    reply_to: str,
 ) -> tuple[str, dict[str, object]]:
-    if reply_to.strip():
-        return target_agent, {}
-
     from .sidecar import request_team_runtime
 
     try:
@@ -1118,9 +1114,9 @@ def _handoff_delegate_body(
         f"Original sender: {original_sender}",
         f"Anchor msgId: {anchor_msg_id}",
         f"First step: hive thread {anchor_msg_id}",
-        f"Reply path: hive send {original_sender} \"<takeover>\" --reply-to {anchor_msg_id}",
-        "Continue updates on that same --reply-to.",
-        "Do not use hive reply for this handoff.",
+        f"First reply: hive reply {original_sender} --reply-to {anchor_msg_id} \"<takeover>\"",
+        f"(--reply-to is required on the first reply because you never received {anchor_msg_id} yourself.)",
+        f"Once {original_sender} replies back, continue with plain 'hive reply {original_sender} \"...\"' — autoReply picks the thread.",
     ]
     if note.strip():
         lines.append(f"Note: {note.strip()}")
@@ -1737,7 +1733,6 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option("--reply-to", default="", help="Message ID this is replying to")
 @click.option(
     "--wait",
     is_flag=True,
@@ -1749,12 +1744,19 @@ def send(
     to_agent: str,
     body: str,
     artifact: str,
-    reply_to: str,
     wait: bool,
     to_option: str | None,
     msg_option: str | None,
 ):
-    """Send a Hive message to another agent.
+    """Start a new thread to another agent (root send only).
+
+    `hive send` always opens a root thread; it does not accept
+    `--reply-to`. To reply on an existing thread, use `hive reply`.
+
+    Root sends must keep `body` to a short summary and put details in
+    `--artifact`; the body is rejected if longer than 500 chars, has
+    3+ lines, contains fenced code, or starts markdown heading/list
+    lines.
 
     The response carries a `delivery` field:
 
@@ -1767,13 +1769,11 @@ def send(
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
-    if not reply_to.strip():
-        _validate_root_send_protocol(body, artifact)
+    _validate_root_send_protocol(body, artifact)
     effective_target, routing = _maybe_route_busy_root_send(
         t=t,
         workspace=ws,
         target_agent=to_agent,
-        reply_to=reply_to,
     )
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
@@ -1784,7 +1784,7 @@ def send(
             target_agent=effective_target,
             body=body,
             artifact=resolved_artifact,
-            reply_to=reply_to,
+            reply_to="",
             wait=wait,
             command_name="send",
         )
@@ -1842,7 +1842,7 @@ def reply(
         if latest is None:
             _fail(
                 f"no recent message from '{to_agent}' to '{sender}'; "
-                "use 'hive send' or pass --reply-to explicitly"
+                "pass --reply-to explicitly"
             )
         assert latest is not None
         candidate = str(latest.get("msgId") or "")

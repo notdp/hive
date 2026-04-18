@@ -77,11 +77,15 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 - target 正在 active turn 时，root send 路径会自动 fork 一个 clone 接管（`routingMode=fork_handoff, routingReason=active_turn_fork`）；不再有 `deferred` 状态
 - **shell 安全（`hive send` 和 `hive reply` 都适用）**：双引号 `body` 里不要出现反引号（``` ` ```），zsh/bash 会把反引号当作 command substitution 先执行，消息会被悄悄改坏。含 markdown inline code 时走 heredoc + `--artifact -`，或把 body 整句换成单引号包裹
 
-### `hive reply` vs `hive send --reply-to`
+### `hive send` vs `hive reply`
 
-- 刚收到某 agent 的消息、直接回复就用 `hive reply <agent> "..."`：它自动把 `reply-to` 填成"最近一条来自该 agent 且你还没回过的入站消息"
-- 没有入站消息、或最近一条已经回过，`hive reply` 会直接报错，要求你传 `--reply-to <msgId>`；它**不会**跨线程猜
-- 已经拿到了特定 `msgId`（例如 handoff 时 prompt 里带的），继续用 `hive send <agent> "..." --reply-to <msgId>`
+- `hive send` 只用于**开新 thread**（root send），不接受 `--reply-to`；必须带 `--artifact`，body 是短摘要
+- 要接续已有 thread 一律走 `hive reply`：
+  - **主路径**：`hive reply <agent> "..."` 让 Hive 自动挑"最近一条来自该 agent 且你还没回过的入站消息"作 reply-to。这就是默认用法，不需要你去找 msgId
+  - 只在下面这几种情况才显式传 `--reply-to <msgId>`：
+    - handoff / spawn 时 prompt 直接给了你 anchor msgId（你手头并没有那条的 inbound）
+    - 你想跨越 autoReply 默认挑的那条，回一条更早的 thread
+- `hive reply` 在没有可推断的入站消息且你也没传 `--reply-to` 时会直接报错；它**不会**跨线程猜
 
 ### 协作升级（4 条足矣）
 
@@ -143,8 +147,8 @@ hive handoff orch-2 --fork --artifact /tmp/task.md
 
 ### 新处理者的动作
 
-1. 第一件事是用 `hive send <sender> "<short takeover with reason>" --reply-to <msgId>` 通知原 sender，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继
-2. 处理完成后，继续自己用 `hive send <sender> "<done summary>" --reply-to <msgId> [--artifact <path>]` 沿同一条 thread 回结果；后续 question / update 也都继续沿这条 thread 回复
+1. 第一件事是用 `hive reply <sender> --reply-to <msgId> "<short takeover with reason>"` 通知原 sender，例如"从 orch 手中接管了 X 任务，因为 orch 正在处理 Y"；不要让原 pane 先做中继。这里必须显式 `--reply-to`，因为你并不是 `<msgId>` 的 receiver，autoReply 推断不出来
+2. 等 sender 回你之后，你就是正常 receiver，后续直接 `hive reply <sender> "..."` 走 autoReply 即可；只在你**还**没收到过 sender 的回信却要继续沿同一 thread push 更新时，才继续显式 `--reply-to <msgId>`
 
 ### Workflow
 

@@ -207,7 +207,10 @@ Droid's simple message-shape probe does not currently emit `task_closed` / `turn
 
 ## Root Send Protocol
 
-Root sends are messages without `--reply-to`.
+Root sends are every `hive send`; the command no longer accepts
+`--reply-to`. Continuing an existing thread is done via `hive reply`
+(which always carries a `replyTo` and is therefore not subject to the
+root protocol).
 
 Hive enforces a two-layer protocol for root sends:
 

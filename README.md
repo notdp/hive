@@ -63,8 +63,11 @@ cat <<'EOF' | hive send orch "see report" --artifact -
 - item
 EOF
 
-# Reply to a specific message
-hive send orch "fixed" --reply-to aBc1
+# Reply (auto-picks the latest unanswered inbound from orch)
+hive reply orch "fixed"
+
+# Reply to a specific earlier thread when auto-pick would target the wrong one
+hive reply orch --reply-to aBc1 "fixed"
 
 # Answer a pending question
 hive answer dodo "yes"
@@ -89,7 +92,8 @@ hive notify "done, press Space to come back"
 | `hive init` / `hive create` | Bind current window or create a team |
 | `hive team` | Show team with runtime `busy` / `inputState` and peer info |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
-| `hive send <agent> "text"` | Send message (`reply` stays direct; root sends auto-fork a clone when target is in an active turn) |
+| `hive send <agent> "text"` | Start a new thread (root send only; artifact required; auto-forks a clone when target is in an active turn) |
+| `hive reply <agent> "text"` | Reply on an existing thread (auto-picks latest unanswered inbound; `--reply-to` for explicit msgId) |
 | `hive handoff <agent>` | Delegate a thread via direct send, spawn, or fork wrapper |
 | `hive answer <agent> "text"` | Answer a pending AskUserQuestion |
 | `hive doctor [agent] [--skills]` | Diagnose agent connectivity and optional local hive skill drift |
@@ -103,9 +107,17 @@ hive notify "done, press Space to come back"
 
 | Option | Description |
 |--------|-------------|
+| `--artifact <path>` | Attach a file (required on root sends) |
+| `--artifact -` | Read artifact from stdin |
+| `--wait` | Block until transcript confirms delivery |
+
+### Reply options
+
+| Option | Description |
+|--------|-------------|
+| `--reply-to <msgId>` | Override the auto-resolved thread anchor |
 | `--artifact <path>` | Attach a file |
 | `--artifact -` | Read artifact from stdin |
-| `--reply-to <msgId>` | Link to a previous message |
 | `--wait` | Block until transcript confirms delivery |
 
 ## Workspace
