@@ -23,6 +23,7 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda _pane: None)
     monkeypatch.setattr("hive.agent.tmux.send_keys", lambda _pane, text, enter=True: calls.append(text))
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda _pane, key: calls.append(f"<{key}>"))
+    monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _profile: False)
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
     monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: None)

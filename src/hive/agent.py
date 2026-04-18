@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import draft_guard
 from . import skill_sync
 from . import tmux
 from .agent_cli import resolve_session_id_for_pane
@@ -91,13 +92,62 @@ def _build_droid_model_settings(model: str) -> tuple[str, str]:
 
 
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
-    """Submit text to an interactive agent TUI."""
+    """Submit text to an interactive agent TUI, preserving any pending draft."""
     if tmux.is_pane_in_mode(pane_id):
         tmux.cancel_pane_mode(pane_id)
         time.sleep(0.05)
+
+    profile_name = _resolve_profile_name(pane_id, cli)
+    buffer_name = _save_and_clear_draft(pane_id, profile_name)
+
     tmux.send_keys(pane_id, text, enter=False)
     time.sleep(0.05)
     tmux.send_key(pane_id, "Enter")
+
+    if buffer_name:
+        _restore_draft(pane_id, profile_name, buffer_name)
+
+
+def _save_and_clear_draft(pane_id: str, profile_name: str) -> str:
+    """Best-effort: if a draft exists, save it to a tmux buffer and clear input.
+
+    Returns the buffer name to restore later, or '' when no draft / on any error.
+    """
+    if not draft_guard.supported_profile(profile_name):
+        return ""
+    try:
+        draft_text = draft_guard.parse_draft(pane_id, profile_name)
+        if not draft_text:
+            return ""
+        buffer_name = f"hive_draft_{pane_id.replace('%', '')}"
+        tmux.load_buffer(buffer_name, draft_text)
+        draft_guard.clear_input(pane_id, profile_name)
+        draft_guard.wait_input_empty(pane_id, profile_name, timeout=1.0)
+        return buffer_name
+    except Exception:
+        return ""
+
+
+def _restore_draft(pane_id: str, profile_name: str, buffer_name: str) -> None:
+    try:
+        draft_guard.wait_input_empty(pane_id, profile_name, timeout=2.0)
+        tmux.paste_buffer(buffer_name, pane_id, bracketed=True)
+    finally:
+        tmux.delete_buffer(buffer_name)
+
+
+def _resolve_profile_name(pane_id: str, cli: str) -> str:
+    """Prefer runtime detection; fall back to the declared cli."""
+    try:
+        from .agent_cli import detect_profile_for_pane, get_profile
+    except Exception:
+        return cli
+    profile = detect_profile_for_pane(pane_id)
+    if profile is None and cli:
+        profile = get_profile(cli)
+    if profile is not None:
+        return getattr(profile, "name", cli)
+    return cli
 
 
 @dataclass

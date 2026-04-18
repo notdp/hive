@@ -311,6 +311,47 @@ def send_key(pane_id: str, key: str) -> None:
     _run(["send-keys", "-t", pane_id, key])
 
 
+def send_keys_batch(pane_id: str, *keys: str) -> None:
+    """Send multiple keys in one tmux call (atomic w.r.t. tmux server)."""
+    if not keys:
+        return
+    _run(["send-keys", "-t", pane_id, *keys])
+
+
+def get_cursor_x(pane_id: str) -> int | None:
+    value = display_value(pane_id, "#{cursor_x}")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def load_buffer(name: str, data: str) -> None:
+    """Load data into a named tmux buffer via stdin."""
+    try:
+        subprocess.run(
+            ["tmux", "load-buffer", "-b", name, "-"],
+            input=data,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def paste_buffer(name: str, target: str, *, bracketed: bool = False) -> None:
+    """Paste a named tmux buffer into a pane (optionally with bracketed-paste sequences)."""
+    args = ["paste-buffer", "-b", name, "-t", target]
+    if bracketed:
+        args.insert(1, "-p")
+    _run(args, check=False)
+
+
+def delete_buffer(name: str) -> None:
+    _run(["delete-buffer", "-b", name], check=False)
+
+
 def is_pane_in_mode(pane_id: str) -> bool:
     value = display_value(pane_id, "#{pane_in_mode}")
     return value == "1"
