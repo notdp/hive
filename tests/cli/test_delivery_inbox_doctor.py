@@ -145,6 +145,35 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
     assert payload["observedAt"] == "2026-04-14T00:00:00Z"
 
 
+def test_delivery_reports_deferred_policy_state(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    _patch_sidecar_status_requests(monkeypatch)
+
+    bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="see report",
+        artifact="/tmp/report.md",
+        message_id="d1",
+        metadata={
+            "deliveryMode": "deferred",
+            "targetCli": "droid",
+        },
+    )
+
+    result = runner.invoke(cli, ["delivery", "d1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "deferred"
+    assert payload["recommendedAction"] == "continue"
+    assert "deferred for receiver review" in payload["meaning"]
+
+
 def test_delivery_failed_reports_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
@@ -278,6 +307,8 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
             "alive": True,
             "model": "gpt-5.4",
             "inputState": "ready",
+            "interruptSafety": "unknown",
+            "safetyReason": "assistant_text_idle",
             "gate": "clear",
             "transcript": "/tmp/session.jsonl",
             "transcriptSize": 1234,
@@ -294,6 +325,8 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
     assert payload["alive"] is True
     assert payload["model"] == "gpt-5.4"
     assert payload["inputState"] == "ready"
+    assert payload["interruptSafety"] == "unknown"
+    assert payload["safetyReason"] == "assistant_text_idle"
     assert payload["gate"] == "clear"
     assert payload["transcript"] == "/tmp/session.jsonl"
     assert payload["transcriptSize"] == 1234
@@ -532,13 +565,25 @@ def test_activity_command_outputs_activity_probe(runner, configure_hive_home, mo
             "transcriptSize": 1234,
             "activityState": "active",
             "activityReason": "assistant_tool_use_open",
+            "interruptSafety": "unsafe",
+            "safetyReason": "tool_open",
             "activityObservedAt": "2026-04-16T05:00:00Z",
+            "safetyObservedAt": "2026-04-16T05:00:00Z",
             "activityRole": "assistant",
             "activityPartKinds": ["tool_use"],
             "activityEvidence": {
                 "tail": [
                     {
                         "role": "assistant",
+                        "partKinds": ["tool_use"],
+                        "observedAt": "2026-04-16T05:00:00Z",
+                    }
+                ]
+            },
+            "safetyEvidence": {
+                "tail": [
+                    {
+                        "type": "assistant",
                         "partKinds": ["tool_use"],
                         "observedAt": "2026-04-16T05:00:00Z",
                     }
@@ -553,5 +598,9 @@ def test_activity_command_outputs_activity_probe(runner, configure_hive_home, mo
     assert payload["agent"] == "claude"
     assert payload["activityState"] == "active"
     assert payload["activityReason"] == "assistant_tool_use_open"
+    assert payload["interruptSafety"] == "unsafe"
+    assert payload["safetyReason"] == "tool_open"
+    assert payload["safetyObservedAt"] == "2026-04-16T05:00:00Z"
     assert payload["activityRole"] == "assistant"
     assert payload["activityPartKinds"] == ["tool_use"]
+    assert payload["safetyEvidence"]["tail"][0]["type"] == "assistant"

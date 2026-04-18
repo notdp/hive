@@ -24,6 +24,8 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
     team = f"e2e-{uuid.uuid4().hex[:8]}"
     session = f"hive-e2e-{uuid.uuid4().hex[:8]}"
     workspace = workdir / "ws"
+    artifact = workdir / "root-message.md"
+    artifact.write_text("hello from artifact")
 
     pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}"]).stdout.strip()
 
@@ -56,10 +58,11 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
         inject_result = run_in_pane(["inject", "claude", "plain ping"])
         assert inject_result.returncode == 0, inject_result.stdout
         assert "Injected raw input into claude." in inject_result.stdout
-        send_result = run_in_pane(["send", "claude", "hello envelope"])
+        send_result = run_in_pane(["send", "claude", "hello envelope", "--artifact", str(artifact)])
         assert send_result.returncode == 0, send_result.stdout
         send_payload = json.loads(send_result.stdout)
         assert send_payload["to"] == "claude"
+        assert send_payload["state"] in {"queued", "pending", "confirmed"}
 
         wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
         captured = capture_claude()

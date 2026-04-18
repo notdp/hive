@@ -26,19 +26,23 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     _patch_runtime(
         monkeypatch,
         {
-            "members": {
-                "orch": {
-                    "alive": True,
-                    "sessionId": "orch-session-456",
-                    "model": "gpt-5.4",
-                    "inputState": "ready",
-                    "inputReason": "",
-                    "activityState": "idle",
-                    "activityReason": "assistant_terminal_message",
-                    "activityObservedAt": "2026-04-16T05:00:00Z",
+                "members": {
+                    "orch": {
+                        "alive": True,
+                        "sessionId": "orch-session-456",
+                        "model": "gpt-5.4",
+                        "inputState": "ready",
+                        "inputReason": "",
+                        "activityState": "idle",
+                        "activityReason": "assistant_terminal_message",
+                        "activityObservedAt": "2026-04-16T05:00:00Z",
+                        "interruptSafety": "safe",
+                        "safetyReason": "turn_closed",
+                        "deferredCount": 1,
+                        "deferredIds": ["aBc1"],
+                    }
                 }
-            }
-        },
+            },
     )
     result = runner.invoke(cli, ["team"])
 
@@ -57,6 +61,10 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["activityState"] == "idle"
     assert orch["activityReason"] == "assistant_terminal_message"
     assert orch["activityObservedAt"] == "2026-04-16T05:00:00Z"
+    assert orch["interruptSafety"] == "safe"
+    assert orch["safetyReason"] == "turn_closed"
+    assert orch["deferredCount"] == 1
+    assert orch["deferredIds"] == ["aBc1"]
 
 
 def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -72,6 +80,18 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
                 "orch": {
                     "alive": True,
                     "model": "gpt-5.4",
+                    "deferredCount": 1,
+                    "deferredIds": ["aBc1"],
+                    "deferred": [
+                        {
+                            "msgId": "aBc1",
+                            "from": "dodo",
+                            "body": "see report",
+                            "artifact": "/tmp/report.md",
+                            "createdAt": "2026-04-18T00:00:00Z",
+                            "state": "opened",
+                        }
+                    ],
                 }
             }
         },
@@ -83,6 +103,9 @@ def test_current_uses_daemon_for_model(runner, configure_hive_home, monkeypatch,
     assert payload["team"] == "team-current"
     assert payload["agent"] == "orch"
     assert payload["model"] == "gpt-5.4"
+    assert payload["deferredCount"] == 1
+    assert payload["deferredIds"] == ["aBc1"]
+    assert payload["deferred"][0]["artifact"] == "/tmp/report.md"
     assert payload["runtimeWorkspace"] == str(workspace)
     assert payload["cwd"] == os.getcwd()
     assert payload["repoRoot"]

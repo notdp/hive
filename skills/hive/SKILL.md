@@ -38,8 +38,7 @@ npx skills add "$PWD" -g --all
 ```bash
 hive current                          # 看上下文
 hive team                             # 看成员 + runtime inputState/activityState + peer
-hive send dodo "hello"                # 发短消息（positional：收件人 + body，不要加 --to / --msg）
-hive send dodo "see attachment" --artifact /tmp/file.md
+hive send dodo "see attachment" --artifact /tmp/file.md   # 仅当你已经有现成文件
 cat <<'EOF' | hive send dodo "see attachment" --artifact -
 # Findings
 - item
@@ -55,10 +54,17 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 
 其他 agent 的消息会以 `<HIVE from=... to=... msgId=... />` block 出现在你 pane 里——这是主通道。不要去 `hive thread <msgId>` / `hive delivery <msgId>` 轮询等回复；durable store 不是收件箱。
 
-### `hive send` 是 fire-and-forget
+### `hive send` 的 root 协议
 
-- 返回 `queued` / `pending` / `confirmed` 都代表已进后台追踪，直接继续工作
-- body 默认只放动作 + 摘要；长内容、多行结构化内容、需要后续引用的上下文一律先写 artifact
+- root send（没有 `--reply-to`）必须：
+  - `body` 只放短摘要
+  - `artifact` 放详细内容
+- 不带 `--artifact` 的 root send 会直接失败
+- `body` 命中下面任一条件都会直接失败；把这些都移进 artifact：
+  - 超过 `500` 字符
+  - 一共有 `3` 行或更多
+  - 含 fenced code：`` ```
+  - 任一非空行以 `# `、`- `、`* ` 开头
 - 首选 heredoc + stdin artifact：
   ```bash
   cat <<'EOF' | hive send <name> "<message>" --artifact -
@@ -69,6 +75,16 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 - 带引号的 `EOF` 标签不会做 shell 插值，markdown / 代码块 / 引号内容会原样传过去
 - `printf '%s\n' ... | hive send ... --artifact -` 只当备选；它更容易踩转义坑。只有已有现成文件时才传 `--artifact <path>`
 - 不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
+- `reply` 不受这套 root 协议影响，仍然可以只回一句短文本
+- 目标命中硬 `unsafe` 时，root send 会返回 `deferred`：
+  - 当前这条 `unsafe` 判定来自各家 receiver transcript / JCL 观察，不是 hook 挂牌
+  - Claude 常见是 `tool_use` 或 queue backlog
+  - Codex 常见是未闭合 task / tool call
+  - Droid 常见是 `tool_use`
+  - Hive 收下消息，不丢
+  - receiver pane 只会看到正常 Hive 的短摘要消息，不直接打入完整内容
+  - receiver 自己稍后处理
+- 看到 `deferred` 时，继续工作即可；这是“已被 Hive 接收并延后给对方 review”，不是失败
 
 ### `hive reply` vs `hive send --reply-to`
 

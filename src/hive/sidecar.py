@@ -416,6 +416,7 @@ def request_send(
     artifact: str = "",
     reply_to: str = "",
     wait: bool = False,
+    enforce_safety_gate: bool = False,
 ) -> dict[str, Any] | None:
     timeout = OBSERVATION_TIMEOUT if wait else SEND_REQUEST_TIMEOUT
     return _request_sidecar(
@@ -430,6 +431,7 @@ def request_send(
             "artifact": artifact,
             "replyTo": reply_to,
             "wait": wait,
+            "enforceSafetyGate": enforce_safety_gate,
         },
         timeout=timeout,
     )
@@ -627,6 +629,13 @@ def _pending_record(
     return record
 
 
+def _target_cli_name(target: Any) -> str:
+    profile = detect_profile_for_pane(getattr(target, "pane_id", "") or "")
+    if profile and profile.name:
+        return profile.name
+    return str(getattr(target, "cli", "") or "")
+
+
 def _send_payload(
     *,
     workspace: str,
@@ -639,9 +648,11 @@ def _send_payload(
     artifact: str,
     reply_to: str,
     wait: bool,
+    enforce_safety_gate: bool = False,
 ) -> dict[str, Any]:
     team, target = _resolve_live_agent(team_name, target_agent)
     normalized_body = body.strip()
+    target_cli = _target_cli_name(target)
 
     message_id = ""
     transcript_path: Path | None = None
@@ -652,6 +663,56 @@ def _send_payload(
         transcript_path = None
 
     gate_status = _check_send_gate(transcript_path)
+
+    if enforce_safety_gate and not reply_to.strip():
+        runtime = _agent_runtime_payload(target.pane_id)
+        interrupt_safety = str(runtime.get("interruptSafety") or "unknown")
+        if interrupt_safety == "unsafe":
+            event = bus.write_send_event(
+                workspace,
+                from_agent=sender_agent,
+                to_agent=target_agent,
+                body=normalized_body,
+                artifact=artifact,
+                metadata={
+                    "deliveryMode": "deferred",
+                    "deferredReason": str(runtime.get("safetyReason") or "tool_open"),
+                    "targetCli": target_cli,
+                },
+            )
+            message_id = event.msg_id
+            reminder_status = "submitted"
+            try:
+                target.send(
+                    format_hive_envelope(
+                        from_agent=sender_agent,
+                        to_agent=target_agent,
+                        message_id=message_id,
+                        body=normalized_body,
+                        artifact=artifact,
+                    )
+                )
+            except Exception:
+                reminder_status = "failed"
+            payload: dict[str, Any] = {
+                "ok": True,
+                "from": sender_agent,
+                "to": target_agent,
+                "msgId": message_id,
+                "artifact": artifact,
+                "gate": gate_status,
+                "state": "deferred",
+                "interruptSafety": interrupt_safety,
+                "safetyReason": str(runtime.get("safetyReason") or "unknown_evidence"),
+                "meaning": "Accepted by Hive and deferred for receiver review.",
+                "recommendedAction": "continue",
+                "targetCli": target_cli,
+                "deferredPolicy": "unsafe_root",
+                "reminderStatus": reminder_status,
+            }
+            if runtime.get("safetyObservedAt"):
+                payload["safetyObservedAt"] = runtime["safetyObservedAt"]
+            return payload
 
     event = bus.write_send_event(
         workspace,
@@ -884,6 +945,18 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
     if send_event is None:
         return {"ok": False, "error": f"no send event found with msgId '{message_id}'"}
 
+    if _is_deferred_send_event(send_event):
+        payload = {
+            "ok": True,
+            "msgId": message_id,
+            "to": send_event.get("to", ""),
+            "state": "deferred",
+        }
+        guidance = send_guidance("deferred")
+        if guidance is not None:
+            payload.update(guidance)
+        return payload
+
     obs = bus.find_latest_observation(workspace, message_id)
     if obs is None and message_id not in pending:
         _write_observation(
@@ -1026,6 +1099,10 @@ def _doctor_payload(
         diag["activityState"] = runtime["activityState"]
     if runtime.get("activityReason"):
         diag["activityReason"] = runtime["activityReason"]
+    if runtime.get("interruptSafety"):
+        diag["interruptSafety"] = runtime["interruptSafety"]
+    if runtime.get("safetyReason"):
+        diag["safetyReason"] = runtime["safetyReason"]
     if "_gate" in runtime:
         diag["gate"] = runtime["_gate"]
     if verbose:
@@ -1047,12 +1124,16 @@ def _doctor_payload(
             diag["gateReason"] = runtime["_gateReason"]
         if runtime.get("activityObservedAt"):
             diag["activityObservedAt"] = runtime["activityObservedAt"]
+        if runtime.get("safetyObservedAt"):
+            diag["safetyObservedAt"] = runtime["safetyObservedAt"]
         if "activityRole" in runtime:
             diag["activityRole"] = runtime["activityRole"]
         if "activityPartKinds" in runtime:
             diag["activityPartKinds"] = runtime["activityPartKinds"]
         if "_activityEvidence" in runtime:
             diag["activityEvidence"] = runtime["_activityEvidence"]
+        if "_safetyEvidence" in runtime:
+            diag["safetyEvidence"] = runtime["_safetyEvidence"]
         diag["workspace"] = str(workspace)
         diag["eventCount"] = bus.count_events(workspace)
     return diag
@@ -1061,7 +1142,7 @@ def _doctor_payload(
 def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
     from . import adapters, tmux
     from .adapters.base import check_input_gate, extract_pending_question
-    from .activity import probe_transcript_activity
+    from .activity import probe_transcript_activity, probe_transcript_interrupt_safety
     from .agent_cli import resolve_model_for_pane
 
     runtime: dict[str, Any] = {
@@ -1127,6 +1208,13 @@ def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
         runtime["activityPartKinds"] = activity["activityPartKinds"]
     if "evidence" in activity:
         runtime["_activityEvidence"] = activity["evidence"]
+    safety = probe_transcript_interrupt_safety(profile.name, transcript)
+    runtime["interruptSafety"] = str(safety.get("interruptSafety") or "unknown")
+    runtime["safetyReason"] = str(safety.get("safetyReason") or "unknown_evidence")
+    if safety.get("safetyObservedAt"):
+        runtime["safetyObservedAt"] = safety["safetyObservedAt"]
+    if "evidence" in safety:
+        runtime["_safetyEvidence"] = safety["evidence"]
     gate = check_input_gate(transcript)
     runtime["_gate"] = gate.status
     runtime["_gateReason"] = gate.reason
@@ -1151,6 +1239,91 @@ def _member_runtime_payload(pane_id: str, *, role: str) -> dict[str, Any]:
     if role != "agent":
         return {"alive": tmux.is_pane_alive(pane_id)}
     return _agent_runtime_payload(pane_id)
+
+
+def _is_deferred_send_event(event: dict[str, Any]) -> bool:
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("deliveryMode") or "") == "deferred"
+
+
+def _deferred_entries_by_member(
+    workspace: str,
+    members_runtime: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    from .activity import probe_transcript_artifact_opened
+
+    events = bus.read_all_events(workspace)
+    deferred_roots: dict[str, dict[str, Any]] = {}
+    handled_ids: set[str] = set()
+
+    for event in events:
+        msg_id = str(event.get("msgId") or "")
+        if not msg_id:
+            continue
+        if str(event.get("intent") or "") == "send" and _is_deferred_send_event(event):
+            deferred_roots[msg_id] = event
+
+    if not deferred_roots:
+        return {}
+
+    for event in events:
+        intent = str(event.get("intent") or "")
+        if intent == "send":
+            anchor = str(event.get("inReplyTo") or "")
+            if not anchor or anchor not in deferred_roots:
+                continue
+            root = deferred_roots[anchor]
+            if str(event.get("from") or "") == str(root.get("to") or ""):
+                handled_ids.add(anchor)
+        elif intent == "handoff":
+            metadata = event.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            anchor = str(metadata.get("anchorMsgId") or "")
+            if not anchor or anchor not in deferred_roots:
+                continue
+            root = deferred_roots[anchor]
+            if str(event.get("from") or "") == str(root.get("to") or ""):
+                handled_ids.add(anchor)
+
+    by_member: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for msg_id, event in deferred_roots.items():
+        if msg_id in handled_ids:
+            continue
+        receiver = str(event.get("to") or "")
+        runtime = members_runtime.get(receiver, {})
+        state = "unopened"
+        opened_at = ""
+        cli_name = str(runtime.get("_cli") or "")
+        transcript = str(runtime.get("_transcript") or "")
+        artifact = str(event.get("artifact") or "")
+        if cli_name and transcript and artifact:
+            opened = probe_transcript_artifact_opened(
+                cli_name,
+                transcript,
+                artifact,
+                since=str(event.get("createdAt") or ""),
+            )
+            if bool(opened.get("opened")):
+                state = "opened"
+                opened_at = str(opened.get("observedAt") or "")
+        item: dict[str, Any] = {
+            "msgId": msg_id,
+            "from": str(event.get("from") or ""),
+            "body": str(event.get("body") or ""),
+            "artifact": artifact,
+            "createdAt": str(event.get("createdAt") or ""),
+            "state": state,
+        }
+        if opened_at:
+            item["openedAt"] = opened_at
+        by_member[receiver].append(item)
+
+    for items in by_member.values():
+        items.sort(key=lambda item: (str(item.get("createdAt") or ""), str(item.get("msgId") or "")))
+    return by_member
 
 
 def _team_runtime_payload(team_name: str) -> dict[str, Any]:
@@ -1185,6 +1358,16 @@ def _team_runtime_payload(team_name: str) -> dict[str, Any]:
         "team": team_name,
         "members": members,
     }
+    workspace = str(team.workspace or "")
+    if workspace:
+        deferred = _deferred_entries_by_member(workspace, members)
+        for member_name, entries in deferred.items():
+            runtime = members.get(member_name)
+            if not isinstance(runtime, dict):
+                continue
+            runtime["deferredCount"] = len(entries)
+            runtime["deferredIds"] = [str(entry.get("msgId") or "") for entry in entries]
+            runtime["deferred"] = entries
     if needs_answer:
         payload["needsAnswer"] = needs_answer
     return payload
@@ -1563,6 +1746,7 @@ def _handle_request(
                 artifact=str(request.get("artifact", "")),
                 reply_to=str(request.get("replyTo", "")),
                 wait=bool(request.get("wait", False)),
+                enforce_safety_gate=bool(request.get("enforceSafetyGate", False)),
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}

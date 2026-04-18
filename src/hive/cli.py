@@ -276,6 +276,21 @@ def _maybe_warn_long_body(body: str, *, command: str) -> None:
     click.echo(format_body_warning(command=command, hint=hint), err=True)
 
 
+def _validate_root_send_protocol(body: str, artifact: str) -> None:
+    from .runtime_state import body_warning_hint
+
+    summary = body.strip()
+    if not summary:
+        _fail("new root send requires a short body summary")
+    if not artifact:
+        _fail("new root send requires --artifact; put details in the artifact and keep body as a short summary")
+    if body_warning_hint(summary) is not None:
+        _fail(
+            "new root send body must stay short and unstructured; move details into --artifact "
+            "(prefer `--artifact -` unless you already have a file)"
+        )
+
+
 def _fail(msg: str) -> None:
     click.echo(f"Error: {msg}", err=True)
     sys.exit(1)
@@ -416,6 +431,15 @@ def _augment_current_payload_with_runtime(payload: dict[str, object], t: Team) -
     model = member_runtime.get("model")
     if model:
         payload["model"] = model
+    deferred_count = member_runtime.get("deferredCount")
+    if deferred_count not in ("", None):
+        payload["deferredCount"] = deferred_count
+    deferred_ids = member_runtime.get("deferredIds")
+    if isinstance(deferred_ids, list) and deferred_ids:
+        payload["deferredIds"] = deferred_ids
+    deferred = member_runtime.get("deferred")
+    if isinstance(deferred, list) and deferred:
+        payload["deferred"] = deferred
     return payload
 
 
@@ -447,6 +471,10 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             "activityState",
             "activityReason",
             "activityObservedAt",
+            "interruptSafety",
+            "safetyReason",
+            "deferredCount",
+            "deferredIds",
         ):
             value = runtime_fields.get(key)
             if value in ("", None):
@@ -563,6 +591,7 @@ def _request_send_payload(
     artifact: str = "",
     reply_to: str = "",
     wait: bool = False,
+    enforce_safety_gate: bool = False,
     command_name: str = "send",
     warn_on_long_body: bool = True,
 ) -> dict[str, object]:
@@ -581,6 +610,7 @@ def _request_send_payload(
         artifact=artifact,
         reply_to=reply_to,
         wait=wait,
+        enforce_safety_gate=enforce_safety_gate,
     )
     if not payload:
         raise RuntimeError("sidecar unavailable")
@@ -1678,6 +1708,7 @@ def send(
 
     `queued` / `pending` mean the message was accepted and background tracking continues.
     `confirmed` means delivery was confirmed in the initial send window.
+    `deferred` means Hive accepted the root message but postponed receiver review.
     `failed` means local submit failed and should be retried.
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
@@ -1685,6 +1716,8 @@ def send(
     assert team_name is not None and t is not None
     sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
+    if not reply_to.strip():
+        _validate_root_send_protocol(body, artifact)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
         payload = _request_send_payload(
@@ -1696,6 +1729,7 @@ def send(
             artifact=resolved_artifact,
             reply_to=reply_to,
             wait=wait,
+            enforce_safety_gate=True,
             command_name="send",
         )
     except RuntimeError as exc:
@@ -1899,7 +1933,7 @@ def doctor(agent_name: str, include_skills: bool):
 @cli.command()
 @click.argument("agent_name", required=False, default="")
 def activity(agent_name: str):
-    """Classify transcript activity as active/idle/unknown."""
+    """Classify transcript activity and interrupt safety."""
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
@@ -1919,6 +1953,8 @@ def activity(agent_name: str):
         "team": payload.get("team", t.name),
         "activityState": payload.get("activityState", "unknown"),
         "activityReason": payload.get("activityReason", "unknown"),
+        "interruptSafety": payload.get("interruptSafety", "unknown"),
+        "safetyReason": payload.get("safetyReason", "unknown_evidence"),
     }
     for key in (
         "alive",
@@ -1931,9 +1967,11 @@ def activity(agent_name: str):
         "transcriptExists",
         "transcriptSize",
         "activityObservedAt",
+        "safetyObservedAt",
         "activityRole",
         "activityPartKinds",
         "activityEvidence",
+        "safetyEvidence",
     ):
         value = payload.get(key)
         if value in ("", None):

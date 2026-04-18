@@ -126,6 +126,11 @@ def send_guidance(state: str) -> dict[str, str] | None:
             "meaning": "Submit completed and background delivery tracking continues.",
             "recommendedAction": "continue",
         }
+    if state == "deferred":
+        return {
+            "meaning": "Accepted by Hive and deferred for receiver review.",
+            "recommendedAction": "continue",
+        }
     if state == "failed":
         return {
             "meaning": "Local submit attempt failed before background tracking began.",

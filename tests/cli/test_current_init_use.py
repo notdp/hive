@@ -741,7 +741,7 @@ def test_root_help_groups_commands_by_area(runner):
         "Suggest likely collaboration candidates.",
         "Check delivery status of a sent message by ID.",
         "Show a reply thread rooted at a msgId.",
-        "Classify transcript activity as active/idle/unknown.",
+        "Classify transcript activity and interrupt safety.",
         "Manage first-party Hive plugins.",
     ):
         assert short_help in output

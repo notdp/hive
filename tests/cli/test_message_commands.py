@@ -7,6 +7,12 @@ from hive.cli import cli
 FIXED_ID = bus.format_msg_id(1)
 
 
+def _write_artifact(tmp_path, name: str = "details.md", content: str = "details") -> str:
+    path = tmp_path / name
+    path.write_text(content)
+    return str(path)
+
+
 def _patch_ack(monkeypatch):
     """Disable ACK resolution so tests don't need a real transcript.
 
@@ -39,6 +45,14 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         return team_obj, agent
 
     monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
+    monkeypatch.setattr(
+        "hive.sidecar._agent_runtime_payload",
+        lambda _pane_id: {
+            "alive": True,
+            "interruptSafety": "safe",
+            "safetyReason": "turn_closed",
+        },
+    )
 
     def _request_send(
         workspace: str,
@@ -51,6 +65,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         artifact: str = "",
         reply_to: str = "",
         wait: bool = False,
+        enforce_safety_gate: bool = False,
     ):
         from hive.sidecar import _send_payload
 
@@ -66,6 +81,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
                 artifact=artifact,
                 reply_to=reply_to,
                 wait=wait,
+                enforce_safety_gate=enforce_safety_gate,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -101,8 +117,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     configure_hive_home()
     _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
-    artifact = tmp_path / "review.md"
-    artifact.write_text("review request")
+    artifact = _write_artifact(tmp_path, "review.md", "review request")
     bus.init_workspace(workspace)
 
     sent: list[str] = []
@@ -139,7 +154,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
             "gpt",
             "please review this",
             "--artifact",
-            str(artifact),
+            artifact,
         ],
     )
 
@@ -147,7 +162,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     payload = json.loads(result.output)
     assert payload["from"] == "claude"
     assert payload["to"] == "gpt"
-    assert payload["artifact"] == str(artifact)
+    assert payload["artifact"] == artifact
     assert "summary" not in payload
     assert payload["state"] == "pending"
     assert payload["meaning"] == "Submit completed and background delivery tracking continues."
@@ -160,6 +175,121 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert sent == [f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
     assert len(bus.read_all_events(workspace)) == 1
     assert bus.read_all_events(workspace)[0]["intent"] == "send"
+
+
+def test_send_defers_root_send_when_target_is_unsafe(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "deferred.md", "full details")
+
+    sent: list[str] = []
+
+    class _FakeAgent:
+        pane_id = "%99"
+        cli = "claude"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            assert name == "gpt"
+            return _FakeAgent()
+
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
+    monkeypatch.setattr(
+        "hive.sidecar._agent_runtime_payload",
+        lambda _pane_id: {
+            "alive": True,
+            "interruptSafety": "unsafe",
+            "safetyReason": "tool_open",
+            "safetyObservedAt": "2026-04-16T05:00:00Z",
+        },
+    )
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", artifact])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] == "deferred"
+    assert payload["msgId"] == FIXED_ID
+    assert payload["interruptSafety"] == "unsafe"
+    assert payload["safetyReason"] == "tool_open"
+    assert payload["artifact"] == artifact
+    assert payload["deferredPolicy"] == "unsafe_root"
+    assert payload["reminderStatus"] == "submitted"
+    assert len(sent) == 1
+    assert "<HIVE from=claude to=gpt msgId=" in sent[0]
+    assert f"artifact={artifact}" in sent[0]
+    events = bus.read_all_events(workspace)
+    assert len(events) == 1
+    assert events[0]["metadata"]["deliveryMode"] == "deferred"
+
+
+def test_send_does_not_defer_root_send_when_interrupt_safety_is_unknown(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _patch_ack(monkeypatch)
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "unknown.md", "full details")
+
+    sent: list[str] = []
+
+    class _FakeAgent:
+        pane_id = "%99"
+        cli = "droid"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            assert name == "gpt"
+            return _FakeAgent()
+
+    team = _FakeTeam()
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    _patch_sidecar_requests(monkeypatch, team)
+    monkeypatch.setattr(
+        "hive.sidecar._agent_runtime_payload",
+        lambda _pane_id: {
+            "alive": True,
+            "interruptSafety": "unknown",
+            "safetyReason": "assistant_text_idle",
+        },
+    )
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", artifact])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["state"] != "deferred"
+    assert len(sent) == 1
+    assert sent[0].startswith("<HIVE from=claude to=gpt ")
 
 
 def _reply_fake_team(workspace, *, sent_transcript):
@@ -362,6 +492,7 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "live-agent.md")
 
     class _DeadAgent:
         def is_alive(self) -> bool:
@@ -384,7 +515,7 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "hello"])
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
     assert result.exit_code != 0
     assert "not alive" in result.output
 
@@ -532,6 +663,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "ack-confirmed.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -569,7 +701,7 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -584,6 +716,7 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "ack-timeout.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -617,7 +750,7 @@ def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatc
     monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -633,6 +766,7 @@ def test_send_wait_returns_queued_when_queue_visible(runner, configure_hive_home
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "queued-wait.md")
 
     class _FakeAgent:
         pane_id = "%99"
@@ -668,7 +802,7 @@ def test_send_wait_returns_queued_when_queue_visible(runner, configure_hive_home
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
-    result = runner.invoke(cli, ["send", "gpt", "test", "--wait"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -686,6 +820,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "ack-skipped.md")
 
     class _FakeAgent:
         pane_id = "%99"
@@ -711,7 +846,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -726,6 +861,7 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "async-pending.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -762,7 +898,7 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -781,6 +917,7 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "async-queued.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -815,7 +952,7 @@ def test_send_async_queued_reports_runtime_queue_state(runner, configure_hive_ho
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -841,6 +978,7 @@ def test_send_grace_window_waits_for_queue_before_falling_back(
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "grace-window.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -893,7 +1031,7 @@ def test_send_grace_window_waits_for_queue_before_falling_back(
     monkeypatch.setattr("hive.sidecar.detect_runtime_queue_state", lambda **_kw: next(probe_states))
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -908,6 +1046,7 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "inject-failure.md")
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
@@ -937,7 +1076,7 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -950,14 +1089,16 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     assert "followUp" not in payload
 
 
-def test_send_help_explains_queued_and_pending_states(runner):
+def test_send_help_explains_deferred_state(runner):
     result = runner.invoke(cli, ["send", "--help"])
     help_text = " ".join(result.output.split())
 
     assert result.exit_code == 0
     assert "`queued` / `pending` mean the message was accepted" in help_text
+    assert "`deferred` means Hive accepted the root message" in help_text
     assert "background tracking continues" in help_text
     assert "state=queued and background tracking continues" in help_text
+    assert "--force" not in help_text
 
 
 # --- Send gate tests ---
@@ -1012,6 +1153,7 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
 
 def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
+    artifact = _write_artifact(tmp_path, "gate-blocked.md")
     _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
         {"type": "user", "message": {"role": "user", "content": "do something"}},
         {
@@ -1025,7 +1167,7 @@ def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path
         },
     ])
 
-    result = runner.invoke(cli, ["send", "gpt", "hello"])
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code != 0
     assert "waiting for a user answer" in result.output
@@ -1036,6 +1178,7 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
+    artifact = _write_artifact(tmp_path, "gate-open.md")
 
     class _FakeAgent:
         pane_id = "%99"
@@ -1061,7 +1204,7 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "hello"])
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -1074,11 +1217,12 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
 def test_gate_clear_appears_in_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
     """When transcript resolves successfully and gate is clear, output contains gate=clear."""
     configure_hive_home()
+    artifact = _write_artifact(tmp_path, "gate-clear.md")
     workspace, transcript, sent = _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
         {"type": "user", "message": {"role": "user", "content": "hello"}},
     ])
 
-    result = runner.invoke(cli, ["send", "gpt", "hello"])
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
