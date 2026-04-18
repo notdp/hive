@@ -845,7 +845,9 @@ def _hive_join_message(agent_name: str, team_name: str) -> str:
         f"You are '{agent_name}' in hive team '{team_name}'. "
         "Context is pre-bound. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
-        "Use `hive team` to inspect the team and `hive send <name> <message>` to reply."
+        "Use `hive team` to inspect the team; reply on an existing thread with "
+        "`hive reply <name> \"...\"`; open a new thread with "
+        "`hive send <name> \"<summary>\" --artifact -`."
     )
 
 
