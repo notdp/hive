@@ -1,6 +1,7 @@
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -13,13 +14,21 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI_CODE = "from hive.cli import cli; cli()"
 
 
+def _seed_canonical_hive_skill(factory_home: Path) -> None:
+    dst = factory_home / "skills" / "hive" / "SKILL.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "skills" / "hive" / "SKILL.md", dst)
+
+
 def base_env(tmp_path: Path, fake_droid: Path) -> dict[str, str]:
     pythonpath = str(ROOT / "src")
     if os.environ.get("PYTHONPATH"):
         pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
+    factory_home = tmp_path / ".factory"
+    _seed_canonical_hive_skill(factory_home)
     return {
         "HIVE_HOME": str(tmp_path / ".hive"),
-        "FACTORY_HOME": str(tmp_path / ".factory"),
+        "FACTORY_HOME": str(factory_home),
         "XDG_CACHE_HOME": str(tmp_path / ".cache"),
         "DROID_PATH": str(fake_droid),
         "PYTHONPATH": pythonpath,
