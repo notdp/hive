@@ -740,7 +740,6 @@ def test_root_help_groups_commands_by_area(runner):
         "Initialize a team from the current tmux window.",
         "Check delivery status of a sent message by ID.",
         "Show a reply thread rooted at a msgId.",
-        "Classify transcript activity and interrupt safety.",
         "Manage first-party Hive plugins.",
     ):
         assert short_help in output

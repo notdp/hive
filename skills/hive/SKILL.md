@@ -37,7 +37,7 @@ npx skills add "$PWD" -g --all
 
 ```bash
 hive current                          # 看上下文
-hive team                             # 看成员 + runtime inputState/activityState + peer
+hive team                             # 看成员 + runtime inputState/busy/interruptSafety + peer
 hive send dodo "see attachment" --artifact /tmp/file.md   # 仅当你已经有现成文件
 cat <<'EOF' | hive send dodo "see attachment" --artifact -
 # Findings
@@ -110,8 +110,8 @@ Claude 偏前端体验、文案收敛和发散式讨论；GPT 偏后端 correctn
 ### `hive team` 状态字段
 
 - `inputState=waiting_user` 说明对方在等答案，用 `hive answer` 回答
-- `activityState=idle` 说明对方从 transcript 看空闲，较适合协作
-- 两者都是从 session transcript 实时探测的 runtime 状态，不是事件投影
+- `busy=true/false` 是 tmux 输出层的秒级活动布尔，不等于语义上的 busy/idle
+- `interruptSafety` / `safetyReason` 才是“现在插 new root 是否容易打断对方”的 transcript/JCL 语义层
 
 ### `hive notify` 原则
 
@@ -162,7 +162,6 @@ workflow 加载后继续用 Hive 命令作为通信与状态底座。
 - `hive delivery <msgId>` — 某条消息的投递状态
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
 - `hive teams` — 列出所有已知 team（跨 team 排障）
-- `hive activity <agent>` — 分析 transcript 活跃度
 - `hive capture / inject / interrupt / kill / exec` — 低层 pane 操作
 
 ## 协议边界

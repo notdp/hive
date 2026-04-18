@@ -46,7 +46,6 @@ _COMMAND_HELP_SECTIONS = {
     "delivery": "Debug",
     "thread": "Debug",
     "teams": "Debug",
-    "activity": "Debug",
     "peer": "Debug",
     "capture": "Debug",
     "inject": "Debug",
@@ -83,7 +82,7 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
 _ROOT_HELP_EXAMPLES = '''# Inspect current tmux/Hive binding
 hive current
 
-# Show team members, peers, and runtime input/activity state
+# Show team members, peers, and runtime input/busy/safety state
 hive team
 
 # Send a short message to a peer
@@ -467,9 +466,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             "inputState",
             "inputReason",
             "pendingQuestion",
-            "activityState",
-            "activityReason",
-            "activityObservedAt",
             "interruptSafety",
             "safetyReason",
             "deferredCount",
@@ -1907,57 +1903,6 @@ def doctor(agent_name: str, include_skills: bool):
     if include_skills:
         payload["skills"] = skill_sync.diagnose_hive_skill(_resolve_member_cli_name(t, target_name))
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-@cli.command()
-@click.argument("agent_name", required=False, default="")
-def activity(agent_name: str):
-    """Classify transcript activity and interrupt safety."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    self_name = _resolve_sender(None)
-    target_name = agent_name or self_name
-    from .sidecar import request_doctor
-
-    _ensure_team_sidecar(t, ws)
-    payload = request_doctor(str(ws), team=t.name, target_agent=target_name, verbose=True)
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "activity probe failed")))
-
-    activity_payload: dict[str, object] = {
-        "agent": payload.get("agent", target_name),
-        "team": payload.get("team", t.name),
-        "busy": bool(payload.get("busy", False)),
-        "activityState": payload.get("activityState", "unknown"),
-        "activityReason": payload.get("activityReason", "unknown"),
-        "interruptSafety": payload.get("interruptSafety", "unknown"),
-        "safetyReason": payload.get("safetyReason", "unknown_evidence"),
-    }
-    for key in (
-        "alive",
-        "inputState",
-        "cli",
-        "model",
-        "sessionId",
-        "pane",
-        "transcript",
-        "transcriptExists",
-        "transcriptSize",
-        "activityObservedAt",
-        "safetyObservedAt",
-        "activityRole",
-        "activityPartKinds",
-        "activityEvidence",
-        "safetyEvidence",
-    ):
-        value = payload.get(key)
-        if value in ("", None):
-            continue
-        activity_payload[key] = value
-    click.echo(json.dumps(activity_payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()

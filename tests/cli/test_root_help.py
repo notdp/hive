@@ -25,7 +25,7 @@ def test_root_help_layers_daily_handoff_debug_sections(runner):
         assert command_name in daily_block
     for command_name in ("handoff", "fork", "spawn", "workflow"):
         assert command_name in handoff_block
-    for command_name in ("doctor", "delivery", "thread", "teams", "activity"):
+    for command_name in ("doctor", "delivery", "thread", "teams"):
         assert command_name in debug_block
 
 

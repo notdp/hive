@@ -34,9 +34,6 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
                         "model": "gpt-5.4",
                         "inputState": "ready",
                         "inputReason": "",
-                        "activityState": "idle",
-                        "activityReason": "assistant_terminal_message",
-                        "activityObservedAt": "2026-04-16T05:00:00Z",
                         "interruptSafety": "safe",
                         "safetyReason": "turn_closed",
                         "deferredCount": 1,
@@ -60,9 +57,6 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["sessionId"] == "orch-session-456"
     assert orch["model"] == "gpt-5.4"
     assert orch["inputState"] == "ready"
-    assert orch["activityState"] == "idle"
-    assert orch["activityReason"] == "assistant_terminal_message"
-    assert orch["activityObservedAt"] == "2026-04-16T05:00:00Z"
     assert orch["interruptSafety"] == "safe"
     assert orch["safetyReason"] == "turn_closed"
     assert orch["deferredCount"] == 1

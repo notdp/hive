@@ -1098,10 +1098,6 @@ def _doctor_payload(
         diag["sessionId"] = runtime["sessionId"]
     if runtime.get("inputState"):
         diag["inputState"] = runtime["inputState"]
-    if runtime.get("activityState"):
-        diag["activityState"] = runtime["activityState"]
-    if runtime.get("activityReason"):
-        diag["activityReason"] = runtime["activityReason"]
     if "busy" in runtime:
         diag["busy"] = bool(runtime["busy"])
     if runtime.get("interruptSafety"):
@@ -1127,16 +1123,8 @@ def _doctor_payload(
             diag["transcriptSize"] = runtime["_transcriptSize"]
         if "_gateReason" in runtime:
             diag["gateReason"] = runtime["_gateReason"]
-        if runtime.get("activityObservedAt"):
-            diag["activityObservedAt"] = runtime["activityObservedAt"]
         if runtime.get("safetyObservedAt"):
             diag["safetyObservedAt"] = runtime["safetyObservedAt"]
-        if "activityRole" in runtime:
-            diag["activityRole"] = runtime["activityRole"]
-        if "activityPartKinds" in runtime:
-            diag["activityPartKinds"] = runtime["activityPartKinds"]
-        if "_activityEvidence" in runtime:
-            diag["activityEvidence"] = runtime["_activityEvidence"]
         if "_safetyEvidence" in runtime:
             diag["safetyEvidence"] = runtime["_safetyEvidence"]
         diag["workspace"] = str(workspace)
@@ -1147,7 +1135,7 @@ def _doctor_payload(
 def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
     from . import adapters, tmux
     from .adapters.base import check_input_gate, extract_pending_question
-    from .activity import probe_transcript_activity, probe_transcript_interrupt_safety
+    from .activity import probe_transcript_interrupt_safety
     from .agent_cli import resolve_model_for_pane
 
     runtime: dict[str, Any] = {
@@ -1203,17 +1191,6 @@ def _agent_runtime_payload(pane_id: str) -> dict[str, Any]:
         return runtime
 
     runtime["_transcriptSize"] = transcript.stat().st_size
-    activity = probe_transcript_activity(profile.name, transcript)
-    runtime["activityState"] = str(activity.get("activityState") or "unknown")
-    runtime["activityReason"] = str(activity.get("activityReason") or "unknown")
-    if activity.get("activityObservedAt"):
-        runtime["activityObservedAt"] = activity["activityObservedAt"]
-    if "activityRole" in activity:
-        runtime["activityRole"] = activity["activityRole"]
-    if "activityPartKinds" in activity:
-        runtime["activityPartKinds"] = activity["activityPartKinds"]
-    if "evidence" in activity:
-        runtime["_activityEvidence"] = activity["evidence"]
     safety = probe_transcript_interrupt_safety(profile.name, transcript)
     runtime["interruptSafety"] = str(safety.get("interruptSafety") or "unknown")
     runtime["safetyReason"] = str(safety.get("safetyReason") or "unknown_evidence")
