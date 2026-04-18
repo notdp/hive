@@ -45,7 +45,6 @@ _COMMAND_HELP_SECTIONS = {
     "doctor": "Debug",
     "delivery": "Debug",
     "thread": "Debug",
-    "teams": "Debug",
     "peer": "Debug",
     "capture": "Debug",
     "inject": "Debug",
@@ -718,27 +717,6 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
     current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
     tmux.send_keys(new_pane, profile.resume_cmd.format(session_id=session_id))
-
-
-@cli.command("teams")
-def teams_cmd():
-    """List known teams."""
-    _gc_dead_teams()
-    from .team import list_teams
-    rows = []
-    for entry in list_teams():
-        try:
-            team = Team.load(entry["name"])
-        except FileNotFoundError:
-            continue
-        rows.append({
-            "name": team.name,
-            "workspace": team.workspace,
-            "tmuxSession": team.tmux_session,
-            "tmuxWindow": team.tmux_window,
-            "members": sorted({team.lead_name, *team.agents.keys()}),
-        })
-    click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
 @cli.command("current")

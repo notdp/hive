@@ -5,39 +5,6 @@ from hive import bus
 from hive.cli import cli
 
 
-def test_teams_lists_known_teams(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-
-    assert runner.invoke(cli, ["create", "team-a", "--workspace", str(tmp_path / "ws-a")]).exit_code == 0
-
-    # Switch to a different window for the second team
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:1")
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%1")
-
-    assert runner.invoke(cli, ["create", "team-b", "--workspace", str(tmp_path / "ws-b")]).exit_code == 0
-
-    result = runner.invoke(cli, ["teams"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert sorted(row["name"] for row in payload) == ["team-a", "team-b"]
-    team_a = next(r for r in payload if r["name"] == "team-a")
-    assert team_a["members"] == ["orch"]
-
-
-def test_teams_tolerates_missing_created_option(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-
-    assert runner.invoke(cli, ["create", "team-a", "--workspace", str(tmp_path / "ws-a")]).exit_code == 0
-    monkeypatch.setattr("hive.team._find_team_window", lambda _name, *, prefer_pane="": ("dev:0", {"workspace": str(tmp_path / "ws-a"), "desc": "", "created": ""}))
-
-    result = runner.invoke(cli, ["teams"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload[0]["name"] == "team-a"
-
-
 def test_current_reads_persisted_context(runner, configure_hive_home, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

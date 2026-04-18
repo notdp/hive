@@ -161,7 +161,6 @@ workflow 加载后继续用 Hive 命令作为通信与状态底座。
 - `hive doctor [agent] [--skills]` — agent 连通性 / 本地 skill drift
 - `hive delivery <msgId>` — 某条消息的投递状态
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
-- `hive teams` — 列出所有已知 team（跨 team 排障）
 - `hive capture / inject / interrupt / kill / exec` — 低层 pane 操作
 
 ## 协议边界

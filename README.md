@@ -87,7 +87,7 @@ hive notify "done, press Space to come back"
 |---------|-------------|
 | `hive current` | Inspect current tmux/Hive binding |
 | `hive init` / `hive create` | Bind current window or create a team |
-| `hive team` / `hive teams` | Show team with runtime `busy` / `inputState` and peer info, or list teams |
+| `hive team` | Show team with runtime `busy` / `inputState` and peer info |
 | `hive peer set\|clear` | Persist or clear default peer pairs |
 | `hive send <agent> "text"` | Send message (`reply` stays direct; root sends auto-fork a clone when target is in an active turn) |
 | `hive handoff <agent>` | Delegate a thread via direct send, spawn, or fork wrapper |
