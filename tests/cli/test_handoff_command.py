@@ -117,7 +117,7 @@ def test_handoff_direct_uses_send_path_for_delegate_and_announce(runner, configu
     assert payload["delegate"]["to"] == "dodo"
     assert payload["delegate"]["artifact"] == str(artifact)
     assert payload["announce"]["to"] == "lulu"
-    assert payload["announce"]["state"] == "pending"
+    assert payload["announce"]["delivery"] == "pending"
 
     events = bus.read_all_events(workspace)
     delegate = [event for event in events if event.get("intent") == "send" and event.get("to") == "dodo"][-1]
@@ -312,7 +312,7 @@ def test_handoff_treats_announce_failure_as_best_effort(runner, configure_hive_h
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["delegate"]["to"] == "dodo"
-    assert payload["announce"]["state"] == "failed"
+    assert payload["announce"]["delivery"] == "failed"
     assert "Agent 'lulu' not found" in payload["announce"]["error"]
 
     handoff = [event for event in bus.read_all_events(workspace) if event.get("intent") == "handoff"][-1]

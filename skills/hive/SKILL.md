@@ -75,6 +75,7 @@ hive notify "按 Space 和我对话"       # 给当前 pane 的用户弹通知
 - 不要把 `$(cat <<EOF ...)` 这类多行 command substitution 直接塞进 `hive send`
 - `reply` 不受这套 root 协议影响，仍然可以只回一句短文本
 - target 正在 active turn 时，root send 路径会自动 fork 一个 clone 接管（`routingMode=fork_handoff, routingReason=active_turn_fork`）；不再有 `deferred` 状态
+- **shell 安全（`hive send` 和 `hive reply` 都适用）**：双引号 `body` 里不要出现反引号（``` ` ```），zsh/bash 会把反引号当作 command substitution 先执行，消息会被悄悄改坏。含 markdown inline code 时走 heredoc + `--artifact -`，或把 body 整句换成单引号包裹
 
 ### `hive reply` vs `hive send --reply-to`
 

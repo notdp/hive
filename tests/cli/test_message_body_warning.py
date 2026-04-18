@@ -182,5 +182,5 @@ def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_ho
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["msgId"] == FIXED_ID
-    assert payload["state"] == "pending"
+    assert payload["delivery"] == "pending"
     assert result.stderr == ""

@@ -120,21 +120,21 @@ workspace/
 
 ## Delivery Tracking
 
-For accepted sends, `hive send` uses a 1-second grace window to confirm delivery in-process. If the message isn't confirmed immediately:
+A send is *delivered* when the target pane's output shows the message `msgId` (either via Claude transcript JSONL or the tmux control-mode stream for the target pane). `hive send` runs a short grace window in-process; if it doesn't settle immediately:
 
-- A team-scoped **sidecar daemon** tracks it in the background
-- The sidecar detects CLI queue state (transcript or tmux capture)
-- Results land as observation events in `hive.db`
-- High-value exceptions (`unconfirmed`, `tracking_lost`) are injected back to the sender pane
+- A team-scoped **sidecar daemon** tracks it for up to 60 seconds in the background
+- Results land as observation events in `hive.db` with `confirmationSource = transcript | stream` (on success)
+- Failed deliveries are injected back into the sender pane as `<HIVE-SYSTEM>` exceptions
 
 Root sends without `--reply-to` must keep `body` to a short summary and put detailed context in `artifact` (prefer `--artifact -`; only use a file path when you already have one). Hive currently enforces this by rejecting root bodies that are longer than `500` chars, have `3+` lines, contain fenced code (`````), or start markdown heading/list lines (`# ` / `- ` / `* `). When the target member is in an active turn (transcript still shows `tool_open` / `user_prompt_pending` / `tool_result_pending_reply`, or `busy=True` with any non-closed `turnPhase`), the root send path auto-forks a clone pane so the new thread runs without interrupting the original; the response payload carries `routingMode=fork_handoff` and `routingReason=active_turn_fork`.
 
-Immediate `hive send` states:
+`hive send` response carries a `delivery` field:
 
-- `queued`: accepted and now tracked in the background; continue working
-- `pending`: submit completed and background tracking continues; continue working
-- `confirmed`: delivery was confirmed in the initial send window
-- `failed`: local submit failed before tracking began; retry
+- `success`: target pane rendered msgId; delivery confirmed
+- `pending`: submit completed; background tracking continues (up to 60s)
+- `failed`: submit errored OR target pane never rendered msgId before timeout
+
+**Shell quoting footgun (applies to both `hive send` and `hive reply`)**: double-quoted `body` strings with backticks get pre-processed by zsh/bash as command substitution, and the message is silently rewritten before Hive sees it. For anything containing markdown inline code, prefer heredoc + `--artifact -`, or wrap the body in single quotes.
 
 ## Plugins
 

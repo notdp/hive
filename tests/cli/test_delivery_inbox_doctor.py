@@ -61,7 +61,62 @@ def _patch_sidecar_status_requests(monkeypatch):
 # --- delivery ---
 
 
-def test_delivery_reports_primary_state_and_raw_details(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_reports_tracking_lost_without_writing_observation(configure_hive_home, tmp_path):
+    """High: no obs + not in pending should return failed+reason=tracking_lost and NOT pollute durable store."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="stranded msg",
+        message_id="t1",
+    )
+
+    payload = sidecar._delivery_payload(str(workspace), {}, "t1")
+
+    assert payload["delivery"] == "failed"
+    assert payload["reason"] == "tracking_lost"
+    assert payload["recommendedAction"] == "retry"
+
+    observations = [e for e in bus.read_all_events(workspace) if e.get("intent") == "observation"]
+    assert observations == []
+
+
+def test_delivery_reads_legacy_tracking_lost_as_failed(configure_hive_home, tmp_path):
+    """Medium: legacy observations with result=tracking_lost must project as failed (not pending)."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    bus.write_event(
+        workspace,
+        from_agent="claude",
+        to_agent="gpt",
+        intent="send",
+        body="legacy msg",
+        message_id="l1",
+    )
+    bus.write_event(
+        workspace,
+        from_agent="_system",
+        to_agent="",
+        intent="observation",
+        message_id="l1",
+        metadata={
+            "msgId": "l1",
+            "result": "tracking_lost",
+            "injectStatus": "submitted",
+            "turnObserved": "pending",
+        },
+    )
+
+    payload = sidecar._delivery_payload(str(workspace), {}, "l1")
+    assert payload["delivery"] == "failed"
+
+
+def test_delivery_reports_pending_when_tracker_still_running(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -73,33 +128,22 @@ def test_delivery_reports_primary_state_and_raw_details(runner, configure_hive_h
         from_agent="claude",
         to_agent="gpt",
         intent="send",
-        body="queued msg",
+        body="in-flight msg",
         message_id="q1",
     )
 
     monkeypatch.setattr(
         "hive.sidecar.request_delivery",
-        lambda ws, message_id: sidecar._delivery_payload(
-            ws,
-            {
-                "q1": {
-                    "runtimeQueueState": "queued",
-                    "queueSource": "capture",
-                }
-            },
-            message_id,
-        ),
+        lambda ws, message_id: sidecar._delivery_payload(ws, {"q1": {}}, message_id),
     )
 
     result = runner.invoke(cli, ["delivery", "q1"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["msgId"] == "q1"
-    assert payload["state"] == "queued"
+    assert payload["delivery"] == "pending"
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "pending"
-    assert payload["runtimeQueueState"] == "queued"
-    assert payload["queueSource"] == "capture"
 
 
 def test_delivery_prefers_observation_result(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -126,11 +170,11 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
         message_id="c1",
         metadata={
             "msgId": "c1",
-            "result": "confirmed",
+            "result": "success",
             "observedAt": "2026-04-14T00:00:00Z",
             "injectStatus": "submitted",
             "turnObserved": "confirmed",
-            "runtimeQueueState": "queued",
+            "confirmationSource": "stream",
         },
     )
 
@@ -138,10 +182,10 @@ def test_delivery_prefers_observation_result(runner, configure_hive_home, monkey
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["msgId"] == "c1"
-    assert payload["state"] == "confirmed"
+    assert payload["delivery"] == "success"
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "confirmed"
-    assert payload["runtimeQueueState"] == "queued"
+    assert payload["confirmationSource"] == "stream"
     assert payload["observedAt"] == "2026-04-14T00:00:00Z"
 
 
@@ -179,9 +223,9 @@ def test_delivery_failed_reports_retry_guidance(runner, configure_hive_home, mon
     result = runner.invoke(cli, ["delivery", "f1"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["state"] == "failed"
+    assert payload["delivery"] == "failed"
     assert payload["recommendedAction"] == "retry"
-    assert "failed before delivery tracking began" in payload["meaning"]
+    assert "Delivery failed" in payload["meaning"]
 
 
 def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -207,7 +251,7 @@ def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_
         message_id="u1",
         metadata={
             "msgId": "u1",
-            "result": "unconfirmed",
+            "result": "failed",
             "observedAt": "2026-04-14T00:00:00Z",
             "injectStatus": "submitted",
             "turnObserved": "unconfirmed",
@@ -217,9 +261,9 @@ def test_delivery_unconfirmed_reports_cautious_retry_guidance(runner, configure_
     result = runner.invoke(cli, ["delivery", "u1"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["state"] == "unconfirmed"
-    assert payload["recommendedAction"] == "cautious_retry"
-    assert "not confirmed" in payload["meaning"]
+    assert payload["delivery"] == "failed"
+    assert payload["recommendedAction"] == "retry"
+    assert "Delivery failed" in payload["meaning"]
 
 
 def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -240,9 +284,7 @@ def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runne
 
     pending = {
         "u2": {
-            "runtimeQueueState": "not_queued",
-            "queueSource": "capture",
-            "terminalNotifiedResult": "unconfirmed",
+            "terminalNotifiedResult": "failed",
             "terminalFollowupUntil": 9999999999.0,
         }
     }
@@ -258,8 +300,8 @@ def test_delivery_pending_record_retains_unconfirmed_state_during_followup(runne
     result = runner.invoke(cli, ["delivery", "u2"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["state"] == "unconfirmed"
-    assert payload["recommendedAction"] == "cautious_retry"
+    assert payload["delivery"] == "failed"
+    assert payload["recommendedAction"] == "retry"
 
 
 # --- doctor ---

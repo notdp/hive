@@ -7,18 +7,6 @@ _BODY_WARNING_LINE_LIMIT = 3
 _BODY_WARNING_MARKERS = ("# ", "- ", "* ")
 
 
-def build_queue_probe_text(body: str, *, limit: int = 48) -> str:
-    """Build a short body-derived needle for runtime queue detection."""
-    text = body.strip()
-    if not text:
-        return ""
-    for line in text.splitlines():
-        collapsed = " ".join(line.split())
-        if collapsed:
-            return collapsed[:limit]
-    return " ".join(text.split())[:limit]
-
-
 def body_warning_hint(body: str) -> dict[str, object] | None:
     """Suggest when a message body looks better suited for an artifact."""
     text = body.strip()
@@ -63,18 +51,14 @@ def format_body_warning(*, command: str, hint: dict[str, object]) -> str:
     )
 
 
-def present_send_state(*, inject_status: str, turn_observed: str, runtime_queue_state: str) -> str:
-    """Collapse internal delivery details into one default send state."""
+def present_send_state(*, inject_status: str, turn_observed: str) -> str:
+    """Collapse internal delivery details into one outcome: pending | success | failed."""
     if inject_status == "failed":
         return "failed"
     if turn_observed == "confirmed":
-        return "confirmed"
-    if turn_observed == "unconfirmed":
-        return "unconfirmed"
-    if runtime_queue_state == "queued":
-        return "queued"
-    if turn_observed == "unavailable":
-        return "unavailable"
+        return "success"
+    if turn_observed in ("unconfirmed", "unavailable"):
+        return "failed"
     return "pending"
 
 
@@ -82,22 +66,19 @@ def present_delivery_state(
     *,
     inject_status: str,
     turn_observed: str,
-    runtime_queue_state: str,
     observation_result: str = "",
 ) -> str:
-    """Collapse persisted delivery detail into one primary state."""
+    """Collapse persisted delivery detail into one outcome: pending | success | failed."""
     if inject_status == "failed":
         return "failed"
-    if observation_result:
-        return observation_result
+    if observation_result == "success":
+        return "success"
+    if observation_result == "failed":
+        return "failed"
     if turn_observed == "confirmed":
-        return "confirmed"
-    if turn_observed == "unconfirmed":
-        return "unconfirmed"
-    if runtime_queue_state == "queued":
-        return "queued"
-    if turn_observed == "unavailable":
-        return "unavailable"
+        return "success"
+    if turn_observed in ("unconfirmed", "unavailable"):
+        return "failed"
     return "pending"
 
 
@@ -110,87 +91,47 @@ def gate_guidance(gate_status: str) -> dict[str, str] | None:
     return None
 
 
-def send_guidance(state: str) -> dict[str, str] | None:
-    if state == "confirmed":
+def send_guidance(delivery: str) -> dict[str, str] | None:
+    if delivery == "success":
         return {
-            "meaning": "Delivery was confirmed during the initial send window.",
+            "meaning": "Target pane rendered the message id; delivery confirmed.",
             "recommendedAction": "continue",
         }
-    if state == "queued":
-        return {
-            "meaning": "Accepted for background delivery tracking; no action is needed now.",
-            "recommendedAction": "continue",
-        }
-    if state == "pending":
+    if delivery == "pending":
         return {
             "meaning": "Submit completed and background delivery tracking continues.",
             "recommendedAction": "continue",
         }
-    if state == "failed":
+    if delivery == "failed":
         return {
-            "meaning": "Local submit attempt failed before background tracking began.",
+            "meaning": "Delivery failed: either submit errored or the target pane never rendered the message id.",
             "recommendedAction": "retry",
-        }
-    if state == "unconfirmed":
-        return {
-            "meaning": "Delivery was not confirmed within the synchronous wait window.",
-            "recommendedAction": "check_delivery",
-        }
-    if state == "unavailable":
-        return {
-            "meaning": "Delivery tracking is unavailable for this send result.",
-            "recommendedAction": "check_delivery",
         }
     return None
 
 
-def delivery_guidance(state: str) -> dict[str, str] | None:
-    if state == "failed":
+def delivery_guidance(delivery: str) -> dict[str, str] | None:
+    if delivery == "failed":
         return {
-            "meaning": "Local submit attempt failed before delivery tracking began.",
+            "meaning": "Delivery failed: either submit errored or the target pane never rendered the message id.",
             "recommendedAction": "retry",
-        }
-    if state == "tracking_lost":
-        return {
-            "meaning": "Delivery tracking was lost. Final delivery is unknown.",
-            "recommendedAction": "investigate",
-        }
-    if state == "unconfirmed":
-        return {
-            "meaning": "Delivery was not confirmed before the timeout window elapsed.",
-            "recommendedAction": "cautious_retry",
         }
     return None
 
 
 def delivery_exception_body(
-    state: str,
+    delivery: str,
     *,
     message_id: str,
     target_agent: str,
     timeout_seconds: float,
 ) -> str | None:
-    guidance = delivery_guidance(state)
-    if guidance is None:
+    if delivery != "failed":
         return None
-    meaning = guidance["meaning"]
-    if state == "failed":
-        return (
-            f"Message {message_id} to {target_agent}: {meaning} "
-            "Retry is reasonable."
-        )
-    if state == "tracking_lost":
-        return (
-            f"Message {message_id} to {target_agent}: {meaning} "
-            "Inspect before retrying."
-        )
-    if state == "unconfirmed":
-        return (
-            f"Message {message_id} to {target_agent} was not confirmed within "
-            f"{int(timeout_seconds)}s. {meaning} "
-            "Retry only if duplicate delivery is acceptable."
-        )
-    return None
+    return (
+        f"Message {message_id} to {target_agent} failed to deliver within "
+        f"{int(timeout_seconds)}s. Retry only if duplicate delivery is acceptable."
+    )
 
 
 def project_thread_event(event: dict[str, object]) -> dict[str, object]:

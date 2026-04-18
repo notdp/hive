@@ -1579,7 +1579,7 @@ def handoff(
     announce_msg_id = ""
     if original_sender == target_agent:
         announce_payload: dict[str, object] = {
-            "state": "skipped",
+            "delivery": "skipped",
             "reason": "target_is_original_sender",
         }
     else:
@@ -1597,7 +1597,7 @@ def handoff(
             announce_msg_id = str(announce_payload.get("msgId") or "")
         except RuntimeError as exc:
             announce_payload = {
-                "state": "failed",
+                "delivery": "failed",
                 "error": str(exc),
             }
 
@@ -1741,7 +1741,7 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.option(
     "--wait",
     is_flag=True,
-    help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
+    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
 )
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
@@ -1756,9 +1756,11 @@ def send(
 ):
     """Send a Hive message to another agent.
 
-    `queued` / `pending` mean the message was accepted and background tracking continues.
-    `confirmed` means delivery was confirmed in the initial send window.
-    `failed` means local submit failed and should be retried.
+    The response carries a `delivery` field:
+
+      - `success`: target pane rendered the msgId (transcript or stream).
+      - `pending`: submit completed; background tracking continues up to 60s.
+      - `failed`: submit errored OR target pane never rendered msgId before timeout. Retry.
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     team_name, t = _resolve_scoped_team(None, required=True)
@@ -1807,7 +1809,7 @@ def send(
 @click.option(
     "--wait",
     is_flag=True,
-    help="Block until transcript confirms delivery; if the runtime queue is visible first, state=queued and background tracking continues",
+    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
 )
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)

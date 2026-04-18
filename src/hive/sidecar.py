@@ -20,7 +20,6 @@ from typing import Any
 from . import bus
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
-    build_queue_probe_text,
     delivery_exception_body,
     delivery_guidance,
     format_hive_envelope,
@@ -34,7 +33,6 @@ from .runtime_state import (
 IDLE_SLEEP = 5.0
 ACTIVE_SLEEP = 0.5
 OBSERVATION_TIMEOUT = 60.0
-POST_QUEUE_TIMEOUT = 10.0
 POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
@@ -90,6 +88,13 @@ def _busy_output_payload(pane_id: str) -> dict[str, Any]:
     return {
         "busy": bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS)),
     }
+
+
+def _saw_msg_id(pane_id: str, msg_id: str) -> bool:
+    monitor = _OUTPUT_BUSY_MONITOR
+    if monitor is None or not pane_id or not msg_id:
+        return False
+    return bool(monitor.saw_msg_id(pane_id, msg_id))
 
 
 def _run_dir(workspace: str) -> Path:
@@ -157,119 +162,14 @@ def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: 
         pass
 
 
-def detect_runtime_queue_state(
-    *,
-    pane_id: str,
-    message_id: str,
-    queue_probe_text: str,
-    transcript_path: str,
-    baseline: int,
-    cli_name: str = "",
-) -> dict[str, str]:
-    resolved_cli = cli_name
-    if not resolved_cli and pane_id:
-        profile = detect_profile_for_pane(pane_id)
-        resolved_cli = profile.name if profile else ""
-
-    if resolved_cli == "claude":
-        state = _detect_claude_queue_state(Path(transcript_path), message_id, baseline)
-        if state != "unknown":
-            return {"state": state, "source": "transcript", "observedAt": _now_iso()}
-        return {"state": "unknown", "source": "none", "observedAt": _now_iso()}
-
-    if resolved_cli == "codex":
-        state = _detect_capture_queue_state(
-            pane_id,
-            message_id,
-            "Messages to be submitted after next tool call",
-            queue_probe_text=queue_probe_text,
-        )
-        source = "capture" if state != "unknown" else "none"
-        return {"state": state, "source": source, "observedAt": _now_iso()}
-
-    if resolved_cli == "droid":
-        state = _detect_capture_queue_state(
-            pane_id,
-            message_id,
-            "Queued messages:",
-            queue_probe_text=queue_probe_text,
-        )
-        source = "capture" if state != "unknown" else "none"
-        return {"state": state, "source": source, "observedAt": _now_iso()}
-
-    return {"state": "unknown", "source": "none", "observedAt": _now_iso()}
-
-
-def _detect_claude_queue_state(transcript_path: Path, message_id: str, baseline: int) -> str:
-    from .adapters.base import safe_json_loads
-
-    if not transcript_path.exists():
-        return "unknown"
-
-    try:
-        with transcript_path.open("r") as handle:
-            handle.seek(baseline)
-            data = handle.read()
-    except OSError:
-        return "unknown"
-
-    state = "not_queued"
-    for line in data.splitlines():
-        if message_id not in line:
-            continue
-        parsed = safe_json_loads(line)
-        if parsed is None:
-            continue
-        if parsed.get("type") == "queue-operation":
-            operation = parsed.get("operation")
-            if operation == "enqueue":
-                state = "queued"
-            elif operation in {"dequeue", "remove"}:
-                state = "not_queued"
-        elif "queued_command" in line:
-            state = "queued"
-    return state
-
-
-def _detect_capture_queue_state(
-    pane_id: str,
-    message_id: str,
-    phrase: str,
-    *,
-    queue_probe_text: str = "",
-) -> str:
-    from . import tmux
-
-    if not pane_id:
-        return "unknown"
-    try:
-        capture = tmux.capture_pane(pane_id, lines=200)
-    except Exception:
-        return "unknown"
-
-    if phrase not in capture:
-        return "not_queued"
-    if message_id in capture:
-        return "queued"
-    if queue_probe_text:
-        collapsed_capture = " ".join(capture.split())
-        collapsed_probe = " ".join(queue_probe_text.split())
-        if collapsed_probe and collapsed_probe in collapsed_capture:
-            return "queued"
-    return "unknown"
-
-
 def _effective_deadline(record: dict[str, Any]) -> float:
-    last_queued_at = record.get("lastQueuedAt")
-    if isinstance(last_queued_at, (int, float)) and last_queued_at > 0:
-        return last_queued_at + POST_QUEUE_TIMEOUT
     deadline = record.get("deadlineAt", 0)
     return float(deadline) if isinstance(deadline, (int, float)) else 0.0
 
 
 def _pending_terminal_result(record: dict[str, Any]) -> str:
     result = str(record.get("terminalNotifiedResult", "") or "")
-    if result in {"unconfirmed", "tracking_lost"}:
+    if result == "failed":
         return result
     return ""
 
@@ -282,79 +182,50 @@ def _exception_followup_active(record: dict[str, Any], *, now: float) -> bool:
 
 
 def _pending_delivery_state(record: dict[str, Any], observation: dict[str, Any] | None = None) -> dict[str, Any]:
-    runtime_queue_state = str(record.get("runtimeQueueState", "unknown"))
-    queue_source = str(record.get("queueSource", "none"))
     inject_status = "submitted"
     turn_observed = "pending"
     observation_result = _pending_terminal_result(record)
     observed_at = ""
+    confirmation_source = str(record.get("confirmationSource", ""))
 
     if observation is not None:
         metadata = observation.get("metadata", {})
         if isinstance(metadata, dict):
-            observation_result = str(metadata.get("result") or observation_result)
+            raw_result = metadata.get("result") or observation_result
+            observation_result = "success" if raw_result == "success" else ("pending" if raw_result in ("", "pending") else "failed")
             observed_at = str(metadata.get("observedAt") or "")
             inject_status = (
                 str(metadata.get("injectStatus", ""))
                 or ("failed" if observation_result == "failed" else "submitted")
             )
             turn_observed = str(metadata.get("turnObserved", "")) or turn_observed
-            runtime_queue_state = str(metadata.get("runtimeQueueState", runtime_queue_state))
-            queue_source = str(metadata.get("queueSource", queue_source))
+            confirmation_source = str(metadata.get("confirmationSource", "")) or confirmation_source
 
     if not turn_observed:
-        if observation_result in {"confirmed", "unconfirmed"}:
-            turn_observed = observation_result
+        if observation_result == "success":
+            turn_observed = "confirmed"
         elif observation_result == "failed":
-            turn_observed = "unavailable"
+            turn_observed = "unconfirmed" if inject_status == "submitted" else "unavailable"
         else:
             turn_observed = "pending"
 
     payload: dict[str, Any] = {
-        "state": present_delivery_state(
+        "delivery": present_delivery_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
-            runtime_queue_state=runtime_queue_state,
             observation_result=observation_result,
         ),
         "injectStatus": inject_status,
         "turnObserved": turn_observed,
     }
-    if runtime_queue_state != "unknown":
-        payload["runtimeQueueState"] = runtime_queue_state
-    if queue_source and queue_source != "none":
-        payload["queueSource"] = queue_source
     if observed_at:
         payload["observedAt"] = observed_at
-    guidance = delivery_guidance(str(payload["state"]))
+    if confirmation_source and payload["delivery"] == "success":
+        payload["confirmationSource"] = confirmation_source
+    guidance = delivery_guidance(payload["delivery"])
     if guidance is not None:
         payload.update(guidance)
     return payload
-
-
-def _apply_queue_probe(record: dict[str, Any], probe: dict[str, str]) -> None:
-    now = time.time()
-    record["lastQueueProbeAt"] = now
-
-    state = probe.get("state", "unknown")
-    source = probe.get("source", "none")
-
-    if state == "queued":
-        record["runtimeQueueState"] = "queued"
-        record["queueSource"] = source
-        if not record.get("firstQueuedAt"):
-            record["firstQueuedAt"] = now
-        record["lastQueuedAt"] = now
-        return
-
-    if state == "not_queued":
-        record["runtimeQueueState"] = "not_queued"
-        if source != "none":
-            record["queueSource"] = source
-        return
-
-    if "runtimeQueueState" not in record:
-        record["runtimeQueueState"] = "unknown"
 
 
 def _socket_alive(workspace: str) -> bool:
@@ -558,38 +429,55 @@ def _check_send_gate(transcript_path: Path | None) -> str:
     return result.status
 
 
+def _wait_for_delivery_confirmation(
+    *,
+    pane_id: str,
+    transcript_path: Path | None,
+    message_id: str,
+    baseline: int,
+    timeout: float,
+) -> str:
+    """Block up to *timeout* seconds. Return 'transcript' / 'stream' on confirm, '' on timeout."""
+    from .adapters.base import transcript_has_id_in_new_user_turn
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if transcript_path is not None and transcript_has_id_in_new_user_turn(
+            transcript_path, message_id, baseline
+        ):
+            return "transcript"
+        if _saw_msg_id(pane_id, message_id):
+            return "stream"
+        time.sleep(0.2)
+    return ""
+
+
 def _observe_send_grace(
     *,
     pane_id: str,
     transcript_path: Path | None,
     message_id: str,
     baseline: int,
-    queue_probe_text: str,
-    cli_name: str,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, str]:
+    """Short synchronous grace loop. Returns (state, confirmation_source).
+
+    state is "confirmed" or "pending". confirmation_source is "transcript",
+    "stream", or "" for pending.
+    """
     from .adapters.base import transcript_has_id_in_new_user_turn
 
     deadline = time.monotonic() + SEND_GRACE_TIMEOUT
-    last_probe: dict[str, str] = {"state": "unknown", "source": "none", "observedAt": ""}
 
     while True:
         if transcript_path is not None and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
-            return "confirmed", last_probe
+            return "confirmed", "transcript"
 
-        last_probe = detect_runtime_queue_state(
-            pane_id=pane_id,
-            message_id=message_id,
-            queue_probe_text=queue_probe_text,
-            transcript_path=str(transcript_path) if transcript_path is not None else "",
-            baseline=baseline,
-            cli_name=cli_name,
-        )
-        if last_probe.get("state") == "queued":
-            return "queued", last_probe
+        if _saw_msg_id(pane_id, message_id):
+            return "confirmed", "stream"
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return "pending", last_probe
+            return "pending", ""
         time.sleep(min(0.2, remaining))
 
 
@@ -603,11 +491,8 @@ def _pending_record(
     target_cli: str,
     transcript_path: str,
     baseline: int,
-    runtime_queue_state: str,
-    queue_source: str,
-    queue_probe_text: str,
 ) -> dict[str, Any]:
-    record: dict[str, Any] = {
+    return {
         "msgId": message_id,
         "senderAgent": sender_agent,
         "senderPane": sender_pane,
@@ -616,18 +501,9 @@ def _pending_record(
         "targetCli": target_cli,
         "targetTranscript": transcript_path,
         "baseline": baseline,
-        "runtimeQueueState": runtime_queue_state,
-        "queueSource": queue_source,
-        "queueProbeText": queue_probe_text,
         "createdAt": _now_iso(),
         "deadlineAt": time.time() + OBSERVATION_TIMEOUT,
     }
-    if runtime_queue_state == "queued":
-        now = time.time()
-        record["firstQueuedAt"] = now
-        record["lastQueuedAt"] = now
-    record["lastQueueProbeAt"] = time.time()
-    return record
 
 
 def _target_cli_name(target: Any) -> str:
@@ -688,11 +564,27 @@ def _send_payload(
     except Exception:
         inject_status = "failed"
 
-    runtime_queue_state = "unknown"
-    probe: dict[str, str] = {"source": "none"}
     turn_observed = "pending"
+    confirmation_source = ""
     profile = detect_profile_for_pane(target.pane_id)
-    queue_probe_text = build_queue_probe_text(normalized_body)
+
+    def _confirmed_metadata(source: str) -> dict[str, str]:
+        meta = {"injectStatus": "submitted", "turnObserved": "confirmed"}
+        if source:
+            meta["confirmationSource"] = source
+        return meta
+
+    def _add_to_pending() -> None:
+        pending[message_id] = _pending_record(
+            message_id=message_id,
+            sender_agent=sender_agent,
+            sender_pane=sender_pane,
+            target_agent=target_agent,
+            target_pane=target.pane_id,
+            target_cli=profile.name if profile else "",
+            transcript_path=str(transcript_path) if transcript_path is not None else "",
+            baseline=baseline,
+        )
 
     if inject_status == "failed":
         turn_observed = "unavailable"
@@ -706,116 +598,52 @@ def _send_payload(
             },
         )
     elif wait:
-        grace_state, probe = _observe_send_grace(
+        grace_state, grace_source = _observe_send_grace(
             pane_id=target.pane_id,
             transcript_path=transcript_path,
             message_id=message_id,
             baseline=baseline,
-            queue_probe_text=queue_probe_text,
-            cli_name=profile.name if profile else "",
         )
         if grace_state == "confirmed":
             turn_observed = "confirmed"
-            _write_observation(
-                workspace,
-                message_id,
-                "confirmed",
-                metadata={
-                    "injectStatus": "submitted",
-                    "turnObserved": "confirmed",
-                },
-            )
-        elif grace_state == "queued":
-            runtime_queue_state = "queued"
-            pending[message_id] = _pending_record(
+            confirmation_source = grace_source
+            _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(grace_source))
+        else:
+            wait_source = _wait_for_delivery_confirmation(
+                pane_id=target.pane_id,
+                transcript_path=transcript_path,
                 message_id=message_id,
-                sender_agent=sender_agent,
-                sender_pane=sender_pane,
-                target_agent=target_agent,
-                target_pane=target.pane_id,
-                target_cli=profile.name if profile else "",
-                transcript_path=str(transcript_path) if transcript_path is not None else "",
                 baseline=baseline,
-                runtime_queue_state=runtime_queue_state,
-                queue_source=probe.get("source", "none"),
-                queue_probe_text=queue_probe_text,
+                timeout=OBSERVATION_TIMEOUT - SEND_GRACE_TIMEOUT,
             )
-            turn_observed = "pending"
-        elif transcript_path is not None:
-            from .adapters.base import wait_for_id_in_transcript
-
-            if wait_for_id_in_transcript(transcript_path, message_id, baseline):
+            if wait_source:
                 turn_observed = "confirmed"
-                _write_observation(
-                    workspace,
-                    message_id,
-                    "confirmed",
-                    metadata={
-                        "injectStatus": "submitted",
-                        "turnObserved": "confirmed",
-                    },
-                )
+                confirmation_source = wait_source
+                _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(wait_source))
             else:
                 turn_observed = "unconfirmed"
                 _write_observation(
                     workspace,
                     message_id,
-                    "unconfirmed",
+                    "failed",
                     metadata={
                         "injectStatus": "submitted",
                         "turnObserved": "unconfirmed",
                     },
                 )
-        else:
-            pending[message_id] = _pending_record(
-                message_id=message_id,
-                sender_agent=sender_agent,
-                sender_pane=sender_pane,
-                target_agent=target_agent,
-                target_pane=target.pane_id,
-                target_cli=profile.name if profile else "",
-                transcript_path="",
-                baseline=baseline,
-                runtime_queue_state="unknown",
-                queue_source=probe.get("source", "none"),
-                queue_probe_text=queue_probe_text,
-            )
-            turn_observed = "pending"
     else:
-        grace_state, probe = _observe_send_grace(
+        grace_state, grace_source = _observe_send_grace(
             pane_id=target.pane_id,
             transcript_path=transcript_path,
             message_id=message_id,
             baseline=baseline,
-            queue_probe_text=queue_probe_text,
-            cli_name=profile.name if profile else "",
         )
         if grace_state == "confirmed":
             turn_observed = "confirmed"
-            _write_observation(
-                workspace,
-                message_id,
-                "confirmed",
-                metadata={
-                    "injectStatus": "submitted",
-                    "turnObserved": "confirmed",
-                },
-            )
+            confirmation_source = grace_source
+            _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(grace_source))
         else:
-            runtime_queue_state = "queued" if grace_state == "queued" else "unknown"
-            pending[message_id] = _pending_record(
-                message_id=message_id,
-                sender_agent=sender_agent,
-                sender_pane=sender_pane,
-                target_agent=target_agent,
-                target_pane=target.pane_id,
-                target_cli=profile.name if profile else "",
-                transcript_path=str(transcript_path) if transcript_path is not None else "",
-                baseline=baseline,
-                runtime_queue_state=runtime_queue_state,
-                queue_source=probe.get("source", "none"),
-                queue_probe_text=queue_probe_text,
-            )
+            _add_to_pending()
             turn_observed = "pending"
 
     payload = {
@@ -825,13 +653,14 @@ def _send_payload(
         "msgId": message_id,
         "artifact": artifact,
         "gate": gate_status,
-        "state": present_send_state(
+        "delivery": present_send_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
-            runtime_queue_state=runtime_queue_state,
         ),
     }
-    guidance = send_guidance(str(payload["state"]))
+    if confirmation_source and payload["delivery"] == "success":
+        payload["confirmationSource"] = confirmation_source
+    guidance = send_guidance(payload["delivery"])
     if guidance is not None:
         payload.update(guidance)
     gate_info = gate_guidance(gate_status)
@@ -897,21 +726,22 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
 
     obs = bus.find_latest_observation(workspace, message_id)
     if obs is None and message_id not in pending:
-        _write_observation(
-            workspace,
-            message_id,
-            "tracking_lost",
-            metadata={
-                "injectStatus": "submitted",
-                "turnObserved": "pending",
-            },
-        )
-        obs = bus.find_latest_observation(workspace, message_id)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "msgId": message_id,
+            "to": send_event.get("to", ""),
+            "delivery": "failed",
+            "reason": "tracking_lost",
+            "injectStatus": "submitted",
+            "turnObserved": "unavailable",
+        }
+        guidance = delivery_guidance("failed")
+        if guidance is not None:
+            payload.update(guidance)
+        return payload
 
     inject_status = "submitted"
     turn_observed = "pending"
-    runtime_queue_state = "unknown"
-    queue_source = ""
 
     if message_id in pending:
         record = pending[message_id]
@@ -938,20 +768,18 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
             if isinstance(metadata, dict)
             else ""
         )
+        # Any non-success terminal result — including legacy values like
+        # "unconfirmed"/"tracking_lost" left in hive.db — folds to "failed".
+        normalized_result = "success" if result == "success" else ("pending" if result in ("", "pending") else "failed")
         if not turn_observed:
-            if result in {"confirmed", "unconfirmed"}:
-                turn_observed = str(result)
-            elif result == "failed":
-                turn_observed = "unavailable"
+            if normalized_result == "success":
+                turn_observed = "confirmed"
+            elif normalized_result == "failed":
+                turn_observed = "unconfirmed" if inject_status == "submitted" else "unavailable"
             else:
                 turn_observed = "pending"
-        runtime_queue_state = (
-            str(metadata.get("runtimeQueueState", "unknown"))
-            if isinstance(metadata, dict)
-            else "unknown"
-        )
-        queue_source = (
-            str(metadata.get("queueSource", ""))
+        confirmation_source = (
+            str(metadata.get("confirmationSource", ""))
             if isinstance(metadata, dict)
             else ""
         )
@@ -959,22 +787,19 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
             "ok": True,
             "msgId": message_id,
             "to": send_event.get("to", ""),
-            "state": present_delivery_state(
+            "delivery": present_delivery_state(
                 inject_status=inject_status,
                 turn_observed=turn_observed,
-                runtime_queue_state=runtime_queue_state,
-                observation_result=str(result),
+                observation_result=normalized_result,
             ),
             "injectStatus": inject_status,
             "turnObserved": turn_observed,
         }
-        if runtime_queue_state != "unknown":
-            payload["runtimeQueueState"] = runtime_queue_state
-        if queue_source:
-            payload["queueSource"] = queue_source
+        if confirmation_source and payload["delivery"] == "success":
+            payload["confirmationSource"] = confirmation_source
         if observed_at:
             payload["observedAt"] = observed_at
-        guidance = delivery_guidance(str(payload["state"]))
+        guidance = delivery_guidance(payload["delivery"])
         if guidance is not None:
             payload.update(guidance)
         return payload
@@ -983,19 +808,14 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
         "ok": True,
         "msgId": message_id,
         "to": send_event.get("to", ""),
-        "state": present_delivery_state(
+        "delivery": present_delivery_state(
             inject_status=inject_status,
             turn_observed=turn_observed,
-            runtime_queue_state=runtime_queue_state,
         ),
         "injectStatus": inject_status,
         "turnObserved": turn_observed,
     }
-    if runtime_queue_state != "unknown":
-        payload["runtimeQueueState"] = runtime_queue_state
-    if queue_source:
-        payload["queueSource"] = queue_source
-    guidance = delivery_guidance(str(payload["state"]))
+    guidance = delivery_guidance(payload["delivery"])
     if guidance is not None:
         payload.update(guidance)
     return payload
@@ -1284,15 +1104,15 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
             _, observation = latest_observations[thread_msg_id]
             metadata = observation.get("metadata", {})
             if isinstance(metadata, dict):
-                delivery = {
-                    "state": str(metadata.get("result") or "pending"),
-                }
+                result = str(metadata.get("result") or "pending")
+                delivery_value = result if result in ("pending", "success", "failed") else "pending"
+                info: dict[str, Any] = {"delivery": delivery_value}
                 if metadata.get("observedAt"):
-                    delivery["observedAt"] = metadata["observedAt"]
-                guidance = delivery_guidance(delivery["state"])
+                    info["observedAt"] = metadata["observedAt"]
+                guidance = delivery_guidance(delivery_value)
                 if guidance is not None:
-                    delivery.update(guidance)
-                item["delivery"] = delivery
+                    info.update(guidance)
+                item["delivery"] = info
 
         items.append(item)
 
@@ -1385,7 +1205,7 @@ def _live_state(record: dict[str, Any]) -> str:
     terminal_result = _pending_terminal_result(record)
     if terminal_result:
         return terminal_result
-    return "queued" if record.get("runtimeQueueState") == "queued" else "pending"
+    return "pending"
 
 
 def _handle_request(
@@ -1444,7 +1264,7 @@ def _handle_request(
         if not isinstance(record, dict) or not record.get("msgId"):
             return {"ok": False, "error": "invalid record"}, True
         pending[str(record["msgId"])] = record
-        return {"ok": True, "state": _live_state(record)}, True
+        return {"ok": True, "delivery": _live_state(record)}, True
     if action == "delivery":
         return _delivery_payload(workspace, pending, str(request.get("msgId", ""))), True
     if action == "doctor":
@@ -1478,9 +1298,7 @@ def _handle_request(
             return {
                 "ok": True,
                 "tracked": True,
-                "state": _live_state(record),
-                "runtimeQueueState": record.get("runtimeQueueState", "unknown"),
-                "queueSource": record.get("queueSource", "none"),
+                "delivery": _live_state(record),
             }, True
         obs = bus.find_latest_observation(workspace, str(message_id))
         if obs is not None:
@@ -1600,7 +1418,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     result,
                     metadata=_observation_metadata_for_pending(record, result),
                 )
-                if result in ("unconfirmed", "tracking_lost"):
+                if result == "failed":
                     sender_pane = record.get("senderPane", "")
                     target_agent = record.get("targetAgent", "")
                     record["terminalNotifiedResult"] = result
@@ -1621,57 +1439,31 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
 
 def _check_pending(record: dict[str, Any]) -> str | None:
-    """Check a single pending record. Returns result or None if still pending."""
+    """Check a pending record. Returns 'success' / 'failed' / None (still pending)."""
     from .adapters.base import transcript_has_id_in_new_user_turn
 
     transcript_path = Path(record.get("targetTranscript", ""))
+    pane_id = record.get("targetPane", "")
     message_id = record.get("msgId", "")
     baseline = record.get("baseline", 0)
     deadline = _effective_deadline(record)
     now = time.time()
 
-    if not transcript_path.exists():
-        probe = detect_runtime_queue_state(
-            pane_id=record.get("targetPane", ""),
-            message_id=message_id,
-            queue_probe_text=record.get("queueProbeText", ""),
-            transcript_path=str(transcript_path),
-            baseline=baseline,
-            cli_name=record.get("targetCli", ""),
-        )
-        _apply_queue_probe(record, probe)
-        if probe.get("state") == "queued":
-            return None
-        if _pending_terminal_result(record):
-            if _exception_followup_active(record, now=now):
-                return None
-            return _FINALIZE_PENDING
-        if now > deadline:
-            return "tracking_lost"
-        return None
+    if transcript_path.exists() and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
+        record["confirmationSource"] = "transcript"
+        return "success"
 
-    if transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
-        return "confirmed"
-
-    probe = detect_runtime_queue_state(
-        pane_id=record.get("targetPane", ""),
-        message_id=message_id,
-        queue_probe_text=record.get("queueProbeText", ""),
-        transcript_path=str(transcript_path),
-        baseline=baseline,
-        cli_name=record.get("targetCli", ""),
-    )
-    _apply_queue_probe(record, probe)
-    if probe.get("state") == "queued":
-        return None
+    if _saw_msg_id(pane_id, message_id):
+        record["confirmationSource"] = "stream"
+        return "success"
 
     if _pending_terminal_result(record):
         if _exception_followup_active(record, now=now):
             return None
         return _FINALIZE_PENDING
 
-    if now > _effective_deadline(record):
-        return "unconfirmed"
+    if now > deadline:
+        return "failed"
     return None
 
 
@@ -1679,16 +1471,13 @@ def _observation_metadata_for_pending(record: dict[str, Any], result: str) -> di
     metadata: dict[str, str] = {
         "injectStatus": "submitted",
     }
-    if result == "confirmed":
+    if result == "success":
         metadata["turnObserved"] = "confirmed"
-    elif result == "unconfirmed":
+    elif result == "failed":
         metadata["turnObserved"] = "unconfirmed"
-    elif result == "tracking_lost":
-        metadata["turnObserved"] = "pending"
-    if str(record.get("runtimeQueueState", "unknown")) != "unknown":
-        metadata["runtimeQueueState"] = str(record["runtimeQueueState"])
-    if str(record.get("queueSource", "")) not in ("", "none"):
-        metadata["queueSource"] = str(record["queueSource"])
+    source = str(record.get("confirmationSource", ""))
+    if result == "success" and source:
+        metadata["confirmationSource"] = source
     return metadata
 
 

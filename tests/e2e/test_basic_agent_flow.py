@@ -57,7 +57,7 @@ def test_e2e_create_spawn_send_capture_and_status(tmp_path: Path):
         assert send_result.returncode == 0, send_result.stdout
         send_payload = json.loads(send_result.stdout)
         assert send_payload["to"] == "claude"
-        assert send_payload["state"] in {"queued", "pending", "confirmed"}
+        assert send_payload["delivery"] in {"pending", "success"}
 
         wait_for(lambda: "plain ping" in capture_claude() and "hello envelope" in capture_claude())
         captured = capture_claude()

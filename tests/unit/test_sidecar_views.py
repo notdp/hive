@@ -69,19 +69,14 @@ def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):
         message_id="a002",
         metadata={
             "msgId": "a002",
-            "result": "confirmed",
+            "result": "success",
             "observedAt": "2026-04-15T00:00:00Z",
         },
     )
 
     payload = sidecar._thread_payload(
         str(workspace),
-        {
-            "a003": {
-                "runtimeQueueState": "queued",
-                "queueSource": "capture",
-            }
-        },
+        {"a003": {}},
         "a003",
     )
 
@@ -90,7 +85,6 @@ def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):
     assert payload["focusMsgId"] == "a003"
     assert [item["msgId"] for item in payload["messages"]] == ["a001", "a002", "a003"]
     assert [item["depth"] for item in payload["messages"]] == [0, 1, 2]
-    assert payload["messages"][1]["delivery"]["state"] == "confirmed"
-    assert payload["messages"][2]["delivery"]["state"] == "queued"
-    assert payload["messages"][2]["delivery"]["queueSource"] == "capture"
+    assert payload["messages"][1]["delivery"]["delivery"] == "success"
+    assert payload["messages"][2]["delivery"]["delivery"] == "pending"
     assert payload["messages"][2]["focus"] is True

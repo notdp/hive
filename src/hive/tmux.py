@@ -28,16 +28,51 @@ def _run_output(args: list[str]) -> str:
     return r.stdout.strip()
 
 
-_CONTROL_MODE_OUTPUT_RE = re.compile(r"^%(?:extended-)?output (?P<pane>%[0-9]+)\b")
+_CONTROL_MODE_OUTPUT_RE = re.compile(
+    r"^%(?P<kind>extended-output|output) (?P<pane>%[0-9]+)\b"
+)
 _CONTROL_MODE_RESTART_DELAY = 1.0
+_OUTPUT_BUFFER_MAX = 64 * 1024
+_OCTAL_DIGITS = frozenset("01234567")
+
+
+def _decode_output_payload(raw: str) -> str:
+    """Decode tmux control-mode escape: control bytes and '\\' are encoded as \\NNN (3 octal digits)."""
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\\" and i + 3 < n and all(c in _OCTAL_DIGITS for c in raw[i + 1 : i + 4]):
+            out.append(chr(int(raw[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def parse_control_mode_output(line: str) -> tuple[str, str]:
+    """Return (pane_id, decoded_payload) for a control mode output line, or ("", "")."""
+    stripped = (line or "").strip()
+    match = _CONTROL_MODE_OUTPUT_RE.match(stripped)
+    if not match:
+        return "", ""
+    remainder = stripped[match.end():]
+    if match.group("kind") == "extended-output":
+        # format: "<age> ... : <value>"
+        colon_idx = remainder.find(":")
+        if colon_idx >= 0:
+            remainder = remainder[colon_idx + 1 :]
+    return match.group("pane"), _decode_output_payload(remainder.lstrip())
 
 
 def parse_control_mode_output_pane(line: str) -> str | None:
     """Return the pane id for a control mode output line, if any."""
-    match = _CONTROL_MODE_OUTPUT_RE.match((line or "").strip())
-    if not match:
-        return None
-    return match.group("pane")
+    pane_id, _ = parse_control_mode_output(line)
+    return pane_id or None
 
 
 class ControlModeOutputMonitor:
@@ -51,6 +86,7 @@ class ControlModeOutputMonitor:
         self._proc: subprocess.Popen[bytes] | None = None
         self._master_fd: int | None = None
         self._last_output_at: dict[str, float] = {}
+        self._output_buffer: dict[str, str] = {}
 
     def start(self) -> None:
         if not self.session_target:
@@ -87,6 +123,23 @@ class ControlModeOutputMonitor:
         if last is None:
             return None
         return max(0.0, time.monotonic() - last)
+
+    def saw_msg_id(self, pane_id: str, msg_id: str) -> bool:
+        if not pane_id or not msg_id:
+            return False
+        with self._lock:
+            buffer = self._output_buffer.get(pane_id, "")
+        return msg_id in buffer
+
+    def _append_output(self, pane_id: str, payload: str) -> None:
+        if not pane_id or not payload:
+            return
+        with self._lock:
+            current = self._output_buffer.get(pane_id, "")
+            combined = current + payload
+            if len(combined) > _OUTPUT_BUFFER_MAX:
+                combined = combined[-_OUTPUT_BUFFER_MAX:]
+            self._output_buffer[pane_id] = combined
 
     def _request_detach(self) -> None:
         with self._lock:
@@ -169,10 +222,13 @@ class ControlModeOutputMonitor:
                 buffer += chunk
                 while b"\n" in buffer:
                     raw_line, buffer = buffer.split(b"\n", 1)
-                    pane_id = parse_control_mode_output_pane(raw_line.decode(errors="ignore").rstrip("\r"))
+                    decoded = raw_line.decode(errors="ignore").rstrip("\r")
+                    pane_id, payload = parse_control_mode_output(decoded)
                     if pane_id:
                         with self._lock:
                             self._last_output_at[pane_id] = time.monotonic()
+                        if payload:
+                            self._append_output(pane_id, payload)
         finally:
             if proc is not None and proc.poll() is None:
                 try:
