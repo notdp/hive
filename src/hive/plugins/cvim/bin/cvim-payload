@@ -66,12 +66,15 @@ def main() -> int:
     tmpdir = dst.parent
     offset_file = tmpdir / "offset"
     transcript_path_file = tmpdir / "transcript_path"
+    menu_selected_file = tmpdir / "menu_selected"
     if offset_file.is_file():
         try:
             offset = int(offset_file.read_text().strip())
         except (ValueError, OSError):
             pass
-    if transcript_path_file.is_file():
+    # The popup picker writes the selected index directly; skip the codex
+    # commentary-turn shift since the user picked the exact message.
+    if not menu_selected_file.is_file() and transcript_path_file.is_file():
         try:
             offset = resolve_assistant_offset(Path(transcript_path_file.read_text().strip()), offset=offset)
         except OSError:

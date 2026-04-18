@@ -36,9 +36,12 @@ src_pane_tty="$(tmux display-message -p -t "$src_pane" '#{pane_tty}')"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
 src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+resources_dir="$(CDPATH= cd -- "$script_dir/../resources" && pwd 2>/dev/null || true)"
 seed_helper="$script_dir/cvim-seed"
 session_helper="$script_dir/cvim-session"
+list_helper="$script_dir/cvim-list"
 payload_builder="$script_dir/cvim-payload"
+menu_vim_template="$resources_dir/menu.vim"
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/cvim.XXXXXX")"
 msg_file="$tmpdir/message.md"
 orig_file="$tmpdir/original.md"
@@ -555,14 +558,34 @@ trap cleanup EXIT
 debug_log "helper.start transport=$transport_mode send_mode=$send_mode msg_file=$msg_file orig_file=$orig_file tmpdir=$tmpdir"
 
 editor_name="$(basename -- "$editor_bin")"
+menu_enabled=0
+if [[ -f "$tmpdir/menu.vim" && -f "$tmpdir/menu.json" ]]; then
+  export CVIM_MENU_JSON="$tmpdir/menu.json"
+  export CVIM_SEEDS_DIR="$tmpdir/seeds"
+  export CVIM_MSG_FILE="$msg_file"
+  export CVIM_ORIG_FILE="$orig_file"
+  export CVIM_OFFSET_FILE="$tmpdir/offset"
+  export CVIM_MENU_SELECTED_FILE="$tmpdir/menu_selected"
+  menu_enabled=1
+  debug_log "helper.menu_mode enabled menu_json=$CVIM_MENU_JSON seeds=$CVIM_SEEDS_DIR"
+fi
+
 case "$editor_name" in
   *vim*)
     case "$cursor_mode" in
       end)
-        "$editor_bin" +'normal! G$' "$msg_file"
+        if [[ "$menu_enabled" == "1" ]]; then
+          "$editor_bin" -S "$tmpdir/menu.vim" +'normal! G$' "$msg_file"
+        else
+          "$editor_bin" +'normal! G$' "$msg_file"
+        fi
         ;;
       *)
-        "$editor_bin" "$msg_file"
+        if [[ "$menu_enabled" == "1" ]]; then
+          "$editor_bin" -S "$tmpdir/menu.vim" "$msg_file"
+        else
+          "$editor_bin" "$msg_file"
+        fi
         ;;
     esac
     ;;
@@ -982,6 +1005,38 @@ done
 set -- "${remaining_args[@]+"${remaining_args[@]}"}"
 printf '%s\n' "$vim_offset" > "$tmpdir/offset"
 
+menu_mode=0
+maybe_prepare_menu() {
+  # Called with a resolved transcript path. When no explicit offset / args
+  # were given, prepares the popup-menu assets in $tmpdir so the vim helper
+  # can launch the picker. The caller is responsible for transcript
+  # detection/fallback; this function only decides whether to seed a single
+  # message or to stage the menu.
+  local transcript_path="$1"
+  if [[ $# -gt 1 && "$2" -ne 0 ]]; then
+    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$2"
+    return 0
+  fi
+  if [[ -z "$menu_vim_template" || ! -f "$menu_vim_template" || ! -x "$list_helper" ]]; then
+    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "0"
+    return 0
+  fi
+  if ! "$list_helper" "$transcript_path" "$tmpdir/seeds" "$tmpdir/menu.json" >/dev/null 2>&1; then
+    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "0"
+    return 0
+  fi
+  local entry_count
+  entry_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$tmpdir/menu.json" 2>/dev/null || printf '0')"
+  if [[ "$entry_count" == "0" ]]; then
+    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "0"
+    return 0
+  fi
+  cp "$menu_vim_template" "$tmpdir/menu.vim"
+  : > "$msg_file"
+  menu_mode=1
+  debug_log "seed.menu transcript_path=$transcript_path entries=$entry_count"
+}
+
 if [[ $# -gt 0 ]]; then
   printf '%s\n' "$*" > "$msg_file"
   debug_log "seed.args bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
@@ -989,8 +1044,8 @@ elif [[ "$seed_mode" == "session" ]]; then
   transcript_path="$("$session_helper" "$src_cwd" "" "$src_pane" 2>/dev/null || true)"
   if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
-    "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
-    debug_log "seed.session transcript_path=$transcript_path offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
+    maybe_prepare_menu "$transcript_path" "$vim_offset"
+    debug_log "seed.session transcript_path=$transcript_path offset=$vim_offset menu_mode=$menu_mode bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
   elif [[ "$src_profile" == "droid" || "$src_profile" == "unknown" ]]; then
     droid_pid=""
     droid_tty=""
@@ -1001,8 +1056,8 @@ elif [[ "$seed_mode" == "session" ]]; then
     transcript_path="$("$session_helper" "$src_cwd" "$droid_args" "$src_pane" 2>/dev/null || true)"
     if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
       printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
-      "$seed_helper" "$src_cwd" "$msg_file" "$transcript_path" "$vim_offset"
-      debug_log "seed.capture profile=$src_profile pid=${droid_pid:-none} tty=${droid_tty:-none} transcript_path=$transcript_path offset=$vim_offset bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
+      maybe_prepare_menu "$transcript_path" "$vim_offset"
+      debug_log "seed.capture profile=$src_profile pid=${droid_pid:-none} tty=${droid_tty:-none} transcript_path=$transcript_path offset=$vim_offset menu_mode=$menu_mode bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
     else
       : > "$msg_file"
       debug_log "seed.blank profile=$src_profile reason=missing_droid_transcript pid=${droid_pid:-none} tty=${droid_tty:-none}"

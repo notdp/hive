@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Emit the menu payload for the cvim picker popup.
+
+Writes:
+  <seeds_dir>/<offset>.md   — full text of each candidate, one per file
+  <menu_json>               — JSON array of {offset, label} entries
+
+`label` is a ``"HH:MM  preview"`` string the vim popup_menu() renders as-is.
+Empty timestamps (unknown adapter metadata) render as blank columns.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from _cvim_shared import list_recent_assistant_messages
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if len(args) not in {3, 4}:
+        raise SystemExit("usage: cvim-list <transcript> <seeds_dir> <menu_json> [limit]")
+    transcript = Path(args[0])
+    seeds_dir = Path(args[1])
+    menu_json = Path(args[2])
+    limit = int(args[3]) if len(args) == 4 else 10
+
+    seeds_dir.mkdir(parents=True, exist_ok=True)
+    entries = list_recent_assistant_messages(transcript, limit=limit)
+
+    menu: list[dict[str, object]] = []
+    for entry in entries:
+        seed_path = seeds_dir / f"{entry['offset']}.md"
+        text = entry["text"]
+        seed_path.write_text(text + "\n" if text and not text.endswith("\n") else text)
+        timestamp = entry["timestamp"] or "--:--"
+        preview = entry["preview"] or "(empty)"
+        menu.append({
+            "offset": entry["offset"],
+            "label": f"{timestamp}  {preview}",
+        })
+    menu_json.write_text(json.dumps(menu, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

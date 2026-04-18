@@ -52,6 +52,126 @@ def iter_candidate_files(path: str):
         yield from sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
 
 
+def list_recent_assistant_messages(
+    file_path: Path, *, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Return up to *limit* most-recent assistant messages, newest first.
+
+    Each entry carries the raw *offset* such that
+    ``extract_last_assistant_text(file_path, offset=offset)`` returns the same
+    text (i.e. this walks assistant messages in the same order). Entries also
+    include a ``timestamp`` (HH:MM local, ``""`` when missing) and an 80-char
+    first-line ``preview`` suitable for a menu label.
+    """
+    adapter = _detect_adapter_for_transcript(file_path)
+    entries: list[dict[str, Any]]
+    if adapter is not None:
+        entries = _list_messages_via_adapter(adapter, file_path, limit=limit)
+    else:
+        entries = _list_messages_via_raw_jsonl(file_path, limit=limit)
+    return entries
+
+
+def _list_messages_via_adapter(adapter, file_path: Path, *, limit: int) -> list[dict[str, Any]]:
+    try:
+        messages = list(adapter.iter_messages(file_path))
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    offset = 0
+    for message in reversed(messages):
+        if getattr(message, "role", "") != "assistant":
+            continue
+        text = _assistant_text_from_normalized_message(message)
+        if not text:
+            continue
+        timestamp = _format_timestamp(getattr(message, "timestamp", None))
+        out.append({
+            "offset": offset,
+            "timestamp": timestamp,
+            "preview": _build_preview(text),
+            "text": text,
+        })
+        offset += 1
+        if offset >= limit:
+            break
+    return out
+
+
+def _list_messages_via_raw_jsonl(file_path: Path, *, limit: int) -> list[dict[str, Any]]:
+    try:
+        lines = file_path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    offset = 0
+    for line in reversed(lines):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "message":
+            continue
+        message = obj.get("message") or {}
+        if message.get("role") != "assistant":
+            continue
+        text = _assistant_text_from_raw_claude_message(message)
+        if not text:
+            continue
+        out.append({
+            "offset": offset,
+            "timestamp": _format_timestamp(obj.get("timestamp")),
+            "preview": _build_preview(text),
+            "text": text,
+        })
+        offset += 1
+        if offset >= limit:
+            break
+    return out
+
+
+def _format_timestamp(value: Any) -> str:
+    from datetime import datetime
+
+    if isinstance(value, datetime):
+        return value.astimezone().strftime("%H:%M")
+    if isinstance(value, str) and value:
+        raw = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return ""
+        return dt.astimezone().strftime("%H:%M")
+    return ""
+
+
+def _build_preview(text: str, *, width: int = 80) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped if len(stripped) <= width else stripped[:width - 1] + "…"
+    return ""
+
+
+def _assistant_text_from_raw_claude_message(message: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for item in message.get("content") or []:
+        if item.get("type") == "text":
+            text = item.get("text") or ""
+            if text.strip():
+                parts.append(text.rstrip("\n"))
+        elif item.get("type") == "tool_use" and item.get("name") in ("ExitSpecMode", "ExitPlanMode"):
+            tool_input = item.get("input") or {}
+            plan = tool_input.get("plan") if isinstance(tool_input, dict) else ""
+            title = tool_input.get("title") if isinstance(tool_input, dict) else ""
+            if isinstance(plan, str) and plan.strip():
+                header = ""
+                if isinstance(title, str) and title.strip():
+                    header = f'Propose Specification title: "{title.strip()}"\n\n'
+                parts.append(f"{header}Specification for approval:\n\n{plan.strip()}")
+    return "\n\n".join(parts).strip() if parts else ""
+
+
 def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
     """Return the Nth assistant message from the end (0=last, 1=second-to-last, ...)."""
     adapter = _detect_adapter_for_transcript(file_path)
@@ -77,22 +197,7 @@ def extract_last_assistant_text(file_path: Path, offset: int = 0) -> str:
         message = obj.get("message") or {}
         if message.get("role") != "assistant":
             continue
-        parts: list[str] = []
-        for item in message.get("content") or []:
-            if item.get("type") == "text":
-                text = item.get("text") or ""
-                if text.strip():
-                    parts.append(text.rstrip("\n"))
-            elif item.get("type") == "tool_use" and item.get("name") in ("ExitSpecMode", "ExitPlanMode"):
-                tool_input = item.get("input") or {}
-                plan = tool_input.get("plan") if isinstance(tool_input, dict) else ""
-                title = tool_input.get("title") if isinstance(tool_input, dict) else ""
-                if isinstance(plan, str) and plan.strip():
-                    header = ""
-                    if isinstance(title, str) and title.strip():
-                        header = f'Propose Specification title: "{title.strip()}"\n\n'
-                    parts.append(f"{header}Specification for approval:\n\n{plan.strip()}")
-        text_result = "\n\n".join(parts).strip() if parts else ""
+        text_result = _assistant_text_from_raw_claude_message(message)
         if text_result:
             if skip <= 0:
                 return text_result

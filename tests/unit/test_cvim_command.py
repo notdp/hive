@@ -738,6 +738,158 @@ def test_popup_debug_log_records_sendback_stages(tmp_path):
     assert "post.submit" in log_text
 
 
+def _write_capturing_fake_vim(tmp_path: Path, log_path: Path) -> Path:
+    script = tmp_path / "fake-vim"
+    script.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+log_path = {str(log_path)!r}
+menu_json = os.environ.get("CVIM_MENU_JSON", "")
+menu = None
+if menu_json and os.path.isfile(menu_json):
+    with open(menu_json) as fh:
+        menu = json.load(fh)
+record = {{
+    "argv": sys.argv,
+    "env": {{k: os.environ.get(k, "") for k in (
+        "CVIM_MENU_JSON", "CVIM_SEEDS_DIR", "CVIM_MSG_FILE",
+        "CVIM_ORIG_FILE", "CVIM_OFFSET_FILE", "CVIM_MENU_SELECTED_FILE",
+    )}},
+    "menu": menu,
+    "seeds": sorted(os.listdir(os.environ.get("CVIM_SEEDS_DIR", "") or "."))
+        if os.environ.get("CVIM_SEEDS_DIR") and os.path.isdir(os.environ["CVIM_SEEDS_DIR"]) else [],
+}}
+with open(log_path, "w") as fh:
+    json.dump(record, fh)
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _run_menu_command(
+    tmp_path: Path,
+    *,
+    transcript_rows: list[dict[str, object]],
+    extra_env: dict[str, str] | None = None,
+    seed_mode: str = "session",
+    vim_args: list[str] | None = None,
+) -> dict[str, object]:
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("".join(json.dumps(row) + "\n" for row in transcript_rows))
+
+    bundle_root = tmp_path / "cvim-bundle"
+    shutil.copytree(ROOT / "src" / "hive" / "plugins" / "cvim", bundle_root)
+    for path in (bundle_root / "bin").iterdir():
+        if path.is_file():
+            path.chmod(0o755)
+    session_helper = bundle_root / "bin" / "cvim-session"
+    session_helper.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' {subprocess.list2cmdline([str(transcript)])}\n")
+    session_helper.chmod(0o755)
+    command = bundle_root / "bin" / "cvim-command"
+
+    _write_fake_tmux(tmp_path)
+    editor_log = tmp_path / "editor.json"
+    fake_vim = _write_capturing_fake_vim(tmp_path, editor_log)
+
+    log_path = tmp_path / "tmux-log.json"
+    actions_path = tmp_path / "tmux-actions.jsonl"
+    state = {
+        "current_pane": "%1",
+        "client_width": 200,
+        "client_height": 100,
+        "panes": [{"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100}],
+    }
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+    env["TMUX"] = "/tmp/tmux-test"
+    env["TMUX_PANE"] = "%1"
+    env["DROID_VIM_TRANSPORT"] = "popup"
+    env["DROID_VIM_SEED_MODE"] = seed_mode
+    env["DROID_VIM_OUTPUT_MODE"] = "text"
+    env["DROID_VIM_EDITOR"] = str(fake_vim)
+    env["DROID_VIM_PASTE_DELAY"] = "0"
+    env["DROID_VIM_INTERRUPT_SETTLE_DELAY"] = "0"
+    env["DROID_VIM_SUBMIT_DELAY"] = "0"
+    env["FAKE_TMUX_STATE"] = json.dumps(state)
+    env["FAKE_TMUX_LOG"] = str(log_path)
+    env["FAKE_TMUX_ACTIONS"] = str(actions_path)
+    env["FAKE_TMUX_EXEC_POPUP"] = "1"
+    if extra_env:
+        env.update(extra_env)
+
+    cmd_args = [str(command)]
+    if vim_args:
+        cmd_args.extend(vim_args)
+    subprocess.run(cmd_args, check=True, env=env, cwd=ROOT)
+    return json.loads(editor_log.read_text())
+
+
+def test_cvim_menu_mode_activates_with_session_seed_and_no_offset(tmp_path):
+    record = _run_menu_command(
+        tmp_path,
+        transcript_rows=[
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer A"}]}},
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "u"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer B"}]}},
+        ],
+    )
+    assert "-S" in record["argv"]
+    assert any(arg.endswith("menu.vim") for arg in record["argv"])
+    assert record["env"]["CVIM_MENU_JSON"].endswith("/menu.json")
+    assert record["env"]["CVIM_SEEDS_DIR"].endswith("/seeds")
+    assert record["env"]["CVIM_MSG_FILE"].endswith("/message.md")
+    assert record["env"]["CVIM_ORIG_FILE"].endswith("/original.md")
+    assert record["env"]["CVIM_OFFSET_FILE"].endswith("/offset")
+    assert record["env"]["CVIM_MENU_SELECTED_FILE"].endswith("/menu_selected")
+    assert record["menu"] is not None
+    assert [entry["offset"] for entry in record["menu"]] == [0, 1]
+    assert "answer B" in record["menu"][0]["label"]
+    assert "answer A" in record["menu"][1]["label"]
+    assert set(record["seeds"]) == {"0.md", "1.md"}
+
+
+def test_cvim_menu_mode_skipped_when_offset_flag_present(tmp_path):
+    record = _run_menu_command(
+        tmp_path,
+        transcript_rows=[
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "u"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "b"}]}},
+        ],
+        vim_args=["-1"],
+    )
+    assert "-S" not in record["argv"]
+    assert record["env"]["CVIM_MENU_JSON"] == ""
+    assert record["menu"] is None
+
+
+def test_cvim_menu_mode_skipped_in_blank_seed_mode(tmp_path):
+    record = _run_menu_command(
+        tmp_path,
+        transcript_rows=[
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
+        ],
+        seed_mode="blank",
+    )
+    assert "-S" not in record["argv"]
+    assert record["env"]["CVIM_MENU_JSON"] == ""
+
+
+def test_cvim_menu_mode_falls_back_when_transcript_has_no_assistant(tmp_path):
+    record = _run_menu_command(
+        tmp_path,
+        transcript_rows=[
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "u"}]}},
+        ],
+    )
+    assert "-S" not in record["argv"]
+    assert record["env"]["CVIM_MENU_JSON"] == ""
+
+
 def test_unedited_save_interrupts_without_paste_or_submit(tmp_path):
     actions = _run_command_actions(
         tmp_path,

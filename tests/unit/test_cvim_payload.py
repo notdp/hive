@@ -57,6 +57,60 @@ def test_diff_payload_with_offset_2_uses_indexed_target(tmp_path):
     assert "倒数第 3 条" in payload
 
 
+def test_diff_payload_menu_selected_skips_codex_commentary_shift(tmp_path):
+    # When the popup picker writes `menu_selected`, the offset is taken verbatim
+    # (the user already saw and chose the exact message); the codex
+    # commentary-turn shift that normally fires via `resolve_assistant_offset`
+    # must be bypassed.
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"type": "session_meta", "payload": {"id": "sess-codex", "cwd": "/repo"}},
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "真正要编辑的回答"}],
+                    },
+                },
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-2"}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "$cvim"}],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "使用 cvim skill 启动外部编辑器。"}],
+                    },
+                },
+            ]
+        )
+    )
+    (tmp_path / "transcript_path").write_text(str(transcript))
+    (tmp_path / "menu_selected").write_text("1")
+
+    payload = _build_payload(tmp_path, orig="a\n", edited="a\nb\n", mode="diff", offset=1)
+
+    # Without menu_selected, `resolve_assistant_offset` would add the commentary
+    # shift and the target would land on [-3]; with the sentinel present the
+    # offset passes through as-is.
+    assert "<edit_target>assistant_message[-2]</edit_target>" in payload
+    assert "倒数第 2 条" in payload
+
+
 def test_diff_payload_uses_effective_offset_from_transcript(tmp_path):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(
