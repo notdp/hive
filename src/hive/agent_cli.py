@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from . import adapters
@@ -38,7 +39,10 @@ def classify_model_family(model: str) -> str:
     Returns 'anthropic', 'openai', or 'unknown'. Handles droid's 'custom:'
     prefix, common aliases, and bare provider labels like 'anthropic' /
     'openai' (useful when Factory customModels store provider in its own
-    field and the model/id string does not carry the family token).
+    field and the model/id string does not carry the family token). Legacy
+    OpenAI codenames (o1/o2/o3/o4) are intentionally not matched because
+    they have been rebranded to the gpt-x.y numbering and treating the bare
+    letter "o" as a family token causes false positives on unrelated names.
     """
     if not model:
         return "unknown"
@@ -48,7 +52,7 @@ def classify_model_family(model: str) -> str:
     m = m.lstrip("-")
     if "anthropic" in m or "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
         return "anthropic"
-    if "openai" in m or "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
+    if "openai" in m or "codex" in m or m.startswith("gpt"):
         return "openai"
     return "unknown"
 
@@ -106,9 +110,83 @@ _EFFORT_RANK: dict[str, int] = {
 
 _OPPOSITE_FAMILY = {"anthropic": "openai", "openai": "anthropic"}
 
+# Coarse Claude tier hierarchy. Opus > Sonnet > Haiku across every generation,
+# so a newer Sonnet never beats an older Opus in peer selection. Version
+# numbers are used as a secondary tie-breaker (see ``_model_tier``).
+_CLAUDE_TIER: dict[str, float] = {
+    "opus": 3.0,
+    "sonnet": 2.0,
+    "haiku": 1.0,
+}
+
+_VERSION_PATTERN = re.compile(r"(\d+(?:\.\d+)*)")
+
 
 def _effort_rank(effort: str) -> int:
     return _EFFORT_RANK.get((effort or "").strip().lower(), -1)
+
+
+def _extract_leading_version(text: str) -> float:
+    """Best-effort numeric version extractor.
+
+    Looks at every dot-delimited number token in ``text`` and returns the
+    first one it can parse as float. Supports patterns like ``gpt-5.5``
+    (-> 5.5), ``claude-opus-4-7`` (-> 4.0, the ``-7`` is not dot-joined),
+    ``claude-opus-4.7`` (-> 4.7), ``gpt-5.3-codex`` (-> 5.3). Returns
+    ``0.0`` when nothing numeric is present.
+    """
+    match = _VERSION_PATTERN.search(text or "")
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return 0.0
+
+
+def _model_tier(family: str, raw: str) -> float:
+    """Return a numeric tier score for ranking candidates of the same family.
+
+    Anthropic: Opus=3.x, Sonnet=2.x, Haiku=1.x. The fractional part is the
+    first version number encountered, clamped to ``[0, 1)`` so a wildly
+    large Haiku version (``haiku-99``) can never leak past the Sonnet
+    floor. Unknown lineage in the anthropic family falls back to 0.x with
+    the version included, so it still ranks below any recognised lineage.
+
+    OpenAI: returns the raw version number found in the string (gpt-5.5 ->
+    5.5, gpt-5.3-codex -> 5.3). Bare ``gpt`` without a version falls to
+    ``0`` but is still a valid candidate.
+
+    All matching is case-insensitive because ``raw`` is lowercased before
+    inspection.
+    """
+    lowered = (raw or "").lower()
+    if family == "anthropic":
+        base = 0.0
+        for name, score in _CLAUDE_TIER.items():
+            if name in lowered:
+                base = score
+                break
+        version = _extract_leading_version(lowered)
+        # Clamp the fractional slot to <1 so haiku-N can never reach sonnet.
+        fractional = min(version / 10.0, 0.999)
+        return base + fractional
+    if family == "openai":
+        return _extract_leading_version(lowered)
+    return 0.0
+
+
+def _candidate_tier(entry: dict, family: str) -> float:
+    """Pick the most informative field for tier extraction."""
+    best = 0.0
+    for key in ("model", "id", "displayName"):
+        value = entry.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        tier = _model_tier(family, value)
+        if tier > best:
+            best = tier
+    return best
 
 
 def _candidate_family(entry: dict) -> str:
@@ -139,13 +217,19 @@ def select_droid_peer_from_settings(
       1. Only consider entries on the opposite family of ``orch_family``
          (anthropic ↔ openai). Kimi / glm / unknown slots are ignored so
          the hive two-family peer invariant holds.
-      2. Sort candidates by (effort_rank desc, maxOutputTokens desc,
-         index asc). The first winner's ``id`` + effort is returned.
+      2. Sort candidates by ``(model_tier, effort_rank, maxOutputTokens,
+         -index)``. Tier is the primary axis so Opus-4 always beats
+         Sonnet-4 even if Sonnet is configured with a higher effort;
+         inside the same tier effort acts as the deciding factor, then
+         token budget and registration order.
       3. Effort resolution per entry: own ``reasoningEffort`` first, else
          the global ``sessionDefaultSettings.reasoningEffort``, else ``""``.
          An empty effort still competes but loses ties to a peer with an
          explicit high value.
-      4. Returns ``None`` when nothing qualifies — caller falls back to the
+      4. All string matching (family tokens, effort names, tier keywords)
+         is case-insensitive; the inputs are lowercased at each decision
+         boundary.
+      5. Returns ``None`` when nothing qualifies — caller falls back to the
          legacy anti-family CLI flow instead of silently cloning orch.
     """
     target_family = _OPPOSITE_FAMILY.get(orch_family)
@@ -164,7 +248,7 @@ def select_droid_peer_from_settings(
         if isinstance(raw, str):
             global_effort = raw
 
-    best: tuple[int, int, int, str, str] | None = None
+    best: tuple[float, int, int, int, str, str] | None = None
     for entry in models:
         if not isinstance(entry, dict):
             continue
@@ -179,12 +263,13 @@ def select_droid_peer_from_settings(
         max_tokens = int(entry.get("maxOutputTokens") or 0)
         idx_raw = entry.get("index")
         idx = int(idx_raw) if isinstance(idx_raw, int) else 9999
-        key = (rank, max_tokens, -idx, model_id, effort)
+        tier = _candidate_tier(entry, target_family)
+        key = (tier, rank, max_tokens, -idx, model_id, effort)
         if best is None or key > best:
             best = key
     if best is None:
         return None
-    _rank, _tokens, _neg_idx, model_id, effort = best
+    _tier, _rank, _tokens, _neg_idx, model_id, effort = best
     return model_id, effort
 
 

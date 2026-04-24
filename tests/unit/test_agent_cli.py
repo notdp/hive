@@ -184,10 +184,11 @@ _PEER_SAMPLE_SETTINGS = {
 def test_droid_peer_plan_picks_top_opposite_family_from_settings(monkeypatch):
     _clear_peer_env(monkeypatch)
 
-    # anthropic orch → openai peer; CODEX wins because it has the same
-    # effort rank as GPT-5.5 but larger maxOutputTokens.
+    # anthropic orch → openai peer: GPT-5.5 wins over GPT-5.3-codex purely
+    # on version number (tier 5.5 > 5.3), even though both share the same
+    # effort rank and codex has more output tokens.
     assert agent_cli.droid_peer_plan("anthropic", settings=_PEER_SAMPLE_SETTINGS) == (
-        "custom:GPT-5.3-CODEX-2",
+        "custom:GPT-5.5-1",
         "xhigh",
     )
     # openai orch → anthropic peer: only Opus qualifies (Kimi is unknown).
@@ -280,3 +281,91 @@ def test_select_droid_peer_uses_provider_fallback(monkeypatch):
         "custom:proxy-b",
         "xhigh",
     )
+
+
+def test_select_droid_peer_tier_beats_effort(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # Opus + high MUST beat Sonnet + max because tier is the primary axis.
+    settings = {
+        "customModels": [
+            {"id": "custom:Sonnet-max", "model": "Claude-Sonnet-4", "reasoningEffort": "max", "provider": "anthropic"},
+            {"id": "custom:Opus-high", "model": "Claude-Opus-4", "reasoningEffort": "high", "provider": "anthropic"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "custom:Opus-high",
+        "high",
+    )
+
+
+def test_select_droid_peer_within_same_tier_uses_effort(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    settings = {
+        "customModels": [
+            {"id": "custom:Opus-high", "model": "Claude-Opus-4", "reasoningEffort": "high", "provider": "anthropic"},
+            {"id": "custom:Opus-max", "model": "Claude-Opus-4", "reasoningEffort": "max", "provider": "anthropic"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "custom:Opus-max",
+        "max",
+    )
+
+
+def test_select_droid_peer_gpt_higher_version_wins(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # GPT-5.5 + high beats GPT-5.3 + max purely on version number.
+    settings = {
+        "customModels": [
+            {"id": "custom:gpt-5.3-codex", "model": "gpt-5.3-codex", "reasoningEffort": "max", "provider": "openai"},
+            {"id": "custom:gpt-5.5", "model": "gpt-5.5", "reasoningEffort": "high", "provider": "openai"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("anthropic", settings) == (
+        "custom:gpt-5.5",
+        "high",
+    )
+
+
+def test_select_droid_peer_haiku_never_beats_sonnet(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # Even an absurdly large Haiku version stays below the Sonnet floor.
+    settings = {
+        "customModels": [
+            {"id": "custom:Haiku-99", "model": "Claude-Haiku-99", "reasoningEffort": "max", "provider": "anthropic"},
+            {"id": "custom:Sonnet-0", "model": "Claude-Sonnet-0", "reasoningEffort": "low", "provider": "anthropic"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "custom:Sonnet-0",
+        "low",
+    )
+
+
+def test_select_droid_peer_is_case_insensitive(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # Mixed case for family tokens, effort, and provider should not change
+    # the selection.
+    settings = {
+        "customModels": [
+            {"id": "CUSTOM:Sonnet-MAX", "model": "CLAUDE-SONNET-4", "reasoningEffort": "MAX", "provider": "Anthropic"},
+            {"id": "CUSTOM:Opus-Hi", "model": "Claude-Opus-4.7", "reasoningEffort": "xHIGH", "provider": "ANTHROPIC"},
+        ],
+    }
+    # Opus tier still beats Sonnet tier regardless of upper/lower casing.
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "CUSTOM:Opus-Hi",
+        "xHIGH",
+    )
+
+
+def test_classify_model_family_drops_o_codenames():
+    # Old o1/o3/o4 OpenAI codenames have been retired; we no longer want to
+    # classify bare "o1" as openai because it triggers false positives on
+    # unrelated names.
+    assert agent_cli.classify_model_family("o1-preview") == "unknown"
+    assert agent_cli.classify_model_family("o3") == "unknown"
+    assert agent_cli.classify_model_family("o4-mini") == "unknown"
+    # gpt-* still works.
+    assert agent_cli.classify_model_family("gpt-4") == "openai"
+    assert agent_cli.classify_model_family("GPT-5.5") == "openai"
