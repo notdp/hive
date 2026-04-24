@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from . import adapters
@@ -77,6 +78,39 @@ def peer_cli_for_family(my_family: str) -> str:
     if my_family == "openai":
         return "claude"
     return "claude"
+
+
+# Default "highest-end" droid peer configuration per orch family. Droid wraps
+# arbitrary backends, so Hive picks an explicit model + reasoningEffort rather
+# than relying on droid global defaults (which would otherwise make peer
+# spawns silently inherit the same model as orch). These defaults match the
+# top-tier entries in the local `~/.factory/settings.json` customModels.
+_DROID_PEER_HIGH_END: dict[str, tuple[str, str]] = {
+    "anthropic": ("custom:GPT-5.5-1", "xhigh"),
+    "openai": ("custom:Claude-Opus-4.7-0", "max"),
+}
+
+# Environment-variable overrides keyed by "orch family". The env var names
+# describe the *peer* family (i.e. orch=anthropic → OPENAI peer).
+_DROID_PEER_ENV: dict[str, tuple[str, str]] = {
+    "anthropic": ("HIVE_DROID_PEER_OPENAI_MODEL", "HIVE_DROID_PEER_OPENAI_EFFORT"),
+    "openai": ("HIVE_DROID_PEER_ANTHROPIC_MODEL", "HIVE_DROID_PEER_ANTHROPIC_EFFORT"),
+}
+
+
+def droid_peer_plan(my_family: str) -> tuple[str, str] | None:
+    """Return (model, reasoning_effort) for a droid-as-droid peer.
+
+    Only maps anthropic ↔ openai today; returns None for other/unknown
+    families so the caller falls back to the legacy anti-family CLI flow.
+    """
+    if my_family not in _DROID_PEER_HIGH_END:
+        return None
+    default_model, default_effort = _DROID_PEER_HIGH_END[my_family]
+    env_model_key, env_effort_key = _DROID_PEER_ENV[my_family]
+    model = os.environ.get(env_model_key, "") or default_model
+    effort = os.environ.get(env_effort_key, "") or default_effort
+    return model, effort
 
 
 def normalize_command(command: str) -> str:

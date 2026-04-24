@@ -25,7 +25,18 @@ from . import plugin_manager
 from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
-from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
+from .agent_cli import (
+    AGENT_CLI_NAMES,
+    anti_peer_cli,
+    classify_model_family,
+    detect_profile_for_pane,
+    droid_peer_plan,
+    family_for_pane,
+    member_role_for_pane,
+    normalize_command,
+    peer_cli_for_family,
+    resolve_session_id_for_pane,
+)
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
 
 
@@ -1199,6 +1210,65 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     return False
 
 
+def _droid_pane_settings_model(pane_id: str) -> str:
+    """Best-effort read of the model the droid in *pane_id* was launched with.
+
+    Walks the pane's tty processes, finds the droid invocation's
+    ``--settings <path>`` flag, and returns the ``sessionDefaultSettings.model``
+    recorded inside that JSON file. Empty string when nothing can be
+    resolved — callers fall back to the Factory-wide default.
+    """
+    tty = tmux.get_pane_tty(pane_id) or ""
+    if not tty:
+        return ""
+    for process in tmux.list_tty_processes(tty):
+        argv = getattr(process, "argv", "") or ""
+        command = getattr(process, "command", "") or ""
+        if "droid" not in command and "droid" not in argv:
+            continue
+        tokens = shlex.split(argv) if argv else []
+        settings_path = ""
+        for idx, token in enumerate(tokens):
+            if token == "--settings" and idx + 1 < len(tokens):
+                settings_path = tokens[idx + 1]
+                break
+            if token.startswith("--settings="):
+                settings_path = token.split("=", 1)[1]
+                break
+        if not settings_path:
+            continue
+        try:
+            data = json.loads(Path(settings_path).expanduser().read_text())
+        except (OSError, ValueError):
+            continue
+        defaults = data.get("sessionDefaultSettings") if isinstance(data, dict) else None
+        if isinstance(defaults, dict):
+            model = defaults.get("model", "")
+            if isinstance(model, str) and model:
+                return model
+    return ""
+
+
+def _factory_default_model() -> str:
+    """Return the `sessionDefaultSettings.model` recorded in ~/.factory/settings.json.
+
+    Empty string on any error or when the file is missing. Only used to
+    infer the orch family for a fresh droid session whose transcript does
+    not yet surface a model meta record and whose process-level
+    ``--settings`` override is unreadable.
+    """
+    try:
+        home = Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
+        data = json.loads((home / "settings.json").read_text())
+    except (OSError, ValueError):
+        return ""
+    defaults = data.get("sessionDefaultSettings") if isinstance(data, dict) else None
+    if not isinstance(defaults, dict):
+        return ""
+    model = defaults.get("model", "")
+    return model if isinstance(model, str) else ""
+
+
 def _discover_peer_candidate(current_pane: str, my_family: str) -> tmux.PaneInfo | None:
     """Find an idle anti-family agent pane not already committed to any group.
 
@@ -1253,7 +1323,18 @@ def _attach_peer_to_team(
     # identifying.
     tmux.set_pane_option(current_pane, "hive-group", "peer")
 
+    orch_profile = detect_profile_for_pane(current_pane)
+    orch_cli_name = orch_profile.name if orch_profile else ""
     my_family = family_for_pane(current_pane)
+    if orch_cli_name == "droid" and my_family == "unknown":
+        # Fresh droid sessions start with an empty transcript so model meta
+        # is not yet observable. Try the per-process `--settings` file first
+        # (authoritative — reflects the exact override used at launch), then
+        # fall back to the Factory-wide default. Without this fallback,
+        # `/hive` would misclassify `--settings overrides-for-this-session`
+        # as the global default and pair the peer on the wrong side.
+        model_hint = _droid_pane_settings_model(current_pane) or _factory_default_model()
+        my_family = classify_model_family(model_hint or "")
     seen_names = set(t.agents.keys())
     seen_names.add(t.lead_name or LEAD_AGENT_NAME)
 
@@ -1267,6 +1348,47 @@ def _attach_peer_to_team(
             t.set_peer(lead_name, peer_name)
         except (KeyError, ValueError):
             pass
+
+    # Droid-as-droid peer plan: when the lead is droid and its family is
+    # known, spawn another droid pane pinned to the opposite family's
+    # top-tier model + reasoning effort. Skip pane reuse here because an
+    # idle droid candidate may already be running a different model and we
+    # want a hard guarantee on the pair's anti-family diversity.
+    if orch_cli_name == "droid":
+        plan = droid_peer_plan(my_family)
+        if plan is not None:
+            peer_model, peer_effort = plan
+            peer_name = _derive_agent_name(seen_names)
+            peer_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
+            peer_agent = Agent.spawn(
+                name=peer_name,
+                team_name=t.name,
+                target_pane=current_pane,
+                cwd=peer_cwd,
+                split_horizontal=True,
+                cli="droid",
+                model=peer_model,
+                reasoning_effort=peer_effort,
+                skill="hive",
+            )
+            t.agents[peer_name] = peer_agent
+            tmux.set_pane_option(peer_agent.pane_id, "hive-group", "peer")
+            hive_context.save_context_for_pane(
+                peer_agent.pane_id,
+                team=t.name,
+                workspace=workspace,
+                agent=peer_name,
+            )
+            _declare_pair(peer_name)
+            return {
+                "mode": "spawned",
+                "pane": peer_agent.pane_id,
+                "name": peer_name,
+                "cli": "droid",
+                "model": peer_model,
+                "reasoningEffort": peer_effort,
+                "pair": [lead_name, peer_name],
+            }
 
     candidate = _discover_peer_candidate(current_pane, my_family)
     if candidate is not None:

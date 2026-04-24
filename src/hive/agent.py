@@ -79,16 +79,25 @@ def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> s
     return _resolve_session_id_from_runtime(pane_id)
 
 
-def _build_droid_model_settings(model: str) -> tuple[str, str]:
+def _build_droid_model_settings(
+    model: str,
+    reasoning_effort: str = "",
+) -> tuple[str, str]:
     """Resolve model ID and return inline JSON for --settings process substitution.
 
     Returns (json_str, resolved_model_id).  Empty json_str when no model given.
+    When ``reasoning_effort`` is provided it is written alongside ``model`` in
+    the session default settings so the spawned droid comes up at that depth
+    (e.g. ``xhigh`` / ``max``).
     """
     if not model:
         return "", model
     settings = _load_settings()
     target_id = _resolve_model_id(model, settings)
-    return json.dumps({"sessionDefaultSettings": {"model": target_id}}), target_id
+    session_defaults: dict[str, Any] = {"model": target_id}
+    if reasoning_effort:
+        session_defaults["reasoningEffort"] = reasoning_effort
+    return json.dumps({"sessionDefaultSettings": session_defaults}), target_id
 
 
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
@@ -181,12 +190,18 @@ class Agent:
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
         cli: str = "droid",
+        reasoning_effort: str = "",
     ) -> Agent:
         """Spawn an agent CLI (droid/claude/codex) in a tmux pane.
 
         If split_window is True (default), splits *target_pane* and runs the
         CLI in the new pane. If False, runs the CLI in *target_pane* itself
         (target must be a shell pane, not already running an agent).
+
+        ``reasoning_effort`` is only honoured for the droid CLI today: when
+        non-empty it is baked into the temp ``--settings`` file alongside
+        ``model`` so the spawned droid starts at that depth without inheriting
+        global ``~/.factory/settings.json`` defaults silently.
         """
         if cli not in CLI_BINS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
@@ -215,7 +230,9 @@ class Agent:
 
         if model and not session_id:
             if cli == "droid":
-                json_str, resolved_model = _build_droid_model_settings(model)
+                json_str, resolved_model = _build_droid_model_settings(
+                    model, reasoning_effort=reasoning_effort
+                )
                 if json_str:
                     pre_cmd_parts.extend([
                         'settings_file=$(mktemp "${TMPDIR:-/tmp}/hive-droid-settings.XXXXXX")',

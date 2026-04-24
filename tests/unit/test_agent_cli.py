@@ -127,3 +127,30 @@ def test_member_role_for_pane_returns_terminal_for_shell(monkeypatch):
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
 
     assert agent_cli.member_role_for_pane("%2") == "terminal"
+
+
+def test_droid_peer_plan_defaults(monkeypatch):
+    for key in (
+        "HIVE_DROID_PEER_OPENAI_MODEL",
+        "HIVE_DROID_PEER_OPENAI_EFFORT",
+        "HIVE_DROID_PEER_ANTHROPIC_MODEL",
+        "HIVE_DROID_PEER_ANTHROPIC_EFFORT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    assert agent_cli.droid_peer_plan("anthropic") == ("custom:GPT-5.5-1", "xhigh")
+    assert agent_cli.droid_peer_plan("openai") == ("custom:Claude-Opus-4.7-0", "max")
+    assert agent_cli.droid_peer_plan("unknown") is None
+    assert agent_cli.droid_peer_plan("") is None
+
+
+def test_droid_peer_plan_honours_env_overrides(monkeypatch):
+    monkeypatch.setenv("HIVE_DROID_PEER_OPENAI_MODEL", "custom:OtherGPT")
+    monkeypatch.setenv("HIVE_DROID_PEER_OPENAI_EFFORT", "high")
+    monkeypatch.setenv("HIVE_DROID_PEER_ANTHROPIC_MODEL", "custom:OtherClaude")
+    monkeypatch.setenv("HIVE_DROID_PEER_ANTHROPIC_EFFORT", "max")
+
+    # For orch family = anthropic the env namespace is OPENAI (because peer
+    # is on the other side).
+    assert agent_cli.droid_peer_plan("anthropic") == ("custom:OtherGPT", "high")
+    assert agent_cli.droid_peer_plan("openai") == ("custom:OtherClaude", "max")

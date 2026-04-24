@@ -195,10 +195,14 @@ def test_send_exits_tmux_copy_mode_before_submitting(monkeypatch):
 def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
     calls, tags = _setup_tmux_mocks(monkeypatch)
 
-    monkeypatch.setattr(
-        "hive.agent._build_droid_model_settings",
-        lambda _model: ('{"sessionDefaultSettings":{"model":"custom:Claude-Opus-4.6-0"}}', "custom:Claude-Opus-4.6-0"),
-    )
+    def _fake_build(model, reasoning_effort=""):
+        payload = {"model": "custom:Claude-Opus-4.6-0"}
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
+        import json as _json
+        return _json.dumps({"sessionDefaultSettings": payload}), "custom:Claude-Opus-4.6-0"
+
+    monkeypatch.setattr("hive.agent._build_droid_model_settings", _fake_build)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -211,6 +215,30 @@ def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
     assert "--settings \"$settings_file\"" in startup_cmd
     assert "sessionDefaultSettings" in startup_cmd
     assert tags == [("%0", "agent", "w1", "t")]
+    _assert_startup_cmd_runs_on_bash(startup_cmd)
+
+
+def test_spawn_droid_writes_reasoning_effort_into_settings(monkeypatch):
+    calls, _tags = _setup_tmux_mocks(monkeypatch)
+
+    def _fake_build(model, reasoning_effort=""):
+        payload = {"model": "custom:GPT-5.5-1"}
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
+        import json as _json
+        return _json.dumps({"sessionDefaultSettings": payload}), "custom:GPT-5.5-1"
+
+    monkeypatch.setattr("hive.agent._build_droid_model_settings", _fake_build)
+
+    Agent.spawn(
+        name="peer", team_name="t", target_pane="%0",
+        model="custom:GPT-5.5-1", cwd="/tmp", is_first=True,
+        skill="none", cli="droid", reasoning_effort="xhigh",
+    )
+
+    startup_cmd = calls[0]
+    assert '"reasoningEffort": "xhigh"' in startup_cmd
+    assert '"model": "custom:GPT-5.5-1"' in startup_cmd
     _assert_startup_cmd_runs_on_bash(startup_cmd)
 
 
