@@ -36,7 +36,9 @@ def classify_model_family(model: str) -> str:
     """Classify a model identifier into a coarse family for peer diversity.
 
     Returns 'anthropic', 'openai', or 'unknown'. Handles droid's 'custom:'
-    prefix and common aliases.
+    prefix, common aliases, and bare provider labels like 'anthropic' /
+    'openai' (useful when Factory customModels store provider in its own
+    field and the model/id string does not carry the family token).
     """
     if not model:
         return "unknown"
@@ -44,9 +46,9 @@ def classify_model_family(model: str) -> str:
     if m.startswith("custom:"):
         m = m[len("custom:"):]
     m = m.lstrip("-")
-    if "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
+    if "anthropic" in m or "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
         return "anthropic"
-    if "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
+    if "openai" in m or "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
     return "unknown"
 
@@ -80,37 +82,138 @@ def peer_cli_for_family(my_family: str) -> str:
     return "claude"
 
 
-# Default "highest-end" droid peer configuration per orch family. Droid wraps
-# arbitrary backends, so Hive picks an explicit model + reasoningEffort rather
-# than relying on droid global defaults (which would otherwise make peer
-# spawns silently inherit the same model as orch). These defaults match the
-# top-tier entries in the local `~/.factory/settings.json` customModels.
-_DROID_PEER_HIGH_END: dict[str, tuple[str, str]] = {
-    "anthropic": ("custom:GPT-5.5-1", "xhigh"),
-    "openai": ("custom:Claude-Opus-4.7-0", "max"),
-}
-
 # Environment-variable overrides keyed by "orch family". The env var names
-# describe the *peer* family (i.e. orch=anthropic → OPENAI peer).
+# describe the *peer* family (i.e. orch=anthropic → OPENAI peer). When set
+# they skip the settings-driven selector below so users can pin a pair by
+# hand without editing code or ~/.factory/settings.json.
 _DROID_PEER_ENV: dict[str, tuple[str, str]] = {
     "anthropic": ("HIVE_DROID_PEER_OPENAI_MODEL", "HIVE_DROID_PEER_OPENAI_EFFORT"),
     "openai": ("HIVE_DROID_PEER_ANTHROPIC_MODEL", "HIVE_DROID_PEER_ANTHROPIC_EFFORT"),
 }
 
+# Relative rank for reasoningEffort strings. Higher = deeper thinking. Hive
+# picks the peer with the highest rank among candidates. Anything unknown
+# falls to the bottom so an explicit "max" or "xhigh" always wins over an
+# empty / misspelled value.
+_EFFORT_RANK: dict[str, int] = {
+    "max": 5,
+    "xhigh": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+    "minimal": 0,
+}
 
-def droid_peer_plan(my_family: str) -> tuple[str, str] | None:
+_OPPOSITE_FAMILY = {"anthropic": "openai", "openai": "anthropic"}
+
+
+def _effort_rank(effort: str) -> int:
+    return _EFFORT_RANK.get((effort or "").strip().lower(), -1)
+
+
+def _candidate_family(entry: dict) -> str:
+    """Classify a customModels entry by inspecting its named fields.
+
+    Droid's ``customModels[]`` stores the authoritative backend model name in
+    ``model``; ``id`` is the Factory handle (often ``custom:`` prefixed) and
+    ``displayName`` is free-form. ``provider`` is the final fallback — it is
+    the coarsest signal but still distinguishes hosted-proxy setups that do
+    not leak the family token anywhere else.
+    """
+    for key in ("model", "id", "displayName", "provider"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            family = classify_model_family(value)
+            if family != "unknown":
+                return family
+    return "unknown"
+
+
+def select_droid_peer_from_settings(
+    orch_family: str,
+    settings: dict | None,
+) -> tuple[str, str] | None:
+    """Pick the best droid peer (model_id, effort) from ``customModels``.
+
+    Rules:
+      1. Only consider entries on the opposite family of ``orch_family``
+         (anthropic ↔ openai). Kimi / glm / unknown slots are ignored so
+         the hive two-family peer invariant holds.
+      2. Sort candidates by (effort_rank desc, maxOutputTokens desc,
+         index asc). The first winner's ``id`` + effort is returned.
+      3. Effort resolution per entry: own ``reasoningEffort`` first, else
+         the global ``sessionDefaultSettings.reasoningEffort``, else ``""``.
+         An empty effort still competes but loses ties to a peer with an
+         explicit high value.
+      4. Returns ``None`` when nothing qualifies — caller falls back to the
+         legacy anti-family CLI flow instead of silently cloning orch.
+    """
+    target_family = _OPPOSITE_FAMILY.get(orch_family)
+    if target_family is None:
+        return None
+    if not isinstance(settings, dict):
+        return None
+    models = settings.get("customModels")
+    if not isinstance(models, list):
+        return None
+
+    global_effort = ""
+    defaults = settings.get("sessionDefaultSettings")
+    if isinstance(defaults, dict):
+        raw = defaults.get("reasoningEffort")
+        if isinstance(raw, str):
+            global_effort = raw
+
+    best: tuple[int, int, int, str, str] | None = None
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id") or entry.get("model")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        if _candidate_family(entry) != target_family:
+            continue
+        effort_raw = entry.get("reasoningEffort")
+        effort = effort_raw if isinstance(effort_raw, str) and effort_raw else global_effort
+        rank = _effort_rank(effort)
+        max_tokens = int(entry.get("maxOutputTokens") or 0)
+        idx_raw = entry.get("index")
+        idx = int(idx_raw) if isinstance(idx_raw, int) else 9999
+        key = (rank, max_tokens, -idx, model_id, effort)
+        if best is None or key > best:
+            best = key
+    if best is None:
+        return None
+    _rank, _tokens, _neg_idx, model_id, effort = best
+    return model_id, effort
+
+
+def droid_peer_plan(
+    my_family: str,
+    *,
+    settings: dict | None = None,
+) -> tuple[str, str] | None:
     """Return (model, reasoning_effort) for a droid-as-droid peer.
 
-    Only maps anthropic ↔ openai today; returns None for other/unknown
-    families so the caller falls back to the legacy anti-family CLI flow.
+    Resolution order:
+      1. Environment-variable override (``HIVE_DROID_PEER_*_MODEL`` /
+         ``_EFFORT``). Effort defaults to ``""`` when only the model var
+         is set, leaving droid's own default in play.
+      2. ``select_droid_peer_from_settings(my_family, settings)``.
+      3. ``None`` — caller falls back to the legacy anti-family CLI route.
+
+    Only ``anthropic`` ↔ ``openai`` are mapped today (returns ``None`` for
+    anything else) to match the hive "two-family peer review" invariant.
     """
-    if my_family not in _DROID_PEER_HIGH_END:
+    if my_family not in _DROID_PEER_ENV:
         return None
-    default_model, default_effort = _DROID_PEER_HIGH_END[my_family]
     env_model_key, env_effort_key = _DROID_PEER_ENV[my_family]
-    model = os.environ.get(env_model_key, "") or default_model
-    effort = os.environ.get(env_effort_key, "") or default_effort
-    return model, effort
+    env_model = os.environ.get(env_model_key, "").strip()
+    env_effort = os.environ.get(env_effort_key, "").strip()
+    if env_model:
+        return env_model, env_effort
+
+    return select_droid_peer_from_settings(my_family, settings)
 
 
 def normalize_command(command: str) -> str:

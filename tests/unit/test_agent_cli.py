@@ -129,28 +129,154 @@ def test_member_role_for_pane_returns_terminal_for_shell(monkeypatch):
     assert agent_cli.member_role_for_pane("%2") == "terminal"
 
 
-def test_droid_peer_plan_defaults(monkeypatch):
-    for key in (
-        "HIVE_DROID_PEER_OPENAI_MODEL",
-        "HIVE_DROID_PEER_OPENAI_EFFORT",
-        "HIVE_DROID_PEER_ANTHROPIC_MODEL",
-        "HIVE_DROID_PEER_ANTHROPIC_EFFORT",
-    ):
+_PEER_ENV_KEYS = (
+    "HIVE_DROID_PEER_OPENAI_MODEL",
+    "HIVE_DROID_PEER_OPENAI_EFFORT",
+    "HIVE_DROID_PEER_ANTHROPIC_MODEL",
+    "HIVE_DROID_PEER_ANTHROPIC_EFFORT",
+)
+
+
+def _clear_peer_env(monkeypatch):
+    for key in _PEER_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
-    assert agent_cli.droid_peer_plan("anthropic") == ("custom:GPT-5.5-1", "xhigh")
-    assert agent_cli.droid_peer_plan("openai") == ("custom:Claude-Opus-4.7-0", "max")
-    assert agent_cli.droid_peer_plan("unknown") is None
-    assert agent_cli.droid_peer_plan("") is None
+
+_PEER_SAMPLE_SETTINGS = {
+    "sessionDefaultSettings": {"reasoningEffort": "high"},
+    "customModels": [
+        {
+            "id": "custom:Claude-Opus-4.7-0",
+            "model": "claude-opus-4-7",
+            "reasoningEffort": "max",
+            "maxOutputTokens": 128000,
+            "index": 0,
+            "provider": "anthropic",
+        },
+        {
+            "id": "custom:GPT-5.5-1",
+            "model": "gpt-5.5",
+            "reasoningEffort": "xhigh",
+            "maxOutputTokens": 100000,
+            "index": 1,
+            "provider": "openai",
+        },
+        {
+            "id": "custom:GPT-5.3-CODEX-2",
+            "model": "gpt-5.3-codex",
+            "reasoningEffort": "xhigh",
+            "maxOutputTokens": 200000,
+            "index": 2,
+            "provider": "openai",
+        },
+        {
+            "id": "custom:Kimi-K2.5-3",
+            "model": "kimi-k2.5",
+            "reasoningEffort": "max",
+            "maxOutputTokens": 128000,
+            "index": 3,
+            "provider": "generic-chat-completion-api",
+        },
+    ],
+}
+
+
+def test_droid_peer_plan_picks_top_opposite_family_from_settings(monkeypatch):
+    _clear_peer_env(monkeypatch)
+
+    # anthropic orch → openai peer; CODEX wins because it has the same
+    # effort rank as GPT-5.5 but larger maxOutputTokens.
+    assert agent_cli.droid_peer_plan("anthropic", settings=_PEER_SAMPLE_SETTINGS) == (
+        "custom:GPT-5.3-CODEX-2",
+        "xhigh",
+    )
+    # openai orch → anthropic peer: only Opus qualifies (Kimi is unknown).
+    assert agent_cli.droid_peer_plan("openai", settings=_PEER_SAMPLE_SETTINGS) == (
+        "custom:Claude-Opus-4.7-0",
+        "max",
+    )
+    assert agent_cli.droid_peer_plan("unknown", settings=_PEER_SAMPLE_SETTINGS) is None
+    assert agent_cli.droid_peer_plan("", settings=_PEER_SAMPLE_SETTINGS) is None
+
+
+def test_droid_peer_plan_returns_none_when_opposite_family_missing(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    only_claude = {
+        "customModels": [
+            {"id": "custom:Claude-A", "model": "claude-opus", "provider": "anthropic"},
+        ],
+    }
+    assert agent_cli.droid_peer_plan("anthropic", settings=only_claude) is None
+    assert agent_cli.droid_peer_plan("openai", settings=only_claude) == (
+        "custom:Claude-A",
+        "",
+    )
+
+
+def test_droid_peer_plan_returns_none_on_empty_settings(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    assert agent_cli.droid_peer_plan("anthropic", settings=None) is None
+    assert agent_cli.droid_peer_plan("openai", settings={}) is None
+    assert agent_cli.droid_peer_plan("anthropic", settings={"customModels": []}) is None
 
 
 def test_droid_peer_plan_honours_env_overrides(monkeypatch):
+    _clear_peer_env(monkeypatch)
     monkeypatch.setenv("HIVE_DROID_PEER_OPENAI_MODEL", "custom:OtherGPT")
     monkeypatch.setenv("HIVE_DROID_PEER_OPENAI_EFFORT", "high")
     monkeypatch.setenv("HIVE_DROID_PEER_ANTHROPIC_MODEL", "custom:OtherClaude")
     monkeypatch.setenv("HIVE_DROID_PEER_ANTHROPIC_EFFORT", "max")
 
-    # For orch family = anthropic the env namespace is OPENAI (because peer
-    # is on the other side).
-    assert agent_cli.droid_peer_plan("anthropic") == ("custom:OtherGPT", "high")
-    assert agent_cli.droid_peer_plan("openai") == ("custom:OtherClaude", "max")
+    # env wins over settings-driven auto-pick.
+    assert agent_cli.droid_peer_plan("anthropic", settings=_PEER_SAMPLE_SETTINGS) == (
+        "custom:OtherGPT",
+        "high",
+    )
+    assert agent_cli.droid_peer_plan("openai", settings=_PEER_SAMPLE_SETTINGS) == (
+        "custom:OtherClaude",
+        "max",
+    )
+
+
+def test_droid_peer_plan_env_model_without_effort(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    monkeypatch.setenv("HIVE_DROID_PEER_OPENAI_MODEL", "custom:BareGPT")
+    assert agent_cli.droid_peer_plan("anthropic", settings=_PEER_SAMPLE_SETTINGS) == (
+        "custom:BareGPT",
+        "",
+    )
+
+
+def test_select_droid_peer_uses_effort_rank(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    settings = {
+        "customModels": [
+            {"id": "custom:gpt-low", "model": "gpt-5", "reasoningEffort": "low", "provider": "openai"},
+            {"id": "custom:gpt-xhigh", "model": "gpt-5", "reasoningEffort": "xhigh", "provider": "openai"},
+            {"id": "custom:gpt-high", "model": "gpt-5", "reasoningEffort": "high", "provider": "openai"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("anthropic", settings) == (
+        "custom:gpt-xhigh",
+        "xhigh",
+    )
+
+
+def test_select_droid_peer_uses_provider_fallback(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # When neither id/model/displayName reveals the family, fall back to
+    # the provider tag.
+    settings = {
+        "customModels": [
+            {"id": "custom:proxy-a", "model": "some-proxy-x", "provider": "anthropic", "reasoningEffort": "max"},
+            {"id": "custom:proxy-b", "model": "another-proxy-y", "provider": "openai", "reasoningEffort": "xhigh"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "custom:proxy-a",
+        "max",
+    )
+    assert agent_cli.select_droid_peer_from_settings("anthropic", settings) == (
+        "custom:proxy-b",
+        "xhigh",
+    )

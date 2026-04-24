@@ -1249,6 +1249,20 @@ def _droid_pane_settings_model(pane_id: str) -> str:
     return ""
 
 
+def _factory_settings() -> dict:
+    """Read ``~/.factory/settings.json`` into a plain dict (empty on error).
+
+    Consumed by ``droid_peer_plan`` to auto-discover the highest-rank peer
+    model from the user's ``customModels`` array without hard-coding IDs.
+    """
+    try:
+        home = Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
+        data = json.loads((home / "settings.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _factory_default_model() -> str:
     """Return the `sessionDefaultSettings.model` recorded in ~/.factory/settings.json.
 
@@ -1257,12 +1271,7 @@ def _factory_default_model() -> str:
     not yet surface a model meta record and whose process-level
     ``--settings`` override is unreadable.
     """
-    try:
-        home = Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
-        data = json.loads((home / "settings.json").read_text())
-    except (OSError, ValueError):
-        return ""
-    defaults = data.get("sessionDefaultSettings") if isinstance(data, dict) else None
+    defaults = _factory_settings().get("sessionDefaultSettings")
     if not isinstance(defaults, dict):
         return ""
     model = defaults.get("model", "")
@@ -1355,7 +1364,7 @@ def _attach_peer_to_team(
     # idle droid candidate may already be running a different model and we
     # want a hard guarantee on the pair's anti-family diversity.
     if orch_cli_name == "droid":
-        plan = droid_peer_plan(my_family)
+        plan = droid_peer_plan(my_family, settings=_factory_settings())
         if plan is not None:
             peer_model, peer_effort = plan
             peer_name = _derive_agent_name(seen_names)
