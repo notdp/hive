@@ -218,7 +218,7 @@ class Agent:
                 json_str, resolved_model = _build_droid_model_settings(model)
                 if json_str:
                     pre_cmd_parts.extend([
-                        "settings_file=$(mktemp -t hive-droid-settings)",
+                        'settings_file=$(mktemp "${TMPDIR:-/tmp}/hive-droid-settings.XXXXXX")',
                         f"printf '%s' {_shell_escape(json_str)} > \"$settings_file\"",
                     ])
                     cmd_parts.extend(["--settings", "\"$settings_file\""])

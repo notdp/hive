@@ -207,7 +207,7 @@ def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "settings_file=$(mktemp -t hive-droid-settings)" in startup_cmd
+    assert 'settings_file=$(mktemp "${TMPDIR:-/tmp}/hive-droid-settings.XXXXXX")' in startup_cmd
     assert "--settings \"$settings_file\"" in startup_cmd
     assert "sessionDefaultSettings" in startup_cmd
     assert tags == [("%0", "agent", "w1", "t")]
