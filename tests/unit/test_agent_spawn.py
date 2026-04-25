@@ -211,6 +211,43 @@ def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
     assert "--settings \"$settings_file\"" in startup_cmd
     assert "sessionDefaultSettings" in startup_cmd
     assert tags == [("%0", "agent", "w1", "t")]
+    _assert_startup_cmd_runs_on_bash(startup_cmd)
+
+
+def _assert_startup_cmd_runs_on_bash(startup_cmd: str) -> None:
+    """Run the generated startup_cmd on the local bash up to (but excluding)
+    the final `exec <cli>` step, to catch shell-level failures like GNU
+    `mktemp -t TEMPLATE` rejecting templates without 3+ X's.
+
+    The real command ends with `exec '.../droid' ...`; we stop before exec
+    by replacing the droid invocation with `true`, then ensure the settings
+    file was actually created.
+    """
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        return
+
+    # Trim everything from the final `exec '` onwards and replace with a no-op
+    # that still consumes the trailing `--settings "$settings_file"` args.
+    exec_idx = startup_cmd.rfind(" && exec '")
+    assert exec_idx > 0, f"startup_cmd missing exec step: {startup_cmd!r}"
+    harness = startup_cmd[:exec_idx] + ' && test -s "$settings_file"'
+
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "TMPDIR": "/tmp"},
+    )
+    assert result.returncode == 0, (
+        "generated startup_cmd failed to execute on bash\n"
+        f"cmd={harness!r}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
 
 
 def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
