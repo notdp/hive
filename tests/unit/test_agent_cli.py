@@ -359,6 +359,89 @@ def test_select_droid_peer_is_case_insensitive(monkeypatch):
     )
 
 
+def test_extract_leading_version_handles_multi_segment(monkeypatch):
+    # Regression: three-segment versions used to make `float("5.1.3")` raise
+    # ValueError, dropping the tier silently to 0.0 and misranking patch
+    # releases. Now we keep major.minor and discard the patch tail.
+    assert agent_cli._extract_leading_version("gpt-5.1.3") == 5.1
+    assert agent_cli._extract_leading_version("gpt-5.5.2") == 5.5
+    assert agent_cli._extract_leading_version("claude-opus-4.7.1") == 4.7
+
+
+def test_extract_leading_version_treats_dash_as_minor_separator():
+    # Factory's customModels stores Claude versions hyphen-separated in the
+    # `model` field (e.g. `claude-opus-4-7`). Treat the dash as a minor
+    # separator so 4-7 vs 4-8 don't tie at the same tier (they used to both
+    # collapse to 4.0).
+    assert agent_cli._extract_leading_version("claude-opus-4-7") == 4.7
+    assert agent_cli._extract_leading_version("claude-opus-4-8") == 4.8
+    # The trailing -0 in id strings must not pollute the captured version.
+    assert agent_cli._extract_leading_version("custom:Claude-Opus-4.7-0") == 4.7
+
+
+def test_extract_leading_version_keeps_openai_dash_as_registration_suffix():
+    # Factory handle ids append a registration slot index (`custom:GPT-5.5-1`,
+    # `custom:GPT-5-9`). For non-Claude strings the trailing `-<digits>` must
+    # NOT be read as a minor version — otherwise `custom:GPT-5-9` would tier
+    # at 5.9 and falsely beat a real `gpt-5.5` candidate.
+    assert agent_cli._extract_leading_version("gpt-5-9") == 5.0
+    assert agent_cli._extract_leading_version("custom:GPT-5-9") == 5.0
+    # The dot-separated minor still works for real OpenAI versions.
+    assert agent_cli._extract_leading_version("gpt-5.5") == 5.5
+    assert agent_cli._extract_leading_version("custom:GPT-5.5-1") == 5.5
+
+
+def test_select_droid_peer_gpt_patch_release_outranks_lower_minor(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # Regression: gpt-5.5.1 used to drop tier to 0.0 and lose to gpt-5.0.
+    # Now major.minor is preserved so gpt-5.5.1 (5.5) beats gpt-5 (5.0)
+    # even though gpt-5 has higher effort.
+    settings = {
+        "customModels": [
+            {"id": "custom:gpt-5.5.1", "model": "gpt-5.5.1", "reasoningEffort": "low", "provider": "openai"},
+            {"id": "custom:gpt-5", "model": "gpt-5", "reasoningEffort": "max", "provider": "openai"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("anthropic", settings) == (
+        "custom:gpt-5.5.1",
+        "low",
+    )
+
+
+def test_select_droid_peer_ignores_openai_registration_suffix(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # Regression: when dash-minor parsing was enabled for every family, the
+    # Factory registration suffix in `custom:GPT-5-9` was read as a minor
+    # version (5.9) and beat a real `gpt-5.5` entry. Dash-minor must be
+    # Claude-only so this case selects the higher real version.
+    settings = {
+        "customModels": [
+            {"id": "custom:GPT-5-9", "model": "gpt-5", "reasoningEffort": "low", "provider": "openai"},
+            {"id": "custom:GPT-5.5-1", "model": "gpt-5.5", "reasoningEffort": "max", "provider": "openai"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("anthropic", settings) == (
+        "custom:GPT-5.5-1",
+        "max",
+    )
+
+
+def test_select_droid_peer_hyphen_minor_distinguishes_anthropic_versions(monkeypatch):
+    _clear_peer_env(monkeypatch)
+    # claude-opus-4-7 and claude-opus-4-8 must rank by minor version when no
+    # other tie-breaker (effort/tokens) separates them.
+    settings = {
+        "customModels": [
+            {"id": "custom:opus-4-7", "model": "claude-opus-4-7", "reasoningEffort": "high", "provider": "anthropic"},
+            {"id": "custom:opus-4-8", "model": "claude-opus-4-8", "reasoningEffort": "high", "provider": "anthropic"},
+        ],
+    }
+    assert agent_cli.select_droid_peer_from_settings("openai", settings) == (
+        "custom:opus-4-8",
+        "high",
+    )
+
+
 def test_classify_model_family_drops_o_codenames():
     # Old o1/o3/o4 OpenAI codenames have been retired; we no longer want to
     # classify bare "o1" as openai because it triggers false positives on

@@ -119,29 +119,83 @@ _CLAUDE_TIER: dict[str, float] = {
     "haiku": 1.0,
 }
 
-_VERSION_PATTERN = re.compile(r"(\d+(?:\.\d+)*)")
+# Two leading-version extractors:
+#
+#   _DOT_VERSION_PATTERN  — only the first ``major[.minor]`` via ``.``. Used
+#     for OpenAI and any callsite where a trailing ``-<digits>`` would be a
+#     Factory registration suffix, not a model minor version. Example:
+#     ``custom:GPT-5-9`` must stay ``5.0`` (the ``-9`` is the slot index).
+#
+#   _DASH_VERSION_PATTERN — accepts both ``.`` and ``-`` as the minor
+#     separator. Used only for Anthropic Claude lineage, because Factory's
+#     customModels stores Claude versions hyphen-separated in the ``model``
+#     field (e.g. ``claude-opus-4-7``).
+#
+# Both stop after the minor segment on purpose: a third component
+# (``gpt-5.1.3``, ``claude-opus-4.7.1``) used to break ``float()`` and
+# silently collapse the tier to 0.0, which misranked patch releases. Now
+# we only keep major.minor and drop the patch tail.
+_DOT_VERSION_PATTERN = re.compile(r"(\d+)(?:\.(\d+))?")
+_DASH_VERSION_PATTERN = re.compile(r"(\d+)(?:[.-](\d+))?")
+
+_CLAUDE_LINEAGE_PATTERN = re.compile(r"claude|opus|sonnet|haiku")
 
 
 def _effort_rank(effort: str) -> int:
     return _EFFORT_RANK.get((effort or "").strip().lower(), -1)
 
 
-def _extract_leading_version(text: str) -> float:
-    """Best-effort numeric version extractor.
+def _version_from(pattern: re.Pattern[str], text: str) -> float:
+    """Run *pattern* against *text* and return the first major[.minor] as float.
 
-    Looks at every dot-delimited number token in ``text`` and returns the
-    first one it can parse as float. Supports patterns like ``gpt-5.5``
-    (-> 5.5), ``claude-opus-4-7`` (-> 4.0, the ``-7`` is not dot-joined),
-    ``claude-opus-4.7`` (-> 4.7), ``gpt-5.3-codex`` (-> 5.3). Returns
-    ``0.0`` when nothing numeric is present.
+    The pattern must expose group(1)=major and group(2)=optional minor.
+    Patch tails (group(3)+) are deliberately ignored so ``gpt-5.1.3`` ->
+    5.1 rather than raising ``ValueError`` inside ``float("5.1.3")`` and
+    silently collapsing to 0.0.
     """
-    match = _VERSION_PATTERN.search(text or "")
+    match = pattern.search(text or "")
     if not match:
         return 0.0
+    major_str = match.group(1)
+    minor_str = match.group(2)
     try:
-        return float(match.group(1))
+        if minor_str is not None:
+            return float(f"{major_str}.{minor_str}")
+        return float(major_str)
     except ValueError:
         return 0.0
+
+
+def _extract_leading_version(text: str) -> float:
+    """Best-effort major[.minor] version extractor.
+
+    Uses dash-minor parsing only when *text* names a Claude lineage
+    (``claude``/``opus``/``sonnet``/``haiku``). For everything else — OpenAI
+    identifiers, opaque proxy names, Factory handle ids such as
+    ``custom:GPT-5-9`` — the trailing ``-<digits>`` is treated as a Factory
+    registration suffix, not as a version component, so ``gpt-5-9`` stays
+    at 5.0 and loses to ``gpt-5.5``.
+
+    Examples::
+
+      gpt-5                    -> 5.0
+      gpt-5.5                  -> 5.5
+      gpt-5.1.3                -> 5.1  (patch segment dropped)
+      gpt-5.3-codex            -> 5.3
+      custom:GPT-5-9           -> 5.0  (``-9`` is a slot index, not minor)
+      claude-opus-4-7          -> 4.7  (Claude lineage -> dash = minor)
+      claude-opus-4.7.1        -> 4.7
+      custom:Claude-Opus-4.7-0 -> 4.7
+
+    Returns ``0.0`` when nothing numeric is present.
+    """
+    lowered = (text or "").lower()
+    pattern = (
+        _DASH_VERSION_PATTERN
+        if _CLAUDE_LINEAGE_PATTERN.search(lowered)
+        else _DOT_VERSION_PATTERN
+    )
+    return _version_from(pattern, lowered)
 
 
 def _model_tier(family: str, raw: str) -> float:
