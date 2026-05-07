@@ -25,43 +25,23 @@ def test_parse_claude_empty_input_returns_nothing():
     assert draft_guard._parse_claude(_lines(capture)) == ""
 
 
-def test_parse_claude_queued_placeholder_is_not_treated_as_draft():
-    # Regression: when the user has queued messages, Claude renders the dim
-    # placeholder "Press up to edit queued messages" inside the input box.
-    # `capture-pane -p` strips the dim ANSI, so the parser previously saw
-    # it as a real draft and the Hive send path saved it to a tmux buffer
-    # and pasted it back into the input box after the send completed —
-    # polluting the user's input with bogus characters.
+def test_parse_claude_dim_autocomplete_hint_is_not_treated_as_draft():
+    # Real Claude autocomplete state from `capture-pane -e`: hint text is
+    # styled dim, sometimes with a reverse-video cursor cell at the front.
     capture = f"""
  ▐▛███▜▌   Claude Code v2.1.111
 
-───────────────────────────────────────────────
-❯\xa0Press up to edit queued messages
-───────────────────────────────────────────────
-  /Users/notdp/Developer/hive · main · Opus 4.7 (1M context)
-"""
-    assert draft_guard._parse_claude(_lines(capture)) == ""
-
-
-def test_parse_claude_try_placeholder_is_not_treated_as_draft():
-    # Claude renders a dim `Try "..."` placeholder when the input box is
-    # empty. `capture-pane -p` drops ANSI attributes, so we match the
-    # string instead of the gray color.
-    capture = f"""
- ▐▛███▜▌   Claude Code v2.1.111
-
-───────────────────────────────────────────────
-❯\xa0Try "explain this error"
-───────────────────────────────────────────────
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
+\x1b[39m❯\xa0\x1b[7mp\x1b[0;2mush\x1b[0m
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
   status line
 """
     assert draft_guard._parse_claude(_lines(capture)) == ""
 
 
 def test_parse_claude_user_draft_that_starts_with_try_is_preserved():
-    # Defense against overreach: a real multi-line draft that happens to
-    # begin with `Try ` must still be parsed. The placeholder gate only
-    # fires when the whole parsed block is a single line.
+    # Normal-style draft text must be preserved even when it begins with text
+    # that used to be treated as a hardcoded placeholder.
     capture = f"""
  ▐▛███▜▌   Claude Code v2.1.111
 
@@ -89,6 +69,19 @@ def test_parse_claude_two_line_draft():
     assert draft_guard._parse_claude(_lines(capture)) == "事发当时发生3\n3记录2➕234"
 
 
+def test_parse_claude_continuation_indentation_is_preserved():
+    capture = """
+ ▐▛███▜▌   Claude Code v2.1.111
+
+───────────────────────────────────────────────
+❯\xa0line 1
+    indented
+───────────────────────────────────────────────
+  status line
+"""
+    assert draft_guard._parse_claude(_lines(capture)) == "line 1\n  indented"
+
+
 def test_parse_codex_no_draft_block_returns_nothing():
     # Capture with no `› ` prompt line -> parser gives up.
     capture = """
@@ -100,8 +93,7 @@ def test_parse_codex_no_draft_block_returns_nothing():
 
 
 def test_parse_codex_single_line_real_draft_is_preserved():
-    # A single-line input that doesn't match any known codex placeholder
-    # hint must be returned as-is (real user draft).
+    # Normal-style single-line input must be returned as-is.
     capture = """
 • earlier turn
 
@@ -112,24 +104,21 @@ def test_parse_codex_single_line_real_draft_is_preserved():
     assert draft_guard._parse_codex(_lines(capture)) == "hello team what's next"
 
 
-def test_parse_codex_improve_documentation_placeholder_is_not_treated_as_draft():
-    # Codex renders `› Improve documentation in @filename` as dim placeholder
-    # when the input box is empty. `capture-pane -p` strips ANSI attributes,
-    # so we match the exact string instead of the gray color.
+def test_parse_codex_dim_autocomplete_hint_is_not_treated_as_draft():
+    # Current Codex empty input from `capture-pane -e`: suggestion text is dim.
     capture = """
 • earlier turn
 
-› Improve documentation in @filename
+\x1b[1m›\x1b[0m\x1b[48;2;244;244;244m \x1b[2mExplain this codebase\x1b[0m\x1b[48;2;244;244;244m
 
-  gpt-5.4 xhigh fast · ~/Developer/hive
+  gpt-5.5 xhigh · ~/Developer/hive
 """
     assert draft_guard._parse_codex(_lines(capture)) == ""
 
 
-def test_parse_codex_user_draft_that_starts_with_improve_is_preserved():
-    # Defense against overreach: a real multi-line draft that happens to
-    # begin with the placeholder text must still be parsed. The gate only
-    # fires when the whole parsed block is a single line.
+def test_parse_codex_user_draft_that_looks_like_old_placeholder_is_preserved():
+    # The old hardcoded placeholder text must not be special anymore when it is
+    # rendered as normal draft text.
     capture = """
 • earlier turn
 
@@ -163,7 +152,19 @@ def test_parse_codex_multi_line_draft_is_joined():
     )
 
 
-def test_parse_droid_empty_input_returns_nothing():
+def test_parse_droid_dim_autocomplete_hint_returns_nothing():
+    capture = """
+ Auto (High) - allow all commands                                             Claude Opus 4.6 (Max)
+\x1b[38;2;176;176;176m╭─────────────────────────────────────────────────────────────────────────────────────╮
+│\x1b[39m \x1b[38;2;215;95;0m> \x1b[7m\x1b[39mT\x1b[0;2mry "Create a PR with these changes"\x1b[0m                  \x1b[38;2;176;176;176m│
+╰─────────────────────────────────────────────────────────────────────────────────────╯
+ ? for help                                                          MCP ✓ GHOSTTY ᗣ
+ Claude Opus 4.6 · main                                             ~/Developer/hive
+"""
+    assert draft_guard._parse_droid(_lines(capture)) == ""
+
+
+def test_parse_droid_normal_text_that_looks_like_old_hint_is_preserved():
     capture = """
  Auto (High) - allow all commands                                             Claude Opus 4.6 (Max)
 ╭─────────────────────────────────────────────────────────────────────────────────────╮
@@ -172,7 +173,7 @@ def test_parse_droid_empty_input_returns_nothing():
  ? for help                                                          MCP ✓ GHOSTTY ᗣ
  Claude Opus 4.6 · main                                             ~/Developer/hive
 """
-    assert draft_guard._parse_droid(_lines(capture)) == ""
+    assert draft_guard._parse_droid(_lines(capture)) == 'Try "Create a PR with these changes"'
 
 
 def test_parse_droid_multi_line_draft():
@@ -205,23 +206,23 @@ def test_suspected_draft_claude_empty_input_is_false(monkeypatch):
     monkeypatch.setattr(
         draft_guard.tmux,
         "capture_pane",
-        lambda _pane, lines=50: capture.lstrip("\n"),
+        lambda _pane, lines=50, preserve_styles=False: capture.lstrip("\n"),
     )
     assert draft_guard.suspected_draft("%999", "claude") is False
 
 
-def test_suspected_draft_claude_queued_placeholder_is_false(monkeypatch):
+def test_suspected_draft_claude_dim_hint_is_false(monkeypatch):
     capture = """
-───────────────────────────────────────────────
-❯\xa0Press up to edit queued messages
-───────────────────────────────────────────────
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
+\x1b[39m❯\xa0\x1b[2mPress up to edit queued messages\x1b[0m
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
   status
 """
     monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
     monkeypatch.setattr(
         draft_guard.tmux,
         "capture_pane",
-        lambda _pane, lines=50: capture.lstrip("\n"),
+        lambda _pane, lines=50, preserve_styles=False: capture.lstrip("\n"),
     )
     assert draft_guard.suspected_draft("%999", "claude") is False
 
@@ -237,9 +238,29 @@ def test_suspected_draft_claude_with_text_is_true(monkeypatch):
     monkeypatch.setattr(
         draft_guard.tmux,
         "capture_pane",
-        lambda _pane, lines=50: capture.lstrip("\n"),
+        lambda _pane, lines=50, preserve_styles=False: capture.lstrip("\n"),
     )
     assert draft_guard.suspected_draft("%999", "claude") is True
+
+
+def test_suspected_draft_claude_uses_styled_capture_for_autocomplete(monkeypatch):
+    capture = """
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
+\x1b[39m❯\xa0\x1b[7mp\x1b[0;2mush\x1b[0m
+\x1b[38;5;246m───────────────────────────────────────────────\x1b[39m
+  status
+"""
+    seen: dict[str, bool] = {}
+
+    def fake_capture(_pane, lines=50, preserve_styles=False):
+        seen["preserve_styles"] = preserve_styles
+        return capture.lstrip("\n")
+
+    monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
+    monkeypatch.setattr(draft_guard.tmux, "capture_pane", fake_capture)
+
+    assert draft_guard.suspected_draft("%999", "claude") is False
+    assert seen["preserve_styles"] is True
 
 
 def test_suspected_draft_codex_multi_paragraph_is_true(monkeypatch):
@@ -261,10 +282,31 @@ def test_suspected_draft_codex_multi_paragraph_is_true(monkeypatch):
     monkeypatch.setattr(
         draft_guard.tmux,
         "capture_pane",
-        lambda _pane, lines=50: capture.lstrip("\n"),
+        lambda _pane, lines=50, preserve_styles=False: capture.lstrip("\n"),
     )
     assert draft_guard.suspected_draft("%999", "codex") is True
     assert draft_guard.parse_draft("%999", "codex") == "line 1\n\nline 2 after blank\n\nline 3"
+
+
+def test_suspected_draft_codex_uses_styled_capture_for_autocomplete(monkeypatch):
+    capture = """
+• earlier turn
+
+\x1b[1m›\x1b[0m\x1b[48;2;244;244;244m \x1b[2mExplain this codebase\x1b[0m\x1b[48;2;244;244;244m
+
+  gpt-5.5 xhigh · ~/Developer/hive
+"""
+    seen: dict[str, bool] = {}
+
+    def fake_capture(_pane, lines=50, preserve_styles=False):
+        seen["preserve_styles"] = preserve_styles
+        return capture.lstrip("\n")
+
+    monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
+    monkeypatch.setattr(draft_guard.tmux, "capture_pane", fake_capture)
+
+    assert draft_guard.suspected_draft("%999", "codex") is False
+    assert seen["preserve_styles"] is True
 
 
 def test_suspected_draft_droid_uses_capture(monkeypatch):
@@ -275,23 +317,26 @@ def test_suspected_draft_droid_uses_capture(monkeypatch):
  status
 """
     capture_empty = """
-╭──────╮
-│ > Try "Create a PR with these changes"                           │
+\x1b[38;2;176;176;176m╭──────╮
+│\x1b[39m \x1b[38;2;215;95;0m> \x1b[7m\x1b[39mT\x1b[0;2mry "Create a PR with these changes"\x1b[0m        \x1b[38;2;176;176;176m│
 ╰──────╯
  status
 """
+    seen: dict[str, bool] = {}
+
+    def fake_capture(_pane, lines=50, preserve_styles=False):
+        seen["preserve_styles"] = preserve_styles
+        return capture_with_draft.lstrip("\n")
+
     monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
-    monkeypatch.setattr(
-        draft_guard.tmux,
-        "capture_pane",
-        lambda _pane, lines=50: capture_with_draft.lstrip("\n"),
-    )
+    monkeypatch.setattr(draft_guard.tmux, "capture_pane", fake_capture)
     assert draft_guard.suspected_draft("%999", "droid") is True
+    assert seen["preserve_styles"] is True
 
     monkeypatch.setattr(
         draft_guard.tmux,
         "capture_pane",
-        lambda _pane, lines=50: capture_empty.lstrip("\n"),
+        lambda _pane, lines=50, preserve_styles=False: capture_empty.lstrip("\n"),
     )
     assert draft_guard.suspected_draft("%999", "droid") is False
 

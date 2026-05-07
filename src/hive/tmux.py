@@ -481,11 +481,13 @@ def cancel_pane_mode(pane_id: str) -> None:
     _run(["copy-mode", "-q", "-t", pane_id], check=False)
 
 
-def capture_pane(pane_id: str, lines: int = 50) -> str:
+def capture_pane(pane_id: str, lines: int = 50, *, preserve_styles: bool = False) -> str:
     """Capture pane content."""
-    return _run_output([
-        "capture-pane", "-t", pane_id, "-p", f"-S", f"-{lines}",
-    ])
+    args = ["capture-pane", "-t", pane_id]
+    if preserve_styles:
+        args.append("-e")
+    args.extend(["-p", f"-S", f"-{lines}"])
+    return _run_output(args)
 
 
 def is_pane_alive(pane_id: str) -> bool:

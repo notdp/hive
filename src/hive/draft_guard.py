@@ -12,7 +12,7 @@ Profiles differ in prompt glyph, baseline cursor_x, and clear-keys cost:
   empty state; C-u × 30 drains the input box
 - codex:  `› ` (U+203A + 0x20); cursor_x=2 in empty state; C-u × 30
 - droid:  box-bordered `│ > ...│`; cursor_x is unreliable (=0 whether
-  empty or typed); falls back to placeholder pattern match; C-u × 15
+  empty or typed); C-u × 15
 """
 
 from __future__ import annotations
@@ -25,26 +25,6 @@ from . import tmux
 
 _CODEX_PROMPT = "› "
 _CLAUDE_PROMPT = "❯\xa0"
-_DROID_PLACEHOLDER_HINTS = ('Try "', 'Suggest ', 'Ask ')
-# Claude renders dim-gray placeholder text inside the input box when the
-# user has not typed anything. `capture-pane -p` strips ANSI attributes,
-# so we cannot distinguish dim from normal by color and must match by
-# string. Missing an entry here causes the placeholder to be saved as if
-# it were the user's draft and pasted back after a send.
-_CLAUDE_PLACEHOLDER_HINTS = (
-    'Try "',
-    'Press up to edit queued messages',
-)
-_CODEX_PLACEHOLDER_HINTS = (
-    'Explain this codebase',
-    'Summarize recent commits',
-    'Implement {feature}',
-    'Find and fix a bug in @filename',
-    'Write tests for @filename',
-    'Improve documentation in @filename',
-    'Run /review on my current changes',
-    'Use /skills to list available skills',
-)
 
 
 @dataclass(frozen=True)
@@ -52,6 +32,13 @@ class ProfileConfig:
     name: str
     baseline_cursor_x: int | None
     clear_repetitions: int
+
+
+@dataclass(frozen=True)
+class _StyledChar:
+    value: str
+    dim: bool = False
+    reverse: bool = False
 
 
 _PROFILES: dict[str, ProfileConfig] = {
@@ -81,7 +68,7 @@ def suspected_draft(pane_id: str, profile_name: str) -> bool:
     parser = _PARSERS.get(profile_name)
     if parser is None:
         return False
-    return bool(parser(_capture_lines(pane_id)))
+    return bool(parser(_capture_lines(pane_id, profile_name)))
 
 
 def parse_draft(pane_id: str, profile_name: str) -> str:
@@ -93,7 +80,7 @@ def parse_draft(pane_id: str, profile_name: str) -> str:
     parser = _PARSERS.get(profile_name)
     if parser is None:
         return ""
-    return parser(_capture_lines(pane_id))
+    return parser(_capture_lines(pane_id, profile_name))
 
 
 def clear_input(pane_id: str, profile_name: str) -> None:
@@ -119,42 +106,22 @@ def wait_input_empty(
     return False
 
 
-def _capture_lines(pane_id: str) -> list[str]:
+def _capture_lines(pane_id: str, profile_name: str) -> list[str]:
     height = tmux.display_value(pane_id, "#{pane_height}") or "80"
     try:
         lines_arg = max(int(height), 30)
     except ValueError:
         lines_arg = 80
+    if profile_name in {"claude", "codex", "droid"}:
+        return tmux.capture_pane(pane_id, lines=lines_arg, preserve_styles=True).splitlines()
     return tmux.capture_pane(pane_id, lines=lines_arg).splitlines()
-
-
-def _droid_has_draft(lines: list[str]) -> bool:
-    top, bot = _droid_box_bounds(lines)
-    if top is None or bot is None or bot - top < 2:
-        return False
-    rows = lines[top + 1 : bot]
-    if len(rows) != 1:
-        return True
-    row = rows[0]
-    if not (row.startswith("│") and row.endswith("│")):
-        return True
-    inner = row[1:-1].strip()
-    if not inner:
-        return False
-    if inner.startswith("> "):
-        payload = inner[2:]
-        for hint in _DROID_PLACEHOLDER_HINTS:
-            if payload.startswith(hint):
-                return False
-        return True
-    return True
 
 
 def _droid_box_bounds(lines: list[str]) -> tuple[int | None, int | None]:
     top: int | None = None
     bot: int | None = None
     for i in range(len(lines) - 1, -1, -1):
-        line = lines[i]
+        line = _visible_text(lines[i])
         if line.startswith("╰"):
             bot = i
         elif line.startswith("╭") and bot is not None:
@@ -164,28 +131,23 @@ def _droid_box_bounds(lines: list[str]) -> tuple[int | None, int | None]:
 
 
 def _parse_claude(lines: list[str]) -> str:
-    seps = [i for i, l in enumerate(lines) if l.startswith("─") and len(l) > 20]
+    seps = [i for i, l in enumerate(lines) if _visible_text(l).startswith("─") and len(_visible_text(l)) > 20]
     if len(seps) < 2:
         return ""
     top = seps[-2] + 1
     bot = seps[-1]
     block = lines[top:bot]
-    text = _strip_lines(block, first_prefix=_CLAUDE_PROMPT, cont_prefix="  ")
-    if "\n" not in text:
-        for placeholder in _CLAUDE_PLACEHOLDER_HINTS:
-            if text.startswith(placeholder):
-                return ""
-    return text
+    return _strip_styled_lines(block, first_prefix=_CLAUDE_PROMPT)
 
 
 def _parse_codex(lines: list[str]) -> str:
     # Locate the last draft line (excluding status + trailing empty rows).
     i = len(lines) - 1
-    while i >= 0 and lines[i].strip() == "":
+    while i >= 0 and _visible_text(lines[i]).strip() == "":
         i -= 1
-    while i >= 0 and lines[i].strip() != "":
+    while i >= 0 and _visible_text(lines[i]).strip() != "":
         i -= 1
-    while i >= 0 and lines[i].strip() == "":
+    while i >= 0 and _visible_text(lines[i]).strip() == "":
         i -= 1
     end = i
     if end < 0:
@@ -193,17 +155,12 @@ def _parse_codex(lines: list[str]) -> str:
     # Walk upward for the `›` prompt row that opens the draft block.
     start = None
     for j in range(end, -1, -1):
-        if lines[j].startswith(_CODEX_PROMPT):
+        if _visible_text(lines[j]).startswith(_CODEX_PROMPT):
             start = j
             break
     if start is None:
         return ""
-    text = _strip_lines(lines[start : end + 1], first_prefix=_CODEX_PROMPT, cont_prefix="  ")
-    if "\n" not in text:
-        for placeholder in _CODEX_PLACEHOLDER_HINTS:
-            if text.startswith(placeholder):
-                return ""
-    return text
+    return _strip_styled_lines(lines[start : end + 1], first_prefix=_CODEX_PROMPT)
 
 
 def _parse_droid(lines: list[str]) -> str:
@@ -213,44 +170,137 @@ def _parse_droid(lines: list[str]) -> str:
     rows = lines[top + 1 : bot]
     stripped: list[str] = []
     for idx, row in enumerate(rows):
-        if not (row.startswith("│") and row.endswith("│")):
+        inner = _droid_inner_cells(row)
+        if inner is None:
             continue
-        inner = row[1:-1]
         if idx == 0:
-            if inner.startswith(" > "):
-                text = inner[3:].rstrip()
-            else:
-                text = inner.strip()
+            cells = _drop_visible_prefix(inner, " > ")
         else:
-            if inner.startswith("   "):
-                text = inner[3:].rstrip()
-            else:
-                text = inner.strip()
-        stripped.append(text)
-    if len(stripped) == 1:
-        hint = stripped[0]
-        for placeholder in _DROID_PLACEHOLDER_HINTS:
-            if hint.startswith(placeholder):
-                return ""
+            cells = _drop_visible_prefix(inner, "   ")
+        cells = _drop_autocomplete_hint_cells(cells)
+        stripped.append("".join(cell.value for cell in _rstrip_cells(cells)))
+    if all(not item for item in stripped):
+        return ""
     return "\n".join(stripped)
 
 
-def _strip_lines(lines: list[str], *, first_prefix: str, cont_prefix: str) -> str:
+def _strip_styled_lines(lines: list[str], *, first_prefix: str) -> str:
     out: list[str] = []
     for idx, line in enumerate(lines):
-        if idx == 0 and line.startswith(first_prefix):
-            rest = line[len(first_prefix):]
-            # Some TUIs (Codex) render `›  <text>` when the user pasted with
-            # a leading space; drop one extra leading space to avoid a
-            # phantom space in the restored draft.
-            if rest.startswith(" "):
-                rest = rest[1:]
-            out.append(rest)
-        elif line.startswith(cont_prefix):
-            out.append(line[len(cont_prefix):])
+        cells = _styled_chars(line)
+        if idx == 0:
+            cells = _drop_visible_prefix(cells, first_prefix)
+            cells = _drop_autocomplete_hint_cells(cells)
+            # Match the old plain-text parser: if the prompt rendering leaves
+            # one extra leading space before draft text, drop that boundary
+            # space only on the first line.
+            if cells and cells[0].value == " ":
+                cells = cells[1:]
         else:
-            out.append(line)
+            cells = _drop_visible_prefix(cells, "  ")
+        out.append("".join(cell.value for cell in cells))
     return "\n".join(out)
+
+
+def _drop_visible_prefix(cells: list[_StyledChar], prefix: str) -> list[_StyledChar]:
+    if "".join(cell.value for cell in cells[:len(prefix)]) == prefix:
+        return cells[len(prefix):]
+    return cells
+
+
+def _drop_visible_suffix(cells: list[_StyledChar], suffix: str) -> list[_StyledChar]:
+    if suffix and "".join(cell.value for cell in cells[-len(suffix):]) == suffix:
+        return cells[:-len(suffix)]
+    return cells
+
+
+def _rstrip_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
+    end = len(cells)
+    while end > 0 and cells[end - 1].value == " ":
+        end -= 1
+    return cells[:end]
+
+
+def _droid_inner_cells(row: str) -> list[_StyledChar] | None:
+    cells = _styled_chars(row)
+    visible = "".join(cell.value for cell in cells)
+    if not (visible.startswith("│") and visible.rstrip().endswith("│")):
+        return None
+    cells = _drop_visible_prefix(cells, "│")
+    cells = _rstrip_cells(cells)
+    return _drop_visible_suffix(cells, "│")
+
+
+def _drop_autocomplete_hint_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
+    first_dim = next((idx for idx, cell in enumerate(cells) if cell.dim), None)
+    if first_dim is None:
+        return cells
+    start = first_dim
+    while start > 0 and cells[start - 1].reverse:
+        start -= 1
+    return cells[:start]
+
+
+def _visible_text(line: str) -> str:
+    return "".join(cell.value for cell in _styled_chars(line))
+
+
+def _styled_chars(line: str) -> list[_StyledChar]:
+    cells: list[_StyledChar] = []
+    dim = False
+    reverse = False
+    i = 0
+    while i < len(line):
+        if line[i] == "\x1b" and i + 1 < len(line) and line[i + 1] == "[":
+            end = line.find("m", i + 2)
+            if end != -1:
+                codes = line[i + 2:end]
+                params = [0] if codes == "" else _parse_sgr_codes(codes)
+                dim, reverse = _apply_sgr(params, dim=dim, reverse=reverse)
+                i = end + 1
+                continue
+        cells.append(_StyledChar(line[i], dim=dim, reverse=reverse))
+        i += 1
+    return cells
+
+
+def _parse_sgr_codes(raw: str) -> list[int]:
+    codes: list[int] = []
+    for part in raw.split(";"):
+        if not part:
+            codes.append(0)
+            continue
+        try:
+            codes.append(int(part))
+        except ValueError:
+            continue
+    return codes
+
+
+def _apply_sgr(params: list[int], *, dim: bool, reverse: bool) -> tuple[bool, bool]:
+    i = 0
+    while i < len(params):
+        code = params[i]
+        if code == 0:
+            dim = False
+            reverse = False
+        elif code == 2:
+            dim = True
+        elif code == 7:
+            reverse = True
+        elif code == 22:
+            dim = False
+        elif code == 27:
+            reverse = False
+        elif code in {38, 48}:
+            if i + 1 < len(params):
+                mode = params[i + 1]
+                if mode == 2:
+                    i += 4
+                elif mode == 5:
+                    i += 2
+        i += 1
+    return dim, reverse
 
 
 _PARSERS = {
