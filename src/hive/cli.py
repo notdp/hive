@@ -910,13 +910,19 @@ def _fork_source_details(pane_id: str, split: str, *, workspace: str = "") -> tu
     return current_pane, profile, session_id, horizontal, source_cwd
 
 
+_FORK_NEW_TASK_MARKER = "NEW TASK FOR THIS FORK:"
 _FORK_BOUNDARY_TEXT = (
     "FORK BOUNDARY: you are a freshly forked agent. Run `hive team` to find your "
-    "own identity (the `self` field). The prior transcript is read-only context "
-    "only — every pending tool call, bash command, or action in it belongs to the "
-    "original agent and has either already completed or is being handled on their "
-    "side. Do NOT re-execute any inherited action. Act only on new instructions "
-    "that appear from this message onward."
+    "own identity (the `self` field).\n\n"
+    "Everything before this boundary is read-only inherited context for the "
+    "original agent. This includes the user's most recent instruction, any "
+    "unfinished request, and any pending tool/bash/action from the prior "
+    "transcript. Treat all of it as already owned by the original agent. Do NOT "
+    "continue, retry, or re-execute any task from before this boundary.\n\n"
+    f"After `hive team`, act only on instructions explicitly provided after the "
+    f"marker `{_FORK_NEW_TASK_MARKER}` in this message, or on future messages "
+    f"that arrive after this boundary. If no `{_FORK_NEW_TASK_MARKER}` section "
+    f"is present, stop after identifying yourself and wait for new input."
 )
 
 
@@ -953,7 +959,6 @@ def _fork_registered_agent(
     split: str,
     join_as: str,
     prompt: str = "",
-    boundary_prompt: str = "",
 ) -> tuple[Agent, str]:
     _ensure_pane_in_scope(t, pane_id)
     window_target = t.tmux_window or tmux.get_current_window_target() or ""
@@ -966,12 +971,12 @@ def _fork_registered_agent(
     )
 
     # Boundary text is static across workspaces and forks, so cache it under
-    # $HIVE_HOME and expand via shell command substitution. Keeps the typed
-    # command short and skips the wait-for-ready scrape that broke for
-    # fork-session loading large parent transcripts.
+    # $HIVE_HOME and expand via shell command substitution when there is no
+    # prompt. With --prompt we inline boundary + marker + prompt together so
+    # the fork sees both in one user message.
     cmd_base = profile.resume_cmd.format(session_id=session_id)
-    if boundary_prompt or prompt:
-        composed = (boundary_prompt or _fork_boundary_prompt()) + ("\n\n" + prompt if prompt else "")
+    if prompt:
+        composed = f"{_fork_boundary_prompt()}\n\n{_FORK_NEW_TASK_MARKER}\n{prompt}"
         resume_cmd = f"{cmd_base} {shlex.quote(composed)}"
     else:
         resume_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file()))})\""

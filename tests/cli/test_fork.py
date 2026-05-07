@@ -3,7 +3,7 @@ import shlex
 
 import pytest
 
-from hive.cli import _choose_fork_split, _fork_boundary_prompt, cli
+from hive.cli import _choose_fork_split, _FORK_NEW_TASK_MARKER, _fork_boundary_prompt, cli
 
 
 def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -153,10 +153,14 @@ def test_fork_join_as_prompt_embeds_in_resume_command(runner, configure_hive_hom
 
     assert result.exit_code == 0
     # With --prompt, the boundary text is inlined together with the user prompt
-    # in the resume command (rather than expanded from the cached file).
+    # in the resume command (rather than expanded from the cached file). The
+    # NEW TASK marker separates inherited transcript context from the new
+    # prompt so the fork only acts on instructions after the marker.
     expected_prompt = (
         _fork_boundary_prompt()
         + "\n\n"
+        + _FORK_NEW_TASK_MARKER
+        + "\n"
         + "先跑 hive thread Veh9 看原始内容，处理完 reply-to lulu"
     )
     expected_cmd = f"claude -r sess-123 --fork-session {shlex.quote(expected_prompt)}"
@@ -168,7 +172,13 @@ def test_fork_boundary_prompt_is_static_and_directs_to_hive_team():
     body = _fork_boundary_prompt()
     assert "FORK BOUNDARY" in body
     assert "hive team" in body
-    assert "Do NOT re-execute" in body
+    # Inherited context must explicitly include the user's most recent
+    # instruction, not just agent-side pending tool calls.
+    assert "user's most recent instruction" in body
+    assert "Do NOT continue, retry, or re-execute" in body
+    # Marker pattern: forks without a NEW TASK section must stop and wait.
+    assert _FORK_NEW_TASK_MARKER in body
+    assert "stop after identifying yourself and wait for new input" in body
     # Boundary must be a single user message (no leading / trailing whitespace drift).
     assert body == body.strip()
 
