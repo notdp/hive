@@ -19,9 +19,11 @@ from typing import Any, Iterable, Iterator
 
 from .. import tmux
 from .base import (
+    ContextSnapshot,
     Message,
     MessagePart,
     SessionMeta,
+    iter_jsonl_records_reverse,
     normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
@@ -156,6 +158,34 @@ class ClaudeAdapter:
             raw=payload,
         )
 
+    def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
+        for record in iter_jsonl_records_reverse(path):
+            if record.get("type") != "assistant":
+                continue
+            msg = record.get("message")
+            if not isinstance(msg, dict):
+                continue
+            usage = msg.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            tokens = _usage_token_sum(
+                usage,
+                (
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ),
+            )
+            if tokens is None:
+                continue
+            return ContextSnapshot(
+                tokens=tokens,
+                window=None,
+                observed_at=parse_iso_timestamp(record.get("timestamp")),
+                source="claude_assistant_usage",
+            )
+        return None
+
 
 _META_SCAN_LIMIT = 20
 # Calibration from the cvim /clear regression data:
@@ -278,6 +308,26 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _usage_token_sum(usage: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    total = 0
+    seen = False
+    for key in keys:
+        value = _int_or_none(usage.get(key))
+        if value is None:
+            continue
+        total += value
+        seen = True
+    return total if seen else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
 
 
 def _is_claude_process(command: str, argv: str) -> bool:

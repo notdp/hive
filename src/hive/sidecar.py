@@ -1389,6 +1389,8 @@ def _doctor_payload(
         diag["busy"] = bool(runtime["busy"])
     if runtime.get("turnPhase"):
         diag["turnPhase"] = runtime["turnPhase"]
+    if runtime.get("context"):
+        diag["context"] = runtime["context"]
     if verbose:
         diag["pane"] = target.pane_id
         diag["teamMembers"] = len(list(team.agents.values()))
@@ -1499,6 +1501,14 @@ def _agent_runtime_payload(
         return runtime
 
     runtime["_transcriptSize"] = transcript.stat().st_size
+    context = adapter.extract_context_snapshot(transcript)
+    if context:
+        runtime["context"] = {
+            "tokens": context.tokens,
+            "window": context.window,
+            "observedAt": context.observed_at.isoformat() if context.observed_at else None,
+            "source": context.source,
+        }
     safety = probe_transcript_turn_phase(profile.name, transcript)
     runtime["turnPhase"] = str(safety.get("turnPhase") or "unknown_evidence")
     if safety.get("phaseObservedAt"):

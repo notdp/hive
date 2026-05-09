@@ -16,6 +16,7 @@ from typing import Any, Iterable, Iterator
 
 from .. import tmux
 from .base import (
+    ContextSnapshot,
     Message,
     MessagePart,
     SessionMeta,
@@ -140,6 +141,9 @@ class DroidAdapter:
             timestamp=parse_iso_timestamp(payload.get("timestamp")),
             raw=payload,
         )
+
+    def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
+        return None
 
 
 def _read_settings_model(jsonl_path: Path) -> str | None:

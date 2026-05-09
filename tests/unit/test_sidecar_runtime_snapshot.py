@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import hive.sidecar as sidecar
+from hive.adapters.base import ContextSnapshot
 from hive.runtime_snapshot import RuntimeSnapshotStore
 
 
@@ -416,3 +418,49 @@ def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkey
     assert runtime["sessionId"] == "unresolved"
     assert runtime["inputState"] == "unknown"
     assert runtime["inputReason"] == "no_session"
+
+
+def test_agent_runtime_payload_includes_context_snapshot(monkeypatch, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"role":"user","content":"ok"}}\n')
+    observed_at = datetime(2026, 5, 9, 8, 16, 36, tzinfo=timezone.utc)
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            assert pane_id == "%1"
+            return "sid-1"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            assert session_id == "sid-1"
+            assert cwd == "/repo"
+            return transcript
+
+        def extract_context_snapshot(self, path):
+            assert path == transcript
+            return ContextSnapshot(
+                tokens=24028,
+                window=258400,
+                observed_at=observed_at,
+                source="codex_token_count_event",
+            )
+
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _pane_id: {"busy": False})
+    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="codex"))
+    monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "codex" else None)
+    monkeypatch.setattr(
+        "hive.activity.probe_transcript_turn_phase",
+        lambda _cli, _path: {"turnPhase": "turn_closed"},
+    )
+
+    runtime = sidecar._agent_runtime_payload("%1")
+
+    assert runtime["context"] == {
+        "tokens": 24028,
+        "window": 258400,
+        "observedAt": "2026-05-09T08:16:36+00:00",
+        "source": "codex_token_count_event",
+    }
+    assert runtime["inputState"] == "ready"

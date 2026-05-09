@@ -24,9 +24,11 @@ from typing import Any, Iterable, Iterator
 
 from .. import tmux
 from .base import (
+    ContextSnapshot,
     Message,
     MessagePart,
     SessionMeta,
+    iter_jsonl_records_reverse,
     normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
@@ -217,6 +219,31 @@ class CodexAdapter:
             raw=payload,
         )
 
+    def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
+        for record in iter_jsonl_records_reverse(path):
+            if record.get("type") != "event_msg":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                continue
+            info = payload.get("info")
+            if not isinstance(info, dict):
+                continue
+            last_usage = info.get("last_token_usage")
+            if not isinstance(last_usage, dict):
+                continue
+            tokens = _int_or_none(last_usage.get("total_tokens"))
+            if tokens is None:
+                continue
+            return ContextSnapshot(
+                tokens=tokens,
+                window=_int_or_none(info.get("model_context_window")),
+                observed_at=parse_iso_timestamp(payload.get("timestamp"))
+                or parse_iso_timestamp(record.get("timestamp")),
+                source="codex_token_count_event",
+            )
+        return None
+
 
 def _codex_message_iter(handle) -> Iterator[Message]:
     current_turn_id: str | None = None
@@ -361,6 +388,14 @@ def _extract_reasoning_text(body: dict[str, Any]) -> str | None:
     text = body.get("text")
     if isinstance(text, str) and text:
         return text
+    return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
     return None
 
 

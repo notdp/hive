@@ -7,6 +7,7 @@ without knowing the per-CLI on-disk layout.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,14 @@ class SessionMeta:
     started_at: datetime | None
     jsonl_path: Path
     model: str | None = None
+
+
+@dataclass(frozen=True)
+class ContextSnapshot:
+    tokens: int
+    window: int | None
+    observed_at: datetime | None
+    source: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,9 @@ class SessionAdapter(Protocol):
     def message_from_record(self, payload: dict[str, Any]) -> Message | None:
         """Normalize one raw JSONL record into a :class:`Message` when possible."""
 
+    def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
+        """Read the latest context size from a session transcript, or None."""
+
 
 def parse_iso_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
@@ -117,6 +129,36 @@ def safe_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return -1
+
+
+def iter_jsonl_records_reverse(path: Path, *, chunk_size: int = 64 * 1024) -> Iterator[dict[str, Any]]:
+    """Yield JSONL records from *path* newest-to-oldest without loading the whole file."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            pending = b""
+            while position > 0:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                pending = handle.read(read_size) + pending
+                lines = pending.split(b"\n")
+                if position > 0:
+                    pending = lines[0]
+                    complete = lines[1:]
+                else:
+                    pending = b""
+                    complete = lines
+                for raw in reversed(complete):
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    payload = safe_json_loads(line.decode("utf-8", errors="replace"))
+                    if payload is not None:
+                        yield payload
+    except OSError:
+        return
 
 
 # --- Send gate helpers ---
