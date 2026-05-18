@@ -2009,22 +2009,37 @@ def inject_cmd(agent_name: str, text: str):
 
 
 @cli.command("compact")
-def compact_cmd():
+@click.option("--pane", "pane_id", default="", help="Target pane ID (default: current pane via TMUX_PANE)")
+def compact_cmd(pane_id: str):
     """Trigger /compact on your own pane.
 
     Equivalent to `hive inject <self> /compact`, but the response never
     carries a `compactHint` — `/compact` already addresses the condition
     the hint reports, so re-nagging would be noise.
 
+    When wired into a tmux key binding, pass `--pane "#{pane_id}"` so the
+    triggering pane is captured by tmux at keypress time rather than read
+    from the (potentially stale) TMUX_PANE env in a detached subprocess.
+
     \b
-    Example:
+    Examples:
       hive compact
+      hive compact --pane %21
     """
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    sender = _resolve_sender(None)
-    if not sender:
-        _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
+    if pane_id:
+        team_name = tmux.get_pane_option(pane_id, "hive-team")
+        if not team_name:
+            _fail(f"pane '{pane_id}' is not bound to a Hive team")
+        t = _load_team(team_name)
+        sender = tmux.get_pane_option(pane_id, "hive-agent") or ""
+        if not sender:
+            _fail(f"pane '{pane_id}' has no hive-agent tag")
+    else:
+        team_name, t = _resolve_scoped_team(None, required=True)
+        assert team_name is not None and t is not None
+        sender = _resolve_sender(None)
+        if not sender:
+            _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
     agent = t.get(sender)
     agent.send("/compact")
     result = {

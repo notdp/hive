@@ -626,6 +626,67 @@ def test_compact_injects_self_compact_without_hint(runner, configure_hive_home, 
     assert "compactHint" not in payload
 
 
+def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    sent: list[tuple[str, str]] = []
+
+    class _FakeAgent:
+        pane_id = "%42"
+
+        def send(self, text: str) -> None:
+            sent.append(("send", text))
+
+    class _FakeTeam:
+        name = "team-x"
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+        workspace = "/tmp/ws"
+
+        def get(self, name: str):
+            assert name == "bobo"
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._load_team", lambda _name: _FakeTeam())
+
+    # `--pane` path must NOT consult _resolve_sender / _resolve_scoped_team
+    # (those read TMUX_PANE/current pane). Guard against accidental fallback.
+    def _fail_resolve_sender(_from_agent=None):
+        raise AssertionError("--pane must not consult _resolve_sender")
+
+    def _fail_resolve_team(_team, required=True):
+        raise AssertionError("--pane must not consult _resolve_scoped_team")
+
+    monkeypatch.setattr("hive.cli._resolve_sender", _fail_resolve_sender)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", _fail_resolve_team)
+
+    pane_options = {("%42", "hive-team"): "team-x", ("%42", "hive-agent"): "bobo"}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert sent == [("send", "/compact")]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "bobo",
+        "action": "compact",
+        "pane": "%42",
+        "success": True,
+    }
+    assert "compactHint" not in payload
+
+
+def test_compact_with_pane_rejects_untagged_pane(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _pane, _key: None)
+
+    result = runner.invoke(cli, ["compact", "--pane", "%99"])
+    assert result.exit_code != 0
+    assert "not bound to a Hive team" in result.output
+
+
 def test_capture_reads_agent_output(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     class _FakeAgent:
