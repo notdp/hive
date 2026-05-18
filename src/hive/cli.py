@@ -37,6 +37,7 @@ _COMMAND_HELP_SECTIONS = {
     "reply": "Daily",
     "answer": "Daily",
     "notify": "Daily",
+    "compact": "Daily",
     # Handoff — hand a thread to another pane (same/new/forked).
     "handoff": "Handoff",
     "fork": "Handoff",
@@ -432,10 +433,33 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             if value in ("", None):
                 continue
             member[key] = value
+        ctx = runtime_fields.get("context")
+        if isinstance(ctx, dict):
+            member["context"] = ctx
     needs_answer = runtime.get("needsAnswer")
     if isinstance(needs_answer, list) and needs_answer:
         payload["needsAnswer"] = needs_answer
     return payload
+
+
+def _maybe_attach_compact_hint(
+    payload: dict[str, Any],
+    *,
+    sender: str,
+    team_name: str,
+    workspace: Any,
+) -> None:
+    """Best-effort: attach ``compactHint`` when sender context > threshold."""
+    if not sender or not team_name or not workspace:
+        return
+    from .sidecar import request_team_runtime
+    from . import context_hint as _ctx_hint
+
+    try:
+        runtime = request_team_runtime(str(workspace), team=team_name)
+    except Exception:
+        return
+    _ctx_hint.maybe_attach_hint(payload, self_name=sender, team_runtime=runtime)
 
 
 def _should_show_description(desc: object) -> bool:
@@ -1949,6 +1973,10 @@ def wait_status(legacy_args: tuple[str, ...]):
     _status_migration_failure("wait-status")
 
 
+def _is_self_compact(sender: str, target: str, text: str) -> bool:
+    return bool(sender) and sender == target and text.strip() == "/compact"
+
+
 @cli.command("inject")
 @click.argument("agent_name")
 @click.argument("text")
@@ -1967,12 +1995,45 @@ def inject_cmd(agent_name: str, text: str):
     assert team_name is not None and t is not None
     agent = t.get(agent_name)
     agent.send(text)
-    click.echo(json.dumps({
+    result = {
         "member": agent_name,
         "action": "inject",
         "pane": getattr(agent, "pane_id", "") or "",
         "success": True,
-    }, indent=2, ensure_ascii=False))
+    }
+    sender = _resolve_sender(None)
+    if not _is_self_compact(sender, agent_name, text):
+        ws = _resolve_workspace(t, required=False)
+        _maybe_attach_compact_hint(result, sender=sender, team_name=team_name, workspace=ws)
+    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+@cli.command("compact")
+def compact_cmd():
+    """Trigger /compact on your own pane.
+
+    Equivalent to `hive inject <self> /compact`, but the response never
+    carries a `compactHint` — `/compact` already addresses the condition
+    the hint reports, so re-nagging would be noise.
+
+    \b
+    Example:
+      hive compact
+    """
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert team_name is not None and t is not None
+    sender = _resolve_sender(None)
+    if not sender:
+        _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
+    agent = t.get(sender)
+    agent.send("/compact")
+    result = {
+        "member": sender,
+        "action": "compact",
+        "pane": getattr(agent, "pane_id", "") or "",
+        "success": True,
+    }
+    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 @cli.command("team")
@@ -3048,6 +3109,7 @@ def send(
     except RuntimeError as exc:
         _fail(str(exc))
         return
+    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
@@ -3133,6 +3195,7 @@ def reply(
         return
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
+    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
@@ -3166,6 +3229,7 @@ def answer(agent_name: str, text: str):
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "answer failed")))
     payload.pop("ok", None)
+    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

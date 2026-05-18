@@ -488,8 +488,10 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
             sent.append(text)
 
     class _FakeTeam:
+        name = "team-x"
         tmux_session = "dev"
         tmux_window = "dev:0"
+        workspace = ""
 
         def get(self, _name: str):
             return _FakeAgent()
@@ -506,6 +508,122 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
         "pane": "%11",
         "success": True,
     }
+
+
+def test_inject_self_compact_skips_compact_hint(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    sent: list[str] = []
+
+    class _FakeAgent:
+        pane_id = "%11"
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+
+    class _FakeTeam:
+        name = "team-x"
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+        workspace = "/tmp/ws"
+
+        def get(self, _name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    monkeypatch.setattr("hive.cli._resolve_workspace", lambda _t, required=False: "/tmp/ws")
+
+    called: list[str] = []
+
+    def _fail_if_called(*_a, **_kw):
+        called.append("attached")
+
+    monkeypatch.setattr("hive.cli._maybe_attach_compact_hint", _fail_if_called)
+
+    result = runner.invoke(cli, ["inject", "orch", "/compact"])
+    assert result.exit_code == 0
+    assert sent == ["/compact"]
+    payload = json.loads(result.output)
+    assert "compactHint" not in payload
+    assert called == [], "self-compact inject must not consult compactHint"
+
+
+def test_inject_other_agent_compact_still_attaches_hint(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+
+    class _FakeAgent:
+        pane_id = "%11"
+
+        def send(self, _text: str) -> None:
+            return None
+
+    class _FakeTeam:
+        name = "team-x"
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+        workspace = "/tmp/ws"
+
+        def get(self, _name: str):
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    monkeypatch.setattr("hive.cli._resolve_workspace", lambda _t, required=False: "/tmp/ws")
+
+    captured: list[dict] = []
+
+    def _spy(payload, *, sender, team_name, workspace):
+        captured.append({"sender": sender, "team_name": team_name, "workspace": workspace})
+        payload["compactHint"] = "stub"
+
+    monkeypatch.setattr("hive.cli._maybe_attach_compact_hint", _spy)
+
+    result = runner.invoke(cli, ["inject", "bobo", "/compact"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload.get("compactHint") == "stub"
+    assert captured == [{"sender": "orch", "team_name": "team-x", "workspace": "/tmp/ws"}]
+
+
+def test_compact_injects_self_compact_without_hint(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    sent: list[tuple[str, str]] = []
+
+    class _FakeAgent:
+        pane_id = "%21"
+
+        def send(self, text: str) -> None:
+            sent.append(("send", text))
+
+    class _FakeTeam:
+        name = "team-x"
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+        workspace = "/tmp/ws"
+
+        def get(self, name: str):
+            assert name == "orch"
+            return _FakeAgent()
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+
+    def _fail_if_called(*_a, **_kw):
+        raise AssertionError("hive compact must not attach compactHint")
+
+    monkeypatch.setattr("hive.cli._maybe_attach_compact_hint", _fail_if_called)
+
+    result = runner.invoke(cli, ["compact"])
+    assert result.exit_code == 0, result.output
+    assert sent == [("send", "/compact")]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "orch",
+        "action": "compact",
+        "pane": "%21",
+        "success": True,
+    }
+    assert "compactHint" not in payload
 
 
 def test_capture_reads_agent_output(runner, configure_hive_home, monkeypatch):

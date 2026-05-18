@@ -174,6 +174,45 @@ Claude 偏前端体验、文案收敛和发散式讨论;GPT 偏后端 correctnes
 
 workflow 加载后继续用 Hive 命令作为通信与状态底座。
 
+## context 监控与自主 /compact
+
+Hive runtime 持续监控你 pane 的 context.tokens(从 transcript 直接读)。当触达阈值时,会在你看到的下一条 hive 命令返回 / inbound 消息里 push 一个 hint:
+
+- hive 命令 stdout JSON 多一个 `compactHint` 字段
+- inbound `<HIVE>` envelope 后追加一段独立 `<HIVE-HINT>` block
+
+收到 compactHint **不要立刻处理**。它是 reminder,不是 action 信号 —— 告诉你"context 已经偏大,合适时机 compact"。
+
+### 何时调 /compact
+
+只有 **(A) AND (B) 同时成立** 才触发:
+
+- (A) 大任务刚完成,你正准备给用户最终答复(不是中间步骤、子任务、阶段转换、hive 多 agent 讨论收敛)
+- (B) compactHint 提示 context.tokens > 400K(Claude only,Codex 暂不监控)
+
+### 怎么调
+
+```bash
+hive compact
+```
+
+### 不要做
+
+- 中间步骤 / 工具调用之间触发 — 丢正在做的事的语义边界
+- context < 400K 触发 — host runtime 会自动 compact,够用
+- 同一 task 已经 compact 过 — 不要重复
+- hive 多 agent 讨论中段触发 — 阶段转换不算"大任务结束"
+
+### 为什么这个能力存在
+
+Claude / Codex host 都有自动 compact(按 token 压力触发),agent 自主调的不可替代价值在 **"在 agent 掌握语义边界时刷新上下文"** —— host 自动 compact 的边界由 token 压力决定,可能落在工具调用之间或 mid-thinking,而你最清楚哪些事实该保留、哪些是搜索路径噪音。
+
+### 范围限定
+
+- **首版只做 Claude**。Codex 自动 compact 暂时够用,不发 hint
+- 阈值 400K 写死,改阈值是 hive runtime 的事,不是 agent 规则
+- 不需要主动 query context size。`hive team` 也暴露 `context` 字段供你查,但默认走 push
+
 ## 排障 + 协议边界
 
 排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill` / `exec`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `references/debug.md`。日常收发消息不用读这份;主通道见上文「消息机制」。

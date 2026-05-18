@@ -1098,6 +1098,23 @@ def _send_payload(
         reply_to=reply_to,
     )
 
+    # Push channel: append HIVE-HINT after envelope when receiver's context
+    # exceeds threshold. Best-effort; silently skipped on any failure.
+    try:
+        target_pane = getattr(target, "pane_id", "") or ""
+        if target_pane:
+            from . import context_hint as _ctx_hint
+
+            target_runtime = _agent_runtime_payload(target_pane)
+            hint_block = _ctx_hint.hint_block_for(
+                self_name=target_agent,
+                team_runtime={"members": {target_agent: target_runtime}},
+            )
+            if hint_block:
+                envelope = envelope + "\n" + hint_block
+    except Exception:
+        pass
+
     inject_status = "submitted"
     try:
         target.send(envelope)

@@ -160,6 +160,13 @@ class ClaudeAdapter:
 
     def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
         for record in iter_jsonl_records_reverse(path):
+            # After /compact, host writes an isCompactSummary record but the
+            # next assistant turn (which carries the new post-compact usage)
+            # may not arrive for minutes or hours. If we keep scanning past
+            # the summary we land on pre-compact usage and report a stale
+            # value. Stop and report unknown until a new assistant turn lands.
+            if record.get("isCompactSummary") is True:
+                return None
             if record.get("type") != "assistant":
                 continue
             msg = record.get("message")
@@ -180,7 +187,7 @@ class ClaudeAdapter:
                 continue
             return ContextSnapshot(
                 tokens=tokens,
-                window=None,
+                window=_claude_window_for_model(str_or_none(msg.get("model"))),
                 observed_at=parse_iso_timestamp(record.get("timestamp")),
                 source="claude_assistant_usage",
             )
@@ -308,6 +315,20 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+# Claude transcripts don't carry the active context window, so we map
+# known model ids ourselves. Update this when adding a new Anthropic
+# model; an unmapped model returns None rather than guessing.
+_CLAUDE_MODEL_WINDOW = {
+    "claude-opus-4-7": 1_000_000,
+}
+
+
+def _claude_window_for_model(model: str | None) -> int | None:
+    if not model:
+        return None
+    return _CLAUDE_MODEL_WINDOW.get(model.lower())
 
 
 def _usage_token_sum(usage: dict[str, Any], keys: tuple[str, ...]) -> int | None:
