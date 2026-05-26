@@ -9,6 +9,8 @@ def test_normalize_command_strips_path_and_aliases():
     assert agent_cli.normalize_command("/usr/local/bin/claude") == "claude"
     assert agent_cli.normalize_command("claude-code") == "claude"
     assert agent_cli.normalize_command("CODEX") == "codex"
+    assert agent_cli.normalize_command("claude.exe") == "claude"
+    assert agent_cli.normalize_command("/opt/homebrew/bin/claude.exe") == "claude"
     assert agent_cli.normalize_command("") == ""
 
 
@@ -51,6 +53,21 @@ def test_detect_profile_for_pane_falls_back_to_tty_processes(monkeypatch):
 
     assert profile is not None
     assert profile.name == "codex"
+
+
+def test_detect_profile_for_pane_claude_exe_not_misled_by_codex_title(monkeypatch):
+    # Regression: macOS Claude Code reports comm "claude.exe". The command probe
+    # must resolve it to claude so detection never falls back to the pane title,
+    # which would misclassify a claude pane whose title mentions another CLI.
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "claude.exe")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "✳ Research Codex app server")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
+
+    profile = agent_cli.detect_profile_for_pane("%1")
+
+    assert profile is not None
+    assert profile.name == "claude"
 
 
 def test_resolve_session_id_for_pane_dispatches_to_adapter(monkeypatch):

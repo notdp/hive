@@ -17,6 +17,11 @@ SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "cs
 CLI_ALIASES = {
     "claude-code": "claude",
     "claudecode": "claude",
+    # macOS Claude Code reports its process comm as "claude.exe"; without this
+    # the command probe misses and detection falls back to the pane title,
+    # which misclassifies a claude pane whose title happens to contain another
+    # CLI's name (e.g. "Research Codex app server" -> codex).
+    "claude.exe": "claude",
 }
 
 # Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
