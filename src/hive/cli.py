@@ -1295,6 +1295,7 @@ def _attach_peer_to_team(
         cli=peer_cli,
         model=peer_model,
         skill="hive",
+        workspace=workspace,
     )
     t.agents[peer_name] = peer_agent
     tmux.set_pane_option(peer_agent.pane_id, "hive-group", "peer")

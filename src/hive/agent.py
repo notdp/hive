@@ -181,6 +181,7 @@ class Agent:
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
         cli: str = "droid",
+        workspace: str = "",
     ) -> Agent:
         """Spawn an agent CLI (droid/claude/codex) in a tmux pane.
 
@@ -225,6 +226,15 @@ class Agent:
                         "--remote", _shell_escape(f"unix://{sock}"),
                         "--cd", _shell_escape(cwd),
                     ])
+                    # Bring hive's 2nd client online now — before codex (started
+                    # by send_keys at the end of this method) creates its thread
+                    # — so the sidecar receives the full thread/started +
+                    # tokenUsage broadcast live instead of late-joining and
+                    # resuming. Best-effort: a down/slow sidecar just falls back
+                    # to the lazy connect on the next runtime tick.
+                    if workspace:
+                        from .sidecar import request_connect_codex
+                        request_connect_codex(workspace, pane_id)
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:

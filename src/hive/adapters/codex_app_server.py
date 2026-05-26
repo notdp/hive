@@ -589,6 +589,16 @@ class CodexClientPool:
         client = self._client_for(pane)
         return client.latest_runtime() if client is not None else None
 
+    def connect(self, pane: str) -> bool:
+        """Eagerly bring the 2nd client online for a pane.
+
+        Called at spawn time — after the daemon is up but before codex creates
+        its thread — so the client is already connected when ``thread/started``
+        and the per-turn ``tokenUsage`` broadcasts fire. Runtime is then tracked
+        live from the broadcast stream; no late-join resume is needed.
+        """
+        return self._client_for(pane) is not None
+
     def send_to_pane(self, pane: str, text: str) -> bool:
         """Deliver text as a new turn over the pane's daemon.
 
@@ -667,6 +677,10 @@ def pool() -> CodexClientPool:
 
 def runtime_for_pane(pane: str) -> ThreadRuntime | None:
     return pool().runtime_for_pane(pane)
+
+
+def connect_pane(pane: str) -> bool:
+    return pool().connect(pane)
 
 
 def send_to_pane(pane: str, text: str) -> bool:

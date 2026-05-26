@@ -414,6 +414,54 @@ def test_spawn_codex_new_session_uses_remote_daemon(monkeypatch):
     assert "--cd '/work/dir'" in startup_cmd  # codex flag is -C/--cd, not --cwd
 
 
+def _mock_daemon_up(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.pane_socket_path",
+        lambda pane: Path(f"/home/.codex/app-server-control/hive-pane-{pane.replace('%', '')}.sock"),
+    )
+
+
+def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
+    # With a workspace, spawn asks the sidecar to bring the 2nd client online
+    # before codex starts, so it never has to late-join/resume.
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    connects: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_codex",
+        lambda workspace, pane: connects.append((workspace, pane)) or {"ok": True},
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+        workspace="/tmp/ws",
+    )
+
+    assert connects == [("/tmp/ws", "%0")]
+
+
+def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    connects: list = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_codex",
+        lambda workspace, pane: connects.append((workspace, pane)),
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+    )  # no workspace → no eager preconnect, lazy tick covers it
+
+    assert connects == []
+
+
 def test_spawn_codex_new_session_falls_back_when_daemon_fails(monkeypatch):
     # _setup_tmux_mocks makes spawn_daemon return None (daemon failed to bind).
     calls, _ = _setup_tmux_mocks(monkeypatch)

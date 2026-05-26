@@ -243,6 +243,18 @@ def test_pool_send_to_pane_turn_starts_when_idle(monkeypatch):
     assert sent == [("t1", "hi")]
 
 
+def test_pool_connect_true_when_client_established(monkeypatch):
+    pool = m.CodexClientPool()
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: object())
+    assert pool.connect("%1") is True
+
+
+def test_pool_connect_false_when_no_daemon(monkeypatch):
+    pool = m.CodexClientPool()
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: None)
+    assert pool.connect("%1") is False
+
+
 def test_runtime_for_returns_copy_not_reference():
     c = _bare_client()
     c._on_notification(

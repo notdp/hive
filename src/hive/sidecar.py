@@ -766,6 +766,17 @@ def request_ping(workspace: str) -> dict[str, Any] | None:
     return _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
 
 
+def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
+    """Ask the sidecar to bring a per-pane codex 2nd client online now.
+
+    Called at spawn time so the client is connected *before* codex creates its
+    thread — it then receives the full thread/started + tokenUsage broadcast
+    live, with no late-join resume. Best-effort: returns None when the sidecar
+    is down, and the lazy connect on the next runtime tick covers that case.
+    """
+    return _request_sidecar(workspace, {"action": "connect-codex", "pane": pane}, timeout=3.0)
+
+
 def _sidecar_identity_matches(
     response: dict[str, Any] | None,
     *,
@@ -2293,6 +2304,15 @@ def _handle_request(
     if action == "thread":
         try:
             response = _thread_payload(workspace, pending, str(request.get("msgId", "")))
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
+    if action == "connect-codex":
+        try:
+            from .adapters import codex_app_server
+            pane = str(request.get("pane") or "")
+            connected = bool(pane) and codex_app_server.connect_pane(pane)
+            response = {"ok": True, "connected": connected}
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
