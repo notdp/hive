@@ -211,6 +211,20 @@ class Agent:
         cmd_parts = ["exec", _shell_escape(bin_path)]
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
+            # A new codex session runs against a per-pane app-server daemon: hive
+            # starts the daemon (injecting this pane's TMUX_PANE so shell tools
+            # keep the right identity, sharing the real CODEX_HOME) and the TUI
+            # joins it via --remote. cwd is passed explicitly because Remote
+            # workspace mode drops config.cwd. Resume/fork stays embedded (below).
+            # If the daemon can't bind, fall through to a plain embedded codex.
+            if not session_id:
+                from .adapters import codex_app_server
+                if codex_app_server.spawn_daemon(pane_id):
+                    sock = codex_app_server.pane_socket_path(pane_id)
+                    cmd_parts.extend([
+                        "--remote", _shell_escape(f"unix://{sock}"),
+                        "--cd", _shell_escape(cwd),
+                    ])
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
@@ -290,7 +304,18 @@ class Agent:
     # --- Control ---
 
     def send(self, text: str) -> None:
-        """Send a prompt to the agent TUI."""
+        """Send a prompt to the agent.
+
+        hive-spawned codex delivers via the per-pane daemon's ``turn/start``
+        RPC, which never touches the composer draft. Embedded (manual) codex and
+        the other CLIs — or a daemon that rejects the turn (no thread yet, or a
+        turn already active) — fall back to keystroke injection.
+        """
+        if self.cli == "codex":
+            from .adapters import codex_app_server
+
+            if codex_app_server.send_to_pane(self.pane_id, text):
+                return
         _submit_interactive_text(self.pane_id, text, self.cli)
 
     def load_skill(self, skill_name: str) -> None:

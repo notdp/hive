@@ -1,0 +1,281 @@
+"""Unit tests for the per-pane codex app-server client (pure-logic layer).
+
+The socket transport (`_WSConn`) and live daemon (`spawn_daemon`) need a real
+unix socket bind, which is covered by the real-machine smoke, not here. These
+tests cover the state-mapping logic the reader thread drives.
+"""
+import threading
+import time
+
+import pytest
+
+from hive.adapters import codex_app_server as m
+
+pytestmark = pytest.mark.unit
+
+
+def _bare_client() -> m.CodexDaemonClient:
+    """A client without a socket connection, for state-logic tests."""
+    c = object.__new__(m.CodexDaemonClient)
+    c._state_lock = threading.Lock()
+    c._threads = {}
+    c._session_ids = {}
+    c._resume_cooldown = {}
+    return c
+
+
+def test_pane_socket_path_slugifies_pane_id():
+    assert m.pane_socket_path("%19").name == "hive-pane-19.sock"
+    assert m.pane_socket_path("%7").name == "hive-pane-7.sock"
+    assert m.pane_socket_path("").name == "hive-pane-default.sock"
+
+
+def test_pane_socket_path_under_app_server_control():
+    path = m.pane_socket_path("%1")
+    assert path.parent.name == "app-server-control"
+    # macOS unix socket paths cap at 104 bytes; keep headroom.
+    assert len(str(path)) < 104
+
+
+def test_apply_status_active_ready():
+    rt = m.ThreadRuntime()
+    m._apply_status(rt, {"type": "active", "activeFlags": []})
+    assert rt.busy
+    assert rt.input_state == "ready"
+    assert rt.turn_phase == "tool_open"
+
+
+def test_apply_status_active_waiting_on_user_input():
+    rt = m.ThreadRuntime()
+    m._apply_status(rt, {"type": "active", "activeFlags": ["waitingOnUserInput"]})
+    assert rt.input_state == "waiting_user"
+
+
+def test_apply_status_active_waiting_on_approval():
+    rt = m.ThreadRuntime()
+    m._apply_status(rt, {"type": "active", "activeFlags": ["waitingOnApproval"]})
+    assert rt.input_state == "waiting_user"
+
+
+def test_apply_status_idle():
+    rt = m.ThreadRuntime(busy=True)
+    m._apply_status(rt, {"type": "idle"})
+    assert not rt.busy
+    assert rt.input_state == "ready"
+    assert rt.turn_phase == "turn_closed"
+
+
+def test_apply_status_unknown_kind_preserves_prior_fields():
+    rt = m.ThreadRuntime(busy=True, input_state="ready", turn_phase="tool_open")
+    m._apply_status(rt, {"type": "systemError"})
+    assert rt.busy
+    assert rt.input_state == "ready"
+    assert rt.turn_phase == "tool_open"
+
+
+def test_thread_runtime_is_fresh():
+    assert m.ThreadRuntime(observed_at=time.time()).is_fresh()
+    stale = m.ThreadRuntime(observed_at=time.time() - m._RUNTIME_STALE_AFTER - 1)
+    assert not stale.is_fresh()
+
+
+def test_on_notification_turn_lifecycle():
+    c = _bare_client()
+    c._on_notification("turn/started", {"threadId": "t1", "turn": {"id": "turn-1"}})
+    rt = c.runtime_for("t1")
+    assert rt.busy
+    assert rt.active_turn_id == "turn-1"
+    assert rt.turn_phase == "tool_open"
+
+    c._on_notification("turn/completed", {"threadId": "t1"})
+    rt = c.runtime_for("t1")
+    assert not rt.busy
+    assert rt.active_turn_id is None
+    assert rt.input_state == "ready"
+
+
+def test_on_notification_status_changed():
+    c = _bare_client()
+    c._on_notification(
+        "thread/status/changed",
+        {"threadId": "t1", "status": {"type": "active", "activeFlags": []}},
+    )
+    assert c.runtime_for("t1").busy
+    c._on_notification(
+        "thread/status/changed", {"threadId": "t1", "status": {"type": "idle"}}
+    )
+    assert not c.runtime_for("t1").busy
+
+
+def test_on_notification_token_usage_uses_last_not_total():
+    c = _bare_client()
+    c._on_notification(
+        "thread/tokenUsage/updated",
+        {
+            "threadId": "t1",
+            "tokenUsage": {
+                "last": {"totalTokens": 1234},
+                "total": {"totalTokens": 999999},
+                "modelContextWindow": 200000,
+            },
+        },
+    )
+    rt = c.runtime_for("t1")
+    assert rt.tokens == 1234  # `last`, not cumulative `total`
+    assert rt.window == 200000
+
+
+def test_on_notification_ignores_missing_thread_id():
+    c = _bare_client()
+    c._on_notification("turn/started", {"turn": {"id": "x"}})
+    assert c._threads == {}
+
+
+def test_latest_runtime_picks_most_recently_observed():
+    c = _bare_client()
+    c._on_notification(
+        "thread/status/changed", {"threadId": "old", "status": {"type": "idle"}}
+    )
+    time.sleep(0.01)
+    c._on_notification(
+        "thread/status/changed",
+        {"threadId": "new", "status": {"type": "active", "activeFlags": []}},
+    )
+    rt = c.latest_runtime()
+    assert rt.busy  # `new` is active and most recently observed
+
+
+def test_latest_runtime_none_when_no_threads():
+    assert _bare_client().latest_runtime() is None
+
+
+def test_latest_thread_id_picks_most_recently_observed():
+    c = _bare_client()
+    c._on_notification(
+        "thread/status/changed", {"threadId": "old", "status": {"type": "idle"}}
+    )
+    time.sleep(0.01)
+    c._on_notification(
+        "thread/status/changed",
+        {"threadId": "new", "status": {"type": "active", "activeFlags": []}},
+    )
+    assert c.latest_thread_id() == "new"
+
+
+def test_latest_thread_id_none_when_no_threads():
+    assert _bare_client().latest_thread_id() is None
+
+
+def test_resume_caches_session_id_from_thread_metadata():
+    c = _bare_client()
+    c.call = lambda method, params=None, timeout=10.0: {
+        "result": {"thread": {"sessionId": "sess-uuid"}}
+    }
+    assert c.resume("t1") is True
+    assert c._session_ids["t1"] == "sess-uuid"
+
+
+def test_resume_returns_false_on_error():
+    c = _bare_client()
+    c.call = lambda *a, **k: {"__error__": "no rollout found"}
+    assert c.resume("t1") is False
+    assert "t1" not in c._session_ids
+
+
+def test_ensure_session_id_resumes_and_caches(monkeypatch):
+    c = _bare_client()
+    c._on_notification(
+        "thread/status/changed",
+        {"threadId": "t1", "status": {"type": "active", "activeFlags": []}},
+    )
+    resume_calls = []
+
+    def fake_call(method, params=None, timeout=10.0):
+        resume_calls.append(method)
+        return {"result": {"thread": {"sessionId": "sess-1"}}}
+
+    c.call = fake_call
+    assert c.ensure_session_id() == "sess-1"
+    assert resume_calls == ["thread/resume"]
+    # cached: a second lookup does not resume again
+    c.call = lambda *a, **k: pytest.fail("should not resume a second time")
+    assert c.ensure_session_id() == "sess-1"
+
+
+def test_ensure_session_id_none_without_thread():
+    assert _bare_client().ensure_session_id() is None
+
+
+def test_pool_send_to_pane_falls_back_when_thread_active(monkeypatch):
+    pool = m.CodexClientPool()
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def runtime_for(self, _tid):
+            return m.ThreadRuntime(busy=True)
+
+        def turn_start(self, *_a):
+            raise AssertionError("must not turn/start into an active turn")
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is False  # caller falls back to keystrokes
+
+
+def test_pool_send_to_pane_turn_starts_when_idle(monkeypatch):
+    pool = m.CodexClientPool()
+    sent = []
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def runtime_for(self, _tid):
+            return m.ThreadRuntime(busy=False)
+
+        def turn_start(self, tid, text):
+            sent.append((tid, text))
+            return {"result": {}}
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is True
+    assert sent == [("t1", "hi")]
+
+
+def test_runtime_for_returns_copy_not_reference():
+    c = _bare_client()
+    c._on_notification(
+        "thread/status/changed", {"threadId": "t1", "status": {"type": "idle"}}
+    )
+    snap = c.runtime_for("t1")
+    snap.busy = True
+    assert not c.runtime_for("t1").busy  # internal state untouched
+
+
+def test_pane_pidfile_path():
+    assert m.pane_pidfile_path("%19").name == "hive-pane-19.pid"
+    assert m.pane_pidfile_path("%19").parent.name == "app-server-control"
+
+
+def test_pane_from_socket_name_roundtrip():
+    assert m._pane_from_socket_name("hive-pane-19.sock") == "%19"
+    assert m._pane_from_socket_name("hive-pane-default.sock") is None
+    assert m._pane_from_socket_name("app-server-control.sock") is None
+    assert m._pane_from_socket_name("hive-pane-.sock") is None
+
+
+def test_list_daemon_panes_filters_to_hive_panes(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    ctrl = tmp_path / "app-server-control"
+    ctrl.mkdir()
+    (ctrl / "hive-pane-19.sock").touch()
+    (ctrl / "hive-pane-7.sock").touch()
+    (ctrl / "app-server-control.sock").touch()  # codex's own singleton, ignored
+    (ctrl / "hive-pane-default.sock").touch()  # non-pane, ignored
+    assert sorted(m.list_daemon_panes()) == ["%19", "%7"]
+
+
+def test_list_daemon_panes_missing_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert m.list_daemon_panes() == []
