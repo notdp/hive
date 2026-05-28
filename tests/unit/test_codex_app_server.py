@@ -182,6 +182,56 @@ def test_resume_returns_false_on_error():
     assert "t1" not in c._session_ids
 
 
+def test_resume_backfills_active_runtime_from_thread_status():
+    """Late-join recovery: resume must seed _threads from the thread's status so
+    latest_runtime() reports native busy/turnPhase instead of None (which would
+    drop the caller to the transcript path)."""
+    c = _bare_client()
+    c.call = lambda method, params=None, timeout=10.0: {
+        "result": {"thread": {"sessionId": "s", "status": {"type": "active", "activeFlags": []}}}
+    }
+    assert c.resume("t1") is True
+    rt = c.runtime_for("t1")
+    assert rt is not None and rt.busy
+    assert c.latest_runtime() is not None and c.latest_runtime().busy
+
+
+def test_resume_backfills_idle_runtime_from_thread_status():
+    c = _bare_client()
+    c.call = lambda *a, **k: {
+        "result": {"thread": {"sessionId": "s", "status": {"type": "idle"}}}
+    }
+    assert c.resume("t1") is True
+    rt = c.runtime_for("t1")
+    assert rt is not None and not rt.busy and rt.turn_phase == "turn_closed"
+
+
+def test_resume_without_status_still_caches_session_id():
+    c = _bare_client()
+    c.call = lambda *a, **k: {"result": {"thread": {"sessionId": "only-sid"}}}
+    assert c.resume("t1") is True
+    assert c._session_ids["t1"] == "only-sid"
+    assert c.runtime_for("t1") is None  # no status -> no runtime fabricated
+
+
+def test_attach_resumes_with_turns_included_for_token_replay():
+    """attach() is the late-join path; it must resume with excludeTurns=False so
+    the daemon replays persisted token usage (the cheap excludeTurns=True path
+    skips the replay, leaving context tokens unrecovered)."""
+    c = _bare_client()
+    c.loaded_list = lambda: ["t1"]
+    seen: dict = {}
+
+    def fake_resume(tid, *, exclude_turns=True):
+        seen["tid"] = tid
+        seen["exclude_turns"] = exclude_turns
+        return True
+
+    c.resume = fake_resume
+    c.attach()
+    assert seen == {"tid": "t1", "exclude_turns": False}
+
+
 def test_ensure_session_id_resumes_and_caches(monkeypatch):
     c = _bare_client()
     c._on_notification(
@@ -268,6 +318,13 @@ def test_runtime_for_returns_copy_not_reference():
 def test_pane_pidfile_path():
     assert m.pane_pidfile_path("%19").name == "hive-pane-19.pid"
     assert m.pane_pidfile_path("%19").parent.name == "app-server-control"
+
+
+def test_daemon_env_marks_native_pane(monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%old")
+    env = m._daemon_env_for_pane("%19")
+    assert env["TMUX_PANE"] == "%19"
+    assert env["HIVE_CODEX_PANE"] == "%19"
 
 
 def test_pane_from_socket_name_roundtrip():

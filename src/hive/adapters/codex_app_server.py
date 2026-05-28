@@ -2,12 +2,12 @@
 
 Each hive-spawned codex pane runs its own ``codex app-server --listen
 unix://<sock>`` daemon that shares the real CODEX_HOME. The daemon is started
-with ``TMUX_PANE=<pane>`` in its environment, so shell tools it spawns inherit
-the correct pane identity — codex copies the daemon process env into tool
-subprocesses (``inherit:All``) with no per-thread TMUX_PANE injection. The codex
-TUI in that pane connects with ``codex --remote unix://<sock> --cd <cwd>``;
-hive connects as a second client over the same socket for runtime signals and
-turn delivery.
+with ``TMUX_PANE=<pane>`` and ``HIVE_CODEX_PANE=<pane>`` in its environment, so
+shell tools it spawns inherit the correct pane identity marker — codex copies
+the daemon process env into tool subprocesses (``inherit:All``) with no
+per-thread TMUX_PANE injection. The codex TUI in that pane connects with
+``codex --remote unix://<sock> --cd <cwd>``; hive connects as a second client
+over the same socket for runtime signals and turn delivery.
 
 Why per-pane and not one shared daemon: a single shared daemon freezes one
 TMUX_PANE for every thread, so untagged codex shells silently impersonate the
@@ -78,6 +78,13 @@ def pane_pidfile_path(pane: str) -> Path:
     the daemon) can find and reap it when the pane dies.
     """
     return pane_socket_path(pane).with_suffix(".pid")
+
+
+def _daemon_env_for_pane(pane: str) -> dict[str, str]:
+    env = dict(os.environ)
+    env["TMUX_PANE"] = pane
+    env["HIVE_CODEX_PANE"] = pane
+    return env
 
 
 def _pane_from_socket_name(name: str) -> str | None:
@@ -370,11 +377,15 @@ class CodexDaemonClient:
         """Recover state for already-active threads (busy late-join).
 
         A client online at thread creation gets the full broadcast; this covers
-        the late-join case by resuming each loaded thread once. Resuming an
-        idle, not-yet-rolled-out thread fails with `no rollout found` — harmless.
+        the late-join case by resuming each loaded thread once. ``excludeTurns``
+        is False here so the daemon also replays the persisted token usage as a
+        ``thread/tokenUsage/updated`` notification (the cheap resume path skips
+        it) — that is the only way a late client recovers context tokens without
+        waiting for the next live turn. Resuming an idle, not-yet-rolled-out
+        thread fails with `no rollout found` — harmless.
         """
         for tid in self.loaded_list():
-            self.resume(tid)
+            self.resume(tid, exclude_turns=False)
 
     def thread_list(self, cwd: str) -> list[dict]:
         res = self.call("thread/list", {"cwd": cwd})
@@ -384,20 +395,32 @@ class CodexDaemonClient:
         res = self.call("thread/loaded/list", {})
         return (res.get("result") or {}).get("data") or [] if "result" in res else []
 
-    def resume(self, thread_id: str) -> bool:
-        res = self.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+    def resume(self, thread_id: str, *, exclude_turns: bool = True) -> bool:
+        res = self.call("thread/resume", {"threadId": thread_id, "excludeTurns": exclude_turns})
         result = res.get("result")
         if not isinstance(result, dict):
             return False
-        # thread/resume returns the full Thread, whose sessionId is the transcript
-        # session id (the rollout file's UUID). Cache it: this is the reliable
-        # source, vs lsof which the daemon does not always expose.
+        # thread/resume returns the full Thread. Two things we harvest from it:
         thread = result.get("thread")
-        if isinstance(thread, dict):
+        if not isinstance(thread, dict):
+            return True
+        with self._state_lock:
+            # 1) sessionId — the transcript session id (rollout UUID); the
+            #    reliable source vs lsof, which the daemon does not always expose.
             sid = thread.get("sessionId")
             if sid:
-                with self._state_lock:
-                    self._session_ids[thread_id] = str(sid)
+                self._session_ids[thread_id] = str(sid)
+            # 2) status — the thread's current ThreadStatus
+            #    ({"type": "idle"|"active"|..., "activeFlags": [...]}). Backfill it
+            #    into _threads so a *late-joined* client (one that missed the live
+            #    status broadcast) still reports native busy/turnPhase. Without
+            #    this, latest_runtime() returns None and the caller falls back to
+            #    transcript reverse-engineering (turnPhase=unknown_evidence).
+            status = thread.get("status")
+            if isinstance(status, dict):
+                rt = self._threads.setdefault(thread_id, ThreadRuntime())
+                rt.observed_at = time.time()
+                _apply_status(rt, status)
         return True
 
     def turn_start(self, thread_id: str, text: str) -> dict:
@@ -462,8 +485,7 @@ def spawn_daemon(
             sock.unlink()  # stale socket from a dead daemon
         except OSError:
             pass
-    env = dict(os.environ)
-    env["TMUX_PANE"] = pane
+    env = _daemon_env_for_pane(pane)
     try:
         proc = subprocess.Popen(
             [codex_bin, "app-server", "--listen", f"unix://{sock}"],
