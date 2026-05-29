@@ -322,6 +322,7 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
 # model; an unmapped model returns None rather than guessing.
 _CLAUDE_MODEL_WINDOW = {
     "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
 }
 
 

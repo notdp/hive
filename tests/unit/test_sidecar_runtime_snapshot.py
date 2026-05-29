@@ -448,6 +448,10 @@ def test_agent_runtime_payload_includes_context_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
     monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _pane_id: {"busy": False})
     monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="codex"))
+    # Pin the app-server probe off so the codex transcript path under test runs
+    # deterministically; otherwise a live codex daemon on pane "%1" makes the
+    # app-server branch return early and this test flakes by environment.
+    monkeypatch.setattr(sidecar, "_codex_app_server_runtime", lambda _pane_id: None)
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_args, **_kwargs: "")
     monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "codex" else None)
     monkeypatch.setattr(
