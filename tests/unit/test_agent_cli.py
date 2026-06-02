@@ -9,6 +9,8 @@ def test_normalize_command_strips_path_and_aliases():
     assert agent_cli.normalize_command("/usr/local/bin/claude") == "claude"
     assert agent_cli.normalize_command("claude-code") == "claude"
     assert agent_cli.normalize_command("CODEX") == "codex"
+    assert agent_cli.normalize_command("claude.exe") == "claude"
+    assert agent_cli.normalize_command("/opt/homebrew/bin/claude.exe") == "claude"
     assert agent_cli.normalize_command("") == ""
 
 
@@ -51,6 +53,21 @@ def test_detect_profile_for_pane_falls_back_to_tty_processes(monkeypatch):
 
     assert profile is not None
     assert profile.name == "codex"
+
+
+def test_detect_profile_for_pane_claude_exe_not_misled_by_codex_title(monkeypatch):
+    # Regression: macOS Claude Code reports comm "claude.exe". The command probe
+    # must resolve it to claude so detection never falls back to the pane title,
+    # which would misclassify a claude pane whose title mentions another CLI.
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "claude.exe")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "✳ Research Codex app server")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
+
+    profile = agent_cli.detect_profile_for_pane("%1")
+
+    assert profile is not None
+    assert profile.name == "claude"
 
 
 def test_resolve_session_id_for_pane_dispatches_to_adapter(monkeypatch):
@@ -98,6 +115,57 @@ def test_resolve_session_id_for_pane_returns_none_when_no_profile(monkeypatch):
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
 
     assert agent_cli.resolve_session_id_for_pane("%2") is None
+
+
+def test_resolve_model_for_pane_codex_falls_back_to_app_server(monkeypatch, tmp_path):
+    """Born-connected codex: lsof can't see the daemon-held jsonl, so model
+    resolution must fall back to the app-server session id."""
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("")
+
+    class FakeMeta:
+        model = "gpt-5.5"
+
+    class FakeCodexAdapter:
+        def resolve_current_session_id(self, _pane_id):
+            return None  # lsof miss — daemon holds the jsonl, not the pane tree
+
+        def find_session_file(self, session_id, *, cwd=None):
+            return transcript if session_id == "sess-app" else None
+
+        def read_meta(self, _path):
+            return FakeMeta()
+
+    monkeypatch.setattr(
+        "hive.agent_cli.adapters.get",
+        lambda name: FakeCodexAdapter() if name == "codex" else None,
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane",
+        lambda pane: "sess-app" if pane == "%1" else None,
+    )
+    monkeypatch.setattr("hive.agent_cli.tmux.display_value", lambda *_a, **_kw: "/work")
+
+    assert agent_cli.resolve_model_for_pane("%1", cli_name="codex") == "gpt-5.5"
+
+
+def test_resolve_model_for_pane_codex_no_daemon_returns_current(monkeypatch):
+    """Manual/embedded codex (no daemon socket) keeps the caller's default."""
+
+    class FakeCodexAdapter:
+        def resolve_current_session_id(self, _pane_id):
+            return None
+
+    monkeypatch.setattr(
+        "hive.agent_cli.adapters.get",
+        lambda name: FakeCodexAdapter() if name == "codex" else None,
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane",
+        lambda _pane: None,
+    )
+
+    assert agent_cli.resolve_model_for_pane("%9", cli_name="codex", current_model="") == ""
 
 
 def test_member_role_for_pane_returns_agent_when_profile_detected(monkeypatch):

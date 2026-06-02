@@ -17,6 +17,11 @@ SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "cs
 CLI_ALIASES = {
     "claude-code": "claude",
     "claudecode": "claude",
+    # macOS Claude Code reports its process comm as "claude.exe"; without this
+    # the command probe misses and detection falls back to the pane title,
+    # which misclassifies a claude pane whose title happens to contain another
+    # CLI's name (e.g. "Research Codex app server" -> codex).
+    "claude.exe": "claude",
 }
 
 # Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
@@ -349,6 +354,14 @@ def resolve_model_for_pane(
     if not adapter:
         return current_model
     session_id = adapter.resolve_current_session_id(pane_id)
+    if not session_id and profile.name == "codex":
+        # Born-connected codex runs a per-pane app-server daemon; the session
+        # jsonl is held by that daemon, not by any process in the pane's tty
+        # tree, so the lsof-based resolver above can never see it. Ask the
+        # daemon directly. Manual/embedded codex has no daemon and returns None.
+        from .adapters import codex_app_server
+
+        session_id = codex_app_server.session_id_for_pane(pane_id)
     if not session_id:
         return current_model
     cwd_hint = tmux.display_value(pane_id, "#{pane_current_path}")

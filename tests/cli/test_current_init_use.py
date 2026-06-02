@@ -266,6 +266,12 @@ def test_init_registers_current_unbound_pane_into_existing_team(
         "hive.cli.detect_profile_for_pane",
         lambda pane_id: type("P", (), {"name": "codex"})() if pane_id == "%2" else None,
     )
+    # %2 is a daemon-backed codex (born-connected): the init gate must let it
+    # join. A live socket short-circuits _require_codex_daemon_backed.
+    sock = tmp_path / "hive-pane-2.sock"
+    sock.touch()
+    monkeypatch.setattr("hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock)
+    monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
 
     result = runner.invoke(cli, ["init"])
 

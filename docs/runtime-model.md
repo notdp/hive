@@ -97,6 +97,10 @@ Source — `busy=true` when **either** of two branches holds:
 
 Combined into ``sidecar._pane_is_truly_busy``.
 
+Codex override: a daemon-backed (born-connected) codex pane reports `busy`
+from its per-pane app-server instead — both branches above are still computed
+but then replaced for that pane. See "Codex Native Runtime (app-server source)".
+
 Fail-open: if the transcript path can't be resolved (non-agent pane, no
 session yet, stat error), the output branch returns true on monitor
 activity alone — idle-notify must never silently disappear for panes the
@@ -117,6 +121,8 @@ Notes:
 Source:
 
 - transcript gate inspection via `check_input_gate()`
+- codex app-server `status.activeFlags` for a daemon-backed codex pane
+  (overrides the transcript gate for that pane — see "Codex Native Runtime")
 
 Current values:
 
@@ -138,6 +144,8 @@ Important consumer:
 Source:
 
 - transcript/JCL probe (last observed transcript state)
+- codex app-server thread status for a daemon-backed codex pane (overrides the
+  transcript probe for that pane — see "Codex Native Runtime")
 
 Current values:
 
@@ -208,6 +216,52 @@ Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 - `assistant_text_idle` — assistant text without `tool_use`
 
 Droid's simple message-shape probe does not currently emit `task_closed` / `turn_closed`.
+
+## Codex Native Runtime (app-server source)
+
+A born-connected codex pane — hive-spawned, or launched through `hive codex` /
+the `hive shell-init` shell function — runs a per-pane `codex app-server`
+daemon. Hive connects as a second client over that pane's unix socket and reads
+`busy` / `inputState` / `turnPhase` / context **natively** from the daemon's
+notification stream, instead of reverse-engineering them from the transcript.
+The emitted payload is tagged `_runtimeSource: codex_app_server`.
+
+This path is taken only when a live per-pane daemon answers. An embedded
+(manually launched, non-daemon) codex has no socket and falls through to the
+transcript/JCL evidence above; `docs/transcript-signals.md` describes that
+fallback.
+
+State is event-sourced from app-server notifications and stays valid until the
+next event — there is no time-based staleness gate. The relevant notifications
+are `thread/status/changed`, `turn/started`, `turn/completed`, and
+`thread/tokenUsage/updated`.
+
+Field mapping (notification → runtime field):
+
+- `busy`
+  - `true` — `turn/started`, or `thread/status/changed` with `status.type=active`
+  - `false` — `turn/completed`, or `status.type=idle`
+- `turnPhase`
+  - `tool_open` — any `active` turn. The native path does not subdivide active
+    phases (no `tool_result_pending_reply` / `user_prompt_pending` split); it
+    trades transcript-tail granularity for an authoritative busy edge.
+  - `turn_closed` — `idle` / `turn/completed`
+  - `unknown_evidence` — before the first event; `notLoaded` / `systemError`
+    leave the prior phase unchanged
+- `inputState`
+  - `waiting_user` — `active` whose `status.activeFlags` contain
+    `waitingOnApproval` or `waitingOnUserInput`; emitted with
+    `inputReason=app_server_active_flag`
+  - `ready` — any other `active`, or `idle`
+- context
+  - `context.tokens` / `context.window` from `thread/tokenUsage/updated`:
+    `tokenUsage.last.totalTokens` and `modelContextWindow`. `last` is the
+    current context size; the cumulative `total` is deliberately ignored (it
+    grows past the window across turns).
+
+`sessionId` for a daemon-backed pane resolves from app-server thread metadata
+(`thread.sessionId` via `thread/resume`), with an lsof-on-daemon-pid fallback.
+It stays `unresolved` until the thread has produced activity.
 
 ## Root Send Protocol
 

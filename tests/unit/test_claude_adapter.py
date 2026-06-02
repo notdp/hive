@@ -166,6 +166,32 @@ def test_extract_context_snapshot_maps_opus_4_7_to_1m_window(tmp_path):
     assert snapshot.window == 1_000_000
 
 
+def test_extract_context_snapshot_maps_opus_4_8_to_1m_window(tmp_path):
+    path = tmp_path / "claude.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-05-14T00:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-8",
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_read_input_tokens": 100_000,
+                    },
+                },
+            },
+        ],
+    )
+
+    snapshot = adapters.get("claude").extract_context_snapshot(path)
+
+    assert snapshot is not None
+    assert snapshot.window == 1_000_000
+
+
 def test_extract_context_snapshot_unknown_model_window_is_none(tmp_path):
     path = tmp_path / "claude.jsonl"
     _write_jsonl(

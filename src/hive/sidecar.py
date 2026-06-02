@@ -766,6 +766,17 @@ def request_ping(workspace: str) -> dict[str, Any] | None:
     return _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
 
 
+def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
+    """Ask the sidecar to bring a per-pane codex 2nd client online now.
+
+    Called at spawn time so the client is connected *before* codex creates its
+    thread — it then receives the full thread/started + tokenUsage broadcast
+    live, with no late-join resume. Best-effort: returns None when the sidecar
+    is down, and the lazy connect on the next runtime tick covers that case.
+    """
+    return _request_sidecar(workspace, {"action": "connect-codex", "pane": pane}, timeout=3.0)
+
+
 def _sidecar_identity_matches(
     response: dict[str, Any] | None,
     *,
@@ -1436,6 +1447,63 @@ def _doctor_payload(
     return diag
 
 
+def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
+    """Native codex runtime from the per-pane daemon, or None if no daemon.
+
+    hive-spawned codex panes run their own app-server daemon; reading
+    busy/turn/context from it is both accurate and cheap versus tailing the
+    transcript. Returns None for embedded (manual) codex so the caller falls
+    back to the transcript path.
+    """
+    from .adapters import codex_app_server
+
+    rt = codex_app_server.runtime_for_pane(pane_id)
+    if rt is None:
+        return None
+    input_state = rt.input_state or "ready"
+    fields: dict[str, Any] = {
+        "busy": rt.busy,
+        "turnPhase": rt.turn_phase,
+        "inputState": input_state,
+        "inputReason": "" if input_state != "waiting_user" else "app_server_active_flag",
+        "_runtimeSource": "codex_app_server",
+    }
+    if rt.tokens is not None:
+        fields["context"] = {
+            "tokens": rt.tokens,
+            "window": rt.window,
+            "observedAt": _now_iso(),
+            "source": "codex_app_server",
+        }
+    return fields
+
+
+def _codex_session_id_best_effort(
+    pane_id: str, *, runtime_snapshot: RuntimeSnapshot | None
+) -> str:
+    """Codex transcript session id without reading the transcript.
+
+    Prefers a fresh snapshot, then the daemon's app-server thread metadata
+    (``thread.sessionId`` from ``thread/resume``), falling back to lsof on the
+    daemon pid. Returns 'unresolved' when nothing resolves.
+    """
+    from .adapters import codex_app_server
+
+    if (
+        runtime_snapshot is not None
+        and runtime_snapshot.sessionId.value
+        and runtime_snapshot.sessionId.is_fresh()
+    ):
+        return str(runtime_snapshot.sessionId.value)
+    sid = codex_app_server.session_id_for_pane(pane_id)
+    if sid:
+        _RUNTIME_SNAPSHOTS.update_session_id(
+            pane_id, sid, source="codex_app_server_session"
+        )
+        return sid
+    return "unresolved"
+
+
 def _agent_runtime_payload(
     pane_id: str,
     *,
@@ -1476,6 +1544,19 @@ def _agent_runtime_payload(
         runtime["inputState"] = "unknown"
         runtime["inputReason"] = "no_session"
         return runtime
+
+    # hive-spawned codex runs a per-pane app-server daemon: read native runtime
+    # signals (busy / turn / context) over the socket instead of reverse-
+    # engineering them from the transcript. manual codex (embedded, no daemon
+    # socket) falls through to the transcript path below.
+    if profile.name == "codex":
+        app_runtime = _codex_app_server_runtime(pane_id)
+        if app_runtime is not None:
+            runtime.update(app_runtime)
+            runtime["sessionId"] = _codex_session_id_best_effort(
+                pane_id, runtime_snapshot=runtime_snapshot
+            )
+            return runtime
 
     if (
         runtime_snapshot is not None
@@ -2226,6 +2307,15 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
+    if action == "connect-codex":
+        try:
+            from .adapters import codex_app_server
+            pane = str(request.get("pane") or "")
+            connected = bool(pane) and codex_app_server.connect_pane(pane)
+            response = {"ok": True, "connected": connected}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
     if action == "status":
         message_id = request.get("msgId", "")
         if message_id in pending:
@@ -2304,6 +2394,23 @@ def _serve_requests(
             return False
 
 
+def _cleanup_dead_codex_daemons() -> None:
+    """Reap per-pane codex app-server daemons whose pane has died.
+
+    The daemon is started at spawn time (agent.py) with ``start_new_session`` so
+    it outlives the short-lived CLI process; the long-lived sidecar owns
+    cleanup. Scan the on-disk sockets and, for any whose pane is gone, kill the
+    daemon and remove its socket + pidfile. Independent of team bindings, so it
+    also reaps orphans from crashed spawns.
+    """
+    from . import tmux
+    from .adapters import codex_app_server
+
+    for pane in codex_app_server.list_daemon_panes():
+        if not tmux.is_pane_alive(pane):
+            codex_app_server.kill_pane_daemon(pane)
+
+
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
     from . import tmux
 
@@ -2316,6 +2423,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     code_reexec_state: dict[str, Any] = {}
     last_window_check = 0.0
     last_owner_check = 0.0
+    last_daemon_cleanup = 0.0
     owner_token = f"{os.getpid()}:{time.monotonic_ns()}"
     notify_debug.emit(
         workspace,
@@ -2351,6 +2459,10 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 last_window_check = now
                 if not _is_tmux_window_alive(tmux_window_id):
                     return
+
+            if now - last_daemon_cleanup >= 30.0:
+                last_daemon_cleanup = now
+                _cleanup_dead_codex_daemons()
 
             if now - last_owner_check >= SIDECAR_OWNER_CHECK_SECONDS:
                 last_owner_check = now

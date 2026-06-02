@@ -31,6 +31,9 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
     monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: None)
+    # Default: no per-pane codex daemon, so tests never attempt a real socket
+    # bind. Tests that exercise the --remote path override this explicitly.
+    monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
 
     return calls, tags
 
@@ -385,6 +388,161 @@ def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
     assert "sess-abc" in startup_cmd
     # codex fork does not take --model; model flag should not appear
     assert "-m" not in startup_cmd
+
+
+def test_spawn_codex_new_session_uses_remote_daemon(monkeypatch):
+    from pathlib import Path
+
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    # Daemon comes up: spawn_daemon returns True; socket path is fixed.
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.pane_socket_path",
+        lambda pane: Path(f"/home/.codex/app-server-control/hive-pane-{pane.replace('%', '')}.sock"),
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+    )
+
+    startup_cmd = calls[0]
+    assert "--remote" in startup_cmd
+    assert "unix:///home/.codex/app-server-control/hive-pane-0.sock" in startup_cmd
+    assert "--cd '/work/dir'" in startup_cmd  # codex flag is -C/--cd, not --cwd
+
+
+def _mock_daemon_up(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.pane_socket_path",
+        lambda pane: Path(f"/home/.codex/app-server-control/hive-pane-{pane.replace('%', '')}.sock"),
+    )
+
+
+def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
+    # With a workspace, spawn asks the sidecar to bring the 2nd client online
+    # before codex starts, so it never has to late-join/resume.
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    connects: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_codex",
+        lambda workspace, pane: connects.append((workspace, pane)) or {"ok": True},
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+        workspace="/tmp/ws",
+    )
+
+    assert connects == [("/tmp/ws", "%0")]
+
+
+def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    connects: list = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_codex",
+        lambda workspace, pane: connects.append((workspace, pane)),
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+    )  # no workspace → no eager preconnect, lazy tick covers it
+
+    assert connects == []
+
+
+def test_spawn_codex_new_session_falls_back_when_daemon_fails(monkeypatch):
+    # _setup_tmux_mocks makes spawn_daemon return None (daemon failed to bind).
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+    )
+
+    startup_cmd = calls[0]
+    assert "codex" in startup_cmd
+    assert "--remote" not in startup_cmd  # embedded fallback, no daemon
+    assert "--cwd" not in startup_cmd
+
+
+def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    started: list[object] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.spawn_daemon",
+        lambda *a, **k: started.append(a) or True,
+    )
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+        session_id="sess-abc",
+    )
+
+    startup_cmd = calls[0]
+    assert "fork" in startup_cmd and "sess-abc" in startup_cmd
+    assert "--remote" not in startup_cmd  # resume stays embedded
+    assert started == []  # daemon not started on resume
+
+
+def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda pane, text: sent.append((pane, text)) or True,
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert sent == [("%3", "hi")]
+    assert submitted == []  # no keystroke fallback when daemon accepts
+
+
+def test_send_codex_falls_back_to_keystrokes_when_daemon_rejects(monkeypatch):
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: False
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert len(submitted) == 1  # fell back to keystroke injection
+
+
+def test_send_claude_never_uses_codex_daemon(monkeypatch):
+    daemon_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda *a: daemon_calls.append(a) or True,
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert daemon_calls == []  # codex daemon path not taken for claude
+    assert len(submitted) == 1
 
 
 def test_spawn_claude_skips_droid_session_detection(monkeypatch):

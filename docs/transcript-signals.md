@@ -112,6 +112,13 @@ Both map to:
 
 ## Codex JCL / Event JSONL
 
+> Applies to **embedded** codex only. A daemon-backed (born-connected) codex
+> pane is read natively over its per-pane app-server socket, so its
+> `busy` / `inputState` / `turnPhase` do **not** come from the transcript
+> signals below — see "Codex Native Runtime (app-server source)" in
+> `docs/runtime-model.md`. The signals here are the fallback for a codex with
+> no live daemon.
+
 Hive treats Codex session logs as JCL-like event JSONL and looks at:
 
 - top-level `type`

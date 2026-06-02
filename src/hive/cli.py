@@ -112,7 +112,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -625,7 +625,47 @@ def _stderr_is_interactive() -> bool:
 
 # Subcommands that must keep working even when the hive skill is stale —
 # they are the recovery/diagnostic paths the user needs to fix the drift.
-_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin"}
+_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex"}
+_CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
+    "codex",
+    "config",
+    "current",
+    "doctor",
+    "inject",
+    "plugin",
+    "shell-init",
+    "status",
+    "status-set",
+    "status-show",
+    "statuses",
+    "wait-status",
+}
+
+
+def _codex_native_pane_from_env() -> str:
+    return os.environ.get("HIVE_CODEX_PANE", "").strip()
+
+
+def _is_codex_tool_env() -> bool:
+    return bool(os.environ.get("CODEX_THREAD_ID", "").strip())
+
+
+def _codex_relaunch_message() -> str:
+    return (
+        "this codex isn't daemon-backed — hive runtime is degraded.\n"
+        "make every future codex native (run once, any shell):\n"
+        "  grep -q 'hive shell-init' ~/.zshrc || "
+        "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
+        "then exit this codex (Ctrl-C twice) and run: hive codex resume"
+    )
+
+
+def _require_codex_native(invoked: str | None) -> None:
+    if invoked in _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS:
+        return
+    if _codex_native_pane_from_env() or not _is_codex_tool_env():
+        return
+    _fail(_codex_relaunch_message())
 
 
 def _fail_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
@@ -653,6 +693,7 @@ def cli(ctx: click.Context):
         return
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
+    _require_codex_native(ctx.invoked_subcommand)
     _fail_if_current_pane_hive_skill_is_stale(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
@@ -1292,6 +1333,7 @@ def _attach_peer_to_team(
         cli=peer_cli,
         model=peer_model,
         skill="hive",
+        workspace=workspace,
     )
     t.agents[peer_name] = peer_agent
     tmux.set_pane_option(peer_agent.pane_id, "hive-group", "peer")
@@ -1353,6 +1395,52 @@ def _register_existing_pane(
     return role, terminal_name, terminal
 
 
+def _require_codex_daemon_backed(pane: str) -> None:
+    """Refuse to let an embedded (non-daemon) codex join; point to the fix.
+
+    A manually-launched bare codex runs its app-server embedded, so hive can
+    only reverse-engineer state from the transcript — never read native runtime.
+    Rather than register a degraded member, stop here and tell the user how to
+    relaunch it daemon-backed; ``hive codex resume`` preserves the session.
+    """
+    native_pane = _codex_native_pane_from_env()
+    if native_pane:
+        pane = native_pane
+        from .adapters import codex_app_server
+
+        sock = codex_app_server.pane_socket_path(pane)
+        if sock.exists() and codex_app_server.probe_socket(str(sock)):
+            return
+        _fail(_codex_relaunch_message())
+    if _is_codex_tool_env():
+        _fail(_codex_relaunch_message())
+    if not pane:
+        return
+    profile = detect_profile_for_pane(pane)
+    if not profile or profile.name != "codex":
+        return
+    from .adapters import codex_app_server
+
+    sock = codex_app_server.pane_socket_path(pane)
+    if sock.exists() and codex_app_server.probe_socket(str(sock)):
+        return  # already daemon-backed (born-connected / hive-spawned) — fine
+    from .adapters.codex import CodexAdapter
+
+    sid = CodexAdapter().resolve_current_session_id(pane) or ""
+    resume = f"hive codex resume {sid}" if sid else "hive codex resume"
+    _fail(
+        "this codex is running embedded; hive needs it daemon-backed for native "
+        "runtime, so it can't join yet.\n"
+        "make every future codex native (run once, any shell):\n"
+        "  grep -q 'hive shell-init' ~/.zshrc || "
+        "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
+        "for this session now (your session is preserved):\n"
+        "  1) exit codex: press Ctrl-C (twice)\n"
+        f"  2) run: {resume}\n"
+        "then re-run /hive."
+    )
+
+
 @cli.command("init")
 @click.option("--name", "-n", default="", help="Team name (default: tmux session name)")
 @click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
@@ -1370,6 +1458,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
     window_id = tmux.get_current_window_id() or ""
     window_target = tmux.get_current_window_target()
     current_pane = tmux.get_current_pane_id()
+    _require_codex_daemon_backed(current_pane or "")
     existing = _discover_tmux_binding()
     if existing.get("team"):
         click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
@@ -3375,6 +3464,164 @@ def plugin_disable(name: str, json_output: bool) -> None:
         click.echo(_render_plugin_mutation_result("disabled", payload))
     except ValueError as e:
         _fail(str(e))
+
+
+# --- codex managed launch ---
+
+# codex subcommands that are not an interactive TUI launch: hive leaves these
+# completely untouched (raw codex). Everything else (no subcommand, a bare
+# [PROMPT], or `resume`/`fork`) is an interactive launch we bind to a per-pane
+# daemon so hive can read its native runtime. Kept in sync with `codex --help`.
+_CODEX_PASSTHROUGH_SUBCOMMANDS = (
+    "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server",
+    "app-server", "remote-control", "app", "completion", "update", "doctor",
+    "sandbox", "debug", "apply", "a", "cloud", "exec-server", "features", "help",
+    "--help", "-h", "--version", "-V",
+)
+
+# Global codex options that consume the following token as their value, so the
+# subcommand scan does not mistake that value for the subcommand. `--opt=value`
+# and `-Cvalue` are self-contained and handled separately.
+_CODEX_VALUE_OPTS = frozenset({
+    "-c", "--config", "-m", "--model", "-C", "--cd", "--remote",
+    "--remote-auth-token-env", "--enable", "--disable", "-p", "--profile",
+    "-a", "--ask-for-approval", "-s", "--sandbox",
+})
+
+
+def _codex_subcommand(args: list[str]) -> str | None:
+    """First non-option token in `args` — codex's subcommand, if any.
+
+    codex accepts global options before the subcommand (`codex [OPTIONS]
+    <COMMAND>`), so checking only `args[0]` misses e.g. `codex -c k=v exec …`.
+    Skip option tokens (and the value of value-taking options) to find the real
+    subcommand / prompt. Conservative: an unknown option is treated as a flag,
+    which at worst leaves an interactive launch managed (the safe default).
+    """
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("-"):
+            i += 2 if (a in _CODEX_VALUE_OPTS and "=" not in a) else 1
+            continue
+        return a
+    return None
+
+
+def _exec_codex_managed(args: list[str]) -> None:
+    """Replace this process with codex, bound to a per-pane app-server daemon.
+
+    Born-connected path for a user-launched codex: start (or reuse) the pane's
+    daemon, then exec ``codex --remote unix://<sock> --cd <cwd> <args>`` so the
+    TUI talks to the daemon from the first thread — hive reads native runtime
+    over the same socket, no restart and no transcript reverse-engineering.
+
+    Degrades to raw ``codex`` (embedded, status quo) whenever the managed path
+    cannot apply: outside tmux, an explicit ``--remote`` already given, or the
+    daemon failing to bind. The caller never ends up worse than plain codex.
+    """
+    from .adapters import codex_app_server
+
+    def _raw() -> None:
+        os.execvp("codex", ["codex", *args])
+
+    pane = os.environ.get("TMUX_PANE") or (tmux.get_current_pane_id() or "")
+    if not pane or not tmux.is_inside_tmux():
+        _raw()  # hive needs a tmux pane to bind a daemon to
+    if _codex_subcommand(args) in _CODEX_PASSTHROUGH_SUBCOMMANDS:
+        _raw()  # a management subcommand, not an interactive TUI launch
+    if any(a == "--remote" or a.startswith("--remote=") for a in args):
+        _raw()  # caller already chose an endpoint
+    if not codex_app_server.spawn_daemon(pane):
+        _raw()  # daemon would not bind — fall back to embedded codex
+    sock = codex_app_server.pane_socket_path(pane)
+    # -c check_for_update_on_startup=false mirrors the hive-spawned path so a
+    # managed launch never drops the user into codex's npm self-update prompt.
+    argv = ["codex", "-c", "check_for_update_on_startup=false", "--remote", f"unix://{sock}"]
+    if not _codex_args_set_cwd(args):
+        argv += ["--cd", os.getcwd()]
+    argv += args
+    os.execvp("codex", argv)
+
+
+def _codex_args_set_cwd(args: list[str]) -> bool:
+    """True when the user already passed codex's cwd flag (-C / --cd, any form)."""
+    return any(
+        a == "--cd" or a.startswith("--cd=") or a.startswith("-C") for a in args
+    )
+
+
+@cli.command(
+    "codex",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.pass_context
+def codex_cmd(ctx: click.Context):
+    """Launch codex bound to a per-pane app-server daemon (hive-managed).
+
+    Usually invoked through the `hive shell-init` shell function rather than by
+    hand; all arguments are forwarded to codex. Replaces the current process
+    with codex and never returns on success.
+    """
+    _exec_codex_managed(list(ctx.args))
+
+
+_SHELL_INIT_POSIX = """\
+# hive codex integration — bind interactive codex launches to a per-pane daemon.
+# Bypass anytime with `command codex`. Edit/remove by deleting this function.
+codex() {
+  if [ -z "$TMUX" ]; then command codex "$@"; return; fi
+  case "$1" in
+    %(passthrough)s)
+      command codex "$@"; return ;;
+  esac
+  hive codex "$@" || command codex "$@"
+}
+"""
+
+_SHELL_INIT_FISH = """\
+# hive codex integration — bind interactive codex launches to a per-pane daemon.
+# Bypass anytime with `command codex`.
+function codex
+    if test -z "$TMUX"
+        command codex $argv
+        return
+    end
+    switch "$argv[1]"
+        case %(passthrough)s
+            command codex $argv
+            return
+    end
+    hive codex $argv; or command codex $argv
+end
+"""
+
+
+@cli.command("shell-init")
+@click.argument("shell", required=False, default="")
+def shell_init_cmd(shell: str):
+    """Print the codex shell integration for your shell.
+
+    Add to your shell rc to make interactive `codex` launches hive-managed:
+
+    \b
+      # ~/.zshrc or ~/.bashrc
+      eval "$(hive shell-init zsh)"
+      # ~/.config/fish/config.fish
+      hive shell-init fish | source
+
+    The function only acts inside tmux on interactive launches; management
+    subcommands and `command codex` pass straight through to real codex.
+    """
+    shell = (shell or os.path.basename(os.environ.get("SHELL", "") or "zsh")).strip()
+    passthrough = " ".join(_CODEX_PASSTHROUGH_SUBCOMMANDS)
+    if shell == "fish":
+        click.echo(_SHELL_INIT_FISH % {"passthrough": passthrough}, nl=False)
+    else:
+        # zsh and bash share POSIX function syntax; case patterns use `|`.
+        click.echo(_SHELL_INIT_POSIX % {"passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS)}, nl=False)
 
 
 # --- Terminal commands ---

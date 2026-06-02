@@ -14,6 +14,13 @@ def _isolate_notify_debug_global_log(tmp_path, monkeypatch):
     monkeypatch.setattr(notify_debug, "_GLOBAL_LOG", tmp_path / "notify-debug-isolation.jsonl")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_codex_tool_env(monkeypatch):
+    """Prevent the host Codex tool env from leaking into CLI tests."""
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("HIVE_CODEX_PANE", raising=False)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
