@@ -1,6 +1,6 @@
 ---
 name: gang-orch
-description: GANG orchestrator skill. 你是 orch,编排 gang 闭环 — 拆 feature / 派 peer / 收 verdict / 翻 board / 集成验 / 向 human 汇报。
+description: GANG orchestrator skill. 你是 orch,编排 gang 闭环 — 拆 feature / 派 peer / 收 verdict / 集成验 / 向 human 汇报。
 disable-model-invocation: true
 ---
 
@@ -50,9 +50,9 @@ hive team
   - spawn-peer 出生即 `<gang>-<feature>-running`(`<gang>-pending` 那步已省);rename 从 DONE / fail 才开始动
 - **worker 的汇报链止于 validator**(worker 完成后 handoff validator;orch 与 worker 之间没有直接消息链)
 - 首轮由你派 verify 指令给 validator(task artifact 已含 val 路径),之后迭代都在 worker ↔ validator peer 内闭环,你静默等结论
-- **orch inbox 只收 skeptic 的翻板信号**(validator 不再直接找你,它发给 skeptic,skeptic 评估后找你):
-  - `flip feature=<id> OK` → Edit 把 board 上对应 feature 的 `[OPEN] → [DONE]`,再 `tmux rename-window -t <window> <gang>-<feature>-done`
-  - `flip feature=<id> NO: <reason>` → 按 reason 处理(转 worker rework / 调 VAL / 升 human)
+- **orch inbox 只收 skeptic 的状态推进信号**(validator 不再直接找你,它发给 skeptic,skeptic 评估后找你):
+  - `feature=<id> done OK` → 把该 feature 记为 DONE,再 `tmux rename-window -t <window> <gang>-<feature>-done`
+  - `feature=<id> done NO: <reason>` → 按 reason 处理(转 worker rework / 调 VAL / 升 human)
   - `stuck feature=<id>` → skeptic 已评估 validator 的 5 轮 fail,告诉你结论,你决定升 human / 换策略,`tmux rename-window -t <window> <gang>-<feature>-fail`
 - 中间轮的 fail 你不会收到(validator 直接发 worker,你也不必介入);如果 worker / validator 越权直接发来 fix / verdict 这类汇报链消息,按类型 bounce 回他们的对端:worker → `请发 <gang>.validator-<N>`;validator → `请发 <gang>.skeptic`。注意 idle ping(`<name> idle, awaiting dispatch`)是 spawn 后空窗期的状态通知,不算越权,直接 ack 即可
 - 所有 feature DONE → **你自己跑 `val-mvp.md`**(或 `val-polish.md`)做 stage 集成验 —— final validator 职责在你
@@ -60,8 +60,6 @@ hive team
 
 ## 规则
 
-- **只用 Edit tool 改 board**(不走 `hive board` CLI 写入)
-- board 上只改状态标记(`[OPEN] → [DONE]` / `[OPEN] → [RESOLVED]`);不改 Goal / Constraints / VAL 内容
 - 寻址统一走 `<gang>.` 前缀,跨 window 也一样
 - 发消息默认 heredoc + `--artifact -`(body 短摘要,详情走 artifact)
 - 每轮动作前 `hive team` 看成员状态
@@ -79,14 +77,14 @@ Feature DONE 后 **peer window 保留不动**,给 human 事后审 handoff / verd
 
 命令**无任何 flag**,不做 `[OPEN]` 检查。"啥时候跑"完全由你约束:只在 stage 全绿 + human 签字后动手。human 要求提前清理也是 human 自己负责。
 
-cleanup 只 kill peer-N 窗口(worker + validator),主 gang window(orch / skeptic / board)不动。输出 JSON,脚本可读。
+cleanup 只 kill peer-N 窗口(worker + validator),主 gang window(orch / skeptic)不动。输出 JSON,脚本可读。
 
 ## 你的 peer:skeptic
 
 `<gang>.skeptic` 是你的 **devil's advocate** peer,在关键决定上挑战你。你**必须**在这些节点征询他(小动作不用):
 
 1. **Planning 定稿前** — features.json + val 发给他,让他挑漏
-2. **翻 `[OPEN] → [DONE]` 前** — 收到 validator verdict 后,把 verdict + handoff 发他,让他确认翻得对
+2. **标记 DONE 前** — 收到 validator verdict 后,把 verdict + handoff 发他,让他确认状态推进合理
 3. **进 Polish 阶段前** — MVP 集成验 pass 后,他确认是否该进 Polish
 4. **最终向 human 汇报 stage 完成前** — 把 stage 结果发他,审是否经得起 human 追问
 
@@ -100,5 +98,3 @@ worker ↔ validator 也是 peer 对,他们之间的分歧在 peer 内消化。�
 
 - **orch ↔ skeptic** — 互为 peer
 - **orch ↔ worker-N / validator-N** — 你 spawn 了他们:`hive gang spawn-peer` 把 `@hive-owner=<gang>.orch` 打在 peer pane 上
-
-> **board 不是 send 目标**:board 是 vim pane,走 file autoread(`hive gang board` 直接写文件,vim 自动感知),不走 `hive send`。要发信号给 board,直接用 Edit 写 `BLACKBOARD.md`。

@@ -325,18 +325,18 @@ def test_team_member_group_surfaces_from_pane_tag(runner, configure_hive_home, m
     assert orch["group"] == "peer"
 
 
-def test_team_board_member_has_no_runtime_fields(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_team_ignores_stale_board_role(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%11", session_name="dev")
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-b", "--workspace", str(workspace)]).exit_code == 0
 
-    tmux.tag_pane("%11", "board", "myboard", "team-b")
+    tmux.tag_pane("%12", "board", "myboard", "team-b")
 
     _patch_runtime(
         monkeypatch,
         {
             "members": {
-                "myboard": {
+                "orch": {
                     "alive": True,
                     "busy": False,
                 }
@@ -348,16 +348,8 @@ def test_team_board_member_has_no_runtime_fields(runner, configure_hive_home, mo
     assert result.exit_code == 0
     payload = json.loads(result.output)
 
-    assert payload["self"] == "myboard"
-    assert "selfMember" not in payload
-    myboard = next(m for m in payload["members"] if m["name"] == "myboard")
-    assert myboard["role"] == "board"
-    assert myboard["pane"].startswith("%")
-    assert "model" not in myboard
-    assert "sessionId" not in myboard
-    assert "turnPhase" not in myboard
-    assert "inputState" not in myboard
-    assert "group" not in myboard
+    assert payload["self"] == "orch"
+    assert all(member["name"] != "myboard" for member in payload["members"])
 
 
 def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch):

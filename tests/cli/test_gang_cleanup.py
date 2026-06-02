@@ -4,7 +4,7 @@ Cleanup scans current gang's `<main>-peer-<N>` teams, kills their tmux
 windows, and clears leftover `@hive-*` window options. Invariants:
   - no flags / positional args (timing is orch-skill-enforced, not CLI)
   - must run from a gang pane; running from a peer pane is rejected
-  - main gang window (orch / skeptic / board) is never touched
+  - main gang window (orch / skeptic) is never touched
   - JSON output shape: `{killedWindows: [...], killedTeams: [...]}`
 """
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import secrets
@@ -12,7 +11,6 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -45,7 +43,6 @@ _COMMAND_HELP_SECTIONS = {
     # Workflow — higher-level flows on top of Hive.
     "workflow": "Workflow",
     "gang": "Workflow",
-    "board": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -84,7 +81,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Daily": "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
     "Handoff": "Hand a thread to another worker — same pane, a fresh spawn, or a forked clone.",
-    "Workflow": "Higher-level flows on top of Hive: load workflows, run gang squads, share a blackboard.",
+    "Workflow": "Higher-level flows on top of Hive: load workflows and run gang squads.",
     "Team": "Create, extend, and wire up the tmux team around the current window.",
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
@@ -2146,212 +2143,9 @@ def layout_cmd(preset: str):
     click.echo(json.dumps({"layout": preset, "window": window_target}))
 
 
-BLACKBOARD_FILENAME = "BLACKBOARD.md"
-
-BLACKBOARD_STUB = """# Mission: <pending>
-
-## Goal
-<一句话>
-
-## Core concepts
-- <不变量>
-
-## Constraints
-- <边界>
-
-## Definition of done
-- [VAL-001] <断言>
-
-## Open questions
-- [OPEN] <question>
-"""
-
-_BOARD_VIM_SETUP = (
-    "set autoread",
-    "set updatetime=1000",
-    "autocmd CursorHold,CursorHoldI * silent! checktime",
-    "autocmd FocusGained,BufEnter * silent! checktime",
-    "autocmd FileChangedShellPost * echohl WarningMsg | echo 'board reloaded' | echohl None",
-    "if has('timers') | call timer_start(200, { -> execute('silent! checktime') }, {'repeat': -1}) | endif",
-    "autocmd BufWritePost <buffer> silent! call job_start(['hive', 'board', 'ping'])",
-)
-
-
-def _tag_pane_as_board(pane_id: str, team_name: str, name: str) -> None:
-    tmux.set_pane_option(pane_id, "hive-role", "board")
-    tmux.set_pane_option(pane_id, "hive-agent", name)
-    tmux.set_pane_option(pane_id, "hive-team", team_name)
-    tmux.set_pane_title(pane_id, "BLACKBOARD")
-
-
-def _ensure_blackboard(path: Path) -> None:
-    if path.is_file():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(BLACKBOARD_STUB)
-
-
-@cli.group("board")
-def board_cmd():
-    """Blackboard utilities: open, bind, ping, path."""
-
-
-@board_cmd.command("path")
-def board_path_cmd():
-    """Print absolute path to the team's BLACKBOARD.md."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    click.echo(str(Path(ws) / BLACKBOARD_FILENAME))
-
-
-@board_cmd.command("bind")
-@click.option("--name", default="board", help="Pane member name (default: board)")
-def board_bind_cmd(name: str):
-    """Tag the current pane as the blackboard seat (role=board, pane title set)."""
-    if not tmux.is_inside_tmux():
-        _fail("must run inside tmux")
-    pane_id = tmux.get_current_pane_id() or ""
-    if not pane_id:
-        _fail("no current tmux pane id")
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    _tag_pane_as_board(pane_id, t.name, name)
-    click.echo(json.dumps({
-        "paneId": pane_id,
-        "role": "board",
-        "name": name,
-        "team": t.name,
-    }, indent=2))
-
-
-@board_cmd.command("open")
-@click.option("--name", default="board", help="Pane member name (default: board)")
-def board_open_cmd(name: str):
-    """Bind current pane as board and replace shell with vim on BLACKBOARD.md.
-
-    Creates BLACKBOARD.md from stub if missing. Loads autoread + 200ms timer
-    so external edits (by orch) reflect in the vim buffer within 200ms.
-    """
-    if not tmux.is_inside_tmux():
-        _fail("must run inside tmux")
-    pane_id = tmux.get_current_pane_id() or ""
-    if not pane_id:
-        _fail("no current tmux pane id")
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    blackboard = Path(ws) / BLACKBOARD_FILENAME
-    _ensure_blackboard(blackboard)
-    _tag_pane_as_board(pane_id, t.name, name)
-    vim_args = ["vim"]
-    for cmd in _BOARD_VIM_SETUP:
-        vim_args.extend(["-c", cmd])
-    vim_args.append(str(blackboard))
-    os.execvp(vim_args[0], vim_args)
-
-
-_BOARD_DIFF_INLINE_MAX_LINES = 40
-
-
-def _compute_board_diff(ws_path: Path, blackboard: Path) -> tuple[str, str, Path | None]:
-    """Compute unified diff since last snapshot; update snapshot; write full artifact.
-
-    Returns (ts, diff_text, artifact_path).
-    diff_text == "" means no diff (snapshot unchanged); artifact_path is None then.
-    """
-    snapshot = ws_path / ".board-snapshot.md"
-    new_text = blackboard.read_text()
-    old_text = snapshot.read_text() if snapshot.is_file() else ""
-    diff_lines = list(difflib.unified_diff(
-        old_text.splitlines(keepends=True),
-        new_text.splitlines(keepends=True),
-        fromfile="before",
-        tofile="after",
-        n=3,
-    ))
-    snapshot.write_text(new_text)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    if not diff_lines:
-        return ts, "", None
-    diff_text = "".join(diff_lines)
-    ping_dir = ws_path / "artifacts" / "board-pings"
-    ping_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = ping_dir / f"{ts}.md"
-    artifact_path.write_text(
-        f"# Board ping {ts}\n\n```diff\n{diff_text}```\n\n---\n\n# Current full BLACKBOARD.md\n\n{new_text}"
-    )
-    return ts, diff_text, artifact_path
-
-
-def _inject_board_diff_block(orch_pane: str, block: str) -> None:
-    """Inject a BOARD-DIFF block into orch pane via bracketed paste + Enter."""
-    buffer_name = f"hive-board-{secrets.token_hex(4)}"
-    tmux.load_buffer(buffer_name, block + "\n")
-    try:
-        tmux.paste_buffer(buffer_name, orch_pane, bracketed=True)
-        tmux.send_key(orch_pane, "Enter")
-    finally:
-        tmux.delete_buffer(buffer_name)
-
-
-@board_cmd.command("ping")
-def board_ping_cmd():
-    """Inject a BOARD-DIFF block into the orch pane.
-
-    - No diff since last ping → skip injection (still seeds snapshot on first call).
-    - Small diff (≤40 lines) → diff is embedded inline in the block.
-    - Large diff → block carries `artifact=<path>`; full diff + current content
-      are at `artifacts/board-pings/<ts>.md`.
-    """
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    ws_path = Path(ws)
-    blackboard = ws_path / BLACKBOARD_FILENAME
-    if not blackboard.is_file():
-        _fail(f"no BLACKBOARD.md at {blackboard}")
-    ts, diff_text, artifact_path = _compute_board_diff(ws_path, blackboard)
-    if not diff_text:
-        click.echo(json.dumps({"status": "no-diff", "ts": ts}, ensure_ascii=False))
-        return
-    orch_pane = t.lead_pane_id
-    if not orch_pane:
-        lead_name = t.lead_name or LEAD_AGENT_NAME
-        lead_agent = t.agents.get(lead_name)
-        if lead_agent:
-            orch_pane = lead_agent.pane_id
-    if not orch_pane:
-        # Gang teams tag orch as role=agent with name "<gang>.orch", so no
-        # lead is ever resolved above. Scan for an agent whose name ends in
-        # ".orch" — unique per team under the gang naming scheme.
-        for agent in t.agents.values():
-            if agent.name.endswith(".orch"):
-                orch_pane = agent.pane_id
-                break
-    if not orch_pane:
-        _fail("no orch/lead pane bound in this team")
-    diff_line_count = diff_text.count("\n") + (0 if diff_text.endswith("\n") else 1)
-    inline = diff_line_count <= _BOARD_DIFF_INLINE_MAX_LINES
-    if inline:
-        body = diff_text.rstrip()
-    else:
-        body = f"(diff too large: {diff_line_count} lines)\nartifact={artifact_path}"
-    block = f"<BOARD-DIFF at={ts}>\n{body}\n</BOARD-DIFF>"
-    _inject_board_diff_block(orch_pane, block)
-    click.echo(json.dumps({
-        "status": "ok",
-        "ts": ts,
-        "diffLines": diff_line_count,
-        "inline": inline,
-        "artifact": str(artifact_path) if artifact_path else None,
-        "orchPane": orch_pane,
-    }, ensure_ascii=False))
-
-
 @cli.group("gang")
 def gang_cmd():
-    """GANG squad (orch + board + on-demand peers) management."""
+    """GANG squad (orch + skeptic + on-demand peers) management."""
 
 
 def _wait_for_peer_ready(
@@ -2446,15 +2240,6 @@ def _auto_init_team_for_gang() -> Team:
     return t
 
 
-def _start_board_vim(board_pane: str, blackboard: Path) -> None:
-    """Replace board pane's shell with vim on BLACKBOARD.md."""
-    vim_args = ["vim"]
-    for cmd in _BOARD_VIM_SETUP:
-        vim_args.extend(["-c", cmd])
-    vim_args.append(str(blackboard))
-    tmux.send_keys(board_pane, "exec " + " ".join(shlex.quote(a) for a in vim_args))
-
-
 @gang_cmd.command("init")
 @click.option(
     "--peer-cli",
@@ -2473,7 +2258,7 @@ def _start_board_vim(board_pane: str, blackboard: Path) -> None:
     ),
 )
 def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
-    """Break current pane into a dedicated gang window (orch + skeptic + board).
+    """Break current pane into a dedicated gang window (orch + skeptic).
 
     Standalone — no need to run `hive init` first. Must run from a pane that's
     already running an agent CLI (claude / codex / droid); that CLI becomes
@@ -2483,12 +2268,13 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     Each gang gets a public namespace name (picked from the canonical pool
     unless overridden via --name). The window is renamed to the gang name;
     agents inside are addressed as ``<gang>.orch``, ``<gang>.skeptic``,
-    ``<gang>.board``. This lets multiple gangs coexist in the same tmux
-    session without qualified-name collision.
+    and on-demand ``<gang>.worker-<N>`` / ``<gang>.validator-<N>`` peers.
+    This lets multiple gangs coexist in the same tmux session without
+    qualified-name collision.
 
     Layout auto-picks based on window aspect ratio:
-      - horizontal (wide): orch + skeptic stacked left column, board right
-      - vertical (tall): orch / skeptic / board stacked top-to-bottom
+      - horizontal (wide): orch left, skeptic right
+      - vertical (tall): orch / skeptic stacked top-to-bottom
 
     Focus switches to the new gang window after init.
     """
@@ -2532,7 +2318,6 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
 
     orch_agent_name = f"{gang_name}.orch"
     skeptic_agent_name = f"{gang_name}.skeptic"
-    board_agent_name = f"{gang_name}.board"
 
     window_display_name = f"gang {gang_name}"
     if tmux.get_pane_count(current_pane) <= 1:
@@ -2567,17 +2352,16 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     tmux.set_pane_option(orch_pane, "hive-group", gang_name)
     tmux.set_pane_option(orch_pane, "hive-cli", orch_cli)
 
-    # Create 3 panes. Sizes here are placeholders — _apply_gang_layout
-    # redistributes via tmux preset (main-vertical / even-vertical / ...).
-    # Use orch's cwd (user's project dir) for children, not Hive's workspace
+    from . import layout as layout_mod
+
+    # Use orch's cwd (user's project dir) for the skeptic, not Hive's workspace
     # state dir — skeptic needs to see the same codebase orch sees.
-    board_pane = tmux.split_window(orch_pane, horizontal=True, size="50%", cwd=orch_cwd)
     skeptic_agent = Agent.spawn(
         name=skeptic_agent_name,
         team_name=t.name,
         target_pane=orch_pane,
         cwd=orch_cwd,
-        split_horizontal=False,
+        split_horizontal=layout_mod.split_horizontal(gang_window, 2),
         split_size="50%",
         skill="gang-skeptic",
         cli=peer_cli_name,
@@ -2585,13 +2369,6 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
     )
 
     tmux.set_pane_option(skeptic_agent.pane_id, "hive-group", gang_name)
-
-    _tag_pane_as_board(board_pane, t.name, board_agent_name)
-    tmux.set_pane_option(board_pane, "hive-group", gang_name)
-
-    blackboard = Path(ws) / BLACKBOARD_FILENAME
-    _ensure_blackboard(blackboard)
-    _start_board_vim(board_pane, blackboard)
 
     orientation = _apply_gang_layout(gang_window)
 
@@ -2624,7 +2401,6 @@ def gang_init_cmd(peer_cli: str | None, gang_name: str | None):
         "orientation": orientation,
         "orch": {"pane": orch_pane, "name": orch_agent_name},
         "skeptic": {"pane": skeptic_agent.pane_id, "name": skeptic_agent_name},
-        "board": {"pane": board_pane, "name": board_agent_name, "path": str(blackboard)},
         "dispatched": dispatched,
     }, indent=2))
 
@@ -2947,8 +2723,8 @@ def gang_layout_cmd():
     """Re-apply the canonical GANG layout to the current gang window.
 
     Auto-picks by aspect ratio:
-      - horizontal window → orch main left (50%), board + skeptic stacked right
-      - vertical window   → 3 panes stacked equally
+      - horizontal window → orch main left (50%), skeptic right
+      - vertical window   → panes stacked equally
 
     Useful after manually dragging panes or switching between monitors.
     """
@@ -2977,8 +2753,8 @@ def gang_cleanup_cmd():
 
     Run this only after every feature is DONE and the human has signed off —
     timing is enforced by the gang-orch skill, not the CLI. No flags, no
-    `[OPEN]` safety checks. The main gang window (orch / skeptic / board)
-    is never touched.
+    `[OPEN]` safety checks. The main gang window (orch / skeptic) is never
+    touched.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -3000,7 +2776,7 @@ def gang_cleanup_cmd():
     if _is_peer_team_name(main_team.name):
         _fail(
             f"current pane is bound to peer team {main_team.name!r}; "
-            "run cleanup from the main gang window (orch / skeptic / board)"
+            "run cleanup from the main gang window (orch / skeptic)"
         )
 
     from .team import list_teams

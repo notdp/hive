@@ -59,7 +59,7 @@ hive notify "按 Space 和我对话"      # 桌面弹通知给当前 pane 的用
 
 去 `members` 里按 `self` 找自己那行,看完整状态。字段含义:
 
-- **`self`** — 字符串 = 你自己的 member name(board/terminal pane 不会有 `model` / `sessionId` / `turnPhase` 等 runtime 字段,也不会伪造)
+- **`self`** — 字符串 = 你自己的 member name(terminal pane 不会有 `model` / `sessionId` / `turnPhase` 等 runtime 字段,也不会伪造)
 - **`group`** — 在 member 行上,只有 pane 打了 `@hive-group` 标签时才出现(例:peer group 成员 `group: peer`)
 - **`inputState=waiting_user`** — 对方在等答案,用 `hive answer` 回答
 - **`busy=true/false`** — tmux 输出层的秒级活动布尔,不等于语义上的 busy/idle

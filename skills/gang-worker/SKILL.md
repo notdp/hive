@@ -88,7 +88,7 @@ worker 的汇报链固定:
 - validator 反馈 fail → 在 peer 内迭代,最多 5 轮(由 validator 追踪 round 数)
 - validator 的 verdict / stuck 报告由 **validator** 自己推上游(走 skeptic,skeptic 评估后给 orch),worker 不过问
 
-流程规范(非 runtime gate):orch 只接 skeptic 的翻板信号;worker 绕过 validator 直接找 orch,会被 orch 按 prompt 流程 bounce 回 validator(CLI 本身不校验 sender role)。
+流程规范(非 runtime gate):orch 只接 skeptic 的状态推进信号;worker 绕过 validator 直接找 orch,会被 orch 按 prompt 流程 bounce 回 validator(CLI 本身不校验 sender role)。
 
 ## Peer
 

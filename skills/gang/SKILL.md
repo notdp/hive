@@ -1,6 +1,6 @@
 ---
 name: gang
-description: GANG entry skill. 用户打 /gang 表示要把当前 pane 升级成 GANG orchestrator 并启动 gang 闭环。skill 内容 = 跑 `hive gang init`,把当前 pane 搬到新 window,布好 board + skeptic,并自动 dispatch /gang-orch 接管 duty。
+description: GANG entry skill. 用户打 /gang 表示要把当前 pane 升级成 GANG orchestrator 并启动 gang 闭环。skill 内容 = 跑 `hive gang init`,把当前 pane 搬到新 window,布好 skeptic,并自动 dispatch /gang-orch 接管 duty。
 ---
 
 # GANG — entry
@@ -14,7 +14,7 @@ hive gang init
 完事。执行后你会看到:
 
 - 当前 pane 切到新的 gang window,orch 身份带过去
-- 同 window 出现 skeptic(异族 CLI,claude↔codex;droid 默认 claude)和 board(vim 打开 BLACKBOARD.md)
+- 同 window 出现 skeptic(异族 CLI,claude↔codex;droid 默认 claude)
 - `/gang-orch` 自动接管 orch pane,本 skill 退场
 
 用户想显式指定 gang 实例名可传 `--name <name>`;不传就由 CLI 自动分配。
@@ -29,7 +29,7 @@ hive gang init
 本 skill 只负责跑 `hive gang init`。其余职责在 CLI 和下游 skill 里已经归位:
 
 - **tmux 窗口 / 分栏布局** — `hive gang init` 自己做
-- **skeptic / board spawn** — `hive gang init` 内部负责
+- **skeptic spawn** — `hive gang init` 内部负责
 - **workspace 路径 / agent name** — 从当前 pane 上下文自动推断,直接用
 - **planning / 拆 feature** — 是 `/gang-orch` 接管之后的 duty,本 skill 不涉
 

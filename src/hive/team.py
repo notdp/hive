@@ -135,7 +135,7 @@ class Team:
         for pane in panes:
             if pane.team != name:
                 continue
-            if pane.role in ("lead", "orchestrator", "agent", "terminal", "board"):
+            if pane.role in ("lead", "orchestrator", "agent", "terminal"):
                 if pane.agent and pane.group:
                     team.member_groups[pane.agent] = pane.group
                 if pane.role in ("lead", "orchestrator"):
@@ -155,7 +155,7 @@ class Team:
                         cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
                     team.agents[pane.agent] = agent
-                elif pane.role in ("terminal", "board"):
+                elif pane.role == "terminal":
                     terminal = Terminal(name=pane.agent, pane_id=pane.pane_id, role=pane.role)
                     team.terminals[pane.agent] = terminal
 
