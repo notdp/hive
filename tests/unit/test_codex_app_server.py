@@ -73,12 +73,6 @@ def test_apply_status_unknown_kind_preserves_prior_fields():
     assert rt.turn_phase == "tool_open"
 
 
-def test_thread_runtime_is_fresh():
-    assert m.ThreadRuntime(observed_at=time.time()).is_fresh()
-    stale = m.ThreadRuntime(observed_at=time.time() - m._RUNTIME_STALE_AFTER - 1)
-    assert not stale.is_fresh()
-
-
 def test_on_notification_turn_lifecycle():
     c = _bare_client()
     c._on_notification("turn/started", {"threadId": "t1", "turn": {"id": "turn-1"}})

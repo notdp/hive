@@ -50,7 +50,6 @@ from pathlib import Path
 _HANDSHAKE_TIMEOUT = 5.0
 _CALL_TIMEOUT = 10.0
 _DAEMON_START_TIMEOUT = 8.0
-_RUNTIME_STALE_AFTER = 30.0
 _CONNECT_COOLDOWN = 5.0
 _RESUME_COOLDOWN = 5.0
 
@@ -206,9 +205,6 @@ class ThreadRuntime:
     window: int | None = None
     observed_at: float = 0.0
 
-    def is_fresh(self, now: float | None = None) -> bool:
-        return (now or time.time()) - self.observed_at < _RUNTIME_STALE_AFTER
-
 
 def _apply_status(rt: ThreadRuntime, status: dict) -> None:
     kind = status.get("type")
@@ -278,8 +274,12 @@ class CodexDaemonClient:
             except ValueError:
                 continue
             rid = msg.get("id")
-            if rid is not None and rid in self._pending:
-                slot = self._pending.pop(rid)
+            # Pop atomically: a `call()` that timed out concurrently may have
+            # already removed this rid, so a check-then-pop would race into a
+            # KeyError and kill the reader thread. A missing slot just means the
+            # waiter is gone (timed out) — drop the late response silently.
+            slot = self._pending.pop(rid, None) if rid is not None else None
+            if slot is not None:
                 slot["msg"] = msg
                 slot["event"].set()
             elif msg.get("method"):
