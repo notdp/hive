@@ -489,7 +489,7 @@ def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):
         "_team_member_bindings",
         lambda _team_name: {
             "agent-a": {"role": "agent", "pane": "%1"},
-            "board": {"role": "board", "pane": "%2"},
+            "terminal": {"role": "terminal", "pane": "%2"},
             "orch": {"role": "orchestrator", "pane": "%3"},
             "dead": {"role": "lead", "pane": "%4"},
             "dup": {"role": "agent", "pane": "%1"},

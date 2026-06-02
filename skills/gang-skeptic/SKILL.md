@@ -19,7 +19,6 @@ hive team
 ## 寻址
 
 - `hive send <gang>.orch "..."` — 和你 peer orch 对话
-- `<gang>.board` 不是 send 目标(board 是 vim,不是 agent)
 - 跨 team / 跨 window 统一走 `<gang>.` 前缀
 
 ## 你的两个入口
@@ -34,9 +33,9 @@ orch 必须在**关键决定**上征询你(不是每个小动作):
 
 ### 入口 B:validator 直接发你 verdict(**承接原 orch 的 relay**)
 
-- **pass verdict** — validator 做完 verify 把 pass 发你(不经 orch);你评估是否该翻 `[OPEN] → [DONE]`:
-  - OK → `hive send <gang>.orch "flip feature=<id> OK" --artifact <原 verdict 路径>`,orch 翻板
-  - 不 OK → `hive send <gang>.orch "flip feature=<id> NO: <reason>"`,orch 按 reason 处理(rework / 调 VAL / 升 human)
+- **pass verdict** — validator 做完 verify 把 pass 发你(不经 orch);你评估是否该把 feature 标为 DONE:
+  - OK → `hive send <gang>.orch "feature=<id> done OK" --artifact <原 verdict 路径>`,orch 更新状态
+  - 不 OK → `hive send <gang>.orch "feature=<id> done NO: <reason>"`,orch 按 reason 处理(rework / 调 VAL / 升 human)
 - **stuck verdict**(validator peer 内 5 轮 fail) — validator 发你 stuck-report;你评估:
   - 方向对但技术卡住 → `hive send <gang>.orch "stuck feature=<id>" --artifact <stuck-report>`,orch 升 human
   - 方向本身错 → `hive send <gang>.orch "stuck feature=<id> NO: <reason>"`,orch 调方向
@@ -62,7 +61,7 @@ orch 不再做 validator → orch 的 relay,你是 validator → orch 路径上�
 
 - **派 worker / validator** — orch 的活
 - **跑 verify 命令** — validator 的活
-- **改 board** — orch 的活(且只走 Edit,见 gang-orch 规则)
+- **推进 feature 状态** — orch 的活
 - **向 human 汇报 stage 结果** — orch 的活;你只和 orch 对话
 
 ## Peer

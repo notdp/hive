@@ -6,7 +6,7 @@ currently claimed by any live `@hive-group` tag across the tmux server.
 The picked name then appears as:
 
   - `@hive-group=<name>` on every pane in the gang
-  - `@hive-agent=<name>.orch / <name>.skeptic / <name>.board`
+  - `@hive-agent=<name>.orch / <name>.skeptic`
   - `@hive-agent=<name>.worker-<N> / <name>.validator-<N>` for peers
   - `@hive-owner=<name>.orch` on spawned peers
 

@@ -69,8 +69,7 @@ def test_pick_skips_claimed_pool_names(monkeypatch):
 
 def test_pick_ignores_legacy_gang_token_and_empty_groups(monkeypatch):
     # @hive-group="gang" is the pre-migration literal; must NOT be counted
-    # against the pool. Empty groups (daily agent panes, board, shells) also
-    # ignored.
+    # against the pool. Empty groups (daily agent panes, shells) also ignored.
     panes = [
         _pane("gang"),       # legacy, ignored
         _pane(""),           # no tag, ignored
