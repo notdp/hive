@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -36,6 +37,7 @@ _COMMAND_HELP_SECTIONS = {
     "answer": "Daily",
     "notify": "Daily",
     "compact": "Daily",
+    "skills": "Daily",
     # Handoff — hand a thread to another pane (same/new/forked).
     "handoff": "Handoff",
     "fork": "Handoff",
@@ -112,7 +114,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "skills"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -625,7 +627,7 @@ def _stderr_is_interactive() -> bool:
 
 # Subcommands that must keep working even when the hive skill is stale —
 # they are the recovery/diagnostic paths the user needs to fix the drift.
-_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex"}
+_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex", "skills"}
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "codex",
     "config",
@@ -634,6 +636,7 @@ _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "inject",
     "plugin",
     "shell-init",
+    "skills",
     "status",
     "status-set",
     "status-show",
@@ -2230,6 +2233,74 @@ def layout_cmd(preset: str):
         tmux.set_window_option(window_target, dim, "50%")
     tmux.select_layout(window_target, preset)
     click.echo(json.dumps({"layout": preset, "window": window_target}))
+
+
+# --- CLI-shipped skill specs ---------------------------------------------
+# Thin discovery stub (skills/hive/SKILL.md) points here; the volatile
+# protocol/topology guidance ships inside the package and is fetched on
+# demand, so it can never drift from the installed CLI version.
+
+_SPEC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _spec_repo_dir() -> Path | None:
+    """Repo specs dir when running from a checkout; else None (packaged)."""
+    candidate = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
+    return candidate if candidate.is_dir() else None
+
+
+def _read_spec(name: str) -> str | None:
+    repo = _spec_repo_dir()
+    if repo is not None:
+        path = repo / f"{name}.md"
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+    from importlib import resources
+
+    resource = resources.files("hive.core_assets").joinpath("specs", f"{name}.md")
+    try:
+        return resource.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _list_specs() -> list[str]:
+    repo = _spec_repo_dir()
+    if repo is not None:
+        return sorted(p.stem for p in repo.glob("*.md"))
+    from importlib import resources
+
+    names: list[str] = []
+    try:
+        for entry in resources.files("hive.core_assets").joinpath("specs").iterdir():
+            if entry.name.endswith(".md"):
+                names.append(entry.name[:-3])
+    except (FileNotFoundError, OSError, NotADirectoryError):
+        pass
+    return sorted(names)
+
+
+@cli.group("skills")
+def skills_cmd():
+    """CLI-shipped skill specs (version-locked, never drift). Start: `hive skills get core`."""
+
+
+@skills_cmd.command("get")
+@click.argument("name")
+def skills_get_cmd(name: str):
+    """Print spec NAME (e.g. `core`). Content always matches the installed CLI version."""
+    if not _SPEC_NAME_RE.match(name):
+        _fail(f"invalid spec name '{name}' (lowercase letters, digits, dashes only)")
+    text = _read_spec(name)
+    if text is None:
+        available = ", ".join(_list_specs()) or "(none)"
+        _fail(f"unknown spec '{name}'. available: {available}")
+    click.echo(text)
+
+
+@skills_cmd.command("list")
+def skills_list_cmd():
+    """List spec names available on this installed version."""
+    click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
 @cli.group("gang")
