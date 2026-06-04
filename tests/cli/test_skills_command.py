@@ -73,6 +73,14 @@ def test_skills_get_core_includes_challenge_stance(runner):
     assert "挑战立场" in result.output
 
 
+def test_skills_get_core_includes_ask_user_idiom(runner):
+    """问用户走 runtime 的阻塞式工具(AskUserQuestion / request_user_input),
+    不是打印一行就往下走 —— 这条 idiom 随 core spec 下发。"""
+    result = runner.invoke(cli, ["skills", "get", "core"])
+    assert result.exit_code == 0, result.output
+    assert "AskUserQuestion" in result.output
+
+
 def test_skills_get_bypasses_stale_skill_gate(runner, monkeypatch):
     """`skills get` is the recovery/bootstrap path — it must serve specs even
     when the installed stub is stale, otherwise the stub→`skills get core`
