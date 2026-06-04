@@ -398,7 +398,7 @@ class Team:
     def resolve_peer(self, name: str) -> str | None:
         """Find *name*'s peer, preferring no-peer + anti-family CLI candidates.
 
-        Rule (mirrors `hive gang spawn-peer`'s anti-family philosophy):
+        Rule (mirrors `hive crew spawn-peer`'s anti-family philosophy):
           1. explicit peer from peer_map (set by `hive peer set`)
           2. otherwise: pick a member that has no explicit peer yet
              (`no-peer`), preferring one whose CLI is anti-family of *name*'s

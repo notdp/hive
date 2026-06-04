@@ -42,7 +42,7 @@ def test_kill_qualified_crosses_team(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     target_agent = _FakeAgent()
     scoped_team = _FakeTeam("scoped", {})  # caller's scoped team has no such agent
-    peer_team = _FakeTeam("peer-1", {"gang.worker-1": target_agent})
+    peer_team = _FakeTeam("peer-1", {"crew.worker-1": target_agent})
 
     monkeypatch.setattr(
         "hive.cli._resolve_scoped_team",
@@ -50,21 +50,21 @@ def test_kill_qualified_crosses_team(runner, configure_hive_home, monkeypatch):
     )
     monkeypatch.setattr(
         "hive.cli._find_qualified_agent_target",
-        lambda qualified: ("peer-1", "gang.worker-1") if qualified == "gang.worker-1" else None,
+        lambda qualified: ("peer-1", "crew.worker-1") if qualified == "crew.worker-1" else None,
     )
     monkeypatch.setattr("hive.cli._load_team", lambda name: peer_team)
     layout_calls = _install_layout_mocks(monkeypatch)
 
-    result = runner.invoke(cli, ["kill", "gang.worker-1"])
+    result = runner.invoke(cli, ["kill", "crew.worker-1"])
 
     assert result.exit_code == 0, result.output
     assert target_agent.killed is True
-    assert "gang.worker-1" not in peer_team.agents  # removed from target team
+    assert "crew.worker-1" not in peer_team.agents  # removed from target team
     # Kill must trigger adaptive rebalance against the target team's window.
     assert any(call[0] == "layout" and call[1] == "dev:0" for call in layout_calls)
     payload = json.loads(result.output)
     assert payload == {
-        "member": "gang.worker-1",
+        "member": "crew.worker-1",
         "action": "kill",
         "pane": "%99",
         "removedFromTeam": True,

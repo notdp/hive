@@ -2,7 +2,7 @@
 
 Picks a preset from the window's aspect ratio (tmux cell ≈ 1:2 pixel,
 so char-width >= 2*char-height ≈ landscape pixels) and current pane count.
-Used by Team.spawn, hive init peer attach, hive kill, and gang.
+Used by Team.spawn, hive init peer attach, hive kill, and crew.
 """
 
 from __future__ import annotations

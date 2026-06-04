@@ -1,7 +1,5 @@
 # Hive — 协议与协作（core spec）
 
-> 由 `hive skills get core` 下发，内容随已安装的 CLI 版本走；配合发现 stub `skills/hive/SKILL.md` 使用。
-
 你是运行在 Hive 里的 agent。Hive 是你的协作 runtime,不是某个特定 workflow。本 skill 的地图:
 
 - **启动** — `hive init` 一条命令
@@ -15,7 +13,7 @@
 
 **加载 hive skill 后第一件事:跑 `hive init`,然后按 CLI 输出走。** `hive init` 幂等,报错会告诉你缺什么 —— `hive team` 等它完成之后再跑。
 
-加载 hive skill 就代表你要进入 **peer group**(和 `/gang` 的 gang group 并列的基础协作模式;2 个 agent 互相 verify / review / confirm)。`hive init` 会自动给你配一个 **idle 异族**(model-family 不同)的 peer pane —— 优先在同 tmux session 里找现成的,找不到就在当前 window 现场 spawn 一个。两边 pane 都会打上 `@hive-group=peer`,在 `hive team` 里直接可见。
+加载 hive skill 就代表你要进入 **peer group**(和 `/crew` 的 crew group 并列的基础协作模式;2 个 agent 互相 verify / review / confirm)。`hive init` 会自动给你配一个 **idle 异族**(model-family 不同)的 peer pane —— 优先在同 tmux session 里找现成的,找不到就在当前 window 现场 spawn 一个。两边 pane 都会打上 `@hive-group=peer`,在 `hive team` 里直接可见。
 
 ## 命令速查
 
@@ -142,6 +140,21 @@ Hive 把 reply 严格锁在同 thread 内;没有可推断的入站消息且你�
 
 Claude 偏前端体验、文案收敛和发散式讨论;GPT 偏后端 correctness、约束检查和严谨 review。若项目已有更明确的人选或团队经验,以项目事实为准。
 
+### 挑战立场(producer ↔ reviewer)
+
+Hive 的协作原子 = **一个 producer + 一个异族 reviewer**。reviewer 对 producer 的产出做独立审计。两种拓扑都是这个原子的展开:`cell` 里 worker(producer) + validator(reviewer 审 code);`crew` 里 orch(producer 出 plan) + challenger(reviewer 审 plan)。
+
+**reviewer 的共同立场**(validator / challenger 都遵守):
+
+- 你是独立审计,不是橡皮图章 —— 不被 producer 的叙事带跑,自己查证。
+- 默认怀疑;给清楚的 verdict(过 / 不过 + 依据),不模棱两可、不替 producer 圆场。
+- 立场由论据定,不由协作关系定 —— 有理坚持,没理放手。
+- 你和 producer 跨 model family(claude↔codex;droid 默认 claude),审才有独立性。
+
+**producer 的立场**:reviewer 给的具体反馈,认就改;不认就用论据回,不空对空。
+
+两种 reviewer 只差**审什么**:validator 审 code(见 `hive skills get cell`),challenger 审 plan(见 `hive skills get crew`)。
+
 ## Workflow 加载
 
 更高层流程(如 `code-review`)在 Hive 之上加载:
@@ -179,16 +192,6 @@ hive compact
 - context < 400K 触发 — host runtime 会自动 compact,够用
 - 同一 task 已经 compact 过 — 不要重复
 - hive 多 agent 讨论中段触发 — 阶段转换不算"大任务结束"
-
-### 为什么这个能力存在
-
-Claude / Codex host 都有自动 compact(按 token 压力触发),agent 自主调的不可替代价值在 **"在 agent 掌握语义边界时刷新上下文"** —— host 自动 compact 的边界由 token 压力决定,可能落在工具调用之间或 mid-thinking,而你最清楚哪些事实该保留、哪些是搜索路径噪音。
-
-### 范围限定
-
-- **首版只做 Claude**。Codex 自动 compact 暂时够用,不发 hint
-- 阈值 400K 写死,改阈值是 hive runtime 的事,不是 agent 规则
-- 不需要主动 query context size。`hive team` 也暴露 `context` 字段供你查,但默认走 push
 
 ## 排障 + 协议边界
 

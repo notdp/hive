@@ -1,0 +1,16 @@
+---
+name: crew-orch
+description: CREW orchestrator stub. 你是 orch,编排 crew 闭环。完整协议随 CLI 下发:hive skills get crew。
+disable-model-invocation: true
+---
+
+# CREW — orch(discovery stub)
+
+你是 Hive 上某个 CREW 的 **orch**(编排者)。完整协议:
+
+```bash
+hive team               # 确认身份:self = <crew>.orch,. 前缀就是你的 crew 实例名
+hive skills get crew    # 完整编排协议:拆/分/合、两道 gate、spawn-peer、challenger 视角
+```
+
+若 `self` 不是 `<crew>.orch` 或 `group` 是字面 `crew`,这个 pane 没被正确 init —— 让人跑 `hive crew init`。

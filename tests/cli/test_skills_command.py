@@ -38,6 +38,41 @@ def test_skills_get_unknown_lists_available(runner):
     assert "core" in result.output  # error names the available specs
 
 
+def test_skills_list_includes_cell_and_crew(runner):
+    result = runner.invoke(cli, ["skills", "list"])
+    assert result.exit_code == 0, result.output
+    specs = json.loads(result.output)["specs"]
+    assert {"core", "cell", "crew"} <= set(specs)
+
+
+def test_skills_get_cell_serves_worker_and_validator(runner):
+    """cell is the shared atom: worker (producer) + validator (reviewer),
+    with the coordinator left abstract so crew can bind it."""
+    result = runner.invoke(cli, ["skills", "get", "cell"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "worker" in out and "validator" in out
+    assert "协调者" in out  # coordinator kept abstract in the atom
+    assert "successState" in out  # handoff schema lives in the atom
+
+
+def test_skills_get_crew_composes_cell(runner):
+    """crew is the orchestration delta (orch + challenger); it must compose
+    the cell atom by reference, not re-inline the worker/validator kernel."""
+    result = runner.invoke(cli, ["skills", "get", "crew"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "orch" in out and "challenger" in out
+    assert "hive skills get cell" in out  # references the atom, no duplication
+    assert "spawn-cell" in out
+
+
+def test_skills_get_core_includes_challenge_stance(runner):
+    result = runner.invoke(cli, ["skills", "get", "core"])
+    assert result.exit_code == 0, result.output
+    assert "挑战立场" in result.output
+
+
 def test_skills_get_bypasses_stale_skill_gate(runner, monkeypatch):
     """`skills get` is the recovery/bootstrap path — it must serve specs even
     when the installed stub is stale, otherwise the stub→`skills get core`

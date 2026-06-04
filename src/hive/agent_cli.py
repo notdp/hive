@@ -26,7 +26,7 @@ CLI_ALIASES = {
 
 # Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
 # OpenAI) produce more diverse viewpoints than same-family pairs. Used by:
-# - `hive gang init` to pick skeptic's CLI
+# - `hive crew init` to pick challenger's CLI
 # - `hive init` peer discovery / spawn fallback
 _ANTI_PEER_CLI = {"claude": "codex", "codex": "claude", "droid": "claude"}
 

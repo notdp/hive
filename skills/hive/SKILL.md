@@ -1,12 +1,12 @@
 ---
 name: hive
-description: Hive 基础 skill。让 agent 作为 Hive runtime 成员工作：发现上下文、查看成员、接收 <HIVE ...> 消息、发送消息，并加载更高层 workflow skill。
+description: Hive 基础 skill。让 agent 作为 Hive runtime 成员工作：发现上下文、查看成员、接收 <HIVE ...> 消息、发送消息；完整协议与协作拓扑（cell / crew）由 CLI 经 `hive skills get` 现取。
 metadata: {"hive-bot":{"os":["darwin","linux"],"requires":{"bins":["tmux","python3","hive"]}}}
 ---
 
 # Hive — agent 协作 runtime（discovery stub）
 
-Hive 是你的协作 runtime。**本文件是发现入口，不是用法手册** —— 用法由 CLI 按已安装版本下发，永不过期。
+Hive 是你的协作 runtime。**本文件是发现入口，不是用法手册** —— 用法用 `hive skills get` 取。
 
 ## 安装
 
@@ -32,9 +32,4 @@ hive init                 # 把当前 tmux window 接入/创建一个 team（幂
 hive skills get core      # 完整协议：命令速查 / 消息机制 / thread / 协作规则 / compact
 ```
 
-`hive skills get core` 下发的内容**始终匹配已安装的 CLI 版本**，指令不会 stale；本 stub 在版本间不变，正因如此它只指向 `hive skills get core`。跑 `hive skills list` 看全部可取 spec。
-
-## 为什么这样分层
-
-- 本 stub 稳定少变、可重复安装；升级 CLI 不会让它过期
-- 会演进的协议 / 工作流随 CLI 走，`hive skills get` 现取现用，从源头消除 skill 与 CLI 的 drift
+跑 `hive skills list` 看全部可取 spec。

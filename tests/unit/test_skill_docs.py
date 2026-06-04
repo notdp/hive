@@ -26,6 +26,46 @@ def test_hive_skill_guides_multiline_send_via_artifact():
     assert "--artifact - <<'EOF'" in core_spec
 
 
+def test_crew_role_skills_are_thin_stubs_pointing_at_specs():
+    """守拓扑重构的架构不变量:crew 角色 skill 是薄 stub,只指向 CLI 下发的
+    spec(orch/challenger → crew;worker/validator → cell);fat 角色内核
+    (handoff schema)单一来源在 cell spec,不在 stub 里复刻。"""
+    repo_root = Path(__file__).resolve().parents[2]
+    skills = repo_root / "skills"
+
+    orch = (skills / "crew-orch" / "SKILL.md").read_text()
+    challenger = (skills / "crew-challenger" / "SKILL.md").read_text()
+    worker = (skills / "crew-worker" / "SKILL.md").read_text()
+    validator = (skills / "crew-validator" / "SKILL.md").read_text()
+
+    # stubs point at the version-locked spec for their topology
+    assert "hive skills get crew" in orch
+    assert "hive skills get crew" in challenger
+    assert "hive skills get cell" in worker
+    assert "hive skills get cell" in validator
+
+    # the fat role kernel (handoff schema) lives ONLY in the cell spec, never
+    # re-inlined into a stub — guards against drift via duplication
+    cell_spec = (repo_root / "src" / "hive" / "core_assets" / "specs" / "cell.md").read_text()
+    assert "salientSummary" in cell_spec
+    for stub in (orch, challenger, worker, validator):
+        assert "salientSummary" not in stub
+
+    # skeptic → challenger rename is complete in the skill surface
+    assert not (skills / "crew-skeptic").exists()
+
+
+def test_crew_skills_are_not_model_auto_invocable():
+    """所有 crew 系 skill 都该是 deliberate-only:`crew` 入口靠用户显式 /crew
+    (动作是 `hive crew init`,会破窗 + spawn challenger,误触发代价大),角色
+    stub 靠 spawn 注入 `/crew-orch` 等加载。两者都不该被模型按描述自动调用,
+    所以全部钉 `disable-model-invocation: true`。"""
+    skills = Path(__file__).resolve().parents[2] / "skills"
+    for name in ("crew", "crew-orch", "crew-challenger", "crew-worker", "crew-validator"):
+        text = (skills / name / "SKILL.md").read_text()
+        assert "disable-model-invocation: true" in text, f"{name} missing disable-model-invocation"
+
+
 def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     """守 install/refresh 命令在 README / AGENTS 跨文件一致 — contract test"""
     repo_root = Path(__file__).resolve().parents[2]
