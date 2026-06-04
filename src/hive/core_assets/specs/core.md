@@ -24,8 +24,6 @@ hive send dodo "see attachment" --artifact - <<'EOF'
 EOF
 hive reply dodo "ack, looking"       # 回复 dodo 最近一条给你的消息(自动 reply-to)
 hive answer claude "yes"             # 回答 agent 的 pending question
-hive notify "按 Space 和我对话"      # 桌面弹通知给当前 pane 的用户
-# notify 只在你被阻塞、必须用户介入时用 —— 说清发生了什么、回来后要做什么
 ```
 
 ### `hive team` 返回什么
