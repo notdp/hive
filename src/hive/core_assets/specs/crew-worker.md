@@ -1,10 +1,4 @@
----
-name: crew-worker
-description: CREW worker stub. 你是 crew 派生 cell 里的 worker。角色协议:hive skills get cell。
-disable-model-invocation: true
----
-
-# CREW — worker(discovery stub)
+# CREW — worker
 
 你是某个 CREW 派生 cell 里的 **worker**(`<crew>.worker-<N>`)。角色内核 + crew 绑定:
 

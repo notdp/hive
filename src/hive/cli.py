@@ -1990,20 +1990,18 @@ def skills_list_cmd():
     click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
-def _dispatch_role_skill(pane: str, skill_name: str) -> bool:
-    """Inject ``/<skill_name>`` into *pane* so the agent loads its role.
+def _dispatch_role_spec(pane: str, role: str) -> bool:
+    """Inject ``hive skills get <role>`` into *pane* as the agent's first input.
 
-    Mirrors how crew hands ``/crew-orch`` to its orch pane. Returns True if
-    dispatched (pane runs a known agent CLI), False otherwise.
+    Role content lives in CLI-served specs (`hive skills get <role>`), not in
+    installed skills — so a single bootstrap command loads the role, no
+    per-role SKILL.md. Returns True if the pane runs a known agent CLI.
     """
-    profile = detect_profile_for_pane(pane)
-    if profile is None:
+    if detect_profile_for_pane(pane) is None:
         return False
-    skill_cmd = profile.skill_cmd.format(name=skill_name)
-    tmux.send_keys(pane, skill_cmd, enter=False)
+    tmux.send_keys(pane, f"hive skills get {role}", enter=False)
     time.sleep(0.1)
-    for _ in range(2 if profile.name == "codex" else 1):
-        tmux.send_key(pane, "Enter")
+    tmux.send_key(pane, "Enter")
     return True
 
 
@@ -2112,7 +2110,8 @@ def _attach_cell_to_team(
             split_size="50%",
             cli=v_cli,
             model=v_model,
-            skill="cell-validator",
+            skill="none",
+            prompt="hive skills get cell-validator",
             workspace=ws,
         )
         t.agents["validator"] = validator_agent
@@ -2131,13 +2130,14 @@ def _attach_cell_to_team(
 
     layout_mod.apply_adaptive(window)
 
-    # Hand each pane its role skill. A spawned validator already loaded
-    # cell-validator at spawn; an adopted neighbor gets it dispatched here.
+    # Hand each pane its role: the agent's first input is `hive skills get
+    # <role>`. A spawned validator already got it as its startup prompt; an
+    # adopted neighbor gets it injected here.
     dispatched: list[str] = []
-    if _dispatch_role_skill(worker_pane, "cell-worker"):
+    if _dispatch_role_spec(worker_pane, "cell-worker"):
         dispatched.append("worker")
     if mode == "paired":
-        _dispatch_role_skill(validator_pane, "cell-validator")
+        _dispatch_role_spec(validator_pane, "cell-validator")
     dispatched.append("validator")
 
     tmux.select_window(window)
@@ -2428,7 +2428,8 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         cwd=orch_cwd,
         split_horizontal=layout_mod.split_horizontal(crew_window, 2),
         split_size="50%",
-        skill="crew-challenger",
+        skill="none",
+        prompt="hive skills get crew-challenger",
         cli=peer_cli_name,
         model=peer_model_id,
     )
@@ -2446,13 +2447,7 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         pass
 
     dispatched: list[str] = [challenger_agent_name]
-    profile = detect_profile_for_pane(orch_pane)
-    if profile is not None:
-        skill_cmd = profile.skill_cmd.format(name="crew-orch")
-        tmux.send_keys(orch_pane, skill_cmd, enter=False)
-        time.sleep(0.1)
-        for _ in range(2 if profile.name == "codex" else 1):
-            tmux.send_key(orch_pane, "Enter")
+    if _dispatch_role_spec(orch_pane, "crew-orch"):
         dispatched.insert(0, orch_agent_name)
 
     tmux.select_window(crew_window)
@@ -2684,7 +2679,8 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         target_pane=shell_pane,
         cwd=cwd,
         split_window=False,
-        skill="crew-worker",
+        skill="none",
+        prompt="hive skills get crew-worker",
         cli=worker_cli,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", crew_name)
@@ -2700,7 +2696,8 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         cwd=cwd,
         split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
-        skill="crew-validator",
+        skill="none",
+        prompt="hive skills get crew-validator",
         cli=validator_cli,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", crew_name)

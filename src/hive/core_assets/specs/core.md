@@ -11,9 +11,9 @@
 
 ## 启动
 
-**加载 hive skill 后第一件事:跑 `hive init`,然后按 CLI 输出走。** `hive init` 幂等,报错会告诉你缺什么 —— `hive team` 等它完成之后再跑。
+**先跑 `hive team`** 看 self / 成员 / peer / group,确认身份再动。
 
-加载 hive skill 就代表你要进入 **peer group**(和 `/crew` 的 crew group 并列的基础协作模式;2 个 agent 互相 verify / review / confirm)。`hive init` 会自动给你配一个 **idle 异族**(model-family 不同)的 peer pane —— 优先在同 tmux session 里找现成的,找不到就在当前 window 现场 spawn 一个。两边 pane 都会打上 `@hive-group=peer`,在 `hive team` 里直接可见。
+`hive init` 幂等,= 在当前 window 起一个 **cell**:你当 worker，配一个 **异族**(model-family 不同)的 validator 审你的 code，两边 `@hive-group=cell`，在 `hive team` 里直接可见。crew 用 `hive crew init`(orch + challenger）。被 spawn 进来的角色身份已带好，直接按你的角色 spec 干活。
 
 ## 命令速查
 

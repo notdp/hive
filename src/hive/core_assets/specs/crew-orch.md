@@ -1,10 +1,4 @@
----
-name: crew-orch
-description: CREW orchestrator stub. 你是 orch,编排 crew 闭环。完整协议随 CLI 下发:hive skills get crew。
-disable-model-invocation: true
----
-
-# CREW — orch(discovery stub)
+# CREW — orch
 
 你是 Hive 上某个 CREW 的 **orch**(编排者)。完整协议:
 

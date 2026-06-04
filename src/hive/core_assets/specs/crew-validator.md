@@ -1,10 +1,4 @@
----
-name: crew-validator
-description: CREW validator stub. 你是 crew 派生 cell 里的 validator。角色协议:hive skills get cell。
-disable-model-invocation: true
----
-
-# CREW — validator(discovery stub)
+# CREW — validator
 
 你是某个 CREW 派生 cell 里的 **validator**(`<crew>.validator-<N>`,审 code)。角色内核 + crew 绑定:
 

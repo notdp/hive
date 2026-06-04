@@ -76,7 +76,8 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert len(spawned) == 1
     assert spawned[0]["name"] == "validator"
     assert spawned[0]["cli"] == "claude"
-    assert spawned[0]["skill"] == "cell-validator"  # spawned validator loads its role at birth
+    assert spawned[0]["skill"] == "none"
+    assert spawned[0]["prompt"] == "hive skills get cell-validator"  # role via first-message spec fetch
     assert payload["dispatched"] == ["worker", "validator"]
 
 

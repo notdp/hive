@@ -93,3 +93,17 @@ def test_skills_get_bypasses_stale_skill_gate(runner, monkeypatch):
     result = runner.invoke(cli, ["skills", "get", "core"])
     assert result.exit_code == 0, result.output
     assert "## 消息机制" in result.output
+
+
+def test_skills_get_serves_role_specs(runner):
+    """Role content lives in CLI-served specs now (no per-role SKILL.md). Every
+    role a spawn dispatches `hive skills get <role>` for must be fetchable."""
+    listed = json.loads(runner.invoke(cli, ["skills", "list"]).output)["specs"]
+    for role in (
+        "crew-orch", "crew-challenger", "crew-worker", "crew-validator",
+        "cell-worker", "cell-validator",
+    ):
+        assert role in listed
+        result = runner.invoke(cli, ["skills", "get", role])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip()

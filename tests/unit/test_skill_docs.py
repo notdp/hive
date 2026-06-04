@@ -26,75 +26,42 @@ def test_hive_skill_guides_multiline_send_via_artifact():
     assert "--artifact - <<'EOF'" in core_spec
 
 
-def test_crew_role_skills_are_thin_stubs_pointing_at_specs():
-    """守拓扑重构的架构不变量:crew 角色 skill 是薄 stub,只指向 CLI 下发的
-    spec(orch/challenger → crew;worker/validator → cell);fat 角色内核
-    (handoff schema)单一来源在 cell spec,不在 stub 里复刻。"""
-    repo_root = Path(__file__).resolve().parents[2]
-    skills = repo_root / "skills"
+def test_role_content_is_cli_served_specs_not_installed_skills():
+    """拓扑重构终态:角色内容不再是装机 skill,而是 CLI 现取的 spec
+    (`hive skills get <role>`)。每个角色 spec 都在;worker/validator 指 cell
+    内核、orch/challenger 指 crew;fat handoff schema 单一来源在 cell spec。"""
+    specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
 
-    orch = (skills / "crew-orch" / "SKILL.md").read_text()
-    challenger = (skills / "crew-challenger" / "SKILL.md").read_text()
-    worker = (skills / "crew-worker" / "SKILL.md").read_text()
-    validator = (skills / "crew-validator" / "SKILL.md").read_text()
+    for role in ("crew-orch", "crew-challenger", "crew-worker", "crew-validator",
+                 "cell-worker", "cell-validator"):
+        assert (specs / f"{role}.md").exists(), f"missing role spec: {role}.md"
 
-    # stubs point at the version-locked spec for their topology
-    assert "hive skills get crew" in orch
-    assert "hive skills get crew" in challenger
-    assert "hive skills get cell" in worker
-    assert "hive skills get cell" in validator
+    assert "hive skills get crew" in (specs / "crew-orch.md").read_text()
+    assert "hive skills get crew" in (specs / "crew-challenger.md").read_text()
+    for role in ("crew-worker", "cell-worker", "cell-validator"):
+        assert "hive skills get cell" in (specs / f"{role}.md").read_text()
 
-    # the fat role kernel (handoff schema) lives ONLY in the cell spec, never
-    # re-inlined into a stub — guards against drift via duplication
-    cell_spec = (repo_root / "src" / "hive" / "core_assets" / "specs" / "cell.md").read_text()
-    assert "salientSummary" in cell_spec
-    for stub in (orch, challenger, worker, validator):
-        assert "salientSummary" not in stub
-
-    # skeptic → challenger rename is complete in the skill surface
-    assert not (skills / "crew-skeptic").exists()
+    # fat kernel (handoff schema) single-sourced in the cell spec, never copied
+    assert "salientSummary" in (specs / "cell.md").read_text()
+    for role in ("crew-worker", "crew-validator", "cell-worker", "cell-validator"):
+        assert "salientSummary" not in (specs / f"{role}.md").read_text()
 
 
-def test_cell_role_skills_are_thin_stubs_pointing_at_specs():
-    """独立 cell 的角色 skill 同样是薄 stub:worker/validator 指向 cell spec,
-    /cell 入口只跑 `hive cell init`;fat handoff schema 只在 cell spec。
-    cell-*(human-coordinator binding)与 crew-*(crew binding)各自独立。"""
-    repo_root = Path(__file__).resolve().parents[2]
-    skills = repo_root / "skills"
-
-    entry = (skills / "cell" / "SKILL.md").read_text()
-    worker = (skills / "cell-worker" / "SKILL.md").read_text()
-    validator = (skills / "cell-validator" / "SKILL.md").read_text()
-
-    assert "hive cell init" in entry
-    assert "hive skills get cell" in worker
-    assert "hive skills get cell" in validator
-
-    cell_spec = (repo_root / "src" / "hive" / "core_assets" / "specs" / "cell.md").read_text()
-    assert "salientSummary" in cell_spec
-    for stub in (entry, worker, validator):
-        assert "salientSummary" not in stub
-
-
-def test_hive_stub_offers_cell_crew_picker():
-    """/hive 起新拓扑时问 cell/crew 再 dispatch,引用 core 的「问用户」idiom。"""
-    stub = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
-    assert "/cell" in stub and "/crew" in stub
-    assert "问用户" in stub
-
-
-def test_topology_skills_are_not_model_auto_invocable():
-    """所有拓扑 skill(入口 + 角色 stub)都该是 deliberate-only:入口靠用户显式
-    /cell · /crew(动作会破窗 + spawn,误触发代价大),角色 stub 靠 spawn 注入
-    /cell-worker · /crew-orch 等加载。都不该被模型按描述自动调用,所以全部钉
-    `disable-model-invocation: true`。"""
+def test_hive_is_the_only_installed_skill():
+    """单一装机 skill = `/hive`;cell/crew + 所有角色都被拉进 CLI(`hive skills
+    get`),不再是 SKILL.md —— 可 drift 面收到只剩 /hive。"""
     skills = Path(__file__).resolve().parents[2] / "skills"
-    for name in (
-        "crew", "crew-orch", "crew-challenger", "crew-worker", "crew-validator",
-        "cell", "cell-worker", "cell-validator",
-    ):
-        text = (skills / name / "SKILL.md").read_text()
-        assert "disable-model-invocation: true" in text, f"{name} missing disable-model-invocation"
+    installed = sorted(p.name for p in skills.iterdir() if p.is_dir())
+    assert installed == ["hive"], f"expected only the hive skill installed, got {installed}"
+
+
+def test_hive_picker_dispatches_to_cli_init():
+    """/hive 起拓扑时问 cell/crew(引用 core「问用户」),按答案跑 CLI 的
+    `hive cell init` / `hive crew init`,不再 dispatch /cell · /crew skill。"""
+    stub = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
+    assert "hive cell init" in stub
+    assert "hive crew init" in stub
+    assert "问用户" in stub
 
 
 def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
