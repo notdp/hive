@@ -2303,6 +2303,168 @@ def skills_list_cmd():
     click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
+@cli.group("cell")
+def cell_cmd():
+    """CELL atom (worker + anti-family validator) management."""
+
+
+def _cell_neighbor_for_pairing(
+    current_pane: str, window: str, my_family: str
+) -> tmux.PaneInfo | None:
+    """The current window's sole other pane, if it qualifies as the validator.
+
+    Qualifies = an idle, unowned, anti-family agent. Returns None otherwise.
+    Cell only ever conscripts here — the 2-pane case. 3+ panes break out
+    rather than guess which neighbor to grab.
+    """
+    others = [p for p in tmux.list_panes_full(window) if p.pane_id != current_pane]
+    if len(others) != 1:
+        return None
+    neighbor = others[0]
+    if neighbor.team or neighbor.group:
+        return None
+    if detect_profile_for_pane(neighbor.pane_id) is None:
+        return None
+    other_family = family_for_pane(neighbor.pane_id)
+    if my_family != "unknown" and other_family != "unknown" and my_family == other_family:
+        return None
+    if not _pane_is_idle_for_pairing(neighbor.pane_id):
+        return None
+    return neighbor
+
+
+@cell_cmd.command("init")
+@click.option(
+    "--validator-cli",
+    type=click.Choice(["claude", "codex", "droid"]),
+    default=None,
+    help="CLI for validator (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
+)
+def cell_init_cmd(validator_cli: str | None):
+    """Set up a cell from the current pane: worker (=this pane) + anti-family validator.
+
+    Standalone — no prior `hive init` needed. The current pane must be running
+    an agent CLI (claude / codex / droid); it becomes the worker. Realized by
+    the current window's pane count:
+
+      1 pane   → split-spawn the validator beside the worker
+      2 panes  → adopt the neighbor as validator if it's an idle, unowned,
+                 anti-family agent; otherwise treat as 3+
+      3+ panes → break the worker out to a fresh window, then spawn
+
+    The validator runs the anti-family CLI (claude↔codex; droid defaults to
+    claude) so review stays independent.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+    if detect_profile_for_pane(current_pane) is None:
+        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
+    _require_codex_daemon_backed(current_pane)
+
+    t = _auto_init_team_for_crew()
+    ws = _resolve_workspace(t, required=True)
+
+    worker_cli = _resolve_spawn_cli_name(None)
+    my_family = family_for_pane(current_pane)
+    if validator_cli:
+        v_cli, v_model = validator_cli, ""
+    else:
+        v_cli, v_model = resolve_peer_spawn(my_cli=worker_cli, my_family=my_family)
+        if not v_cli:
+            v_cli = anti_peer_cli(worker_cli)
+
+    window = tmux.get_pane_window_target(current_pane) or ""
+    if not window:
+        _fail("cannot determine current window")
+    count = tmux.get_pane_count(current_pane)
+    worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
+
+    # Decide adopt-vs-spawn before mutating any windows.
+    adopt = _cell_neighbor_for_pairing(current_pane, window, my_family) if count == 2 else None
+
+    worker_pane = current_pane
+    if adopt is None and count >= 2:
+        # Crowded / unpairable window — isolate the worker, then spawn clean.
+        new_window, worker_pane = tmux.break_pane(current_pane, name="cell")
+        if not new_window:
+            _fail("failed to break out into a new window")
+        window = new_window
+
+    tmux.set_window_option(window, "@hive-team", t.name)
+    tmux.set_window_option(window, "@hive-workspace", t.workspace or ws)
+    tmux.configure_hive_window(window)
+    tmux.set_pane_option(worker_pane, "hive-role", "agent")
+    tmux.set_pane_option(worker_pane, "hive-agent", "worker")
+    tmux.set_pane_option(worker_pane, "hive-team", t.name)
+    tmux.set_pane_option(worker_pane, "hive-group", "cell")
+    tmux.set_pane_option(worker_pane, "hive-cli", worker_cli)
+    hive_context.save_context_for_pane(worker_pane, team=t.name, workspace=ws, agent="worker")
+    _remember_context(team=t.name, workspace=ws, agent="worker")
+
+    from . import layout as layout_mod
+
+    if adopt is not None:
+        v_profile = detect_profile_for_pane(adopt.pane_id)
+        v_pane_cli = v_profile.name if v_profile else "claude"
+        adopt_cwd = tmux.display_value(adopt.pane_id, "#{pane_current_path}") or worker_cwd
+        _register_agent_member(
+            t,
+            pane_id=adopt.pane_id,
+            team_name=t.name,
+            agent_name="validator",
+            pane_cli=v_pane_cli,
+            cwd=adopt_cwd,
+            notify=True,
+            group="cell",
+        )
+        validator_pane, validator_cli_used, mode = adopt.pane_id, v_pane_cli, "paired"
+    else:
+        validator_agent = Agent.spawn(
+            name="validator",
+            team_name=t.name,
+            target_pane=worker_pane,
+            cwd=worker_cwd,
+            split_horizontal=layout_mod.split_horizontal(window, 2),
+            split_size="50%",
+            cli=v_cli,
+            model=v_model,
+            skill="hive",
+            workspace=ws,
+        )
+        t.agents["validator"] = validator_agent
+        tmux.set_pane_option(validator_agent.pane_id, "hive-group", "cell")
+        hive_context.save_context_for_pane(
+            validator_agent.pane_id, team=t.name, workspace=ws, agent="validator"
+        )
+        validator_pane, validator_cli_used, mode = validator_agent.pane_id, v_cli, "spawned"
+
+    # Declare the worker ↔ validator pair (reload so both names are visible).
+    try:
+        reloaded = Team.load(t.name, prefer_pane=worker_pane)
+        reloaded.set_peer("worker", "validator")
+    except (FileNotFoundError, KeyError, ValueError):
+        pass
+
+    layout_mod.apply_adaptive(window)
+    tmux.select_window(window)
+
+    click.echo(json.dumps({
+        "team": t.name,
+        "window": window,
+        "group": "cell",
+        "worker": {"pane": worker_pane, "name": "worker", "cli": worker_cli},
+        "validator": {
+            "pane": validator_pane,
+            "name": "validator",
+            "cli": validator_cli_used,
+            "mode": mode,
+        },
+    }, indent=2, ensure_ascii=False))
+
+
 @cli.group("crew")
 def crew_cmd():
     """CREW squad (orch + challenger + on-demand cells) management."""
