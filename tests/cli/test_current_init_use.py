@@ -48,7 +48,8 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     assert payload["tmux"]["panes"][0]["id"] == "%0"
     assert payload["tmux"]["panes"][0]["role"] == "agent"
     assert payload["tmux"]["panes"][1]["role"] == "agent"
-    assert "hive init" in payload["hint"]
+    # no-team hint defers the topology choice to the user (ask, don't self-init)
+    assert "cell" in payload["hint"] and "crew" in payload["hint"]
 
 
 def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(runner, configure_hive_home, tmp_path):

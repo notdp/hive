@@ -35,7 +35,7 @@ hive skills get core      # 完整协议：命令速查 / 消息机制 / thread 
 
 **被别的 team 拉进来**（收到 join 消息 / 当前 window 已绑 team）→ 不用起拓扑，`hive team` 看成员，按 core 干活。
 
-**你来起一个新协作拓扑** → 先问用户要 cell 还是 crew（用 runtime 的阻塞式提问工具，见 core 的「问用户」），按答案跑：
+**你来起一个新协作拓扑** → **先用阻塞式提问工具(claude `AskUserQuestion`，见 core 的「问用户」)问用户要 cell 还是 crew —— 这一步不能省、别替用户选、别直接 `hive init`**。按用户的答案跑：
 
 - **cell** —— worker + 异族 validator，你协调 → `hive cell init`
 - **crew** —— orch + challenger + 按需 cell，编排 → `hive crew init`

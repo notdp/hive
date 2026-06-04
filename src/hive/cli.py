@@ -1327,7 +1327,7 @@ def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str
     binding = _discover_tmux_binding()
     team_name = binding.get("team")
     if not team_name:
-        _fail("no team bound to the current window. Run `hive init` first.")
+        _fail("no team bound to the current window. Run `hive cell init` or `hive crew init` first.")
 
     t = Team.load(team_name, prefer_pane=tmux.get_current_pane_id() or "")
     window_target = t.tmux_window or tmux.get_current_window_target() or ""
@@ -1875,7 +1875,7 @@ def team_cmd():
         ],
         "paneCount": len(panes),
     }
-    result["hint"] = "No team bound. Run `hive init` to create one from this tmux window."
+    result["hint"] = "No team bound. The cell-vs-crew choice is the user's — ask them with the blocking question tool, then init accordingly. Don't pick or init on your own."
     window_id = tmux.get_current_window_id() or ""
     if session_name and window_id:
         result["runtimeWorkspace"] = str(_default_auto_workspace_path(session_name, window_id))
