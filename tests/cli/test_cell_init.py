@@ -77,7 +77,10 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert spawned[0]["name"] == "validator"
     assert spawned[0]["cli"] == "claude"
     assert spawned[0]["skill"] == "none"
-    assert spawned[0]["prompt"] == "hive skills get cell-validator"  # role via first-message spec fetch
+    # validator's first message is the fed role bootstrap (preamble + spec), not a bare command,
+    # so a spawned no-human pane operates on it directly instead of run-and-stop.
+    assert "cell-validator" in spawned[0]["prompt"]
+    assert "等你的第一条任务消息" in spawned[0]["prompt"]
     assert payload["dispatched"] == ["worker", "validator"]
 
 
