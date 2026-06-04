@@ -25,7 +25,7 @@ from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent
 from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
-from .team import HIVE_HOME, LEAD_AGENT_NAME, Team, Terminal
+from .team import HIVE_HOME, LEAD_AGENT_NAME, Team
 
 
 _COMMAND_HELP_SECTIONS = {
@@ -45,12 +45,12 @@ _COMMAND_HELP_SECTIONS = {
     # Workflow — higher-level flows on top of Hive.
     "workflow": "Workflow",
     "crew": "Workflow",
+    "cell": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
     "register": "Team",
     "peer": "Team",
-    "terminal": "Team",
     "layout": "Team",
     # Human Helpers — human-only popup + split helpers.
     "cvim": "Human Helpers",
@@ -65,7 +65,6 @@ _COMMAND_HELP_SECTIONS = {
     "inject": "Debug",
     "interrupt": "Debug",
     "kill": "Debug",
-    "exec": "Debug",
     # Extensions.
     "plugin": "Extensions",
     "config": "Extensions",
@@ -827,16 +826,6 @@ def _derive_agent_name(seen: set[str]) -> str:
     return candidate
 
 
-def _derive_terminal_name(seen: set[str]) -> str:
-    suffix = 1
-    candidate = f"term-{suffix}"
-    while candidate in seen:
-        suffix += 1
-        candidate = f"term-{suffix}"
-    seen.add(candidate)
-    return candidate
-
-
 def _window_seen_names(t: Team, panes: list[tmux.PaneInfo]) -> set[str]:
     seen_names = _names_used_in_window(panes)
     seen_names.add(t.lead_name or LEAD_AGENT_NAME)
@@ -1203,201 +1192,6 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     return False
 
 
-def _discover_peer_candidate(current_pane: str, my_family: str) -> tmux.PaneInfo | None:
-    """Find an idle anti-family agent pane not already committed to any group.
-
-    Candidates are sorted MRU (most-recent tmux activity first); the first
-    qualifying pane wins.  Returns None when no candidate qualifies.
-    """
-    candidates: list[tuple[int, tmux.PaneInfo]] = []
-    for pane in tmux.list_panes_all():
-        if pane.pane_id == current_pane:
-            continue
-        if pane.team or pane.group:
-            continue
-        if detect_profile_for_pane(pane.pane_id) is None:
-            continue
-        other_family = family_for_pane(pane.pane_id)
-        if (
-            my_family != "unknown"
-            and other_family != "unknown"
-            and my_family == other_family
-        ):
-            continue
-        if not _pane_is_idle_for_pairing(pane.pane_id):
-            continue
-        candidates.append((_pane_last_activity(pane.pane_id), pane))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda t: t[0], reverse=True)
-    return candidates[0][1]
-
-
-def _attach_peer_to_team(
-    t: Team,
-    *,
-    current_pane: str,
-    workspace: str,
-    notify: bool,
-) -> dict[str, object] | None:
-    """`hive init` peer-group attach: discover or spawn an anti-family peer.
-
-    Tags both the lead pane and the peer pane with ``@hive-group=peer`` so
-    the pair is identifiable cross-window (mirrors how crew tags panes with
-    its instance name, e.g. ``@hive-group=peaky``).  Returns a descriptor,
-    or ``None`` when the current pane has no detectable agent CLI.
-    """
-    if not current_pane:
-        return None
-    if detect_profile_for_pane(current_pane) is None:
-        return None
-
-    # Declare peer-group intent on the lead pane even if we end up finding
-    # no candidate and the spawn falls through — makes the window self-
-    # identifying.
-    tmux.set_pane_option(current_pane, "hive-group", "peer")
-
-    my_family = family_for_pane(current_pane)
-    seen_names = set(t.agents.keys())
-    seen_names.add(t.lead_name or LEAD_AGENT_NAME)
-
-    lead_name = t.lead_name or LEAD_AGENT_NAME
-
-    def _declare_pair(peer_name: str) -> None:
-        """Persist the lead↔peer pair so `hive team` reflects it even when
-        a third agent later joins the team (no reliance on the 2-agent
-        implicit derive)."""
-        try:
-            t.set_peer(lead_name, peer_name)
-        except (KeyError, ValueError):
-            pass
-
-    # Compute intended peer spawn first. When droid.selfPeer is on and the
-    # lead is droid with a cross-family custom model available, the user has
-    # explicitly asked for a droid peer — discovering an idle non-droid pane
-    # would silently override that intent. Skip discovery in that case and
-    # fall straight through to spawn.
-    my_profile = detect_profile_for_pane(current_pane)
-    my_cli = my_profile.name if my_profile else ""
-    peer_cli, peer_model = resolve_peer_spawn(my_cli=my_cli, my_family=my_family)
-    skip_discovery = peer_cli == "droid" and bool(peer_model)
-
-    candidate = None if skip_discovery else _discover_peer_candidate(current_pane, my_family)
-    if candidate is not None:
-        peer_name = _derive_agent_name(seen_names)
-        profile = detect_profile_for_pane(candidate.pane_id)
-        pane_cli = profile.name if profile else "claude"
-        cwd = tmux.display_value(candidate.pane_id, "#{pane_current_path}") or os.getcwd()
-
-        # Invariant: one window = one team. If the candidate sits in another
-        # tmux window, migrate it into the current window via `tmux join-pane`
-        # before tagging it as a team member. Peer is NOT cross-window (only
-        # group is — that's CREW's job).
-        my_window = tmux.get_pane_window_target(current_pane) or ""
-        their_window = tmux.get_pane_window_target(candidate.pane_id) or ""
-        if my_window and their_window and my_window != their_window:
-            tmux.join_pane(candidate.pane_id, current_pane, horizontal=True)
-
-        _register_agent_member(
-            t,
-            pane_id=candidate.pane_id,
-            team_name=t.name,
-            agent_name=peer_name,
-            pane_cli=pane_cli,
-            cwd=cwd,
-            notify=notify,
-            group="peer",
-        )
-        _declare_pair(peer_name)
-        _apply_peer_layout(current_pane)
-        return {
-            "mode": "discovered",
-            "pane": candidate.pane_id,
-            "name": peer_name,
-            "cli": pane_cli,
-            "pair": [lead_name, peer_name],
-        }
-
-    # Spawn fallback: create an anti-family peer pane in the current window.
-    # peer_cli / peer_model resolved above (see skip_discovery comment).
-    peer_name = _derive_agent_name(seen_names)
-    peer_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or os.getcwd()
-    from . import layout as layout_mod
-    peer_window = tmux.get_pane_window_target(current_pane) or ""
-    pane_count_after = (
-        len(tmux.list_panes(peer_window)) + 1 if peer_window else 2
-    )
-    peer_agent = Agent.spawn(
-        name=peer_name,
-        team_name=t.name,
-        target_pane=current_pane,
-        cwd=peer_cwd,
-        split_horizontal=layout_mod.split_horizontal(peer_window, pane_count_after),
-        cli=peer_cli,
-        model=peer_model,
-        skill="hive",
-        workspace=workspace,
-    )
-    t.agents[peer_name] = peer_agent
-    tmux.set_pane_option(peer_agent.pane_id, "hive-group", "peer")
-    hive_context.save_context_for_pane(
-        peer_agent.pane_id,
-        team=t.name,
-        workspace=workspace,
-        agent=peer_name,
-    )
-    _declare_pair(peer_name)
-    _apply_peer_layout(current_pane)
-    return {
-        "mode": "spawned",
-        "pane": peer_agent.pane_id,
-        "name": peer_name,
-        "cli": peer_cli,
-        "pair": [lead_name, peer_name],
-    }
-
-
-def _apply_peer_layout(current_pane: str) -> None:
-    """Apply adaptive layout to the window that owns *current_pane*."""
-    if not current_pane:
-        return
-    window_target = tmux.get_pane_window_target(current_pane) or ""
-    if not window_target:
-        return
-    from . import layout as layout_mod
-    layout_mod.apply_adaptive(window_target)
-
-
-def _register_existing_pane(
-    t: Team,
-    pane: tmux.PaneInfo,
-    *,
-    team_name: str,
-    seen_names: set[str],
-) -> tuple[str, str, Agent | Terminal]:
-    role, pane_cli = _classify_pane(pane)
-    tmux.clear_pane_tags(pane.pane_id)
-    pane_cwd = tmux.display_value(pane.pane_id, "#{pane_current_path}") or os.getcwd()
-    if role == "agent":
-        agent_name = _derive_agent_name(seen_names)
-        agent = _register_agent_member(
-            t,
-            pane_id=pane.pane_id,
-            team_name=team_name,
-            agent_name=agent_name,
-            pane_cli=pane_cli,
-            cwd=pane_cwd,
-            notify=False,
-        )
-        return role, agent_name, agent
-
-    terminal_name = _derive_terminal_name(seen_names)
-    terminal = Terminal(name=terminal_name, pane_id=pane.pane_id)
-    t.terminals[terminal_name] = terminal
-    tmux.tag_pane(pane.pane_id, "terminal", terminal_name, team_name)
-    return role, terminal_name, terminal
-
-
 def _require_codex_daemon_backed(pane: str) -> None:
     """Refuse to let an embedded (non-daemon) codex join; point to the fix.
 
@@ -1449,7 +1243,12 @@ def _require_codex_daemon_backed(pane: str) -> None:
 @click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
 @click.option("--notify/--no-notify", default=True, help="Push hive skill + context to other panes")
 def init_cmd(name: str, workspace: str, notify: bool):
-    """Initialize a team from the current tmux window."""
+    """Initialize a cell from the current tmux window: worker (= this pane) + anti-family validator.
+
+    `hive init` is the bare entry into the cell topology (`/cell` and `/crew`
+    are the explicit ones). Idempotent: re-running in a bound window reports the
+    existing binding.
+    """
     if not tmux.is_inside_tmux():
         _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
 
@@ -1461,66 +1260,17 @@ def init_cmd(name: str, workspace: str, notify: bool):
     window_id = tmux.get_current_window_id() or ""
     window_target = tmux.get_current_window_target()
     current_pane = tmux.get_current_pane_id()
+    if detect_profile_for_pane(current_pane or "") is None:
+        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
     _require_codex_daemon_backed(current_pane or "")
+
     existing = _discover_tmux_binding()
     if existing.get("team"):
         click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
         return
-    bound_team = tmux.get_window_option(window_target, "hive-team") if window_target else ""
-    if bound_team:
-        try:
-            loaded = Team.load(bound_team, prefer_pane=current_pane or "")
-        except FileNotFoundError:
-            loaded = None
-        if loaded and loaded.tmux_window == window_target and loaded.status().get("members"):
-            panes = tmux.list_panes_full(window_target) if window_target else []
-            current_info = next((pane for pane in panes if pane.pane_id == current_pane), None)
-            if current_info and (not current_info.team or current_info.team == bound_team):
-                # Freeze any 2-agent implicit pair into explicit BEFORE adding
-                # a third agent — mirrors the fresh-init `_declare_pair`
-                # guarantee. Without this, registering a new member below
-                # flips peer_mode from `implicit` to `none` and the existing
-                # (auto-paired) relationship vanishes from `hive team`.
-                pair = loaded.implicit_pair()
-                if pair is not None:
-                    try:
-                        loaded.set_peer(pair[0], pair[1])
-                    except (KeyError, ValueError):
-                        pass
-                seen_names = _names_used_in_window(panes)
-                seen_names.add(loaded.lead_name or LEAD_AGENT_NAME)
-                role, member_name, member = _register_existing_pane(
-                    loaded,
-                    current_info,
-                    team_name=bound_team,
-                    seen_names=seen_names,
-                )
-                workspace_str = loaded.workspace or ""
-                hive_context.save_context_for_pane(
-                    current_pane or "",
-                    team=bound_team,
-                    workspace=workspace_str,
-                    agent=member_name,
-                )
-                _remember_context(team=bound_team, workspace=workspace_str, agent=member_name)
-                # Self-register: `member` is the current pane, which already
-                # ran `/hive` and sees the JSON output below. Re-injecting
-                # `/hive` + join message here would land in the pane's own
-                # input queue.
-                click.echo(json.dumps({
-                    "team": bound_team,
-                    "workspace": workspace_str,
-                    "agent": member_name,
-                    "role": role,
-                    "pane": current_pane,
-                    "tmuxSession": session_name,
-                    "tmuxWindow": window_target,
-                }, indent=2, ensure_ascii=False))
-                return
-            _fail(
-                f"tmux window '{window_target}' already belongs to team '{bound_team}'; "
-                "current pane is not registered"
-            )
+
+    # Stale `@hive-team` tag from a prior team on this window — clear so we can rebind.
+    if window_target and tmux.get_window_option(window_target, "hive-team"):
         for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(window_target, f"@{key}")
 
@@ -1537,9 +1287,6 @@ def init_cmd(name: str, workspace: str, notify: bool):
     default_ws_path = _default_auto_workspace_path(session_name, window_id or window_index)
     using_auto_workspace = not workspace
     ws_path = Path(workspace).expanduser() if workspace else default_ws_path
-    ws = str(ws_path)
-
-    panes = tmux.list_panes_full(window_target) if window_target else []
 
     if using_auto_workspace:
         # A fresh `hive init` on the same tmux window should not inherit the
@@ -1558,67 +1305,12 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
 
-    seen_names = _names_used_in_window(panes)
-    seen_names.add(LEAD_AGENT_NAME)
-    discovered = []
-    for pane in panes:
-        if pane.team and pane.team != team_name:
-            _fail(f"pane '{pane.pane_id}' already belongs to team '{pane.team}'")
-        role, _pane_cli = _classify_pane(pane)
-        is_current = pane.pane_id == current_pane
-        if is_current:
-            discovered.append({
-                "paneId": pane.pane_id,
-                "role": role,
-                "name": LEAD_AGENT_NAME,
-                "command": pane.command,
-                "isSelf": True,
-            })
-            continue
-
-        role, member_name, member = _register_existing_pane(
-            t,
-            pane,
-            team_name=team_name,
-            seen_names=seen_names,
-        )
-        if isinstance(member, Agent):
-            hive_context.save_context_for_pane(
-                pane.pane_id, team=team_name, workspace=str(ws_path), agent=member_name,
-            )
-            if notify:
-                member.load_skill("hive")
-                member.send(_hive_join_message(member_name, team_name))
-        discovered.append({
-            "paneId": pane.pane_id,
-            "role": role,
-            "name": member_name,
-            "command": pane.command,
-            "isSelf": False,
-        })
-
-    # `hive init` = peer group entry. Discover (or spawn) an anti-family peer
-    # so `hive team` immediately reflects the pair.  `hive crew init` takes a
-    # different entry (`_auto_init_team_for_crew`) and sets up the crew group
-    # without touching this path.
-    peer_info = _attach_peer_to_team(
-        t,
-        current_pane=current_pane or "",
-        workspace=str(ws_path),
-        notify=notify,
+    # Form the cell (worker = current pane + anti-family validator), then start
+    # the team sidecar for pending-send tracking.
+    result = _attach_cell_to_team(
+        t, current_pane=current_pane or "", ws=str(ws_path), validator_cli=None
     )
-
-    # Start team sidecar for pending send tracking.
     _ensure_team_sidecar(t, ws_path)
-
-    result: dict[str, object] = {
-        "team": team_name,
-        "workspace": str(ws_path),
-        "window": window_target,
-        "panes": discovered,
-    }
-    if peer_info is not None:
-        result["peer"] = peer_info
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -1656,25 +1348,20 @@ def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str
     _claim_member_name(name_override, seen_names)
 
     role, pane_cli = _classify_pane(target_pane)
-    if role == "agent":
-        agent_name = name_override or _derive_agent_name(seen_names)
-        _register_agent_member(
-            t,
-            pane_id=pane_id,
-            team_name=team_name,
-            agent_name=agent_name,
-            pane_cli=pane_cli,
-            cwd=tmux.display_value(pane_id, "#{pane_current_path}") or os.getcwd(),
-            notify=notify,
-            group=group_name,
-        )
-        member_name = agent_name
-    else:
-        terminal_name = name_override or _derive_terminal_name(seen_names)
-        terminal = Terminal(name=terminal_name, pane_id=pane_id)
-        t.terminals[terminal_name] = terminal
-        tmux.tag_pane(pane_id, "terminal", terminal_name, team_name, group=group_name)
-        member_name = terminal_name
+    if role != "agent":
+        _fail(f"pane '{pane_id}' is not running an agent CLI; only agent panes can be registered")
+    agent_name = name_override or _derive_agent_name(seen_names)
+    _register_agent_member(
+        t,
+        pane_id=pane_id,
+        team_name=team_name,
+        agent_name=agent_name,
+        pane_cli=pane_cli,
+        cwd=tmux.display_value(pane_id, "#{pane_current_path}") or os.getcwd(),
+        notify=notify,
+        group=group_name,
+    )
+    member_name = agent_name
 
     result_payload = {
         "registered": member_name,
@@ -2350,40 +2037,17 @@ def _cell_neighbor_for_pairing(
     return neighbor
 
 
-@cell_cmd.command("init")
-@click.option(
-    "--validator-cli",
-    type=click.Choice(["claude", "codex", "droid"]),
-    default=None,
-    help="CLI for validator (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
-)
-def cell_init_cmd(validator_cli: str | None):
-    """Set up a cell from the current pane: worker (=this pane) + anti-family validator.
+def _attach_cell_to_team(
+    t: Team, *, current_pane: str, ws: str, validator_cli: str | None = None
+) -> dict[str, object]:
+    """Form a cell on team *t*: worker (= current pane) + an anti-family validator.
 
-    Standalone — no prior `hive init` needed. The current pane must be running
-    an agent CLI (claude / codex / droid); it becomes the worker. Realized by
-    the current window's pane count:
-
-      1 pane   → split-spawn the validator beside the worker
-      2 panes  → adopt the neighbor as validator if it's an idle, unowned,
-                 anti-family agent; otherwise treat as 3+
-      3+ panes → break the worker out to a fresh window, then spawn
-
-    The validator runs the anti-family CLI (claude↔codex; droid defaults to
-    claude) so review stays independent.
+    Realized by the current window's pane count — 1: split-spawn the validator;
+    2: adopt an idle/unowned/anti-family neighbor, else break out; 3+: break the
+    worker to a fresh window then spawn. Tags the worker, spawns/adopts +
+    dispatches the validator, declares the pair. Returns a descriptor for the
+    caller to echo. Shared by `hive cell init` and `hive init`.
     """
-    if not tmux.is_inside_tmux():
-        _fail("must run inside tmux")
-    current_pane = tmux.get_current_pane_id() or ""
-    if not current_pane:
-        _fail("cannot determine current pane")
-    if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
-    _require_codex_daemon_backed(current_pane)
-
-    t = _auto_init_team_for_crew()
-    ws = _resolve_workspace(t, required=True)
-
     worker_cli = _resolve_spawn_cli_name(None)
     my_family = family_for_pane(current_pane)
     if validator_cli:
@@ -2478,7 +2142,7 @@ def cell_init_cmd(validator_cli: str | None):
 
     tmux.select_window(window)
 
-    click.echo(json.dumps({
+    return {
         "team": t.name,
         "window": window,
         "group": "cell",
@@ -2490,7 +2154,47 @@ def cell_init_cmd(validator_cli: str | None):
             "mode": mode,
         },
         "dispatched": dispatched,
-    }, indent=2, ensure_ascii=False))
+    }
+
+
+@cell_cmd.command("init")
+@click.option(
+    "--validator-cli",
+    type=click.Choice(["claude", "codex", "droid"]),
+    default=None,
+    help="CLI for validator (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
+)
+def cell_init_cmd(validator_cli: str | None):
+    """Set up a cell from the current pane: worker (=this pane) + anti-family validator.
+
+    Standalone — no prior `hive init` needed. The current pane must be running
+    an agent CLI (claude / codex / droid); it becomes the worker. Realized by
+    the current window's pane count:
+
+      1 pane   → split-spawn the validator beside the worker
+      2 panes  → adopt the neighbor as validator if it's an idle, unowned,
+                 anti-family agent; otherwise treat as 3+
+      3+ panes → break the worker out to a fresh window, then spawn
+
+    The validator runs the anti-family CLI (claude↔codex; droid defaults to
+    claude) so review stays independent.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+    if detect_profile_for_pane(current_pane) is None:
+        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
+    _require_codex_daemon_backed(current_pane)
+
+    t = _auto_init_team_for_crew()
+    ws = _resolve_workspace(t, required=True)
+
+    result = _attach_cell_to_team(
+        t, current_pane=current_pane, ws=ws, validator_cli=validator_cli
+    )
+    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 @cli.group("crew")
@@ -3507,7 +3211,7 @@ def doctor(agent_name: str, include_skills: bool):
 @click.argument("member_name")
 @click.option("--lines", "-n", default=30)
 def capture(member_name: str, lines: int):
-    """Debug: capture raw pane output from any member (agent or terminal).
+    """Debug: capture raw pane output from a team member's pane.
 
     Prints the last N lines (default 30) of the member's tmux pane.
     Use to inspect what the agent actually sees when transcript parsing
@@ -3523,11 +3227,7 @@ def capture(member_name: str, lines: int):
         agent = t.get(member_name)
         click.echo(agent.capture(lines))
     except KeyError:
-        if member_name in t.terminals:
-            pane_id = t.terminals[member_name].pane_id
-            click.echo(tmux.capture_pane(pane_id, lines))
-        else:
-            _fail(f"member '{member_name}' not found in team '{t.name}'")
+        _fail(f"member '{member_name}' not found in team '{t.name}'")
 
 
 @cli.command()
@@ -3918,78 +3618,6 @@ def shell_init_cmd(shell: str):
     else:
         # zsh and bash share POSIX function syntax; case patterns use `|`.
         click.echo(_SHELL_INIT_POSIX % {"passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS)}, nl=False)
-
-
-# --- Terminal commands ---
-
-def _resolve_terminal(t: Team, name: str) -> Terminal:
-    if name not in t.terminals:
-        _fail(f"terminal '{name}' not found in team '{t.name}'")
-    terminal = t.terminals[name]
-    _ensure_pane_in_scope(t, terminal.pane_id)
-    if not terminal.is_alive():
-        _fail(f"terminal '{name}' pane is no longer alive")
-    return terminal
-
-
-@cli.command("exec")
-@click.argument("terminal_name")
-@click.argument("command")
-def exec_cmd(terminal_name: str, command: str):
-    """Debug: inject a command into a terminal pane.
-
-    Only targets panes registered as terminals (not agents). Use for
-    terminal-side tooling scripted by agents; for agent-directed
-    commands use the message protocol.
-
-    \b
-    Example:
-      hive exec shell "ls -la"
-    """
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    terminal = _resolve_terminal(t, terminal_name)
-    tmux.send_keys(terminal.pane_id, command)
-    click.echo(f"Sent to {terminal_name} ({terminal.pane_id}).")
-
-
-@cli.group()
-def terminal():
-    """Manage terminal panes in the team."""
-    pass
-
-
-@terminal.command("add")
-@click.argument("name", required=False, default="")
-@click.option("--pane", "pane_id", default="", help="Pane ID (default: current pane)")
-def terminal_add(name: str, pane_id: str):
-    """Register a pane as a terminal."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    resolved_pane = pane_id or tmux.get_current_pane_id()
-    if not resolved_pane:
-        _fail("cannot determine pane ID (are you in tmux?)")
-    _ensure_pane_in_scope(t, resolved_pane)
-    term_name = name or f"term-{len(t.terminals) + 1}"
-    if term_name in t.terminals:
-        _fail(f"terminal '{term_name}' already exists")
-    t.terminals[term_name] = Terminal(name=term_name, pane_id=resolved_pane)
-    tmux.tag_pane(resolved_pane, "terminal", term_name, team_name)
-    click.echo(f"Terminal '{term_name}' registered ({resolved_pane}).")
-
-
-@terminal.command("remove")
-@click.argument("name")
-def terminal_remove(name: str):
-    """Unregister a terminal pane."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    if name not in t.terminals:
-        _fail(f"terminal '{name}' not found")
-    terminal_obj = t.terminals.pop(name)
-    if tmux.is_pane_alive(terminal_obj.pane_id):
-        tmux.clear_pane_tags(terminal_obj.pane_id)
-    click.echo(f"Terminal '{name}' removed.")
 
 
 @cli.group()

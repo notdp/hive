@@ -16,31 +16,12 @@ LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
 @dataclass
-class Terminal:
-    name: str
-    pane_id: str
-    role: str = "terminal"
-
-    def is_alive(self) -> bool:
-        return tmux.is_pane_alive(self.pane_id)
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "role": self.role,
-            "tmuxPaneId": self.pane_id,
-            "isActive": self.is_alive(),
-        }
-
-
-@dataclass
 class Team:
     name: str
     description: str = ""
     workspace: str = ""
     lead_name: str = LEAD_AGENT_NAME
     agents: dict[str, Agent] = field(default_factory=dict)
-    terminals: dict[str, Terminal] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     lead_pane_id: str = ""
     lead_session_id: str | None = None
@@ -135,7 +116,7 @@ class Team:
         for pane in panes:
             if pane.team != name:
                 continue
-            if pane.role in ("lead", "orchestrator", "agent", "terminal"):
+            if pane.role in ("lead", "orchestrator", "agent"):
                 if pane.agent and pane.group:
                     team.member_groups[pane.agent] = pane.group
                 if pane.role in ("lead", "orchestrator"):
@@ -155,9 +136,6 @@ class Team:
                         cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
                     team.agents[pane.agent] = agent
-                elif pane.role == "terminal":
-                    terminal = Terminal(name=pane.agent, pane_id=pane.pane_id, role=pane.role)
-                    team.terminals[pane.agent] = terminal
 
         team.peer_map = team._canonical_peer_map(team.peer_map)
         return team
@@ -300,17 +278,6 @@ class Team:
                 if peer_name:
                     row["peer"] = peer_name
             members.append(row)
-        for name in sorted(self.terminals):
-            terminal = self.terminals[name]
-            row = {
-                "name": name,
-                "role": terminal.role,
-                "pane": terminal.pane_id,
-            }
-            group = self.member_groups.get(name, "")
-            if group:
-                row["group"] = group
-            members.append(row)
         return {
             "name": self.name,
             "description": self.description,
@@ -362,7 +329,7 @@ class Team:
     def _peer_member_names(self) -> list[str]:
         names: list[str] = []
         lead = self.lead_agent()
-        if lead is not None and member_role_for_pane(lead.pane_id) != "terminal":
+        if lead is not None:
             names.append(lead.name)
         names.extend(sorted(self.agents))
         return list(dict.fromkeys(names))
@@ -492,9 +459,6 @@ class Team:
         """Kill all agent panes (not the session itself if in-place)."""
         for agent in self.agents.values():
             agent.kill()
-        for terminal in self.terminals.values():
-            if tmux.is_pane_alive(terminal.pane_id):
-                tmux.clear_pane_tags(terminal.pane_id)
         if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
             tmux.clear_pane_tags(self.lead_pane_id)
 

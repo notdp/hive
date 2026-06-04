@@ -2,11 +2,14 @@ import json
 from types import SimpleNamespace
 
 from hive.agent import Agent
-from hive.cli import cli
+from hive.cli import cli, _attach_cell_to_team as _real_attach_cell_to_team
 
 
 def _cell_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes=None):
     """Shared cell-init stubs: codex worker (openai family), claude validator."""
+    # configure_hive_home stubs _attach_cell_to_team; restore the real one so
+    # these tests exercise the actual cell-formation logic.
+    monkeypatch.setattr(cli_mod, "_attach_cell_to_team", _real_attach_cell_to_team)
     profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
     fam = family_map or {}
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: profile)
