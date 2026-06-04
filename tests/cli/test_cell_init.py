@@ -73,6 +73,8 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert len(spawned) == 1
     assert spawned[0]["name"] == "validator"
     assert spawned[0]["cli"] == "claude"
+    assert spawned[0]["skill"] == "cell-validator"  # spawned validator loads its role at birth
+    assert payload["dispatched"] == ["worker", "validator"]
 
 
 def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
@@ -113,6 +115,7 @@ def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
     assert payload["worker"]["pane"] == "%100"  # stays put, not broken out
     assert spawned == []  # adopted the neighbor, did not spawn
     assert breaks == []  # 2-pane pairable → no break-out
+    assert payload["dispatched"] == ["worker", "validator"]  # worker + adopted validator both get their role
 
 
 def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
@@ -161,6 +164,7 @@ def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
     assert payload["window"] == "dev:1"
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
+    assert payload["dispatched"] == ["worker", "validator"]
 
 
 def test_cell_init_three_panes_breaks_out_then_spawns(
@@ -196,3 +200,4 @@ def test_cell_init_three_panes_breaks_out_then_spawns(
     assert payload["window"] == "dev:1"
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
+    assert payload["dispatched"] == ["worker", "validator"]

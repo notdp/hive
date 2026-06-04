@@ -55,13 +55,44 @@ def test_crew_role_skills_are_thin_stubs_pointing_at_specs():
     assert not (skills / "crew-skeptic").exists()
 
 
-def test_crew_skills_are_not_model_auto_invocable():
-    """所有 crew 系 skill 都该是 deliberate-only:`crew` 入口靠用户显式 /crew
-    (动作是 `hive crew init`,会破窗 + spawn challenger,误触发代价大),角色
-    stub 靠 spawn 注入 `/crew-orch` 等加载。两者都不该被模型按描述自动调用,
-    所以全部钉 `disable-model-invocation: true`。"""
+def test_cell_role_skills_are_thin_stubs_pointing_at_specs():
+    """独立 cell 的角色 skill 同样是薄 stub:worker/validator 指向 cell spec,
+    /cell 入口只跑 `hive cell init`;fat handoff schema 只在 cell spec。
+    cell-*(human-coordinator binding)与 crew-*(crew binding)各自独立。"""
+    repo_root = Path(__file__).resolve().parents[2]
+    skills = repo_root / "skills"
+
+    entry = (skills / "cell" / "SKILL.md").read_text()
+    worker = (skills / "cell-worker" / "SKILL.md").read_text()
+    validator = (skills / "cell-validator" / "SKILL.md").read_text()
+
+    assert "hive cell init" in entry
+    assert "hive skills get cell" in worker
+    assert "hive skills get cell" in validator
+
+    cell_spec = (repo_root / "src" / "hive" / "core_assets" / "specs" / "cell.md").read_text()
+    assert "salientSummary" in cell_spec
+    for stub in (entry, worker, validator):
+        assert "salientSummary" not in stub
+
+
+def test_hive_stub_offers_cell_crew_picker():
+    """/hive 起新拓扑时问 cell/crew 再 dispatch,引用 core 的「问用户」idiom。"""
+    stub = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
+    assert "/cell" in stub and "/crew" in stub
+    assert "问用户" in stub
+
+
+def test_topology_skills_are_not_model_auto_invocable():
+    """所有拓扑 skill(入口 + 角色 stub)都该是 deliberate-only:入口靠用户显式
+    /cell · /crew(动作会破窗 + spawn,误触发代价大),角色 stub 靠 spawn 注入
+    /cell-worker · /crew-orch 等加载。都不该被模型按描述自动调用,所以全部钉
+    `disable-model-invocation: true`。"""
     skills = Path(__file__).resolve().parents[2] / "skills"
-    for name in ("crew", "crew-orch", "crew-challenger", "crew-worker", "crew-validator"):
+    for name in (
+        "crew", "crew-orch", "crew-challenger", "crew-worker", "crew-validator",
+        "cell", "cell-worker", "cell-validator",
+    ):
         text = (skills / name / "SKILL.md").read_text()
         assert "disable-model-invocation: true" in text, f"{name} missing disable-model-invocation"
 

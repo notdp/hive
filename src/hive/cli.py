@@ -2303,6 +2303,23 @@ def skills_list_cmd():
     click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
+def _dispatch_role_skill(pane: str, skill_name: str) -> bool:
+    """Inject ``/<skill_name>`` into *pane* so the agent loads its role.
+
+    Mirrors how crew hands ``/crew-orch`` to its orch pane. Returns True if
+    dispatched (pane runs a known agent CLI), False otherwise.
+    """
+    profile = detect_profile_for_pane(pane)
+    if profile is None:
+        return False
+    skill_cmd = profile.skill_cmd.format(name=skill_name)
+    tmux.send_keys(pane, skill_cmd, enter=False)
+    time.sleep(0.1)
+    for _ in range(2 if profile.name == "codex" else 1):
+        tmux.send_key(pane, "Enter")
+    return True
+
+
 @cli.group("cell")
 def cell_cmd():
     """CELL atom (worker + anti-family validator) management."""
@@ -2417,7 +2434,7 @@ def cell_init_cmd(validator_cli: str | None):
             agent_name="validator",
             pane_cli=v_pane_cli,
             cwd=adopt_cwd,
-            notify=True,
+            notify=False,  # role loaded via /cell-validator dispatch below, not the generic hive join
             group="cell",
         )
         validator_pane, validator_cli_used, mode = adopt.pane_id, v_pane_cli, "paired"
@@ -2431,7 +2448,7 @@ def cell_init_cmd(validator_cli: str | None):
             split_size="50%",
             cli=v_cli,
             model=v_model,
-            skill="hive",
+            skill="cell-validator",
             workspace=ws,
         )
         t.agents["validator"] = validator_agent
@@ -2449,6 +2466,16 @@ def cell_init_cmd(validator_cli: str | None):
         pass
 
     layout_mod.apply_adaptive(window)
+
+    # Hand each pane its role skill. A spawned validator already loaded
+    # cell-validator at spawn; an adopted neighbor gets it dispatched here.
+    dispatched: list[str] = []
+    if _dispatch_role_skill(worker_pane, "cell-worker"):
+        dispatched.append("worker")
+    if mode == "paired":
+        _dispatch_role_skill(validator_pane, "cell-validator")
+    dispatched.append("validator")
+
     tmux.select_window(window)
 
     click.echo(json.dumps({
@@ -2462,6 +2489,7 @@ def cell_init_cmd(validator_cli: str | None):
             "cli": validator_cli_used,
             "mode": mode,
         },
+        "dispatched": dispatched,
     }, indent=2, ensure_ascii=False))
 
 
