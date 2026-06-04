@@ -2607,7 +2607,14 @@ def _auto_init_team_for_crew() -> Team:
         "shelby/yakuza/bloods/dalton/bratva) when omitted."
     ),
 )
-def crew_init_cmd(peer_cli: str | None, crew_name: str | None):
+@click.option(
+    "--worker",
+    "worker_cli",
+    type=click.Choice(["claude", "codex", "droid"]),
+    default=None,
+    help="CLI for this crew's cell workers (default: orch's family; validator takes the anti-family review seat). e.g. --worker codex for backend-heavy crews.",
+)
+def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str | None):
     """Break current pane into a dedicated crew window (orch + challenger).
 
     Standalone — no need to run `hive init` first. Must run from a pane that's
@@ -2691,6 +2698,10 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None):
     tmux.set_window_option(crew_window, "@hive-workspace", t.workspace or ws)
     tmux.set_window_option(crew_window, "@hive-crew-name", crew_name)
     tmux.set_window_option(crew_window, "@hive-crew-base", str(range_base))
+    if worker_cli:
+        # Per-crew worker-family override; spawn-cell reads this when picking
+        # which CLI a cell's worker runs (validator takes the anti-family).
+        tmux.set_window_option(crew_window, "@hive-crew-worker", worker_cli)
     tmux.configure_hive_window(crew_window)
     if t.description:
         tmux.set_window_option(crew_window, "@hive-desc", t.description)
@@ -2807,6 +2818,26 @@ def _next_peer_index_in_range(session: str, base: int) -> int:
 _CREW_PEER_WINDOW_NAME_INITIAL = "pending"
 
 
+def _resolve_crew_worker_cli(orch_pane: str, crew_window: str) -> str:
+    """Which CLI a crew's cell worker runs. Default = orch's family — worker
+    stays same-family as orch, the anti-family review seat goes to the
+    validator (cross-family value lives in the review gate, not the handoff).
+
+    Override precedence: ``@hive-crew-worker`` (set by ``crew init --worker``)
+    > global ``crew.cellWorker`` config > orch's CLI.
+    """
+    tagged = tmux.get_window_option(crew_window, "hive-crew-worker") if crew_window else ""
+    if tagged in AGENT_CLI_NAMES:
+        return tagged
+    from . import settings as user_settings
+
+    configured = user_settings.get_setting("crew.cellWorker", "")
+    if configured in AGENT_CLI_NAMES:
+        return configured
+    orch_cli = tmux.get_pane_option(orch_pane, "hive-cli") or _resolve_spawn_cli_name(None)
+    return orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
+
+
 @crew_cmd.command("spawn-cell")
 @click.option(
     "--feature-id",
@@ -2849,9 +2880,10 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     `$session:1000` maps to team `<main>-cell-1000` / `<crew>.worker-1000`
     / `<crew>.validator-1000`, visually grouping by crew in the status bar.
 
-    Worker runs claude, validator runs codex. Both tagged
-    ``@hive-group=<crew>`` and ``@hive-owner=<crew>.orch`` for owner-bypass
-    routing.
+    Worker runs the crew's configured family (default: orch's; override via
+    ``crew init --worker`` or the ``crew.cellWorker`` config), validator the
+    anti-family. Both tagged ``@hive-group=<crew>`` and
+    ``@hive-owner=<crew>.orch`` for owner-bypass routing.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2939,6 +2971,9 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         tmux_window_id=tmux.get_window_id(peer_window) or "",
     )
 
+    worker_cli = _resolve_crew_worker_cli(current_pane, crew_window_target)
+    validator_cli = anti_peer_cli(worker_cli)
+
     worker_agent = Agent.spawn(
         name=worker_name,
         team_name=peer_team_name,
@@ -2946,7 +2981,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         cwd=cwd,
         split_window=False,
         skill="crew-worker",
-        cli="claude",
+        cli=worker_cli,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", crew_name)
     tmux.set_pane_option(worker_agent.pane_id, "hive-owner", owner_name)
@@ -2962,7 +2997,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
         skill="crew-validator",
-        cli="codex",
+        cli=validator_cli,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", crew_name)
     tmux.set_pane_option(validator_agent.pane_id, "hive-owner", owner_name)
