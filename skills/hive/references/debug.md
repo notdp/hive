@@ -7,7 +7,7 @@
 - `hive doctor [agent] [--skills]` — agent 连通性 / 本地 skill drift
 - `hive delivery <msgId>` — 某条消息的投递状态
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
-- `hive capture / inject / interrupt / kill / exec` — 低层 pane 操作
+- `hive capture / inject / interrupt / kill` — 低层 pane 操作
 
 ### 日志位置
 
