@@ -4,10 +4,10 @@
 
 - **上手** — 先 `hive team` 认身份
 - **命令速查** — 每天用的 CLI + `hive team` 字段语义
-- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 见 `references/advanced-routing.md`)
+- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 见 `hive skills get advanced-routing`)
 - **协作规则** — 什么在 team 内消化,什么升给用户
 - **Workflow 加载** — 在 Hive 之上叠更高层流程(如 code-review)
-- **排障 + 协议边界** — 见 `references/debug.md`
+- **排障 + 协议边界** — 见 `hive skills get debug`
 
 ## 上手
 
@@ -45,7 +45,7 @@ hive answer claude "yes"             # 回答 agent 的 pending question
 - 短 body(sender 的摘要)在标签之间
 - 详细内容在 `artifact=<path>` 指的文件里,用 Read tool 打开那条 path 就是全文
 
-**原文永远在 `<HIVE>` block 里读。** `hive thread <msgId>` 和 `hive delivery <msgId>` 是排障入口(见 `references/debug.md`),agent 日常收信用不上。
+**原文永远在 `<HIVE>` block 里读。** `hive thread <msgId>` 和 `hive delivery <msgId>` 是排障入口(见 `hive skills get debug`),agent 日常收信用不上。
 
 ### send vs reply(thread 模型)
 
@@ -95,7 +95,7 @@ EOF
 
 ### 接管已有 thread 时的第一条 reply
 
-被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;详见 `references/advanced-routing.md`。
+被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;详见 `hive skills get advanced-routing`。
 
 ## 协作规则
 
@@ -180,4 +180,4 @@ hive compact
 
 ## 排障 + 协议边界
 
-排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `references/debug.md`。日常收发消息不用读这份;主通道见上文「消息机制」。
+排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `hive skills get debug`。日常收发消息不用读这份;主通道见上文「消息机制」。

@@ -74,3 +74,15 @@ def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
     assert 'npx skills add "$PWD" -g --all' in readme_text
     assert 'npx skills add "$PWD" -g --all' in agents_text
     assert 'repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`' in agents_text
+
+
+def test_specs_point_onward_only_via_reachable_skills_get():
+    """A CLI-served spec may point onward only via `hive skills get <name>` — never
+    at skill-home files (`references/...`) or a stub section (`../SKILL.md`) that an
+    agent holding just the CLI output cannot follow. Guards the regression where
+    slimming the stub left specs pointing at a `消息机制` section it no longer has."""
+    specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
+    for p in sorted(specs.glob("*.md")):
+        text = p.read_text()
+        assert "references/" not in text, f"{p.name}: unreachable references/ pointer"
+        assert "../SKILL.md" not in text, f"{p.name}: points at ../SKILL.md (stub has no protocol sections)"

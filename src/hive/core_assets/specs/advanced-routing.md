@@ -1,6 +1,6 @@
 # advanced routing — thread takeover
 
-hive 路由的低频场景。常规 `hive send` / `hive reply` 流程不需要读这份,主文 `../SKILL.md`「消息机制」章节已经覆盖。
+hive 路由的低频场景。常规 `hive send` / `hive reply` 流程不需要读这份,`hive skills get core` 的「消息机制」已经覆盖。
 
 命中以下情况才查这里:
 

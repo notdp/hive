@@ -6,7 +6,7 @@ cell 是 Hive 的最小协作单元:一个 **worker**(producer,干活)+ 一个�
 
 ## 角色钉死
 
-worker 永远干活,validator 永远审 —— 出生即定,不协商角色(协商角色是纯浪费 turn)。唯一的越界许可:**validator 发现的 bug、worker 认账了,validator 直接改更快** —— 这是更优工作流,不是违规。
+worker 永远干活,validator 永远审 —— 出生即定,不协商角色(协商角色是纯浪费 turn)。唯一的越界许可:**validator 发现的 bug、worker 认账了,validator 可以直接改**。
 
 ## 协调者(coordinator)
 
