@@ -86,19 +86,3 @@ def test_delete_removes_workspace_with_flag(runner, configure_hive_home, tmp_pat
     assert not workspace.exists()
 
 
-def test_delete_clears_terminal_tags(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    cleared = []
-    killed = []
-    monkeypatch.setattr("hive.team.tmux.clear_pane_tags", lambda pane_id: cleared.append(pane_id))
-    monkeypatch.setattr("hive.team.tmux.kill_pane", lambda pane_id: killed.append(pane_id))
-    workspace = tmp_path / "ws"
-    assert runner.invoke(cli, ["create", "team-d2", "--workspace", str(workspace)]).exit_code == 0
-    assert runner.invoke(cli, ["terminal", "add", "t1", "--pane", "%88"]).exit_code == 0
-
-    result = runner.invoke(cli, ["delete", "team-d2"])
-
-    assert result.exit_code == 0
-    assert "%88" in cleared
-    # Lead pane is tagged as agent role, so cleanup kills it
-    assert "%0" in killed or "%0" in cleared

@@ -1667,10 +1667,6 @@ def _team_runtime_payload(team_name: str) -> dict[str, Any]:
         if runtime.get("inputState") == "waiting_user":
             needs_answer.append(name)
 
-    for name in sorted(team.terminals):
-        terminal = team.terminals[name]
-        members[name] = _member_runtime_payload(terminal.pane_id, role="terminal")
-
     payload: dict[str, Any] = {
         "ok": True,
         "team": team_name,

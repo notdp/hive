@@ -181,11 +181,21 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)
         monkeypatch.setattr("hive.cli.tmux.clear_pane_tags", state.clear_pane_tags)
         monkeypatch.setattr("hive.cli.tmux.list_panes_all", state.list_panes_all)
-        # Peer auto-attach during `hive init` spawns or discovers another agent
-        # pane. Tests that want to exercise that flow must override this mock;
-        # by default we return None so plain `hive init` tests stay focused on
-        # the init scaffolding itself.
-        monkeypatch.setattr("hive.cli._attach_peer_to_team", lambda *_a, **_kw: None)
+        # Cell formation during `hive init` spawns or adopts a validator pane.
+        # Tests that want to exercise that flow must override this mock; by
+        # default we return a representative descriptor so plain `hive init`
+        # tests stay focused on the init scaffolding itself.
+        monkeypatch.setattr(
+            "hive.cli._attach_cell_to_team",
+            lambda t, **_kw: {
+                "team": t.name,
+                "window": t.tmux_window,
+                "group": "cell",
+                "worker": {"pane": "%self", "name": "worker", "cli": "claude"},
+                "validator": {"pane": "%peer", "name": "validator", "cli": "codex", "mode": "spawned"},
+                "dispatched": ["worker", "validator"],
+            },
+        )
         monkeypatch.delenv("TMUX_PANE", raising=False)
         # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
         # that want to observe sidecar startup patch this themselves.

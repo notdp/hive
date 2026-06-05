@@ -5,7 +5,7 @@ from hive.agent import Agent
 from hive.cli import cli
 
 
-def test_gang_init_creates_orch_and_skeptic_without_board(
+def test_crew_init_creates_orch_and_challenger_without_board(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home(current_pane="%100", session_name="dev")
@@ -56,19 +56,19 @@ def test_gang_init_creates_orch_and_skeptic_without_board(
 
     monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
 
-    result = runner.invoke(cli, ["gang", "init", "--name", "peaky"])
+    result = runner.invoke(cli, ["crew", "init", "--name", "peaky"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
-    assert payload["gangName"] == "peaky"
+    assert payload["crewName"] == "peaky"
     assert payload["orch"]["name"] == "peaky.orch"
-    assert payload["skeptic"]["name"] == "peaky.skeptic"
-    assert payload["skeptic"]["pane"] == "%101"
-    assert payload["dispatched"] == ["peaky.orch", "peaky.skeptic"]
+    assert payload["challenger"]["name"] == "peaky.challenger"
+    assert payload["challenger"]["pane"] == "%101"
+    assert payload["dispatched"] == ["peaky.orch", "peaky.challenger"]
     assert "board" not in payload
     assert selected_windows == ["dev:0"]
 
     assert len(spawned) == 1
-    assert spawned[0]["name"] == "peaky.skeptic"
+    assert spawned[0]["name"] == "peaky.challenger"
     assert spawned[0]["split_horizontal"] is True
     assert not any(key == "hive-role" and value == "board" for _, key, value in pane_options)

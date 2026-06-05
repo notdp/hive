@@ -135,21 +135,6 @@ def test_team_includes_needs_answer_from_daemon(runner, configure_hive_home, mon
     assert orch["pendingQuestion"] == "proceed?"
 
 
-def test_who_includes_terminals(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    assert runner.invoke(cli, ["create", "team-w", "--workspace", str(workspace)]).exit_code == 0
-    assert runner.invoke(cli, ["terminal", "add", "term-1", "--pane", "%77"]).exit_code == 0
-    _patch_runtime(monkeypatch, {"members": {"orch": {"alive": True}, "term-1": {"alive": False}}})
-
-    result = runner.invoke(cli, ["team"])
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    terminal = next(member for member in payload["members"] if member["name"] == "term-1")
-    assert terminal["role"] == "terminal"
-    assert terminal["alive"] is False
-
-
 def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
@@ -195,7 +180,6 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
                 "bobo": _FakeAgent("bobo", "%2000"),
                 "orch": _FakeAgent("orch", "%1070"),
             }
-            self.terminals = {}
 
         def lead_agent(self):
             return None
@@ -375,7 +359,7 @@ def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch
     payload = json.loads(result.output)
     assert payload["team"] is None
     assert payload["tmux"]["paneCount"] == 2
-    assert "hive init" in payload["hint"]
+    assert "cell" in payload["hint"] and "crew" in payload["hint"]
 
 
 def test_current_migration_stub(runner, configure_hive_home):

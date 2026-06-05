@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 
 from hive import bus
 from hive.cli import cli
@@ -47,7 +48,8 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     assert payload["tmux"]["panes"][0]["id"] == "%0"
     assert payload["tmux"]["panes"][0]["role"] == "agent"
     assert payload["tmux"]["panes"][1]["role"] == "agent"
-    assert "hive init" in payload["hint"]
+    # no-team hint defers the topology choice to the user (ask, don't self-init)
+    assert "cell" in payload["hint"] and "crew" in payload["hint"]
 
 
 def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(runner, configure_hive_home, tmp_path):
@@ -192,7 +194,10 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: "@2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane_id: SimpleNamespace(name="droid"),
+    )
     monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda *_args, **_kwargs: None)
 
     from hive.tmux import PaneInfo
@@ -221,79 +226,6 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
         ("stop", "/tmp/hive-dev-2"),
         ("reset", "/tmp/hive-dev-2"),
     ]
-
-
-def test_init_registers_current_unbound_pane_into_existing_team(
-    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
-):
-    configure_hive_home(current_pane="%2", session_name="dev")
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "5")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:5")
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%2")
-    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
-
-    from hive import tmux
-    from hive.tmux import PaneInfo
-
-    tmux.set_window_option("dev:5", "@hive-team", "dev-5")
-    tmux.set_window_option("dev:5", "@hive-workspace", str(tmp_path / "ws"))
-    tmux.set_window_option("dev:5", "@hive-created", "0")
-
-    def fake_get_pane_option(pane_id: str, key: str):
-        if pane_id == "%2" and key == "hive-team":
-            return "dev-5"
-        return None
-
-    monkeypatch.setattr("hive.cli.tmux.get_pane_option", fake_get_pane_option)
-    monkeypatch.setattr("hive.tmux.get_pane_option", fake_get_pane_option)
-    monkeypatch.setattr(
-        "hive.cli.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%1", "orch", command="droid", role="agent", agent="orch", team="dev-5"),
-            PaneInfo("%2", "Codex", command="zsh", team="dev-5"),
-        ],
-    )
-    monkeypatch.setattr(
-        "hive.team.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%1", "orch", command="droid", role="agent", agent="orch", team="dev-5"),
-            PaneInfo("%2", "Codex", command="zsh", team="dev-5"),
-        ],
-    )
-    monkeypatch.setattr(
-        "hive.cli.detect_profile_for_pane",
-        lambda pane_id: type("P", (), {"name": "codex"})() if pane_id == "%2" else None,
-    )
-    # %2 is a daemon-backed codex (born-connected): the init gate must let it
-    # join. A live socket short-circuits _require_codex_daemon_backed.
-    sock = tmp_path / "hive-pane-2.sock"
-    sock.touch()
-    monkeypatch.setattr("hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock)
-    monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
-
-    result = runner.invoke(cli, ["init"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload == {
-        "team": "dev-5",
-        "workspace": str(tmp_path / "ws"),
-        "agent": "dodo",
-        "role": "agent",
-        "pane": "%2",
-        "tmuxSession": "dev",
-        "tmuxWindow": "dev:5",
-    }
-    # Self-register must not inject `/hive` or join message into the pane
-    # that is currently running `hive init` — that lands in the pane's own
-    # input queue and causes the agent to re-trigger `/hive`.
-    pane_events = [text for pane, text in mock_tmux_send if pane == "%2"]
-    assert pane_events == []
-    current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
-    assert current["team"] == "dev-5"
-    assert current["agent"] == "dodo"
 
 
 def test_init_self_register_never_injects_hive_slash_into_own_input(
@@ -362,12 +294,16 @@ def test_init_self_register_never_injects_hive_slash_into_own_input(
 
 
 def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A window carrying only a stale `@hive-team` tag (no registered self pane)
+    is not treated as a binding: init clears the stale tag and forms a fresh
+    cell named after the current window."""
     configure_hive_home(current_pane="%9", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%9")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
 
     from hive import tmux
     from hive.tmux import PaneInfo
@@ -381,31 +317,28 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
+    # Stale "ghost" tag cleared; a fresh cell is formed for this window.
     assert payload["team"] == "dev-0"
-    assert payload["panes"][0]["name"] == "orch"
-    assert payload["panes"][0]["isSelf"] is True
+    assert payload["group"] == "cell"
+    assert payload["worker"]["name"] == "worker"
+    assert payload["validator"]["name"] == "validator"
     assert tmux.get_window_option("dev:0", "hive-team") == "dev-0"
 
 
-def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
+def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "nini")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%5", "[orch]", command="droid"),
-            PaneInfo("%6", "⛬ Claude", command="droid"),
-            PaneInfo("%7", "", command="zsh"),
-        ],
+        lambda _target: [PaneInfo("%5", "[orch]", command="droid")],
     )
 
     workspace = tmp_path / "ws"
@@ -413,51 +346,49 @@ def test_init_creates_team_registers_agents_and_notifies(runner, configure_hive_
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
+    # init now delegates to the cell topology and echoes its result dict.
     assert payload["team"] == "dev-2"
-    assert payload["workspace"] == str(workspace)
-    assert len(payload["panes"]) == 3
-    assert payload["panes"][0]["isSelf"] is True
-    assert payload["panes"][0]["name"] == "orch"
-    assert payload["panes"][0]["role"] == "agent"
-    assert payload["panes"][1]["name"] == "nini"
-    assert payload["panes"][1]["role"] == "agent"
-    assert payload["panes"][2]["name"] == "term-1"
-    assert payload["panes"][2]["role"] == "terminal"
+    assert payload["group"] == "cell"
+    assert payload["worker"]["name"] == "worker"
+    assert payload["validator"]["name"] == "validator"
+    assert payload["dispatched"] == ["worker", "validator"]
 
-    assert [text for _, text in mock_tmux_send if text == "/hive"] == ["/hive"]
-    assert len([text for _, text in mock_tmux_send if "<HIVE ...>" in text]) == 1
-
-    ctx_alpha = json.loads((tmp_path / ".hive" / "contexts" / "pane-6.json").read_text())
-    assert ctx_alpha == {"team": "dev-2", "workspace": str(workspace), "agent": "nini"}
+    # The team is created and the current pane is remembered as the lead.
+    from hive.team import Team
+    assert Team.load("dev-2").workspace == str(workspace)
     current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
     assert current["team"] == "dev-2"
     assert current["agent"] == "orch"
 
 
-def test_init_detects_preopened_codex_cli_and_uses_codex_commands(
-    runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
+def test_init_accepts_preopened_codex_worker_pane(
+    runner, configure_hive_home, monkeypatch, tmp_path,
 ):
+    """A pre-opened codex CLI in the current pane is a valid worker: init
+    detects the codex profile and forms the cell."""
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "5")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:5")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%10")
-    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%10", "shell", command="zsh"),
-            PaneInfo("%11", "Codex", command="zsh"),
-        ],
+        lambda _target: [PaneInfo("%10", "Codex", command="zsh")],
     )
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
-        lambda pane_id: type("P", (), {"name": "codex"})() if pane_id == "%11" else None,
+        lambda pane_id: SimpleNamespace(name="codex") if pane_id == "%10" else None,
     )
+    # A pre-opened codex must be daemon-backed for the init gate to pass; a
+    # live socket short-circuits _require_codex_daemon_backed.
+    sock = tmp_path / "hive-pane-10.sock"
+    sock.touch()
+    monkeypatch.setattr("hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock)
+    monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
 
     workspace = tmp_path / "ws"
     result = runner.invoke(cli, ["init", "--workspace", str(workspace)])
@@ -465,15 +396,8 @@ def test_init_detects_preopened_codex_cli_and_uses_codex_commands(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "dev-5"
-    roles = {p["name"]: p["role"] for p in payload["panes"]}
-    assert roles["orch"] == "terminal"
-    assert roles["dodo"] == "agent"
-
-    codex_events = [text for pane, text in mock_tmux_send if pane == "%11"]
-    assert "$hive" in codex_events
-    assert "/hive" not in codex_events
-    # codex skill picker = 2 Enters (pick + submit); plus join-message Enter = 3.
-    assert codex_events.count("<Enter>") == 3
+    assert payload["group"] == "cell"
+    assert payload["worker"]["name"] == "worker"
 
 
 def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
@@ -483,13 +407,13 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%0")
-    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "kiki")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%0", "", command="droid"), PaneInfo("%1", "GPT", command="droid")],
+        lambda _target: [PaneInfo("%0", "", command="droid")],
     )
 
     workspace = tmp_path / "ws"
@@ -498,9 +422,8 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "dev-0"
-    pane_map = {p["name"]: p["paneId"] for p in payload["panes"]}
-    assert pane_map["kiki"] == "%1"
-    assert mock_tmux_send == []
+    assert payload["group"] == "cell"
+    assert payload["worker"]["name"] == "worker"
 
 
 def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -511,7 +434,7 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: "@2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
 
     from hive.tmux import PaneInfo
 
@@ -535,46 +458,6 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
     assert calls == [(str(workspace), "dev-2", "dev:2", "@2")]
 
 
-def test_init_excludes_names_already_used_in_current_window(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%0")
-
-    from hive.tmux import PaneInfo
-
-    monkeypatch.setattr(
-        "hive.cli.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%0", "[orch]", command="droid"),
-            PaneInfo("%1", "Claude", command="droid", agent="nini"),
-            PaneInfo("%2", "GPT", command="droid", agent="kiki"),
-        ],
-    )
-
-    seen_choices: list[list[str]] = []
-
-    def fake_choice(names):
-        seen_choices.append(list(names))
-        return names[0]
-
-    monkeypatch.setattr("hive.cli.secrets.choice", fake_choice)
-
-    workspace = tmp_path / "ws"
-    result = runner.invoke(cli, ["init", "--workspace", str(workspace), "--no-notify"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    peer_names = [pane["name"] for pane in payload["panes"] if not pane["isSelf"]]
-    assert "nini" not in seen_choices[0]
-    assert "kiki" not in seen_choices[0]
-    assert "nini" not in peer_names
-    assert "kiki" not in peer_names
-    assert len(peer_names) == len(set(peer_names))
-
-
 def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
@@ -582,6 +465,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
     auto_workspace = tmp_path / "auto-ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda _session, _window: auto_workspace)
 
@@ -589,7 +473,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "", command="droid"), PaneInfo("%6", "GPT", command="droid")],
+        lambda _target: [PaneInfo("%5", "", command="droid")],
     )
 
     bus.init_workspace(auto_workspace)
@@ -607,8 +491,8 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
     result = runner.invoke(cli, ["init", "--no-notify"])
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["workspace"] == str(auto_workspace)
+    # Auto workspace is reset before the new team is created: stale events and
+    # artifacts from the previous team are gone.
     assert bus.count_events(auto_workspace) == 0
     assert len(list((auto_workspace / "artifacts").iterdir())) == 0
 
@@ -725,41 +609,6 @@ def test_init_fails_outside_tmux(runner, configure_hive_home, monkeypatch):
     assert "tmux" in result.output.lower()
 
 
-def test_init_classifies_terminals(runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path):
-    configure_hive_home()
-    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
-    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%10")
-    monkeypatch.setattr("hive.cli.secrets.choice", lambda names: "dodo")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
-
-    from hive.tmux import PaneInfo
-
-    monkeypatch.setattr(
-        "hive.cli.tmux.list_panes_full",
-        lambda _target: [
-            PaneInfo("%10", "orch", command="droid"),
-            PaneInfo("%11", "Claude", command="droid"),
-            PaneInfo("%12", "myshell", command="bash"),
-            PaneInfo("%13", "fish", command="fish"),
-        ],
-    )
-
-    ws = tmp_path / "ws"
-    result = runner.invoke(cli, ["init", "--workspace", str(ws)])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["team"] == "dev-0"
-    roles = {p["name"]: p["role"] for p in payload["panes"]}
-    assert roles["orch"] == "agent"
-    assert roles["dodo"] == "agent"
-    assert roles["term-1"] == "terminal"
-    assert roles["term-2"] == "terminal"
-
-
-
 def test_legacy_commands_removed(runner):
     for command in ("comment", "wait", "read", "inbox"):
         result = runner.invoke(cli, [command, "--help"])
@@ -773,17 +622,34 @@ def test_root_help_groups_commands_by_area(runner):
     assert result.exit_code == 0
     output = result.output
     assert "Hive - tmux-first multi-agent collaboration runtime." in output
-    for section in ("Daily:", "Handoff:", "Debug:", "Human Helpers:", "Extensions:", "Examples:"):
+    for section in (
+        "Daily:",
+        "Handoff:",
+        "Workflow:",
+        "Team:",
+        "Debug:",
+        "Human Helpers:",
+        "Extensions:",
+        "Examples:",
+    ):
         assert section in output
 
     for short_help in (
         "Show team overview.",
-        "Initialize a team from the current tmux window.",
         "Check delivery status of a sent message by ID.",
         "Show a reply thread rooted at a msgId.",
         "Manage first-party Hive plugins.",
     ):
         assert short_help in output
+
+    # init now leads into the cell topology.
+    assert "Initialize a cell from the current tmux window" in output
+    # cell / crew live under Workflow; register / peer / layout under Team.
+    for command in ("cell", "crew", "register", "peer", "layout"):
+        assert f"  {command} " in output
+    # terminal / exec are gone for good.
+    for removed in ("terminal", "exec"):
+        assert f"  {removed} " not in output
 
     assert "Debug: inject raw input into an agent pane." in output
 

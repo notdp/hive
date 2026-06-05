@@ -1,13 +1,6 @@
 from hive import tmux as _tmux
 from hive.agent import Agent
-from hive.team import Team, Terminal, _find_team_window, _gc_stale_team_windows
-
-
-def test_terminal_to_dict_uses_liveness(monkeypatch):
-    monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane_id: pane_id == "%42")
-    terminal = Terminal(name="shell", pane_id="%42")
-
-    assert terminal.to_dict() == {"name": "shell", "tmuxPaneId": "%42", "isActive": True, "role": "terminal"}
+from hive.team import Team, _find_team_window, _gc_stale_team_windows
 
 
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
@@ -60,7 +53,6 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
         peer_map={"orch": "claude", "claude": "orch"},
     )
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", cwd="/tmp")
-    team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     team.save()
     assert borders == ["dev:0"]
@@ -68,7 +60,6 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     # Set up pane tags for load to find (in real usage, set during create/spawn)
     _tmux.tag_pane("%0", "lead", "orch", "team-a")
     _tmux.tag_pane("%1", "agent", "claude", "team-a", cli="claude")
-    _tmux.tag_pane("%2", "terminal", "shell", "team-a")
 
     loaded = Team.load("team-a")
 
@@ -78,7 +69,6 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.tmux_window_id == "@0"
     assert loaded.lead_pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
-    assert loaded.terminals["shell"].pane_id == "%2"
     assert loaded.peer_map == {"orch": "claude", "claude": "orch"}
 
 
@@ -370,7 +360,6 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     monkeypatch.setattr("hive.team.tmux.list_tty_processes", lambda _tty: [])
     team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1")
-    team.terminals["shell"] = Terminal(name="shell", pane_id="%2")
 
     payload = team.status()
 
@@ -378,11 +367,8 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     assert payload["tmuxWindow"] == ""
     orch = next(member for member in payload["members"] if member["name"] == "orch")
     claude = next(member for member in payload["members"] if member["name"] == "claude")
-    shell = next(member for member in payload["members"] if member["name"] == "shell")
     assert orch["role"] == "terminal"
     assert claude["role"] == "agent"
-    assert shell["pane"] == "%2"
-    assert shell["role"] == "terminal"
     assert team.is_tmux_alive() is True
     team.lead_pane_id = "%dead"
     assert team.is_tmux_alive() is False
@@ -420,7 +406,6 @@ def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
     monkeypatch.setattr(a2, "kill", lambda: calls.append(("kill", "%2")))
     team = Team(name="team-a", lead_pane_id="%0")
     team.agents = {"claude": a1, "gpt": a2}
-    team.terminals["shell"] = Terminal(name="shell", pane_id="%3")
 
     team.shutdown("claude")
     team.shutdown()
@@ -428,7 +413,7 @@ def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
 
     assert calls[:3] == [("shutdown", "%1"), ("shutdown", "%1"), ("shutdown", "%2")]
     assert ("kill", "%1") in calls and ("kill", "%2") in calls
-    assert ("clear", "%3") in calls and ("clear", "%0") in calls
+    assert ("clear", "%0") in calls
 
 
 def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, monkeypatch):
