@@ -1,6 +1,6 @@
 from hive import tmux as _tmux
 from hive.agent import Agent
-from hive.team import Team, _find_team_window, _gc_stale_team_windows
+from hive.team import Team, _find_team_window, _gc_stale_team_windows, duplicate_team_bindings
 
 
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
@@ -536,3 +536,38 @@ def test_find_team_window_keeps_live_duplicate(configure_hive_home, monkeypatch)
 
     assert wt == "dev:3"          # prefer_pane window wins for routing
     assert "dev:2" not in cleared  # the other live duplicate keeps its tags
+
+
+def test_duplicate_team_bindings_reports_only_collisions(configure_hive_home, monkeypatch):
+    """Two windows sharing a team name are reported with their ids + live members;
+    a uniquely-named team is not."""
+    configure_hive_home()
+    list_output = (
+        "0:2\t@2\t0-2\t/tmp/hive-0-w2\n"
+        "0:3\t@3\t0-2\t/tmp/hive-0-w3\n"
+        "0:5\t@5\tsolo\t/tmp/hive-0-w5\n"
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
+    )
+
+    from hive.tmux import PaneInfo
+
+    def fake_list_panes(target):
+        return {
+            "0:2": [PaneInfo("%42", "", "claude", role="agent", agent="worker", team="0-2")],
+            "0:3": [PaneInfo("%10", "", "claude", role="agent", agent="worker", team="0-2")],
+            "0:5": [PaneInfo("%80", "", "claude", role="agent", agent="worker", team="solo")],
+        }.get(target, [])
+
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+
+    dupes = duplicate_team_bindings()
+
+    assert len(dupes) == 1  # only the colliding team, not the unique "solo"
+    assert dupes[0]["team"] == "0-2"
+    windows = dupes[0]["windows"]
+    assert {w["windowId"] for w in windows} == {"@2", "@3"}
+    assert windows[0]["liveMembers"][0]["name"] == "worker"
+    assert "manual" in dupes[0]["repair"]

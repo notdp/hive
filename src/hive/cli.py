@@ -3348,6 +3348,11 @@ def doctor(agent_name: str, include_skills: bool):
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "doctor failed")))
     payload.pop("ok", None)
+    from .team import duplicate_team_bindings
+
+    dupes = duplicate_team_bindings()
+    if dupes:
+        payload["duplicateTeams"] = dupes
     if include_skills:
         payload["skills"] = skill_sync.diagnose_hive_skill(_resolve_member_cli_name(t, target_name))
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))

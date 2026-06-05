@@ -588,6 +588,54 @@ def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> N
             tmux.clear_window_option(wt, f"@{key}")
 
 
+def duplicate_team_bindings() -> list[dict[str, object]]:
+    """Report tmux windows that collide on the same ``@hive-team`` name.
+
+    Bug A could leave two live cells tagged with one team name across different
+    windows. This scans all windows, groups by team, and returns every group
+    with more than one window — including each window's id, workspace, and live
+    member panes — so ``hive doctor`` can surface the collision. Detection only:
+    retagging a live team can break sidecar identity / pane context / pending
+    sends, so repair is left to a human.
+    """
+    r = tmux._run([
+        "list-windows", "-a", "-F",
+        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}",
+    ], check=False)
+
+    by_team: dict[str, list[dict[str, object]]] = {}
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 4:
+            parts.append("")
+        window, window_id, team, workspace = parts[0], parts[1], parts[2], parts[3]
+        if not team:
+            continue
+        members = [
+            {"name": p.agent, "pane": p.pane_id, "group": p.group}
+            for p in tmux.list_panes_full(window)
+            if p.team == team and (p.agent or p.role)
+        ]
+        by_team.setdefault(team, []).append({
+            "tmuxWindow": window,
+            "windowId": window_id,
+            "workspace": workspace,
+            "liveMembers": members,
+        })
+
+    duplicates: list[dict[str, object]] = []
+    for team, windows in by_team.items():
+        if len(windows) > 1:
+            duplicates.append({
+                "team": team,
+                "windows": windows,
+                "repair": "manual: two windows claim this team; do not auto-retag a live team",
+            })
+    return duplicates
+
+
 def list_teams() -> list[dict[str, str]]:
     """List all teams by scanning tmux window options."""
     r = tmux._run([
