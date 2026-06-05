@@ -143,3 +143,68 @@ def test_crew_init_breakout_names_main_team_from_final_window_keeps_readable_cre
     assert payload["challenger"]["name"] == "peaky.challenger"
     assert spawned[0]["team_name"] == "dev-w88"   # challenger spawned under the final-window team
     assert sidecar_calls == [("/tmp/hive-dev-w88", "dev-w88", "dev:8", "@88")]
+
+
+def _bind_pane_as_crew_orch(cli_mod, pane="%100", *, team="dev-w0", crew="peaky"):
+    cli_mod.tmux.tag_pane(pane, "agent", f"{crew}.orch", team, group=crew)
+
+
+def test_crew_init_idempotent_on_bound_orch_with_same_name(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Re-running `hive crew init --name peaky` from an already-bound peaky.orch
+    pane echoes the existing binding — no duplicate-name failure (the crew's own
+    group must not count as a foreign claim), no retag, no second challenger."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: SimpleNamespace(name="codex", skill_cmd="/{name}"))
+    _bind_pane_as_crew_orch(cli_mod)
+
+    spawned: list[dict] = []
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn",
+        staticmethod(lambda **k: spawned.append(k) or Agent(name="x", team_name="t", pane_id="%999", cli="codex")),
+    )
+    broke: list[str] = []
+    renamed: list = []
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: broke.append(p) or ("dev:9", "%900"))
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda *a: renamed.append(a))
+
+    result = runner.invoke(cli, ["crew", "init", "--name", "peaky"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-w0"   # existing binding echoed, not a duplicate-name failure
+    assert payload.get("group") == "peaky"
+    assert spawned == []                  # no second challenger
+    assert broke == [] and renamed == []  # no window mutation
+
+
+def test_crew_init_idempotent_on_bound_orch_plain_rerun(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Plain `hive crew init` from a bound peaky.orch pane does not rename the
+    crew namespace or spawn another challenger."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: SimpleNamespace(name="codex", skill_cmd="/{name}"))
+    _bind_pane_as_crew_orch(cli_mod)
+
+    spawned: list[dict] = []
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn",
+        staticmethod(lambda **k: spawned.append(k) or Agent(name="x", team_name="t", pane_id="%999", cli="codex")),
+    )
+    renamed: list = []
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda *a: renamed.append(a))
+
+    result = runner.invoke(cli, ["crew", "init"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-w0"
+    assert payload.get("group") == "peaky"   # crew namespace unchanged
+    assert spawned == []                       # no second challenger
+    assert renamed == []                       # no window rename

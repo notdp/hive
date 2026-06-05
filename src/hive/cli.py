@@ -2490,6 +2490,22 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
     if profile is None:
         _fail("current pane must be running claude / codex / droid (this will become orch)")
 
+    # Idempotent: a pane already running as a crew orch returns its existing
+    # binding untouched — before any crew-name claim, rename/break, retag, or a
+    # second challenger spawn. Re-running `hive crew init` must be safe, and the
+    # crew's own `@hive-group` must not be mistaken for a foreign name claim.
+    existing = _discover_tmux_binding()
+    if existing.get("team"):
+        group = existing.get("group", "")
+        agent = existing.get("agent", "")
+        if group and group != "cell" and agent.endswith(".orch"):
+            click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
+            return
+        _fail(
+            f"current pane is already bound to Hive team '{existing['team']}' as "
+            f"'{agent or 'a member'}'; run `hive crew init` from an unbound pane."
+        )
+
     if crew_name:
         ok, reason = crew_names.validate_name(crew_name)
         if not ok:
@@ -2516,27 +2532,21 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
     orch_agent_name = f"{crew_name}.orch"
     challenger_agent_name = f"{crew_name}.challenger"
 
-    # Decide the final crew window before creating the main team, so the team
-    # identity derives from where the crew actually lives (Bug A). An already
-    # bound pane reuses its team/window untouched (idempotent).
-    binding = _discover_tmux_binding()
-    if binding.get("team"):
-        t = _load_team(binding["team"], prefer_pane=current_pane)
-        crew_window = t.tmux_window or tmux.get_pane_window_target(current_pane) or ""
-        orch_pane = current_pane
+    # The pane is unbound here (bound crew orch returned early above). Decide the
+    # final crew window before creating the main team, so the team identity
+    # derives from where the crew actually lives (Bug A).
+    window_display_name = f"crew {crew_name}"
+    if tmux.get_pane_count(current_pane) <= 1:
+        current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
+        if not current_window:
+            _fail("cannot determine current window")
+        tmux.rename_window(current_window, window_display_name)
+        crew_window, orch_pane = current_window, current_pane
     else:
-        window_display_name = f"crew {crew_name}"
-        if tmux.get_pane_count(current_pane) <= 1:
-            current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
-            if not current_window:
-                _fail("cannot determine current window")
-            tmux.rename_window(current_window, window_display_name)
-            crew_window, orch_pane = current_window, current_pane
-        else:
-            crew_window, orch_pane = tmux.break_pane(current_pane, name=window_display_name)
-            if not crew_window:
-                _fail("failed to break-pane into new window")
-        t = _create_crew_main_team(window_target=crew_window, lead_pane=orch_pane)
+        crew_window, orch_pane = tmux.break_pane(current_pane, name=window_display_name)
+        if not crew_window:
+            _fail("failed to break-pane into new window")
+    t = _create_crew_main_team(window_target=crew_window, lead_pane=orch_pane)
 
     ws = _resolve_workspace(t, required=True)
     orch_cwd = tmux.display_value(orch_pane, "#{pane_current_path}") or ws
