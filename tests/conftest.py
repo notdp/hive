@@ -181,6 +181,22 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)
         monkeypatch.setattr("hive.cli.tmux.clear_pane_tags", state.clear_pane_tags)
         monkeypatch.setattr("hive.cli.tmux.list_panes_all", state.list_panes_all)
+        # Safety: cli tests must never touch the real tmux server. Cell placement
+        # decides break-out from the *real* pane count when unmocked, and the
+        # placeholder pane ids used in tests (%5, %10, ...) can collide with live
+        # panes — so a `hive init` could fire a real `break_pane` against a
+        # running session and rip a teammate's pane into a new window. Default to
+        # a single-pane window (no break-out) and hard-fail if any test reaches
+        # break_pane without mocking it; break-out tests override both.
+        monkeypatch.setattr("hive.cli.tmux.get_pane_count", lambda _pane: 1)
+
+        def _guard_break_pane(*_args, **_kwargs):
+            raise AssertionError(
+                "test reached real tmux.break_pane — mock hive.cli.tmux.break_pane "
+                "(and get_pane_count) to exercise break-out without touching live tmux"
+            )
+
+        monkeypatch.setattr("hive.cli.tmux.break_pane", _guard_break_pane)
         # Cell formation during `hive init` spawns or adopts a validator pane.
         # Tests that want to exercise that flow must override this mock; by
         # default we return a representative descriptor so plain `hive init`
