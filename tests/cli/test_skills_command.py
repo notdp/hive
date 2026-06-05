@@ -107,3 +107,13 @@ def test_skills_get_serves_role_specs(runner):
         result = runner.invoke(cli, ["skills", "get", role])
         assert result.exit_code == 0, result.output
         assert result.output.strip()
+
+
+def test_skills_get_serves_debug_and_advanced_routing(runner):
+    """debug + advanced-routing were promoted from skill-home references to
+    CLI-served specs, so core's pointers to them resolve through the same
+    `hive skills get` interface instead of dangling at an unreachable file."""
+    for name in ("debug", "advanced-routing"):
+        result = runner.invoke(cli, ["skills", "get", name])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip()

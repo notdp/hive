@@ -9,7 +9,7 @@ hive skills get cell    # worker 角色内核:实现 → handoff → 按 fail �
 
 ## 出生后:idle wait
 
-spawn 出来后 orch 会在极短窗口内给你第一条任务消息。**等这条就是全部动作。** 只允许:一次性 `hive team` + `hive skills get cell`,读完就停;超 60s 没收到 → `hive send <crew>.orch "<crew>.worker-<N> idle, awaiting dispatch"` 提一次再等。翻 `hive.db` / `artifacts/**` / `features.json` 找「可能的任务」都算越位 —— 任务会自己来。
+spawn 出来后 orch 会在极短窗口内给你第一条任务消息。**等这条就是全部动作。** 只允许:一次性 `hive team` + `hive skills get cell`,读完就停;超 60s 没收到 → `hive send <crew>.orch "<crew>.worker-<N> idle, awaiting dispatch"` 提一次再等。**收到任务消息前别翻运行库 / artifact 目录 / `features.json` 猜任务**——任务会自己来;收到 orch 的 artifact 后再按它读相关文件(见下「crew 绑定」)。
 
 ## crew 绑定
 

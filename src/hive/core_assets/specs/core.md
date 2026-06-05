@@ -2,18 +2,16 @@
 
 你是运行在 Hive 里的 agent。Hive 是你的协作 runtime,不是某个特定 workflow。本 skill 的地图:
 
-- **启动** — `hive init` 一条命令
+- **上手** — 先 `hive team` 认身份
 - **命令速查** — 每天用的 CLI + `hive team` 字段语义
-- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 见 `references/advanced-routing.md`)
+- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 见 `hive skills get advanced-routing`)
 - **协作规则** — 什么在 team 内消化,什么升给用户
 - **Workflow 加载** — 在 Hive 之上叠更高层流程(如 code-review)
-- **排障 + 协议边界** — 见 `references/debug.md`
+- **排障 + 协议边界** — 见 `hive skills get debug`
 
-## 启动
+## 上手
 
-**先跑 `hive team`** 看 self / 成员 / peer / group,确认身份再动。
-
-`hive init` 幂等,= 在当前 window 起一个 **cell**:你当 worker，配一个 **异族**(model-family 不同)的 validator 审你的 code，两边 `@hive-group=cell`，在 `hive team` 里直接可见。crew 用 `hive crew init`(orch + challenger）。被 spawn 进来的角色身份已带好，直接按你的角色 spec 干活。
+**先跑 `hive team`** 看 self / 成员 / peer / group,确认身份再动。被 spawn 进来时你的角色身份已经带好——直接按你的角色 spec 干活,别自己找活、别翻库。
 
 ## 命令速查
 
@@ -26,8 +24,6 @@ hive send dodo "see attachment" --artifact - <<'EOF'
 EOF
 hive reply dodo "ack, looking"       # 回复 dodo 最近一条给你的消息(自动 reply-to)
 hive answer claude "yes"             # 回答 agent 的 pending question
-hive notify "按 Space 和我对话"      # 桌面弹通知给当前 pane 的用户
-# notify 只在你被阻塞、必须用户介入时用;文案结构:发生什么 / 为什么现在需要你 / 按 Space 回来后要做什么
 ```
 
 ### `hive team` 返回什么
@@ -38,7 +34,7 @@ hive notify "按 Space 和我对话"      # 桌面弹通知给当前 pane 的用
 - **`group`** — 在 member 行上,只有 pane 打了 `@hive-group` 标签时才出现(例:peer group 成员 `group: peer`)
 - **`inputState=waiting_user`** — 对方在等答案,用 `hive answer` 回答
 - **`busy=true/false`** — tmux 输出层的秒级活动布尔,不等于语义上的 busy/idle
-- **`turnPhase`** — 才是"现在插 new root 是否容易打断对方"的 transcript/JCL 语义层
+- **`turnPhase`** — 现在发 new root 会不会打断对方的判断依据(比 `busy` 准)
 
 ## 消息机制
 
@@ -49,7 +45,7 @@ hive notify "按 Space 和我对话"      # 桌面弹通知给当前 pane 的用
 - 短 body(sender 的摘要)在标签之间
 - 详细内容在 `artifact=<path>` 指的文件里,用 Read tool 打开那条 path 就是全文
 
-**原文永远在 `<HIVE>` block 里读。** `hive thread <msgId>` 和 `hive delivery <msgId>` 是排障入口(见 `references/debug.md`),agent 日常收信用不上。
+**原文永远在 `<HIVE>` block 里读。** `hive thread <msgId>` 和 `hive delivery <msgId>` 是排障入口(见 `hive skills get debug`),agent 日常收信用不上。
 
 ### send vs reply(thread 模型)
 
@@ -80,34 +76,26 @@ Hive 的消息组织成 thread。每次发消息前问自己:**这是新话题,�
 
 Hive 把 reply 严格锁在同 thread 内;没有可推断的入站消息且你也没传 `--reply-to` 时会直接报错。
 
-### root 协议(send body 约束)
+### root 协议 + shell 安全(send body 约束)
 
-- root send(没有 `--reply-to`)的 `body` 永远是**短摘要**;详细内容放 `--artifact`
-- `--artifact` 不是强制的 —— "ack"、"已就位"、"task done" 这类单行确认可以裸发 root send。信息一多就必须开 artifact
-- `body` 命中下面任一条件会直接 reject,要移进 artifact:
-  - 超过 `500` 字符
-  - 一共有 `3` 行或更多
-  - 含 fenced code:`` ``` ``
-  - 任一非空行以 `#`、`-`、`*` 开头
-- 首选 heredoc + stdin artifact:
-  ```bash
-  hive send <name> "<message>" --artifact - <<'EOF'
-  # Findings
-  - item
-  EOF
-  ```
-- 带引号的 `EOF` 标签不做 shell 插值,markdown / 代码块 / 引号内容原样传过去
-- `printf '%s\n' ... | hive send ... --artifact -` 只当备选,转义坑更多
-- 多行 markdown / 代码走 heredoc + `--artifact -`;`$(cat <<EOF ...)` 这种命令替换的 shell 转义坑更深,heredoc 是唯一安全路径
-- `reply` 不受这套 root 协议约束,可以只回一句短文本
+root send(没 `--reply-to`)的 `body` 永远是**短摘要**:"ack"、"已就位"、"task done" 这类单行可以裸发;一旦超长、多行、或带 markdown / 代码,runtime 会直接 reject —— 把详情移进 `--artifact`。
 
-### shell 安全
+详情、多行、markdown / 代码一律走 **heredoc + 带引号的 `'EOF'`**:
 
-`hive send` 和 `hive reply` 的 body 里**反引号**(```````)会被 zsh/bash 当 command substitution 先执行,消息被悄悄改坏。含 markdown inline code 时走 heredoc + `--artifact -`,或 body 整句改用单引号包裹。
+```bash
+hive send <name> "<message>" --artifact - <<'EOF'
+# Findings
+- item
+EOF
+```
+
+带引号的 `'EOF'` 不做 shell 插值,内容原样传过去 —— 这同时是 shell 安全的答案:body 里裸写反引号或 `$(...)` 会被 zsh/bash 抢先执行、把消息悄悄改坏,heredoc 是绕开它的唯一稳路径(`printf ... |` 和 `$(cat <<EOF)` 转义坑更多,别用)。
+
+`reply` 不受这套约束,回一句短文本即可。
 
 ### 接管已有 thread 时的第一条 reply
 
-被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;详见 `references/advanced-routing.md`。
+被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;详见 `hive skills get advanced-routing`。
 
 ## 协作规则
 
@@ -170,33 +158,26 @@ workflow 加载后继续用 Hive 命令作为通信与状态底座。
 
 ## context 监控与自主 /compact
 
-Hive runtime 持续监控你 pane 的 context.tokens(从 transcript 直接读)。当触达阈值时,会在你看到的下一条 hive 命令返回 / inbound 消息里 push 一个 hint:
+context 偏大时,你会在下一条 hive 命令返回 / inbound 消息里收到一个 compactHint:
 
 - hive 命令 stdout JSON 多一个 `compactHint` 字段
 - inbound `<HIVE>` envelope 后追加一段独立 `<HIVE-HINT>` block
 
 收到 compactHint **不要立刻处理**。它是 reminder,不是 action 信号 —— 告诉你"context 已经偏大,合适时机 compact"。
 
-### 何时调 /compact
+### 何时调 `hive compact`
 
-只有 **(A) AND (B) 同时成立** 才触发:
+只在 **(A) AND (B)** 同时成立时:
 
-- (A) 大任务刚完成,你正准备给用户最终答复(不是中间步骤、子任务、阶段转换、hive 多 agent 讨论收敛)
-- (B) compactHint 提示 context.tokens > 400K(Claude only,Codex 暂不监控)
-
-### 怎么调
+- (A) 一个大任务刚完成、你正要给用户最终答复 —— 不是中间步骤、子任务、阶段转换,也不是 hive 多 agent 讨论刚收敛
+- (B) compactHint 显示 context.tokens > 400K(Claude only,Codex 暂不监控)
 
 ```bash
 hive compact
 ```
 
-### 不要做
-
-- 中间步骤 / 工具调用之间触发 — 丢正在做的事的语义边界
-- context < 400K 触发 — host runtime 会自动 compact,够用
-- 同一 task 已经 compact 过 — 不要重复
-- hive 多 agent 讨论中段触发 — 阶段转换不算"大任务结束"
+同一个 task 已经 compact 过就别重复;条件不满足时什么都不做 —— context < 400K 时 host runtime 会自己 compact,够用。
 
 ## 排障 + 协议边界
 
-排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill` / `exec`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `references/debug.md`。日常收发消息不用读这份;主通道见上文「消息机制」。
+排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `hive skills get debug`。日常收发消息不用读这份;主通道见上文「消息机制」。

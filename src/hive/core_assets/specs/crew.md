@@ -35,9 +35,9 @@ cell spec 把「协调者」留抽象,在 crew 里它具体是:**validator 出 p
   hive crew spawn-cell --feature-id <id> --task <workspace>/artifacts/tasks/feature-<id>.md
   ```
 
-  CLI 原子完成 spawn cell → wait-ready → rename window 到 `<crew>-<id>-running` → 给 worker 发 task、给 validator 发 VAL bootstrap(默认 `<workspace>/val-feature-<id>.md`,可 `--val` 覆盖)。这条硬路径保证 cell **一出生就有任务**,关掉它们瞎探索的空窗期。`--task` / `--feature-id` 都 required。
+  一条命令就把 cell spawn 出来并发好 task + VAL(VAL 默认 `<workspace>/val-feature-<id>.md`,`--val` 可覆盖);`--task` / `--feature-id` 都 required。
 - **并行**就是对每条无依赖 feature 多调几次 spawn-cell,各自一组 cell。每个 cell 做完这条 feature 就 **retire**(不复用、不派第二条),直到 human 显式 `hive crew cleanup`。
-- **window 命名**(永远带 `<crew>` 前缀,让 status bar 里同 crew 视觉聚拢):出生即 `<crew>-<id>-running`;feature DONE → `tmux rename-window -t <window> <crew>-<id>-done`;stuck → `<crew>-<id>-fail`。
+- **window 命名**(永远带 `<crew>` 前缀):出生即 `<crew>-<id>-running`;feature DONE → `tmux rename-window -t <window> <crew>-<id>-done`;stuck → `<crew>-<id>-fail`。
 - **orch inbox 只收 challenger 信号**:
   - `feature=<id> done OK` → 记 DONE,rename window 到 `-done`
   - `feature=<id> done NO: <reason>` → 按 reason 处理(转 worker rework / 调 VAL / 升 human)
@@ -66,7 +66,7 @@ cell spec 把「协调者」留抽象,在 crew 里它具体是:**validator 出 p
 
 ## 寻址 / 布局 / cleanup
 
-- 寻址统一走 `<crew>.` 前缀(`<crew>.orch` / `<crew>.challenger` / `<crew>.worker-<N>` / `<crew>.validator-<N>`),跨 window 一样。`<N>` 是 tmux window index,每个 crew 独占一段 1000 宽 slice,CLI 自动分配。
+- 寻址统一走 `<crew>.` 前缀(`<crew>.orch` / `<crew>.challenger` / `<crew>.worker-<N>` / `<crew>.validator-<N>`),跨 window 一样。`<N>` 是该 cell 的 tmux window index。
 - 发消息默认 heredoc + `--artifact -`(body 短摘要,详情走 artifact);每轮动作前 `hive team` 看状态。
 - 布局被 tmux preset 锁定(横屏 orch 左 50% / challenger 右;竖屏 stacked);拖乱了跑 `hive crew layout`。
 - **cleanup**:feature DONE 后 cell window 保留给 human 事后审 handoff / verdict。所有 feature 全绿 + human 明确签字后,才手工跑 `hive crew cleanup`(无 flag,只 kill cell 窗口,主 crew window 不动)。
