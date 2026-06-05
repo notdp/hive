@@ -55,6 +55,53 @@ class Team:
     # --- Lifecycle ---
 
     @classmethod
+    def create_for_window(
+        cls,
+        name: str,
+        *,
+        window_target: str,
+        lead_pane_id: str = "",
+        lead_name: str = LEAD_AGENT_NAME,
+        description: str = "",
+        cwd: str = "",
+        workspace: str = "",
+        tag_lead: bool = True,
+    ) -> Team:
+        """Create a team bound to *window_target* (not necessarily the focused
+        window).
+
+        ``create()`` binds to the currently-focused tmux window, which is wrong
+        after a ``break_pane`` moves the lead pane to a fresh window while the
+        client still views the origin. ``create_for_window`` takes the final
+        window explicitly so callers can break out first, then bind the team
+        where the pane actually landed — team identity must follow the final
+        window (Bug A).
+        """
+        if not tmux.is_inside_tmux():
+            raise ValueError(_TMUX_REQUIRED_MESSAGE)
+
+        existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
+        if existing_team:
+            raise ValueError(f"Team '{existing_team}' already exists in this window")
+
+        resolved_cwd = cwd or os.getcwd()
+        team = cls(name=name, description=description, workspace=workspace, lead_name=lead_name)
+
+        team.lead_pane_id = lead_pane_id or tmux.get_current_pane_id() or ""
+        from .agent import detect_current_session_id
+        team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
+        team.tmux_session = (
+            window_target.split(":")[0] if ":" in window_target else (tmux.get_current_session_name() or "")
+        )
+        team.tmux_window = window_target
+        team.tmux_window_id = tmux.get_window_id(window_target) or ""
+        if tag_lead and team.lead_pane_id:
+            tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
+
+        team._write_window_options()
+        return team
+
+    @classmethod
     def create(
         cls,
         name: str,
@@ -62,29 +109,18 @@ class Team:
         cwd: str = "",
         workspace: str = "",
     ) -> Team:
-        """Create a new team in the current tmux window."""
+        """Create a new team in the currently-focused tmux window."""
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-
-        window_target = tmux.get_current_window_target() or ""
-        existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
-        if existing_team:
-            raise ValueError(f"Team '{existing_team}' already exists in this window")
-
-        resolved_cwd = cwd or os.getcwd()
-        team = cls(name=name, description=description, workspace=workspace)
-
-        team.lead_pane_id = tmux.get_current_pane_id() or ""
-        from .agent import detect_current_session_id
-        team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
-        team.tmux_session = tmux.get_current_session_name() or ""
-        team.tmux_window = window_target
-        team.tmux_window_id = tmux.get_current_window_id() or ""
-        if team.lead_pane_id:
-            tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
-
-        team._write_window_options()
-        return team
+        return cls.create_for_window(
+            name,
+            window_target=tmux.get_current_window_target() or "",
+            lead_pane_id=tmux.get_current_pane_id() or "",
+            description=description,
+            cwd=cwd,
+            workspace=workspace,
+            tag_lead=True,
+        )
 
     @classmethod
     def load(cls, name: str, *, prefer_pane: str = "") -> Team:
@@ -463,14 +499,29 @@ class Team:
             tmux.clear_pane_tags(self.lead_pane_id)
 
 
+def _window_has_live_team_members(window_target: str, team_name: str) -> bool:
+    """True when *window_target* still hosts a live pane tagged as a member of
+    *team_name*.
+
+    A window with live members is a real team, not a stale leftover — duplicate
+    resolution must never strip its tags, even when another window claims the
+    same name.
+    """
+    return any(
+        p.team == team_name and (p.agent or p.role)
+        for p in tmux.list_panes_full(window_target)
+    )
+
+
 def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[str, str]]:
     """Find the tmux window that hosts team *name* by scanning window options.
 
     When multiple windows claim the same team name (e.g. after a window
     move/reorder leaves stale tags), the window containing *prefer_pane*
     wins.  If *prefer_pane* is not supplied we fall back to the window
-    that actually has panes tagged for the team.  Stale duplicates get
-    their ``@hive-team`` tag stripped automatically.
+    that actually has panes tagged for the team.  Provably-stale duplicates
+    (no live member panes) get their ``@hive-team`` tag stripped; live
+    duplicates are preserved so two colliding teams never lose their tags.
     """
     r = tmux._run([
         "list-windows", "-a", "-F",
@@ -512,8 +563,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
 
     # 2) Prefer the window that has panes actually tagged for this team.
     for wt, data in candidates:
-        panes = tmux.list_panes_full(wt)
-        if any(p.team == name and p.role for p in panes):
+        if _window_has_live_team_members(wt, name):
             _gc_stale_team_windows(name, keep=wt, all_windows=[c[0] for c in candidates])
             return wt, data
 
@@ -522,12 +572,68 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
 
 
 def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> None:
-    """Remove @hive-team from windows that are stale duplicates."""
+    """Strip @hive-team (and sibling options) from *provably stale* duplicate
+    windows of *name*.
+
+    A window that still hosts live member panes is left untouched: two live
+    teams that collide on a name must both survive so neither loses its routing
+    tags. ``hive doctor`` surfaces such collisions for manual repair.
+    """
     for wt in all_windows:
         if wt == keep:
             continue
+        if _window_has_live_team_members(wt, name):
+            continue
         for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(wt, f"@{key}")
+
+
+def duplicate_team_bindings() -> list[dict[str, object]]:
+    """Report tmux windows that collide on the same ``@hive-team`` name.
+
+    Bug A could leave two live cells tagged with one team name across different
+    windows. This scans all windows, groups by team, and returns every group
+    with more than one window — including each window's id, workspace, and live
+    member panes — so ``hive doctor`` can surface the collision. Detection only:
+    retagging a live team can break sidecar identity / pane context / pending
+    sends, so repair is left to a human.
+    """
+    r = tmux._run([
+        "list-windows", "-a", "-F",
+        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}",
+    ], check=False)
+
+    by_team: dict[str, list[dict[str, object]]] = {}
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 4:
+            parts.append("")
+        window, window_id, team, workspace = parts[0], parts[1], parts[2], parts[3]
+        if not team:
+            continue
+        members = [
+            {"name": p.agent, "pane": p.pane_id, "group": p.group}
+            for p in tmux.list_panes_full(window)
+            if p.team == team and (p.agent or p.role)
+        ]
+        by_team.setdefault(team, []).append({
+            "tmuxWindow": window,
+            "windowId": window_id,
+            "workspace": workspace,
+            "liveMembers": members,
+        })
+
+    duplicates: list[dict[str, object]] = []
+    for team, windows in by_team.items():
+        if len(windows) > 1:
+            duplicates.append({
+                "team": team,
+                "windows": windows,
+                "repair": "manual: two windows claim this team; do not auto-retag a live team",
+            })
+    return duplicates
 
 
 def list_teams() -> list[dict[str, str]]:

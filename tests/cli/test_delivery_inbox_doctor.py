@@ -369,6 +369,58 @@ def test_doctor_named_agent(runner, configure_hive_home, monkeypatch, tmp_path):
     assert payload["busy"] is True
 
 
+def test_doctor_reports_duplicate_team_bindings_without_repair(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """`hive doctor` surfaces windows colliding on a team name (Bug A) — reporting
+    both windows/ids/workspaces/members — and never auto-repairs."""
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _setup_team(monkeypatch, workspace)
+    monkeypatch.setattr(
+        "hive.sidecar.request_doctor",
+        lambda _ws, *, team, target_agent, verbose=False: {
+            "ok": True, "agent": target_agent, "team": team, "alive": True,
+        },
+    )
+    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+
+    dupe = {
+        "team": "0-2",
+        "windows": [
+            {
+                "tmuxWindow": "0:2", "windowId": "@2", "workspace": "/tmp/hive-0-w2",
+                "liveMembers": [
+                    {"name": "worker", "pane": "%42", "group": "cell"},
+                    {"name": "validator", "pane": "%45", "group": "cell"},
+                ],
+            },
+            {
+                "tmuxWindow": "0:3", "windowId": "@3", "workspace": "/tmp/hive-0-w3",
+                "liveMembers": [
+                    {"name": "worker", "pane": "%10", "group": "cell"},
+                    {"name": "validator", "pane": "%40", "group": "cell"},
+                ],
+            },
+        ],
+        "repair": "manual: two windows claim this team; do not auto-retag a live team",
+    }
+    cleared: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.team.duplicate_team_bindings", lambda: [dupe])
+    monkeypatch.setattr("hive.cli.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
+
+    result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    dups = payload["duplicateTeams"]
+    assert dups[0]["team"] == "0-2"
+    assert {w["windowId"] for w in dups[0]["windows"]} == {"@2", "@3"}
+    assert dups[0]["windows"][0]["liveMembers"][0]["name"] == "worker"
+    assert "manual" in dups[0]["repair"]
+    assert cleared == []  # detection only — no auto-repair
+
+
 def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"

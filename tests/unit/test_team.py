@@ -1,6 +1,6 @@
 from hive import tmux as _tmux
 from hive.agent import Agent
-from hive.team import Team, _find_team_window, _gc_stale_team_windows
+from hive.team import Team, _find_team_window, _gc_stale_team_windows, duplicate_team_bindings
 
 
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
@@ -417,7 +417,10 @@ def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
 
 
 def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, monkeypatch):
-    """When two windows claim the same team, the one containing prefer_pane wins."""
+    """When two windows claim the same team, the one containing prefer_pane wins.
+
+    The losing duplicate here is stale (no live member panes), so it is cleared.
+    """
     configure_hive_home()
 
     list_output = "dev:2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\tmy-team\t/tmp/ws\tdesc\t0\n"
@@ -426,6 +429,8 @@ def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, 
         lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
     )
     monkeypatch.setattr("hive.team.tmux.get_pane_window_target", lambda pane: "dev:3" if pane == "%99" else None)
+    # No live member panes anywhere → the losing window dev:2 is provably stale.
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", lambda target: [])
     cleared: list[tuple[str, str]] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
 
@@ -464,6 +469,8 @@ def test_find_team_window_falls_back_to_tagged_panes(configure_hive_home, monkey
 
 def test_gc_stale_team_windows_clears_non_kept(configure_hive_home, monkeypatch):
     configure_hive_home()
+    # All duplicates are stale (no live member panes) → all non-kept get cleared.
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", lambda target: [])
     cleared: list[tuple[str, str]] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
 
@@ -472,3 +479,95 @@ def test_gc_stale_team_windows_clears_non_kept(configure_hive_home, monkeypatch)
     stale_windows = {wt for wt, _ in cleared}
     assert stale_windows == {"dev:2", "dev:4"}
     assert ("dev:3", "@hive-team") not in cleared
+
+
+def test_gc_stale_team_windows_skips_live_duplicate(configure_hive_home, monkeypatch):
+    """A duplicate window with live member panes is never cleared (Bug A safety)."""
+    configure_hive_home()
+    from hive.tmux import PaneInfo
+
+    def fake_list_panes(target):
+        if target == "dev:2":
+            return [PaneInfo("%40", "", "codex", role="agent", agent="validator", team="my-team")]
+        return []
+
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
+
+    _gc_stale_team_windows("my-team", keep="dev:3", all_windows=["dev:2", "dev:3", "dev:4"])
+
+    assert "dev:2" not in cleared  # live duplicate preserved
+    assert "dev:4" in cleared      # stale duplicate still cleared
+
+
+def test_find_team_window_keeps_live_duplicate(configure_hive_home, monkeypatch):
+    """Two live windows share a team name; prefer_pane picks one for routing and
+    the other keeps its tags. Bug A: never clobber a live duplicate."""
+    configure_hive_home()
+
+    list_output = "dev:2\t0-2\t/tmp/ws2\tdesc\t0\ndev:3\t0-2\t/tmp/ws3\tdesc\t0\n"
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
+    )
+    monkeypatch.setattr("hive.team.tmux.get_pane_window_target", lambda pane: "dev:3" if pane == "%40" else None)
+
+    from hive.tmux import PaneInfo
+
+    def fake_list_panes(target):
+        if target == "dev:2":
+            return [
+                PaneInfo("%10", "", "claude", role="agent", agent="worker", team="0-2"),
+                PaneInfo("%11", "", "codex", role="agent", agent="validator", team="0-2"),
+            ]
+        if target == "dev:3":
+            return [
+                PaneInfo("%40", "", "claude", role="agent", agent="worker", team="0-2"),
+                PaneInfo("%41", "", "codex", role="agent", agent="validator", team="0-2"),
+            ]
+        return []
+
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
+
+    wt, _ = _find_team_window("0-2", prefer_pane="%40")
+
+    assert wt == "dev:3"          # prefer_pane window wins for routing
+    assert "dev:2" not in cleared  # the other live duplicate keeps its tags
+
+
+def test_duplicate_team_bindings_reports_only_collisions(configure_hive_home, monkeypatch):
+    """Two windows sharing a team name are reported with their ids + live members;
+    a uniquely-named team is not."""
+    configure_hive_home()
+    list_output = (
+        "0:2\t@2\t0-2\t/tmp/hive-0-w2\n"
+        "0:3\t@3\t0-2\t/tmp/hive-0-w3\n"
+        "0:5\t@5\tsolo\t/tmp/hive-0-w5\n"
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda args, check=True: type("R", (), {"stdout": list_output, "returncode": 0})(),
+    )
+
+    from hive.tmux import PaneInfo
+
+    def fake_list_panes(target):
+        return {
+            "0:2": [PaneInfo("%42", "", "claude", role="agent", agent="worker", team="0-2")],
+            "0:3": [PaneInfo("%10", "", "claude", role="agent", agent="worker", team="0-2")],
+            "0:5": [PaneInfo("%80", "", "claude", role="agent", agent="worker", team="solo")],
+        }.get(target, [])
+
+    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+
+    dupes = duplicate_team_bindings()
+
+    assert len(dupes) == 1  # only the colliding team, not the unique "solo"
+    assert dupes[0]["team"] == "0-2"
+    windows = dupes[0]["windows"]
+    assert {w["windowId"] for w in windows} == {"@2", "@3"}
+    assert windows[0]["liveMembers"][0]["name"] == "worker"
+    assert "manual" in dupes[0]["repair"]
