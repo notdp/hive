@@ -298,3 +298,25 @@ def test_cell_init_window_named_after_git_branch(runner, configure_hive_home, mo
 
     # 1-pane window dev:0 renamed to the feature (feat/ prefix stripped), not "cell".
     assert ("dev:0", "compose-creator-language") in renamed
+
+
+def test_unique_cell_window_name_appends_counter_on_collision(monkeypatch):
+    """Same-branch siblings get -2, -3 ...; a free name stays clean; a window
+    never collides with its own name."""
+    import hive.cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod.tmux,
+        "list_window_names",
+        lambda: [
+            ("dev:1", "compose-creator-language"),
+            ("dev:5", "compose-creator-language-2"),
+            ("dev:9", "other"),
+        ],
+    )
+    # free name → unchanged
+    assert cli_mod._unique_cell_window_name("kol-task-control-board", "dev:2") == "kol-task-control-board"
+    # base + -2 both taken → -3
+    assert cli_mod._unique_cell_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
+    # this_window's own name is excluded → no self-collision
+    assert cli_mod._unique_cell_window_name("other", "dev:9") == "other"

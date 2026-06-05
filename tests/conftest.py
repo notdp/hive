@@ -202,6 +202,8 @@ def configure_hive_home(monkeypatch, tmp_path):
         # collision) and no git subprocess against the test cwd.
         monkeypatch.setattr("hive.cli.tmux.rename_window", lambda *_a, **_k: None)
         monkeypatch.setattr("hive.cli._git_branch_for_cwd", lambda _cwd: "")
+        # No other live windows by default → cell window names don't collide.
+        monkeypatch.setattr("hive.cli.tmux.list_window_names", lambda: [])
         # Cell formation during `hive init` spawns or adopts a validator pane.
         # Tests that want to exercise that flow must override this mock; by
         # default we return a representative descriptor so plain `hive init`

@@ -2088,6 +2088,22 @@ def _cell_window_name(worker_cwd: str) -> str:
     return base or "cell"
 
 
+def _unique_cell_window_name(base: str, this_window: str) -> str:
+    """Disambiguate *base* against other live windows.
+
+    Same-repo, same-branch cells compute the same label, so on a collision append
+    ``-2``, ``-3``, .... *this_window* is excluded so the cell never collides with
+    its own (already-set) name.
+    """
+    taken = {name for target, name in tmux.list_window_names() if target != this_window}
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
 def _prepare_cell_placement(
     current_pane: str, *, validator_cli: str | None = None
 ) -> _CellPlacement:
@@ -2157,8 +2173,9 @@ def _attach_cell_to_team(t: Team, *, placement: _CellPlacement, ws: str) -> dict
     worker_cli = placement.worker_cli
     worker_cwd = placement.worker_cwd or ws
 
-    # Label the window after what the cell is working on, not a generic "cell".
-    tmux.rename_window(window, placement.window_name)
+    # Label the window after what the cell is working on, not a generic "cell";
+    # disambiguate same-branch siblings with a -N suffix.
+    tmux.rename_window(window, _unique_cell_window_name(placement.window_name, window))
     tmux.configure_hive_window(window)
     tmux.set_pane_option(worker_pane, "hive-role", "agent")
     tmux.set_pane_option(worker_pane, "hive-agent", "worker")
