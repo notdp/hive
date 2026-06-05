@@ -208,3 +208,50 @@ def test_cell_init_three_panes_breaks_out_then_spawns(
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
     assert payload["dispatched"] == ["worker", "validator"]
+
+
+def test_cell_init_breakout_names_team_from_final_window_not_origin(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Bug A: after break-out the team name + workspace + validator team follow
+    the FINAL window's stable id, not the origin window (dev:0) or its index."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    breaks: list[str] = []
+    # 3-pane origin (dev:0) → worker breaks out to a fresh window dev:7 whose id
+    # slug (@77) differs from its index (7), proving the name is id-derived.
+    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=3)
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:7", "%200"))
+    monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda target: "@77" if target == "dev:7" else "@0")
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%101",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    sidecar_calls: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.ensure_sidecar",
+        lambda ws, team, win, wid: sidecar_calls.append((ws, team, win, wid)) or 1,
+    )
+
+    result = runner.invoke(cli, ["cell", "init"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert breaks == ["%100"]
+    assert payload["window"] == "dev:7"
+    assert payload["team"] == "dev-w77"            # final window @77, not origin/index
+    assert payload["worker"]["pane"] == "%200"
+    assert spawned[0]["team_name"] == "dev-w77"    # validator spawned under the final-window team
+    assert sidecar_calls == [("/tmp/hive-dev-w77", "dev-w77", "dev:7", "@77")]

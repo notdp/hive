@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -196,9 +197,9 @@ def _resolve_sender(agent_name: str | None) -> str:
     return agent_name or _default_agent() or LEAD_AGENT_NAME
 
 
-def _load_team(team: str) -> Team:
+def _load_team(team: str, *, prefer_pane: str = "") -> Team:
     try:
-        return Team.load(team)
+        return Team.load(team, prefer_pane=prefer_pane)
     except FileNotFoundError:
         click.echo(f"Error: team '{team}' not found", err=True)
         sys.exit(1)
@@ -241,7 +242,7 @@ def _resolve_scoped_team(team: str | None, *, required: bool = True) -> tuple[st
         return team, loaded
     discovered_team = _default_team()
     if discovered_team:
-        return discovered_team, _load_team(discovered_team)
+        return discovered_team, _load_team(discovered_team, prefer_pane=tmux.get_current_pane_id() or "")
     if required:
         _fail("no Hive team is bound to this tmux window (run `hive init` in this window)")
     return None, None
@@ -329,9 +330,32 @@ def _add_runtime_location_fields(
     return payload
 
 
-def _default_auto_workspace_path(session_name: str, window_id: str) -> Path:
-    slug = window_id.lstrip("@") if window_id else "0"
-    return Path(f"/tmp/hive-{session_name}-{slug}")
+def _window_id_slug(window_id: str, fallback_index: str = "0") -> str:
+    """Stable per-window slug. Uses the tmux window id (``@42`` → ``w42``),
+    which is never reused within a session; falls back to the mutable window
+    index only when no id is available.
+    """
+    raw = (window_id or "").lstrip("@") or str(fallback_index or "0")
+    return f"w{raw}"
+
+
+def _default_auto_workspace_path(session_name: str, window_id: str, fallback_index: str = "0") -> Path:
+    return Path(f"/tmp/hive-{session_name}-{_window_id_slug(window_id, fallback_index)}")
+
+
+def _default_team_name_for_window(
+    session_name: str, window_id: str, window_index: str = "0", explicit_name: str = ""
+) -> str:
+    """Default team name derived from a window's stable id.
+
+    Team name is a routing key, not a display title, so it must stay unique and
+    stable. tmux window ids are never reused within a session, which avoids the
+    cross-window collisions that window-index-derived names hit after break-out
+    or window reorder (Bug A). An explicit ``--name`` always wins.
+    """
+    if explicit_name:
+        return explicit_name
+    return f"{session_name}-{_window_id_slug(window_id, window_index)}"
 
 
 def _team_default_auto_workspace_path(team: Team) -> Path | None:
@@ -1252,65 +1276,17 @@ def init_cmd(name: str, workspace: str, notify: bool):
     if not tmux.is_inside_tmux():
         _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
 
-    _gc_dead_teams()
-    plugin_manager.cleanup_retired_plugins()
-
-    session_name = tmux.get_current_session_name() or "hive"
-    window_index = tmux.get_current_window_index() or "0"
-    window_id = tmux.get_current_window_id() or ""
-    window_target = tmux.get_current_window_target()
     current_pane = tmux.get_current_pane_id()
     if detect_profile_for_pane(current_pane or "") is None:
         _fail("current pane must be running claude / codex / droid (this becomes the worker)")
     _require_codex_daemon_backed(current_pane or "")
 
-    existing = _discover_tmux_binding()
-    if existing.get("team"):
-        click.echo(json.dumps(existing, indent=2, ensure_ascii=False))
-        return
-
-    # Stale `@hive-team` tag from a prior team on this window — clear so we can rebind.
-    if window_target and tmux.get_window_option(window_target, "hive-team"):
-        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
-            tmux.clear_window_option(window_target, f"@{key}")
-
-    team_name = name or f"{session_name}-{window_index}"
-
-    # Global duplicate check: another window may already own this team name
-    # (e.g. stale tag left after a window move).
-    from .team import _find_team_window, _gc_stale_team_windows
-    existing_wt, _ = _find_team_window(team_name, prefer_pane=tmux.get_current_pane_id() or "")
-    if existing_wt and existing_wt != window_target:
-        # Stale tag on another window — clean it up so we can claim the name.
-        _gc_stale_team_windows(team_name, keep=window_target or "", all_windows=[existing_wt])
-
-    default_ws_path = _default_auto_workspace_path(session_name, window_id or window_index)
-    using_auto_workspace = not workspace
-    ws_path = Path(workspace).expanduser() if workspace else default_ws_path
-
-    if using_auto_workspace:
-        # A fresh `hive init` on the same tmux window should not inherit the
-        # previous team's event log or artifacts from the default auto workspace.
-        from .sidecar import stop_sidecar
-
-        stop_sidecar(str(ws_path))
-        bus.reset_workspace(ws_path)
-    else:
-        bus.init_workspace(ws_path)
-
-    try:
-        t = Team.create(team_name, description=f"auto-init from tmux {session_name}:{window_index}", workspace=str(ws_path))
-    except ValueError as e:
-        _fail(str(e))
-
-    _remember_context(team=team_name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
-
-    # Form the cell (worker = current pane + anti-family validator), then start
-    # the team sidecar for pending-send tracking.
-    result = _attach_cell_to_team(
-        t, current_pane=current_pane or "", ws=str(ws_path), validator_cli=None
+    result = _create_standalone_cell(
+        current_pane=current_pane or "",
+        explicit_name=name,
+        explicit_workspace=workspace,
+        validator_cli=None,
     )
-    _ensure_team_sidecar(t, ws_path)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -2055,16 +2031,31 @@ def _cell_neighbor_for_pairing(
     return neighbor
 
 
-def _attach_cell_to_team(
-    t: Team, *, current_pane: str, ws: str, validator_cli: str | None = None
-) -> dict[str, object]:
-    """Form a cell on team *t*: worker (= current pane) + an anti-family validator.
+@dataclass
+class _CellPlacement:
+    """Where a cell's worker lands and who its validator will be, decided
+    *before* the team is created so team identity can derive from the final
+    window (Bug A).
+    """
+    window: str
+    worker_pane: str
+    worker_cli: str
+    worker_cwd: str
+    validator_cli: str
+    validator_model: str
+    adopt_pane: str = ""
+    adopt_cli: str = ""
 
-    Realized by the current window's pane count — 1: split-spawn the validator;
-    2: adopt an idle/unowned/anti-family neighbor, else break out; 3+: break the
-    worker to a fresh window then spawn. Tags the worker, spawns/adopts +
-    dispatches the validator, declares the pair. Returns a descriptor for the
-    caller to echo. Shared by `hive cell init` and `hive init`.
+
+def _prepare_cell_placement(
+    current_pane: str, *, validator_cli: str | None = None
+) -> _CellPlacement:
+    """Decide cell placement without creating the team or tagging anything.
+
+    Realized by the current window's pane count — 1: validator splits beside the
+    worker; 2: adopt an idle/unowned/anti-family neighbor, else break out; 3+:
+    break the worker to a fresh window. Breaking out here, before team creation,
+    is what lets the team name/workspace follow the final window.
     """
     worker_cli = _resolve_spawn_cli_name(None)
     my_family = family_for_pane(current_pane)
@@ -2079,21 +2070,50 @@ def _attach_cell_to_team(
     if not window:
         _fail("cannot determine current window")
     count = tmux.get_pane_count(current_pane)
-    worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
+    worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
 
     # Decide adopt-vs-spawn before mutating any windows.
     adopt = _cell_neighbor_for_pairing(current_pane, window, my_family) if count == 2 else None
 
     worker_pane = current_pane
-    if adopt is None and count >= 2:
+    adopt_pane, adopt_cli = "", ""
+    if adopt is not None:
+        v_profile = detect_profile_for_pane(adopt.pane_id)
+        adopt_pane = adopt.pane_id
+        adopt_cli = v_profile.name if v_profile else "claude"
+    elif count >= 2:
         # Crowded / unpairable window — isolate the worker, then spawn clean.
         new_window, worker_pane = tmux.break_pane(current_pane, name="cell")
         if not new_window:
             _fail("failed to break out into a new window")
         window = new_window
 
-    tmux.set_window_option(window, "@hive-team", t.name)
-    tmux.set_window_option(window, "@hive-workspace", t.workspace or ws)
+    return _CellPlacement(
+        window=window,
+        worker_pane=worker_pane,
+        worker_cli=worker_cli,
+        worker_cwd=worker_cwd,
+        validator_cli=v_cli,
+        validator_model=v_model,
+        adopt_pane=adopt_pane,
+        adopt_cli=adopt_cli,
+    )
+
+
+def _attach_cell_to_team(t: Team, *, placement: _CellPlacement, ws: str) -> dict[str, object]:
+    """Form a cell on the already-created (final-window) team *t*.
+
+    Tags the worker, spawns or adopts the anti-family validator, declares the
+    worker↔validator pair, and dispatches each role spec. The window's
+    ``@hive-team`` / ``@hive-workspace`` options were already written by
+    ``Team.create_for_window``; this only owns the member panes. Returns a
+    descriptor for the caller to echo. Shared by `hive cell init` and `hive init`.
+    """
+    window = placement.window
+    worker_pane = placement.worker_pane
+    worker_cli = placement.worker_cli
+    worker_cwd = placement.worker_cwd or ws
+
     tmux.configure_hive_window(window)
     tmux.set_pane_option(worker_pane, "hive-role", "agent")
     tmux.set_pane_option(worker_pane, "hive-agent", "worker")
@@ -2105,21 +2125,19 @@ def _attach_cell_to_team(
 
     from . import layout as layout_mod
 
-    if adopt is not None:
-        v_profile = detect_profile_for_pane(adopt.pane_id)
-        v_pane_cli = v_profile.name if v_profile else "claude"
-        adopt_cwd = tmux.display_value(adopt.pane_id, "#{pane_current_path}") or worker_cwd
+    if placement.adopt_pane:
+        adopt_cwd = tmux.display_value(placement.adopt_pane, "#{pane_current_path}") or worker_cwd
         _register_agent_member(
             t,
-            pane_id=adopt.pane_id,
+            pane_id=placement.adopt_pane,
             team_name=t.name,
             agent_name="validator",
-            pane_cli=v_pane_cli,
+            pane_cli=placement.adopt_cli,
             cwd=adopt_cwd,
             notify=False,  # role loaded via /cell-validator dispatch below, not the generic hive join
             group="cell",
         )
-        validator_pane, validator_cli_used, mode = adopt.pane_id, v_pane_cli, "paired"
+        validator_pane, validator_cli_used, mode = placement.adopt_pane, placement.adopt_cli, "paired"
     else:
         validator_agent = Agent.spawn(
             name="validator",
@@ -2128,8 +2146,8 @@ def _attach_cell_to_team(
             cwd=worker_cwd,
             split_horizontal=layout_mod.split_horizontal(window, 2),
             split_size="50%",
-            cli=v_cli,
-            model=v_model,
+            cli=placement.validator_cli,
+            model=placement.validator_model,
             skill="none",
             prompt=_role_bootstrap_prompt("cell-validator"),
             workspace=ws,
@@ -2139,7 +2157,7 @@ def _attach_cell_to_team(
         hive_context.save_context_for_pane(
             validator_agent.pane_id, team=t.name, workspace=ws, agent="validator"
         )
-        validator_pane, validator_cli_used, mode = validator_agent.pane_id, v_cli, "spawned"
+        validator_pane, validator_cli_used, mode = validator_agent.pane_id, placement.validator_cli, "spawned"
 
     # Declare the worker ↔ validator pair (reload so both names are visible).
     try:
@@ -2177,6 +2195,115 @@ def _attach_cell_to_team(
     }
 
 
+def _prepare_window_for_new_team(window_target: str, *, current_pane: str) -> None:
+    """Clear a stale ``@hive-team`` tag on *window_target* so a new team can
+    bind.
+
+    Fails (rather than clobbering) when the window still hosts live members that
+    the current pane isn't part of — that window owns a real team.
+    """
+    from .team import _window_has_live_team_members
+
+    existing = tmux.get_window_option(window_target, "hive-team")
+    if not existing:
+        return
+    if _window_has_live_team_members(window_target, existing):
+        cur_team = tmux.get_pane_option(current_pane, "hive-team") if current_pane else None
+        if cur_team != existing:
+            _fail(
+                f"tmux window '{window_target}' already hosts live Hive team "
+                f"'{existing}' — run from a team pane, or start the cell elsewhere."
+            )
+        return
+    for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
+        tmux.clear_window_option(window_target, f"@{key}")
+
+
+def _claim_team_name(team_name: str, *, this_window: str, explicit: bool) -> None:
+    """Guard a default/explicit team name that another window already owns.
+
+    A stale duplicate (no live member panes) is cleared so the name can be
+    claimed; a live duplicate is a hard error — names are never silently
+    suffixed or clobbered.
+    """
+    from .team import _find_team_window, _gc_stale_team_windows, _window_has_live_team_members
+
+    existing_wt, _ = _find_team_window(team_name)
+    if not existing_wt or existing_wt == this_window:
+        return
+    if _window_has_live_team_members(existing_wt, team_name):
+        hint = "choose a different --name" if explicit else "rerun from that window, or run `hive doctor`"
+        _fail(f"team '{team_name}' already lives in tmux window '{existing_wt}' — {hint}.")
+    _gc_stale_team_windows(team_name, keep=this_window, all_windows=[existing_wt])
+
+
+def _create_standalone_cell(
+    *,
+    current_pane: str,
+    explicit_name: str = "",
+    explicit_workspace: str = "",
+    validator_cli: str | None = None,
+) -> dict[str, object]:
+    """Shared cell bring-up for `hive init` and `hive cell init`.
+
+    Decides placement (which may break the worker out to a fresh window),
+    derives the team name + workspace from the *final* window, creates the team
+    there, then forms the cell. Idempotent: if the current pane is already bound
+    the existing binding is returned untouched.
+    """
+    _gc_dead_teams()
+    plugin_manager.cleanup_retired_plugins()
+
+    existing = _discover_tmux_binding()
+    if existing.get("team"):
+        return existing
+
+    session_name = tmux.get_current_session_name() or "hive"
+    placement = _prepare_cell_placement(current_pane, validator_cli=validator_cli)
+    final_window = placement.window
+    final_window_id = tmux.get_window_id(final_window) or ""
+    final_index = final_window.rsplit(":", 1)[-1] if ":" in final_window else "0"
+
+    team_name = _default_team_name_for_window(session_name, final_window_id, final_index, explicit_name)
+    _prepare_window_for_new_team(final_window, current_pane=placement.worker_pane)
+    _claim_team_name(team_name, this_window=final_window, explicit=bool(explicit_name))
+
+    using_auto_workspace = not explicit_workspace
+    ws_path = (
+        Path(explicit_workspace).expanduser()
+        if explicit_workspace
+        else _default_auto_workspace_path(session_name, final_window_id, final_index)
+    )
+    if using_auto_workspace:
+        # A fresh cell on a reused window must not inherit the previous team's
+        # event log or artifacts from the default auto workspace.
+        from .sidecar import stop_sidecar
+
+        stop_sidecar(str(ws_path))
+        bus.reset_workspace(ws_path)
+    else:
+        bus.init_workspace(ws_path)
+
+    try:
+        t = Team.create_for_window(
+            team_name,
+            window_target=final_window,
+            lead_pane_id=placement.worker_pane,
+            lead_name="worker",
+            description=f"auto-init from tmux {session_name} ({final_window})",
+            workspace=str(ws_path),
+            tag_lead=False,
+        )
+    except ValueError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+
+    _remember_context(team=team_name, workspace=str(ws_path), agent="worker")
+    result = _attach_cell_to_team(t, placement=placement, ws=str(ws_path))
+    _ensure_team_sidecar(t, ws_path)
+    return result
+
+
 @cell_cmd.command("init")
 @click.option(
     "--validator-cli",
@@ -2208,12 +2335,7 @@ def cell_init_cmd(validator_cli: str | None):
         _fail("current pane must be running claude / codex / droid (this becomes the worker)")
     _require_codex_daemon_backed(current_pane)
 
-    t = _auto_init_team_for_crew()
-    ws = _resolve_workspace(t, required=True)
-
-    result = _attach_cell_to_team(
-        t, current_pane=current_pane, ws=ws, validator_cli=validator_cli
-    )
+    result = _create_standalone_cell(current_pane=current_pane, validator_cli=validator_cli)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -2270,40 +2392,38 @@ def _apply_crew_layout(window_target: str) -> str:
     return choice.orientation if choice is not None else ""
 
 
-def _auto_init_team_for_crew() -> Team:
-    """Return a team bound to current pane, auto-creating one if missing.
+def _create_crew_main_team(*, window_target: str, lead_pane: str) -> Team:
+    """Create a crew's internal main team bound to the *final* crew window.
 
-    Lightweight version of `hive init` so `hive crew init` can be run
-    standalone. Reuses existing team if the pane is already bound; otherwise
-    creates a fresh team + workspace + sidecar and tags current pane as lead.
+    Standalone-friendly (mirrors `hive init`): derives the team name + workspace
+    from ``window_target``'s stable id, resets the auto workspace, and starts the
+    sidecar. The caller decides the final window (rename/break) first so identity
+    follows where the crew lives, not the origin pane (Bug A).
     """
-    _gc_dead_teams()
-    binding = _discover_tmux_binding()
-    if binding.get("team"):
-        return _load_team(binding["team"])
+    session_name = (
+        window_target.split(":")[0] if ":" in window_target else (tmux.get_current_session_name() or "hive")
+    )
+    final_window_id = tmux.get_window_id(window_target) or ""
+    final_index = window_target.rsplit(":", 1)[-1] if ":" in window_target else "0"
 
-    session_name = tmux.get_current_session_name() or "hive"
-    window_index = tmux.get_current_window_index() or "0"
-    window_id = tmux.get_current_window_id() or ""
-    window_target = tmux.get_current_window_target() or ""
-
-    # Clear stale window options so Team.create can re-bind cleanly.
-    if window_target and tmux.get_window_option(window_target, "hive-team"):
-        for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
-            tmux.clear_window_option(window_target, f"@{key}")
-
-    team_name = f"{session_name}-{window_index}"
-    ws_path = _default_auto_workspace_path(session_name, window_id or window_index)
+    _prepare_window_for_new_team(window_target, current_pane=lead_pane)
+    team_name = _default_team_name_for_window(session_name, final_window_id, final_index)
+    _claim_team_name(team_name, this_window=window_target, explicit=False)
+    ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
 
     from .sidecar import stop_sidecar
     stop_sidecar(str(ws_path))
     bus.reset_workspace(ws_path)
 
     try:
-        t = Team.create(
+        t = Team.create_for_window(
             team_name,
-            description=f"auto-init from crew init ({session_name}:{window_index})",
+            window_target=window_target,
+            lead_pane_id=lead_pane,
+            lead_name=LEAD_AGENT_NAME,
+            description=f"crew main team ({session_name} {window_target})",
             workspace=str(ws_path),
+            tag_lead=False,
         )
     except ValueError as e:
         _fail(str(e))
@@ -2380,9 +2500,7 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         window_id_for_fallback = tmux.get_current_window_id() or ""
         crew_name = crew_names.pick_available_name(window_id_for_fallback)
 
-    # Auto-init team if not yet bound (standalone start; no prior `hive init` needed).
-    t = _auto_init_team_for_crew()
-    ws = _resolve_workspace(t, required=True)
+    _gc_dead_teams()
 
     orch_cli = _resolve_spawn_cli_name(None)
     if peer_cli:
@@ -2395,22 +2513,33 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         if not peer_cli_name:
             peer_cli_name = anti_peer_cli(orch_cli)
 
-    orch_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ws
-
     orch_agent_name = f"{crew_name}.orch"
     challenger_agent_name = f"{crew_name}.challenger"
 
-    window_display_name = f"crew {crew_name}"
-    if tmux.get_pane_count(current_pane) <= 1:
-        current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
-        if not current_window:
-            _fail("cannot determine current window")
-        tmux.rename_window(current_window, window_display_name)
-        crew_window, orch_pane = current_window, current_pane
+    # Decide the final crew window before creating the main team, so the team
+    # identity derives from where the crew actually lives (Bug A). An already
+    # bound pane reuses its team/window untouched (idempotent).
+    binding = _discover_tmux_binding()
+    if binding.get("team"):
+        t = _load_team(binding["team"], prefer_pane=current_pane)
+        crew_window = t.tmux_window or tmux.get_pane_window_target(current_pane) or ""
+        orch_pane = current_pane
     else:
-        crew_window, orch_pane = tmux.break_pane(current_pane, name=window_display_name)
-        if not crew_window:
-            _fail("failed to break-pane into new window")
+        window_display_name = f"crew {crew_name}"
+        if tmux.get_pane_count(current_pane) <= 1:
+            current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
+            if not current_window:
+                _fail("cannot determine current window")
+            tmux.rename_window(current_window, window_display_name)
+            crew_window, orch_pane = current_window, current_pane
+        else:
+            crew_window, orch_pane = tmux.break_pane(current_pane, name=window_display_name)
+            if not crew_window:
+                _fail("failed to break-pane into new window")
+        t = _create_crew_main_team(window_target=crew_window, lead_pane=orch_pane)
+
+    ws = _resolve_workspace(t, required=True)
+    orch_cwd = tmux.display_value(orch_pane, "#{pane_current_path}") or ws
 
     session_for_base = tmux.get_current_session_name() or ""
     range_base = crew_names.pick_range_base(

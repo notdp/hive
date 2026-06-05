@@ -55,6 +55,53 @@ class Team:
     # --- Lifecycle ---
 
     @classmethod
+    def create_for_window(
+        cls,
+        name: str,
+        *,
+        window_target: str,
+        lead_pane_id: str = "",
+        lead_name: str = LEAD_AGENT_NAME,
+        description: str = "",
+        cwd: str = "",
+        workspace: str = "",
+        tag_lead: bool = True,
+    ) -> Team:
+        """Create a team bound to *window_target* (not necessarily the focused
+        window).
+
+        ``create()`` binds to the currently-focused tmux window, which is wrong
+        after a ``break_pane`` moves the lead pane to a fresh window while the
+        client still views the origin. ``create_for_window`` takes the final
+        window explicitly so callers can break out first, then bind the team
+        where the pane actually landed — team identity must follow the final
+        window (Bug A).
+        """
+        if not tmux.is_inside_tmux():
+            raise ValueError(_TMUX_REQUIRED_MESSAGE)
+
+        existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
+        if existing_team:
+            raise ValueError(f"Team '{existing_team}' already exists in this window")
+
+        resolved_cwd = cwd or os.getcwd()
+        team = cls(name=name, description=description, workspace=workspace, lead_name=lead_name)
+
+        team.lead_pane_id = lead_pane_id or tmux.get_current_pane_id() or ""
+        from .agent import detect_current_session_id
+        team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
+        team.tmux_session = (
+            window_target.split(":")[0] if ":" in window_target else (tmux.get_current_session_name() or "")
+        )
+        team.tmux_window = window_target
+        team.tmux_window_id = tmux.get_window_id(window_target) or ""
+        if tag_lead and team.lead_pane_id:
+            tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
+
+        team._write_window_options()
+        return team
+
+    @classmethod
     def create(
         cls,
         name: str,
@@ -62,29 +109,18 @@ class Team:
         cwd: str = "",
         workspace: str = "",
     ) -> Team:
-        """Create a new team in the current tmux window."""
+        """Create a new team in the currently-focused tmux window."""
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-
-        window_target = tmux.get_current_window_target() or ""
-        existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
-        if existing_team:
-            raise ValueError(f"Team '{existing_team}' already exists in this window")
-
-        resolved_cwd = cwd or os.getcwd()
-        team = cls(name=name, description=description, workspace=workspace)
-
-        team.lead_pane_id = tmux.get_current_pane_id() or ""
-        from .agent import detect_current_session_id
-        team.lead_session_id = detect_current_session_id(resolved_cwd, pane_id=team.lead_pane_id)
-        team.tmux_session = tmux.get_current_session_name() or ""
-        team.tmux_window = window_target
-        team.tmux_window_id = tmux.get_current_window_id() or ""
-        if team.lead_pane_id:
-            tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
-
-        team._write_window_options()
-        return team
+        return cls.create_for_window(
+            name,
+            window_target=tmux.get_current_window_target() or "",
+            lead_pane_id=tmux.get_current_pane_id() or "",
+            description=description,
+            cwd=cwd,
+            workspace=workspace,
+            tag_lead=True,
+        )
 
     @classmethod
     def load(cls, name: str, *, prefer_pane: str = "") -> Team:

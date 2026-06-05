@@ -72,3 +72,74 @@ def test_crew_init_creates_orch_and_challenger_without_board(
     assert spawned[0]["name"] == "peaky.challenger"
     assert spawned[0]["split_horizontal"] is True
     assert not any(key == "hive-role" and value == "board" for _, key, value in pane_options)
+
+
+def test_crew_init_breakout_names_main_team_from_final_window_keeps_readable_crew(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Bug A (crew): after break-out the internal main team name follows the
+    FINAL crew window's stable id, while the crew-facing namespace stays
+    human-readable (peaky.orch / peaky.challenger)."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    spawned: list[dict[str, object]] = []
+    breaks: list[str] = []
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: profile)
+    monkeypatch.setattr(cli_mod, "family_for_pane", lambda _pane: "openai")
+    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_kwargs: ("claude", ""))
+    monkeypatch.setattr(cli_mod.tmux, "get_current_window_index", lambda: "8")
+    # Crowded origin → crew breaks out to dev:8 whose id slug (@88) differs from
+    # its index (8), proving the main team name is id-derived, not index-derived.
+    monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _pane: 2)
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:8", "%100"))
+    monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda target: "@88" if target == "dev:8" else "@0")
+    monkeypatch.setattr(
+        cli_mod.tmux,
+        "display_value",
+        lambda _pane, fmt: "dev:0" if fmt == "#{session_name}:#{window_index}" else str(repo),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "set_window_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _target: None)
+    monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _target: None)
+    monkeypatch.setattr("hive.team.tmux.configure_hive_window", lambda _target: None)
+    monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _workspace: None)
+    monkeypatch.setattr("hive.layout.split_horizontal", lambda _target, _count: True)
+    monkeypatch.setattr("hive.layout.apply_adaptive", lambda _target: SimpleNamespace(orientation="horizontal"))
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _seconds: None)
+
+    sidecar_calls: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.ensure_sidecar",
+        lambda ws, team, win, wid: sidecar_calls.append((ws, team, win, wid)) or 1,
+    )
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        name = str(kwargs["name"])
+        team_name = str(kwargs["team_name"])
+        cli_name = str(kwargs["cli"])
+        cli_mod.tmux.tag_pane("%101", "agent", name, team_name, cli=cli_name)
+        return Agent(name=name, team_name=team_name, pane_id="%101", cli=cli_name)
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    result = runner.invoke(cli, ["crew", "init", "--name", "peaky"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    assert breaks == ["%100"]                     # crowded origin → broke out
+    assert payload["window"] == "dev:8"
+    assert payload["team"] == "dev-w88"           # internal main team id-derived from final window
+    assert payload["crewName"] == "peaky"         # crew-facing namespace stays readable
+    assert payload["orch"]["name"] == "peaky.orch"
+    assert payload["challenger"]["name"] == "peaky.challenger"
+    assert spawned[0]["team_name"] == "dev-w88"   # challenger spawned under the final-window team
+    assert sidecar_calls == [("/tmp/hive-dev-w88", "dev-w88", "dev:8", "@88")]

@@ -199,6 +199,7 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
         lambda _pane_id: SimpleNamespace(name="droid"),
     )
     monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
 
     from hive.tmux import PaneInfo
 
@@ -223,8 +224,8 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
 
     assert result.exit_code == 0
     assert calls[:2] == [
-        ("stop", "/tmp/hive-dev-2"),
-        ("reset", "/tmp/hive-dev-2"),
+        ("stop", "/tmp/hive-dev-w2"),
+        ("reset", "/tmp/hive-dev-w2"),
     ]
 
 
@@ -318,11 +319,11 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     assert result.exit_code == 0
     payload = json.loads(result.output)
     # Stale "ghost" tag cleared; a fresh cell is formed for this window.
-    assert payload["team"] == "dev-0"
+    assert payload["team"] == "dev-w0"
     assert payload["group"] == "cell"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
-    assert tmux.get_window_option("dev:0", "hive-team") == "dev-0"
+    assert tmux.get_window_option("dev:0", "hive-team") == "dev-w0"
 
 
 def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -340,6 +341,7 @@ def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypat
         "hive.cli.tmux.list_panes_full",
         lambda _target: [PaneInfo("%5", "[orch]", command="droid")],
     )
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
 
     workspace = tmp_path / "ws"
     result = runner.invoke(cli, ["init", "--workspace", str(workspace)])
@@ -347,18 +349,18 @@ def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypat
     assert result.exit_code == 0
     payload = json.loads(result.output)
     # init now delegates to the cell topology and echoes its result dict.
-    assert payload["team"] == "dev-2"
+    assert payload["team"] == "dev-w2"
     assert payload["group"] == "cell"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
     assert payload["dispatched"] == ["worker", "validator"]
 
-    # The team is created and the current pane is remembered as the lead.
+    # The team is created and the current pane is remembered as the worker.
     from hive.team import Team
-    assert Team.load("dev-2").workspace == str(workspace)
+    assert Team.load("dev-w2").workspace == str(workspace)
     current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
-    assert current["team"] == "dev-2"
-    assert current["agent"] == "orch"
+    assert current["team"] == "dev-w2"
+    assert current["agent"] == "worker"
 
 
 def test_init_accepts_preopened_codex_worker_pane(
@@ -372,6 +374,7 @@ def test_init_accepts_preopened_codex_worker_pane(
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "5")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:5")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%10")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:5")
 
     from hive.tmux import PaneInfo
 
@@ -395,7 +398,7 @@ def test_init_accepts_preopened_codex_worker_pane(
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-5"
+    assert payload["team"] == "dev-w5"
     assert payload["group"] == "cell"
     assert payload["worker"]["name"] == "worker"
 
@@ -421,7 +424,7 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-0"
+    assert payload["team"] == "dev-w0"
     assert payload["group"] == "cell"
     assert payload["worker"]["name"] == "worker"
 
@@ -443,6 +446,8 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
         lambda _target: [PaneInfo("%5", "", command="droid")],
     )
 
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
+
     calls: list[tuple[str, str, str, str]] = []
 
     def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
@@ -455,7 +460,7 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
     result = runner.invoke(cli, ["init", "--workspace", str(workspace), "--no-notify"])
 
     assert result.exit_code == 0
-    assert calls == [(str(workspace), "dev-2", "dev:2", "@2")]
+    assert calls == [(str(workspace), "dev-w2", "dev:2", "@2")]
 
 
 def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -467,7 +472,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
     auto_workspace = tmp_path / "auto-ws"
-    monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda _session, _window: auto_workspace)
+    monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda _session, _window, _fallback="0": auto_workspace)
 
     from hive.tmux import PaneInfo
 
@@ -581,6 +586,7 @@ def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_t
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "1")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:1")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:1")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%8")
 
@@ -597,7 +603,71 @@ def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_t
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-1"
+    assert payload["team"] == "dev-w1"
+
+
+def test_init_breakout_names_team_from_final_window(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Bug A: when the worker breaks out of a crowded window, the team name,
+    workspace, and sidecar binding all follow the FINAL window's stable id, not
+    the origin window or its (mutable) index."""
+    configure_hive_home(current_pane="%5", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    # Origin window dev:0 is crowded (3 panes) → the worker breaks out to dev:3.
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:0")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_count", lambda _pane: 3)
+    monkeypatch.setattr("hive.cli.tmux.break_pane", lambda p, **k: ("dev:3", "%200"))
+    # The final window's id slug (@42) differs from origin (@0) and index (3),
+    # so a passing assertion proves the name is final-window-id-derived.
+    monkeypatch.setattr("hive.cli.tmux.get_window_id", lambda target: "@42" if target == "dev:3" else "@0")
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%5", "", command="droid")])
+
+    sidecar_calls: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.ensure_sidecar",
+        lambda ws, team, win, wid: sidecar_calls.append((ws, team, win, wid)) or 1,
+    )
+
+    result = runner.invoke(cli, ["init", "--no-notify"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-w42"   # final window @42, not origin (dev-w0) or index (dev-w3)
+    assert payload["window"] == "dev:3"
+    assert sidecar_calls == [("/tmp/hive-dev-w42", "dev-w42", "dev:3", "@42")]
+
+
+def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Re-running init from a pane already bound as a worker echoes the existing
+    binding without breaking out, clearing window tags, or resetting state."""
+    configure_hive_home(current_pane="%5", session_name="dev")
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+
+    bound = {"team": "dev-w2", "agent": "worker", "role": "agent", "workspace": "/tmp/hive-dev-w2"}
+    monkeypatch.setattr("hive.cli._discover_tmux_binding", lambda: bound)
+
+    cleared: list[tuple[str, str]] = []
+    resets: list[str] = []
+    breaks: list[str] = []
+    monkeypatch.setattr("hive.cli.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
+    monkeypatch.setattr("hive.cli.bus.reset_workspace", lambda ws: resets.append(str(ws)))
+    monkeypatch.setattr("hive.cli.tmux.break_pane", lambda p, **k: breaks.append(p) or ("dev:9", "%900"))
+
+    result = runner.invoke(cli, ["init", "--no-notify"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["team"] == "dev-w2"   # echoes the existing binding untouched
+    assert cleared == []                  # no window-option clearing
+    assert resets == []                   # no workspace reset
+    assert breaks == []                   # no break-out
 
 
 def test_init_fails_outside_tmux(runner, configure_hive_home, monkeypatch):
