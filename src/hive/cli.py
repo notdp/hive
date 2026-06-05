@@ -1806,17 +1806,23 @@ def compact_cmd(pane_id: str):
         team_name = tmux.get_pane_option(pane_id, "hive-team")
         if not team_name:
             _fail(f"pane '{pane_id}' is not bound to a Hive team")
-        t = _load_team(team_name)
         sender = tmux.get_pane_option(pane_id, "hive-agent") or ""
         if not sender:
             _fail(f"pane '{pane_id}' has no hive-agent tag")
+        # Compact the pane the keystroke fired in. Bind the Agent to THIS pane
+        # rather than re-resolving the name through the team: when two cells share
+        # a derived team name, that team holds two agents called "worker"/
+        # "validator", and t.get(name) would land /compact on the same-named pane
+        # in the other window.
+        pane_cli = tmux.get_pane_option(pane_id, "hive-cli") or ""
+        agent = Agent(name=sender, team_name=team_name, pane_id=pane_id, cli=pane_cli)
     else:
         team_name, t = _resolve_scoped_team(None, required=True)
         assert team_name is not None and t is not None
         sender = _resolve_sender(None)
         if not sender:
             _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
-    agent = t.get(sender)
+        agent = t.get(sender)
     agent.send("/compact")
     result = {
         "member": sender,

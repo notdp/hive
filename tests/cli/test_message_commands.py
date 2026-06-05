@@ -628,38 +628,34 @@ def test_compact_injects_self_compact_without_hint(runner, configure_hive_home, 
 
 def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
+    built: list[dict] = []
     sent: list[tuple[str, str]] = []
 
-    class _FakeAgent:
-        pane_id = "%42"
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            self.pane_id = kwargs.get("pane_id", "")
 
         def send(self, text: str) -> None:
-            sent.append(("send", text))
+            sent.append((self.pane_id, text))
 
-    class _FakeTeam:
-        name = "team-x"
-        tmux_session = "dev"
-        tmux_window = "dev:0"
-        workspace = "/tmp/ws"
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
 
-        def get(self, name: str):
-            assert name == "bobo"
-            return _FakeAgent()
+    # `--pane` binds the Agent to that literal pane; it must NOT consult
+    # _resolve_sender / _resolve_scoped_team (which read the current pane) nor
+    # _load_team (re-resolving by name is the cross-window bug).
+    def _fail(*_a, **_kw):
+        raise AssertionError("--pane must bind to the literal pane, not re-resolve")
 
-    monkeypatch.setattr("hive.cli._load_team", lambda _name: _FakeTeam())
+    monkeypatch.setattr("hive.cli._resolve_sender", _fail)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", _fail)
+    monkeypatch.setattr("hive.cli._load_team", _fail)
 
-    # `--pane` path must NOT consult _resolve_sender / _resolve_scoped_team
-    # (those read TMUX_PANE/current pane). Guard against accidental fallback.
-    def _fail_resolve_sender(_from_agent=None):
-        raise AssertionError("--pane must not consult _resolve_sender")
-
-    def _fail_resolve_team(_team, required=True):
-        raise AssertionError("--pane must not consult _resolve_scoped_team")
-
-    monkeypatch.setattr("hive.cli._resolve_sender", _fail_resolve_sender)
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", _fail_resolve_team)
-
-    pane_options = {("%42", "hive-team"): "team-x", ("%42", "hive-agent"): "bobo"}
+    pane_options = {
+        ("%42", "hive-team"): "team-x",
+        ("%42", "hive-agent"): "bobo",
+        ("%42", "hive-cli"): "codex",
+    }
     monkeypatch.setattr(
         "hive.cli.tmux.get_pane_option",
         lambda pane, key: pane_options.get((pane, key)),
@@ -667,7 +663,8 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
 
     result = runner.invoke(cli, ["compact", "--pane", "%42"])
     assert result.exit_code == 0, result.output
-    assert sent == [("send", "/compact")]
+    assert sent == [("%42", "/compact")]  # delivered to the literal pane
+    assert built[0]["pane_id"] == "%42" and built[0]["cli"] == "codex"
     payload = json.loads(result.output)
     assert payload == {
         "member": "bobo",
@@ -676,6 +673,47 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
         "success": True,
     }
     assert "compactHint" not in payload
+
+
+def test_compact_with_pane_targets_literal_pane_not_same_named_agent(
+    runner, configure_hive_home, monkeypatch
+):
+    """Regression: two cells can end up sharing a derived team name, so one team
+    holds two agents named `validator` in different windows. `compact --pane
+    <here>` must compact <here>, never the same-named agent's pane elsewhere —
+    which is exactly what re-resolving via `_load_team` + `t.get(name)` did."""
+    configure_hive_home()
+    sent: list[str] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            self.pane_id = kwargs.get("pane_id", "")
+
+        def send(self, text: str) -> None:
+            sent.append(self.pane_id)
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+
+    def _no_team(*_a, **_kw):
+        raise AssertionError("--pane must not re-resolve through the team")
+
+    monkeypatch.setattr("hive.cli._load_team", _no_team)
+
+    # %40 is window 3's validator, but its @hive-team collides with window 2's
+    # team (0-2), whose registered `validator` lives at a different pane.
+    pane_options = {
+        ("%40", "hive-team"): "0-2",
+        ("%40", "hive-agent"): "validator",
+        ("%40", "hive-cli"): "codex",
+    }
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%40"])
+    assert result.exit_code == 0, result.output
+    assert sent == ["%40"]  # window 3's own pane, not the other window's validator
 
 
 def test_compact_with_pane_rejects_untagged_pane(runner, configure_hive_home, monkeypatch):
