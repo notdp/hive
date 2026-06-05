@@ -255,3 +255,46 @@ def test_cell_init_breakout_names_team_from_final_window_not_origin(
     assert payload["worker"]["pane"] == "%200"
     assert spawned[0]["team_name"] == "dev-w77"    # validator spawned under the final-window team
     assert sidecar_calls == [("/tmp/hive-dev-w77", "dev-w77", "dev:7", "@77")]
+
+
+def test_cell_window_name_branch_then_project(monkeypatch):
+    """Cell window label = git branch with noise prefix stripped; falls back to
+    the project basename on a default branch or outside git."""
+    import hive.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "feat/compose-creator-language")
+    assert cli_mod._cell_window_name("/Users/x/ordo_ai") == "compose-creator-language"
+
+    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "worktree-kol-task-control-board")
+    assert cli_mod._cell_window_name("/Users/x/ordo_ai") == "kol-task-control-board"
+
+    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "main")
+    assert cli_mod._cell_window_name("/Users/notdp/Developer/hive") == "hive"
+
+    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "")
+    assert cli_mod._cell_window_name("/Users/x/myproj") == "myproj"
+
+
+def test_cell_init_window_named_after_git_branch(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A formed cell renames its window to the worker's feature branch (noise
+    prefix stripped) instead of a generic 'cell'."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _cwd: "feat/compose-creator-language")
+    renamed: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda target, name: renamed.append((target, name)))
+    monkeypatch.setattr(
+        cli_mod.Agent,
+        "spawn",
+        staticmethod(lambda **k: Agent(name="validator", team_name=str(k["team_name"]), pane_id="%101", cli="claude")),
+    )
+
+    result = runner.invoke(cli, ["cell", "init"])
+    assert result.exit_code == 0, result.output
+
+    # 1-pane window dev:0 renamed to the feature (feat/ prefix stripped), not "cell".
+    assert ("dev:0", "compose-creator-language") in renamed
