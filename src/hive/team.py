@@ -463,14 +463,29 @@ class Team:
             tmux.clear_pane_tags(self.lead_pane_id)
 
 
+def _window_has_live_team_members(window_target: str, team_name: str) -> bool:
+    """True when *window_target* still hosts a live pane tagged as a member of
+    *team_name*.
+
+    A window with live members is a real team, not a stale leftover — duplicate
+    resolution must never strip its tags, even when another window claims the
+    same name.
+    """
+    return any(
+        p.team == team_name and (p.agent or p.role)
+        for p in tmux.list_panes_full(window_target)
+    )
+
+
 def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[str, str]]:
     """Find the tmux window that hosts team *name* by scanning window options.
 
     When multiple windows claim the same team name (e.g. after a window
     move/reorder leaves stale tags), the window containing *prefer_pane*
     wins.  If *prefer_pane* is not supplied we fall back to the window
-    that actually has panes tagged for the team.  Stale duplicates get
-    their ``@hive-team`` tag stripped automatically.
+    that actually has panes tagged for the team.  Provably-stale duplicates
+    (no live member panes) get their ``@hive-team`` tag stripped; live
+    duplicates are preserved so two colliding teams never lose their tags.
     """
     r = tmux._run([
         "list-windows", "-a", "-F",
@@ -512,8 +527,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
 
     # 2) Prefer the window that has panes actually tagged for this team.
     for wt, data in candidates:
-        panes = tmux.list_panes_full(wt)
-        if any(p.team == name and p.role for p in panes):
+        if _window_has_live_team_members(wt, name):
             _gc_stale_team_windows(name, keep=wt, all_windows=[c[0] for c in candidates])
             return wt, data
 
@@ -522,9 +536,17 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
 
 
 def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> None:
-    """Remove @hive-team from windows that are stale duplicates."""
+    """Strip @hive-team (and sibling options) from *provably stale* duplicate
+    windows of *name*.
+
+    A window that still hosts live member panes is left untouched: two live
+    teams that collide on a name must both survive so neither loses its routing
+    tags. ``hive doctor`` surfaces such collisions for manual repair.
+    """
     for wt in all_windows:
         if wt == keep:
+            continue
+        if _window_has_live_team_members(wt, name):
             continue
         for key in ("hive-team", "hive-workspace", "hive-desc", "hive-created", "hive-peers"):
             tmux.clear_window_option(wt, f"@{key}")
