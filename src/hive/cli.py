@@ -2045,6 +2045,63 @@ class _CellPlacement:
     validator_model: str
     adopt_pane: str = ""
     adopt_cli: str = ""
+    window_name: str = "cell"
+
+
+_CELL_NAME_NOISE_PREFIXES = ("feat/", "fix/", "feature/", "bugfix/", "chore/", "hotfix/", "worktree-")
+
+
+def _git_branch_for_cwd(cwd: str) -> str:
+    """Current git branch of *cwd*, or "" if it is not a git repo / is detached."""
+    if not cwd:
+        return ""
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _cell_window_name(worker_cwd: str) -> str:
+    """A meaningful tmux window label for a cell.
+
+    The worker cwd's git branch is what the cell is actually working on (Hive's
+    per-feature worktree workflow makes branch == feature), so use it — minus
+    noise prefixes (``feat/``, ``worktree-``, ...). On a default branch
+    (main/master) or outside git, fall back to the project (cwd basename); a
+    bare "cell" tells you nothing.
+    """
+    branch = _git_branch_for_cwd(worker_cwd)
+    if branch and branch not in ("main", "master"):
+        for prefix in _CELL_NAME_NOISE_PREFIXES:
+            if branch.startswith(prefix):
+                branch = branch[len(prefix):]
+                break
+        if branch:
+            return branch
+    base = os.path.basename(worker_cwd.rstrip("/")) if worker_cwd else ""
+    return base or "cell"
+
+
+def _unique_cell_window_name(base: str, this_window: str) -> str:
+    """Disambiguate *base* against other live windows.
+
+    Same-repo, same-branch cells compute the same label, so on a collision append
+    ``-2``, ``-3``, .... *this_window* is excluded so the cell never collides with
+    its own (already-set) name.
+    """
+    taken = {name for target, name in tmux.list_window_names() if target != this_window}
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
 
 
 def _prepare_cell_placement(
@@ -2071,6 +2128,7 @@ def _prepare_cell_placement(
         _fail("cannot determine current window")
     count = tmux.get_pane_count(current_pane)
     worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
+    window_name = _cell_window_name(worker_cwd)
 
     # Decide adopt-vs-spawn before mutating any windows.
     adopt = _cell_neighbor_for_pairing(current_pane, window, my_family) if count == 2 else None
@@ -2083,7 +2141,7 @@ def _prepare_cell_placement(
         adopt_cli = v_profile.name if v_profile else "claude"
     elif count >= 2:
         # Crowded / unpairable window — isolate the worker, then spawn clean.
-        new_window, worker_pane = tmux.break_pane(current_pane, name="cell")
+        new_window, worker_pane = tmux.break_pane(current_pane, name=window_name)
         if not new_window:
             _fail("failed to break out into a new window")
         window = new_window
@@ -2097,6 +2155,7 @@ def _prepare_cell_placement(
         validator_model=v_model,
         adopt_pane=adopt_pane,
         adopt_cli=adopt_cli,
+        window_name=window_name,
     )
 
 
@@ -2114,6 +2173,9 @@ def _attach_cell_to_team(t: Team, *, placement: _CellPlacement, ws: str) -> dict
     worker_cli = placement.worker_cli
     worker_cwd = placement.worker_cwd or ws
 
+    # Label the window after what the cell is working on, not a generic "cell";
+    # disambiguate same-branch siblings with a -N suffix.
+    tmux.rename_window(window, _unique_cell_window_name(placement.window_name, window))
     tmux.configure_hive_window(window)
     tmux.set_pane_option(worker_pane, "hive-role", "agent")
     tmux.set_pane_option(worker_pane, "hive-agent", "worker")

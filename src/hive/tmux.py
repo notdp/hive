@@ -918,6 +918,17 @@ def list_window_indices(session: str) -> list[int]:
     return out
 
 
+def list_window_names() -> list[tuple[str, str]]:
+    """Return ``(window_target, window_name)`` for every window across sessions."""
+    r = _run(["list-windows", "-a", "-F", "#{session_name}:#{window_index}\t#{window_name}"], check=False)
+    out: list[tuple[str, str]] = []
+    for line in r.stdout.strip().split("\n"):
+        if "\t" in line:
+            target, name = line.split("\t", 1)
+            out.append((target, name))
+    return out
+
+
 def _parse_panes_full(stdout: str) -> list[PaneInfo]:
     result: list[PaneInfo] = []
     for line in stdout.strip().split("\n"):
