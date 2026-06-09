@@ -276,7 +276,7 @@ class Agent:
             # command substitution instead of shell-escaping the (large) spec
             # inline. The whole launch string is run by the pane shell
             # (send_keys below), so `"$(cat <path>)"` expands at startup — same
-            # mechanism as `hive fork`'s resume_cmd and the droid $settings_file
+            # mechanism as `hive fork`'s fork_cmd and the droid $settings_file
             # branch above. Only the path is escaped, never the spec bytes.
             # (prompt / skill mutual-exclusion is enforced at the top of spawn.)
             cmd_parts.append(f'"$(cat {_shell_escape(prompt_file)})"')

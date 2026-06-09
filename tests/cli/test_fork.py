@@ -19,7 +19,7 @@ def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monk
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
@@ -63,7 +63,7 @@ def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
@@ -118,7 +118,7 @@ def test_fork_join_as_prompt_embeds_in_resume_command(runner, configure_hive_hom
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
@@ -201,7 +201,7 @@ def test_fork_join_as_rejects_taken_name_before_split(runner, configure_hive_hom
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
-        lambda _pane: type("P", (), {"name": "claude", "resume_cmd": "claude -r {session_id} --fork-session"})(),
+        lambda _pane: type("P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session"})(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
@@ -245,7 +245,7 @@ def test_fork_codex_resolves_session_via_daemon(runner, configure_hive_home, mon
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "codex", "resume_cmd": "codex resume {session_id}", "ready_text": "codex"},
+            "P", (), {"name": "codex", "fork_cmd": "codex fork {session_id}", "ready_text": "codex"},
         )(),
     )
 
@@ -278,7 +278,152 @@ def test_fork_codex_resolves_session_via_daemon(runner, configure_hive_home, mon
     assert payload["team"] == "team-x"
     # The resume command carries the daemon-resolved session id: fork survived.
     assert len(sent) == 1 and sent[0][0] == "%100"
-    assert sent[0][1].startswith("codex resume sess-daemon")
+    assert sent[0][1].startswith("codex fork sess-daemon")
+
+
+def test_fork_non_team_pane_bare_clone(runner, configure_hive_home, monkeypatch, tmp_path):
+    # A pane bound to no Hive team forks into a bare clone: split + resume sent,
+    # but NO member registration and NO @hive-* tags on the new pane. Output is
+    # registered: null, team: null, and the resume uses the orphan boundary.
+    configure_hive_home(current_pane="%99", session_name="dev")
+
+    sent: list[tuple[str, str, bool]] = []
+    registered: list = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+    monkeypatch.setattr("hive.cli._register_agent_member", lambda *a, **k: registered.append((a, k)))
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"pane": "%100", "registered": None, "team": None}
+    # split happened and a resume command was sent to the new pane.
+    assert len(sent) == 1 and sent[0][0] == "%100"
+    assert sent[0][1].startswith("claude -r sess-123 --fork-session \"$(cat ")
+    assert sent[0][1].endswith(")\"")
+    # the orphan boundary file is used, not the team one.
+    assert "fork-boundary-orphan.txt" in sent[0][1]
+    # bare clone: no registration, no @hive-* tags on the new pane.
+    assert registered == []
+    from hive import tmux
+
+    assert tmux.get_pane_option("%100", "hive-team") is None
+    assert tmux.get_pane_option("%100", "hive-agent") is None
+
+
+def test_fork_non_team_current_pane_bare_clone(runner, configure_hive_home, monkeypatch, tmp_path):
+    # no --pane: the current pane is non-team, so fork clones it bare and never
+    # falls into _resolve_scoped_team (which would fail "no Hive team is bound").
+    configure_hive_home(current_pane="%99", session_name="dev")
+
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+
+    def _no_scoped(*_a, **_kw):
+        raise AssertionError("non-team fork must not resolve a scoped team")
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", _no_scoped)
+
+    result = runner.invoke(cli, ["fork", "-s", "h"])  # no --pane: uses current pane %99
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"pane": "%100", "registered": None, "team": None}
+    assert len(sent) == 1 and sent[0][0] == "%100"
+
+
+def test_fork_join_as_on_non_team_fails_before_split(runner, configure_hive_home, monkeypatch, tmp_path):
+    # --join-as needs a team to register into; on a non-team pane it fails BEFORE
+    # any split and never auto-creates a team.
+    configure_hive_home(current_pane="%99", session_name="dev")
+    split_called = False
+
+    def _split_window(_pane, horizontal=True, cwd=None, detach=False):
+        nonlocal split_called
+        split_called = True
+        return "%100"
+
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type("P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session"})(),
+    )
+    monkeypatch.setattr("hive.cli.tmux.split_window", _split_window)
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h", "--join-as", "dodo"])
+
+    assert result.exit_code != 0
+    assert "--join-as requires a team-bound pane" in result.output
+    assert split_called is False
+
+
+def test_fork_non_team_codex_resolves_session_via_daemon(runner, configure_hive_home, monkeypatch, tmp_path):
+    # Non-team codex fork still resolves the session via the per-pane daemon
+    # (daemon-first), so the bare clone's resume command carries the right id.
+    # Like the team-bound codex test, this does NOT mock resolve_session_id_for_pane.
+    configure_hive_home(current_pane="%99", session_name="dev")
+
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "codex", "fork_cmd": "codex fork {session_id}", "ready_text": "codex"},
+        )(),
+    )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane",
+        lambda pane: "sess-daemon" if pane == "%99" else None,
+    )
+    monkeypatch.setattr("hive.sidecar.request_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"pane": "%100", "registered": None, "team": None}
+    assert len(sent) == 1 and sent[0][0] == "%100"
+    assert sent[0][1].startswith("codex fork sess-daemon")
+
+
+def test_fork_orphan_boundary_prompt_has_no_self_lookup():
+    body = _fork_boundary_prompt(team_bound=False)
+    assert "FORK BOUNDARY" in body
+    # orphan has no team and no `self` — it must NOT be told to find an identity.
+    assert "bound to any Hive team" in body
+    assert "find your own identity" not in body
+    # anti-re-execution core is preserved verbatim.
+    assert "Do NOT continue, retry, or re-execute" in body
+    assert _FORK_NEW_TASK_MARKER in body
+    # Single user message: no leading / trailing whitespace drift.
+    assert body == body.strip()
 
 
 @pytest.mark.parametrize("width,height,expected_horizontal", [
