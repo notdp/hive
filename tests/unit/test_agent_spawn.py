@@ -3,6 +3,7 @@
 from hive.agent import (
     Agent,
     _build_droid_model_settings,
+    _shell_escape,
     detect_current_session_id,
 )
 import json
@@ -135,6 +136,61 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     assert "Please check your inbox." in startup_cmd
     # Only the initial `cd ... && exec codex` Enter — no follow-up TUI inject.
     assert calls.count("<Enter>") == 1
+
+
+def test_spawn_prompt_file_referenced_via_cat_not_inlined(monkeypatch, tmp_path):
+    # A spawned no-human role pane gets its bootstrap (preamble + full spec) via
+    # a cached file referenced by `"$(cat <path>)"`, NOT inlined + shell-escaped
+    # into the launch command. Mirrors `hive fork`'s resume_cmd: the launch
+    # string stays short and never shell-escapes arbitrary spec bytes.
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    spec_file = tmp_path / "role-bootstrap-cell-validator.txt"
+    spec_file.write_text(
+        "你被 spawn 成这个 team 的 cell-validator。\n\n---\n\nSPEC_BODY_MARKER full spec body"
+    )
+
+    Agent.spawn(
+        name="validator", team_name="t", target_pane="%0",
+        cwd="/tmp", is_first=True, skill="none", cli="claude",
+        prompt_file=str(spec_file),
+    )
+
+    startup_cmd = calls[0]
+    assert f'"$(cat {_shell_escape(str(spec_file))})"' in startup_cmd
+    # The spec content lives in the file, never on the command line.
+    assert "SPEC_BODY_MARKER" not in startup_cmd
+
+
+def test_spawn_prompt_file_rejects_inline_prompt(monkeypatch, tmp_path):
+    _setup_tmux_mocks(monkeypatch)
+    spec_file = tmp_path / "f.txt"
+    spec_file.write_text("x")
+
+    try:
+        Agent.spawn(
+            name="v", team_name="t", target_pane="%0", cwd="/tmp",
+            skill="none", cli="claude", prompt_file=str(spec_file), prompt="inline",
+        )
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_spawn_prompt_file_rejects_skill_activation(monkeypatch, tmp_path):
+    _setup_tmux_mocks(monkeypatch)
+    spec_file = tmp_path / "f.txt"
+    spec_file.write_text("x")
+
+    try:
+        Agent.spawn(
+            name="v", team_name="t", target_pane="%0", cwd="/tmp",
+            skill="hive", cli="claude", prompt_file=str(spec_file),
+        )
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_load_skill_sends_slash_command(monkeypatch):
