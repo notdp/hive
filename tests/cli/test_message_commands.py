@@ -591,6 +591,7 @@ def test_compact_injects_self_compact_without_hint(runner, configure_hive_home, 
 
     class _FakeAgent:
         pane_id = "%21"
+        cli = "droid"  # non-codex: /compact is delivered through the composer via send()
 
         def send(self, text: str) -> None:
             sent.append(("send", text))
@@ -621,6 +622,7 @@ def test_compact_injects_self_compact_without_hint(runner, configure_hive_home, 
         "member": "orch",
         "action": "compact",
         "pane": "%21",
+        "status": "compacted",
         "success": True,
     }
     assert "compactHint" not in payload
@@ -635,6 +637,7 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
         def __init__(self, **kwargs):
             built.append(kwargs)
             self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
 
         def send(self, text: str) -> None:
             sent.append((self.pane_id, text))
@@ -661,15 +664,24 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
         lambda pane, key: pane_options.get((pane, key)),
     )
 
+    compacted: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.compact_pane",
+        lambda pane: compacted.append(pane) or "compacted",
+    )
+
     result = runner.invoke(cli, ["compact", "--pane", "%42"])
     assert result.exit_code == 0, result.output
-    assert sent == [("%42", "/compact")]  # delivered to the literal pane
+    # codex compaction goes over the daemon RPC, not the composer/keystrokes.
+    assert sent == []
+    assert compacted == ["%42"]  # RPC fired at the literal pane
     assert built[0]["pane_id"] == "%42" and built[0]["cli"] == "codex"
     payload = json.loads(result.output)
     assert payload == {
         "member": "bobo",
         "action": "compact",
         "pane": "%42",
+        "status": "compacted",
         "success": True,
     }
     assert "compactHint" not in payload
@@ -688,6 +700,7 @@ def test_compact_with_pane_targets_literal_pane_not_same_named_agent(
     class _RecordingAgent:
         def __init__(self, **kwargs):
             self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
 
         def send(self, text: str) -> None:
             sent.append(self.pane_id)
@@ -711,9 +724,17 @@ def test_compact_with_pane_targets_literal_pane_not_same_named_agent(
         lambda pane, key: pane_options.get((pane, key)),
     )
 
+    compacted: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.compact_pane",
+        lambda pane: compacted.append(pane) or "compacted",
+    )
+
     result = runner.invoke(cli, ["compact", "--pane", "%40"])
     assert result.exit_code == 0, result.output
-    assert sent == ["%40"]  # window 3's own pane, not the other window's validator
+    # codex -> RPC compaction; the literal pane is what gets compacted.
+    assert sent == []
+    assert compacted == ["%40"]  # window 3's own pane, not the other window's validator
 
 
 def test_compact_with_pane_rejects_untagged_pane(runner, configure_hive_home, monkeypatch):
@@ -723,6 +744,51 @@ def test_compact_with_pane_rejects_untagged_pane(runner, configure_hive_home, mo
     result = runner.invoke(cli, ["compact", "--pane", "%99"])
     assert result.exit_code != 0
     assert "not bound to a Hive team" in result.output
+
+
+def test_compact_codex_busy_keystrokes_disabled_notice(runner, configure_hive_home, monkeypatch):
+    # codex mid-turn: compact_pane returns "busy"; compact_cmd keystrokes
+    # /compact into the TUI so codex shows its own "disabled while a task is in
+    # progress" refusal — it must NOT fire the RPC at a busy agent and must NOT
+    # fall back to turn/start send().
+    configure_hive_home()
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
+
+        def send(self, text: str) -> None:
+            raise AssertionError("codex compact must not use turn/start send()")
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+    pane_options = {
+        ("%42", "hive-team"): "team-x",
+        ("%42", "hive-agent"): "bobo",
+        ("%42", "hive-cli"): "codex",
+    }
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+    monkeypatch.setattr("hive.adapters.codex_app_server.compact_pane", lambda _pane: "busy")
+    keyed: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli: keyed.append((pane, text, cli)),
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert keyed == [("%42", "/compact", "codex")]  # codex itself surfaces the refusal
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "bobo",
+        "action": "compact",
+        "pane": "%42",
+        "status": "busy",
+        "success": False,
+    }
 
 
 def test_capture_reads_agent_output(runner, configure_hive_home, monkeypatch):
