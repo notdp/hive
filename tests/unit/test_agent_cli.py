@@ -117,9 +117,10 @@ def test_resolve_session_id_for_pane_returns_none_when_no_profile(monkeypatch):
     assert agent_cli.resolve_session_id_for_pane("%2") is None
 
 
-def test_resolve_model_for_pane_codex_falls_back_to_app_server(monkeypatch, tmp_path):
-    """Born-connected codex: lsof can't see the daemon-held jsonl, so model
-    resolution must fall back to the app-server session id."""
+def test_resolve_model_for_pane_reads_model_from_adapter_session(monkeypatch, tmp_path):
+    """resolve_model_for_pane reads the model from whatever session the adapter
+    resolves. For codex the daemon-first lookup lives inside the adapter, so the
+    fake adapter here simply hands back a session id."""
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text("")
 
@@ -128,7 +129,7 @@ def test_resolve_model_for_pane_codex_falls_back_to_app_server(monkeypatch, tmp_
 
     class FakeCodexAdapter:
         def resolve_current_session_id(self, _pane_id):
-            return None  # lsof miss — daemon holds the jsonl, not the pane tree
+            return "sess-app"  # daemon-first resolution happens inside the adapter
 
         def find_session_file(self, session_id, *, cwd=None):
             return transcript if session_id == "sess-app" else None
@@ -140,17 +141,14 @@ def test_resolve_model_for_pane_codex_falls_back_to_app_server(monkeypatch, tmp_
         "hive.agent_cli.adapters.get",
         lambda name: FakeCodexAdapter() if name == "codex" else None,
     )
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane",
-        lambda pane: "sess-app" if pane == "%1" else None,
-    )
     monkeypatch.setattr("hive.agent_cli.tmux.display_value", lambda *_a, **_kw: "/work")
 
     assert agent_cli.resolve_model_for_pane("%1", cli_name="codex") == "gpt-5.5"
 
 
-def test_resolve_model_for_pane_codex_no_daemon_returns_current(monkeypatch):
-    """Manual/embedded codex (no daemon socket) keeps the caller's default."""
+def test_resolve_model_for_pane_no_session_returns_current(monkeypatch):
+    """When the adapter resolves no session (e.g. embedded codex with nothing
+    open), resolve_model_for_pane keeps the caller's default."""
 
     class FakeCodexAdapter:
         def resolve_current_session_id(self, _pane_id):
@@ -159,10 +157,6 @@ def test_resolve_model_for_pane_codex_no_daemon_returns_current(monkeypatch):
     monkeypatch.setattr(
         "hive.agent_cli.adapters.get",
         lambda name: FakeCodexAdapter() if name == "codex" else None,
-    )
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane",
-        lambda _pane: None,
     )
 
     assert agent_cli.resolve_model_for_pane("%9", cli_name="codex", current_model="") == ""
