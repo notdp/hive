@@ -678,8 +678,8 @@ def _stderr_is_interactive() -> bool:
     return sys.stderr.isatty()
 
 
-# Subcommands that must keep working even when the hive skill is stale —
-# they are the recovery/diagnostic paths the user needs to fix the drift.
+# Subcommands that must skip skill drift checks entirely because they are the
+# recovery/diagnostic paths or own their own environment setup.
 _SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex", "skills"}
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "codex",
@@ -724,21 +724,14 @@ def _require_codex_native(invoked: str | None) -> None:
     _fail(_codex_relaunch_message())
 
 
-def _fail_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
-    """Abort with an error when the current pane's installed skill is stale.
-
-    Runs unconditionally (no stderr TTY gate) so agent Bash-tool invocations
-    also surface a non-zero exit code and the refresh command, not just a
-    stderr warning that the caller may silently absorb.
-    """
+def _warn_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
+    """Keep transport commands running even when the installed hive skill drifts."""
     if invoked in _SKILL_DRIFT_BYPASS_COMMANDS:
         return
     cli_name = _current_pane_agent_cli()
     if not cli_name:
         return
-    payload = skill_sync.diagnose_hive_skill(cli_name)
-    if payload.get("state") in {"missing", "stale"}:
-        _fail(skill_sync.render_hive_skill_warning(payload))
+    skill_sync.maybe_warn_hive_skill_drift(cli_name)
 
 
 @click.group(cls=SectionedHelpGroup)
@@ -750,7 +743,7 @@ def cli(ctx: click.Context):
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
     _require_codex_native(ctx.invoked_subcommand)
-    _fail_if_current_pane_hive_skill_is_stale(ctx.invoked_subcommand)
+    _warn_if_current_pane_hive_skill_is_stale(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
 

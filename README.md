@@ -84,21 +84,17 @@ pipx upgrade hive           # upgrade the CLI
 npx skills update hive -g   # upgrade the skill (GitHub-sourced installs only)
 ```
 
-The CLI and the skill upgrade separately. Upgrading the CLI does not refresh the skill. When the skill is stale, `hive` commands run from an agent pane warn on stderr, and `hive doctor --skills` shows the mismatch.
+The CLI and the skill upgrade separately. Upgrading the CLI does not refresh the skill. When the skill is stale, `hive` commands run from an agent pane warn on stderr and continue, and `hive doctor --skills` shows the mismatch.
 
-For local checkouts, `skills update` cannot refresh the install — see the contributor section below.
+For local checkout development, keep source-under-test separate from the live install — see the contributor section below.
 
-## For contributors
-
-Install from your current checkout instead of GitHub:
+## For Contributors
 
 ```bash
-python3 -m pip install -e .
-npx skills add "$PWD" -g --all     # local checkouts are not tracked by `skills update`; rerun this to refresh
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-The full post-edit refresh workflow (install + skill refresh + plugin re-enable) and repository conventions live in [AGENTS.md](AGENTS.md).
+The global `hive` binary is live agent transport. Keep it on the stable install while developing Hive itself; tests should import the checkout explicitly with `PYTHONPATH=src`. Manual verification that needs plugin materialization or sidecar behavior should use disposable `HIVE_HOME`, `FACTORY_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window rather than the live team. Repository conventions live in [AGENTS.md](AGENTS.md).
 
 ## Docs
 

@@ -26,19 +26,16 @@ Tests live under `tests/` and are split by level:
 
 ## Build, Test, and Development Commands
 
-- `python3 -m pip install -e .` — install Hive in editable mode.
-- **MUST**: after ANY code change, run install + hive skill sync + plugin re-enable BEFORE testing, committing, or manual verification:
+- Live Hive agents use the stable global/network-installed `hive` binary as their communication transport. Do not point that live install at an in-progress checkout while a team is using it.
+- Development and tests run against source explicitly:
   ```
-  python3 -m pip install -e . --break-system-packages && npx skills add "$PWD" -g --all && hive plugin enable code-review && hive plugin enable notify
+  PYTHONPATH=src python -m pytest tests/ -q
   ```
-  This is a single mandatory step. Do not skip it. Do not split it. Do not "do it later".
-- Why this matters: plugin commands under `~/.factory/commands/` are materialized copies, not symlinks, so changing plugin code without re-enabling can leave you testing stale command files. The base `hive` skill also lives outside the plugin install path, so repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`.
-- Sidecar upgrade rule: if your manual verification depends on new sidecar behavior or fields (for example `hive doctor`, delivery tracking, or other sidecar-backed runtime data), stop the existing sidecar for the current workspace after the mandatory refresh step, then rerun the target command so the sidecar restarts under the new code. Otherwise you may be verifying a stale daemon process instead of the code you just changed.
-- `PYTHONPATH=src python -m pytest tests/ -q` — run the full test suite.
 - `PYTHONPATH=src python -m pytest tests/ -m unit -q` — fast unit tests only.
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.
 - `PYTHONPATH=src python -m pytest tests/ -m e2e -q` — end-to-end tmux tests.
 - `PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_cvim_payload.py -q` — focused `/cvim` and `/vim` sendback coverage.
+- Plugin/skill materialization and sidecar behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `FACTORY_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's sidecar onto checkout code; the live sidecar stays on the stable install until an intentional upgrade.
 
 ## Coding Style & Naming Conventions
 

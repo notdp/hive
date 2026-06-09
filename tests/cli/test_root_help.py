@@ -30,20 +30,22 @@ def test_root_help_layers_daily_handoff_debug_sections(runner):
     assert 'hive send dodo "see report" --artifact - <<\'EOF\'' in result.output
 
 
-def test_root_cli_fails_when_current_agent_pane_skill_is_stale(runner, monkeypatch):
+def test_root_cli_continues_when_current_agent_pane_skill_is_stale(runner, monkeypatch):
+    warned: list[str] = []
     monkeypatch.setattr(
-        "hive.cli.skill_sync.diagnose_hive_skill",
-        lambda _cli: {"state": "stale", "cli": "codex", "installedPath": "/x/SKILL.md", "expectedHash": "a", "actualHash": "b"},
+        "hive.cli.skill_sync.maybe_warn_hive_skill_drift",
+        lambda cli: warned.append(cli) or {"state": "stale"},
     )
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%1")
     monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _pane, _key: "")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: SimpleNamespace(name="codex"))
 
-    result = runner.invoke(cli, ["team"])
+    result = runner.invoke(cli, ["status"])
 
     assert result.exit_code == 1
-    assert "stale" in result.output
+    assert "`hive status` was removed" in result.output
+    assert warned == ["codex"]
 
 
 def test_root_cli_allows_doctor_even_when_skill_is_stale(runner, monkeypatch):

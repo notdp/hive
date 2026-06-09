@@ -62,18 +62,32 @@ def test_hive_picker_dispatches_to_cli_init():
     assert "问用户" in stub
 
 
-def test_hive_install_docs_use_npx_skills_add_as_canonical_path():
-    """守 install/refresh 命令在 README / AGENTS 跨文件一致 — contract test"""
+def _section(text: str, start: str, end: str) -> str:
+    start_index = text.index(start)
+    end_index = text.index(end, start_index + len(start))
+    return text[start_index:end_index]
+
+
+def test_hive_install_docs_keep_live_transport_out_of_dev_refresh():
+    """守 live/dev lane 边界,只断言高风险命令和 source-test 入口。"""
     repo_root = Path(__file__).resolve().parents[2]
     readme_text = (repo_root / "README.md").read_text()
     agents_text = (repo_root / "AGENTS.md").read_text()
+    agents_build = _section(agents_text, "## Build, Test, and Development Commands", "## Coding Style")
+    readme_contributors = _section(readme_text, "## For Contributors", "## Docs")
+    toxic = (
+        "python3 -m pip install -e . --break-system-packages",
+        'npx skills add "$PWD" -g --all',
+    )
 
     assert "pipx upgrade hive" in readme_text
     assert "npx skills update hive -g" in readme_text
     assert 'npx skills add https://github.com/notdp/hive -g --all' in readme_text
-    assert 'npx skills add "$PWD" -g --all' in readme_text
-    assert 'npx skills add "$PWD" -g --all' in agents_text
-    assert 'repo changes to `skills/hive/SKILL.md` do not reach agents unless you refresh it via `npx skills add`' in agents_text
+    for command in toxic:
+        assert command not in agents_build
+        assert command not in readme_contributors
+    assert "PYTHONPATH=src python -m pytest" in agents_build
+    assert "PYTHONPATH=src python -m pytest" in readme_contributors
 
 
 def test_specs_point_onward_only_via_reachable_skills_get():
