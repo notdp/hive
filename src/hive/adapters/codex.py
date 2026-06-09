@@ -52,6 +52,22 @@ class CodexAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
+        # A codex session is owned by its per-pane app-server daemon, so the
+        # daemon is the authoritative source (thread metadata, then lsof on the
+        # daemon pid). lsof on the *tty* processes only ever finds a rollout
+        # file for a fully embedded codex — one with no daemon socket at all,
+        # running directly in the pane where it holds the jsonl itself — so that
+        # is a last resort, not the primary lookup.
+        from .codex_app_server import session_id_for_pane as _daemon_session_id
+
+        sid = _daemon_session_id(pane_id)
+        if sid:
+            return sid
+        return self._session_id_via_tty_lsof(pane_id)
+
+    def _session_id_via_tty_lsof(self, pane_id: str) -> str | None:
+        """Embedded-codex fallback: with no daemon to ask, the rollout jsonl is
+        held by a codex process in the pane's own tty tree."""
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
             if not _is_codex_process(process.command, process.argv):
