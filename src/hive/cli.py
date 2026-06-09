@@ -2097,8 +2097,9 @@ def _role_bootstrap_prompt(role: str) -> str:
     spec = _read_spec(role) or f"hive skills get {role}"
     return (
         f"你被 spawn 成这个 team 的 {role}。下面 `---` 之后是你的角色协议 —— 照它做。"
-        f"先 `hive team` 确认身份,然后**等你的第一条任务消息**(orch / peer 会发来);"
-        f"在那之前别自己找活、别翻库、别退出。\n\n---\n\n{spec}"
+        f"先 `hive team` 确认身份,然后读角色协议。读完就结束当前 turn,让 pane 开着接收"
+        f"第一条任务消息(orch / peer 会发来);在那之前别自己找活、别翻库、别 `sleep` "
+        f"轮询。\n\n---\n\n{spec}"
     )
 
 

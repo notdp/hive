@@ -87,7 +87,9 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert bootstrap_path.name == "role-bootstrap-cell-validator.txt"
     bootstrap = bootstrap_path.read_text()
     assert "cell-validator" in bootstrap
-    assert "等你的第一条任务消息" in bootstrap
+    assert "读完就结束当前 turn" in bootstrap
+    assert "别 `sleep` 轮询" in bootstrap
+    assert "别退出" not in bootstrap
     assert payload["dispatched"] == ["worker", "validator"]
 
 
@@ -112,6 +114,17 @@ def test_role_bootstrap_file_caches_byte_exact_and_rewrites_on_drift(
     assert _role_bootstrap_file("cell-validator").read_text() == _role_bootstrap_prompt(
         "cell-validator"
     )
+
+
+def test_role_bootstrap_prompts_do_not_tell_idle_agents_to_not_exit(configure_hive_home):
+    from hive.cli import _role_bootstrap_prompt
+
+    configure_hive_home()
+
+    for role in ("cell-validator", "crew-challenger", "crew-worker", "crew-validator"):
+        prompt = _role_bootstrap_prompt(role)
+        assert "别退出" not in prompt
+        assert "别 `sleep` 轮询" in prompt
 
 
 def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(

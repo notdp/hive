@@ -47,6 +47,18 @@ hive answer claude "yes"             # 回答 agent 的 pending question
 
 **原文永远在 `<HIVE>` block 里读。** `hive thread <msgId>` 和 `hive delivery <msgId>` 是排障入口(见 `hive skills get debug`),agent 日常收信用不上。
 
+### 没活干时:停下,别轮询
+
+Hive 消息是**push 模型**:别的 agent 发来消息时,runtime 会把 `<HIVE>` block 注进你的 pane,并唤醒你进入新 turn。当前 turn 没有待处理任务时,正确动作只有一个:结束当前 turn,让 pane 保持打开,被动等下一条注入消息。
+
+禁止为了"等消息"做这些事:
+
+- `sleep` / while loop / 反复跑 `hive team`。
+- 反复发"继续等待"、"还在等"这类空转状态。
+- 自己翻运行库、artifact 目录、任务表来猜下一条任务。
+
+只有协议明确要求时才发一次 idle ping(例如出生后 60s 没收到首条任务消息),发完立刻结束 turn。这里的"停下"指结束当前 turn,**不是** quit 进程、关 pane、kill tmux;pane 必须继续存在才能接收下一条注入消息。
+
 ### send vs reply(thread 模型)
 
 Hive 的消息组织成 thread。每次发消息前问自己:**这是新话题,还是对已有 thread 的延续?**

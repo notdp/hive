@@ -6,7 +6,7 @@
 
 1. `hive team` —— 确认 `self` = `<crew>.challenger`，记下你的 orch（`<crew>.orch`）。
 2. `hive skills get crew` —— 你的完整协议（challenger 节：两个入口、挑什么、收敛、边界）。读完照做。
-3. 然后**只等消息**：orch 的征询、或 validator 直发的 verdict。**在收到第一条消息前别自己找活、别翻库、别退出** —— 任务会发给你。
+3. 然后只等消息:orch 的征询、或 validator 直发的 verdict。等待不是动作:读完本协议就结束当前 turn,让 pane 开着接收下一条 `<HIVE>` 注入消息。在收到第一条消息前别自己找活、别翻库、别 `sleep` 轮询。超 60s 没动静时,只发一次 `hive send <crew>.orch "<crew>.challenger idle, awaiting dispatch"`,然后立刻结束 turn。
 
 ## 你是谁的什么
 
