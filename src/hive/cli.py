@@ -24,7 +24,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import skill_sync
 from . import tmux
-from .agent import AGENT_STARTUP_TIMEOUT, Agent
+from .agent import AGENT_STARTUP_TIMEOUT, Agent, _submit_interactive_text
 from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team
 
@@ -1799,12 +1799,30 @@ def compact_cmd(pane_id: str):
         if not sender:
             _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
         agent = t.get(sender)
-    agent.send("/compact")
+    if getattr(agent, "cli", "") == "codex":
+        # codex: an idle agent compacts via the dedicated RPC
+        # (thread/compact/start) — never a turn/start prompt, which only feeds
+        # the model literal "/compact". When the agent is busy (compact_pane
+        # returns non-"compacted") we do NOT queue or silently defer: a Compact
+        # turn would abort the running turn, so instead we keystroke `/compact`
+        # into codex's own TUI, which then shows its native "disabled while a
+        # task is in progress." That is an explicit refusal the agent can see,
+        # not a silent background compaction it never learns about.
+        from .adapters import codex_app_server
+        status = codex_app_server.compact_pane(agent.pane_id)
+        if status != "compacted":
+            _submit_interactive_text(agent.pane_id, "/compact", "codex")
+    else:
+        # droid/claude (and embedded codex without a daemon): deliver `/compact`
+        # as a slash command through the interactive composer.
+        agent.send("/compact")
+        status = "compacted"
     result = {
         "member": sender,
         "action": "compact",
         "pane": getattr(agent, "pane_id", "") or "",
-        "success": True,
+        "status": status,
+        "success": status == "compacted",
     }
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 

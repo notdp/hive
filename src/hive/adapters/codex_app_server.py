@@ -429,6 +429,15 @@ class CodexDaemonClient:
             "input": [{"type": "text", "text": text}],
         })
 
+    def compact_start(self, thread_id: str) -> dict:
+        """Start a context-compaction turn (the ``/compact`` slash equivalent).
+
+        This is the dedicated RPC the codex TUI fires for ``/compact``; sending
+        ``/compact`` as ``turn/start`` text only feeds the model a literal
+        prompt and never compacts.
+        """
+        return self.call("thread/compact/start", {"threadId": thread_id})
+
     def interrupt(self, thread_id: str, turn_id: str) -> dict:
         return self.call("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
@@ -624,10 +633,15 @@ class CodexClientPool:
     def send_to_pane(self, pane: str, text: str) -> bool:
         """Deliver text as a new turn over the pane's daemon.
 
-        Returns False (caller should fall back to keystroke injection) when
-        there is no daemon, no thread yet, or a turn is already active — codex
-        turn/start *steers* into a running turn rather than queuing after it, so
-        an active thread is delivered through the composer instead.
+        Returns False (caller falls back to keystroke injection) only when the
+        pane has no usable daemon path — no daemon (embedded/manual codex) or no
+        thread yet. A *busy* thread is no longer bounced to the composer:
+        ``turn/start`` already carries steer semantics in core (it steers the
+        text into the running turn, or opens a fresh turn when idle), so hive
+        hands it straight to the RPC and lets codex pick the landing — the same
+        thing the codex TUI does for a typed message. Keystroke injection is
+        thereby reserved for CLIs without an app-server (droid/claude) and for
+        embedded codex panes that never spawned a daemon.
         """
         client = self._client_for(pane)
         if client is None:
@@ -635,10 +649,31 @@ class CodexClientPool:
         tid = client.latest_thread_id()
         if not tid:
             return False
+        return "result" in client.turn_start(tid, text)
+
+    def compact_pane(self, pane: str) -> str:
+        """Start context compaction over the pane's daemon.
+
+        Compaction is *not* steerable: codex runs it as a Compact turn via
+        ``spawn_task``, whose first act is to abort any running turn. Firing it
+        at a busy agent would kill the in-flight work. So unlike a normal
+        message, hive gates compaction on busy and only compacts an idle thread.
+
+        Returns ``"compacted"`` (RPC accepted), ``"busy"`` (agent mid-turn), or
+        ``"unavailable"`` (no daemon / no thread). On anything but ``"compacted"``
+        the caller keystrokes ``/compact`` into the TUI so codex itself surfaces
+        its native "disabled while a task is in progress" refusal.
+        """
+        client = self._client_for(pane)
+        if client is None:
+            return "unavailable"
+        tid = client.latest_thread_id()
+        if not tid:
+            return "unavailable"
         rt = client.runtime_for(tid)
         if rt is not None and rt.busy:
-            return False
-        return "result" in client.turn_start(tid, text)
+            return "busy"
+        return "compacted" if "result" in client.compact_start(tid) else "unavailable"
 
     def session_id_for_pane(self, pane: str) -> str | None:
         client = self._client_for(pane)
@@ -707,6 +742,10 @@ def connect_pane(pane: str) -> bool:
 
 def send_to_pane(pane: str, text: str) -> bool:
     return pool().send_to_pane(pane, text)
+
+
+def compact_pane(pane: str) -> str:
+    return pool().compact_pane(pane)
 
 
 def session_id_for_pane(pane: str) -> str | None:

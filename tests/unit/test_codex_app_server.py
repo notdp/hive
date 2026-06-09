@@ -250,7 +250,56 @@ def test_ensure_session_id_none_without_thread():
     assert _bare_client().ensure_session_id() is None
 
 
-def test_pool_send_to_pane_falls_back_when_thread_active(monkeypatch):
+def test_pool_send_to_pane_turn_starts_even_when_busy(monkeypatch):
+    # Busy is no longer bounced to the composer. turn/start carries steer
+    # semantics in core (steer the running turn, or open a fresh one when idle),
+    # so hive hands a busy thread straight to the RPC and never consults busy.
+    # FakeClient deliberately omits runtime_for: send_to_pane must not call it.
+    pool = m.CodexClientPool()
+    sent = []
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def turn_start(self, tid, text):
+            sent.append((tid, text))
+            return {"result": {}}
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is True
+    assert sent == [("t1", "hi")]
+
+
+def test_pool_send_to_pane_falls_back_without_daemon(monkeypatch):
+    pool = m.CodexClientPool()
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: None)
+    assert pool.send_to_pane("%1", "hi") is False  # no daemon -> keystroke fallback
+
+
+def test_pool_compact_pane_compacts_when_idle(monkeypatch):
+    pool = m.CodexClientPool()
+    started = []
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def runtime_for(self, _tid):
+            return m.ThreadRuntime(busy=False)
+
+        def compact_start(self, tid):
+            started.append(tid)
+            return {"result": {}}
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.compact_pane("%1") == "compacted"
+    assert started == ["t1"]
+
+
+def test_pool_compact_pane_busy_defers_without_aborting_turn(monkeypatch):
+    # A Compact turn aborts any running turn, so a busy agent must never be
+    # compacted out from under its in-flight work.
     pool = m.CodexClientPool()
 
     class FakeClient:
@@ -260,31 +309,17 @@ def test_pool_send_to_pane_falls_back_when_thread_active(monkeypatch):
         def runtime_for(self, _tid):
             return m.ThreadRuntime(busy=True)
 
-        def turn_start(self, *_a):
-            raise AssertionError("must not turn/start into an active turn")
+        def compact_start(self, *_a):
+            raise AssertionError("must not compact a busy agent (would abort its turn)")
 
     monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
-    assert pool.send_to_pane("%1", "hi") is False  # caller falls back to keystrokes
+    assert pool.compact_pane("%1") == "busy"
 
 
-def test_pool_send_to_pane_turn_starts_when_idle(monkeypatch):
+def test_pool_compact_pane_unavailable_without_daemon(monkeypatch):
     pool = m.CodexClientPool()
-    sent = []
-
-    class FakeClient:
-        def latest_thread_id(self):
-            return "t1"
-
-        def runtime_for(self, _tid):
-            return m.ThreadRuntime(busy=False)
-
-        def turn_start(self, tid, text):
-            sent.append((tid, text))
-            return {"result": {}}
-
-    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
-    assert pool.send_to_pane("%1", "hi") is True
-    assert sent == [("t1", "hi")]
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: None)
+    assert pool.compact_pane("%1") == "unavailable"
 
 
 def test_pool_connect_true_when_client_established(monkeypatch):
