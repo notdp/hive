@@ -156,28 +156,6 @@ Hive 的协作原子 = **一个 producer + 一个异族 reviewer**。reviewer �
 
 workflow 加载后继续用 Hive 命令作为通信与状态底座。
 
-## context 监控与自主 /compact
-
-context 偏大时,你会在下一条 hive 命令返回 / inbound 消息里收到一个 compactHint:
-
-- hive 命令 stdout JSON 多一个 `compactHint` 字段
-- inbound `<HIVE>` envelope 后追加一段独立 `<HIVE-HINT>` block
-
-收到 compactHint **不要立刻处理**。它是 reminder,不是 action 信号 —— 告诉你"context 已经偏大,合适时机 compact"。
-
-### 何时调 `hive compact`
-
-只在 **(A) AND (B)** 同时成立时:
-
-- (A) 一个大任务刚完成、你正要给用户最终答复 —— 不是中间步骤、子任务、阶段转换,也不是 hive 多 agent 讨论刚收敛
-- (B) compactHint 显示 context.tokens > 400K(Claude only,Codex 暂不监控)
-
-```bash
-hive compact
-```
-
-同一个 task 已经 compact 过就别重复;条件不满足时什么都不做 —— context < 400K 时 host runtime 会自己 compact,够用。
-
 ## 排障 + 协议边界
 
 排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ `hive skills get debug`。日常收发消息不用读这份;主通道见上文「消息机制」。
