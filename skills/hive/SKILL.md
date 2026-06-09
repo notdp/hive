@@ -15,7 +15,7 @@ Hive 是你的协作 runtime：tmux 里多个 agent 互发 `<HIVE ...>` 消息�
 **本文件只是发现入口，不是用法手册。** 跑任何 `hive` 命令前，先从 CLI 取协议：
 
 ```bash
-hive skills get core      # 从这开始：命令速查 / 消息机制 / thread / 协作规则 / compact
+hive skills get core      # 从这开始：命令速查 / 消息机制 / thread / 协作规则
 hive skills list          # 列出全部可取的 spec
 ```
 

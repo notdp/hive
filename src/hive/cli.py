@@ -464,26 +464,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
     return payload
 
 
-def _maybe_attach_compact_hint(
-    payload: dict[str, Any],
-    *,
-    sender: str,
-    team_name: str,
-    workspace: Any,
-) -> None:
-    """Best-effort: attach ``compactHint`` when sender context > threshold."""
-    if not sender or not team_name or not workspace:
-        return
-    from .sidecar import request_team_runtime
-    from . import context_hint as _ctx_hint
-
-    try:
-        runtime = request_team_runtime(str(workspace), team=team_name)
-    except Exception:
-        return
-    _ctx_hint.maybe_attach_hint(payload, self_name=sender, team_runtime=runtime)
-
-
 def _should_show_description(desc: object) -> bool:
     if not isinstance(desc, str) or not desc:
         return False
@@ -1725,10 +1705,6 @@ def wait_status(legacy_args: tuple[str, ...]):
     _status_migration_failure("wait-status")
 
 
-def _is_self_compact(sender: str, target: str, text: str) -> bool:
-    return bool(sender) and sender == target and text.strip() == "/compact"
-
-
 @cli.command("inject")
 @click.argument("agent_name")
 @click.argument("text")
@@ -1753,10 +1729,6 @@ def inject_cmd(agent_name: str, text: str):
         "pane": getattr(agent, "pane_id", "") or "",
         "success": True,
     }
-    sender = _resolve_sender(None)
-    if not _is_self_compact(sender, agent_name, text):
-        ws = _resolve_workspace(t, required=False)
-        _maybe_attach_compact_hint(result, sender=sender, team_name=team_name, workspace=ws)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -1764,10 +1736,6 @@ def inject_cmd(agent_name: str, text: str):
 @click.option("--pane", "pane_id", default="", help="Target pane ID (default: current pane via TMUX_PANE)")
 def compact_cmd(pane_id: str):
     """Trigger /compact on your own pane.
-
-    Equivalent to `hive inject <self> /compact`, but the response never
-    carries a `compactHint` — `/compact` already addresses the condition
-    the hint reports, so re-nagging would be noise.
 
     When wired into a tmux key binding, pass `--pane "#{pane_id}"` so the
     triggering pane is captured by tmux at keypress time rather than read
@@ -3225,7 +3193,6 @@ def send(
     except RuntimeError as exc:
         _fail(str(exc))
         return
-    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
@@ -3311,7 +3278,6 @@ def reply(
         return
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
-    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
@@ -3345,7 +3311,6 @@ def answer(agent_name: str, text: str):
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "answer failed")))
     payload.pop("ok", None)
-    _maybe_attach_compact_hint(payload, sender=sender, team_name=t.name, workspace=ws)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
