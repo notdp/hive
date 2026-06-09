@@ -55,10 +55,10 @@ cell 出的结论(pass verdict / 卡死 escalation)交给**「你的协调者」
    - `evidence`:跑了哪些命令、看了哪些文件、exit code / 关键输出(必填)
    - `required-changes`:(if fail)要 worker 改的具体 bullet list
    - `openQuestion`:(optional)你觉得该升级的 VAL / 议题
-5. **路由**:
+5. **路由**(fail 迭代上限 = **5 轮**,这里是该常量的单一来源 —— worker↔validator 在 cell 内自己迭代,第 5 轮仍无进展才升协调者;各拓扑的 validator 路由表沿用这个值,不另立):
    - `pass` → **协调者**
-   - `fail` 且未到上限 → **worker**(peer 内迭代;轮数上限由拓扑/协调者定,具体值见你的拓扑绑定)
-   - 连续到上限仍无进展(stuck)→ **协调者**(附 stuck-report 汇总各轮 fail 原因)
+   - `fail` 且 round < 5 → **worker**(peer 内迭代)
+   - round = 5 仍无进展(stuck)→ **协调者**(附 stuck-report 汇总各轮 fail 原因)
 6. 结论**锚 VAL 的 verify 结果**,LLM judgment 只兜底。worker 挑战你的 fail → peer 对话;verdict 以 VAL 为准,不随意让步。沟通短:body 摘要,详情走 artifact。
 
 ## 收发
