@@ -1987,6 +1987,24 @@ def _role_bootstrap_prompt(role: str) -> str:
     )
 
 
+def _role_bootstrap_file(role: str) -> Path:
+    """Cached per-role bootstrap prompt under ``$HIVE_HOME``.
+
+    Lets the spawn command stay short — ``"$(cat <path>)"`` instead of the full
+    role spec inlined and shell-escaped into ``exec <cli> '...'``. Mirrors
+    ``_fork_boundary_file``. One file *per role* (not a single rewritten file):
+    crew init spawns several roles near-simultaneously, so a shared file would
+    let one spawn's ``cat`` race a concurrent rewrite and read torn content.
+    Rewritten when the cached text drifts from the current code.
+    """
+    content = _role_bootstrap_prompt(role)
+    path = HIVE_HOME / f"role-bootstrap-{role}.txt"
+    if not path.exists() or path.read_text() != content:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return path
+
+
 @cli.group("cell")
 def cell_cmd():
     """CELL atom (worker + anti-family validator) management."""
@@ -2197,7 +2215,7 @@ def _attach_cell_to_team(t: Team, *, placement: _CellPlacement, ws: str) -> dict
             cli=placement.validator_cli,
             model=placement.validator_model,
             skill="none",
-            prompt=_role_bootstrap_prompt("cell-validator"),
+            prompt_file=str(_role_bootstrap_file("cell-validator")),
             workspace=ws,
         )
         t.agents["validator"] = validator_agent
@@ -2636,7 +2654,7 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         split_horizontal=layout_mod.split_horizontal(crew_window, 2),
         split_size="50%",
         skill="none",
-        prompt=_role_bootstrap_prompt("crew-challenger"),
+        prompt_file=str(_role_bootstrap_file("crew-challenger")),
         cli=peer_cli_name,
         model=peer_model_id,
     )
@@ -2887,7 +2905,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         cwd=cwd,
         split_window=False,
         skill="none",
-        prompt=_role_bootstrap_prompt("crew-worker"),
+        prompt_file=str(_role_bootstrap_file("crew-worker")),
         cli=worker_cli,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", crew_name)
@@ -2904,7 +2922,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
         skill="none",
-        prompt=_role_bootstrap_prompt("crew-validator"),
+        prompt_file=str(_role_bootstrap_file("crew-validator")),
         cli=validator_cli,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", crew_name)

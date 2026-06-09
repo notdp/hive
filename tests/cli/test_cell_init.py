@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from hive.agent import Agent
@@ -77,11 +78,40 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert spawned[0]["name"] == "validator"
     assert spawned[0]["cli"] == "claude"
     assert spawned[0]["skill"] == "none"
-    # validator's first message is the fed role bootstrap (preamble + spec), not a bare command,
-    # so a spawned no-human pane operates on it directly instead of run-and-stop.
-    assert "cell-validator" in spawned[0]["prompt"]
-    assert "等你的第一条任务消息" in spawned[0]["prompt"]
+    # validator's role bootstrap (preamble + spec) is fed via a cached file
+    # referenced by `"$(cat <path>)"`, not inlined into the launch command — so
+    # the spawned no-human pane still operates on the full bootstrap directly
+    # (no run-and-stop) while the launch stays short.
+    assert not spawned[0].get("prompt")
+    bootstrap_path = Path(spawned[0]["prompt_file"])
+    assert bootstrap_path.name == "role-bootstrap-cell-validator.txt"
+    bootstrap = bootstrap_path.read_text()
+    assert "cell-validator" in bootstrap
+    assert "等你的第一条任务消息" in bootstrap
     assert payload["dispatched"] == ["worker", "validator"]
+
+
+def test_role_bootstrap_file_caches_byte_exact_and_rewrites_on_drift(
+    configure_hive_home, tmp_path
+):
+    from hive.cli import _role_bootstrap_file, _role_bootstrap_prompt
+
+    configure_hive_home()
+
+    path = _role_bootstrap_file("cell-validator")
+    assert path.name == "role-bootstrap-cell-validator.txt"
+    # Byte-exact (no trailing newline): the `$(cat <file>)` replay must equal the
+    # old inline prompt, or "zero behavior change" wouldn't hold.
+    assert path.read_text() == _role_bootstrap_prompt("cell-validator")
+
+    # Idempotent: same path, content preserved.
+    assert _role_bootstrap_file("cell-validator") == path
+
+    # Drift: stale cached content is rewritten to match current code.
+    path.write_text("stale")
+    assert _role_bootstrap_file("cell-validator").read_text() == _role_bootstrap_prompt(
+        "cell-validator"
+    )
 
 
 def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
