@@ -261,7 +261,7 @@ def member_role(command: str) -> str:
 class CLIProfile:
     name: str
     ready_text: str
-    resume_cmd: str
+    fork_cmd: str
     skill_cmd: str
 
 
@@ -269,19 +269,19 @@ PROFILES: dict[str, CLIProfile] = {
     "droid": CLIProfile(
         name="droid",
         ready_text="for help",
-        resume_cmd="droid --fork {session_id}",
+        fork_cmd="droid --fork {session_id}",
         skill_cmd="/{name}",
     ),
     "claude": CLIProfile(
         name="claude",
         ready_text="Claude Code",
-        resume_cmd="claude -r {session_id} --fork-session",
+        fork_cmd="claude -r {session_id} --fork-session",
         skill_cmd="/{name}",
     ),
     "codex": CLIProfile(
         name="codex",
         ready_text="OpenAI Codex",
-        resume_cmd="codex fork {session_id}",
+        fork_cmd="codex fork {session_id}",
         skill_cmd="${name}",
     ),
 }

@@ -248,6 +248,56 @@ def _resolve_scoped_team(team: str | None, *, required: bool = True) -> tuple[st
     return None, None
 
 
+@dataclass(frozen=True)
+class _PaneTarget:
+    """Identity of an agent pane resolved straight from its tmux options.
+
+    Deliberately team-agnostic: ``team_name`` is empty for panes not bound to
+    any Hive team, and ``member_label`` falls back to the literal pane id. This
+    lets compact/fork operate on the pane in front of you whether or not it
+    belongs to a team.
+    """
+
+    pane_id: str
+    team_name: str
+    is_team_bound: bool
+    cli: str
+    member_label: str
+
+
+def _resolve_pane_target(pane_id: str = "") -> _PaneTarget:
+    """Resolve a pane's identity from tmux pane options *only*.
+
+    Never loads a ``Team`` and never calls ``_resolve_scoped_team`` /
+    ``_resolve_sender`` / ``t.get``: re-resolving an agent by name is exactly the
+    cross-window same-name bug that PR #8 fixed for ``compact --pane``. The pane
+    facts (id, cli, team tag) are all read directly off the literal pane, so the
+    command always acts on the pane in hand, team-bound or not.
+    """
+    pane = pane_id or tmux.get_current_pane_id() or ""
+    if not pane:
+        _fail("cannot determine current pane (pass --pane explicitly)")
+
+    team_name = tmux.get_pane_option(pane, "hive-team") or ""
+    option_cli = normalize_command(tmux.get_pane_option(pane, "hive-cli") or "")
+    if option_cli in AGENT_CLI_NAMES:
+        cli_name = option_cli
+    else:
+        profile = detect_profile_for_pane(pane)
+        cli_name = profile.name if profile else ""
+    if not cli_name:
+        _fail(f"unsupported agent pane '{pane}'")
+
+    member_label = tmux.get_pane_option(pane, "hive-agent") or pane
+    return _PaneTarget(
+        pane_id=pane,
+        team_name=team_name,
+        is_team_bound=bool(team_name),
+        cli=cli_name,
+        member_label=member_label,
+    )
+
+
 def _ensure_pane_in_scope(t: Team, pane_id: str) -> None:
     if not pane_id:
         return
@@ -764,18 +814,33 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
     Pass `--join-as <name>` to register the new pane as a team member;
     `--prompt` then sends an initial message after the fork is ready.
 
+    On a pane not bound to any Hive team, fork still works: it produces a bare,
+    independent clone (no team registration, no `@hive-*` tags) and returns
+    `registered: null`, `team: null`. `--join-as` requires a team-bound pane.
+
     \b
     Examples:
       hive fork                                  # auto-detect split direction
       hive fork --split h                        # force horizontal split
       hive fork --join-as dodo-c1 --prompt "continue the thread"
     """
+    target = _resolve_pane_target(pane_id)
+    if not target.is_team_bound:
+        # Non-team pane: clone it bare — no member registration, no @hive-* tags.
+        # The clone is an independent agent that belongs to no Hive team.
+        if join_as:
+            _fail("--join-as requires a team-bound pane")
+        new_pane = _fork_orphan_clone(target.pane_id, split, prompt)
+        click.echo(json.dumps({
+            "pane": new_pane,
+            "registered": None,
+            "team": None,
+        }, indent=2, ensure_ascii=False))
+        return
+
+    # Team-bound fork: register the clone as a new team member (unchanged).
     if pane_id:
-        team_name = tmux.get_pane_option(pane_id, "hive-team")
-        if team_name:
-            target_team = _load_team(team_name)
-        else:
-            _fail(f"pane '{pane_id}' is not bound to a Hive team")
+        target_team = _load_team(target.team_name)
     else:
         _, target_team = _resolve_scoped_team(None, required=True)
 
@@ -982,31 +1047,53 @@ _FORK_BOUNDARY_TEXT = (
     f"that arrive after this boundary. If no `{_FORK_NEW_TASK_MARKER}` section "
     f"is present, stop after identifying yourself and wait for new input."
 )
+# Orphan variant: a non-team fork has no team and no `self`, so it must NOT be
+# told to run `hive team` to find an identity. The anti-re-execution core is
+# preserved verbatim — that is what stops the clone from re-running the parent's
+# in-flight work regardless of team membership.
+_FORK_ORPHAN_BOUNDARY_TEXT = (
+    "FORK BOUNDARY: you are a freshly forked, independent clone. You are NOT "
+    "bound to any Hive team — running `hive team` only confirms you have no team "
+    "binding, and there is no `self` identity to look up.\n\n"
+    "Everything before this boundary is read-only inherited context for the "
+    "original agent. This includes the user's most recent instruction, any "
+    "unfinished request, and any pending tool/bash/action from the prior "
+    "transcript. Treat all of it as already owned by the original agent. Do NOT "
+    "continue, retry, or re-execute any task from before this boundary.\n\n"
+    f"Act only on instructions explicitly provided after the marker "
+    f"`{_FORK_NEW_TASK_MARKER}` in this message, or on future messages that "
+    f"arrive after this boundary. If no `{_FORK_NEW_TASK_MARKER}` section is "
+    f"present, stop and wait for new human input."
+)
 
 
-def _fork_boundary_prompt() -> str:
+def _fork_boundary_prompt(*, team_bound: bool = True) -> str:
     """The boundary message every fork receives as its first user input.
 
     Static across workspaces and forks: the new pane resumes the parent's session
     so its transcript starts populated with mid-flight tool calls and intended
     actions. Without a boundary the child happily re-executes those (e.g.
-    triggering another `hive fork` and recursing). The fork discovers its own
-    name via `hive team` rather than having it baked in.
+    triggering another `hive fork` and recursing). A team-bound fork discovers its
+    own name via `hive team`; an orphan (``team_bound=False``) has no team or
+    `self` and is told so instead.
     """
-    return _FORK_BOUNDARY_TEXT
+    return _FORK_BOUNDARY_TEXT if team_bound else _FORK_ORPHAN_BOUNDARY_TEXT
 
 
-def _fork_boundary_file() -> Path:
+def _fork_boundary_file(*, team_bound: bool = True) -> Path:
     """Cached static boundary file under ``$HIVE_HOME``.
 
     Lets the resume command stay short (``cat <path>`` rather than the full
     several-line text inline). Rewritten when the cached content drifts from the
-    current code so updates take effect without manual cleanup.
+    current code so updates take effect without manual cleanup. Team-bound and
+    orphan boundaries live in separate files so neither clobbers the other.
     """
-    path = HIVE_HOME / "fork-boundary.txt"
-    if not path.exists() or path.read_text() != _FORK_BOUNDARY_TEXT:
+    text = _fork_boundary_prompt(team_bound=team_bound)
+    filename = "fork-boundary.txt" if team_bound else "fork-boundary-orphan.txt"
+    path = HIVE_HOME / filename
+    if not path.exists() or path.read_text() != text:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_FORK_BOUNDARY_TEXT)
+        path.write_text(text)
     return path
 
 
@@ -1032,14 +1119,14 @@ def _fork_registered_agent(
     # $HIVE_HOME and expand via shell command substitution when there is no
     # prompt. With --prompt we inline boundary + marker + prompt together so
     # the fork sees both in one user message.
-    cmd_base = profile.resume_cmd.format(session_id=session_id)
+    cmd_base = profile.fork_cmd.format(session_id=session_id)
     if prompt:
-        composed = f"{_fork_boundary_prompt()}\n\n{_FORK_NEW_TASK_MARKER}\n{prompt}"
-        resume_cmd = f"{cmd_base} {shlex.quote(composed)}"
+        composed = f"{_fork_boundary_prompt(team_bound=True)}\n\n{_FORK_NEW_TASK_MARKER}\n{prompt}"
+        launch_cmd = f"{cmd_base} {shlex.quote(composed)}"
     else:
-        resume_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file()))})\""
+        launch_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file(team_bound=True)))})\""
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
-    tmux.send_keys(new_pane, resume_cmd)
+    tmux.send_keys(new_pane, launch_cmd)
     registered_agent = _register_agent_member(
         t,
         pane_id=new_pane,
@@ -1052,6 +1139,26 @@ def _fork_registered_agent(
     return registered_agent, new_pane
 
 
+def _fork_orphan_clone(pane_id: str, split: str, prompt: str = "") -> str:
+    """Fork a non-team agent pane into a bare, independent clone.
+
+    Mirrors a registered fork — split the pane, fork the parent session via the
+    CLI's fork command (``profile.fork_cmd``: ``codex fork`` / ``claude
+    --fork-session`` / ``droid --fork``), then send the boundary — but skips
+    member registration and writes no ``@hive-*`` pane tags: the clone belongs to
+    no team. Uses the orphan boundary so the clone is not told to look up a
+    `self` it does not have. Returns the new pane id.
+    """
+    current_pane, profile, session_id, horizontal, source_cwd = _fork_source_details(pane_id, split)
+    cmd_base = profile.fork_cmd.format(session_id=session_id)
+    if prompt:
+        composed = f"{_fork_boundary_prompt(team_bound=False)}\n\n{_FORK_NEW_TASK_MARKER}\n{prompt}"
+        launch_cmd = f"{cmd_base} {shlex.quote(composed)}"
+    else:
+        launch_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file(team_bound=False)))})\""
+    new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
+    tmux.send_keys(new_pane, launch_cmd)
+    return new_pane
 
 
 def _resolve_handoff_anchor_event(
@@ -1732,10 +1839,46 @@ def inject_cmd(agent_name: str, text: str):
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def _compact_target(target: _PaneTarget) -> str:
+    """Run ``/compact`` on the literal pane. Returns the compaction status.
+
+    Acts purely on ``target``'s pane facts — never re-resolves through Team
+    state — so a pane shared by two same-named agents (Bug A) still compacts the
+    pane in hand.
+    """
+    if target.cli == "codex":
+        # codex: an idle agent compacts via the dedicated RPC
+        # (thread/compact/start) — never a turn/start prompt, which only feeds
+        # the model literal "/compact". When the agent is busy (compact_pane
+        # returns non-"compacted") we do NOT queue or silently defer: a Compact
+        # turn would abort the running turn, so instead we keystroke `/compact`
+        # into codex's own TUI, which then shows its native "disabled while a
+        # task is in progress." That is an explicit refusal the agent can see,
+        # not a silent background compaction it never learns about.
+        from .adapters import codex_app_server
+        status = codex_app_server.compact_pane(target.pane_id)
+        if status != "compacted":
+            _submit_interactive_text(target.pane_id, "/compact", "codex")
+        return status
+    # droid/claude (and embedded codex without a daemon): deliver `/compact`
+    # as a slash command through the interactive composer.
+    Agent(
+        name=target.member_label,
+        team_name=target.team_name,
+        pane_id=target.pane_id,
+        cli=target.cli,
+    ).send("/compact")
+    return "compacted"
+
+
 @cli.command("compact")
 @click.option("--pane", "pane_id", default="", help="Target pane ID (default: current pane via TMUX_PANE)")
 def compact_cmd(pane_id: str):
     """Trigger /compact on your own pane.
+
+    Works on any agent pane, team-bound or not: a pane with no Hive team is
+    compacted by its literal pane facts, and the response carries `member` =
+    the pane id with `team: null`.
 
     When wired into a tmux key binding, pass `--pane "#{pane_id}"` so the
     triggering pane is captured by tmux at keypress time rather than read
@@ -1746,52 +1889,24 @@ def compact_cmd(pane_id: str):
       hive compact
       hive compact --pane %21
     """
-    if pane_id:
-        team_name = tmux.get_pane_option(pane_id, "hive-team")
-        if not team_name:
-            _fail(f"pane '{pane_id}' is not bound to a Hive team")
-        sender = tmux.get_pane_option(pane_id, "hive-agent") or ""
-        if not sender:
-            _fail(f"pane '{pane_id}' has no hive-agent tag")
-        # Compact the pane the keystroke fired in. Bind the Agent to THIS pane
-        # rather than re-resolving the name through the team: when two cells share
-        # a derived team name, that team holds two agents called "worker"/
-        # "validator", and t.get(name) would land /compact on the same-named pane
-        # in the other window.
-        pane_cli = tmux.get_pane_option(pane_id, "hive-cli") or ""
-        agent = Agent(name=sender, team_name=team_name, pane_id=pane_id, cli=pane_cli)
-    else:
-        team_name, t = _resolve_scoped_team(None, required=True)
-        assert team_name is not None and t is not None
-        sender = _resolve_sender(None)
-        if not sender:
-            _fail("cannot determine current agent (run inside a tmux pane bound to this team)")
-        agent = t.get(sender)
-    if getattr(agent, "cli", "") == "codex":
-        # codex: an idle agent compacts via the dedicated RPC
-        # (thread/compact/start) — never a turn/start prompt, which only feeds
-        # the model literal "/compact". When the agent is busy (compact_pane
-        # returns non-"compacted") we do NOT queue or silently defer: a Compact
-        # turn would abort the running turn, so instead we keystroke `/compact`
-        # into codex's own TUI, which then shows its native "disabled while a
-        # task is in progress." That is an explicit refusal the agent can see,
-        # not a silent background compaction it never learns about.
-        from .adapters import codex_app_server
-        status = codex_app_server.compact_pane(agent.pane_id)
-        if status != "compacted":
-            _submit_interactive_text(agent.pane_id, "/compact", "codex")
-    else:
-        # droid/claude (and embedded codex without a daemon): deliver `/compact`
-        # as a slash command through the interactive composer.
-        agent.send("/compact")
-        status = "compacted"
+    # Resolve the pane straight from its tmux options — both with an explicit
+    # --pane and from the current pane. We never re-resolve through Team state:
+    # that is the cross-window same-name bug PR #8 fixed for --pane, and routing
+    # the no---pane path through pane facts too lets a non-team agent compact
+    # itself (it has no team to resolve against).
+    target = _resolve_pane_target(pane_id)
+    status = _compact_target(target)
     result = {
-        "member": sender,
+        "member": target.member_label,
         "action": "compact",
-        "pane": getattr(agent, "pane_id", "") or "",
+        "pane": target.pane_id,
         "status": status,
         "success": status == "compacted",
     }
+    if not target.is_team_bound:
+        # Pane-only compact has no team identity; `member` is the pane id. Flag
+        # the absent team explicitly so callers can tell it apart from a member.
+        result["team"] = None
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 

@@ -141,7 +141,7 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
 def test_spawn_prompt_file_referenced_via_cat_not_inlined(monkeypatch, tmp_path):
     # A spawned no-human role pane gets its bootstrap (preamble + full spec) via
     # a cached file referenced by `"$(cat <path>)"`, NOT inlined + shell-escaped
-    # into the launch command. Mirrors `hive fork`'s resume_cmd: the launch
+    # into the launch command. Mirrors `hive fork`'s fork_cmd: the launch
     # string stays short and never shell-escapes arbitrary spec bytes.
     calls, _ = _setup_tmux_mocks(monkeypatch)
     spec_file = tmp_path / "role-bootstrap-cell-validator.txt"

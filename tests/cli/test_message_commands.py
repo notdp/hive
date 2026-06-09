@@ -511,32 +511,47 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
 
 
 def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive_home, monkeypatch):
+    # no --pane: compact resolves the CURRENT pane from its tmux options, never
+    # through _resolve_scoped_team / _resolve_sender / t.get (re-resolving by name
+    # is the cross-window same-name bug). A team-bound droid pane delivers
+    # /compact through the composer and keeps the team-member output shape.
     configure_hive_home()
+    built: list[dict] = []
     sent: list[tuple[str, str]] = []
 
-    class _FakeAgent:
-        pane_id = "%21"
-        cli = "droid"  # non-codex: /compact is delivered through the composer via send()
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
 
         def send(self, text: str) -> None:
             sent.append(("send", text))
 
-    class _FakeTeam:
-        name = "team-x"
-        tmux_session = "dev"
-        tmux_window = "dev:0"
-        workspace = "/tmp/ws"
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
 
-        def get(self, name: str):
-            assert name == "orch"
-            return _FakeAgent()
+    def _no_team(*_a, **_kw):
+        raise AssertionError("no-`--pane` compact must use current-pane facts, not team resolution")
 
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+    monkeypatch.setattr("hive.cli._resolve_sender", _no_team)
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", _no_team)
+    monkeypatch.setattr("hive.cli._load_team", _no_team)
+
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%21")
+    pane_options = {
+        ("%21", "hive-team"): "team-x",
+        ("%21", "hive-agent"): "orch",
+        ("%21", "hive-cli"): "droid",
+    }
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
 
     result = runner.invoke(cli, ["compact"])
     assert result.exit_code == 0, result.output
     assert sent == [("send", "/compact")]
+    assert built[0]["pane_id"] == "%21" and built[0]["cli"] == "droid"
     payload = json.loads(result.output)
     assert payload == {
         "member": "orch",
@@ -591,10 +606,11 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
 
     result = runner.invoke(cli, ["compact", "--pane", "%42"])
     assert result.exit_code == 0, result.output
-    # codex compaction goes over the daemon RPC, not the composer/keystrokes.
+    # codex compaction goes over the daemon RPC, not the composer/keystrokes, so
+    # no Agent is built — the literal-pane guarantee is proven by the RPC target.
     assert sent == []
+    assert built == []
     assert compacted == ["%42"]  # RPC fired at the literal pane
-    assert built[0]["pane_id"] == "%42" and built[0]["cli"] == "codex"
     payload = json.loads(result.output)
     assert payload == {
         "member": "bobo",
@@ -655,13 +671,17 @@ def test_compact_with_pane_targets_literal_pane_not_same_named_agent(
     assert compacted == ["%40"]  # window 3's own pane, not the other window's validator
 
 
-def test_compact_with_pane_rejects_untagged_pane(runner, configure_hive_home, monkeypatch):
+def test_compact_rejects_non_agent_pane(runner, configure_hive_home, monkeypatch):
+    # An untagged pane is no longer rejected for lacking a team — non-team panes
+    # are supported. It is rejected only when it is not an agent pane at all: no
+    # hive-cli tag AND no detectable agent profile.
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _pane, _key: None)
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane: None)
 
     result = runner.invoke(cli, ["compact", "--pane", "%99"])
     assert result.exit_code != 0
-    assert "not bound to a Hive team" in result.output
+    assert "unsupported agent pane" in result.output
 
 
 def test_compact_codex_busy_keystrokes_disabled_notice(runner, configure_hive_home, monkeypatch):
@@ -706,6 +726,169 @@ def test_compact_codex_busy_keystrokes_disabled_notice(runner, configure_hive_ho
         "pane": "%42",
         "status": "busy",
         "success": False,
+    }
+
+
+def _forbid_team_resolution(monkeypatch):
+    """Make any Team load/resolve a hard failure (non-team compact must avoid it)."""
+    def _no_team(*_a, **_kw):
+        raise AssertionError("non-team compact must not resolve or load a Team")
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", _no_team)
+    monkeypatch.setattr("hive.cli._resolve_sender", _no_team)
+    monkeypatch.setattr("hive.cli._load_team", _no_team)
+
+
+def test_compact_pane_non_team_codex_fires_rpc(runner, configure_hive_home, monkeypatch):
+    # A pane with no hive-team is still compactable. codex compacts over the
+    # daemon RPC at the literal pane; member is the pane id and the payload
+    # carries team: null. No Agent is built and no Team is touched.
+    configure_hive_home()
+    _forbid_team_resolution(monkeypatch)
+    built: list[dict] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+        def send(self, _text: str) -> None:
+            raise AssertionError("codex compact must not send through the composer")
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+
+    pane_options = {("%42", "hive-cli"): "codex"}  # no hive-team / hive-agent
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+    compacted: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.compact_pane",
+        lambda pane: compacted.append(pane) or "compacted",
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert built == [] and compacted == ["%42"]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "%42",
+        "action": "compact",
+        "pane": "%42",
+        "status": "compacted",
+        "success": True,
+        "team": None,
+    }
+
+
+def test_compact_pane_non_team_non_codex_sends_composer(runner, configure_hive_home, monkeypatch):
+    # Non-team, non-codex pane: /compact is delivered through the composer on the
+    # literal pane. The Agent is bound to the pane with an empty team name and the
+    # pane id as its name.
+    configure_hive_home()
+    _forbid_team_resolution(monkeypatch)
+    built: list[dict] = []
+    sent: list[tuple[str, str]] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
+
+        def send(self, text: str) -> None:
+            sent.append((self.pane_id, text))
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+
+    pane_options = {("%42", "hive-cli"): "droid"}  # no hive-team / hive-agent
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert sent == [("%42", "/compact")]
+    assert built[0] == {"name": "%42", "team_name": "", "pane_id": "%42", "cli": "droid"}
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "%42",
+        "action": "compact",
+        "pane": "%42",
+        "status": "compacted",
+        "success": True,
+        "team": None,
+    }
+
+
+def test_compact_self_non_team_codex_uses_current_pane(runner, configure_hive_home, monkeypatch):
+    # no --pane on a non-team codex pane: resolve the CURRENT pane and compact it
+    # over the RPC. member is the pane id; payload carries team: null.
+    configure_hive_home()
+    _forbid_team_resolution(monkeypatch)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%7")
+
+    pane_options = {("%7", "hive-cli"): "codex"}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+    compacted: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.compact_pane",
+        lambda pane: compacted.append(pane) or "compacted",
+    )
+
+    result = runner.invoke(cli, ["compact"])
+    assert result.exit_code == 0, result.output
+    assert compacted == ["%7"]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "%7",
+        "action": "compact",
+        "pane": "%7",
+        "status": "compacted",
+        "success": True,
+        "team": None,
+    }
+
+
+def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hive_home, monkeypatch):
+    # no --pane on a non-team droid pane: resolve the CURRENT pane and deliver
+    # /compact through the composer.
+    configure_hive_home()
+    _forbid_team_resolution(monkeypatch)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%7")
+    sent: list[tuple[str, str]] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            self.pane_id = kwargs.get("pane_id", "")
+            self.cli = kwargs.get("cli", "")
+
+        def send(self, text: str) -> None:
+            sent.append((self.pane_id, text))
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+
+    pane_options = {("%7", "hive-cli"): "droid"}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+
+    result = runner.invoke(cli, ["compact"])
+    assert result.exit_code == 0, result.output
+    assert sent == [("%7", "/compact")]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "%7",
+        "action": "compact",
+        "pane": "%7",
+        "status": "compacted",
+        "success": True,
+        "team": None,
     }
 
 
