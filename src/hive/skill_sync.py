@@ -40,8 +40,7 @@ def _local_repo_root() -> Path | None:
 
 
 def _refresh_command() -> str:
-    repo_root = _local_repo_root()
-    source = shlex.quote(str(repo_root)) if repo_root is not None else _DEFAULT_REMOTE_SKILL_SOURCE
+    source = shlex.quote(_DEFAULT_REMOTE_SKILL_SOURCE)
     return f"npx skills add {source} -g --all"
 
 
@@ -52,16 +51,10 @@ def _update_command() -> str:
 def _preferred_refresh_hint() -> tuple[str, str]:
     """Return (label, command) for the hint best suited to the current environment.
 
-    Local repo checkout (dev): `npx skills add` from $PWD. skills CLI does not
-    write a lock entry for local sources, so `npx skills update` cannot resolve
-    the skill — recommending it here would fail with "No installed skills found".
-
-    Otherwise (consumer install from github): `npx skills update` works because
-    the skills CLI recorded the github source during install.
+    Always points at the stable published source. A local checkout must not be
+    materialized into global agent homes from a live Hive team.
     """
-    if _local_repo_root() is not None:
-        return "Refresh with (local checkout):", _refresh_command()
-    return "Update with:", _update_command()
+    return "Refresh with stable source:", _refresh_command()
 
 
 def _shared_hive_skill_path() -> Path:
@@ -215,6 +208,7 @@ def render_hive_skill_warning(payload: dict[str, Any]) -> str:
         lines.append(f"  shared:    {payload.get('sharedPath', '')}")
     hint_label, hint_command = _preferred_refresh_hint()
     lines.extend([
+        "Command continues; inspect or repair after this message if needed.",
         hint_label,
         f"  {hint_command}",
         "Inspect details with:",

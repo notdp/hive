@@ -65,4 +65,3 @@ def test_warn_hive_skill_drift_is_rate_limited(monkeypatch, tmp_path: Path):
     assert len(messages) == 2
     state_file = tmp_path / ".hive" / "state" / "skill-sync" / "codex.json"
     assert state_file.is_file()
-

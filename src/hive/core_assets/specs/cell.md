@@ -36,7 +36,7 @@ cell 出的结论(pass verdict / 卡死 escalation)交给**「你的协调者」
 
 **为什么 worker 不跑全套**:跨 agent 重复 pytest 只是让 validator 复读同样命令、浪费资源;worker 看到 test fail 容易陷入「改 test 让它过,而不是改实现」的死循环。职责边界清楚:worker 实现,validator 验收。
 
-注意:「不越权」**不等于**「不做基础卫生」。项目要求的 mandatory refresh / install 该跑还得跑,它是让 self-check 跑在正确代码上的前置,不是验收。
+注意:「不越权」**不等于**「不做基础卫生」。项目要求的测试前置 / 隔离环境该用还得用,确保 self-check 跑在目标代码上,但不要把未完成的开发 checkout 装进 live 通信环境。
 
 ## validator(reviewer 审 code)
 
