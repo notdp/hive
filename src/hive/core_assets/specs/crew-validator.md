@@ -9,11 +9,11 @@ hive skills get cell    # validator 角色内核:证据面 / 三层 verify / ver
 
 ## 出生后:idle wait
 
-spawn 出来后 orch 会先发 verify bootstrap(含 VAL 路径),之后 worker 发 handoff。**等这些消息就是全部动作。** 只允许:一次性 `hive team` + `hive skills get cell`,读完就停;超 60s 没收到 → `hive send <crew>.orch "<crew>.validator-<N> idle, awaiting dispatch"` 提一次再等。翻表 / 翻 artifacts 找任务都算越位。
+spawn 出来后 orch 会先发 verify bootstrap(含 VAL 路径),之后 worker 发 handoff。**等这些消息就是全部动作** —— 出生 idle 纪律(别 sleep / 翻表翻 artifacts 找任务、读完就停、超 60s 才 ping 一次)统一见 `hive skills get core` 的「没活干时」;你的 idle ping 发 orch:`hive send <crew>.orch "<crew>.validator-<N> idle, awaiting dispatch"`。
 
 ## crew 绑定:你的协调者 = challenger
 
-cell 内核里抽象的「协调者」,在 crew 里就是 `<crew>.challenger`。按 verdict 路由:
+cell 内核里抽象的「协调者」,在 crew 里就是 `<crew>.challenger`。按 verdict 路由(fail 上限 5 见 `hive skills get cell`):
 
 | verdict | round | 发给谁 | 命令 |
 |---|---|---|---|

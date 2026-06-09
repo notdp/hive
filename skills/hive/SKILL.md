@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive 基础 skill。让 agent 作为 Hive runtime 成员工作：发现上下文、查看成员、接收 <HIVE ...> 消息、发送消息；完整协议与协作拓扑（cell / crew）由 CLI 经 `hive skills get` 现取。
+description: Hive 是 tmux 里的多 agent 协作 runtime。当你收到 <HIVE ...> 消息、被拉进某个 team、或要和别的 agent 分工协作时，用它发现上下文、查看成员、收发消息；完整协议与 cell / crew 拓扑由 CLI 经 `hive skills get` 现取。
 metadata: {"hive-bot":{"os":["darwin","linux"],"requires":{"bins":["tmux","python3","hive"]}}}
 ---
 
