@@ -7,7 +7,7 @@ crew = human 给 **orch** 一个高层需求,orch 拆成 features,**每条 featu
 ## 组成
 
 - **orch**(1):跑 `hive crew init` 后成为的 pane。producer —— 出 plan、派活、收结论、向 human 汇报。**不写一行码**。
-- **challenger**(1):`hive crew init` 时 spawn 的异族 pane。reviewer —— 挑 orch 的 plan(沿用 core 挑战立场)。
+- **challenger**(1):`hive crew init` 时 spawn 的异构 pane。reviewer —— 挑 orch 的 plan(沿用 core 挑战立场)。
 - **N×cell**(按需):orch 每条 feature 跑 `hive crew spawn-cell` 派出的 worker+validator 对,做完即 retire。
 
 ## cell 的协调者 = challenger → orch

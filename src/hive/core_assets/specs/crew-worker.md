@@ -4,7 +4,7 @@
 
 ```bash
 hive team               # 取你的 qualified name + 编号 <N> + peer validator(<crew>.validator-<N>)
-hive skills get cell    # worker 角色内核:实现 → handoff → 按 fail 迭代(含 handoff schema)
+hive skills get cell    # worker 角色内核:plan 草案 → 实现 → handoff → 按 fail 迭代(含 handoff schema)
 ```
 
 ## 出生后:idle wait
@@ -15,5 +15,6 @@ spawn 出来后 orch 会在极短窗口内发你第一条任务。**等这条就
 
 - owner = `<crew>.orch`;peer + 唯一下游 = `<crew>.validator-<N>`。
 - 收到 orch 的 `<HIVE ... artifact=<path>>` → 直接 Read `artifact=` 全文,再读 `features.json` 对应条目 + `val-feature-<id>.md`(做什么、什么算做完)。
+- **先把 plan 草案发 validator**(它对照 orch 的 VAL 挑;crew 里 VAL 已定稿,不重写),plan 过了再动手。
 - handoff 写 `<workspace>/artifacts/handoffs/feature-<id>-handoff.md`(多次用 `feature-<id>-<ts>.md`),发 `hive send <crew>.validator-<N> "verify feature=<id>" --artifact <handoff>`。
 - 做完这条 feature 即 retire,不复用、不派第二条。
