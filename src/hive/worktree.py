@@ -22,7 +22,7 @@ from pathlib import Path
 POOL_SEGMENTS = (".claude", "worktrees")
 
 # branch.<feature>.<key> written on a ready start; cleared by done.
-META_KEYS = ("hive-owner", "hive-team", "hive-crew", "hive-base", "hive-base-oid", "hive-created")
+META_KEYS = ("hive-owner", "hive-team", "hive-squad", "hive-base", "hive-base-oid", "hive-created")
 GH_MERGE_BASE_KEY = "gh-merge-base"
 
 _IN_PROGRESS_MARKERS = (
@@ -237,27 +237,27 @@ def hive_labeled_branches(anchor: Path) -> list[str]:
 class BaseResolution:
     ref: str
     oid: str
-    source: str  # explicit | crew-integration | default-branch
+    source: str  # explicit | squad-integration | default-branch
 
 
-def resolve_base(anchor: Path, explicit: str | None, crew_integration: str | None) -> BaseResolution:
+def resolve_base(anchor: Path, explicit: str | None, squad_integration: str | None) -> BaseResolution:
     """Resolve the base ref for a new feature.
 
-    *crew_integration* is None outside crew context; inside crew context it is
+    *squad_integration* is None outside squad context; inside squad context it is
     the integration branch from the window option ("" when unset, which is a
     hard failure — base must never silently fall back to the default branch in
-    a crew, or sub-PRs aim at main).
+    a squad, or sub-PRs aim at main).
     """
     if explicit:
         return BaseResolution(ref=explicit, oid=rev_parse(anchor, explicit), source="explicit")
-    if crew_integration is not None:
-        if not crew_integration:
+    if squad_integration is not None:
+        if not squad_integration:
             raise WorktreeError(
-                "crew context but no integration branch is set "
-                "(@hive-crew-integration-branch); pass --base <integration> explicitly"
+                "squad context but no integration branch is set "
+                "(@hive-squad-integration-branch); pass --base <integration> explicitly"
             )
         return BaseResolution(
-            ref=crew_integration, oid=rev_parse(anchor, crew_integration), source="crew-integration"
+            ref=squad_integration, oid=rev_parse(anchor, squad_integration), source="squad-integration"
         )
     r = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=str(anchor), timeout=10.0)
     default = r.stdout.strip() if r.returncode == 0 else ""
@@ -279,7 +279,7 @@ class StartResult:
     mode: str  # created | existing | attached | adopted-existing-branch | needs-rebase
     owner: str
     team: str
-    crew_name: str
+    squad_name: str
     base: str
     base_oid: str
     worktree_root: str
@@ -298,7 +298,7 @@ class StartResult:
             "mode": self.mode,
             "owner": self.owner,
             "team": self.team,
-            "crewName": self.crew_name,
+            "squadName": self.squad_name,
             "base": self.base,
             "baseOid": self.base_oid,
             "worktreeRoot": self.worktree_root,
@@ -314,7 +314,7 @@ def start(
     base: BaseResolution,
     owner: str,
     team: str = "",
-    crew_name: str = "",
+    squad_name: str = "",
     gh_merge_base: str | None = None,
     now: float | None = None,
 ) -> StartResult:
@@ -330,7 +330,7 @@ def start(
             mode=mode,
             owner=owner,
             team=team,
-            crew_name=crew_name,
+            squad_name=squad_name,
             base=base.ref,
             base_oid=base.oid,
             worktree_root=str(pool_root(anchor)),
@@ -346,15 +346,15 @@ def start(
             "hive-base-oid": base.oid,
             "hive-created": str(now if now is not None else time.time()),
         }
-        if crew_name:
-            meta["hive-crew"] = crew_name
+        if squad_name:
+            meta["hive-squad"] = squad_name
         if gh_merge_base:
             meta[GH_MERGE_BASE_KEY] = gh_merge_base
         return meta
 
     def sync_ready_meta(existing: dict[str, str]) -> None:
         """Every ready start must leave the full required config current —
-        notably gh-merge-base when the crew's integration branch moved.
+        notably gh-merge-base when the squad's integration branch moved.
         The first-created timestamp is the only key that survives as-is."""
         fresh = required_meta()
         if "hive-created" in existing:

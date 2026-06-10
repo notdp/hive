@@ -359,7 +359,7 @@ def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch
     payload = json.loads(result.output)
     assert payload["team"] is None
     assert payload["tmux"]["paneCount"] == 2
-    assert "cell" in payload["hint"] and "crew" in payload["hint"]
+    assert "duo" in payload["hint"] and "squad" in payload["hint"]
 
 
 def test_current_migration_stub(runner, configure_hive_home):

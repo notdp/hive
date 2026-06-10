@@ -2,14 +2,14 @@ import json
 from types import SimpleNamespace
 
 from hive.agent import Agent
-from hive.cli import cli, _attach_cell_to_team as _real_attach_cell_to_team
+from hive.cli import cli, _attach_duo_to_team as _real_attach_duo_to_team
 
 
-def _cell_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes=None):
-    """Shared cell-init stubs: codex worker (openai family), claude validator."""
-    # configure_hive_home stubs _attach_cell_to_team; restore the real one so
-    # these tests exercise the actual cell-formation logic.
-    monkeypatch.setattr(cli_mod, "_attach_cell_to_team", _real_attach_cell_to_team)
+def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes=None):
+    """Shared duo-init stubs: codex worker (openai family), claude validator."""
+    # configure_hive_home stubs _attach_duo_to_team; restore the real one so
+    # these tests exercise the actual duo-formation logic.
+    monkeypatch.setattr(cli_mod, "_attach_duo_to_team", _real_attach_duo_to_team)
     profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
     fam = family_map or {}
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: profile)
@@ -40,7 +40,7 @@ def _cell_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, pane
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda _t: SimpleNamespace(orientation="horizontal"))
 
 
-def test_cell_init_one_pane_spawns_antifamily_validator(
+def test_duo_init_one_pane_spawns_antifamily_validator(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home(current_pane="%100", session_name="dev")
@@ -49,7 +49,7 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     repo = tmp_path / "repo"
     repo.mkdir()
     spawned: list[dict] = []
-    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
 
     def fake_spawn(**kwargs):
         spawned.append(kwargs)
@@ -62,11 +62,11 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
 
     monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
-    assert payload["group"] == "cell"
+    assert payload["group"] == "duo"
     assert payload["worker"] == {"pane": "%100", "name": "worker", "cli": "codex"}
     assert payload["validator"]["name"] == "validator"
     assert payload["validator"]["mode"] == "spawned"
@@ -78,11 +78,11 @@ def test_cell_init_one_pane_spawns_antifamily_validator(
     assert spawned[0]["cli"] == "claude"
     assert spawned[0]["skill"] == "none"
     # validator's role bootstrap is a thin pointer: the spawned pane loads its
-    # spec itself via `hive skills get cell-validator` — the same CLI-served
+    # spec itself via `hive skills get duo-validator` — the same CLI-served
     # channel a dispatched pane uses — so no spec snapshot is inlined into the
     # launch command or cached on disk.
     bootstrap = spawned[0]["prompt"]
-    assert "hive skills get cell-validator" in bootstrap
+    assert "hive skills get duo-validator" in bootstrap
     assert "别 `sleep` 轮询" in bootstrap
     assert "别退出" not in bootstrap
     assert payload["dispatched"] == ["worker", "validator"]
@@ -93,13 +93,13 @@ def test_role_bootstrap_prompts_do_not_tell_idle_agents_to_not_exit(configure_hi
 
     configure_hive_home()
 
-    for role in ("cell-validator", "crew-challenger", "crew-worker", "crew-validator"):
+    for role in ("duo-validator", "squad-challenger", "squad-worker", "squad-validator"):
         prompt = _role_bootstrap_prompt(role)
         assert "别退出" not in prompt
         assert "别 `sleep` 轮询" in prompt
 
 
-def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
+def test_duo_init_two_panes_adopts_idle_antifamily_neighbor(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home(current_pane="%100", session_name="dev")
@@ -113,7 +113,7 @@ def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
         SimpleNamespace(pane_id="%100", team="", group=""),
         SimpleNamespace(pane_id="%150", team="", group=""),
     ]
-    _cell_mocks(
+    _duo_mocks(
         cli_mod,
         monkeypatch,
         repo,
@@ -128,7 +128,7 @@ def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
     )
     monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
@@ -140,7 +140,7 @@ def test_cell_init_two_panes_adopts_idle_antifamily_neighbor(
     assert payload["dispatched"] == ["worker", "validator"]  # worker + adopted validator both get their role
 
 
-def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
+def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     """A 2-pane window whose neighbor is same-family is not pairable, so the
@@ -156,7 +156,7 @@ def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
         SimpleNamespace(pane_id="%100", team="", group=""),
         SimpleNamespace(pane_id="%150", team="", group=""),
     ]
-    _cell_mocks(
+    _duo_mocks(
         cli_mod,
         monkeypatch,
         repo,
@@ -177,7 +177,7 @@ def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
     monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
     monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
@@ -189,7 +189,7 @@ def test_cell_init_two_panes_same_family_breaks_out_then_spawns(
     assert payload["dispatched"] == ["worker", "validator"]
 
 
-def test_cell_init_three_panes_breaks_out_then_spawns(
+def test_duo_init_three_panes_breaks_out_then_spawns(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home(current_pane="%100", session_name="dev")
@@ -199,7 +199,7 @@ def test_cell_init_three_panes_breaks_out_then_spawns(
     repo.mkdir()
     spawned: list[dict] = []
     breaks: list[str] = []
-    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=3)
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
 
     def fake_spawn(**kwargs):
         spawned.append(kwargs)
@@ -213,7 +213,7 @@ def test_cell_init_three_panes_breaks_out_then_spawns(
     monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
     monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
@@ -225,7 +225,7 @@ def test_cell_init_three_panes_breaks_out_then_spawns(
     assert payload["dispatched"] == ["worker", "validator"]
 
 
-def test_cell_init_breakout_names_team_from_final_window_not_origin(
+def test_duo_init_breakout_names_team_from_final_window_not_origin(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     """Bug A: after break-out the team name + workspace + validator team follow
@@ -239,7 +239,7 @@ def test_cell_init_breakout_names_team_from_final_window_not_origin(
     breaks: list[str] = []
     # 3-pane origin (dev:0) → worker breaks out to a fresh window dev:7 whose id
     # slug (@77) differs from its index (7), proving the name is id-derived.
-    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=3)
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
     monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:7", "%200"))
     monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda target: "@77" if target == "dev:7" else "@0")
 
@@ -260,7 +260,7 @@ def test_cell_init_breakout_names_team_from_final_window_not_origin(
         lambda ws, team, win, wid: sidecar_calls.append((ws, team, win, wid)) or 1,
     )
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
@@ -272,33 +272,33 @@ def test_cell_init_breakout_names_team_from_final_window_not_origin(
     assert sidecar_calls == [("/tmp/hive-dev-w77", "dev-w77", "dev:7", "@77")]
 
 
-def test_cell_window_name_branch_then_project(monkeypatch):
-    """Cell window label = git branch with noise prefix stripped; falls back to
+def test_duo_window_name_branch_then_project(monkeypatch):
+    """Duo window label = git branch with noise prefix stripped; falls back to
     the project basename on a default branch or outside git."""
     import hive.cli as cli_mod
 
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "feat/compose-creator-language")
-    assert cli_mod._cell_window_name("/Users/x/ordo_ai") == "compose-creator-language"
+    assert cli_mod._duo_window_name("/Users/x/ordo_ai") == "compose-creator-language"
 
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "worktree-kol-task-control-board")
-    assert cli_mod._cell_window_name("/Users/x/ordo_ai") == "kol-task-control-board"
+    assert cli_mod._duo_window_name("/Users/x/ordo_ai") == "kol-task-control-board"
 
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "main")
-    assert cli_mod._cell_window_name("/Users/notdp/Developer/hive") == "hive"
+    assert cli_mod._duo_window_name("/Users/notdp/Developer/hive") == "hive"
 
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "")
-    assert cli_mod._cell_window_name("/Users/x/myproj") == "myproj"
+    assert cli_mod._duo_window_name("/Users/x/myproj") == "myproj"
 
 
-def test_cell_init_window_named_after_git_branch(runner, configure_hive_home, monkeypatch, tmp_path):
-    """A formed cell renames its window to the worker's feature branch (noise
-    prefix stripped) instead of a generic 'cell'."""
+def test_duo_init_window_named_after_git_branch(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A formed duo renames its window to the worker's feature branch (noise
+    prefix stripped) instead of a generic 'duo'."""
     configure_hive_home(current_pane="%100", session_name="dev")
     import hive.cli as cli_mod
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    _cell_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _cwd: "feat/compose-creator-language")
     renamed: list[tuple[str, str]] = []
     monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda target, name: renamed.append((target, name)))
@@ -308,14 +308,14 @@ def test_cell_init_window_named_after_git_branch(runner, configure_hive_home, mo
         staticmethod(lambda **k: Agent(name="validator", team_name=str(k["team_name"]), pane_id="%101", cli="claude")),
     )
 
-    result = runner.invoke(cli, ["cell", "init"])
+    result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
-    # 1-pane window dev:0 renamed to the feature (feat/ prefix stripped), not "cell".
+    # 1-pane window dev:0 renamed to the feature (feat/ prefix stripped), not "duo".
     assert ("dev:0", "compose-creator-language") in renamed
 
 
-def test_unique_cell_window_name_appends_counter_on_collision(monkeypatch):
+def test_unique_duo_window_name_appends_counter_on_collision(monkeypatch):
     """Same-branch siblings get -2, -3 ...; a free name stays clean; a window
     never collides with its own name."""
     import hive.cli as cli_mod
@@ -330,8 +330,8 @@ def test_unique_cell_window_name_appends_counter_on_collision(monkeypatch):
         ],
     )
     # free name → unchanged
-    assert cli_mod._unique_cell_window_name("kol-task-control-board", "dev:2") == "kol-task-control-board"
+    assert cli_mod._unique_duo_window_name("kol-task-control-board", "dev:2") == "kol-task-control-board"
     # base + -2 both taken → -3
-    assert cli_mod._unique_cell_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
+    assert cli_mod._unique_duo_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
     # this_window's own name is excluded → no self-collision
-    assert cli_mod._unique_cell_window_name("other", "dev:9") == "other"
+    assert cli_mod._unique_duo_window_name("other", "dev:9") == "other"

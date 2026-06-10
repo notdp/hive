@@ -38,7 +38,7 @@ $ claude       # 或：codex、droid
 /hive
 ```
 
-skill 加载后，agent 会运行 `hive init`，把当前 tmux window 绑定成一个 team，并自动与一个空闲的异族 peer 配对：如果能找到现成的 pane 就直接附着，否则再新开一个 pane。从这里开始，你和 agent 对话；agent 再和它的 peer 协作。
+skill 加载后，agent 会运行 `hive init`，把当前 tmux window 绑定成一个 team，并自动与一个空闲的异构 peer 配对：如果能找到现成的 pane 就直接附着，否则再新开一个 pane。从这里开始，你和 agent 对话；agent 再和它的 peer 协作。
 
 ## 手动命令
 

@@ -392,15 +392,15 @@ def test_doctor_reports_duplicate_team_bindings_without_repair(
             {
                 "tmuxWindow": "0:2", "windowId": "@2", "workspace": "/tmp/hive-0-w2",
                 "liveMembers": [
-                    {"name": "worker", "pane": "%42", "group": "cell"},
-                    {"name": "validator", "pane": "%45", "group": "cell"},
+                    {"name": "worker", "pane": "%42", "group": "duo"},
+                    {"name": "validator", "pane": "%45", "group": "duo"},
                 ],
             },
             {
                 "tmuxWindow": "0:3", "windowId": "@3", "workspace": "/tmp/hive-0-w3",
                 "liveMembers": [
-                    {"name": "worker", "pane": "%10", "group": "cell"},
-                    {"name": "validator", "pane": "%40", "group": "cell"},
+                    {"name": "worker", "pane": "%10", "group": "duo"},
+                    {"name": "validator", "pane": "%40", "group": "duo"},
                 ],
             },
         ],

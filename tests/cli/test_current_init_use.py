@@ -49,7 +49,7 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     assert payload["tmux"]["panes"][0]["role"] == "agent"
     assert payload["tmux"]["panes"][1]["role"] == "agent"
     # no-team hint defers the topology choice to the user (ask, don't self-init)
-    assert "cell" in payload["hint"] and "crew" in payload["hint"]
+    assert "duo" in payload["hint"] and "squad" in payload["hint"]
 
 
 def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(runner, configure_hive_home, tmp_path):
@@ -297,7 +297,7 @@ def test_init_self_register_never_injects_hive_slash_into_own_input(
 def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
     """A window carrying only a stale `@hive-team` tag (no registered self pane)
     is not treated as a binding: init clears the stale tag and forms a fresh
-    cell named after the current window."""
+    duo named after the current window."""
     configure_hive_home(current_pane="%9", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -318,15 +318,15 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # Stale "ghost" tag cleared; a fresh cell is formed for this window.
+    # Stale "ghost" tag cleared; a fresh duo is formed for this window.
     assert payload["team"] == "dev-w0"
-    assert payload["group"] == "cell"
+    assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
     assert tmux.get_window_option("dev:0", "hive-team") == "dev-w0"
 
 
-def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -348,9 +348,9 @@ def test_init_creates_team_and_forms_cell(runner, configure_hive_home, monkeypat
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # init now delegates to the cell topology and echoes its result dict.
+    # init now delegates to the duo topology and echoes its result dict.
     assert payload["team"] == "dev-w2"
-    assert payload["group"] == "cell"
+    assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
     assert payload["dispatched"] == ["worker", "validator"]
@@ -367,7 +367,7 @@ def test_init_accepts_preopened_codex_worker_pane(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     """A pre-opened codex CLI in the current pane is a valid worker: init
-    detects the codex profile and forms the cell."""
+    detects the codex profile and forms the duo."""
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -399,7 +399,7 @@ def test_init_accepts_preopened_codex_worker_pane(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "dev-w5"
-    assert payload["group"] == "cell"
+    assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
 
 
@@ -425,7 +425,7 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "dev-w0"
-    assert payload["group"] == "cell"
+    assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
 
 
@@ -712,10 +712,10 @@ def test_root_help_groups_commands_by_area(runner):
     ):
         assert short_help in output
 
-    # init now leads into the cell topology.
-    assert "Initialize a cell from the current tmux window" in output
-    # cell / crew live under Workflow; register / peer / layout under Team.
-    for command in ("cell", "crew", "register", "peer", "layout"):
+    # init now leads into the duo topology.
+    assert "Initialize a duo from the current tmux window" in output
+    # duo / squad live under Workflow; register / peer / layout under Team.
+    for command in ("duo", "squad", "register", "peer", "layout"):
         assert f"  {command} " in output
     # terminal / exec are gone for good.
     for removed in ("terminal", "exec"):

@@ -38,17 +38,17 @@ def test_skills_get_unknown_lists_available(runner):
     assert "core" in result.output  # error names the available specs
 
 
-def test_skills_list_includes_cell_and_crew(runner):
+def test_skills_list_includes_duo_and_squad(runner):
     result = runner.invoke(cli, ["skills", "list"])
     assert result.exit_code == 0, result.output
     specs = json.loads(result.output)["specs"]
-    assert {"core", "cell", "crew"} <= set(specs)
+    assert {"core", "duo", "squad"} <= set(specs)
 
 
-def test_skills_get_cell_serves_worker_and_validator(runner):
-    """cell is the shared atom: worker (producer) + validator (reviewer),
-    with the coordinator left abstract so crew can bind it."""
-    result = runner.invoke(cli, ["skills", "get", "cell"])
+def test_skills_get_duo_serves_worker_and_validator(runner):
+    """duo is the shared atom: worker (producer) + validator (reviewer),
+    with the coordinator left abstract so squad can bind it."""
+    result = runner.invoke(cli, ["skills", "get", "duo"])
     assert result.exit_code == 0, result.output
     out = result.output
     assert "worker" in out and "validator" in out
@@ -56,15 +56,15 @@ def test_skills_get_cell_serves_worker_and_validator(runner):
     assert "successState" in out  # handoff schema lives in the atom
 
 
-def test_skills_get_crew_composes_cell(runner):
-    """crew is the orchestration delta (orch + challenger); it must compose
-    the cell atom by reference, not re-inline the worker/validator kernel."""
-    result = runner.invoke(cli, ["skills", "get", "crew"])
+def test_skills_get_squad_composes_duo(runner):
+    """squad is the orchestration delta (orch + challenger); it must compose
+    the duo atom by reference, not re-inline the worker/validator kernel."""
+    result = runner.invoke(cli, ["skills", "get", "squad"])
     assert result.exit_code == 0, result.output
     out = result.output
     assert "orch" in out and "challenger" in out
-    assert "hive skills get cell" in out  # references the atom, no duplication
-    assert "spawn-cell" in out
+    assert "hive skills get duo" in out  # references the atom, no duplication
+    assert "spawn-duo" in out
 
 
 def test_skills_get_core_includes_challenge_stance(runner):
@@ -100,8 +100,8 @@ def test_skills_get_serves_role_specs(runner):
     role a spawn dispatches `hive skills get <role>` for must be fetchable."""
     listed = json.loads(runner.invoke(cli, ["skills", "list"]).output)["specs"]
     for role in (
-        "crew-orch", "crew-challenger", "crew-worker", "crew-validator",
-        "cell-worker", "cell-validator",
+        "squad-orch", "squad-challenger", "squad-worker", "squad-validator",
+        "duo-worker", "duo-validator",
     ):
         assert role in listed
         result = runner.invoke(cli, ["skills", "get", role])

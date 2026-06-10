@@ -307,8 +307,8 @@ def new_window(
 
     If *index* is given, the new window is created at that explicit tmux
     window index via `-t session:index`. Caller must ensure the index is
-    free — tmux refuses with "index N in use" otherwise. Used by crew
-    spawn-peer to place peer windows at 1000+ so they never collide with
+    free — tmux refuses with "index N in use" otherwise. Used by squad
+    spawn-duo to place peer windows at 1000+ so they never collide with
     the user's regular low-index windows.
     """
     if index is not None:

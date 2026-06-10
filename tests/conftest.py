@@ -181,7 +181,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)
         monkeypatch.setattr("hive.cli.tmux.clear_pane_tags", state.clear_pane_tags)
         monkeypatch.setattr("hive.cli.tmux.list_panes_all", state.list_panes_all)
-        # Safety: cli tests must never touch the real tmux server. Cell placement
+        # Safety: cli tests must never touch the real tmux server. Duo placement
         # decides break-out from the *real* pane count when unmocked, and the
         # placeholder pane ids used in tests (%5, %10, ...) can collide with live
         # panes — so a `hive init` could fire a real `break_pane` against a
@@ -197,23 +197,23 @@ def configure_hive_home(monkeypatch, tmp_path):
             )
 
         monkeypatch.setattr("hive.cli.tmux.break_pane", _guard_break_pane)
-        # Cell windows are renamed after the worker's git branch; keep the suite
+        # Duo windows are renamed after the worker's git branch; keep the suite
         # hermetic — no real tmux rename (would hit a live window on pane-id
         # collision) and no git subprocess against the test cwd.
         monkeypatch.setattr("hive.cli.tmux.rename_window", lambda *_a, **_k: None)
         monkeypatch.setattr("hive.cli._git_branch_for_cwd", lambda _cwd: "")
-        # No other live windows by default → cell window names don't collide.
+        # No other live windows by default → duo window names don't collide.
         monkeypatch.setattr("hive.cli.tmux.list_window_names", lambda: [])
-        # Cell formation during `hive init` spawns or adopts a validator pane.
+        # Duo formation during `hive init` spawns or adopts a validator pane.
         # Tests that want to exercise that flow must override this mock; by
         # default we return a representative descriptor so plain `hive init`
         # tests stay focused on the init scaffolding itself.
         monkeypatch.setattr(
-            "hive.cli._attach_cell_to_team",
+            "hive.cli._attach_duo_to_team",
             lambda t, **_kw: {
                 "team": t.name,
                 "window": t.tmux_window,
-                "group": "cell",
+                "group": "duo",
                 "worker": {"pane": "%self", "name": "worker", "cli": "claude"},
                 "validator": {"pane": "%peer", "name": "validator", "cli": "codex", "mode": "spawned"},
                 "dispatched": ["worker", "validator"],
