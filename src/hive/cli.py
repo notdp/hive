@@ -2325,15 +2325,14 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
 
     layout_mod.apply_adaptive(window)
 
-    # Hand each pane its role: the agent's first input is `hive skills get
-    # <role>`. A spawned validator already got it as its startup prompt; an
-    # adopted neighbor gets it injected here.
-    dispatched: list[str] = []
-    if _dispatch_role_spec(worker_pane, "duo-worker"):
-        dispatched.append("worker")
+    # Hand the validator its role: a spawned validator already got `hive
+    # skills get duo-validator` as its startup prompt; an adopted idle
+    # neighbor gets it injected here. The worker pane is the agent running
+    # this very command — its role load is returned as `next` for it to run
+    # in-turn, never injected into its input box as a fake user message.
     if mode == "paired":
         _dispatch_role_spec(validator_pane, "duo-validator")
-    dispatched.append("validator")
+    dispatched: list[str] = ["validator"]
 
     tmux.select_window(window)
 
@@ -2349,6 +2348,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
             "mode": mode,
         },
         "dispatched": dispatched,
+        "next": "hive skills get duo-worker",
     }
 
 
@@ -2762,9 +2762,9 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     except (FileNotFoundError, KeyError, ValueError):
         pass
 
+    # The orch pane is the agent running this very command — its role load
+    # is returned as `next`, never injected as a fake user message.
     dispatched: list[str] = [challenger_agent_name]
-    if _dispatch_role_spec(orch_pane, "squad-orch"):
-        dispatched.insert(0, orch_agent_name)
 
     tmux.select_window(squad_window)
 
@@ -2778,6 +2778,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         "orch": {"pane": orch_pane, "name": orch_agent_name},
         "challenger": {"pane": challenger_agent.pane_id, "name": challenger_agent_name},
         "dispatched": dispatched,
+        "next": "hive skills get squad-orch",
     }, indent=2))
 
 

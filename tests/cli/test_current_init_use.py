@@ -353,7 +353,8 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
     assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
-    assert payload["dispatched"] == ["worker", "validator"]
+    assert payload["dispatched"] == ["validator"]
+    assert payload["next"] == "hive skills get duo-worker"
 
     # The team is created and the current pane is remembered as the worker.
     from hive.team import Team
