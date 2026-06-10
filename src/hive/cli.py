@@ -47,6 +47,7 @@ _COMMAND_HELP_SECTIONS = {
     "workflow": "Workflow",
     "crew": "Workflow",
     "cell": "Workflow",
+    "worktree": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -114,7 +115,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "skills"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "skills", "worktree"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -2852,6 +2853,46 @@ def _resolve_crew_worker_cli(orch_pane: str, crew_window: str) -> str:
     return orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
 
 
+def _copy_crew_integration_option(crew_window: str, peer_window: str) -> None:
+    """Propagate @hive-crew-integration-branch from the crew window to a cell
+    window so `hive worktree start` in the cell resolves the crew base locally.
+    No-op when the crew has not declared an integration branch yet."""
+    if not crew_window or not peer_window:
+        return
+    value = tmux.get_window_option(crew_window, "hive-crew-integration-branch")
+    if value:
+        tmux.set_window_option(peer_window, "@hive-crew-integration-branch", value)
+
+
+@crew_cmd.command("set-integration-branch")
+@click.argument("ref")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def crew_set_integration_branch_cmd(ref: str, as_json: bool):
+    """Declare the crew's integration branch (the base of every sub-PR).
+
+    Run from the crew window after creating the branch; cells spawned
+    afterwards inherit it and `hive worktree start` resolves base from it.
+    REF must already resolve to a commit.
+    """
+    window = tmux.get_current_window_target() or ""
+    crew_name = (tmux.get_window_option(window, "hive-crew-name") if window else None) or ""
+    if not crew_name:
+        _fail("not in a crew window (no @hive-crew-name); run from the crew's orch window")
+    from . import worktree as wt_mod
+
+    try:
+        anchor = wt_mod.repo_anchor(os.getcwd())
+        oid = wt_mod.rev_parse(anchor, ref)
+    except wt_mod.WorktreeError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+    tmux.set_window_option(window, "@hive-crew-integration-branch", ref)
+    if as_json:
+        click.echo(json.dumps({"crew": crew_name, "integrationBranch": ref, "oid": oid, "window": window}, indent=2))
+    else:
+        click.echo(f"crew '{crew_name}' integration branch set: {ref} ({oid[:12]})")
+
+
 @crew_cmd.command("spawn-cell")
 @click.option(
     "--feature-id",
@@ -2975,6 +3016,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     tmux.set_window_option(peer_window, "@hive-workspace", workspace)
     tmux.set_window_option(peer_window, "@hive-crew-name", crew_name)
     tmux.set_window_option(peer_window, "@hive-created", str(time.time()))
+    _copy_crew_integration_option(crew_window_target, peer_window)
     tmux.configure_hive_window(peer_window)
 
     peer_team = Team(
@@ -3974,3 +4016,145 @@ def peer_clear(agent_name: str):
         )
         return
     click.echo(f"Peer cleared: {agent_name} <-> {peer_name}.")
+
+
+# --- worktree pool ----------------------------------------------------------
+
+
+def _worktree_context() -> dict:
+    """Owner / crew context for worktree commands (pane-anchored, cwd-free)."""
+    binding = _discover_tmux_binding()
+    window = binding.get("tmuxWindow") or (
+        (tmux.get_current_window_target() or "") if tmux.is_inside_tmux() else ""
+    )
+    team = binding.get("team", "")
+    crew_name = (tmux.get_window_option(window, "hive-crew-name") if window else None) or ""
+    if crew_name:
+        integration: str | None = (
+            tmux.get_window_option(window, "hive-crew-integration-branch") or ""
+        )
+        owner = f"crew:{crew_name}"
+    else:
+        integration = None
+        owner = f"team:{team}" if team else "unbound"
+    return {"owner": owner, "team": team, "crew": crew_name, "integration": integration}
+
+
+@cli.group("worktree")
+def worktree_cmd():
+    """Per-feature worktree pool: start a feature, finish it, inspect state.
+
+    Pool layout: <main checkout>/.claude/worktrees/<feature>, branch == feature.
+    Hive creates/removes worktrees and records ownership in git config;
+    entering/leaving the directory is the agent's own move (Claude:
+    EnterWorktree path=<path> / ExitWorktree action=keep; Codex/Droid: cd).
+    """
+
+
+@worktree_cmd.command("start")
+@click.argument("feature")
+@click.option(
+    "--base",
+    "base_ref",
+    default=None,
+    help="Base ref override (default: crew integration branch, else detected default branch)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def worktree_start_cmd(feature: str, base_ref: str | None, as_json: bool):
+    """Create (or re-attach) the worktree for FEATURE and print its path.
+
+    Exit 0 = ready (mode created/existing/attached/adopted-existing-branch).
+    Exit 1 with mode=needs-rebase = branch exists but does not contain the
+    resolved base: rebase inside the worktree, then rerun start.
+    """
+    from . import worktree as wt_mod
+
+    try:
+        anchor = wt_mod.repo_anchor(os.getcwd())
+        wctx = _worktree_context()
+        base = wt_mod.resolve_base(anchor, base_ref, wctx["integration"])
+        result = wt_mod.start(
+            anchor,
+            feature,
+            base=base,
+            owner=wctx["owner"],
+            team=wctx["team"],
+            crew_name=wctx["crew"],
+            gh_merge_base=(wctx["integration"] or None),
+        )
+    except wt_mod.WorktreeError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+    if as_json:
+        click.echo(json.dumps(result.to_json(), indent=2))
+    else:
+        click.echo(result.path)
+        click.echo(f"mode={result.mode} branch={result.branch} base={result.base}@{result.base_oid[:12]}")
+        for w in result.warnings:
+            click.echo(f"warning: {w}", err=True)
+    if not result.ready:
+        sys.exit(1)
+
+
+@worktree_cmd.command("done")
+@click.argument("feature")
+@click.option("--force", is_flag=True, help="Discard uncommitted work (destructive; prints a status summary first)")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def worktree_done_cmd(feature: str, force: bool, as_json: bool):
+    """Remove FEATURE's worktree. The branch is always kept (PRs live on it).
+
+    Refuses while you are inside the worktree, while a git operation is in
+    progress, or while there are uncommitted changes (unless --force).
+    """
+    from . import worktree as wt_mod
+
+    try:
+        anchor = wt_mod.repo_anchor(os.getcwd())
+        result = wt_mod.done(anchor, feature, force=force, caller_cwd=os.getcwd())
+    except wt_mod.WorktreeError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+    if as_json:
+        click.echo(json.dumps(result.to_json(), indent=2))
+        return
+    if result.status_summary:
+        click.echo(result.status_summary, err=True)
+    click.echo(f"removed {result.removed_path}")
+    click.echo(f"branch {result.branch} kept (delete after PR merge via normal flow)")
+
+
+@worktree_cmd.command("status")
+@click.argument("feature", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def worktree_status_cmd(feature: str | None, as_json: bool):
+    """Read-only lifecycle view of FEATURE (or every hive-labeled worktree)."""
+    from . import worktree as wt_mod
+
+    try:
+        anchor = wt_mod.repo_anchor(os.getcwd())
+        payload: object
+        if feature:
+            payload = wt_mod.feature_status(anchor, feature)
+        else:
+            payload = wt_mod.pool_status(anchor)
+    except wt_mod.WorktreeError as e:
+        _fail(str(e))
+        raise AssertionError("unreachable")
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    rows = payload if isinstance(payload, list) else [payload]
+    if not rows:
+        click.echo("no hive-labeled worktrees or branches")
+        return
+    for row in rows:
+        flags = []
+        if row["dirty"]:
+            flags.append("dirty")
+        if row["inProgress"]:
+            flags.append("in-progress:" + ",".join(row["inProgress"]))
+        if row["stale"]:
+            flags.append("stale")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        owner = f" owner={row['owner']}" if row["owner"] else ""
+        click.echo(f"{row['feature']}: {row['state']}{owner} {row['worktreePath']}{suffix}".rstrip())
