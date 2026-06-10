@@ -6,7 +6,11 @@ from hive.cli import cli, _attach_duo_to_team as _real_attach_duo_to_team
 
 
 def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes=None):
-    """Shared duo-init stubs: codex worker (openai family), claude validator."""
+    """Shared duo-init stubs: codex worker (openai family), claude validator.
+
+    Returns the list of (pane, text) captured from cli-layer tmux.send_keys —
+    role injection into the current pane would show up here."""
+    sent: list = []
     # configure_hive_home stubs _attach_duo_to_team; restore the real one so
     # these tests exercise the actual duo-formation logic.
     monkeypatch.setattr(cli_mod, "_attach_duo_to_team", _real_attach_duo_to_team)
@@ -33,11 +37,12 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _t: None)
     monkeypatch.setattr("hive.team.tmux.configure_hive_window", lambda _t: None)
     monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _t: None)
-    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_a, **_k: None)
     monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _ws: None)
     monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda _t: SimpleNamespace(orientation="horizontal"))
+    return sent
 
 
 def test_duo_init_one_pane_spawns_antifamily_validator(
@@ -49,7 +54,7 @@ def test_duo_init_one_pane_spawns_antifamily_validator(
     repo = tmp_path / "repo"
     repo.mkdir()
     spawned: list[dict] = []
-    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    sent = _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
 
     def fake_spawn(**kwargs):
         spawned.append(kwargs)
@@ -82,10 +87,17 @@ def test_duo_init_one_pane_spawns_antifamily_validator(
     # channel a dispatched pane uses — so no spec snapshot is inlined into the
     # launch command or cached on disk.
     bootstrap = spawned[0]["prompt"]
+    assert bootstrap == cli_mod._role_bootstrap_prompt("duo-validator")
     assert "hive skills get duo-validator" in bootstrap
     assert "别 `sleep` 轮询" in bootstrap
     assert "别退出" not in bootstrap
-    assert payload["dispatched"] == ["worker", "validator"]
+    assert payload["dispatched"] == ["validator"]
+    assert payload["next"] == "hive skills get duo-worker"
+    # The worker runs init itself: nothing may be injected into its pane.
+    worker_pane = payload["worker"]["pane"]
+    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    # Spawned validator gets its role via the launch prompt, not injection.
+    assert not [c for c in sent if "skills get duo-validator" in c[1]]
 
 
 def test_role_bootstrap_prompts_do_not_tell_idle_agents_to_not_exit(configure_hive_home):
@@ -113,7 +125,7 @@ def test_duo_init_two_panes_adopts_idle_antifamily_neighbor(
         SimpleNamespace(pane_id="%100", team="", group=""),
         SimpleNamespace(pane_id="%150", team="", group=""),
     ]
-    _duo_mocks(
+    sent = _duo_mocks(
         cli_mod,
         monkeypatch,
         repo,
@@ -137,7 +149,15 @@ def test_duo_init_two_panes_adopts_idle_antifamily_neighbor(
     assert payload["worker"]["pane"] == "%100"  # stays put, not broken out
     assert spawned == []  # adopted the neighbor, did not spawn
     assert breaks == []  # 2-pane pairable → no break-out
-    assert payload["dispatched"] == ["worker", "validator"]  # worker + adopted validator both get their role
+    assert payload["dispatched"] == ["validator"]  # adopted validator got its role injected
+    assert payload["next"] == "hive skills get duo-worker"
+    worker_pane = payload["worker"]["pane"]
+    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    # Positive control: the adopted idle neighbor gets the exact same
+    # bootstrap prompt a spawned validator would get at launch.
+    validator_pane = payload["validator"]["pane"]
+    injected = [c[1] for c in sent if c[0] == validator_pane and "skills get" in c[1]]
+    assert injected == [cli_mod._role_bootstrap_prompt("duo-validator")]
 
 
 def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
@@ -156,7 +176,7 @@ def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
         SimpleNamespace(pane_id="%100", team="", group=""),
         SimpleNamespace(pane_id="%150", team="", group=""),
     ]
-    _duo_mocks(
+    sent = _duo_mocks(
         cli_mod,
         monkeypatch,
         repo,
@@ -186,7 +206,13 @@ def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
     assert payload["window"] == "dev:1"
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
-    assert payload["dispatched"] == ["worker", "validator"]
+    assert payload["dispatched"] == ["validator"]
+    assert payload["next"] == "hive skills get duo-worker"
+    # The worker runs init itself: nothing may be injected into its pane.
+    worker_pane = payload["worker"]["pane"]
+    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    # Spawned validator gets its role via the launch prompt, not injection.
+    assert not [c for c in sent if "skills get duo-validator" in c[1]]
 
 
 def test_duo_init_three_panes_breaks_out_then_spawns(
@@ -199,7 +225,7 @@ def test_duo_init_three_panes_breaks_out_then_spawns(
     repo.mkdir()
     spawned: list[dict] = []
     breaks: list[str] = []
-    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
+    sent = _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
 
     def fake_spawn(**kwargs):
         spawned.append(kwargs)
@@ -222,7 +248,13 @@ def test_duo_init_three_panes_breaks_out_then_spawns(
     assert payload["window"] == "dev:1"
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
-    assert payload["dispatched"] == ["worker", "validator"]
+    assert payload["dispatched"] == ["validator"]
+    assert payload["next"] == "hive skills get duo-worker"
+    # The worker runs init itself: nothing may be injected into its pane.
+    worker_pane = payload["worker"]["pane"]
+    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    # Spawned validator gets its role via the launch prompt, not injection.
+    assert not [c for c in sent if "skills get duo-validator" in c[1]]
 
 
 def test_duo_init_breakout_names_team_from_final_window_not_origin(
@@ -239,7 +271,7 @@ def test_duo_init_breakout_names_team_from_final_window_not_origin(
     breaks: list[str] = []
     # 3-pane origin (dev:0) → worker breaks out to a fresh window dev:7 whose id
     # slug (@77) differs from its index (7), proving the name is id-derived.
-    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
+    sent = _duo_mocks(cli_mod, monkeypatch, repo, pane_count=3)
     monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:7", "%200"))
     monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda target: "@77" if target == "dev:7" else "@0")
 
@@ -298,7 +330,7 @@ def test_duo_init_window_named_after_git_branch(runner, configure_hive_home, mon
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    sent = _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
     monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _cwd: "feat/compose-creator-language")
     renamed: list[tuple[str, str]] = []
     monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda target, name: renamed.append((target, name)))
@@ -335,3 +367,38 @@ def test_unique_duo_window_name_appends_counter_on_collision(monkeypatch):
     assert cli_mod._unique_duo_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
     # this_window's own name is excluded → no self-collision
     assert cli_mod._unique_duo_window_name("other", "dev:9") == "other"
+
+
+def test_inject_role_bootstrap_sends_full_prompt_once(monkeypatch):
+    """Adoption delivers the same bootstrap prompt as a spawn launch — exact
+    text from _role_bootstrap_prompt, one submit."""
+    import hive.cli as cli_mod
+
+    sent: list = []
+    keys: list = []
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: object())
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda pane, key: keys.append((pane, key)))
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _s: None)
+    assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is True
+    assert sent == [("%9", cli_mod._role_bootstrap_prompt("duo-validator"))]
+    assert keys == [("%9", "Enter")]
+
+
+def test_inject_role_bootstrap_noop_without_agent_profile(monkeypatch):
+    import hive.cli as cli_mod
+
+    sent: list = []
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *a, **_k: sent.append(a))
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *a, **_k: sent.append(a))
+    assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is False
+    assert sent == []
+
+
+def test_role_bootstrap_prompt_is_single_line():
+    """tmux input boxes submit one line; a newline would split the prompt."""
+    import hive.cli as cli_mod
+
+    for role in ("duo-worker", "duo-validator", "squad-orch", "squad-challenger", "squad-worker", "squad-validator"):
+        assert "\n" not in cli_mod._role_bootstrap_prompt(role)

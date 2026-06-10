@@ -32,7 +32,8 @@ def test_squad_init_creates_orch_and_challenger_without_board(
         lambda _pane, fmt: "dev:0" if fmt == "#{session_name}:#{window_index}" else str(repo),
     )
     monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda p, k, v: pane_options.append((p, k, v)))
-    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *_args, **_kwargs: None)
+    sent: list = []
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli_mod.tmux, "select_window", lambda target: selected_windows.append(target))
     monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _target: None)
@@ -64,7 +65,13 @@ def test_squad_init_creates_orch_and_challenger_without_board(
     assert payload["orch"]["name"] == "peaky.orch"
     assert payload["challenger"]["name"] == "peaky.challenger"
     assert payload["challenger"]["pane"] == "%101"
-    assert payload["dispatched"] == ["peaky.orch", "peaky.challenger"]
+    assert payload["dispatched"] == ["peaky.challenger"]
+    assert payload["next"] == "hive skills get squad-orch"
+    # The orch runs init itself: nothing may be injected into its pane.
+    orch_pane = payload["orch"]["pane"]
+    assert not [c for c in sent if c[0] == orch_pane and "skills get" in c[1]]
+    # Positive control: the spawned challenger gets its role via launch prompt.
+    assert spawned[0]["prompt"] == cli_mod._role_bootstrap_prompt("squad-challenger")
     assert "board" not in payload
     assert selected_windows == ["dev:0"]
 
@@ -105,7 +112,8 @@ def test_squad_init_breakout_names_main_team_from_final_window_keeps_readable_sq
     )
     monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
     monkeypatch.setattr(cli_mod.tmux, "set_window_option", lambda *_a: None)
-    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *_args, **_kwargs: None)
+    sent: list = []
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _target: None)
     monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _target: None)
@@ -142,6 +150,10 @@ def test_squad_init_breakout_names_main_team_from_final_window_keeps_readable_sq
     assert payload["orch"]["name"] == "peaky.orch"
     assert payload["challenger"]["name"] == "peaky.challenger"
     assert spawned[0]["team_name"] == "dev-w88"   # challenger spawned under the final-window team
+    assert payload["dispatched"] == ["peaky.challenger"]
+    assert payload["next"] == "hive skills get squad-orch"
+    orch_pane = payload["orch"]["pane"]
+    assert not [c for c in sent if c[0] == orch_pane and "skills get" in c[1]]
     assert sidecar_calls == [("/tmp/hive-dev-w88", "dev-w88", "dev:8", "@88")]
 
 

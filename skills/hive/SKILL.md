@@ -28,4 +28,4 @@ hive skills list          # 列出全部可取的 spec
 - **duo** —— 你 + 一个异构 reviewer，俩人闭环干一件事，你来协调 → `hive duo init`
 - **squad** —— orch 编排、challenger 审 plan、按需派多个 duo，做多 feature 的大活 → `hive squad init`
 
-init 完，当前 pane 的角色（worker / orch）协议会自动到位，照它做即可。
+init 的 JSON 输出带 `next` 字段（如 `hive skills get duo-worker` / `hive skills get squad-orch`）——**你自己跑这条命令**取回当前 pane 的角色协议，照它做即可。

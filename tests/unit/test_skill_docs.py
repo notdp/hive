@@ -100,3 +100,14 @@ def test_specs_point_onward_only_via_reachable_skills_get():
         text = p.read_text()
         assert "references/" not in text, f"{p.name}: unreachable references/ pointer"
         assert "../SKILL.md" not in text, f"{p.name}: points at ../SKILL.md (stub has no protocol sections)"
+
+
+def test_stub_tells_init_runner_to_execute_next_itself():
+    """init's role load reaches the current pane via the JSON `next` field the
+    agent runs itself — the stub must say so and never regress to the old
+    "自动到位" wording (which described the fake-user-message injection)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    stub_text = (repo_root / "skills" / "hive" / "SKILL.md").read_text()
+    assert "自动到位" not in stub_text
+    assert "`next`" in stub_text
+    assert "hive skills get duo-worker" in stub_text
