@@ -2082,36 +2082,17 @@ def _dispatch_role_spec(pane: str, role: str) -> bool:
 
 
 def _role_bootstrap_prompt(role: str) -> str:
-    """Spawn first-message for a no-human role pane: a framing preamble + the
-    role's full spec, fed as the startup prompt so the agent operates on it
-    directly — no bare command to run-and-stop, no get to chain. The preamble
-    carries identity + the idle-wait discipline; the spec carries the protocol.
+    """Spawn first-message for a no-human role pane: identity + the one command
+    that loads the role. The spec itself stays CLI-served — the spawned pane
+    runs ``hive skills get <role>`` exactly like a dispatched pane does
+    (`_dispatch_role_spec`), so there is no inlined spec snapshot to keep in
+    sync and the prompt stays short enough to inline into the launch command.
     """
-    spec = _read_spec(role) or f"hive skills get {role}"
     return (
-        f"你被 spawn 成这个 team 的 {role}。下面 `---` 之后是你的角色协议 —— 照它做。"
-        f"先 `hive team` 确认身份,然后读角色协议。读完就结束当前 turn,让 pane 开着接收"
-        f"第一条任务消息(orch / peer 会发来);在那之前别自己找活、别翻库、别 `sleep` "
-        f"轮询。\n\n---\n\n{spec}"
+        f"你是这个 team 的 {role}。先跑 `hive skills get {role}` 取你的角色协议 "
+        f"—— 照它做。没有待办时结束当前 turn,让 pane 开着接收第一条任务消息"
+        f"(orch / peer 会发来);在那之前别自己找活、别翻库、别 `sleep` 轮询。"
     )
-
-
-def _role_bootstrap_file(role: str) -> Path:
-    """Cached per-role bootstrap prompt under ``$HIVE_HOME``.
-
-    Lets the spawn command stay short — ``"$(cat <path>)"`` instead of the full
-    role spec inlined and shell-escaped into ``exec <cli> '...'``. Mirrors
-    ``_fork_boundary_file``. One file *per role* (not a single rewritten file):
-    crew init spawns several roles near-simultaneously, so a shared file would
-    let one spawn's ``cat`` race a concurrent rewrite and read torn content.
-    Rewritten when the cached text drifts from the current code.
-    """
-    content = _role_bootstrap_prompt(role)
-    path = HIVE_HOME / f"role-bootstrap-{role}.txt"
-    if not path.exists() or path.read_text() != content:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    return path
 
 
 @cli.group("cell")
@@ -2324,7 +2305,7 @@ def _attach_cell_to_team(t: Team, *, placement: _CellPlacement, ws: str) -> dict
             cli=placement.validator_cli,
             model=placement.validator_model,
             skill="none",
-            prompt_file=str(_role_bootstrap_file("cell-validator")),
+            prompt=_role_bootstrap_prompt("cell-validator"),
             workspace=ws,
         )
         t.agents["validator"] = validator_agent
@@ -2763,7 +2744,7 @@ def crew_init_cmd(peer_cli: str | None, crew_name: str | None, worker_cli: str |
         split_horizontal=layout_mod.split_horizontal(crew_window, 2),
         split_size="50%",
         skill="none",
-        prompt_file=str(_role_bootstrap_file("crew-challenger")),
+        prompt=_role_bootstrap_prompt("crew-challenger"),
         cli=peer_cli_name,
         model=peer_model_id,
     )
@@ -3014,7 +2995,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         cwd=cwd,
         split_window=False,
         skill="none",
-        prompt_file=str(_role_bootstrap_file("crew-worker")),
+        prompt=_role_bootstrap_prompt("crew-worker"),
         cli=worker_cli,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", crew_name)
@@ -3031,7 +3012,7 @@ def crew_spawn_peer_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
         skill="none",
-        prompt_file=str(_role_bootstrap_file("crew-validator")),
+        prompt=_role_bootstrap_prompt("crew-validator"),
         cli=validator_cli,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", crew_name)

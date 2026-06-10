@@ -172,7 +172,6 @@ class Agent:
         target_pane: str,
         model: str = "",
         prompt: str = "",
-        prompt_file: str = "",
         cwd: str = "",
         session_id: str | None = None,
         is_first: bool = False,
@@ -192,11 +191,6 @@ class Agent:
         """
         if cli not in CLI_BINS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
-        if prompt_file and (prompt or (skill and skill != "none")):
-            # Fail before any pane split / tag side effect.
-            raise ValueError(
-                "prompt_file is mutually exclusive with prompt / skill activation"
-            )
         cwd = cwd or os.getcwd()
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
@@ -271,23 +265,13 @@ class Agent:
         # here so the CLI auto-submits at startup, bypassing TUI keystroke
         # injection entirely (avoids the codex picker race and any analogous
         # races for claude/droid).
-        if prompt_file:
-            # The startup prompt lives in a file; reference it via a shell
-            # command substitution instead of shell-escaping the (large) spec
-            # inline. The whole launch string is run by the pane shell
-            # (send_keys below), so `"$(cat <path>)"` expands at startup — same
-            # mechanism as `hive fork`'s fork_cmd and the droid $settings_file
-            # branch above. Only the path is escaped, never the spec bytes.
-            # (prompt / skill mutual-exclusion is enforced at the top of spawn.)
-            cmd_parts.append(f'"$(cat {_shell_escape(prompt_file)})"')
-        else:
-            initial_prompt = ""
-            if skill and skill != "none":
-                initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
-            if prompt:
-                initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
-            if initial_prompt:
-                cmd_parts.append(_shell_escape(initial_prompt))
+        initial_prompt = ""
+        if skill and skill != "none":
+            initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
+        if prompt:
+            initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
+        if initial_prompt:
+            cmd_parts.append(_shell_escape(initial_prompt))
 
         env_parts: list[str] = []
         if extra_env:
