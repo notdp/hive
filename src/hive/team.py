@@ -401,7 +401,7 @@ class Team:
     def resolve_peer(self, name: str) -> str | None:
         """Find *name*'s peer, preferring no-peer + anti-family CLI candidates.
 
-        Rule (mirrors `hive crew spawn-peer`'s anti-family philosophy):
+        Rule (mirrors `hive squad spawn-duo`'s anti-family philosophy):
           1. explicit peer from peer_map (set by `hive peer set`)
           2. otherwise: pick a member that has no explicit peer yet
              (`no-peer`), preferring one whose CLI is anti-family of *name*'s
@@ -591,7 +591,7 @@ def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> N
 def duplicate_team_bindings() -> list[dict[str, object]]:
     """Report tmux windows that collide on the same ``@hive-team`` name.
 
-    Bug A could leave two live cells tagged with one team name across different
+    Bug A could leave two live duos tagged with one team name across different
     windows. This scans all windows, groups by team, and returns every group
     with more than one window — including each window's id, workspace, and live
     member panes — so ``hive doctor`` can surface the collision. Detection only:

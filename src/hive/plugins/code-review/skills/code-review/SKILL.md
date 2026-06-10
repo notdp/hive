@@ -45,7 +45,7 @@ MANDATORY:
 {
   "team": null,
   "tmux": { "session": "...", "window": "...", "paneCount": 2 },
-  "hint": "No team bound. The cell-vs-crew choice is the user's — ask them with the blocking question tool, then init accordingly. Don't pick or init on your own.",
+  "hint": "No team bound. The duo-vs-squad choice is the user's — ask them with the blocking question tool, then init accordingly. Don't pick or init on your own.",
   "runtimeWorkspace": "/tmp/hive-<session>-<slug>",
   "cwd": "/absolute/path/to/repo"
 }

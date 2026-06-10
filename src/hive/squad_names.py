@@ -1,16 +1,16 @@
-"""Crew instance naming — pool of short, memorable names used as the
-public namespace for a crew squad.
+"""Squad instance naming — pool of short, memorable names used as the
+public namespace for a squad.
 
-Each `hive crew init` picks one name from ``CREW_NAME_POOL`` that is not
+Each `hive squad init` picks one name from ``SQUAD_NAME_POOL`` that is not
 currently claimed by any live `@hive-group` tag across the tmux server.
 The picked name then appears as:
 
-  - `@hive-group=<name>` on every pane in the crew
+  - `@hive-group=<name>` on every pane in the squad
   - `@hive-agent=<name>.orch / <name>.challenger`
   - `@hive-agent=<name>.worker-<N> / <name>.validator-<N>` for peers
   - `@hive-owner=<name>.orch` on spawned peers
 
-This lets multiple crews coexist in the same tmux session (or across
+This lets multiple squads coexist in the same tmux session (or across
 sessions) without collision in qualified-name lookup.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ import re
 from . import tmux
 
 
-CREW_NAME_POOL: tuple[str, ...] = (
+SQUAD_NAME_POOL: tuple[str, ...] = (
     "peaky",
     "krays",
     "crips",
@@ -38,74 +38,75 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,15}$")
 
 
 def validate_name(name: str) -> tuple[bool, str]:
-    """Return ``(ok, reason)`` for a caller-supplied crew name.
+    """Return ``(ok, reason)`` for a caller-supplied squad name.
 
     Rules: 1-16 chars, lowercase ASCII letters/digits/dashes only,
-    must start with a letter. Reserving the bare token ``crew`` avoids
-    confusion with the legacy fixed-name scheme.
+    must start with a letter. The bare tokens ``squad`` (topology word)
+    and ``crew`` (pre-rename legacy scheme) are reserved, never instance
+    names.
     """
     if not name:
-        return False, "crew name cannot be empty"
-    if name == "crew":
-        return False, "'crew' is reserved; pick a distinct instance name"
+        return False, "squad name cannot be empty"
+    if name in ("squad", "crew"):
+        return False, f"'{name}' is reserved; pick a distinct instance name"
     if not _NAME_RE.match(name):
         return False, (
-            "crew name must be 1-16 lowercase ASCII chars "
+            "squad name must be 1-16 lowercase ASCII chars "
             "(letters/digits/dashes, starting with a letter)"
         )
     return True, ""
 
 
 def claimed_names() -> set[str]:
-    """Return every crew name currently claimed by a live `@hive-group`
+    """Return every squad name currently claimed by a live `@hive-group`
     tag across the tmux server.
 
-    Filters out the empty string and the legacy token ``crew`` (which
-    should no longer be used post-migration but may appear on stale
-    panes).
+    Filters out the empty string and the reserved tokens: ``squad`` and
+    the pre-rename legacy ``crew``, which may still sit on stale panes —
+    neither is ever a valid instance name to collide with.
     """
     claimed: set[str] = set()
     for pane in tmux.list_panes_all():
         group = (pane.group or "").strip()
-        if not group or group == "crew":
+        if not group or group in ("squad", "crew"):
             continue
         claimed.add(group)
     return claimed
 
 
 def pick_available_name(fallback_suffix: str = "") -> str:
-    """Pick a pool name not currently claimed by any live crew.
+    """Pick a pool name not currently claimed by any live squad.
 
     Scans the entire tmux server (qualified-name resolution is
     server-wide, so names must be globally unique). Falls back to
-    ``crew-<fallback_suffix>`` when every pool name is taken — caller
+    ``squad-<fallback_suffix>`` when every pool name is taken — caller
     should pass a stable disambiguator (e.g. tmux window_id stripped of
     the leading ``@``).
     """
     used = claimed_names()
-    for candidate in CREW_NAME_POOL:
+    for candidate in SQUAD_NAME_POOL:
         if candidate not in used:
             return candidate
     suffix = fallback_suffix.lstrip("@") or "0"
-    fallback = f"crew-{suffix}"
+    fallback = f"squad-{suffix}"
     counter = 0
     while fallback in used:
         counter += 1
-        fallback = f"crew-{suffix}-{counter}"
+        fallback = f"squad-{suffix}-{counter}"
     return fallback
 
 
-def pick_range_base(crew_name: str, claimed_bases: set[int]) -> int:
-    """Pick a 1000-step tmux window-index base for *crew_name*.
+def pick_range_base(squad_name: str, claimed_bases: set[int]) -> int:
+    """Pick a 1000-step tmux window-index base for *squad_name*.
 
-    Each crew owns a 1000-wide slice of peer window indices so peer
-    windows sort visually by crew (peaky 1000-1999, krays 2000-2999,
+    Each squad owns a 1000-wide slice of peer window indices so peer
+    windows sort visually by squad (peaky 1000-1999, krays 2000-2999,
     crips 3000-3999, ...). Pool names get deterministic bases by pool
     position (peaky → 1000, krays → 2000, ...); anything else falls
     back to the first unused 1000-multiple.
     """
-    if crew_name in CREW_NAME_POOL:
-        preferred = (CREW_NAME_POOL.index(crew_name) + 1) * 1000
+    if squad_name in SQUAD_NAME_POOL:
+        preferred = (SQUAD_NAME_POOL.index(squad_name) + 1) * 1000
         if preferred not in claimed_bases:
             return preferred
     base = 1000

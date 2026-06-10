@@ -624,7 +624,7 @@ def test_compact_with_pane_uses_pane_options(runner, configure_hive_home, monkey
 def test_compact_with_pane_targets_literal_pane_not_same_named_agent(
     runner, configure_hive_home, monkeypatch
 ):
-    """Regression: two cells can end up sharing a derived team name, so one team
+    """Regression: two duos can end up sharing a derived team name, so one team
     holds two agents named `validator` in different windows. `compact --pane
     <here>` must compact <here>, never the same-named agent's pane elsewhere —
     which is exactly what re-resolving via `_load_team` + `t.get(name)` did."""

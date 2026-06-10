@@ -1,6 +1,6 @@
-"""Tests for `hive crew spawn-cell`: readiness polling + G7 auto-placement.
+"""Tests for `hive squad spawn-duo`: readiness polling + G7 auto-placement.
 
-`crew_spawn_peer_cmd` blocks until both freshly-spawned peer panes report
+`squad_spawn_duo_cmd` blocks until both freshly-spawned peer panes report
 `inputState=ready` via sidecar team-runtime, otherwise it fails with
 `spawn_ready_timeout` JSON and a non-zero exit code. `inputState=ready`
 corresponds to the sidecar's input-gate reading the transcript tail as
@@ -14,7 +14,7 @@ freshly-spawned peer panes, and its value is orthogonal to "skill loaded".)
 
 G7 adds: CLI takes no positional arg, and the peer is placed at an explicit
 tmux window index >= 1000 (monotonic) so it never collides with the user's
-regular low-index windows. The index is computed by `_next_crew_window_index`
+regular low-index windows. The index is computed by `_next_squad_window_index`
 and fed to `tmux.new_window(..., index=n)`; window name defaults to
 `pending` (orch renames as the lifecycle advances).
 """
@@ -22,7 +22,7 @@ and fed to `tmux.new_window(..., index=n)`; window name defaults to
 import pytest
 
 from hive.cli import (
-    _CREW_PEER_WINDOW_NAME_INITIAL,
+    _SQUAD_PEER_WINDOW_NAME_INITIAL,
     _next_peer_index_in_range,
     _wait_for_peer_ready,
     cli,
@@ -45,8 +45,8 @@ def test_wait_for_peer_ready_returns_immediately_when_all_ready(monkeypatch):
         calls.append((workspace, team))
         return {
             "members": {
-                "crew.worker-1": _member("ready", "task_closed"),
-                "crew.validator-1": _member("ready", "turn_closed"),
+                "squad.worker-1": _member("ready", "task_closed"),
+                "squad.validator-1": _member("ready", "turn_closed"),
             }
         }
 
@@ -56,12 +56,12 @@ def test_wait_for_peer_ready_returns_immediately_when_all_ready(monkeypatch):
 
     not_ready = _wait_for_peer_ready(
         "/tmp/ws",
-        team_name="t-cell-1",
-        agents={"crew.worker-1", "crew.validator-1"},
+        team_name="t-duo-1",
+        agents={"squad.worker-1", "squad.validator-1"},
     )
 
     assert not_ready == set()
-    assert calls == [("/tmp/ws", "t-cell-1")]
+    assert calls == [("/tmp/ws", "t-duo-1")]
     assert sleeps == []  # no retry needed
 
 
@@ -78,8 +78,8 @@ def test_wait_for_peer_ready_polls_until_all_eventually_ready(monkeypatch):
         # Poll 1: worker still running its bootstrap turn.
         {
             "members": {
-                "crew.worker-1": _member("busy", "tool_open"),
-                "crew.validator-1": _member("ready", "task_closed"),
+                "squad.worker-1": _member("busy", "tool_open"),
+                "squad.validator-1": _member("ready", "task_closed"),
             }
         },
         # Poll 2: worker's bootstrap turn has closed; input gate is clear.
@@ -87,8 +87,8 @@ def test_wait_for_peer_ready_polls_until_all_eventually_ready(monkeypatch):
         # gate ignores it (skill is loaded as soon as inputState is ready).
         {
             "members": {
-                "crew.worker-1": _member("ready", "tool_open"),
-                "crew.validator-1": _member("ready", "task_closed"),
+                "squad.worker-1": _member("ready", "tool_open"),
+                "squad.validator-1": _member("ready", "task_closed"),
             }
         },
     ])
@@ -102,8 +102,8 @@ def test_wait_for_peer_ready_polls_until_all_eventually_ready(monkeypatch):
 
     not_ready = _wait_for_peer_ready(
         "/tmp/ws",
-        team_name="t-cell-1",
-        agents={"crew.worker-1", "crew.validator-1"},
+        team_name="t-duo-1",
+        agents={"squad.worker-1", "squad.validator-1"},
     )
 
     assert not_ready == set()
@@ -130,33 +130,33 @@ def test_wait_for_peer_ready_times_out_and_returns_not_ready(monkeypatch):
         "hive.sidecar.request_team_runtime",
         lambda workspace, *, team: {
             "members": {
-                "crew.worker-1": _member("busy", "tool_open"),
-                "crew.validator-1": _member("busy", "tool_open"),
+                "squad.worker-1": _member("busy", "tool_open"),
+                "squad.validator-1": _member("busy", "tool_open"),
             }
         },
     )
 
     not_ready = _wait_for_peer_ready(
         "/tmp/ws",
-        team_name="t-cell-1",
-        agents={"crew.worker-1", "crew.validator-1"},
+        team_name="t-duo-1",
+        agents={"squad.worker-1", "squad.validator-1"},
     )
 
-    assert not_ready == {"crew.worker-1", "crew.validator-1"}
+    assert not_ready == {"squad.worker-1", "squad.validator-1"}
 
 
-# --- crew range: tmux window index allocation per crew ---
+# --- squad range: tmux window index allocation per squad ---
 #
-# Each crew owns a 1000-wide slice of peer indices (peaky 1000-1999, krays
+# Each squad owns a 1000-wide slice of peer indices (peaky 1000-1999, krays
 # 2000-2999, ...). `_next_peer_index_in_range(session, base)` picks the
 # next unused index strictly inside [base, base+999]. Retired slots are
 # NOT refilled — peer indices are stable for their lifetime.
 
 
 def test_peer_index_starts_at_range_base_when_empty(monkeypatch):
-    """No peer windows in the crew's range yet → start at base.
+    """No peer windows in the squad's range yet → start at base.
 
-    peaky base=1000; session has user windows 1,2,7 + another crew's peer
+    peaky base=1000; session has user windows 1,2,7 + another squad's peer
     at 2500 (out of peaky's range). First peaky peer lands at 1000.
     """
     monkeypatch.setattr("hive.tmux.list_window_indices", lambda session: [1, 2, 7, 2500])
@@ -183,7 +183,7 @@ def test_peer_index_isolates_ranges(monkeypatch):
     """krays peers (2000-2999) don't touch peaky's counter (1000-1999).
 
     Even if krays has peers up to 2500, peaky with no peers still starts
-    its first peer at 1000 — the range scheme guarantees per-crew slots.
+    its first peer at 1000 — the range scheme guarantees per-squad slots.
     """
     monkeypatch.setattr(
         "hive.tmux.list_window_indices",
@@ -204,21 +204,21 @@ def test_peer_index_fails_when_range_exhausted(runner, monkeypatch):
 
 
 def test_spawn_peer_default_window_name_is_pending():
-    """Initial window name is `pending` — caller prefixes with crew name.
+    """Initial window name is `pending` — caller prefixes with squad name.
 
-    Spawn-peer uses `<crew>-pending` as placeholder before the atomic
-    dispatch renames to `<crew>-<feature>-running`.
+    Spawn-peer uses `<squad>-pending` as placeholder before the atomic
+    dispatch renames to `<squad>-<feature>-running`.
     """
-    assert _CREW_PEER_WINDOW_NAME_INITIAL == "pending"
+    assert _SQUAD_PEER_WINDOW_NAME_INITIAL == "pending"
 
 
-def test_crew_spawn_peer_cmd_rejects_positional_arg(runner):
-    """CLI doesn't accept a positional N. Old invocation (`spawn-cell 1`) must
+def test_squad_spawn_duo_cmd_rejects_positional_arg(runner):
+    """CLI doesn't accept a positional N. Old invocation (`spawn-duo 1`) must
     fail before reaching any runtime code. Now that `--feature-id` + `--task`
     are required, the first failure click surfaces is a missing-option error,
     which equally proves the positional wasn't consumed.
     """
-    result = runner.invoke(cli, ["crew", "spawn-cell", "1"])
+    result = runner.invoke(cli, ["squad", "spawn-duo", "1"])
     assert result.exit_code != 0
     out = result.output.lower()
     assert (
@@ -228,12 +228,12 @@ def test_crew_spawn_peer_cmd_rejects_positional_arg(runner):
     )
 
 
-def test_crew_spawn_peer_cmd_requires_feature_id_and_task(runner):
-    """Bare `hive crew spawn-cell` (no flags) must fail fast — the atomic
+def test_squad_spawn_duo_cmd_requires_feature_id_and_task(runner):
+    """Bare `hive squad spawn-duo` (no flags) must fail fast — the atomic
     dispatch contract requires feature-id + task artifact so the peer never
     boots into an empty inbox.
     """
-    result = runner.invoke(cli, ["crew", "spawn-cell"])
+    result = runner.invoke(cli, ["squad", "spawn-duo"])
     assert result.exit_code != 0
     assert "missing option" in result.output.lower()
     assert "--feature-id" in result.output.lower() or "--task" in result.output.lower()

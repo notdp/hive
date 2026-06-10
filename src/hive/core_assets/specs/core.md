@@ -146,7 +146,7 @@ Claude 偏前端体验、文案收敛和发散式讨论;GPT 偏后端 correctnes
 
 ### 挑战立场(producer ↔ reviewer)
 
-Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer 对 producer 的产出做独立审计。两种拓扑都是这个原子的展开:`cell` 里 worker(producer) + validator(reviewer 先共定 plan+VAL,后审 code);`crew` 里 orch(producer 出 plan) + challenger(reviewer 审 plan)。
+Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer 对 producer 的产出做独立审计。两种拓扑都是这个原子的展开:`duo` 里 worker(producer) + validator(reviewer 先共定 plan+VAL,后审 code);`squad` 里 orch(producer 出 plan) + challenger(reviewer 审 plan)。
 
 **reviewer 的共同立场**(validator / challenger 都遵守):
 
@@ -157,7 +157,7 @@ Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer �
 
 **producer 的立场**:reviewer 给的具体反馈,认就改;不认就用论据回,不空对空。
 
-两种 reviewer 只差**审什么**:validator 审 worker 的 plan+VAL 与 code(见 `hive skills get cell`),challenger 审 orch 的 plan(见 `hive skills get crew`)。
+两种 reviewer 只差**审什么**:validator 审 worker 的 plan+VAL 与 code(见 `hive skills get duo`),challenger 审 orch 的 plan(见 `hive skills get squad`)。
 
 ## Workflow 加载
 

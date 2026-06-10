@@ -26,27 +26,27 @@ def test_hive_skill_guides_multiline_send_via_artifact():
 
 def test_role_content_is_cli_served_specs_not_installed_skills():
     """拓扑重构终态:角色内容不再是装机 skill,而是 CLI 现取的 spec
-    (`hive skills get <role>`)。每个角色 spec 都在;worker/validator 指 cell
-    内核、orch/challenger 指 crew;fat handoff schema 单一来源在 cell spec。"""
+    (`hive skills get <role>`)。每个角色 spec 都在;worker/validator 指 duo
+    内核、orch/challenger 指 squad;fat handoff schema 单一来源在 duo spec。"""
     specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
 
-    for role in ("crew-orch", "crew-challenger", "crew-worker", "crew-validator",
-                 "cell-worker", "cell-validator"):
+    for role in ("squad-orch", "squad-challenger", "squad-worker", "squad-validator",
+                 "duo-worker", "duo-validator"):
         assert (specs / f"{role}.md").exists(), f"missing role spec: {role}.md"
 
-    assert "hive skills get crew" in (specs / "crew-orch.md").read_text()
-    assert "hive skills get crew" in (specs / "crew-challenger.md").read_text()
-    for role in ("crew-worker", "cell-worker", "cell-validator"):
-        assert "hive skills get cell" in (specs / f"{role}.md").read_text()
+    assert "hive skills get squad" in (specs / "squad-orch.md").read_text()
+    assert "hive skills get squad" in (specs / "squad-challenger.md").read_text()
+    for role in ("squad-worker", "duo-worker", "duo-validator"):
+        assert "hive skills get duo" in (specs / f"{role}.md").read_text()
 
-    # fat kernel (handoff schema) single-sourced in the cell spec, never copied
-    assert "salientSummary" in (specs / "cell.md").read_text()
-    for role in ("crew-worker", "crew-validator", "cell-worker", "cell-validator"):
+    # fat kernel (handoff schema) single-sourced in the duo spec, never copied
+    assert "salientSummary" in (specs / "duo.md").read_text()
+    for role in ("squad-worker", "squad-validator", "duo-worker", "duo-validator"):
         assert "salientSummary" not in (specs / f"{role}.md").read_text()
 
 
 def test_hive_is_the_only_installed_skill():
-    """单一装机 skill = `/hive`;cell/crew + 所有角色都被拉进 CLI(`hive skills
+    """单一装机 skill = `/hive`;duo/squad + 所有角色都被拉进 CLI(`hive skills
     get`),不再是 SKILL.md —— 可 drift 面收到只剩 /hive。"""
     skills = Path(__file__).resolve().parents[2] / "skills"
     installed = sorted(p.name for p in skills.iterdir() if p.is_dir())
@@ -54,11 +54,11 @@ def test_hive_is_the_only_installed_skill():
 
 
 def test_hive_picker_dispatches_to_cli_init():
-    """/hive 起拓扑时问 cell/crew(引用 core「问用户」),按答案跑 CLI 的
-    `hive cell init` / `hive crew init`,不再 dispatch /cell · /crew skill。"""
+    """/hive 起拓扑时问 duo/squad(引用 core「问用户」),按答案跑 CLI 的
+    `hive duo init` / `hive squad init`,不再 dispatch /duo · /squad skill。"""
     stub = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
-    assert "hive cell init" in stub
-    assert "hive crew init" in stub
+    assert "hive duo init" in stub
+    assert "hive squad init" in stub
     assert "问用户" in stub
 
 
