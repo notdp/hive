@@ -29,6 +29,12 @@ cell spec 把「协调者」留抽象,在 crew 里它具体是:**validator 出 p
 
 ### Execution(dispatch + aggregate + final validate)
 
+- **起手建集成分支**(你自己跑 git,这是 agent 动作):
+  ```bash
+  git branch <crew>-integration <base>          # base 通常是 default branch
+  hive crew set-integration-branch <crew>-integration
+  ```
+  **先 set 再 spawn-cell** —— spawn 时该值被复制进 cell window,worker 的 `hive worktree start` 才解析得到它;漏 set 的话 cell 里的 start 会硬失败要 `--base`(故意的,不让 sub-PR 静默错基到 main)。
 - **每 feature 一个 cell**:先写 task artifact 到 `<workspace>/artifacts/tasks/feature-<id>.md`,再跑:
 
   ```bash
@@ -44,6 +50,19 @@ cell spec 把「协调者」留抽象,在 crew 里它具体是:**validator 出 p
   - `stuck feature=<id>` → challenger 已评估 validator 的 stuck,你决定升 human / 换策略,rename 到 `-fail`
 - worker / validator 越权直发汇报链消息 → 按类型 bounce:worker → `请发 <crew>.validator-<N>`;validator → `请发 <crew>.challenger`。idle ping(`<name> idle, awaiting dispatch`)是 spawn 空窗期状态,直接 ack,不算越权。
 - 所有 feature DONE → **你自己跑 `val-mvp.md` / `val-polish.md`** 做 stage 集成验(final validator 职责在 orch)→ 过了向 human 汇报。
+
+### Merge queue(orch 独占)
+
+每条 feature 的产出是一个 **sub-PR(feature → 集成分支)**,由该 cell 的 worker 开(显式 `--base`,见 cell spec);**merge 进集成分支只有你做**,串行一次一个:
+
+- challenger 发来 `feature=<id> done OK` 且 human 批准这次 merge 后:
+  ```bash
+  gh pr merge <PR号> --match-head-commit <validator 验过的 head> --squash
+  ```
+  必须带 PR 号(**禁 current-branch 自选**);`--match-head-commit` 防 pass 之后 worker 又 push 新 commit 被误合;strategy 用 crew 约定的(未约定默认 `--squash`)。
+- 每合入一条:通知 in-flight worker rebase(它们重跑 `start` 会得到 `needs-rebase` 提示);检查 deps 解锁 —— **`readyToSpawn(feature)` = 它的 deps 全部已合入集成分支**,被阻塞的 feature 等解锁再 spawn,不生成空 cell。deps 是 flat-through-integration:所有 feature 都 base 集成分支,不互相 stack。
+- **冲突不会被 worktree 消掉**(worktree 只隔离工作区),它们在 PR / 集成点显性出现。你编排解决路径:派回 feature worker / 派 dedicated integration cell / 升 human —— 不亲自写码。
+- 全部合入后开 **main PR(集成分支 → main)**:首个 sub-PR 合入后即可开 draft,human review / merge 它 = crew 的最终交付。
 
 ## challenger(reviewer 审 plan)
 
