@@ -2067,16 +2067,17 @@ def skills_list_cmd():
     click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
-def _dispatch_role_spec(pane: str, role: str) -> bool:
-    """Inject ``hive skills get <role>`` into *pane* as the agent's first input.
+def _inject_role_bootstrap(pane: str, role: str) -> bool:
+    """Inject the full role bootstrap prompt into *pane* as its first input.
 
-    Role content lives in CLI-served specs (`hive skills get <role>`), not in
-    installed skills — so a single bootstrap command loads the role, no
-    per-role SKILL.md. Returns True if the pane runs a known agent CLI.
+    Same text a spawned pane gets as its launch prompt (identity +
+    ``hive skills get <role>`` + idle discipline) — adoption only changes the
+    delivery channel, never the wording. Returns True if the pane runs a
+    known agent CLI; otherwise sends nothing.
     """
     if detect_profile_for_pane(pane) is None:
         return False
-    tmux.send_keys(pane, f"hive skills get {role}", enter=False)
+    tmux.send_keys(pane, _role_bootstrap_prompt(role), enter=False)
     time.sleep(0.1)
     tmux.send_key(pane, "Enter")
     return True
@@ -2086,7 +2087,7 @@ def _role_bootstrap_prompt(role: str) -> str:
     """Spawn first-message for a no-human role pane: identity + the one command
     that loads the role. The spec itself stays CLI-served — the spawned pane
     runs ``hive skills get <role>`` exactly like a dispatched pane does
-    (`_dispatch_role_spec`), so there is no inlined spec snapshot to keep in
+    (`_inject_role_bootstrap`), so there is no inlined spec snapshot to keep in
     sync and the prompt stays short enough to inline into the launch command.
     """
     return (
@@ -2331,7 +2332,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
     # this very command — its role load is returned as `next` for it to run
     # in-turn, never injected into its input box as a fake user message.
     if mode == "paired":
-        _dispatch_role_spec(validator_pane, "duo-validator")
+        _inject_role_bootstrap(validator_pane, "duo-validator")
     dispatched: list[str] = ["validator"]
 
     tmux.select_window(window)

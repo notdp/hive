@@ -87,6 +87,7 @@ def test_duo_init_one_pane_spawns_antifamily_validator(
     # channel a dispatched pane uses — so no spec snapshot is inlined into the
     # launch command or cached on disk.
     bootstrap = spawned[0]["prompt"]
+    assert bootstrap == cli_mod._role_bootstrap_prompt("duo-validator")
     assert "hive skills get duo-validator" in bootstrap
     assert "别 `sleep` 轮询" in bootstrap
     assert "别退出" not in bootstrap
@@ -152,9 +153,11 @@ def test_duo_init_two_panes_adopts_idle_antifamily_neighbor(
     assert payload["next"] == "hive skills get duo-worker"
     worker_pane = payload["worker"]["pane"]
     assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
-    # Positive control: the adopted idle neighbor gets it, in its own pane.
+    # Positive control: the adopted idle neighbor gets the exact same
+    # bootstrap prompt a spawned validator would get at launch.
     validator_pane = payload["validator"]["pane"]
-    assert [c for c in sent if c[0] == validator_pane and "hive skills get duo-validator" in c[1]]
+    injected = [c[1] for c in sent if c[0] == validator_pane and "skills get" in c[1]]
+    assert injected == [cli_mod._role_bootstrap_prompt("duo-validator")]
 
 
 def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
@@ -364,3 +367,38 @@ def test_unique_duo_window_name_appends_counter_on_collision(monkeypatch):
     assert cli_mod._unique_duo_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
     # this_window's own name is excluded → no self-collision
     assert cli_mod._unique_duo_window_name("other", "dev:9") == "other"
+
+
+def test_inject_role_bootstrap_sends_full_prompt_once(monkeypatch):
+    """Adoption delivers the same bootstrap prompt as a spawn launch — exact
+    text from _role_bootstrap_prompt, one submit."""
+    import hive.cli as cli_mod
+
+    sent: list = []
+    keys: list = []
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: object())
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda pane, key: keys.append((pane, key)))
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _s: None)
+    assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is True
+    assert sent == [("%9", cli_mod._role_bootstrap_prompt("duo-validator"))]
+    assert keys == [("%9", "Enter")]
+
+
+def test_inject_role_bootstrap_noop_without_agent_profile(monkeypatch):
+    import hive.cli as cli_mod
+
+    sent: list = []
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *a, **_k: sent.append(a))
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *a, **_k: sent.append(a))
+    assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is False
+    assert sent == []
+
+
+def test_role_bootstrap_prompt_is_single_line():
+    """tmux input boxes submit one line; a newline would split the prompt."""
+    import hive.cli as cli_mod
+
+    for role in ("duo-worker", "duo-validator", "squad-orch", "squad-challenger", "squad-worker", "squad-validator"):
+        assert "\n" not in cli_mod._role_bootstrap_prompt(role)
