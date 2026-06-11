@@ -12,7 +12,7 @@ squad = human 给 **orch** 一个高层需求,orch 拆成 features,**每条 feat
 
 ## duo 的协调者 = challenger → orch
 
-duo spec 把「协调者」留抽象,在 squad 里它具体是:**validator 出 pass → 发 challenger;challenger 评估后告诉 orch 推进状态。** duo 内的 fail 中间轮不惊动上游(worker↔validator 自己迭代),只有 pass / stuck 才走到 challenger。所以 **orch 的 inbox 只收 challenger 的状态推进信号**,不直接收 validator 的 verdict。
+duo spec 把「协调者」留抽象,在 squad 里它具体是:**worker 在 validator final pass 后,带成果摘要 + verdict artifact 发 challenger;challenger 评估后告诉 orch 推进状态。** duo 对外只有 worker 一个发言人 —— validator 的一切输出都回自家 worker,不发 challenger、不发 orch。duo 内的 fail 中间轮不惊动上游(worker↔validator 自己迭代),只有 final pass / stuck 由 worker 走到 challenger。所以 **orch 的 inbox 只收 challenger 的状态推进信号**,不收 worker / validator 的直发。
 
 ## orch
 
@@ -21,7 +21,7 @@ duo spec 把「协调者」留抽象,在 squad 里它具体是:**validator 出 p
 ### Planning(与 human 对话)
 
 1. **需求对话** — 反复问 / 调研 / 回显,直到能清晰说出「MVP 做什么、Polish 做什么」
-2. **拆 feature tree** — MVP 层拆 features,每条标 `deps`(前置 id)和能否并行,写 `<workspace>/features.json`
+2. **拆 feature tree** — MVP 层拆 features,每条标 `deps`(前置 id)和能否并行,写 `<workspace>/features.json`。**feature id 就是 branch / worktree 目录 / window 名 / sub-PR 的来源名**:语义化 kebab-case、git branch 合法、≤4 词、看名知事(✓ `contract-usd-amount-words` ✗ `F1-01_04`);序号 / 层级 / 依赖信息留在 features.json 的字段里,不进名字
 3. **写 VAL** — 每 feature 一份 `val-feature-<id>.md`(duo 内 validator 验);再写 stage 级 `val-mvp.md` / `val-polish.md`(你自己集成验)
 4. **两道 gate,过了才进 Execution**:
    - **gate 1 = challenger cross-review** — features.json + VAL 整套发 challenger,让他挑漏
@@ -29,12 +29,13 @@ duo spec 把「协调者」留抽象,在 squad 里它具体是:**validator 出 p
 
 ### Execution(dispatch + aggregate + final validate)
 
-- **起手建集成分支**(你自己跑 git,这是 agent 动作):
+- **起手建集成分支**(你自己跑 git,这是 agent 动作;集成分支是你的资产,建 / 推远程 / 登记一套动作一次做完):
   ```bash
   git branch <squad>-integration <base>          # base 通常是 default branch
+  git push -u origin <squad>-integration        # 推远程 —— sub-PR 的 base 必须在远程存在
   hive squad set-integration-branch <squad>-integration
   ```
-  **先 set 再 spawn-duo** —— spawn 时该值被复制进 duo window,worker 的 `hive worktree start` 才解析得到它;漏 set 的话 duo 里的 start 会硬失败要 `--base`(故意的,不让 sub-PR 静默错基到 main)。
+  **先 set 再 spawn-duo** —— spawn 时该值被复制进 duo window,worker 的 `hive worktree start` 才解析得到它;漏 set 的话 duo 里的 start 会硬失败要 `--base`(故意的,不让 sub-PR 静默错基到 main)。漏 push 的话 worker 开 sub-PR 会报 `Base sha can't be blank` 并上报你 —— 收到就补 push,worker 自己不会(也不该)推你的集成分支。
 - **每 feature 一个 duo**:先写 task artifact 到 `<workspace>/artifacts/tasks/feature-<id>.md`,再跑:
 
   ```bash
@@ -47,9 +48,9 @@ duo spec 把「协调者」留抽象,在 squad 里它具体是:**validator 出 p
 - **orch inbox 只收 challenger 信号**:
   - `feature=<id> done OK` → 记 DONE,rename window 到 `-done`
   - `feature=<id> done NO: <reason>` → 按 reason 处理(转 worker rework / 调 VAL / 升 human)
-  - `stuck feature=<id>` → challenger 已评估 validator 的 stuck,你决定升 human / 换策略,rename 到 `-fail`
-- worker / validator 越权直发汇报链消息 → 按类型 bounce:worker → `请发 <squad>.validator-<N>`;validator → `请发 <squad>.challenger`。idle ping(`<name> idle, awaiting dispatch`)是 spawn 空窗期状态,直接 ack,不算越权。
-- 所有 feature DONE → **你自己跑 `val-mvp.md` / `val-polish.md`** 做 stage 集成验(final validator 职责在 orch)→ 过了向 human 汇报。
+  - `stuck feature=<id>` → challenger 已评估 worker 转交的 stuck,你决定升 human / 换策略,rename 到 `-fail`
+- worker / validator 越权直发汇报链消息 → 按类型 bounce:validator(任何业务消息)→ `请发你的 worker`;worker(直发你的汇报)→ `请发 <squad>.challenger`。例外两个:worker 报「集成分支 base 不存在」是发给你的设置类求助,直接处理(补 push);idle ping(`<name> idle, awaiting dispatch`)是 spawn 空窗期状态,直接 ack,不算越权。
+- 所有 feature DONE → **你自己跑 `val-mvp.md` / `val-polish.md`** 做 stage 集成验(final validator 职责在 orch)→ 过了向 human 汇报。**凡收件人是 human 的节点汇报**(stage 汇报 / 最终交付):markdown 源之外同目录产一份自包含 HTML,消息给 HTML 绝对路径;agent 间 artifact 一律 markdown。
 
 ### Merge queue(orch 独占)
 
@@ -74,14 +75,15 @@ duo spec 把「协调者」留抽象,在 squad 里它具体是:**validator 出 p
 2. 进 Polish 阶段前:MVP 集成验 pass 后,该不该进 Polish
 3. 最终向 human 汇报前:stage 结果摘要,审是否经得起 human 追问
 
-**入口 B — validator 直接发你 verdict**(你是 validator → orch 路径上的评估节点):
+**入口 B — worker 的终态交付**(你是 duo → orch 路径上的评估节点;交付包 = 成果摘要 + validator 的 verdict / stuck-report artifact):
 
-- **pass** → 评估该不该标 DONE:OK → `hive send <squad>.orch "feature=<id> done OK" --artifact <verdict 路径>`;不 OK → `hive send <squad>.orch "feature=<id> done NO: <reason>"`
-- **stuck**(validator 在 duo 内到上限 fail)→ 评估:方向对但卡技术 → `hive send <squad>.orch "stuck feature=<id>" --artifact <stuck-report>`;方向本身错 → `... "stuck feature=<id> NO: <reason>"`
+- **final pass 交付** → 评估该不该标 DONE:OK → `hive send <squad>.orch "feature=<id> done OK" --artifact <verdict 路径>`;不 OK → `hive send <squad>.orch "feature=<id> done NO: <reason>"`
+- **stuck 交付**(duo 内到上限 fail,worker 转交 validator 的 stuck-report)→ 评估:方向对但卡技术 → `hive send <squad>.orch "stuck feature=<id>" --artifact <stuck-report>`;方向本身错 → `... "stuck feature=<id> NO: <reason>"`
+- **防御**:validator 越过 worker 发你的业务消息 → 回它 `请发你的 worker`,不评估、不转发;plan 阶段没有任何上行,收到「plan pass」类消息同样退回。
 
 **挑什么**:feature 拆法(粒度 / 依赖画对没)、VAL 覆盖度(verify 命令能否真证伪)、DONE 判定是否充分、进 Polish 时机。给**具体可操作**反馈,指明哪条 feature / 哪条 val / 哪个断言,不空喊「考虑更多边界」。
 
-**收敛**:和 orch 3 轮内收敛不了 → 升 human(orch 把争议点摆 human 面前)。**边界**(都在别人身上):派 duo、跑 verify、推进状态、向 human 汇报 —— 你只和 orch 对话。
+**收敛**:和 orch 3 轮内收敛不了 → 升 human(orch 把争议点摆 human 面前)。**边界**(都在别人身上):派 duo、跑 verify、推进状态、向 human 汇报 —— 你的对话对象只有 orch(双向)与 worker 的终态交付(收)。
 
 ## 寻址 / 布局 / cleanup
 
