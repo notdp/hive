@@ -111,3 +111,80 @@ def test_stub_tells_init_runner_to_execute_next_itself():
     assert "自动到位" not in stub_text
     assert "`next`" in stub_text
     assert "hive skills get duo-worker" in stub_text
+
+
+def _spec(name: str) -> str:
+    specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
+    return (specs / f"{name}.md").read_text()
+
+
+def test_duo_worktree_is_feature_anchored_not_plan_anchored():
+    """worktree 锚 feature 不锚 plan:领活第一动作就是 start,plan 在 worktree 里
+    与实现同基线收敛。守住旧「plan 定稿后才开 worktree / 主 checkout 纯文本」
+    不回归 —— 那个时序让 plan 阶段站在错误基线上(live squad 实测翻车点)。"""
+    duo = _spec("duo")
+    assert "主 checkout 纯文本" not in duo
+    assert "不开 worktree" not in duo
+    assert "以 worktree 为始" in duo
+    assert "领到 feature 的第一动作是 `hive worktree start" in duo
+
+
+def test_duo_validator_must_stand_inside_the_worktree():
+    """validator 与 worker 同基线:进 worktree 验,git -C 不能替代(站主 checkout
+    跑 VAL 验的是错误基线);final pass 后退出,worker 才能 done 干净退场。"""
+    duo = _spec("duo")
+    assert "或不进去直接" not in duo  # the old git -C escape hatch
+    assert "只读进入" in duo
+    assert "退出 worktree" in duo
+
+
+def test_validator_routes_everything_to_worker():
+    """单发言人拓扑:validator 一切 verdict 都回 worker,worker 终态交付上游。
+    守住旧「pass → challenger」直发路由不回归 —— 它让 pass 尾巴绕过执行人,
+    还给 challenger 留了把 plan pass 误标 DONE 的口子。"""
+    squad_validator = _spec("squad-validator")
+    assert "hive send <squad>.challenger" not in squad_validator
+    assert 'hive send <squad>.worker-<N> "verdict' in squad_validator
+    # duo kernel: the coordinator talks to worker only, never to validator
+    assert "对外发言人" in _spec("duo")
+
+
+def test_squad_challenger_entry_b_is_worker_terminal_delivery():
+    """challenger 入口 B 收 worker 的终态交付(成果 + verdict artifact),不收
+    validator 直发;plan 阶段零上行。"""
+    squad = _spec("squad")
+    challenger = _spec("squad-challenger")
+    assert "worker 的终态交付" in squad
+    assert "worker 的终态交付" in challenger
+    assert "validator 直接发你 verdict" not in squad
+    assert "请发你的 worker" in squad  # bounce guidance for validator strays
+
+
+def test_squad_orch_pushes_integration_branch_to_origin():
+    """集成分支是 orch 的资产:建 / 推远程 / 登记一套动作。GitHub PR 的 base 必须
+    在远程存在 —— 漏 push 时 worker 上报而不是代推(live squad 实测翻车点)。"""
+    squad = _spec("squad")
+    assert "git push -u origin <squad>-integration" in squad
+    assert "不自己 push 集成分支" in _spec("squad-worker")
+
+
+def test_standalone_plan_snapshot_is_human_facing_html():
+    """human-facing 的三类节点汇报(plan 快照 / final / stage)都要 markdown 源 +
+    自包含 HTML;plan 快照是最容易漏的那个(round-1 验收实抓)。"""
+    duo = _spec("duo")
+    snapshot_lines = [l for l in duo.splitlines() if "快照" in l and "standalone" in l]
+    assert snapshot_lines, "standalone plan snapshot clause missing from duo.md"
+    assert any("HTML" in l and "绝对路径" in l for l in snapshot_lines), (
+        "standalone plan snapshot must carry the human-facing HTML requirement"
+    )
+
+
+def test_handoff_is_anchored_to_a_local_commit():
+    """验收对象是 commit 不是散落工作树:worker handoff 前先本地 commit 并报
+    headCommit;validator rule-based 第一关核 clean + HEAD 一致,dirty 直接 fail。
+    这也是 squad merge queue `--match-head-commit` 的上游锚点。"""
+    duo = _spec("duo")
+    assert "先本地 commit" in duo
+    assert "headCommit" in duo
+    assert "rev-parse HEAD" in duo
+    assert "先本地 commit" in _spec("squad-worker")
