@@ -1833,7 +1833,7 @@ def _show_current_roles() -> None:
     rows = []
     for role in ("worker", "validator", "challenger", "orch"):
         cli, model = user_settings.resolve_role_config(role)
-        note = "stored only" if role not in user_settings.APPLIED_ROLES else ""
+        note = "orch is always your current pane, not spawned" if role not in user_settings.APPLIED_ROLES else ""
         rows.append((role, cli or "—", model or "—", note))
 
     w_role = max(len(r[0]) for r in rows)
