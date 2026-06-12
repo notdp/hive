@@ -122,7 +122,7 @@ def test_interactive_custom_model(monkeypatch):
     store = _run_interactive(monkeypatch, [
         "worker",       # role
         "claude",       # CLI
-        "8",            # custom value option (after 7 claude suggestions)
+        "15",           # custom value option (after 14 claude suggestions)
         "my-custom-model",
         "done",
     ])
@@ -190,7 +190,7 @@ def test_interactive_clear_model_leaves_cli_intact(monkeypatch):
         "worker",
         "keep",         # keep CLI
         # claude suggestions shown; clear = len(suggestions) + 3
-        str(7 + 3),     # clear option = 10
+        str(14 + 3),    # clear option = 17
         "done",
     ], settings_store=dict(initial))
     assert store["roles.worker.cli"] == "claude"

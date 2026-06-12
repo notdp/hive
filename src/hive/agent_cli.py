@@ -20,9 +20,23 @@ AGENT_CLI_NAMES = frozenset({"droid", "claude", "codex"})
 #   claude: https://code.claude.com/docs/en/model-config
 #   codex:  https://developers.openai.com/codex/models
 MODEL_SUGGESTIONS: dict[str, list[str]] = {
-    "claude": ["opus", "sonnet", "haiku", "fable", "opus[1m]", "sonnet[1m]", "opusplan"],
+    "claude": [
+        # aliases (resolve per-platform: API→latest, Bedrock/Vertex→older)
+        "opus", "sonnet", "haiku", "fable",
+        # version-pinned (explicit, no platform variance)
+        "claude-fable-5",
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-sonnet-4-6", "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        # extended context / hybrid
+        "opus[1m]", "sonnet[1m]", "opusplan",
+    ],
     "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
-    "droid": ["opus", "sonnet", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "droid": [
+        "opus", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "sonnet", "claude-sonnet-4-6",
+        "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+    ],
 }
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
