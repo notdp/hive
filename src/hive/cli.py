@@ -2707,18 +2707,18 @@ def _derive_pr_window_status(global_format: str | None) -> str | None:
 
 @duo_cmd.command("set-pr")
 @click.argument("number", type=int)
+@click.argument("title", required=False, default=None)
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def duo_set_pr_cmd(number: int, as_json: bool):
-    """Label the current duo window with its PR number.
+def duo_set_pr_cmd(number: int, title: str | None, as_json: bool):
+    """Label the current duo window with its PR number (and optionally rename it).
 
     Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the
     current tmux window and installs a per-window status-bar display derived
     from the global ``window-status-format`` / ``window-status-current-format``
     (the index position renders ``PR<n>``; user styling and padding are
-    preserved). No operator config needed. Window-local metadata only: never
-    renames the window, moves its index, or writes global options / config
-    files. Idempotent — re-running replaces the stamp (PR reopened under a
-    new number) and re-derives the display from the global formats.
+    preserved). When TITLE is provided the window is also renamed (short
+    kebab-case recommended — this is a tmux tab, not a PR description).
+    Idempotent — re-running replaces the stamp and re-derives the display.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2733,6 +2733,8 @@ def duo_set_pr_cmd(number: int, as_json: bool):
             "run set-pr from your duo window"
         )
     tmux.set_window_option(window, "@hive-pr", str(number))
+    if title:
+        tmux.rename_window(window, title)
     display: dict[str, str] = {}
     for option in ("window-status-format", "window-status-current-format"):
         global_format = tmux.get_global_window_option(option)
@@ -2744,10 +2746,14 @@ def duo_set_pr_cmd(number: int, as_json: bool):
         tmux.set_window_option(window, option, derived)
         display[option] = "derived"
     if as_json:
-        click.echo(json.dumps({"window": window, "pr": number, "display": display}, indent=2))
+        result: dict[str, object] = {"window": window, "pr": number, "display": display}
+        if title:
+            result["title"] = title
+        click.echo(json.dumps(result, indent=2))
     else:
         summary = ", ".join(f"{key}={value}" for key, value in display.items())
-        click.echo(f"window {window} labeled @hive-pr={number} ({summary})")
+        title_note = f", title={title}" if title else ""
+        click.echo(f"window {window} labeled @hive-pr={number}{title_note} ({summary})")
 
 
 @cli.group("squad")
