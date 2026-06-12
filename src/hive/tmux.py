@@ -566,6 +566,17 @@ def get_window_option(target: str, key: str) -> str | None:
     return val or None
 
 
+def get_global_window_option(option: str) -> str | None:
+    """Global (server-wide) window-option value — read-only, no target.
+
+    Values keep their exact spacing (status formats carry meaningful
+    leading/trailing padding); only the trailing newline is removed.
+    """
+    r = _run(["show-options", "-w", "-g", "-v", option], check=False)
+    val = r.stdout.rstrip("\n")
+    return val or None
+
+
 def clear_window_option(target: str, option: str) -> None:
     _run(["set-window-option", "-t", target, "-u", option], check=False)
 

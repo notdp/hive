@@ -54,7 +54,7 @@ duo spec 把「协调者」留抽象,在 squad 里它具体是:**worker 在 vali
 
 ### Merge queue(orch 独占)
 
-每条 feature 的产出是一个 **sub-PR(feature → 集成分支)**,由该 duo 的 worker 开(显式 `--base`,见 duo spec);**merge 进集成分支只有你做**,串行一次一个:
+每条 feature 的产出是一个 **sub-PR(feature → 集成分支)**,由该 duo 的 worker 开 —— 出生即 draft(空 commit 钉号,`hive duo set-pr` 标到 window,状态栏按号锚定),final pass 后转 ready;显式 `--base`,见 duo spec。**merge 进集成分支只有你做**,串行一次一个:
 
 - challenger 发来 `feature=<id> done OK` 且 human 批准这次 merge 后:
   ```bash

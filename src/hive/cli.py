@@ -2497,6 +2497,78 @@ def duo_init_cmd(validator_cli: str | None):
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+# Replaces the bare index token in a window-status format with a conditional
+# that renders `PR<n>` for windows carrying `@hive-pr`. `##I` is tmux's escaped
+# literal `#I`, not the index token — the lookbehind leaves it alone (the
+# pathological `###I` triple is intentionally unsupported: a conservative
+# no-replace beats corrupting a user's format).
+_WINDOW_INDEX_TOKEN_RE = re.compile(r"(?<!#)#I")
+_PR_INDEX_TOKEN = "#{?#{@hive-pr},PR#{@hive-pr},#I}"
+
+
+def _derive_pr_window_status(global_format: str | None) -> str | None:
+    """Per-window status format derived from the *global* value; None = skip.
+
+    Skips when the global format already references ``@hive-pr`` (the user
+    wired the display themselves) and when it has no replaceable ``#I``.
+    Deriving from the global value — never the window-local one — keeps
+    repeated ``set-pr`` calls idempotent instead of recursively wrapping
+    prior derived output.
+    """
+    if not global_format:
+        return None
+    if "@hive-pr" in global_format:
+        return None
+    if not _WINDOW_INDEX_TOKEN_RE.search(global_format):
+        return None
+    return _WINDOW_INDEX_TOKEN_RE.sub(_PR_INDEX_TOKEN, global_format)
+
+
+@duo_cmd.command("set-pr")
+@click.argument("number", type=int)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def duo_set_pr_cmd(number: int, as_json: bool):
+    """Label the current duo window with its PR number.
+
+    Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the
+    current tmux window and installs a per-window status-bar display derived
+    from the global ``window-status-format`` / ``window-status-current-format``
+    (the index position renders ``PR<n>``; user styling and padding are
+    preserved). No operator config needed. Window-local metadata only: never
+    renames the window, moves its index, or writes global options / config
+    files. Idempotent — re-running replaces the stamp (PR reopened under a
+    new number) and re-derives the display from the global formats.
+    """
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    if number <= 0:
+        _fail(f"PR number must be a positive integer, got {number}")
+    window = tmux.get_current_window_target() or ""
+    if not window:
+        _fail("cannot determine current window")
+    if not tmux.get_window_option(window, "hive-team"):
+        _fail(
+            "current window is not a hive team window (no @hive-team); "
+            "run set-pr from your duo window"
+        )
+    tmux.set_window_option(window, "@hive-pr", str(number))
+    display: dict[str, str] = {}
+    for option in ("window-status-format", "window-status-current-format"):
+        global_format = tmux.get_global_window_option(option)
+        derived = _derive_pr_window_status(global_format)
+        if derived is None:
+            already = bool(global_format and "@hive-pr" in global_format)
+            display[option] = "already-global" if already else "skipped-no-index-token"
+            continue
+        tmux.set_window_option(window, option, derived)
+        display[option] = "derived"
+    if as_json:
+        click.echo(json.dumps({"window": window, "pr": number, "display": display}, indent=2))
+    else:
+        summary = ", ".join(f"{key}={value}" for key, value in display.items())
+        click.echo(f"window {window} labeled @hive-pr={number} ({summary})")
+
+
 @cli.group("squad")
 def squad_cmd():
     """Squad (orch + challenger + on-demand duos) management."""
@@ -2900,7 +2972,10 @@ def squad_set_integration_branch_cmd(ref: str, as_json: bool):
     "--feature-id",
     "feature_id",
     required=True,
-    help="Feature id (e.g. F1) — used for window name and dispatch body",
+    help=(
+        "Feature id — semantic kebab-case, ≤4 words (e.g. contract-usd-amount-words); "
+        "becomes the branch / worktree / window / sub-PR name"
+    ),
 )
 @click.option(
     "--task",
@@ -2942,6 +3017,12 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     anti-family. Both tagged ``@hive-group=<squad>`` and
     ``@hive-owner=<squad>.orch`` for owner-bypass routing.
     """
+    # Validate before any tmux/runtime side effect: a rejected feature id
+    # must leave no window, option, spawn, or dispatch behind.
+    ok, reason = squad_names.validate_feature_id(feature_id)
+    if not ok:
+        _fail(reason)
+
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
 
