@@ -23,13 +23,17 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
     "claude": [
         # aliases (resolve per-platform: API→latest, Bedrock/Vertex→older)
         "opus", "sonnet", "haiku", "fable",
-        # version-pinned (explicit, no platform variance)
+        # version-pinned
         "claude-fable-5",
         "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
         "claude-sonnet-4-6", "claude-sonnet-4-5",
         "claude-haiku-4-5",
-        # extended context / hybrid
-        "opus[1m]", "sonnet[1m]", "opusplan",
+        # [1m] variants — Claude Code suffix forcing 1M context window
+        "opus[1m]", "sonnet[1m]",
+        "claude-opus-4-8[1m]", "claude-opus-4-7[1m]", "claude-opus-4-6[1m]",
+        "claude-sonnet-4-6[1m]",
+        # hybrid
+        "opusplan",
     ],
     "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
     "droid": [
