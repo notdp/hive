@@ -1854,79 +1854,115 @@ def _interactive_role_config() -> None:
 
         current_cli, current_model = user_settings.resolve_role_config(role)
 
-        # --- CLI selection ---
-        cli_choices = sorted(AGENT_CLI_NAMES) + ["keep", "clear"]
-        cli_default = "keep"
-        if current_cli:
-            click.echo(f"  current cli: {current_cli}")
-        chosen_cli_input = click.prompt(
-            f"  CLI for {role}",
-            type=click.Choice(cli_choices, case_sensitive=False),
-            default=cli_default,
+        # Collect both choices before any mutation — abort between prompts
+        # must not leave partial settings behind.
+        cli_action, model_action = _collect_role_choices(
+            role, current_cli, current_model, AGENT_CLI_NAMES, MODEL_SUGGESTIONS,
         )
 
-        if chosen_cli_input == "clear":
-            user_settings.unset_setting(f"roles.{role}.cli")
-            effective_cli = ""
-        elif chosen_cli_input == "keep":
-            effective_cli = current_cli
-        else:
-            user_settings.set_setting(f"roles.{role}.cli", chosen_cli_input)
-            effective_cli = chosen_cli_input
-
-        # --- Model selection ---
-        if current_model:
-            click.echo(f"  current model: {current_model}")
-
-        suggestions = MODEL_SUGGESTIONS.get(effective_cli, []) if effective_cli else []
-        if suggestions:
-            click.echo(f"  Models for {effective_cli}:")
-            for i, m in enumerate(suggestions, 1):
-                marker = " ← current" if m == current_model else ""
-                click.echo(f"    {i}) {m}{marker}")
-            click.echo(f"    {len(suggestions) + 1}) (custom value)")
-            click.echo(f"    {len(suggestions) + 2}) (keep)")
-            click.echo(f"    {len(suggestions) + 3}) (clear)")
-
-            max_n = len(suggestions) + 3
-            while True:
-                raw = click.prompt(f"  Choice [1-{max_n}]", default=str(len(suggestions) + 2))
-                try:
-                    n = int(raw)
-                except ValueError:
-                    click.echo(f"  Invalid choice, enter 1-{max_n}")
-                    continue
-                if 1 <= n <= len(suggestions):
-                    user_settings.set_setting(f"roles.{role}.model", suggestions[n - 1])
-                    break
-                elif n == len(suggestions) + 1:
-                    custom = click.prompt("  Enter model value")
-                    if custom.strip():
-                        user_settings.set_setting(f"roles.{role}.model", custom.strip())
-                    break
-                elif n == len(suggestions) + 2:
-                    break
-                elif n == len(suggestions) + 3:
-                    user_settings.unset_setting(f"roles.{role}.model")
-                    break
-                else:
-                    click.echo(f"  Invalid choice, enter 1-{max_n}")
-        else:
-            model_choices = ["keep", "clear", "custom"]
-            chosen_model = click.prompt(
-                f"  Model for {role} (no CLI selected for suggestions)",
-                type=click.Choice(model_choices, case_sensitive=False),
-                default="keep",
-            )
-            if chosen_model == "clear":
-                user_settings.unset_setting(f"roles.{role}.model")
-            elif chosen_model == "custom":
-                custom = click.prompt("  Enter model value")
-                if custom.strip():
-                    user_settings.set_setting(f"roles.{role}.model", custom.strip())
+        # Apply atomically after both prompts succeeded.
+        _apply_role_action(f"roles.{role}.cli", cli_action)
+        _apply_role_action(f"roles.{role}.model", model_action)
 
         final_cli, final_model = user_settings.resolve_role_config(role)
         click.echo(f"  → {role}: cli={final_cli or '—'}  model={final_model or '—'}\n")
+
+
+def _collect_role_choices(
+    role: str,
+    current_cli: str,
+    current_model: str,
+    agent_cli_names: frozenset[str],
+    model_suggestions: dict[str, list[str]],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Prompt for CLI and model choices. Returns (cli_action, model_action).
+
+    Each action is ``("set", value)``, ``("keep", "")``, or ``("clear", "")``.
+    All prompts complete before returning — if any prompt aborts, nothing is
+    returned and no settings are mutated.
+    """
+    cli_choices = sorted(agent_cli_names) + ["keep", "clear"]
+    if current_cli:
+        click.echo(f"  current cli: {current_cli}")
+    chosen_cli_input = click.prompt(
+        f"  CLI for {role}",
+        type=click.Choice(cli_choices, case_sensitive=False),
+        default="keep",
+    )
+
+    if chosen_cli_input == "clear":
+        cli_action: tuple[str, str] = ("clear", "")
+        effective_cli = ""
+    elif chosen_cli_input == "keep":
+        cli_action = ("keep", "")
+        effective_cli = current_cli
+    else:
+        cli_action = ("set", chosen_cli_input)
+        effective_cli = chosen_cli_input
+
+    if current_model:
+        click.echo(f"  current model: {current_model}")
+
+    suggestions = model_suggestions.get(effective_cli, []) if effective_cli else []
+    model_action: tuple[str, str]
+    if suggestions:
+        click.echo(f"  Models for {effective_cli}:")
+        for i, m in enumerate(suggestions, 1):
+            marker = " ← current" if m == current_model else ""
+            click.echo(f"    {i}) {m}{marker}")
+        click.echo(f"    {len(suggestions) + 1}) (custom value)")
+        click.echo(f"    {len(suggestions) + 2}) (keep)")
+        click.echo(f"    {len(suggestions) + 3}) (clear)")
+
+        max_n = len(suggestions) + 3
+        while True:
+            raw = click.prompt(f"  Choice [1-{max_n}]", default=str(len(suggestions) + 2))
+            try:
+                n = int(raw)
+            except ValueError:
+                click.echo(f"  Invalid choice, enter 1-{max_n}")
+                continue
+            if 1 <= n <= len(suggestions):
+                model_action = ("set", suggestions[n - 1])
+                break
+            elif n == len(suggestions) + 1:
+                custom = click.prompt("  Enter model value")
+                model_action = ("set", custom.strip()) if custom.strip() else ("keep", "")
+                break
+            elif n == len(suggestions) + 2:
+                model_action = ("keep", "")
+                break
+            elif n == len(suggestions) + 3:
+                model_action = ("clear", "")
+                break
+            else:
+                click.echo(f"  Invalid choice, enter 1-{max_n}")
+    else:
+        model_choice_list = ["keep", "clear", "custom"]
+        chosen_model = click.prompt(
+            f"  Model for {role} (no CLI selected for suggestions)",
+            type=click.Choice(model_choice_list, case_sensitive=False),
+            default="keep",
+        )
+        if chosen_model == "clear":
+            model_action = ("clear", "")
+        elif chosen_model == "custom":
+            custom = click.prompt("  Enter model value")
+            model_action = ("set", custom.strip()) if custom.strip() else ("keep", "")
+        else:
+            model_action = ("keep", "")
+
+    return cli_action, model_action
+
+
+def _apply_role_action(key: str, action: tuple[str, str]) -> None:
+    from . import settings as user_settings
+
+    op, value = action
+    if op == "set":
+        user_settings.set_setting(key, value)
+    elif op == "clear":
+        user_settings.unset_setting(key)
 
 
 @cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})

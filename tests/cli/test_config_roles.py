@@ -216,8 +216,8 @@ def test_interactive_no_cli_shows_no_suggestions(monkeypatch):
     assert "roles.challenger.cli" not in store
 
 
-def test_interactive_eof_aborts(monkeypatch):
-    """EOF mid-interactive raises Abort, no partial mutation."""
+def test_interactive_eof_aborts_no_partial_mutation(monkeypatch):
+    """EOF after CLI choice but before model choice: store must be empty."""
     store = {}
     with pytest.raises(click.Abort):
         _run_interactive(monkeypatch, [
@@ -225,8 +225,23 @@ def test_interactive_eof_aborts(monkeypatch):
             "codex",
             # EOF here — no model choice
         ], settings_store=store)
-    # CLI was set before abort, but that's the atomicity boundary per-field
-    # The important thing: the abort propagated, no silent continuation
+    assert store == {}, f"partial mutation on abort: {store}"
+
+
+def test_interactive_eof_preserves_existing_config(monkeypatch):
+    """EOF during role config must not mutate pre-existing values."""
+    initial = {
+        "roles.validator.cli": "codex",
+        "roles.validator.model": "gpt-5.5",
+    }
+    store = dict(initial)
+    with pytest.raises(click.Abort):
+        _run_interactive(monkeypatch, [
+            "validator",
+            "clear",        # would clear CLI
+            # EOF here — no model choice
+        ], settings_store=store)
+    assert store == initial, f"existing config mutated on abort: {store}"
 
 
 def test_interactive_multiple_roles(monkeypatch):
