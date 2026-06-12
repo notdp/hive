@@ -122,7 +122,7 @@ def test_interactive_custom_model(monkeypatch):
     store = _run_interactive(monkeypatch, [
         "worker",       # role
         "claude",       # CLI
-        "19",           # custom value option (after 18 claude suggestions)
+        "9",            # custom value option (after 8 claude suggestions)
         "my-custom-model",
         "done",
     ])
@@ -190,7 +190,7 @@ def test_interactive_clear_model_leaves_cli_intact(monkeypatch):
         "worker",
         "keep",         # keep CLI
         # claude suggestions shown; clear = len(suggestions) + 3
-        str(18 + 3),    # clear option = 21
+        str(8 + 3),     # clear option = 11
         "done",
     ], settings_store=dict(initial))
     assert store["roles.worker.cli"] == "claude"
@@ -249,13 +249,13 @@ def test_interactive_multiple_roles(monkeypatch):
     store = _run_interactive(monkeypatch, [
         "worker",
         "claude",
-        "1",            # opus
+        "1",            # claude-fable-5
         "validator",
         "codex",
         "1",            # gpt-5.5
         "done",
     ])
     assert store["roles.worker.cli"] == "claude"
-    assert store["roles.worker.model"] == "opus"
+    assert store["roles.worker.model"] == "claude-fable-5"
     assert store["roles.validator.cli"] == "codex"
     assert store["roles.validator.model"] == "gpt-5.5"

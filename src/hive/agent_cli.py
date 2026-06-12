@@ -21,24 +21,17 @@ AGENT_CLI_NAMES = frozenset({"droid", "claude", "codex"})
 #   codex:  https://developers.openai.com/codex/models
 MODEL_SUGGESTIONS: dict[str, list[str]] = {
     "claude": [
-        # aliases (resolve per-platform: API→latest, Bedrock/Vertex→older)
-        "opus", "sonnet", "haiku", "fable",
-        # version-pinned
         "claude-fable-5",
-        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
-        "claude-sonnet-4-6", "claude-sonnet-4-5",
-        "claude-haiku-4-5",
-        # [1m] variants — Claude Code suffix forcing 1M context window
-        "opus[1m]", "sonnet[1m]",
-        "claude-opus-4-8[1m]", "claude-opus-4-7[1m]", "claude-opus-4-6[1m]",
-        "claude-sonnet-4-6[1m]",
-        # hybrid
-        "opusplan",
+        "claude-opus-4-8",
+        "claude-opus-4-7[1m]", "claude-opus-4-7",
+        "claude-opus-4-6[1m]", "claude-opus-4-6",
+        "claude-sonnet-4-6[1m]", "claude-sonnet-4-6",
     ],
     "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
     "droid": [
-        "opus", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
-        "sonnet", "claude-sonnet-4-6",
+        "claude-fable-5",
+        "claude-opus-4-8", "claude-opus-4-6[1m]",
+        "claude-sonnet-4-6",
         "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
     ],
 }
