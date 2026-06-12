@@ -52,6 +52,47 @@ def test_validate_rejects_invalid_names(name, reason_fragment):
     assert reason_fragment in reason.lower()
 
 
+# --- validate_feature_id ---
+
+
+@pytest.mark.parametrize(
+    "feature_id",
+    [
+        "contract-usd-amount-words",
+        "pr-window-anchor",
+        "fix-2fa",
+        "auth",
+        "v2-api-keys",
+    ],
+)
+def test_validate_feature_id_accepts_semantic_kebab(feature_id):
+    ok, reason = squad_names.validate_feature_id(feature_id)
+    assert ok, reason
+
+
+@pytest.mark.parametrize(
+    "feature_id,reason_fragment",
+    [
+        ("", "empty"),
+        ("F2-03_04", "kebab-case"),    # the live-run mess: uppercase + underscores
+        ("f2-03_04", "kebab-case"),    # underscores
+        ("F1", "kebab-case"),          # uppercase ordinal
+        ("Auth-Fix", "kebab-case"),    # uppercase
+        ("auth.fix", "kebab-case"),    # punctuation
+        ("2fa-fix", "kebab-case"),     # leading digit
+        ("a-b-c-d-e", "kebab-case"),   # >4 segments
+        ("f1", "step/sequence"),       # lowercase feature ordinal
+        ("f2-03-04", "step/sequence"), # all-numeric segments
+        ("auth-03", "step/sequence"),  # trailing step number
+        ("contract-usd-amount-words-extra-long", "too long"),  # >32 chars
+    ],
+)
+def test_validate_feature_id_rejects_step_ids(feature_id, reason_fragment):
+    ok, reason = squad_names.validate_feature_id(feature_id)
+    assert not ok
+    assert reason_fragment in reason
+
+
 # --- pick_available_name ---
 
 

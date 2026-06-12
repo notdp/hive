@@ -416,6 +416,33 @@ def test_window_option_helpers_and_flash(monkeypatch):
     assert calls[2][2].count("sleep 0.5") == 6
 
 
+def test_get_global_window_option_is_read_only_global_scope(monkeypatch):
+    calls = []
+
+    def _fake_run(args, check=True, timeout=5):
+        calls.append((tuple(args), check))
+        return subprocess.CompletedProcess(["tmux", *args], 0, "  #I #W  \n", "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+
+    value = tmux.get_global_window_option("window-status-format")
+
+    # Read-only `show-options -w -g -v`, no `-t` target — global scope only.
+    assert calls == [(("show-options", "-w", "-g", "-v", "window-status-format"), False)]
+    # Meaningful leading/trailing padding survives; only the newline is stripped.
+    assert value == "  #I #W  "
+
+
+def test_get_global_window_option_returns_none_when_unset(monkeypatch):
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=True, timeout=5: subprocess.CompletedProcess(
+            ["tmux", *args], 0, "\n", ""
+        ),
+    )
+    assert tmux.get_global_window_option("window-status-format") is None
+
+
 def test_wait_for_text_success_and_timeout(monkeypatch):
     outputs = iter(["booting", "still booting", "ready for help"])
     monkeypatch.setattr("hive.tmux.capture_pane", lambda _pane, lines=50: next(outputs))

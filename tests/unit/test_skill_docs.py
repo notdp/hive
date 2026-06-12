@@ -179,6 +179,35 @@ def test_standalone_plan_snapshot_is_human_facing_html():
     )
 
 
+def test_duo_pins_draft_pr_anchor_right_after_worktree_start():
+    """draft PR 钉锚:进 worktree 即 空commit→push→draft(显式 base,禁默认分支
+    推断)→`hive duo set-pr`;final pass 推实质 commit + `gh pr ready`。"""
+    duo = _spec("duo")
+    assert "--allow-empty" in duo
+    assert "git push -u origin" in duo
+    assert "gh pr create --draft --base" in duo
+    assert "hive duo set-pr" in duo
+    assert "gh pr ready" in duo
+
+
+def test_set_pr_owns_display_no_operator_config():
+    """set-pr 原生接管窗口状态栏显示;README 不再教用户配 window-status-format
+    (operator tmux.conf 方案被 human 否决,不回归)。"""
+    assert "hive duo set-pr" in _spec("duo-worker")
+    assert "hive duo set-pr" in _spec("squad")
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    assert "window-status-format" not in readme
+
+
+def test_duo_worker_clarifies_ambiguous_human_tasks_first():
+    """需求澄清 gate:人类对话语境的模糊任务先用阻塞式提问工具钉死需求;
+    带完整 task artifact + VAL 的派活不加提问环。"""
+    duo_worker = _spec("duo-worker")
+    assert "AskUserQuestion" in duo_worker
+    assert "request_user_input" in duo_worker
+    assert "task artifact" in duo_worker
+
+
 def test_handoff_is_anchored_to_a_local_commit():
     """验收对象是 commit 不是散落工作树:worker handoff 前先本地 commit 并报
     headCommit;validator rule-based 第一关核 clean + HEAD 一致,dirty 直接 fail。

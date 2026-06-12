@@ -176,6 +176,16 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.get_pane_option", state.get_pane_option)
         monkeypatch.setattr("hive.cli.tmux.get_window_option", state.get_window_option)
         monkeypatch.setattr("hive.cli.tmux.set_window_option", state.set_window_option)
+        # Deterministic global window-status formats (tmux defaults) so
+        # `duo set-pr` display derivation never shells to the real server.
+        global_window_formats = {
+            "window-status-format": "#I:#W#{?window_flags,#{window_flags}, }",
+            "window-status-current-format": "#I:#W#{?window_flags,#{window_flags}, }",
+        }
+        monkeypatch.setattr(
+            "hive.cli.tmux.get_global_window_option",
+            lambda option: global_window_formats.get(option),
+        )
         monkeypatch.setattr("hive.cli.tmux.clear_window_option", state.clear_window_option)
         monkeypatch.setattr("hive.cli.tmux.is_pane_alive", lambda _pane: True)
         monkeypatch.setattr("hive.cli.tmux.tag_pane", state.tag_pane)

@@ -237,3 +237,37 @@ def test_squad_spawn_duo_cmd_requires_feature_id_and_task(runner):
     assert result.exit_code != 0
     assert "missing option" in result.output.lower()
     assert "--feature-id" in result.output.lower() or "--task" in result.output.lower()
+
+
+def _explode(name):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError(f"{name} must not run for an invalid feature id")
+
+    return _boom
+
+
+def test_spawn_duo_rejects_step_style_feature_id_before_any_side_effect(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """`F2-03_04`-style ids (the live-run window-name mess) die in validation —
+    before any window creation, option write, rename, spawn, or dispatch."""
+    configure_hive_home()
+    for fn in ("new_window", "set_window_option", "rename_window"):
+        monkeypatch.setattr(f"hive.cli.tmux.{fn}", _explode(fn))
+    task = tmp_path / "task.md"
+    task.write_text("# task")
+
+    result = runner.invoke(
+        cli, ["squad", "spawn-duo", "--feature-id", "F2-03_04", "--task", str(task)]
+    )
+
+    assert result.exit_code == 1
+    assert "kebab-case" in result.output
+    assert "features.json" in result.output
+
+
+def test_spawn_duo_help_teaches_semantic_feature_ids(runner):
+    """The old help literally taught the spec's anti-example (`e.g. F1`)."""
+    result = runner.invoke(cli, ["squad", "spawn-duo", "--help"])
+    assert "e.g. F1" not in result.output
+    assert "kebab-case" in result.output

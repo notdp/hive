@@ -57,6 +57,35 @@ def validate_name(name: str) -> tuple[bool, str]:
     return True, ""
 
 
+_FEATURE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+){0,3}$")
+_FEATURE_ID_HINT = (
+    "feature id becomes the branch / worktree / window / sub-PR name: "
+    "semantic kebab-case, lowercase, ≤4 dash-separated words, ≤32 chars, "
+    "named for what it does (e.g. 'contract-usd-amount-words'); "
+    "step/sequence ids like 'F2-03_04' belong in features.json fields, not the name"
+)
+
+
+def validate_feature_id(feature_id: str) -> tuple[bool, str]:
+    """Return ``(ok, reason)`` for a spawn-duo feature id.
+
+    Step-number shapes (``F2``, ``03`` …) encode ordering, not meaning —
+    rejected even in lowercase kebab form (``f2-03-04``).
+    """
+    if not feature_id:
+        return False, f"feature id cannot be empty — {_FEATURE_ID_HINT}"
+    if len(feature_id) > 32:
+        return False, f"feature id is too long ({len(feature_id)} > 32 chars) — {_FEATURE_ID_HINT}"
+    if not _FEATURE_ID_RE.match(feature_id):
+        return False, f"feature id '{feature_id}' is not semantic kebab-case — {_FEATURE_ID_HINT}"
+    for segment in feature_id.split("-"):
+        if segment.isdigit() or re.fullmatch(r"f\d+", segment):
+            return False, (
+                f"feature id '{feature_id}' has step/sequence segment '{segment}' — {_FEATURE_ID_HINT}"
+            )
+    return True, ""
+
+
 def claimed_names() -> set[str]:
     """Return every squad name currently claimed by a live `@hive-group`
     tag across the tmux server.
