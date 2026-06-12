@@ -13,6 +13,17 @@ from . import settings as user_settings
 from . import tmux
 
 AGENT_CLI_NAMES = frozenset({"droid", "claude", "codex"})
+
+# Non-authoritative suggestions for the interactive picker. Custom values
+# always accepted; these just save the user from typing common aliases.
+# Sources:
+#   claude: https://code.claude.com/docs/en/model-config
+#   codex:  https://developers.openai.com/codex/models
+MODEL_SUGGESTIONS: dict[str, list[str]] = {
+    "claude": ["opus", "sonnet", "haiku", "fable", "opus[1m]", "sonnet[1m]", "opusplan"],
+    "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
+    "droid": ["opus", "sonnet", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+}
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
     "claude-code": "claude",

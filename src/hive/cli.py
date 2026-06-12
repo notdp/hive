@@ -1799,19 +1799,134 @@ _SENTINEL_CONFIG = object()
 
 
 @config_cmd.command("roles")
-def config_roles():
-    """Show configured role overrides (CLI + model) for all Hive roles."""
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def config_roles(as_json: bool):
+    """Configure per-role CLI + model overrides.
+
+    Interactive picker when run from a TTY; JSON output with --json or
+    when piped.
+    """
     from . import settings as user_settings
 
-    result: dict[str, dict[str, object]] = {}
-    for role in sorted(user_settings.CONFIGURABLE_ROLES):
+    if as_json or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        result: dict[str, dict[str, object]] = {}
+        for role in sorted(user_settings.CONFIGURABLE_ROLES):
+            cli, model = user_settings.resolve_role_config(role)
+            result[role] = {
+                "cli": cli,
+                "model": model,
+                "applied": role in user_settings.APPLIED_ROLES,
+            }
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    _interactive_role_config()
+
+
+def _show_current_roles() -> None:
+    from . import settings as user_settings
+
+    click.echo("\nCurrent role overrides:")
+    for role in ("worker", "validator", "challenger", "orch"):
         cli, model = user_settings.resolve_role_config(role)
-        result[role] = {
-            "cli": cli,
-            "model": model,
-            "applied": role in user_settings.APPLIED_ROLES,
-        }
-    click.echo(json.dumps(result, indent=2, sort_keys=True))
+        suffix = "  (stored only)" if role not in user_settings.APPLIED_ROLES else ""
+        click.echo(f"  {role:<12} cli={cli or '—':<8} model={model or '—'}{suffix}")
+    click.echo()
+
+
+def _interactive_role_config() -> None:
+    from . import settings as user_settings
+    from .agent_cli import AGENT_CLI_NAMES, MODEL_SUGGESTIONS
+
+    applied = sorted(user_settings.APPLIED_ROLES)
+
+    _show_current_roles()
+
+    while True:
+        choices = applied + ["done"]
+        role = click.prompt(
+            "Configure which role?",
+            type=click.Choice(choices, case_sensitive=False),
+            default="done",
+        )
+        if role == "done":
+            break
+
+        current_cli, current_model = user_settings.resolve_role_config(role)
+
+        # --- CLI selection ---
+        cli_choices = sorted(AGENT_CLI_NAMES) + ["keep", "clear"]
+        cli_default = "keep"
+        if current_cli:
+            click.echo(f"  current cli: {current_cli}")
+        chosen_cli_input = click.prompt(
+            f"  CLI for {role}",
+            type=click.Choice(cli_choices, case_sensitive=False),
+            default=cli_default,
+        )
+
+        if chosen_cli_input == "clear":
+            user_settings.unset_setting(f"roles.{role}.cli")
+            effective_cli = ""
+        elif chosen_cli_input == "keep":
+            effective_cli = current_cli
+        else:
+            user_settings.set_setting(f"roles.{role}.cli", chosen_cli_input)
+            effective_cli = chosen_cli_input
+
+        # --- Model selection ---
+        if current_model:
+            click.echo(f"  current model: {current_model}")
+
+        suggestions = MODEL_SUGGESTIONS.get(effective_cli, []) if effective_cli else []
+        if suggestions:
+            click.echo(f"  Models for {effective_cli}:")
+            for i, m in enumerate(suggestions, 1):
+                marker = " ← current" if m == current_model else ""
+                click.echo(f"    {i}) {m}{marker}")
+            click.echo(f"    {len(suggestions) + 1}) (custom value)")
+            click.echo(f"    {len(suggestions) + 2}) (keep)")
+            click.echo(f"    {len(suggestions) + 3}) (clear)")
+
+            max_n = len(suggestions) + 3
+            while True:
+                raw = click.prompt(f"  Choice [1-{max_n}]", default=str(len(suggestions) + 2))
+                try:
+                    n = int(raw)
+                except ValueError:
+                    click.echo(f"  Invalid choice, enter 1-{max_n}")
+                    continue
+                if 1 <= n <= len(suggestions):
+                    user_settings.set_setting(f"roles.{role}.model", suggestions[n - 1])
+                    break
+                elif n == len(suggestions) + 1:
+                    custom = click.prompt("  Enter model value")
+                    if custom.strip():
+                        user_settings.set_setting(f"roles.{role}.model", custom.strip())
+                    break
+                elif n == len(suggestions) + 2:
+                    break
+                elif n == len(suggestions) + 3:
+                    user_settings.unset_setting(f"roles.{role}.model")
+                    break
+                else:
+                    click.echo(f"  Invalid choice, enter 1-{max_n}")
+        else:
+            model_choices = ["keep", "clear", "custom"]
+            chosen_model = click.prompt(
+                f"  Model for {role} (no CLI selected for suggestions)",
+                type=click.Choice(model_choices, case_sensitive=False),
+                default="keep",
+            )
+            if chosen_model == "clear":
+                user_settings.unset_setting(f"roles.{role}.model")
+            elif chosen_model == "custom":
+                custom = click.prompt("  Enter model value")
+                if custom.strip():
+                    user_settings.set_setting(f"roles.{role}.model", custom.strip())
+
+        final_cli, final_model = user_settings.resolve_role_config(role)
+        click.echo(f"  → {role}: cli={final_cli or '—'}  model={final_model or '—'}\n")
 
 
 @cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
