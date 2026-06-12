@@ -262,6 +262,27 @@ def test_interactive_multiple_roles(monkeypatch):
     assert store["roles.validator.model"] == "gpt-5.5"
 
 
+def test_interactive_model_cursor_starts_at_current(monkeypatch):
+    """Model menu cursor_index should match the current model's position."""
+    store = {"roles.validator.cli": "codex", "roles.validator.model": "gpt-5.4"}
+    _mock_settings(monkeypatch, store)
+
+    calls: list[dict] = []
+    menu_indices = iter([1, 3, 0, 3])  # role=validator, CLI=keep, model=first, done
+
+    def tracking_menu(entries, title, **kw):
+        calls.append({"entries": entries, "title": title, **kw})
+        return next(menu_indices)
+
+    monkeypatch.setattr("hive.cli._term_menu", tracking_menu)
+    _interactive_role_config()
+
+    model_call = [c for c in calls if "Model" in c["title"]][0]
+    from hive.agent_cli import MODEL_SUGGESTIONS
+    expected_cursor = MODEL_SUGGESTIONS["codex"].index("gpt-5.4")
+    assert model_call["cursor_index"] == expected_cursor
+
+
 def test_interactive_no_cli_shows_no_suggestions(monkeypatch):
     """When no CLI and user keeps, model prompt offers only custom/keep/clear."""
     store = _run_interactive(monkeypatch, [
