@@ -1,24 +1,33 @@
-"""Tests for `_resolve_squad_worker_cli` — the one squad-duo worker knob.
+"""Tests for `_resolve_squad_worker_config` — per-role CLI + model for squad workers.
 
-Default = orch's family (worker same-family as orch; the anti-family review
-seat goes to the validator). Override precedence: `@hive-squad-worker` window
-tag (set by `squad init --worker`) > global `squad.duoWorker` config > orch's
-CLI.
+CLI precedence: `@hive-squad-worker` window tag > `roles.worker.cli` >
+legacy `squad.duoWorker` > orch's CLI.
+Model: `roles.worker.model` applies regardless of CLI source.
 """
 
 import hive.cli as cli_mod
 
 
-def _mock(monkeypatch, *, window_tag="", config="", orch_cli="claude"):
+def _mock(monkeypatch, *, window_tag="", config="", orch_cli="claude",
+          role_cli="", role_model=""):
     monkeypatch.setattr(
         cli_mod.tmux,
         "get_window_option",
         lambda _w, k: window_tag if k == "hive-squad-worker" else "",
     )
+
+    settings_map = {}
+    if config:
+        settings_map["squad.duoWorker"] = config
+    if role_cli:
+        settings_map["roles.worker.cli"] = role_cli
+    if role_model:
+        settings_map["roles.worker.model"] = role_model
     monkeypatch.setattr(
         "hive.settings.get_setting",
-        lambda k, d: config if (k == "squad.duoWorker" and config) else d,
+        lambda k, d=None: settings_map.get(k, d),
     )
+
     monkeypatch.setattr(
         cli_mod.tmux,
         "get_pane_option",
@@ -26,30 +35,52 @@ def _mock(monkeypatch, *, window_tag="", config="", orch_cli="claude"):
     )
 
 
-def test_squad_worker_cli_defaults_to_orch_family(monkeypatch):
+def test_defaults_to_orch_family(monkeypatch):
     _mock(monkeypatch, orch_cli="codex")
-    assert cli_mod._resolve_squad_worker_cli("%1", "dev:1") == "codex"
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("codex", "")
 
 
-def test_squad_worker_cli_window_tag_overrides_orch(monkeypatch):
-    _mock(monkeypatch, window_tag="codex", orch_cli="claude")
-    assert cli_mod._resolve_squad_worker_cli("%1", "dev:1") == "codex"
+def test_window_tag_overrides_all(monkeypatch):
+    _mock(monkeypatch, window_tag="codex", role_cli="droid", config="droid",
+          orch_cli="claude", role_model="opus")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("codex", "opus")
 
 
-def test_squad_worker_cli_config_default_when_no_tag(monkeypatch):
+def test_role_config_cli_overrides_legacy_and_orch(monkeypatch):
+    _mock(monkeypatch, role_cli="droid", config="codex", orch_cli="claude")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("droid", "")
+
+
+def test_legacy_config_still_works(monkeypatch):
     _mock(monkeypatch, config="codex", orch_cli="claude")
-    assert cli_mod._resolve_squad_worker_cli("%1", "dev:1") == "codex"
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("codex", "")
 
 
-def test_squad_worker_cli_tag_beats_config(monkeypatch):
-    _mock(monkeypatch, window_tag="droid", config="codex", orch_cli="claude")
-    assert cli_mod._resolve_squad_worker_cli("%1", "dev:1") == "droid"
+def test_tag_beats_role_config(monkeypatch):
+    _mock(monkeypatch, window_tag="droid", role_cli="codex", orch_cli="claude")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("droid", "")
 
 
-def test_squad_worker_cli_ignores_legacy_crew_config_key(monkeypatch):
-    """Old `crew.cellWorker` is intentionally dead — direct rename, no alias."""
+def test_role_model_applies_with_any_cli_source(monkeypatch):
+    _mock(monkeypatch, orch_cli="claude", role_model="opus")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("claude", "opus")
+
+
+def test_role_model_applies_with_legacy_cli(monkeypatch):
+    _mock(monkeypatch, config="codex", role_model="o3")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("codex", "o3")
+
+
+def test_model_only_config(monkeypatch):
+    _mock(monkeypatch, orch_cli="claude", role_model="opus")
+    cli, model = cli_mod._resolve_squad_worker_config("%1", "dev:1")
+    assert cli == "claude"
+    assert model == "opus"
+
+
+def test_ignores_legacy_crew_config_key(monkeypatch):
     monkeypatch.setattr(cli_mod.tmux, "get_window_option", lambda _w, _k: "")
     legacy = {"crew.cellWorker": "codex"}
-    monkeypatch.setattr("hive.settings.get_setting", lambda k, d: legacy.get(k, d))
+    monkeypatch.setattr("hive.settings.get_setting", lambda k, d=None: legacy.get(k, d))
     monkeypatch.setattr(cli_mod.tmux, "get_pane_option", lambda _p, k: "claude" if k == "hive-cli" else "")
-    assert cli_mod._resolve_squad_worker_cli("%1", "dev:1") == "claude"
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("claude", "")

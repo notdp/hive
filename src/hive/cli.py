@@ -1802,6 +1802,173 @@ def config_unset(key: str):
 _SENTINEL_CONFIG = object()
 
 
+@config_cmd.command("roles")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def config_roles(as_json: bool):
+    """Configure per-role CLI + model overrides.
+
+    Interactive picker when run from a TTY; JSON output with --json or
+    when piped.
+    """
+    from . import settings as user_settings
+
+    if as_json or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        result: dict[str, dict[str, object]] = {}
+        for role in sorted(user_settings.CONFIGURABLE_ROLES):
+            cli, model = user_settings.resolve_role_config(role)
+            result[role] = {
+                "cli": cli,
+                "model": model,
+                "applied": role in user_settings.APPLIED_ROLES,
+            }
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    _interactive_role_config()
+
+
+def _show_current_roles() -> None:
+    from . import settings as user_settings
+
+    click.echo("\nCurrent role overrides:")
+    for role in ("worker", "validator", "challenger", "orch"):
+        cli, model = user_settings.resolve_role_config(role)
+        suffix = "  (stored only)" if role not in user_settings.APPLIED_ROLES else ""
+        click.echo(f"  {role:<12} cli={cli or '—':<8} model={model or '—'}{suffix}")
+    click.echo()
+
+
+def _interactive_role_config() -> None:
+    from . import settings as user_settings
+    from .agent_cli import AGENT_CLI_NAMES, MODEL_SUGGESTIONS
+
+    applied = sorted(user_settings.APPLIED_ROLES)
+
+    _show_current_roles()
+
+    while True:
+        choices = applied + ["done"]
+        role = click.prompt(
+            "Configure which role?",
+            type=click.Choice(choices, case_sensitive=False),
+            default="done",
+        )
+        if role == "done":
+            break
+
+        current_cli, current_model = user_settings.resolve_role_config(role)
+
+        # Collect both choices before any mutation — abort between prompts
+        # must not leave partial settings behind.
+        cli_action, model_action = _collect_role_choices(
+            role, current_cli, current_model, AGENT_CLI_NAMES, MODEL_SUGGESTIONS,
+        )
+
+        # Apply atomically after both prompts succeeded.
+        _apply_role_action(f"roles.{role}.cli", cli_action)
+        _apply_role_action(f"roles.{role}.model", model_action)
+
+        final_cli, final_model = user_settings.resolve_role_config(role)
+        click.echo(f"  → {role}: cli={final_cli or '—'}  model={final_model or '—'}\n")
+
+
+def _collect_role_choices(
+    role: str,
+    current_cli: str,
+    current_model: str,
+    agent_cli_names: frozenset[str],
+    model_suggestions: dict[str, list[str]],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Prompt for CLI and model choices. Returns (cli_action, model_action).
+
+    Each action is ``("set", value)``, ``("keep", "")``, or ``("clear", "")``.
+    All prompts complete before returning — if any prompt aborts, nothing is
+    returned and no settings are mutated.
+    """
+    cli_choices = sorted(agent_cli_names) + ["keep", "clear"]
+    if current_cli:
+        click.echo(f"  current cli: {current_cli}")
+    chosen_cli_input = click.prompt(
+        f"  CLI for {role}",
+        type=click.Choice(cli_choices, case_sensitive=False),
+        default="keep",
+    )
+
+    if chosen_cli_input == "clear":
+        cli_action: tuple[str, str] = ("clear", "")
+        effective_cli = ""
+    elif chosen_cli_input == "keep":
+        cli_action = ("keep", "")
+        effective_cli = current_cli
+    else:
+        cli_action = ("set", chosen_cli_input)
+        effective_cli = chosen_cli_input
+
+    if current_model:
+        click.echo(f"  current model: {current_model}")
+
+    suggestions = model_suggestions.get(effective_cli, []) if effective_cli else []
+    model_action: tuple[str, str]
+    if suggestions:
+        click.echo(f"  Models for {effective_cli}:")
+        for i, m in enumerate(suggestions, 1):
+            marker = " ← current" if m == current_model else ""
+            click.echo(f"    {i}) {m}{marker}")
+        click.echo(f"    {len(suggestions) + 1}) (custom value)")
+        click.echo(f"    {len(suggestions) + 2}) (keep)")
+        click.echo(f"    {len(suggestions) + 3}) (clear)")
+
+        max_n = len(suggestions) + 3
+        while True:
+            raw = click.prompt(f"  Choice [1-{max_n}]", default=str(len(suggestions) + 2))
+            try:
+                n = int(raw)
+            except ValueError:
+                click.echo(f"  Invalid choice, enter 1-{max_n}")
+                continue
+            if 1 <= n <= len(suggestions):
+                model_action = ("set", suggestions[n - 1])
+                break
+            elif n == len(suggestions) + 1:
+                custom = click.prompt("  Enter model value")
+                model_action = ("set", custom.strip()) if custom.strip() else ("keep", "")
+                break
+            elif n == len(suggestions) + 2:
+                model_action = ("keep", "")
+                break
+            elif n == len(suggestions) + 3:
+                model_action = ("clear", "")
+                break
+            else:
+                click.echo(f"  Invalid choice, enter 1-{max_n}")
+    else:
+        model_choice_list = ["keep", "clear", "custom"]
+        chosen_model = click.prompt(
+            f"  Model for {role} (no CLI selected for suggestions)",
+            type=click.Choice(model_choice_list, case_sensitive=False),
+            default="keep",
+        )
+        if chosen_model == "clear":
+            model_action = ("clear", "")
+        elif chosen_model == "custom":
+            custom = click.prompt("  Enter model value")
+            model_action = ("set", custom.strip()) if custom.strip() else ("keep", "")
+        else:
+            model_action = ("keep", "")
+
+    return cli_action, model_action
+
+
+def _apply_role_action(key: str, action: tuple[str, str]) -> None:
+    from . import settings as user_settings
+
+    op, value = action
+    if op == "set":
+        user_settings.set_setting(key, value)
+    elif op == "clear":
+        user_settings.unset_setting(key)
+
+
 @cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def wait_status(legacy_args: tuple[str, ...]):
@@ -2216,12 +2383,22 @@ def _prepare_duo_placement(
     """
     worker_cli = _resolve_spawn_cli_name(None)
     my_family = family_for_pane(current_pane)
+
+    from . import settings as user_settings
+    role_cli, role_model = user_settings.resolve_role_config("validator")
+
     if validator_cli:
-        v_cli, v_model = validator_cli, ""
+        v_cli = validator_cli
+        v_model = role_model
+    elif role_cli:
+        v_cli = role_cli
+        v_model = role_model
     else:
         v_cli, v_model = resolve_peer_spawn(my_cli=worker_cli, my_family=my_family)
         if not v_cli:
             v_cli = anti_peer_cli(worker_cli)
+        if role_model:
+            v_model = role_model
 
     window = tmux.get_pane_window_target(current_pane) or ""
     if not window:
@@ -2753,8 +2930,16 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     _gc_dead_teams()
 
     orch_cli = _resolve_spawn_cli_name(None)
+
+    from . import settings as user_settings
+    ch_role_cli, ch_role_model = user_settings.resolve_role_config("challenger")
+
     if peer_cli:
-        peer_cli_name, peer_model_id = peer_cli, ""
+        peer_cli_name = peer_cli
+        peer_model_id = ch_role_model
+    elif ch_role_cli:
+        peer_cli_name = ch_role_cli
+        peer_model_id = ch_role_model
     else:
         peer_cli_name, peer_model_id = resolve_peer_spawn(
             my_cli=orch_cli,
@@ -2762,6 +2947,8 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         )
         if not peer_cli_name:
             peer_cli_name = anti_peer_cli(orch_cli)
+        if ch_role_model:
+            peer_model_id = ch_role_model
 
     orch_agent_name = f"{squad_name}.orch"
     challenger_agent_name = f"{squad_name}.challenger"
@@ -2911,24 +3098,28 @@ def _next_peer_index_in_range(session: str, base: int) -> int:
 _SQUAD_PEER_WINDOW_NAME_INITIAL = "pending"
 
 
-def _resolve_squad_worker_cli(orch_pane: str, squad_window: str) -> str:
-    """Which CLI a squad's duo worker runs. Default = orch's family — worker
-    stays same-family as orch, the anti-family review seat goes to the
-    validator (cross-family value lives in the review gate, not the handoff).
+def _resolve_squad_worker_config(orch_pane: str, squad_window: str) -> tuple[str, str]:
+    """``(cli, model)`` for a squad's duo worker.
 
-    Override precedence: ``@hive-squad-worker`` (set by ``squad init --worker``)
-    > global ``squad.duoWorker`` config > orch's CLI.
+    CLI precedence: ``@hive-squad-worker`` (set by ``squad init --worker``)
+    > ``roles.worker.cli`` > legacy ``squad.duoWorker`` > orch's CLI.
+    Model: ``roles.worker.model`` (independent of CLI source).
     """
-    tagged = tmux.get_window_option(squad_window, "hive-squad-worker") if squad_window else ""
-    if tagged in AGENT_CLI_NAMES:
-        return tagged
     from . import settings as user_settings
 
+    role_cli, role_model = user_settings.resolve_role_config("worker")
+
+    tagged = tmux.get_window_option(squad_window, "hive-squad-worker") if squad_window else ""
+    if tagged in AGENT_CLI_NAMES:
+        return (tagged, role_model)
+    if role_cli:
+        return (role_cli, role_model)
     configured = user_settings.get_setting("squad.duoWorker", "")
     if configured in AGENT_CLI_NAMES:
-        return configured
+        return (configured, role_model)
     orch_cli = tmux.get_pane_option(orch_pane, "hive-cli") or _resolve_spawn_cli_name(None)
-    return orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
+    cli = orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
+    return (cli, role_model)
 
 
 def _copy_squad_integration_option(squad_window: str, peer_window: str) -> None:
@@ -3114,8 +3305,12 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         tmux_window_id=tmux.get_window_id(peer_window) or "",
     )
 
-    worker_cli = _resolve_squad_worker_cli(current_pane, squad_window_target)
-    validator_cli = anti_peer_cli(worker_cli)
+    worker_cli, worker_model = _resolve_squad_worker_config(current_pane, squad_window_target)
+
+    from . import settings as user_settings
+    val_role_cli, val_role_model = user_settings.resolve_role_config("validator")
+    validator_cli = val_role_cli if val_role_cli else anti_peer_cli(worker_cli)
+    validator_model = val_role_model
 
     worker_agent = Agent.spawn(
         name=worker_name,
@@ -3126,6 +3321,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         skill="none",
         prompt=_role_bootstrap_prompt("squad-worker"),
         cli=worker_cli,
+        model=worker_model,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", squad_name)
     tmux.set_pane_option(worker_agent.pane_id, "hive-owner", owner_name)
@@ -3143,6 +3339,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         skill="none",
         prompt=_role_bootstrap_prompt("squad-validator"),
         cli=validator_cli,
+        model=validator_model,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", squad_name)
     tmux.set_pane_option(validator_agent.pane_id, "hive-owner", owner_name)

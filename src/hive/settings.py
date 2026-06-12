@@ -12,6 +12,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+CONFIGURABLE_ROLES = frozenset({"orch", "challenger", "worker", "validator"})
+APPLIED_ROLES = frozenset({"challenger", "worker", "validator"})
+
 
 def _hive_home() -> Path:
     return Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
@@ -79,6 +82,28 @@ def unset_setting(key: str) -> bool:
     del node[parts[-1]]
     _write_atomic(data)
     return True
+
+
+def resolve_role_config(role: str) -> tuple[str, str]:
+    """Return ``(cli, model)`` overrides for *role* from user settings.
+
+    Only values under ``roles.<role>.{cli, model}`` are read.  ``cli`` must be
+    one of the recognised agent CLI names to be returned; otherwise ``""``.
+    ``model`` must be a non-empty string; otherwise ``""``.  Unknown or
+    unsupported *role* names always return ``("", "")``.
+    """
+    if role not in CONFIGURABLE_ROLES:
+        return ("", "")
+
+    from .agent_cli import AGENT_CLI_NAMES
+
+    raw_cli = get_setting(f"roles.{role}.cli", "")
+    cli = raw_cli if isinstance(raw_cli, str) and raw_cli in AGENT_CLI_NAMES else ""
+
+    raw_model = get_setting(f"roles.{role}.model", "")
+    model = raw_model if isinstance(raw_model, str) and raw_model else ""
+
+    return (cli, model)
 
 
 def _write_atomic(data: dict[str, Any]) -> None:
