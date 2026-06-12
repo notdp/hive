@@ -50,6 +50,99 @@ def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monk
     assert prompted == []
 
 
+def test_fork_in_squad_prefixes_agent_name(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Forking in a squad pane auto-prefixes the derived name with the squad
+    namespace (e.g. 'coco' → 'peaky.coco') so return routing works."""
+    configure_hive_home(current_pane="%99", session_name="dev")
+
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
+
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
+    monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%99", "orch", command="claude", role="agent", agent="peaky.orch", team="team-x", cli="claude", group="peaky")],
+    )
+    # Source pane is in squad "peaky" — must also return hive-team so the
+    # pane is recognised as team-bound by _resolve_pane_target.
+    pane_options = {"hive-group": "peaky", "hive-team": "team-x", "hive-cli": "claude", "hive-agent": "peaky.orch"}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get(key, ""),
+    )
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["registered"].startswith("peaky."), (
+        f"expected squad-prefixed name, got {payload['registered']!r}"
+    )
+
+
+def test_fork_in_duo_does_not_prefix_agent_name(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Forking in a duo pane (group='duo') should NOT add a prefix."""
+    configure_hive_home(current_pane="%99", session_name="dev")
+
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
+
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
+    monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%99", "worker", command="claude", role="agent", agent="worker", team="team-x", cli="claude", group="duo")],
+    )
+    pane_options = {"hive-group": "duo", "hive-team": "team-x", "hive-cli": "claude", "hive-agent": "worker"}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get(key, ""),
+    )
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "." not in payload["registered"], (
+        f"duo fork should not prefix, got {payload['registered']!r}"
+    )
+
+
 def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%99", session_name="dev")
 

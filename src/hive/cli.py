@@ -843,6 +843,10 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
         panes = tmux.list_panes_full(window_target) if window_target else []
         seen_names = _window_seen_names(target_team, panes)
         join_as = _derive_agent_name(seen_names)
+        source_pane = pane_id or (tmux.get_current_pane_id() or "")
+        group = tmux.get_pane_option(source_pane, "hive-group") if source_pane else ""
+        if group and group != "duo":
+            join_as = f"{group}.{join_as}"
 
     registered_agent, new_pane = _fork_registered_agent(
         t=target_team,
