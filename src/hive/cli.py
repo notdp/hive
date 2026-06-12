@@ -1895,12 +1895,18 @@ def _collect_role_choices(
     Abort (Escape/q) at any point raises ``click.Abort``.
     """
     # --- CLI ---
-    cli_entries = sorted(agent_cli_names)
-    if current_cli:
-        cli_entries = [f"{c}  ← current" if c == current_cli else c for c in cli_entries]
+    cli_sorted = sorted(agent_cli_names)
+    cli_entries = []
+    cli_cursor = 0
+    for i, c in enumerate(cli_sorted):
+        if c == current_cli:
+            cli_entries.append(f"{c}  ← current")
+            cli_cursor = i
+        else:
+            cli_entries.append(c)
     cli_entries += ["(keep)", "(clear)"]
 
-    idx = _term_menu(cli_entries, f"  CLI for {role}:")
+    idx = _term_menu(cli_entries, f"  CLI for {role}:", cursor_index=cli_cursor)
     if idx is None:
         raise click.Abort()
 
@@ -1924,8 +1930,11 @@ def _collect_role_choices(
     model_entries += ["(custom)", "(keep)", "(clear)"]
 
     cursor = 0
-    if current_model and current_model in suggestions:
-        cursor = suggestions.index(current_model)
+    if current_model:
+        if current_model in suggestions:
+            cursor = suggestions.index(current_model)
+        else:
+            cursor = model_entries.index("(keep)")
 
     idx = _term_menu(model_entries, f"  Model for {role}:", cursor_index=cursor)
     if idx is None:
