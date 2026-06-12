@@ -329,3 +329,245 @@ def test_resolve_squad_worker_config_validator_fallback_to_anti_peer(monkeypatch
     assert cli_name == ""  # not set → caller uses anti_peer_cli fallback
     assert model == "o3"
     assert anti_peer_cli("claude") == "codex"  # confirms fallback behavior
+
+
+# --- full CLI-path spawn kwargs test for squad spawn-duo ---
+
+
+def test_squad_spawn_duo_passes_role_config_to_agent_spawn(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """End-to-end: `hive squad spawn-duo` resolves role config and passes
+    cli + model to both worker and validator Agent.spawn calls."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+
+    import hive.cli as cli_mod
+    from hive.agent import Agent
+    from hive.team import Team
+    from types import SimpleNamespace
+
+    # Role config: worker=claude/opus, validator=droid/o3
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.worker.cli": "claude",
+            "roles.worker.model": "opus",
+            "roles.validator.cli": "droid",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    # Orch pane is tagged as peaky.orch in a squad window
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_pane_option",
+        lambda pane, key: {
+            "hive-group": "peaky",
+            "hive-cli": "claude",
+        }.get(key, ""),
+    )
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_window_option",
+        lambda win, key: {
+            "hive-squad-base": "1000",
+            "hive-squad-name": "peaky",
+        }.get(key, ""),
+    )
+
+    # Fake team for _resolve_scoped_team
+    fake_team = Team(
+        name="dev-w0",
+        workspace=str(tmp_path / "ws"),
+        tmux_session="dev",
+        tmux_window="dev:0",
+        tmux_window_id="@0",
+    )
+    (tmp_path / "ws").mkdir()
+    monkeypatch.setattr(
+        cli_mod, "_resolve_scoped_team",
+        lambda _team, required=True: ("dev-w0", fake_team),
+    )
+
+    # Tmux stubs
+    monkeypatch.setattr(cli_mod.tmux, "list_window_indices", lambda _s: [0])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_all", lambda: [])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes", lambda _w: ["%200"])
+    monkeypatch.setattr(
+        cli_mod.tmux, "new_window",
+        lambda _s, name="", cwd="", index=0: (f"dev:{index}", "%200"),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "set_window_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _t: None)
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda _t, _n: None)
+    monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda _t: "@99")
+    monkeypatch.setattr(
+        cli_mod.tmux, "display_value",
+        lambda _p, _f: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        "hive.layout.split_horizontal", lambda _t, _c: True,
+    )
+    monkeypatch.setattr(
+        "hive.layout.apply_adaptive",
+        lambda _t: SimpleNamespace(orientation="horizontal"),
+    )
+
+    # Capture Agent.spawn kwargs
+    spawned: list[dict] = []
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id=f"%{200 + len(spawned)}",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    # Sidecar + readiness: instant ready
+    monkeypatch.setattr(
+        cli_mod, "_ensure_team_sidecar", lambda _t, _ws: None,
+    )
+    monkeypatch.setattr(
+        cli_mod, "_wait_for_peer_ready",
+        lambda _ws, team_name="", agents=None: set(),
+    )
+
+    # Dispatch stubs
+    monkeypatch.setattr(
+        cli_mod, "_request_send_payload",
+        lambda **_k: None,
+    )
+
+    # Task artifact file
+    task = tmp_path / "task.md"
+    task.write_text("# task")
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "role-config", "--task", str(task)],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Worker spawn
+    assert len(spawned) == 2
+    worker_spawn = spawned[0]
+    assert worker_spawn["name"] == "peaky.worker-1000"
+    assert worker_spawn["cli"] == "claude"
+    assert worker_spawn["model"] == "opus"
+
+    # Validator spawn
+    validator_spawn = spawned[1]
+    assert validator_spawn["name"] == "peaky.validator-1000"
+    assert validator_spawn["cli"] == "droid"
+    assert validator_spawn["model"] == "o3"
+
+
+def test_squad_spawn_duo_validator_fallback_when_no_role_cli(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """When roles.validator.cli is unset, validator CLI falls back to
+    anti_peer_cli(worker_cli) while model still applies."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+
+    import hive.cli as cli_mod
+    from hive.agent import Agent
+    from hive.team import Team
+    from types import SimpleNamespace
+
+    # Only validator model set, no CLI
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_pane_option",
+        lambda pane, key: {
+            "hive-group": "peaky",
+            "hive-cli": "claude",
+        }.get(key, ""),
+    )
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_window_option",
+        lambda win, key: {
+            "hive-squad-base": "1000",
+            "hive-squad-name": "peaky",
+        }.get(key, ""),
+    )
+
+    fake_team = Team(
+        name="dev-w0",
+        workspace=str(tmp_path / "ws"),
+        tmux_session="dev",
+        tmux_window="dev:0",
+        tmux_window_id="@0",
+    )
+    (tmp_path / "ws").mkdir()
+    monkeypatch.setattr(
+        cli_mod, "_resolve_scoped_team",
+        lambda _team, required=True: ("dev-w0", fake_team),
+    )
+
+    monkeypatch.setattr(cli_mod.tmux, "list_window_indices", lambda _s: [0])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_all", lambda: [])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes", lambda _w: ["%200"])
+    monkeypatch.setattr(
+        cli_mod.tmux, "new_window",
+        lambda _s, name="", cwd="", index=0: (f"dev:{index}", "%200"),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "set_window_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _t: None)
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda _t, _n: None)
+    monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda _t: "@99")
+    monkeypatch.setattr(
+        cli_mod.tmux, "display_value",
+        lambda _p, _f: str(tmp_path),
+    )
+    monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
+    monkeypatch.setattr(
+        "hive.layout.apply_adaptive",
+        lambda _t: SimpleNamespace(orientation="horizontal"),
+    )
+
+    spawned: list[dict] = []
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id=f"%{200 + len(spawned)}",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+    monkeypatch.setattr(cli_mod, "_ensure_team_sidecar", lambda _t, _ws: None)
+    monkeypatch.setattr(
+        cli_mod, "_wait_for_peer_ready",
+        lambda _ws, team_name="", agents=None: set(),
+    )
+    monkeypatch.setattr(cli_mod, "_request_send_payload", lambda **_k: None)
+
+    task = tmp_path / "task.md"
+    task.write_text("# task")
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "role-config", "--task", str(task)],
+    )
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 2
+    # Worker: no role config → orch's CLI fallback (claude)
+    assert spawned[0]["cli"] == "claude"
+    assert spawned[0]["model"] == ""
+
+    # Validator: CLI falls back to anti_peer_cli("claude") = codex, model from config
+    assert spawned[1]["cli"] == "codex"
+    assert spawned[1]["model"] == "o3"
