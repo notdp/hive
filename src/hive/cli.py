@@ -1830,13 +1830,29 @@ def config_roles(as_json: bool):
 def _show_current_roles() -> None:
     from . import settings as user_settings
 
-    click.echo()
+    rows = []
     for role in ("worker", "validator", "challenger", "orch"):
         cli, model = user_settings.resolve_role_config(role)
-        tag = " (stored only)" if role not in user_settings.APPLIED_ROLES else ""
-        cli_part = cli or "default"
-        model_part = model or "default"
-        click.echo(f"  {role:<12} {cli_part:<10} {model_part}{tag}")
+        note = "stored only" if role not in user_settings.APPLIED_ROLES else ""
+        rows.append((role, cli or "—", model or "—", note))
+
+    w_role = max(len(r[0]) for r in rows)
+    w_cli = max(len(r[1]) for r in rows)
+    w_model = max(len(r[2]) for r in rows)
+    w_role = max(w_role, 4)
+    w_cli = max(w_cli, 3)
+    w_model = max(w_model, 5)
+
+    header = f"  {'Role':<{w_role}}  {'CLI':<{w_cli}}  {'Model':<{w_model}}"
+    sep = f"  {'─' * w_role}  {'─' * w_cli}  {'─' * w_model}"
+    click.echo()
+    click.echo(header)
+    click.echo(sep)
+    for role, cli, model, note in rows:
+        line = f"  {role:<{w_role}}  {cli:<{w_cli}}  {model:<{w_model}}"
+        if note:
+            line += f"  ({note})"
+        click.echo(line)
     click.echo()
 
 
