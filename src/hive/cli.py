@@ -1798,6 +1798,22 @@ def config_unset(key: str):
 _SENTINEL_CONFIG = object()
 
 
+@config_cmd.command("roles")
+def config_roles():
+    """Show configured role overrides (CLI + model) for all Hive roles."""
+    from . import settings as user_settings
+
+    result: dict[str, dict[str, object]] = {}
+    for role in sorted(user_settings.CONFIGURABLE_ROLES):
+        cli, model = user_settings.resolve_role_config(role)
+        result[role] = {
+            "cli": cli,
+            "model": model,
+            "applied": role in user_settings.APPLIED_ROLES,
+        }
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
 @cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def wait_status(legacy_args: tuple[str, ...]):
@@ -2212,12 +2228,22 @@ def _prepare_duo_placement(
     """
     worker_cli = _resolve_spawn_cli_name(None)
     my_family = family_for_pane(current_pane)
+
+    from . import settings as user_settings
+    role_cli, role_model = user_settings.resolve_role_config("validator")
+
     if validator_cli:
-        v_cli, v_model = validator_cli, ""
+        v_cli = validator_cli
+        v_model = role_model
+    elif role_cli:
+        v_cli = role_cli
+        v_model = role_model
     else:
         v_cli, v_model = resolve_peer_spawn(my_cli=worker_cli, my_family=my_family)
         if not v_cli:
             v_cli = anti_peer_cli(worker_cli)
+        if role_model:
+            v_model = role_model
 
     window = tmux.get_pane_window_target(current_pane) or ""
     if not window:
@@ -2749,8 +2775,16 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     _gc_dead_teams()
 
     orch_cli = _resolve_spawn_cli_name(None)
+
+    from . import settings as user_settings
+    ch_role_cli, ch_role_model = user_settings.resolve_role_config("challenger")
+
     if peer_cli:
-        peer_cli_name, peer_model_id = peer_cli, ""
+        peer_cli_name = peer_cli
+        peer_model_id = ch_role_model
+    elif ch_role_cli:
+        peer_cli_name = ch_role_cli
+        peer_model_id = ch_role_model
     else:
         peer_cli_name, peer_model_id = resolve_peer_spawn(
             my_cli=orch_cli,
@@ -2758,6 +2792,8 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         )
         if not peer_cli_name:
             peer_cli_name = anti_peer_cli(orch_cli)
+        if ch_role_model:
+            peer_model_id = ch_role_model
 
     orch_agent_name = f"{squad_name}.orch"
     challenger_agent_name = f"{squad_name}.challenger"
@@ -2907,24 +2943,28 @@ def _next_peer_index_in_range(session: str, base: int) -> int:
 _SQUAD_PEER_WINDOW_NAME_INITIAL = "pending"
 
 
-def _resolve_squad_worker_cli(orch_pane: str, squad_window: str) -> str:
-    """Which CLI a squad's duo worker runs. Default = orch's family — worker
-    stays same-family as orch, the anti-family review seat goes to the
-    validator (cross-family value lives in the review gate, not the handoff).
+def _resolve_squad_worker_config(orch_pane: str, squad_window: str) -> tuple[str, str]:
+    """``(cli, model)`` for a squad's duo worker.
 
-    Override precedence: ``@hive-squad-worker`` (set by ``squad init --worker``)
-    > global ``squad.duoWorker`` config > orch's CLI.
+    CLI precedence: ``@hive-squad-worker`` (set by ``squad init --worker``)
+    > ``roles.worker.cli`` > legacy ``squad.duoWorker`` > orch's CLI.
+    Model: ``roles.worker.model`` (independent of CLI source).
     """
-    tagged = tmux.get_window_option(squad_window, "hive-squad-worker") if squad_window else ""
-    if tagged in AGENT_CLI_NAMES:
-        return tagged
     from . import settings as user_settings
 
+    role_cli, role_model = user_settings.resolve_role_config("worker")
+
+    tagged = tmux.get_window_option(squad_window, "hive-squad-worker") if squad_window else ""
+    if tagged in AGENT_CLI_NAMES:
+        return (tagged, role_model)
+    if role_cli:
+        return (role_cli, role_model)
     configured = user_settings.get_setting("squad.duoWorker", "")
     if configured in AGENT_CLI_NAMES:
-        return configured
+        return (configured, role_model)
     orch_cli = tmux.get_pane_option(orch_pane, "hive-cli") or _resolve_spawn_cli_name(None)
-    return orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
+    cli = orch_cli if orch_cli in AGENT_CLI_NAMES else "claude"
+    return (cli, role_model)
 
 
 def _copy_squad_integration_option(squad_window: str, peer_window: str) -> None:
@@ -3110,8 +3150,12 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         tmux_window_id=tmux.get_window_id(peer_window) or "",
     )
 
-    worker_cli = _resolve_squad_worker_cli(current_pane, squad_window_target)
-    validator_cli = anti_peer_cli(worker_cli)
+    worker_cli, worker_model = _resolve_squad_worker_config(current_pane, squad_window_target)
+
+    from . import settings as user_settings
+    val_role_cli, val_role_model = user_settings.resolve_role_config("validator")
+    validator_cli = val_role_cli if val_role_cli else anti_peer_cli(worker_cli)
+    validator_model = val_role_model
 
     worker_agent = Agent.spawn(
         name=worker_name,
@@ -3122,6 +3166,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         skill="none",
         prompt=_role_bootstrap_prompt("squad-worker"),
         cli=worker_cli,
+        model=worker_model,
     )
     tmux.set_pane_option(worker_agent.pane_id, "hive-group", squad_name)
     tmux.set_pane_option(worker_agent.pane_id, "hive-owner", owner_name)
@@ -3139,6 +3184,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         skill="none",
         prompt=_role_bootstrap_prompt("squad-validator"),
         cli=validator_cli,
+        model=validator_model,
     )
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", squad_name)
     tmux.set_pane_option(validator_agent.pane_id, "hive-owner", owner_name)

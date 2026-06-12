@@ -271,3 +271,61 @@ def test_spawn_duo_help_teaches_semantic_feature_ids(runner):
     result = runner.invoke(cli, ["squad", "spawn-duo", "--help"])
     assert "e.g. F1" not in result.output
     assert "kebab-case" in result.output
+
+
+# --- role config: worker + validator CLI/model in squad spawn-duo ---
+
+
+def test_resolve_squad_worker_config_role_cli_in_precedence(monkeypatch):
+    """roles.worker.cli sits between @hive-squad-worker tag and legacy squad.duoWorker."""
+    import hive.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.tmux, "get_window_option", lambda _w, _k: "")
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.worker.cli": "droid",
+            "roles.worker.model": "opus",
+            "squad.duoWorker": "codex",
+        }.get(key, default),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "get_pane_option", lambda _p, k: "claude" if k == "hive-cli" else "")
+
+    cli_name, model = cli_mod._resolve_squad_worker_config("%1", "dev:1")
+    assert cli_name == "droid"
+    assert model == "opus"
+
+
+def test_resolve_squad_worker_config_validator_role_config(monkeypatch):
+    """resolve_role_config('validator') provides cli+model for squad spawn-duo validator."""
+    from hive.settings import resolve_role_config
+
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "droid",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    cli_name, model = resolve_role_config("validator")
+    assert cli_name == "droid"
+    assert model == "o3"
+
+
+def test_resolve_squad_worker_config_validator_fallback_to_anti_peer(monkeypatch):
+    """When roles.validator.cli is unset, validator falls back to anti_peer_cli."""
+    from hive.agent_cli import anti_peer_cli
+    from hive.settings import resolve_role_config
+
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    cli_name, model = resolve_role_config("validator")
+    assert cli_name == ""  # not set → caller uses anti_peer_cli fallback
+    assert model == "o3"
+    assert anti_peer_cli("claude") == "codex"  # confirms fallback behavior

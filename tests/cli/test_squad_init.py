@@ -220,3 +220,119 @@ def test_squad_init_idempotent_on_bound_orch_plain_rerun(
     assert payload.get("group") == "peaky"   # squad namespace unchanged
     assert spawned == []                       # no second challenger
     assert renamed == []                       # no window rename
+
+
+# --- role config: challenger CLI + model via settings ---
+
+
+def _squad_init_mocks(cli_mod, monkeypatch, repo):
+    """Shared stubs for squad init role-config tests."""
+    spawned: list[dict] = []
+    profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: profile)
+    monkeypatch.setattr(cli_mod, "family_for_pane", lambda _pane: "openai")
+    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_kwargs: ("claude", ""))
+    monkeypatch.setattr(cli_mod, "anti_peer_cli", lambda _c: "claude")
+    monkeypatch.setattr(cli_mod.tmux, "get_current_window_index", lambda: "0")
+    monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _pane: 1)
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda _t, _n: None)
+    monkeypatch.setattr(
+        cli_mod.tmux,
+        "display_value",
+        lambda _p, fmt: "dev:0" if fmt == "#{session_name}:#{window_index}" else str(repo),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _t: None)
+    monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _t: None)
+    monkeypatch.setattr("hive.team.tmux.configure_hive_window", lambda _t: None)
+    monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _ws: None)
+    monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
+    monkeypatch.setattr("hive.layout.apply_adaptive", lambda _t: SimpleNamespace(orientation="horizontal"))
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda _s: None)
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        name = str(kwargs["name"])
+        team_name = str(kwargs["team_name"])
+        cli_name = str(kwargs["cli"])
+        cli_mod.tmux.tag_pane("%101", "agent", name, team_name, cli=cli_name)
+        return Agent(name=name, team_name=team_name, pane_id="%101", cli=cli_name)
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+    return spawned
+
+
+def test_squad_init_uses_role_config_for_challenger(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned = _squad_init_mocks(cli_mod, monkeypatch, repo)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.challenger.cli": "droid",
+            "roles.challenger.model": "opus",
+        }.get(key, default),
+    )
+
+    result = runner.invoke(cli, ["squad", "init", "--name", "peaky"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["model"] == "opus"
+
+
+def test_squad_init_flag_overrides_role_cli_keeps_model(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned = _squad_init_mocks(cli_mod, monkeypatch, repo)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.challenger.cli": "droid",
+            "roles.challenger.model": "opus",
+        }.get(key, default),
+    )
+
+    result = runner.invoke(cli, ["squad", "init", "--name", "peaky", "--peer-cli", "codex"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "codex"
+    assert spawned[0]["model"] == "opus"
+
+
+def test_squad_init_model_only_keeps_default_cli(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned = _squad_init_mocks(cli_mod, monkeypatch, repo)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.challenger.model": "o4-mini",
+        }.get(key, default),
+    )
+
+    result = runner.invoke(cli, ["squad", "init", "--name", "peaky"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "claude"  # anti-family fallback
+    assert spawned[0]["model"] == "o4-mini"

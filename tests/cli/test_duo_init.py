@@ -402,3 +402,155 @@ def test_role_bootstrap_prompt_is_single_line():
 
     for role in ("duo-worker", "duo-validator", "squad-orch", "squad-challenger", "squad-worker", "squad-validator"):
         assert "\n" not in cli_mod._role_bootstrap_prompt(role)
+
+
+# --- role config: validator CLI + model via settings ---
+
+
+def test_duo_init_uses_role_config_for_validator(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """When roles.validator.cli/model are set, duo init uses them for the spawned validator."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "codex",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%101",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "codex"
+    assert spawned[0]["model"] == "o3"
+
+
+def test_duo_init_flag_overrides_role_cli_but_keeps_model(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """--validator-cli flag overrides roles.validator.cli but roles.validator.model still applies."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "codex",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%101",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    result = runner.invoke(cli, ["duo", "init", "--validator-cli", "droid"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["model"] == "o3"
+
+
+def test_duo_init_model_only_keeps_default_cli(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Model-only config: CLI falls back to anti-family, model from roles config."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.model": "opus",
+        }.get(key, default),
+    )
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%101",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "claude"  # anti-family fallback
+    assert spawned[0]["model"] == "opus"
+
+
+def test_duo_init_role_cli_set_without_model_no_stale_peer_model(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """When roles.validator.cli is set but model is not, no stale resolve_peer_spawn model leaks."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "droid",
+        }.get(key, default),
+    )
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%101",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["model"] == ""
