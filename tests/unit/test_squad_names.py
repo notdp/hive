@@ -11,13 +11,13 @@ from hive import squad_names
 from hive.tmux import PaneInfo
 
 
-def _pane(group: str, pane_id: str = "%1") -> PaneInfo:
+def _pane(group: str, pane_id: str = "%1", agent: str = "") -> PaneInfo:
     return PaneInfo(
         pane_id=pane_id,
         title="",
         command="",
         role="agent",
-        agent="",
+        agent=agent,
         team="",
         cli="",
         group=group,
@@ -165,6 +165,28 @@ def test_claimed_names_returns_distinct_groups(monkeypatch):
     ]
     monkeypatch.setattr(squad_names.tmux, "list_panes_all", lambda: panes)
     assert squad_names.claimed_names() == {"peaky", "shelby"}
+
+
+def test_claimed_names_includes_qualified_agent_prefix(monkeypatch):
+    """A pane with @hive-agent=krays.coco but no @hive-group still claims 'krays'."""
+    panes = [
+        _pane("peaky", agent="peaky.orch"),          # group + agent both claim
+        _pane("", "%2", agent="krays.coco"),          # no group, agent claims
+        _pane("", "%3", agent="worker"),              # unqualified, no claim
+    ]
+    monkeypatch.setattr(squad_names.tmux, "list_panes_all", lambda: panes)
+    assert squad_names.claimed_names() == {"peaky", "krays"}
+
+
+def test_claimed_names_ignores_invalid_agent_prefix(monkeypatch):
+    """Qualified agent prefixes that fail validate_name are not claimed."""
+    panes = [
+        _pane("", agent="9bad.worker"),      # leading digit → invalid
+        _pane("", "%2", agent="squad.orch"), # reserved → invalid
+        _pane("", "%3", agent=".worker"),    # empty prefix → no dot split
+    ]
+    monkeypatch.setattr(squad_names.tmux, "list_panes_all", lambda: panes)
+    assert squad_names.claimed_names() == set()
 
 
 def test_validate_rejects_reserved_tokens():
