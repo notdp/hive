@@ -1125,6 +1125,7 @@ def _fork_registered_agent(
         launch_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file(team_bound=True)))})\""
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
     tmux.send_keys(new_pane, launch_cmd)
+    group = join_as.partition(".")[0] if "." in join_as else ""
     registered_agent = _register_agent_member(
         t,
         pane_id=new_pane,
@@ -1133,6 +1134,7 @@ def _fork_registered_agent(
         pane_cli=profile.name,
         cwd=source_cwd or os.getcwd(),
         notify=False,
+        group=group,
     )
     return registered_agent, new_pane
 
