@@ -67,11 +67,25 @@ def test_find_qualified_raises_on_ambiguous(monkeypatch):
         cli_module._find_qualified_agent_target("kraken.worker-1")
 
 
-def test_find_qualified_ignores_mismatched_group(monkeypatch):
+def test_find_qualified_resolves_missing_group(monkeypatch):
+    """A pane with matching @hive-agent but no @hive-group is still routable."""
+    panes = [_pane("kraken.worker-1", "peer-1", "", "%1")]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    assert cli_module._find_qualified_agent_target("kraken.worker-1") == (
+        "peer-1",
+        "kraken.worker-1",
+    )
+
+
+def test_find_qualified_rejects_conflicting_group(monkeypatch):
+    """A pane with @hive-agent=kraken.worker-1 but @hive-group=mafia is a
+    tagging mistake — the resolver must raise, not silently route."""
     panes = [_pane("kraken.worker-1", "peer-1", "mafia", "%1")]
     monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
 
-    assert cli_module._find_qualified_agent_target("kraken.worker-1") is None
+    with pytest.raises(ValueError, match="conflicting"):
+        cli_module._find_qualified_agent_target("kraken.worker-1")
 
 
 def test_find_qualified_ignores_same_suffix_in_other_public_squad(monkeypatch):
@@ -85,6 +99,26 @@ def test_find_qualified_ignores_same_suffix_in_other_public_squad(monkeypatch):
 
 def test_find_qualified_requires_non_empty_group_prefix():
     assert cli_module._find_qualified_agent_target(".worker-1") is None
+
+
+def test_find_qualified_ambiguous_with_missing_groups(monkeypatch):
+    """Duplicate @hive-agent across panes is ambiguous even when both lack group."""
+    panes = [
+        _pane("kraken.worker-1", "peer-1", "", "%1"),
+        _pane("kraken.worker-1", "peer-2", "", "%5"),
+    ]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    with pytest.raises(ValueError, match="unique"):
+        cli_module._find_qualified_agent_target("kraken.worker-1")
+
+
+def test_find_qualified_skips_pane_without_team(monkeypatch):
+    """A pane with matching agent name but empty team is not a valid target."""
+    panes = [_pane("kraken.worker-1", "", "kraken", "%1")]
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: panes)
+
+    assert cli_module._find_qualified_agent_target("kraken.worker-1") is None
 
 
 def test_resolve_send_target_team_loads_target_team_for_qualified_name(monkeypatch):

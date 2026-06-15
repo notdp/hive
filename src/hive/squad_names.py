@@ -87,8 +87,12 @@ def validate_feature_id(feature_id: str) -> tuple[bool, str]:
 
 
 def claimed_names() -> set[str]:
-    """Return every squad name currently claimed by a live `@hive-group`
-    tag across the tmux server.
+    """Return every squad name currently claimed by a live ``@hive-group``
+    tag **or** a qualified ``@hive-agent`` prefix across the tmux server.
+
+    A pane with ``@hive-agent=krays.coco`` claims ``krays`` even when
+    ``@hive-group`` is missing — the qualified resolver can route to it,
+    so the namespace must be reserved.
 
     Filters out the empty string and the reserved tokens: ``squad`` and
     the pre-rename legacy ``crew``, which may still sit on stale panes —
@@ -97,9 +101,14 @@ def claimed_names() -> set[str]:
     claimed: set[str] = set()
     for pane in tmux.list_panes_all():
         group = (pane.group or "").strip()
-        if not group or group in ("squad", "crew"):
-            continue
-        claimed.add(group)
+        if group and group not in ("squad", "crew"):
+            claimed.add(group)
+        agent = (pane.agent or "").strip()
+        if "." in agent:
+            prefix, _, _ = agent.partition(".")
+            ok, _ = validate_name(prefix)
+            if ok:
+                claimed.add(prefix)
     return claimed
 
 

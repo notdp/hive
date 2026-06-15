@@ -1125,6 +1125,7 @@ def _fork_registered_agent(
         launch_cmd = f"{cmd_base} \"$(cat {shlex.quote(str(_fork_boundary_file(team_bound=True)))})\""
     new_pane = tmux.split_window(current_pane, horizontal=horizontal, cwd=source_cwd or None, detach=False)
     tmux.send_keys(new_pane, launch_cmd)
+    group = join_as.partition(".")[0] if "." in join_as else ""
     registered_agent = _register_agent_member(
         t,
         pane_id=new_pane,
@@ -1133,6 +1134,7 @@ def _fork_registered_agent(
         pane_cli=profile.name,
         cwd=source_cwd or os.getcwd(),
         notify=False,
+        group=group,
     )
     return registered_agent, new_pane
 
@@ -1183,31 +1185,42 @@ def _resolve_handoff_anchor_event(
 
 
 def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
-    """Locate a pane by qualified agent name `<group>.<name>`.
+    """Locate a pane by qualified agent name ``<prefix>.<name>``.
 
-    Scans every hive-tagged pane across all sessions. Returns
+    Scans every hive-tagged pane across all sessions.  Returns
     ``(team_name, agent_name)`` on unique match or ``None`` if no match.
-    Raises ``ValueError`` when multiple panes claim the same qualified
-    name (group membership must be unique per qualified name).
+
+    A pane matches when ``p.agent == qualified`` and ``p.team`` is non-empty.
+    A missing ``@hive-group`` is tolerated (fork/register paths may not always
+    set it), but a *conflicting* group (present and differs from the qualified
+    prefix) is rejected with ``ValueError`` — it signals a tagging mistake,
+    not a legitimate target.
+
+    Raises ``ValueError`` on ambiguous duplicates or conflicting group tags.
     """
     if "." not in qualified:
         return None
-    group_name, _, _ = qualified.partition(".")
-    if not group_name:
+    prefix, _, _ = qualified.partition(".")
+    if not prefix:
         return None
-    matches = [
+    candidates = [
         p for p in tmux.list_panes_all()
-        if p.group == group_name and p.agent == qualified
+        if p.agent == qualified and p.team
     ]
-    if not matches:
+    if not candidates:
         return None
-    if len(matches) > 1:
+    for p in candidates:
+        if p.group and p.group != prefix:
+            raise ValueError(
+                f"agent '{qualified}' on pane {p.pane_id} has conflicting "
+                f"@hive-group '{p.group}' (expected '{prefix}' or empty)"
+            )
+    if len(candidates) > 1:
         raise ValueError(
-            f"agent '{qualified}' matches {len(matches)} panes; "
-            "group membership must be unique"
+            f"agent '{qualified}' matches {len(candidates)} panes; "
+            "qualified agent names must be unique"
         )
-    target = matches[0]
-    return target.team, target.agent
+    return candidates[0].team, candidates[0].agent
 
 
 def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
@@ -1227,7 +1240,7 @@ def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
         if resolved is None:
             _fail(
                 f"agent '{to_agent}' not found in any team "
-                f"(check @hive-group tag on the target pane)"
+                f"(check @hive-agent tag on the target pane)"
             )
             raise AssertionError("unreachable")
         target_team_name, _ = resolved
@@ -1379,7 +1392,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
 @click.argument("pane_id")
 @click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
 @click.option("--notify/--no-notify", default=True, help="Push hive skill + join message to the pane")
-@click.option("--group", "group_name", default="", help="Cross-team group tag (e.g. 'squad'). Required for qualified-name routing.")
+@click.option("--group", "group_name", default="", help="Cross-team group tag for display and namespace reservation (optional; qualified-name routing works without it).")
 def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str):
     """Register an external pane into the current team."""
     if not tmux.is_inside_tmux():
