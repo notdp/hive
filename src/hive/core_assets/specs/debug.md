@@ -1,6 +1,6 @@
 # debug + 协议边界
 
-排障命令清单和 hive kernel 的协议硬约束。主通道见 `hive skills get core` 的「消息机制」;日常收发消息不读这份。
+排障命令清单和 hive kernel 的协议硬约束。主通道见 core「消息机制」;日常收发消息不读这份。
 
 ## Debug / 排障
 

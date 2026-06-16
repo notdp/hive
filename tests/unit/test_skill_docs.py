@@ -208,6 +208,48 @@ def test_duo_worker_clarifies_ambiguous_human_tasks_first():
     assert "task artifact" in duo_worker
 
 
+def test_non_bootstrap_cross_refs_are_prose_not_commands():
+    """spec 正文里的 cross-ref 用 prose 形式（"core「没活干时」"、"duo 内核"），
+    不用 command 形式（`hive skills get core`）——后者会让 agent 每 turn 重取。
+    bootstrap 段和 debug/advanced-routing 按需引用除外。"""
+    specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
+    import re
+    toxic = re.compile(r'(?:沿用|统一见|全在|见) `hive skills get (?:core|duo|squad)`')
+    blockquote_cmd = re.compile(r'^>\s*先读\s*`hive skills get')
+    for p in sorted(specs.glob("*.md")):
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            assert not toxic.search(line), (
+                f"{p.name}:{i}: command-form cross-ref in prose — use prose label instead"
+            )
+            assert not blockquote_cmd.search(line), (
+                f"{p.name}:{i}: blockquote command triggers re-read — use dependency statement"
+            )
+
+
+def test_on_demand_specs_remain_reachable_as_commands():
+    """debug 和 advanced-routing 是低频按需 spec，core 里保留命令形式引用
+    以便 agent 能找到取法。"""
+    core = _spec("core")
+    assert "hive skills get debug" in core
+    assert "hive skills get advanced-routing" in core
+
+
+def test_bootstrap_sections_are_marked_once():
+    """bootstrap 段的标题明确标为"首 turn 执行一次"或等价表述，
+    避免 agent 每 turn 重跑。"""
+    specs = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
+    for name in ("duo-validator", "squad-orch", "squad-challenger"):
+        text = (specs / f"{name}.md").read_text()
+        assert "首 turn" in text, (
+            f"{name}.md: bootstrap section should indicate first-turn-only"
+        )
+    for name in ("duo-worker", "squad-worker", "squad-validator"):
+        text = (specs / f"{name}.md").read_text()
+        assert "首 turn 执行一次" in text, (
+            f"{name}.md: bootstrap code block should indicate first-turn-only"
+        )
+
+
 def test_handoff_is_anchored_to_a_local_commit():
     """验收对象是 commit 不是散落工作树:worker handoff 前先本地 commit 并报
     headCommit;validator rule-based 第一关核 clean + HEAD 一致,dirty 直接 fail。
