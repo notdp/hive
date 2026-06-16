@@ -63,7 +63,7 @@ def test_skills_get_squad_composes_duo(runner):
     assert result.exit_code == 0, result.output
     out = result.output
     assert "orch" in out and "challenger" in out
-    assert "hive skills get duo" in out  # references the atom, no duplication
+    assert "duo" in out  # references the atom, no duplication
     assert "spawn-duo" in out
 
 

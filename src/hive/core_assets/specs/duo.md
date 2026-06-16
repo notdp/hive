@@ -1,6 +1,6 @@
 # duo — 协作原子(worker + validator)
 
-> 先读 `hive skills get core`(通信底座 + 挑战立场)。
+> 依赖 core 协议的通信底座 + 挑战立场（bootstrap 时加载）。
 
 duo 是 Hive 的最小协作单元:一个 **worker**(producer,干活)+ 一个异构 **validator**(reviewer,先共定 plan+VAL,后审 code),两人 loop 到 pass。`squad` 拓扑就是 orch 编排 N 个 duo。
 
@@ -13,7 +13,7 @@ worker 永远干活,validator 永远审 —— 出生即定,不协商角色(协�
 duo 对外只有一个发言人:**worker**。final pass / 卡死 escalation 都由 worker 带成果摘要 + validator 的 verdict / stuck-report artifact 交付协调者:
 
 - standalone duo → 协调者就是**人**
-- 在 squad 里 → 协调者 = **challenger → orch**(见 `hive skills get squad`)
+- 在 squad 里 → 协调者 = **challenger → orch**（squad 协议）
 
 本 spec 把协调者留抽象;具体寻址由拓扑填。**validator 不与协调者直接对话** —— 它的一切输出都回 worker;duo 内部的 fail 迭代同样不经协调者,worker ↔ validator 自己闭环。
 
@@ -80,4 +80,4 @@ duo 对外只有一个发言人:**worker**。final pass / 卡死 escalation 都�
 
 ## 收发
 
-寻址、`hive send`/`hive reply` thread 模型、root 协议(heredoc + `--artifact -`)、shell 安全 —— 全在 `hive skills get core`。duo 里只有两个对端:你的 peer(worker↔validator)和(仅 worker 有的)协调者。
+寻址、`hive send`/`hive reply` thread 模型、root 协议(heredoc + `--artifact -`)、shell 安全 —— 全在 core 协议。duo 里只有两个对端:你的 peer(worker↔validator)和(仅 worker 有的)协调者。

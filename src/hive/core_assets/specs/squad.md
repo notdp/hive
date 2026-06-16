@@ -1,6 +1,6 @@
 # squad — 编排拓扑(orch + challenger + N×duo)
 
-> 先读 `hive skills get core`(通信底座 + 挑战立场);worker / validator 协议见 `hive skills get duo`。
+> 依赖 core 协议的通信底座 + 挑战立场；worker / validator 协议见 duo 内核（均在 bootstrap 时加载）。
 
 squad = human 给 **orch** 一个高层需求,orch 拆成 features,**每条 feature 派一个 duo**(worker + validator,见 duo spec)独立闭环,**challenger** 挑 orch 的 plan,orch 收齐向 human 汇报。三个字:**拆 / 分 / 合**。
 

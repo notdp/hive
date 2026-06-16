@@ -10,18 +10,22 @@ Hive 是你的协作 runtime：tmux 里多个 agent 互发 `<HIVE ...>` 消息�
 
 安装：`pipx install git+https://github.com/notdp/hive.git && npx skills add https://github.com/notdp/hive -g --all`（升级、本地 checkout 刷新见仓库 README）
 
-## 先取协议
+## 协议加载
 
-**本文件只是发现入口，不是用法手册。** 跑任何 `hive` 命令前，先从 CLI 取协议：
+**本文件只是发现入口。** 协议在出生首 turn 加载一次，后续 turn 沿用已读协议直接执行。
+
+出生首 turn / 身份变化 / 上下文里协议缺失时：
 
 ```bash
-hive skills get core      # 从这开始：命令速查 / 消息机制 / thread / 协作规则
+hive skills get core      # 通信底座：命令速查 / 消息机制 / thread / 协作规则
 hive skills list          # 列出全部可取的 spec
 ```
 
+上下文已有 role + core 协议时，收到 `<HIVE ...>` 消息直接按已读协议处理，`hive team` 确认身份即可。
+
 ## 你处在哪种局面
 
-**被别的 team 拉进来**（收到 join 消息，或当前 window 已绑 team）→ 不用起拓扑。`hive team` 看成员，按 core 干活。
+**被别的 team 拉进来**（收到 join 消息，或当前 window 已绑 team）→ 不用起拓扑。`hive team` 看成员，按已读 core 协议干活。
 
 **你来开一个新协作拓扑** → 先用阻塞式提问工具问用户要 **duo** 还是 **squad**（claude 用 `AskUserQuestion`，见 core 的「问用户」）。这一步不能省、别替用户选、也别直接 `hive init`——duo / squad 是两种不同的协作形状，替用户猜会让整局走偏。按答案跑：
 
