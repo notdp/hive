@@ -4,7 +4,7 @@
 
 - **上手** — 先 `hive team` 认身份
 - **命令速查** — 每天用的 CLI + `hive team` 字段语义
-- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 见 advanced-routing spec)
+- **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 按需取: `hive skills get advanced-routing`)
 - **协作规则** — 什么在 team 内消化,什么升给用户
 - **Workflow 加载** — 在 Hive 之上叠更高层流程(如 code-review)
 - **排障 + 协议边界** — 排障时按需取: `hive skills get debug`
@@ -107,7 +107,7 @@ EOF
 
 ### 接管已有 thread 时的第一条 reply
 
-被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;详见 advanced-routing spec。
+被 spawn / handoff 到一条不是你自己的 thread 时,接管者要**显式 `--reply-to <msgId>`**;按需取: `hive skills get advanced-routing`。
 
 ## 协作规则
 

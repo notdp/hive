@@ -226,6 +226,14 @@ def test_non_bootstrap_cross_refs_are_prose_not_commands():
             )
 
 
+def test_on_demand_specs_remain_reachable_as_commands():
+    """debug 和 advanced-routing 是低频按需 spec，core 里保留命令形式引用
+    以便 agent 能找到取法。"""
+    core = _spec("core")
+    assert "hive skills get debug" in core
+    assert "hive skills get advanced-routing" in core
+
+
 def test_bootstrap_sections_are_marked_once():
     """bootstrap 段的标题明确标为"首 turn 执行一次"或等价表述，
     避免 agent 每 turn 重跑。"""
