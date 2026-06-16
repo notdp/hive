@@ -3217,7 +3217,13 @@ def squad_set_integration_branch_cmd(ref: str, as_json: bool):
     type=click.Path(dir_okay=False),
     help="VAL artifact path for validator bootstrap (defaults to <workspace>/val-feature-<feature-id>.md if it exists)",
 )
-def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
+@click.option(
+    "--base",
+    "integration_branch",
+    default="",
+    help="Integration branch for sub-PRs (e.g. peaky-integration). Sets @hive-squad-integration-branch on both orch and duo windows; future spawns inherit it automatically.",
+)
+def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str, integration_branch: str):
     """Spawn a fresh duo (worker + validator) and dispatch the task atomically.
 
     Must run from an orch pane inside a squad window — inherits the squad
@@ -3243,11 +3249,17 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     anti-family. Both tagged ``@hive-group=<squad>`` and
     ``@hive-owner=<squad>.orch`` for owner-bypass routing.
     """
-    # Validate before any tmux/runtime side effect: a rejected feature id
-    # must leave no window, option, spawn, or dispatch behind.
     ok, reason = squad_names.validate_feature_id(feature_id)
     if not ok:
         _fail(reason)
+
+    if integration_branch:
+        from . import worktree as wt_mod
+        try:
+            anchor = wt_mod.repo_anchor(os.getcwd())
+            wt_mod.rev_parse(anchor, integration_branch)
+        except wt_mod.WorktreeError as e:
+            _fail(f"--base {integration_branch}: {e}")
 
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -3325,7 +3337,12 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
     tmux.set_window_option(peer_window, "@hive-workspace", workspace)
     tmux.set_window_option(peer_window, "@hive-squad-name", squad_name)
     tmux.set_window_option(peer_window, "@hive-created", str(time.time()))
-    _copy_squad_integration_option(squad_window_target, peer_window)
+    if integration_branch:
+        tmux.set_window_option(squad_window_target, "@hive-squad-integration-branch", integration_branch)
+        tmux.set_window_option(peer_window, "@hive-squad-integration-branch", integration_branch)
+    else:
+        _copy_squad_integration_option(squad_window_target, peer_window)
+    _duo_integration = tmux.get_window_option(peer_window, "hive-squad-integration-branch") or ""
     tmux.configure_hive_window(peer_window)
 
     peer_team = Team(
@@ -3456,6 +3473,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
         "workspace": workspace,
         "orientation": orientation,
         "featureId": feature_id,
+        "integrationBranch": _duo_integration or None,
         "dispatch": {
             "worker": {"target": worker_name, "artifact": task_path},
             "validator": {"target": validator_name, "artifact": val_path},
@@ -3465,6 +3483,12 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str):
             validator_name: validator_agent.pane_id,
         },
     }
+    if not _duo_integration:
+        result["integrationWarning"] = (
+            "no @hive-squad-integration-branch set; worker will fail on "
+            "`hive worktree start`. Fix: `hive squad set-integration-branch <ref>` "
+            "or re-spawn with --base <ref>"
+        )
     if dispatch_errors:
         result["dispatchErrors"] = dispatch_errors
         result["hint"] = (
