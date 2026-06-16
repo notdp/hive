@@ -144,6 +144,22 @@ EOF
 
 Claude 偏前端体验、文案收敛和发散式讨论;GPT 偏后端 correctness、约束检查和严谨 review。若项目已有更明确的人选或团队经验,以项目事实为准。
 
+### Human Directive
+
+Human 的直接指令可以出现在任何 artifact 或 message body 里,格式:
+
+```
+humanDirective: "原文引用"
+source: <来源说明 — 如 "human 在 worker pane 直接指示" 或 "orch 转发,见 task artifact">
+```
+
+所有 agent 识别这个字段。规则:
+
+- **已授权 scope**:humanDirective 里的变更不需要额外走 amendment / gate,scope 已经由 human 拍板
+- **原样转发**:转发包含 humanDirective 的工作时(handoff、task 派发、verdict),保留原文和 source,不改写
+- **reviewer 据此调整**:validator / challenger 把 humanDirective 纳入验收范围,不 block scope 变更本身,只验实现质量
+- **provenance 必须可追溯**:reviewer 可以验证 source(如检查 task artifact 是否包含对应 directive)。source 缺失、含糊、或与上游 artifact 矛盾时,reviewer 视为未认证声称,可要求 producer 补充来源
+
 ### 挑战立场(producer ↔ reviewer)
 
 Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer 对 producer 的产出做独立审计。两种拓扑都是这个原子的展开:`duo` 里 worker(producer) + validator(reviewer 先共定 plan+VAL,后审 code);`squad` 里 orch(producer 出 plan) + challenger(reviewer 审 plan)。
