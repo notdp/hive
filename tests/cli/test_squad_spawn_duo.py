@@ -571,3 +571,199 @@ def test_squad_spawn_duo_validator_fallback_when_no_role_cli(
     # Validator: CLI falls back to anti_peer_cli("claude") = codex, model from config
     assert spawned[1]["cli"] == "codex"
     assert spawned[1]["model"] == "o3"
+
+
+# --- --base integration branch propagation ---
+
+
+def _setup_spawn_harness(monkeypatch, tmp_path, *, orch_integration=""):
+    """Wire up a full spawn-duo harness, returning (task_path, window_opts).
+
+    window_opts tracks all set_window_option calls as {target: {key: value}}.
+    If orch_integration is non-empty, seed the orch window with that value.
+    """
+    import hive.cli as cli_mod
+    from hive.agent import Agent
+    from hive.team import Team
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "hive.settings.get_setting", lambda key, default=None: default,
+    )
+
+    window_opts: dict[str, dict[str, str]] = {}
+
+    def track_set_window_option(target, option, value=""):
+        key = option.removeprefix("@")
+        window_opts.setdefault(target, {})[key] = value
+
+    def track_get_window_option(target, key):
+        return window_opts.get(target, {}).get(key)
+
+    if orch_integration:
+        window_opts.setdefault("dev:0", {})["hive-squad-integration-branch"] = orch_integration
+
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_pane_option",
+        lambda pane, key: {"hive-group": "peaky", "hive-cli": "claude"}.get(key, ""),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "get_window_option", track_get_window_option)
+    monkeypatch.setattr(cli_mod.tmux, "set_window_option", track_set_window_option)
+
+    fake_team = Team(
+        name="dev-w0", workspace=str(tmp_path / "ws"),
+        tmux_session="dev", tmux_window="dev:0", tmux_window_id="@0",
+    )
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        cli_mod, "_resolve_scoped_team",
+        lambda _team, required=True: ("dev-w0", fake_team),
+    )
+
+    monkeypatch.setattr(cli_mod.tmux, "list_window_indices", lambda _s: [0])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_all", lambda: [])
+    monkeypatch.setattr(cli_mod.tmux, "list_panes", lambda _w: ["%200"])
+    monkeypatch.setattr(
+        cli_mod.tmux, "new_window",
+        lambda _s, name="", cwd="", index=0: (f"dev:{index}", "%200"),
+    )
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.tmux, "configure_hive_window", lambda _t: None)
+    monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda _t, _n: None)
+    monkeypatch.setattr(cli_mod.tmux, "get_window_id", lambda _t: "@99")
+    monkeypatch.setattr(cli_mod.tmux, "display_value", lambda _p, _f: str(tmp_path))
+    monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
+    monkeypatch.setattr(
+        "hive.layout.apply_adaptive",
+        lambda _t: SimpleNamespace(orientation="horizontal"),
+    )
+
+    def fake_spawn(**kwargs):
+        return Agent(
+            name=str(kwargs["name"]), team_name=str(kwargs["team_name"]),
+            pane_id=f"%{200}", cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+    monkeypatch.setattr(cli_mod, "_ensure_team_sidecar", lambda _t, _ws: None)
+    monkeypatch.setattr(
+        cli_mod, "_wait_for_peer_ready",
+        lambda _ws, team_name="", agents=None: set(),
+    )
+    monkeypatch.setattr(cli_mod, "_request_send_payload", lambda **_k: None)
+
+    task = tmp_path / "task.md"
+    task.write_text("# task")
+    return task, window_opts
+
+
+def test_spawn_duo_base_sets_integration_on_both_windows(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """--base stamps @hive-squad-integration-branch on orch + duo windows
+    and JSON output includes integrationBranch."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    task, window_opts = _setup_spawn_harness(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        "hive.worktree.repo_anchor", lambda _cwd: tmp_path,
+    )
+    monkeypatch.setattr(
+        "hive.worktree.rev_parse", lambda _anchor, ref: "abc123",
+    )
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "test-base", "--task", str(task),
+         "--base", "peaky-integration"],
+    )
+    assert result.exit_code == 0, result.output
+
+    import json
+    out = json.loads(result.output)
+    assert out["integrationBranch"] == "peaky-integration"
+    assert "integrationWarning" not in out
+
+    assert window_opts.get("dev:0", {}).get("hive-squad-integration-branch") == "peaky-integration"
+    assert window_opts.get("dev:1000", {}).get("hive-squad-integration-branch") == "peaky-integration"
+
+
+def test_spawn_duo_invalid_base_fails_before_side_effects(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Invalid --base must fail before new_window / set_window_option / Agent.spawn."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+
+    import hive.cli as cli_mod
+    from hive.worktree import WorktreeError
+
+    monkeypatch.setattr(
+        cli_mod.tmux, "get_pane_option",
+        lambda pane, key: {"hive-group": "peaky", "hive-cli": "claude"}.get(key, ""),
+    )
+    monkeypatch.setattr(
+        "hive.worktree.repo_anchor", lambda _cwd: tmp_path,
+    )
+    monkeypatch.setattr(
+        "hive.worktree.rev_parse",
+        lambda _anchor, ref: (_ for _ in ()).throw(WorktreeError(f"cannot resolve ref '{ref}'")),
+    )
+
+    for fn in ("new_window", "set_window_option", "rename_window"):
+        monkeypatch.setattr(f"hive.cli.tmux.{fn}", _explode(fn))
+
+    task = tmp_path / "task.md"
+    task.write_text("# task")
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "test-base", "--task", str(task),
+         "--base", "nonexistent-branch"],
+    )
+    assert result.exit_code == 1
+    assert "--base nonexistent-branch" in result.output
+
+
+def test_spawn_duo_no_base_copies_existing_integration(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Without --base, existing @hive-squad-integration-branch on orch window
+    is copied to duo window."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    task, window_opts = _setup_spawn_harness(
+        monkeypatch, tmp_path, orch_integration="peaky-integration",
+    )
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "test-copy", "--task", str(task)],
+    )
+    assert result.exit_code == 0, result.output
+
+    import json
+    out = json.loads(result.output)
+    assert out["integrationBranch"] == "peaky-integration"
+    assert "integrationWarning" not in out
+
+    assert window_opts.get("dev:1000", {}).get("hive-squad-integration-branch") == "peaky-integration"
+
+
+def test_spawn_duo_no_base_no_existing_returns_warning(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Without --base and no existing integration branch, JSON includes
+    integrationBranch: null and integrationWarning."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    task, window_opts = _setup_spawn_harness(monkeypatch, tmp_path)
+
+    result = runner.invoke(
+        cli,
+        ["squad", "spawn-duo", "--feature-id", "test-warn", "--task", str(task)],
+    )
+    assert result.exit_code == 0, result.output
+
+    import json
+    out = json.loads(result.output)
+    assert out["integrationBranch"] is None
+    assert "integrationWarning" in out
+    assert "hive worktree start" in out["integrationWarning"]
