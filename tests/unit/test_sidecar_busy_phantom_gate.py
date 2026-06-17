@@ -37,6 +37,7 @@ class _Monitor:
 def _reset_path_cache(monkeypatch):
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
     monkeypatch.setattr(sidecar, "_pane_active_turn_phase", lambda _pane_id: None)
+    monkeypatch.setattr(sidecar, "_codex_app_server_busy", lambda _pane_id: None)
     yield
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
 
@@ -143,6 +144,50 @@ def test_progressed_returns_false_when_fresh_resolve_yields_no_path(monkeypatch,
 
     _stub_path_with_force(monkeypatch, cached=str(stale), fresh=None)
     assert sidecar._transcript_progressed_recently("%1", 3.0) is False
+
+
+# --- Codex app-server authoritative override --------------------------------
+
+
+def _stub_app_server_busy(monkeypatch, value: bool | None) -> None:
+    monkeypatch.setattr(sidecar, "_codex_app_server_busy", lambda _pane_id: value)
+
+
+def test_truly_busy_true_when_app_server_busy(monkeypatch):
+    _stub_path(monkeypatch, None)
+    _stub_app_server_busy(monkeypatch, True)
+    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
+
+
+def test_truly_busy_false_when_app_server_idle(monkeypatch, tmp_path):
+    """App server says idle → authoritative even if tmux monitor reports output."""
+    fresh = tmp_path / "fresh.jsonl"
+    fresh.write_text("x")
+    _stub_path(monkeypatch, str(fresh))
+    _stub_app_server_busy(monkeypatch, False)
+    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is False
+
+
+def test_truly_busy_falls_through_when_no_app_server(monkeypatch, tmp_path):
+    """No daemon → None → fall through to existing monitor + transcript."""
+    fresh = tmp_path / "fresh.jsonl"
+    fresh.write_text("x")
+    _stub_path(monkeypatch, str(fresh))
+    _stub_app_server_busy(monkeypatch, None)
+    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
+
+
+def test_is_output_busy_true_when_app_server_busy(monkeypatch):
+    _stub_path(monkeypatch, None)
+    _stub_app_server_busy(monkeypatch, True)
+    assert sidecar._is_output_busy("%1", _Monitor(busy=False)) is True
+
+
+def test_is_output_busy_false_when_app_server_idle(monkeypatch):
+    """App server idle → authoritative for idle-notify, prevents false rearm."""
+    _stub_path(monkeypatch, None)
+    _stub_app_server_busy(monkeypatch, False)
+    assert sidecar._is_output_busy("%1", _Monitor(busy=True)) is False
 
 
 # --- _pane_is_truly_busy ----------------------------------------------------

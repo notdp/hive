@@ -449,10 +449,27 @@ def _pane_in_active_turn(pane_id: str) -> bool:
     return _pane_active_turn_phase(pane_id) in ACTIVE_TURN_PHASES
 
 
+def _codex_app_server_busy(pane_id: str) -> bool | None:
+    if not pane_id:
+        return None
+    try:
+        from .adapters import codex_app_server
+
+        rt = codex_app_server.runtime_for_pane(pane_id)
+    except Exception:
+        return None
+    if rt is None:
+        return None
+    return bool(rt.busy)
+
+
 def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     """Public ``busy`` signal: true when the agent is in mid-turn.
 
-    OR of two signal sources:
+    For daemon-backed Codex panes the app-server ``busy`` flag is
+    authoritative and short-circuits the heuristic sources below.
+
+    Heuristic sources (non-Codex or no daemon):
         A. tmux control-mode reports recent visible output (with phantom-redraw
            gate via transcript jsonl mtime).
         B. transcript turnPhase is in :data:`activity.ACTIVE_TURN_PHASES`.
@@ -462,6 +479,10 @@ def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     """
     if not pane_id:
         return False
+
+    app_busy = _codex_app_server_busy(pane_id)
+    if app_busy is not None:
+        return app_busy
 
     monitor_busy = (
         monitor is not None
@@ -487,12 +508,16 @@ def _is_output_busy(
 ) -> bool:
     """idle-notify variant of :func:`_pane_is_truly_busy`.
 
-    Same OR signal as ``_pane_is_truly_busy`` but the monitor source is
-    additionally clamped by an ``inactive_age`` sub-gate: when the window
-    has been inactive for ``inactive_age`` seconds, ignore monitor output
-    that predates that transition (the user already saw it while the
-    window was active — without the clamp, idle-notify rearms ~5s after
-    every window switch).
+    For daemon-backed Codex panes the app-server ``busy`` flag is
+    authoritative and short-circuits all heuristic sources.
+
+    Heuristic sources (non-Codex or no daemon): same OR signal as
+    ``_pane_is_truly_busy`` but the monitor source is additionally
+    clamped by an ``inactive_age`` sub-gate: when the window has been
+    inactive for ``inactive_age`` seconds, ignore monitor output that
+    predates that transition (the user already saw it while the window
+    was active — without the clamp, idle-notify rearms ~5s after every
+    window switch).
 
     The active-turn (turnPhase) source intentionally **bypasses**
     ``inactive_age``: an agent mid-tool is busy regardless of when the
@@ -500,6 +525,10 @@ def _is_output_busy(
     """
     if not pane_id:
         return False
+
+    app_busy = _codex_app_server_busy(pane_id)
+    if app_busy is not None:
+        return app_busy
 
     if monitor is not None and monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS):
         progressed = _transcript_progressed_recently(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS)
