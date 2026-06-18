@@ -78,6 +78,13 @@ def test_resolve_base_detects_default_branch(repo):
     assert len(base.oid) == 40
 
 
+def test_pr_base_strips_origin_refs_longest_prefix_first():
+    assert wt.pr_merge_base_from_ref("origin/main") == "main"
+    assert wt.pr_merge_base_from_ref("refs/remotes/origin/main") == "main"
+    assert wt.pr_merge_base_from_ref("refs/heads/develop") == "develop"
+    assert wt.pr_merge_base_from_ref("main") == "main"
+
+
 def test_resolve_base_explicit_invalid_ref_fails(repo):
     with pytest.raises(wt.WorktreeError, match="cannot resolve"):
         wt.resolve_base(repo, "no-such-ref", None)
@@ -187,6 +194,17 @@ def test_start_squad_writes_gh_merge_base(repo):
     meta = wt.read_meta(repo, "feat-a")
     assert meta["gh-merge-base"] == "epic-int"
     assert meta["hive-squad"] == "epic"
+
+
+def test_start_standalone_writes_gh_merge_base_from_origin_base(repo):
+    base = wt.BaseResolution(
+        ref="origin/main",
+        oid=_run(["git", "rev-parse", "HEAD"], repo),
+        source="default-branch",
+    )
+    res = wt.start(repo, "feat-a", base=base, owner="team:t1", team="t1")
+    assert res.ready
+    assert wt.read_meta(repo, "feat-a")["gh-merge-base"] == "main"
 
 
 def test_start_rejects_invalid_feature_name(repo):

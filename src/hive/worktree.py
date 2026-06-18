@@ -25,6 +25,12 @@ POOL_SEGMENTS = (".claude", "worktrees")
 META_KEYS = ("hive-owner", "hive-team", "hive-squad", "hive-base", "hive-base-oid", "hive-created")
 GH_MERGE_BASE_KEY = "gh-merge-base"
 
+_PR_BASE_PREFIXES = (
+    "refs/remotes/origin/",
+    "origin/",
+    "refs/heads/",
+)
+
 _IN_PROGRESS_MARKERS = (
     ("rebase-merge", "rebase"),
     ("rebase-apply", "rebase"),
@@ -269,6 +275,13 @@ def resolve_base(anchor: Path, explicit: str | None, squad_integration: str | No
     return BaseResolution(ref=default, oid=rev_parse(anchor, default), source="default-branch")
 
 
+def pr_merge_base_from_ref(base_ref: str) -> str:
+    for prefix in _PR_BASE_PREFIXES:
+        if base_ref.startswith(prefix):
+            return base_ref[len(prefix):]
+    return base_ref
+
+
 # --- start ----------------------------------------------------------------------
 
 @dataclass
@@ -348,8 +361,7 @@ def start(
         }
         if squad_name:
             meta["hive-squad"] = squad_name
-        if gh_merge_base:
-            meta[GH_MERGE_BASE_KEY] = gh_merge_base
+        meta[GH_MERGE_BASE_KEY] = gh_merge_base or pr_merge_base_from_ref(base.ref)
         return meta
 
     def sync_ready_meta(existing: dict[str, str]) -> None:
