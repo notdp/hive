@@ -2781,6 +2781,30 @@ def duo_set_pr_cmd(number: int, title: str | None, as_json: bool):
         click.echo(f"window {window} labeled @hive-pr={number}{title_note} ({summary})")
 
 
+@duo_cmd.command("clear-pr")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def duo_clear_pr_cmd(as_json: bool):
+    """Clear the current duo window's PR number stamp."""
+    if not tmux.is_inside_tmux():
+        _fail("must run inside tmux")
+    window = tmux.get_current_window_target() or ""
+    if not window:
+        _fail("cannot determine current window")
+    if not tmux.get_window_option(window, "hive-team"):
+        _fail(
+            "current window is not a hive team window (no @hive-team); "
+            "run clear-pr from your duo window"
+        )
+    previous = tmux.get_window_option(window, "hive-pr")
+    tmux.clear_window_option(window, "@hive-pr")
+    if as_json:
+        click.echo(json.dumps({"window": window, "previous": previous}, indent=2))
+    elif previous:
+        click.echo(f"window {window} cleared @hive-pr={previous}")
+    else:
+        click.echo(f"window {window} had no @hive-pr stamp to clear")
+
+
 @cli.group("squad")
 def squad_cmd():
     """Squad (orch + challenger + on-demand duos) management."""
