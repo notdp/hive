@@ -138,6 +138,34 @@ def test_duo_validator_must_stand_inside_the_worktree():
     assert "退出 worktree" in duo
 
 
+def test_worktree_entry_proof_for_tool_call_agents():
+    """Codex/Droid 的 tool-call 执行没有持久 cd 状态:spec 必须要求
+    workdir + 三命令 entry proof,不能退回裸 `codex / droid cd`。"""
+    duo = _spec("duo")
+    for required in (
+        "entry proof",
+        "`pwd`",
+        "`git rev-parse --show-toplevel`",
+        "`git status --short --branch`",
+    ):
+        assert required in duo
+    assert "codex / droid `cd" not in duo
+
+    role_specs = {
+        "duo-worker": _spec("duo-worker"),
+        "duo-validator": _spec("duo-validator"),
+        "squad-worker": _spec("squad-worker"),
+        "squad-validator": _spec("squad-validator"),
+    }
+    for name, text in role_specs.items():
+        assert "entry proof" in text, name
+        assert "git rev-parse --show-toplevel" in text, name
+        assert "git status --short --branch" in text, name
+        assert "codex / droid `cd" not in text, name
+    assert "EnterWorktree" in role_specs["duo-validator"]
+    assert "EnterWorktree" in role_specs["squad-validator"]
+
+
 def test_validator_routes_everything_to_worker():
     """单发言人拓扑:validator 一切 verdict 都回 worker,worker 终态交付上游。
     守住旧「pass → challenger」直发路由不回归 —— 它让 pass 尾巴绕过执行人,
