@@ -125,6 +125,56 @@ def test_set_pr_rerun_overwrites_stamp_and_rederives_from_global(runner, configu
     assert _window_option("window-status-current-format") == DERIVED_DEFAULT
 
 
+def test_clear_pr_json_removes_stamp_and_keeps_status_formats(runner, configure_hive_home):
+    configure_hive_home()
+    _bind_team()
+    assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
+
+    result = runner.invoke(cli, ["duo", "clear-pr", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"window": "dev:0", "previous": "87"}
+    assert _window_option("hive-pr") is None
+    assert _window_option("window-status-format") == DERIVED_DEFAULT
+    assert _window_option("window-status-current-format") == DERIVED_DEFAULT
+
+
+def test_clear_pr_human_output_reports_previous_stamp(runner, configure_hive_home):
+    configure_hive_home()
+    _bind_team()
+    assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
+
+    result = runner.invoke(cli, ["duo", "clear-pr"])
+
+    assert result.exit_code == 0, result.output
+    assert "cleared" in result.output
+    assert "87" in result.output
+    assert _window_option("hive-pr") is None
+
+
+def test_clear_pr_idempotent_without_stamp(runner, configure_hive_home):
+    configure_hive_home()
+    _bind_team()
+
+    result = runner.invoke(cli, ["duo", "clear-pr", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"window": "dev:0", "previous": None}
+    assert _window_option("hive-pr") is None
+
+
+def test_clear_pr_requires_hive_team_window(runner, configure_hive_home):
+    configure_hive_home()
+
+    result = runner.invoke(cli, ["duo", "clear-pr"])
+
+    assert result.exit_code == 1
+    assert "@hive-team" in result.output
+    assert _window_option("hive-pr") is None
+
+
 def test_set_pr_fails_outside_tmux(runner, configure_hive_home):
     configure_hive_home(tmux_inside=False)
 
