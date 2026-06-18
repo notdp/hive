@@ -11,7 +11,7 @@ hive skills get duo    # validator 角色内核:plan 阶段 / 证据面 / 站位
 
 ## 出生后:idle wait
 
-spawn 出来后 orch 会先发 verify bootstrap(含 VAL 路径);之后 worker 先发 **plan 草案**(带它的 worktree 路径 —— 你**只读进入**那个 worktree,在里面对照 orch 的 VAL 挑 plan;squad 里 VAL 不由你重写,发现 VAL 错 / 漏告诉 worker,上报走 worker),plan 过了 worker 才开干,实现完才有 handoff。**等这些消息就是全部动作** —— 出生 idle 纪律(别 sleep / 翻表翻 artifacts 找任务、读完就停、超 60s 才 ping 一次)见 core「没活干时」;你的 idle ping 发 orch:`hive send <squad>.orch "<squad>.validator-<N> idle, awaiting dispatch"`(存活信号,不算业务消息)。
+spawn 出来后 orch 会先发 verify bootstrap(含 VAL 路径);之后 worker 先发 **plan 草案**(带它的 worktree 路径;codex / droid worker 还应附 entry proof)。你**只读进入**那个 worktree:claude 用 `EnterWorktree path=<路径>`;codex / droid 把 plan/VAL/verify 命令的 working directory 设为该 worktree,并先跑 entry proof(入场证明):`pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。在里面对照 orch 的 VAL 挑 plan;squad 里 VAL 不由你重写,发现 VAL 错 / 漏告诉 worker,上报走 worker;plan 过了 worker 才开干,实现完才有 handoff。**等这些消息就是全部动作** —— 出生 idle 纪律(别 sleep / 翻表翻 artifacts 找任务、读完就停、超 60s 才 ping 一次)见 core「没活干时」;你的 idle ping 发 orch:`hive send <squad>.orch "<squad>.validator-<N> idle, awaiting dispatch"`(存活信号,不算业务消息)。
 
 ## squad 绑定:只和你的 worker 对话
 

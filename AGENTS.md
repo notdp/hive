@@ -45,6 +45,10 @@ Use Python 3.11+ with 4-space indentation and type hints where practical. Match 
 
 Every CLI command should have at least one CLI test and complex flows should also have e2e coverage. Add unit tests for pure logic before relying on higher-level tests. Keep new tests in the correct layer and use shared fixtures from `tests/conftest.py` or helpers in `tests/e2e/_helpers.py`.
 
+Do not test hand-written prose by locking exact words. Forbidden: tests that read repo-authored docs, specs, prompts, or skill text (`AGENTS.md`, `README.md`, `skills/**/SKILL.md`, `src/hive/core_assets/specs/*.md`) and assert that specific phrases or headings are present or absent. Review prose changes by reading the diff.
+
+Allowed: tests that read generated files, state files, JSON, scripts, or payloads to verify executable behavior. Prefer assertions on command exit codes, structured fields, files created, parser output, tmux side effects, and other runtime contracts. If prose must control behavior, move the contract into code or structured data and test that boundary instead of literal wording.
+
 When touching `/cvim` popup sendback behavior, keep `tests/unit/test_cvim_command.py::test_popup_schedules_post_after_popup_exits` passing. It guards the regression where `run-shell` was started before popup teardown completed, causing the returned edit payload to be swallowed.
 
 ## Commit & Pull Request Guidelines

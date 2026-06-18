@@ -19,14 +19,14 @@ duo 对外只有一个发言人:**worker**。final pass / 卡死 escalation 都�
 
 ## worker(producer)
 
-1. **以 worktree 为始**:领到 feature 的第一动作是 `hive worktree start <feature>`,stdout 给路径;然后**自己进入** —— claude 用 `EnterWorktree path=<路径>`,codex / droid 用 `cd <路径>`。之后的探索、plan 收敛、实现、验收全程在这个空间里。
+1. **以 worktree 为始**:领到 feature 的第一动作是 `hive worktree start <feature>`,stdout 给路径;然后**自己进入并证明入场** —— claude 用 `EnterWorktree path=<路径>`(这就是 entry proof);codex / droid 之后每条 repo 命令都把 command working directory 设为该 worktree,并立刻记录 entry proof(入场证明):`pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。之后的探索、plan 收敛、实现、验收全程在这个空间里。
    - **feature 名 = branch 名 = worktree 目录名**,唯一标识这件事:语义化 kebab-case,看名知事、≤4 词、git branch 合法(✓ `contract-usd-amount-words` ✗ `F1-01_04`);序号 / 依赖不进名字。squad 里名字由 orch 派活时定;standalone 人没给名就你按这个规矩起一个。
    - worktree 锚的是 feature 不是 plan:feature 派活即定,plan 只决定怎么做、不决定做不做,所以领到活就开空间;只有协调者 / 人明确 abandon 这条 feature 才提前退场(见 9)。
    - base 自动解析(squad → 集成分支;standalone → default branch;解析不出会硬失败要 `--base`)。`start` 报 `needs-rebase`(exit 1)→ 进 worktree rebase 到它提示的 base,再跑一次 `start`。
    - **进去先钉 PR 锚**(plan 之前):`git commit --allow-empty -m "wip: <feature>"` → `git push -u origin <feature>` → `gh pr create --draft --base <start 解析出的 base>`(base 必须显式传 —— squad 是集成分支,standalone 是 default branch,绝不让 gh 退回 GitHub 默认分支推断;忘了值就查 `git config branch.<feature>.gh-merge-base`)→ `hive duo set-pr <PR 号>` 把号标到当前 window 并接管该窗口的状态栏显示(从全局格式派生,编号位显 `PR<号>`,操作者样式保留、零配置;只动本窗口,不 rename 不动 index、不写全局)。PR 号 draft→ready→merge 终身不变,人从此按号锚定这个 duo。建失败(gh 未认证 / 网络 / base 不在远程)→ 记下原因继续干活,PR 挪到 final pass 补建,不阻塞 feature;base 缺失在 squad 里照 8 上报 orch。draft 钉锚(空 commit push + draft PR)是协议默认动作,无需逐次人批;ready / merge 仍是人控点(见 8)。
    - `start` / `done` 只属于你(validator 永远不跑;机制上同队同 owner 拦不住它,纪律拦)。
 2. **先收敛 plan+VAL,再动手**(在 worktree 里,与实现同基线):
-   - 你出 **plan 草案**(拆解 / 方案 / 风险,引用 worktree 基线的文件与行号)发 validator,**首条消息带上 worktree 路径** —— validator 要进来同基线审。validator 挑 plan 并**主笔 VAL**(可执行的验收命令 / 断言)。主笔对偶是独立性的来源:方案由干活的人设计,考题由监考的人出 —— 你不给自己定验收标准。
+   - 你出 **plan 草案**(拆解 / 方案 / 风险,引用 worktree 基线的文件与行号)发 validator,**首条消息带上 worktree 路径**;codex / droid worker 还要附 entry proof 输出(`pwd` / `git rev-parse --show-toplevel` / `git status --short --branch`),缺失或不匹配就是 plan-stage blocker —— validator 要进来同基线审。validator 挑 plan 并**主笔 VAL**(可执行的验收命令 / 断言)。主笔对偶是独立性的来源:方案由干活的人设计,考题由监考的人出 —— 你不给自己定验收标准。
    - **plan 与 VAL 绑定定稿**:收敛产物是一个包,同时锁定;之后任何一边要改,两边一起审、留记录,不允许各漂各的。
    - 收敛上限沿用 duo 的 **5 轮**(单一常量,见 validator 路由),到限收敛不了 → 由你升协调者。
    - **轻任务一回合化**:小修可以把 plan 草案和 **VAL 建议**压在一条消息里(`plan: 直接修;VAL 建议: pytest xxx 过`);validator 原样确认或改写,**确认后的 VAL 才算定稿** —— 流程定形态不定重量,但最终验收标准仍不由你定。
@@ -47,7 +47,7 @@ duo 对外只有一个发言人:**worker**。final pass / 卡死 escalation 都�
 6. validator 判 fail → 按它给的 `required-changes` 改,再 handoff。loop 到 pass;第 5 轮仍无进展时它写 stuck-report 给你,**由你转交协调者** —— 报忧也是发言人的活。
 7. **不自己宣布完成**;completion 由 validator 的 pass verdict 定义。
 8. **终态交付 + 以 PR 收束**(validator final pass 后):先读完 verdict 的尾巴(pass 常带 residual risk / PR 注意事项 / follow-through,执行人是你),然后带成果摘要 + verdict artifact 向协调者交付 —— standalone 交给人(**给人的节点汇报配 HTML**:markdown 源之外同目录产一份自包含 HTML,消息给 HTML 绝对路径;agent 间 artifact 一律 markdown);squad 交给 challenger(见 squad spec)。随后以 PR 收束 —— draft PR 已在 1 钉好:推实质 commit,**用 `gh pr edit <PR号>` 把 title + body 从钉锚占位更新为终态描述**(title 匹配仓库 `git log --oneline` 风格;body 基于 `git diff <base>...HEAD` 写做了什么、为什么、改了哪些行为;不搬运 handoff / verdict,PR 描述是给 reviewer 看的),`gh pr ready <PR 号>` 把 draft 转 ready,再跑 `gh pr view --json baseRefName` 确认落基正确(standalone 是 default branch;squad 是集成分支)。1 当时建失败的,此刻按同序列补建,**显式 `--base`**(`start` 写的 `gh-merge-base` config 只是漏传时的兜底)。`gh pr create` 报 base 不存在(`Base sha can't be blank` / `Base ref must be a branch`)= 集成分支没被推到远程 → **上报 orch,绝不自己 push 集成分支**(那是 orch 的资产)。实质 push / `gh pr ready` / merge 是不可逆外部副作用,须经 human 授权 —— 1 的 draft 钉锚是唯一协议默认例外。
-9. **退场**:先离开 worktree(claude `ExitWorktree action=keep`,codex / droid `cd` 回主 checkout),再 `hive worktree done <feature>` —— 只删 worktree,**branch 留给 PR 生命周期**。PR merged 后可 `hive duo clear-pr` 清除窗口里的旧 PR 锚点;不清也可以,下一次 `hive duo set-pr` 会自然覆盖。`done --force` 会丢未提交工作:只有协调者 / human 明确 abandon 这条 feature 才用,并先核对它输出的 status 摘要。
+9. **退场**:先离开 worktree(claude `ExitWorktree action=keep`;codex / droid 后续 repo 命令的 working directory 切回主 checkout),再 `hive worktree done <feature>` —— 只删 worktree,**branch 留给 PR 生命周期**。PR merged 后可 `hive duo clear-pr` 清除窗口里的旧 PR 锚点;不清也可以,下一次 `hive duo set-pr` 会自然覆盖。`done --force` 会丢未提交工作:只有协调者 / human 明确 abandon 这条 feature 才用,并先核对它输出的 status 摘要。
 
 **为什么 worker 不跑全套**:跨 agent 重复 pytest 只是让 validator 复读同样命令、浪费资源;worker 看到 test fail 容易陷入「改 test 让它过,而不是改实现」的死循环。职责边界清楚:worker 实现,validator 验收。
 
@@ -59,7 +59,7 @@ duo 对外只有一个发言人:**worker**。final pass / 卡死 escalation 都�
 
 1. **plan 阶段(worker 动手前)**:worker 发来 plan 草案(首条消息带它的 worktree 路径)→ 你挑它(拆解对不对、风险漏没漏),并**主笔 VAL** —— 可执行的验收命令 / 断言,能真证伪,不写「考虑更多边界」这类空话。plan 与 VAL **绑定定稿**(一个包同时锁定);收敛上限同 5 轮,到限由 worker 升协调者。standalone 如此;squad 里 VAL 由 orch 随任务发到,你对照它挑 plan 即可,不重写 VAL;发现 VAL 本身错 / 漏 → 告诉 worker,修订确认与上报都走 worker。
 2. **证据面固定**:handoff artifact + VAL(验收标准)。只看 worker 写下的最终产物,**不借 worker pane 的运行 transcript** —— 独立性的来源就是这条,不然会被 worker 的叙事同化。
-3. **进 worker 的 worktree 验**:路径在 worker 首条消息里(没带就要;`hive worktree status <feature>` 也能查)→ **只读进入**(claude `EnterWorktree path=<路径>`,codex / droid `cd <路径>`),plan 审查与 VAL verify 全程站在里面跑 —— 站在主 checkout 跑 VAL 验的是错误基线,verdict 无效。git 查询可以 `git -C <路径>`,verify 命令不行。只读 = 不写业务文件、不 commit、不动 git 状态(测试缓存这类副产物不算);`start` / `done` 是 worker 的动作,你永远不跑。**发出 final pass verdict 后退出 worktree**(codex / droid `cd` 回主 checkout,claude `ExitWorktree action=keep`)—— worker 退场时要 `hive worktree done`,你的 cwd 还挂在里面会在目录删除后悬空。
+3. **进 worker 的 worktree 验**:路径在 worker 首条消息里(没带就要;`hive worktree status <feature>` 也能查)→ **只读进入**:claude 用 `EnterWorktree path=<路径>`;codex / droid 把 plan/VAL/verify 的每条命令 working directory 设为该 worktree,并先记录 entry proof(入场证明):`pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。plan 审查与 VAL verify 全程站在里面跑 —— 站在主 checkout 跑 VAL 验的是错误基线,verdict 无效。git 查询可以 `git -C <路径>`,verify 命令不行。只读 = 不写业务文件、不 commit、不动 git 状态(测试缓存这类副产物不算);`start` / `done` 是 worker 的动作,你永远不跑。**发出 final pass verdict 后退出 worktree**(claude `ExitWorktree action=keep`;codex / droid 后续 repo 命令的 working directory 切回主 checkout)—— worker 退场时要 `hive worktree done`,你的 cwd 挂在里面会悬空。
 4. **三层 verify,越客观越先跑,前一层 fail 就停、不下钻**:
    1. **Rule-based** — 先核锚点:worktree clean 且 `git -C <路径> rev-parse HEAD` == handoff 的 `headCommit`(dirty / mismatch = 验收对象没锚定,直接 fail `rule-violation`);再跑 handoff `verification` 里的命令 + VAL 的 `verify:` 命令,对 exit code / stdout
    2. **Visual / behavioral** — 仅当 VAL 涉及 UI 或可观察状态时,按描述跑交互看现象
