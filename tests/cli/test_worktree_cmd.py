@@ -70,6 +70,14 @@ def test_start_unbound_owner_outside_team(runner, configure_hive_home, repo):
     assert payload["owner"] == "unbound"
 
 
+def test_start_standalone_writes_gh_merge_base(runner, configure_hive_home, repo):
+    configure_hive_home()
+    default = _run(["git", "symbolic-ref", "--short", "HEAD"], repo)
+    result = runner.invoke(cli, ["worktree", "start", "feat-a", "--json"])
+    assert result.exit_code == 0, result.output
+    assert _run(["git", "config", "branch.feat-a.gh-merge-base"], repo) == default
+
+
 def test_start_needs_rebase_exits_nonzero_with_json(runner, configure_hive_home, repo):
     configure_hive_home()
     assert runner.invoke(cli, ["worktree", "start", "feat-a", "--json"]).exit_code == 0
