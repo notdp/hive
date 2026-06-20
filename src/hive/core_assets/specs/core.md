@@ -6,12 +6,15 @@
 - **命令速查** — 每天用的 CLI + `hive team` 字段语义
 - **消息机制** — 怎么收、怎么发、thread / root 协议 / shell 安全(active-turn fork 和接管 handoff 按需取: `hive skills get advanced-routing`)
 - **协作规则** — 什么在 team 内消化,什么升给用户
+- **共享 checkout 纪律** — 多人同目录时怎么处理 commit / stash / branch
 - **Workflow 加载** — 在 Hive 之上叠更高层流程(如 code-review)
 - **排障 + 协议边界** — 排障时按需取: `hive skills get debug`
 
 ## 上手
 
-**先跑 `hive team`** 看 self / 成员 / peer / group,确认身份再动。被 spawn 进来时你的角色身份已经带好——直接按你的角色 spec 干活,别自己找活、别翻库。
+**先跑 `hive team`** 看 self / 成员 / peer / group,确认身份再动。
+
+被 spawn 进来时你的角色身份已经带好。直接按你的角色 spec 干活;别自己找活、别翻库。
 
 ## 命令速查
 
@@ -49,7 +52,9 @@ hive answer claude "yes"             # 回答 agent 的 pending question
 
 ### 没活干时:停下,别轮询
 
-Hive 消息是**push 模型**:别的 agent 发来消息时,runtime 会把 `<HIVE>` block 注进你的 pane,并唤醒你进入新 turn。当前 turn 没有待处理任务时,正确动作只有一个:结束当前 turn,让 pane 保持打开,被动等下一条注入消息。
+Hive 消息是**push 模型**:别的 agent 发来消息时,runtime 会把 `<HIVE>` block 注进你的 pane,并唤醒你进入新 turn。
+
+当前 turn 没有待处理任务时,正确动作只有一个:结束当前 turn,让 pane 保持打开,被动等下一条注入消息。
 
 禁止为了"等消息"做这些事:
 
@@ -57,7 +62,9 @@ Hive 消息是**push 模型**:别的 agent 发来消息时,runtime 会把 `<HIVE
 - 反复发"继续等待"、"还在等"这类空转状态。
 - 自己翻运行库、artifact 目录、任务表来猜下一条任务。
 
-只有协议明确要求时才发一次 idle ping(例如出生后 60s 没收到首条任务消息),发完立刻结束 turn。这里的"停下"指结束当前 turn,**不是** quit 进程、关 pane、kill tmux;pane 必须继续存在才能接收下一条注入消息。
+只有协议明确要求时才发一次 idle ping,例如出生后 60s 没收到首条任务消息。
+
+发完立刻结束 turn。这里的"停下"指结束当前 turn,**不是** quit 进程、关 pane、kill tmux;pane 必须继续存在才能接收下一条注入消息。
 
 ### send vs reply(thread 模型)
 
@@ -75,11 +82,18 @@ Hive 的消息组织成 thread。每次发消息前问自己:**这是新话题,�
 
 #### `hive send`
 
-开新 thread 的唯一入口,不接受 `--reply-to`。body 是短摘要,装不下时用 `--artifact`(见下文 root 协议)。即使对方刚给你发过 inbound,只要你现在要说的是新话题,也用 `send`。
+开新 thread 的唯一入口,不接受 `--reply-to`。
+
+- body 是短摘要;装不下时用 `--artifact`(见下文 root 协议)。
+- 即使对方刚给你发过 inbound,只要你现在要说的是新话题,也用 `send`。
 
 #### `hive reply`
 
-续 thread。没传 `--reply-to` 时 Hive 会挑"最近一条来自该 agent 且你还没回过的入站消息"作 anchor。autoReply 只省找 msgId 的步骤,不判断内容是否真的延续 —— 开新话题还是用 `send`。
+续 thread。
+
+- 没传 `--reply-to` 时,Hive 会挑"最近一条来自该 agent 且你还没回过的入站消息"作 anchor。
+- autoReply 只省找 msgId 的步骤,不判断内容是否真的延续。
+- 开新话题还是用 `send`。
 
 显式传 `--reply-to <msgId>` 的场景:
 
@@ -90,7 +104,10 @@ Hive 把 reply 严格锁在同 thread 内;没有可推断的入站消息且你�
 
 ### root 协议 + shell 安全(send body 约束)
 
-root send(没 `--reply-to`)的 `body` 永远是**短摘要**:"ack"、"已就位"、"task done" 这类单行可以裸发;一旦超长、多行、或带 markdown / 代码,runtime 会直接 reject —— 把详情移进 `--artifact`。
+root send(没 `--reply-to`)的 `body` 永远是**短摘要**。
+
+- "ack"、"已就位"、"task done" 这类单行可以裸发。
+- 超长、多行、或带 markdown / 代码时,runtime 会 reject;把详情移进 `--artifact`。
 
 详情、多行、markdown / 代码一律走 **heredoc + 带引号的 `'EOF'`**:
 
@@ -101,7 +118,11 @@ hive send <name> "<message>" --artifact - <<'EOF'
 EOF
 ```
 
-带引号的 `'EOF'` 不做 shell 插值,内容原样传过去 —— 这同时是 shell 安全的答案:body 里裸写反引号或 `$(...)` 会被 zsh/bash 抢先执行、把消息悄悄改坏,heredoc 是绕开它的唯一稳路径(`printf ... |` 和 `$(cat <<EOF)` 转义坑更多,别用)。
+带引号的 `'EOF'` 不做 shell 插值,内容原样传过去。
+
+这同时是 shell 安全的答案:body 里裸写反引号或 `$(...)` 会被 zsh/bash 抢先执行、把消息悄悄改坏。
+
+heredoc 是这里的稳路径。`printf ... |` 和 `$(cat <<EOF)` 转义坑更多,别用。
 
 `reply` 不受这套约束,回一句短文本即可。
 
@@ -121,7 +142,9 @@ EOF
 2. 仍未收敛且真正阻断推进的**单个**问题
 3. 你建议的下一步动作
 
-仍在摇摆的 A/B/C、peer 的中间态分歧、你准备回去继续 challenge 的漏洞 —— 都留在 team 内消化完再出。peer 的论证有洞,先回 peer 挑明并收敛,由你自己处理完再对用户汇报(用户明确说要看原始讨论过程的除外)。
+仍在摇摆的 A/B/C、peer 的中间态分歧、你准备回去继续 challenge 的漏洞,都留在 team 内消化完再出。
+
+peer 的论证有洞,先回 peer 挑明并收敛。由你自己处理完再对用户汇报;用户明确说要看原始讨论过程的除外。
 
 **以下 4 种情况才升级给用户**:
 
@@ -134,11 +157,25 @@ EOF
 
 ### 问用户
 
-需要用户拍板时,用 runtime 的**阻塞式提问工具**,而不是打印一行就接着往下走 —— claude 用 `AskUserQuestion`(未加载先 `ToolSearch`),codex 用 `request_user_input`。没有这类工具、或调用报错时才退回对话里问;这一问不能省。
+需要用户拍板时,用 runtime 的**阻塞式提问工具**,而不是打印一行就接着往下走。
+
+- claude 用 `AskUserQuestion`(未加载先 `ToolSearch`)。
+- codex 用 `request_user_input`。
+- 没有这类工具、或调用报错时才退回对话里问;这一问不能省。
 
 ### 采纳谁的方案,谁去实施
 
 和 peer 收敛后,最终采纳的方案由提出者实施,另一方 review。
+
+### 共享 checkout 纪律
+
+多 agent 在同一个 checkout 目录工作时,git 暂存区 / stash / 当前分支会互相影响。
+
+路径含 `.claude/worktrees/`、Hive shared checkout、或多人同 cwd 时,动 git 状态前先看事实:
+
+- commit 前看 `git status --short` + `git diff --cached --stat`; staged 里有别人或越 scope 文件,先和 owner / 协调者收敛,不要卷进自己的 commit。
+- stash 前看 `git stash list`;不要 pop 别人的 stash,也不要静默 stash 别人的 untracked 文件。
+- 并行独立 PR / feature 用各自 worktree。共享 checkout 只适合同一交付物的高耦合协作;不要在共享 checkout 里直接 `git switch -c` / commit / push 开新 PR。
 
 ### 默认分工
 
@@ -158,15 +195,22 @@ source: <来源说明 — 如 "human 在 worker pane 直接指示" 或 "orch 转
 - **已授权 scope**:humanDirective 里的变更不需要额外走 amendment / gate,scope 已经由 human 拍板
 - **原样转发**:转发包含 humanDirective 的工作时(handoff、task 派发、verdict),保留原文和 source,不改写
 - **reviewer 据此调整**:validator / challenger 把 humanDirective 纳入验收范围,不 block scope 变更本身,只验实现质量
-- **provenance 必须可追溯**:reviewer 可以验证 source(如检查 task artifact 是否包含对应 directive)。source 缺失、含糊、或与上游 artifact 矛盾时,reviewer 视为未认证声称,可要求 producer 补充来源
+- **provenance 必须可追溯**:reviewer 可以验证 source,如检查 task artifact 是否包含对应 directive。
+  source 缺失、含糊、或与上游 artifact 矛盾时,reviewer 视为未认证声称,可要求 producer 补充来源
 
 ### 挑战立场(producer ↔ reviewer)
 
-Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer 对 producer 的产出做独立审计。两种拓扑都是这个原子的展开:`duo` 里 worker(producer) + validator(reviewer 先共定 plan+VAL,后审 code);`squad` 里 orch(producer 出 plan) + challenger(reviewer 审 plan)。
+Hive 的协作原子 = **一个 producer + 一个异构 reviewer**。reviewer 对 producer 的产出做独立审计。
+
+两种拓扑都是这个原子的展开:
+
+- `duo`:worker(producer) + validator(reviewer 先共定 plan+VAL,后审 code)
+- `squad`:orch(producer 出 plan) + challenger(reviewer 审 plan)
 
 **reviewer 的共同立场**(validator / challenger 都遵守):
 
 - 你是独立审计,不是橡皮图章 —— 不被 producer 的叙事带跑,自己查证。
+- 关键结论自己从原始证据算:artifact / diff / log / command output / raw data;需要对账时先给自己的完整结论,别把半成品丢给 peer 补算。
 - 默认怀疑;给清楚的 verdict(过 / 不过 + 依据),不模棱两可、不替 producer 圆场。
 - 立场由论据定,不由协作关系定 —— 有理坚持,没理放手。
 - 你和 producer 跨 model family(claude↔codex;droid 默认 claude),审才有独立性。
@@ -186,4 +230,11 @@ workflow 加载后继续用 Hive 命令作为通信与状态底座。
 
 ## 排障 + 协议边界
 
-排障命令清单(`hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`)+ 协议硬约束(发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工)→ 排障时按需取: `hive skills get debug`。日常收发消息不用读这份;主通道见上文「消息机制」。
+排障时按需取: `hive skills get debug`。
+
+debug spec 覆盖:
+
+- `hive doctor` / `delivery` / `thread` / `capture` / `inject` / `interrupt` / `kill`
+- 发送入口、`hive answer` 前提、非严格可靠队列语义、`gh` vs `hive` kernel 分工
+
+日常收发消息不用读这份;主通道见上文「消息机制」。
