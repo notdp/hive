@@ -1,7 +1,6 @@
 ---
 name: hive
-description: Hive 是 tmux 里的多 agent 协作 runtime。当你收到 <HIVE ...> 消息、被拉进某个 team、或要和别的 agent 分工协作时，用它发现上下文、查看成员、收发消息；完整协议与 duo / squad 拓扑由 CLI 经 `hive skills get` 现取。
-metadata: {"hive-bot":{"os":["darwin","linux"],"requires":{"bins":["tmux","python3","hive"]}}}
+description: Hive 是 tmux 里的多 agent 协作 runtime。当你收到 HIVE 消息、被拉进某个 team、或要和别的 agent 分工协作时，用它发现上下文、查看成员、收发消息；完整协议与 duo / squad 拓扑由 CLI 经 `hive skills get` 现取。
 ---
 
 # Hive — agent 协作 runtime

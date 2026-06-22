@@ -5,6 +5,17 @@ import pytest
 from hive.cli import cli
 
 
+def _frontmatter_keys(text: str) -> set[str]:
+    lines = text.splitlines()
+    assert lines[0] == "---"
+    keys: set[str] = set()
+    for line in lines[1:]:
+        if line == "---":
+            return keys
+        keys.add(line.split(":", 1)[0])
+    raise AssertionError("frontmatter terminator not found")
+
+
 def test_plugin_list_does_not_offer_retired_cvim_or_fork(runner, configure_hive_home):
     configure_hive_home(tmux_inside=False)
     listed = runner.invoke(cli, ["plugin", "list", "--json"])
@@ -45,8 +56,7 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     skill = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md"
     assert skill.exists()
     skill_text = skill.read_text()
-    assert "disable-model-invocation: false" in skill_text
-    assert "MANDATORY when the current conversation already contains a <system-notification> code review prompt" in skill_text
+    assert _frontmatter_keys(skill_text) == {"name", "description"}
     assert "depends on the `hive` skill" in skill_text
     assert "load the `hive` skill" in skill_text
     assert "3 Reviewer + Evidence Verification" in skill_text

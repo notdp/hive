@@ -3,6 +3,17 @@ from pathlib import Path
 from hive import skill_sync
 
 
+def _frontmatter_keys(text: str) -> set[str]:
+    lines = text.splitlines()
+    assert lines[0] == "---"
+    keys: set[str] = set()
+    for line in lines[1:]:
+        if line == "---":
+            return keys
+        keys.add(line.split(":", 1)[0])
+    raise AssertionError("frontmatter terminator not found")
+
+
 def _configure_skill_homes(monkeypatch, tmp_path: Path) -> None:
     hive_home = tmp_path / ".hive"
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -17,6 +28,12 @@ def test_packaged_hive_skill_matches_repo_skill():
     repo_skill = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_bytes()
 
     assert skill_sync._canonical_hive_skill_bytes() == repo_skill
+
+
+def test_hive_skill_frontmatter_uses_standard_keys():
+    repo_skill = (Path(__file__).resolve().parents[2] / "skills" / "hive" / "SKILL.md").read_text()
+
+    assert _frontmatter_keys(repo_skill) == {"name", "description"}
 
 
 def test_diagnose_hive_skill_current_for_target_cli(monkeypatch, tmp_path: Path):

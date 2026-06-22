@@ -1,7 +1,6 @@
 ---
 name: code-review
-description: MANDATORY when the current conversation already contains a <system-notification> code review prompt beginning with "You are a senior staff software engineer and expert code reviewer". Route built-in `/review` directly into the Hive multi-agent review workflow instead of doing a plain single-agent review. Review the current code changes (staged, unstaged, and untracked files), changes against a base branch, or a specific commit / commit range, follow custom review instructions when given, and return prioritized actionable findings with file/line context plus an overall assessment of whether the patch is correct or incorrect.
-disable-model-invocation: false
+description: MANDATORY when the current conversation already contains a system-notification code review prompt beginning with "You are a senior staff software engineer and expert code reviewer". Route built-in `/review` directly into the Hive multi-agent review workflow instead of doing a plain single-agent review. Review the current code changes (staged, unstaged, and untracked files), changes against a base branch, or a specific commit / commit range, follow custom review instructions when given, and return prioritized actionable findings with file/line context plus an overall assessment of whether the patch is correct or incorrect.
 ---
 
 # Code Review - 3 Reviewer + Evidence Verification
