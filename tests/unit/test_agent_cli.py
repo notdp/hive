@@ -55,6 +55,24 @@ def test_detect_profile_for_pane_falls_back_to_tty_processes(monkeypatch):
     assert profile.name == "codex"
 
 
+def test_detect_profile_for_pane_reads_codex_argv_without_claude_path_false_positive(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "node")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(
+            pid="200",
+            command="node",
+            argv="node /opt/homebrew/bin/codex --cd /repo/.claude/worktrees/feature",
+        ),
+    ])
+
+    profile = agent_cli.detect_profile_for_pane("%141")
+
+    assert profile is not None
+    assert profile.name == "codex"
+
+
 def test_detect_profile_for_pane_claude_exe_not_misled_by_codex_title(monkeypatch):
     # Regression: macOS Claude Code reports comm "claude.exe". The command probe
     # must resolve it to claude so detection never falls back to the pane title,

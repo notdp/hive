@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -331,6 +332,18 @@ def detect_profile_from_text(text: str) -> CLIProfile | None:
     return None
 
 
+def detect_profile_from_argv(argv: str) -> CLIProfile | None:
+    try:
+        parts = shlex.split(argv or "")
+    except ValueError:
+        parts = (argv or "").split()
+    for token in parts[:4]:
+        profile = get_profile(token)
+        if profile:
+            return profile
+    return None
+
+
 def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
     profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
     if profile:
@@ -343,7 +356,7 @@ def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
         profile = detect_profile_from_pane_command(process.command)
         if profile:
             return profile
-        profile = detect_profile_from_text(process.argv)
+        profile = detect_profile_from_argv(process.argv)
         if profile:
             return profile
     return None
