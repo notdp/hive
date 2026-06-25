@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive 是 tmux 里的多 agent 协作 runtime。收到 HIVE 消息、被拉进 team、或要和别的 agent 协作时，用它确认身份、取当前角色协议、收发消息。
+description: Hive 是 tmux 里的多 agent 协作 runtime。当收到 HIVE 消息、被指定为 duo-worker/duo-validator/squad-orch/squad-challenger/squad-worker/squad-validator、被拉进 Hive team、或需要开/管理 duo/squad 协作时使用；用于确认身份、取当前角色协议、收发消息。
 ---
 
 # Hive — agent 协作入口
