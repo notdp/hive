@@ -318,15 +318,16 @@ class Agent:
 
         hive-spawned codex delivers via the per-pane daemon's ``turn/start``
         RPC, which never touches the composer draft. Embedded (manual) codex and
-        the other CLIs — or a daemon that rejects the turn (no thread yet, or a
-        turn already active) — fall back to keystroke injection.
+        the other CLIs — or a codex pane without a usable daemon/thread — fall
+        back to keystroke injection.
         """
-        if self.cli == "codex":
+        profile_name = _resolve_profile_name(self.pane_id, self.cli)
+        if profile_name == "codex":
             from .adapters import codex_app_server
 
             if codex_app_server.send_to_pane(self.pane_id, text):
                 return
-        _submit_interactive_text(self.pane_id, text, self.cli)
+        _submit_interactive_text(self.pane_id, text, profile_name)
 
     def load_skill(self, skill_name: str) -> None:
         """Load a skill in the pane using the CLI-specific command.

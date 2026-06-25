@@ -514,6 +514,24 @@ def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
     assert submitted == []  # no keystroke fallback when daemon accepts
 
 
+def test_send_uses_detected_codex_daemon_when_stored_cli_is_stale(monkeypatch):
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, _cli: "codex")
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda pane, text: sent.append((pane, text)) or True,
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert sent == [("%3", "hi")]
+    assert submitted == []
+
+
 def test_send_codex_falls_back_to_keystrokes_when_daemon_rejects(monkeypatch):
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: False
