@@ -150,6 +150,47 @@ def _resolve_profile_name(pane_id: str, cli: str) -> str:
     return cli
 
 
+def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> None:
+    """Answer Claude's one-shot startup prompts (folder trust, MCP-server
+    consent, dev-channel warning -- each defaults to the safe first option) and
+    record the channel ready marker once Claude prints the registration notice.
+
+    Spawn-time only. The per-message delivery path never touches the pane; this
+    is the single keystroke-driven step that channel delivery still needs, the
+    same way hive already send-keys the launch command itself.
+    """
+    from .adapters import claude_channel
+
+    prompts = (
+        "trust this folder",
+        "I am using this for local development",
+        "New MCP server found",
+        "Use this MCP server",
+    )
+    registered = "inject directly in this session"
+    deadline = time.time() + AGENT_STARTUP_TIMEOUT
+    marked = False
+    ready_at: float | None = None
+    while time.time() < deadline:
+        screen = tmux.capture_pane(pane_id, lines=80)
+        if not marked and registered in screen:
+            claude_channel.mark_ready(pane_id)
+            marked = True
+        if any(p in screen for p in prompts):
+            tmux.send_key(pane_id, "Enter")
+            ready_at = None
+            time.sleep(0.6)
+            continue
+        if ready_text in screen:
+            if marked:
+                return
+            if ready_at is None:
+                ready_at = time.time()
+            elif time.time() - ready_at > 4.0:
+                return  # ready but no channel notice -> send-keys fallback stays
+        time.sleep(0.4)
+
+
 @dataclass
 class Agent:
     name: str
@@ -235,6 +276,18 @@ class Agent:
                     if workspace:
                         from .sidecar import request_connect_codex
                         request_connect_codex(workspace, pane_id)
+        # A new claude session registers a per-pane MCP "channel" so hive can
+        # push <HIVE> messages over a socket instead of tmux send-keys. Register
+        # writes a git-invisible project .mcp.json and adds the launch flag;
+        # resume/fork claude stays on keystroke delivery. Empty flags (e.g. a
+        # tracked .mcp.json we won't touch) leave the pane on send-keys.
+        channel_enabled = False
+        if cli == "claude" and not session_id:
+            from .adapters import claude_channel
+            channel_flags = claude_channel.prepare_pane(cwd)
+            if channel_flags:
+                cmd_parts.extend(channel_flags)
+                channel_enabled = True
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
@@ -297,6 +350,9 @@ class Agent:
             cli=cli,
         )
 
+        if channel_enabled:
+            _drive_claude_channel_startup(pane_id, ready_text)
+
         if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             if cli == "droid":
                 detected_session = resolve_session_id_for_pane(pane_id)
@@ -326,6 +382,11 @@ class Agent:
             from .adapters import codex_app_server
 
             if codex_app_server.send_to_pane(self.pane_id, text):
+                return
+        if profile_name == "claude":
+            from .adapters import claude_channel
+
+            if claude_channel.send_to_pane(self.pane_id, text):
                 return
         _submit_interactive_text(self.pane_id, text, profile_name)
 

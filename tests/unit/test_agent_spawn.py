@@ -34,6 +34,10 @@ def _setup_tmux_mocks(monkeypatch):
     # Default: no per-pane codex daemon, so tests never attempt a real socket
     # bind. Tests that exercise the --remote path override this explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
+    # Default: claude channel disabled, so spawn tests neither write a .mcp.json
+    # nor drive the channel-ready capture loop. Channel behavior has dedicated
+    # coverage in tests/unit/test_claude_channel.py + tests/cli.
+    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", lambda _cwd: [])
 
     return calls, tags
 
@@ -135,6 +139,42 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     assert "Please check your inbox." in startup_cmd
     # Only the initial `cd ... && exec codex` Enter — no follow-up TUI inject.
     assert calls.count("<Enter>") == 1
+
+
+def test_spawn_claude_enables_channel_and_marks_ready(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel.prepare_pane",
+        lambda _cwd: ["--dangerously-load-development-channels", "server:hive-channel"],
+    )
+    # startup screen already shows the registration notice + ready text
+    monkeypatch.setattr(
+        "hive.agent.tmux.capture_pane",
+        lambda *_a, **_kw: "Claude Code\ninject directly in this session\n",
+    )
+    marked: list[str] = []
+    monkeypatch.setattr("hive.adapters.claude_channel.mark_ready", marked.append)
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                is_first=True, cli="claude")
+
+    startup_cmd = calls[0]
+    assert "--dangerously-load-development-channels" in startup_cmd
+    assert "server:hive-channel" in startup_cmd
+    assert marked == ["%0"]  # channel registration notice -> ready marker
+
+
+def test_spawn_claude_resume_skips_channel(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    flagged: list[str] = []
+    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane",
+                        lambda _cwd: flagged.append(_cwd) or ["--dangerously-load-development-channels"])
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                is_first=True, cli="claude", session_id="sess-123")
+
+    assert flagged == []  # resume/fork claude never registers a channel
+    assert "--dangerously-load-development-channels" not in calls[0]
 
 
 def test_load_skill_sends_slash_command(monkeypatch):
