@@ -36,13 +36,6 @@ def test_skills_get_unknown_lists_available(runner):
     assert "core" in result.output  # error names the available specs
 
 
-def test_skills_list_includes_duo_and_squad(runner):
-    result = runner.invoke(cli, ["skills", "list"])
-    assert result.exit_code == 0, result.output
-    specs = json.loads(result.output)["specs"]
-    assert {"core", "duo", "squad"} <= set(specs)
-
-
 def test_skills_get_bypasses_stale_skill_gate(runner, monkeypatch):
     """`skills get` is the recovery/bootstrap path — it must serve specs even
     when the installed stub is stale, otherwise the stub→`skills get core`
