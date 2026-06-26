@@ -151,51 +151,69 @@ def test_prepare_pane_resolves_git_root_from_subdir(tmp_path):
     assert not (repo / "sub" / "deep" / ".mcp.json").exists()
 
 
-def test_prepare_pane_merges_tracked_mcp_json_via_skip_worktree(tmp_path):
+def _commit_mcp(repo: Path, content: str) -> None:
+    (repo / ".mcp.json").write_text(content)
+    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "mcp"], check=True)
+
+
+def test_prepare_pane_merges_tracked_mcp_json_in_worktree_via_skip_worktree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
-    (repo / ".mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}')
-    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add"], check=True)
+    _commit_mcp(repo, '{"mcpServers": {"other": {"command": "x"}}}')
+    # a real linked worktree: skip-worktree there is isolated + auto-cleaned
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feat", str(wt)], check=True)
+
+    flags = cc.prepare_pane(str(wt))
+    assert flags  # channel registered for a clean tracked config inside a worktree
+
+    cfg = json.loads((wt / ".mcp.json").read_text())
+    assert "other" in cfg["mcpServers"] and "hive-channel" in cfg["mcpServers"]
+    status = subprocess.run(["git", "-C", str(wt), "status", "--short"],
+                            capture_output=True, text=True).stdout
+    assert ".mcp.json" not in status  # hidden via skip-worktree
+    ls = subprocess.run(["git", "-C", str(wt), "ls-files", "-v", ".mcp.json"],
+                        capture_output=True, text=True).stdout
+    assert ls.startswith("S")
+    # the main checkout is untouched while the worktree holds skip-worktree
+    main_ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
+                             capture_output=True, text=True).stdout
+    assert main_ls.startswith("H")
+    assert "hive-channel" not in (repo / ".mcp.json").read_text()
+
+
+def test_prepare_pane_refuses_dirty_tracked_mcp_json(tmp_path):
+    # the validator's repro: never hide/lose a user's uncommitted .mcp.json edits
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    _commit_mcp(repo, '{"mcpServers": {"committed": {"command": "true"}}}')
+    dirty = '{"mcpServers": {"committed": {"command": "true"}, "userWip": {"command": "echo"}}}'
+    (repo / ".mcp.json").write_text(dirty)  # uncommitted user edit
 
     flags = cc.prepare_pane(str(repo))
-    assert flags  # channel registered even for a tracked config
-
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert "other" in cfg["mcpServers"]  # user's server preserved
-    assert "hive-channel" in cfg["mcpServers"]  # merged in
-
-    # the local addition is hidden via skip-worktree: status clean + committed
-    # blob unchanged, so it can never be staged/committed by accident
-    status = subprocess.run(["git", "-C", str(repo), "status", "--short"],
-                            capture_output=True, text=True).stdout
-    assert ".mcp.json" not in status
+    assert flags == []  # refused (dirty checked before anything is written)
+    assert (repo / ".mcp.json").read_text() == dirty  # user's WIP untouched
     ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
                         capture_output=True, text=True).stdout
-    assert ls.startswith("S")  # skip-worktree bit set
-    head = subprocess.run(["git", "-C", str(repo), "show", "HEAD:.mcp.json"],
-                          capture_output=True, text=True).stdout
-    assert "hive-channel" not in head  # committed version untouched
+    assert ls.startswith("H")  # no skip-worktree applied
 
 
-def test_release_pane_restores_tracked_mcp_json(tmp_path):
+def test_prepare_pane_refuses_tracked_mcp_json_outside_worktree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
     committed = '{"mcpServers": {"other": {"command": "x"}}}'
-    (repo / ".mcp.json").write_text(committed)
-    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add"], check=True)
+    _commit_mcp(repo, committed)
 
-    cc.prepare_pane(str(repo))
-    cc.release_pane(str(repo))
-
+    flags = cc.prepare_pane(str(repo))  # main checkout, not a linked worktree
+    assert flags == []  # refused: skip-worktree could not be cleaned up here
+    assert (repo / ".mcp.json").read_text() == committed  # untouched
     ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
                         capture_output=True, text=True).stdout
-    assert ls.startswith("H")  # skip-worktree cleared (tracked, normal)
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert "hive-channel" not in cfg["mcpServers"]  # restored to committed
+    assert ls.startswith("H")
 
 
 def test_prepare_pane_merges_existing_untracked_mcp_json(tmp_path):

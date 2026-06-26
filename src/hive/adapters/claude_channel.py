@@ -158,20 +158,58 @@ def _server_entry() -> dict:
     }
 
 
+def _in_linked_worktree(root: str) -> bool:
+    out = _git(root, "rev-parse", "--git-dir")
+    return out is not None and out.returncode == 0 and "/worktrees/" in out.stdout
+
+
+def _mcp_dirty(root: str) -> bool:
+    """True if a tracked .mcp.json has uncommitted (working-tree or staged)
+    changes. Anything but a clean exit 0 is treated as unsafe-to-touch."""
+    out = _git(root, "diff", "HEAD", "--quiet", "--", _MCP_FILENAME)
+    return out is None or out.returncode != 0
+
+
+def _channel_unavailable(mcp_path: str, reason: str) -> list[str]:
+    """Surface a hard setup failure (the validator requires this over silently
+    hiding/losing work) and disable the channel for this pane."""
+    sys.stderr.write(
+        f"[hive-channel] channel not registered: {mcp_path} {reason}. "
+        f"This claude pane will not receive hive messages.\n"
+    )
+    return []
+
+
 def prepare_pane(cwd: str) -> list[str]:
     """Register the channel MCP server and return Claude launch flags.
 
     ``.mcp.json`` is a shared project MCP config (Claude Code and Codex both read
     it), so hive-channel is **merged** into an existing JSON object, preserving
-    every other server and top-level key. A file that is not a JSON object
-    (invalid JSON, array, scalar) is not a usable config and is replaced. The
-    result is kept out of git either way: a tracked ``.mcp.json`` via
-    ``git update-index --skip-worktree`` (the local hive-channel line never shows
-    in status or gets committed), an untracked one via repo-local ``info/exclude``.
+    every other server and top-level key. A file that is not a JSON object is
+    replaced. Hiding the local addition from git is only safe where it can be
+    cleaned up, so a tracked ``.mcp.json`` is handled conservatively:
+
+    - **untracked / absent** -> merge/create, hide via repo-local ``info/exclude``;
+    - **tracked, clean, inside a hive worktree** -> merge + ``skip-worktree``;
+      the bit lives in this worktree's index and dies with the worktree on
+      ``hive worktree done`` (verified isolated from the main checkout);
+    - **tracked with uncommitted changes**, or **tracked outside a worktree**
+      (where skip-worktree could not be cleaned up) -> refuse, surface, and
+      never touch the file. Channel-only, so such a pane is unsupported.
     """
     root = project_root(cwd)
     mcp_path = os.path.join(root, _MCP_FILENAME)
     tracked = os.path.exists(mcp_path) and _is_tracked(root)
+
+    if tracked:
+        if _mcp_dirty(root):
+            return _channel_unavailable(
+                mcp_path, "is tracked and has uncommitted changes (commit or "
+                "stash them, then respawn)")
+        if not _in_linked_worktree(root):
+            return _channel_unavailable(
+                mcp_path, "is tracked outside a hive worktree, where the "
+                "registration could not be cleaned up (spawn in a worktree)")
 
     cfg: dict = {}
     if os.path.exists(mcp_path):
@@ -195,24 +233,6 @@ def prepare_pane(cwd: str) -> list[str]:
     else:
         _ensure_excluded(root)
     return ["--dangerously-load-development-channels", f"server:{SERVER_NAME}"]
-
-
-def release_pane(cwd: str) -> None:
-    """Undo prepare_pane's git hiding for a pane's project root (teardown).
-
-    For a tracked ``.mcp.json`` this clears the skip-worktree bit and restores
-    the committed content, so a non-worktree spawn does not leave the user's
-    config silently un-tracked. Untracked / generated files are left to normal
-    worktree removal. Best-effort and idempotent.
-    """
-    root = project_root(cwd)
-    if not _is_tracked(root):
-        return
-    out = _git(root, "ls-files", "-v", _MCP_FILENAME)
-    if out is None or not out.stdout.startswith("S"):  # 'S' == skip-worktree
-        return
-    _git(root, "update-index", "--no-skip-worktree", _MCP_FILENAME)
-    _git(root, "checkout", "--", _MCP_FILENAME)
 
 
 # --- delivery ---------------------------------------------------------------
