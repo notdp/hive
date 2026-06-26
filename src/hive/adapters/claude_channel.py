@@ -4,12 +4,14 @@ Mirrors the codex app-server adapter's role for Claude: ``Agent.send`` hands a
 ``<HIVE>`` envelope to :func:`send_to_pane`, which writes it to a per-pane unix
 socket. The channel MCP server (``claude_channel_server``, spawned by Claude
 from a project ``.mcp.json``) turns that into a ``notifications/claude/channel``
-push -- no tmux send-keys, no composer draft disturbance. Anything unavailable
-returns ``False`` so ``Agent.send`` falls back to keystroke injection.
+push -- no tmux send-keys, no composer draft disturbance. Claude delivery is
+channel-only; a ``False`` from :func:`send_to_pane` is a delivery failure that
+surfaces through the sidecar's msgId-render tracking, not a keystroke fallback.
 
-Channel registration (rev-3 / "plan A"): write the MCP server into the project
-``.mcp.json`` at the git root and hide it via the repo-local ``info/exclude`` so
-``git status`` never shows it. The server name resolves for the
+Channel registration: write the MCP server into the project ``.mcp.json`` at the
+git root and keep it out of ``git status`` (repo-local ``info/exclude`` for an
+untracked file; ``skip-worktree`` for a clean tracked file inside a worktree).
+The server name resolves for the
 ``--dangerously-load-development-channels server:hive-channel`` launch flag.
 """
 from __future__ import annotations
@@ -245,12 +247,12 @@ def _extract_msg_id(text: str) -> str:
 def send_to_pane(pane: str, text: str) -> bool:
     """Deliver ``text`` over the pane's channel socket.
 
-    Returns ``False`` (caller falls back to keystroke injection) when the
-    channel is not locally ready: no ready marker (channel never registered),
-    no socket, or a refused/timed-out connect. A successful write returns
-    ``True``; the ready marker -- set only after Claude printed the channel
-    registration notice -- is what distinguishes a live channel from a silently
-    dropped one (channel notifications are not acknowledged).
+    Returns ``False`` (a delivery failure -- Claude is channel-only, so there is
+    no keystroke fallback) when the channel is not locally ready: no ready marker
+    (channel never registered), no socket, or a refused/timed-out connect. A
+    successful write returns ``True``; the ready marker -- set only after Claude
+    printed the channel registration notice -- is what distinguishes a live
+    channel from a silently dropped one (channel notifications are not acked).
     """
     if not pane or not is_ready(pane):
         return False
