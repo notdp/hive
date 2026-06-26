@@ -373,9 +373,10 @@ class Agent:
         """Send a prompt to the agent.
 
         hive-spawned codex delivers via the per-pane daemon's ``turn/start``
-        RPC, which never touches the composer draft. Embedded (manual) codex and
-        the other CLIs — or a codex pane without a usable daemon/thread — fall
-        back to keystroke injection.
+        RPC and claude via its per-pane MCP channel socket — neither touches the
+        composer draft. claude is channel-only (no keystroke fallback). droid,
+        and codex without a usable daemon/thread, fall back to keystroke
+        injection.
         """
         profile_name = _resolve_profile_name(self.pane_id, self.cli)
         if profile_name == "codex":
@@ -386,8 +387,12 @@ class Agent:
         if profile_name == "claude":
             from .adapters import claude_channel
 
-            if claude_channel.send_to_pane(self.pane_id, text):
-                return
+            # Claude is channel-only: no keystroke fallback. A failed delivery
+            # surfaces through the sidecar's msgId-render tracking (and retries)
+            # rather than silently typing into the composer. Environments without
+            # channels (Bedrock/Vertex, Claude Code < 2.1.80) are unsupported.
+            claude_channel.send_to_pane(self.pane_id, text)
+            return
         _submit_interactive_text(self.pane_id, text, profile_name)
 
     def load_skill(self, skill_name: str) -> None:

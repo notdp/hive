@@ -127,6 +127,7 @@ def test_prepare_pane_writes_invisible_mcp_json(tmp_path):
 
     cfg = json.loads((repo / ".mcp.json").read_text())
     entry = cfg["mcpServers"]["hive-channel"]
+    assert entry["type"] == "stdio"  # canonical Claude Code server shape
     assert entry["command"] == sys.executable
     assert entry["args"] == ["-m", "hive.adapters.claude_channel_server"]
     assert "PYTHONPATH" in entry["env"] and "HIVE_HOME" in entry["env"]
@@ -150,7 +151,7 @@ def test_prepare_pane_resolves_git_root_from_subdir(tmp_path):
     assert not (repo / "sub" / "deep" / ".mcp.json").exists()
 
 
-def test_prepare_pane_refuses_tracked_mcp_json(tmp_path):
+def test_prepare_pane_merges_tracked_mcp_json_via_skip_worktree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
@@ -159,9 +160,42 @@ def test_prepare_pane_refuses_tracked_mcp_json(tmp_path):
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add"], check=True)
 
     flags = cc.prepare_pane(str(repo))
-    assert flags == []  # disabled -> caller falls back to send-keys
+    assert flags  # channel registered even for a tracked config
+
     cfg = json.loads((repo / ".mcp.json").read_text())
-    assert "hive-channel" not in cfg["mcpServers"]  # tracked file untouched
+    assert "other" in cfg["mcpServers"]  # user's server preserved
+    assert "hive-channel" in cfg["mcpServers"]  # merged in
+
+    # the local addition is hidden via skip-worktree: status clean + committed
+    # blob unchanged, so it can never be staged/committed by accident
+    status = subprocess.run(["git", "-C", str(repo), "status", "--short"],
+                            capture_output=True, text=True).stdout
+    assert ".mcp.json" not in status
+    ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
+                        capture_output=True, text=True).stdout
+    assert ls.startswith("S")  # skip-worktree bit set
+    head = subprocess.run(["git", "-C", str(repo), "show", "HEAD:.mcp.json"],
+                          capture_output=True, text=True).stdout
+    assert "hive-channel" not in head  # committed version untouched
+
+
+def test_release_pane_restores_tracked_mcp_json(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    committed = '{"mcpServers": {"other": {"command": "x"}}}'
+    (repo / ".mcp.json").write_text(committed)
+    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add"], check=True)
+
+    cc.prepare_pane(str(repo))
+    cc.release_pane(str(repo))
+
+    ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
+                        capture_output=True, text=True).stdout
+    assert ls.startswith("H")  # skip-worktree cleared (tracked, normal)
+    cfg = json.loads((repo / ".mcp.json").read_text())
+    assert "hive-channel" not in cfg["mcpServers"]  # restored to committed
 
 
 def test_prepare_pane_merges_existing_untracked_mcp_json(tmp_path):
@@ -174,6 +208,54 @@ def test_prepare_pane_merges_existing_untracked_mcp_json(tmp_path):
     cfg = json.loads((repo / ".mcp.json").read_text())
     assert "other" in cfg["mcpServers"]  # preserved
     assert "hive-channel" in cfg["mcpServers"]  # added
+
+
+def test_prepare_pane_preserves_other_top_level_keys(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".mcp.json").write_text('{"someTool": {"k": 1}, "mcpServers": {"a": {}}}')
+    cc.prepare_pane(str(repo))
+    cfg = json.loads((repo / ".mcp.json").read_text())
+    assert cfg["someTool"] == {"k": 1}  # unrelated top-level key kept
+    assert "a" in cfg["mcpServers"] and "hive-channel" in cfg["mcpServers"]
+
+
+def test_prepare_pane_overwrites_invalid_mcp_json(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".mcp.json").write_text("{not json, not a usable config")
+
+    flags = cc.prepare_pane(str(repo))
+    assert flags  # not a JSON object -> replaced, channel registered
+    cfg = json.loads((repo / ".mcp.json").read_text())
+    assert "hive-channel" in cfg["mcpServers"]
+
+
+def test_prepare_pane_overwrites_non_object_mcp_json(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".mcp.json").write_text('["valid json", "but not an object"]')
+
+    flags = cc.prepare_pane(str(repo))
+    assert flags
+    cfg = json.loads((repo / ".mcp.json").read_text())
+    assert isinstance(cfg, dict) and "hive-channel" in cfg["mcpServers"]
+
+
+def test_prepare_pane_replaces_non_object_servers_keeps_keys(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".mcp.json").write_text('{"keep": 1, "mcpServers": "not-an-object"}')
+
+    flags = cc.prepare_pane(str(repo))
+    assert flags
+    cfg = json.loads((repo / ".mcp.json").read_text())
+    assert cfg["keep"] == 1  # other keys preserved
+    assert cfg["mcpServers"] == {"hive-channel": cfg["mcpServers"]["hive-channel"]}
 
 
 def test_prepare_pane_outside_git_uses_cwd(tmp_path):

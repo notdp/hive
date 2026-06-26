@@ -36,13 +36,15 @@ def test_claude_send_uses_channel_and_skips_keystrokes(monkeypatch):
     assert keystrokes == []  # channel succeeded -> no send-keys
 
 
-def test_claude_send_falls_back_to_keystrokes_when_channel_unavailable(monkeypatch):
+def test_claude_send_does_not_fall_back_to_keystrokes(monkeypatch):
     keystrokes = _patch(monkeypatch, "claude")
     monkeypatch.setattr(claude_channel, "send_to_pane", lambda pane, text: False)
 
     _agent("claude").send("<HIVE>hi</HIVE>")
 
-    assert keystrokes == [("%1", "<HIVE>hi</HIVE>", "claude")]  # fell through
+    # channel-only: even when the channel reports failure, claude never types
+    # into the composer (a failed delivery surfaces via msgId-render tracking).
+    assert keystrokes == []
 
 
 def test_codex_send_path_unchanged(monkeypatch):

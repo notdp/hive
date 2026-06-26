@@ -151,6 +151,7 @@ def _child_pythonpath() -> str:
 
 def _server_entry() -> dict:
     return {
+        "type": "stdio",  # canonical Claude Code project-MCP server shape
         "command": sys.executable,
         "args": ["-m", "hive.adapters.claude_channel_server"],
         "env": {"HIVE_HOME": str(_hive_home()), "PYTHONPATH": _child_pythonpath()},
@@ -160,34 +161,58 @@ def _server_entry() -> dict:
 def prepare_pane(cwd: str) -> list[str]:
     """Register the channel MCP server and return Claude launch flags.
 
-    Returns ``[]`` (channel disabled -> caller keeps send-keys) when an existing
-    *tracked* ``.mcp.json`` would otherwise be mutated.
+    ``.mcp.json`` is a shared project MCP config (Claude Code and Codex both read
+    it), so hive-channel is **merged** into an existing JSON object, preserving
+    every other server and top-level key. A file that is not a JSON object
+    (invalid JSON, array, scalar) is not a usable config and is replaced. The
+    result is kept out of git either way: a tracked ``.mcp.json`` via
+    ``git update-index --skip-worktree`` (the local hive-channel line never shows
+    in status or gets committed), an untracked one via repo-local ``info/exclude``.
     """
     root = project_root(cwd)
     mcp_path = os.path.join(root, _MCP_FILENAME)
+    tracked = os.path.exists(mcp_path) and _is_tracked(root)
 
+    cfg: dict = {}
     if os.path.exists(mcp_path):
-        if _is_tracked(root):
-            return []  # never dirty a tracked config; fall back to send-keys
         try:
-            cfg = json.loads(Path(mcp_path).read_text())
-            if not isinstance(cfg, dict):
-                cfg = {}
+            loaded = json.loads(Path(mcp_path).read_text())
         except (OSError, ValueError):
-            cfg = {}
-    else:
-        cfg = {}
+            loaded = None
+        if isinstance(loaded, dict):
+            cfg = loaded  # merge: keep the user's / Codex's servers and keys
 
-    servers = cfg.setdefault("mcpServers", {})
+    servers = cfg.get("mcpServers")
     if not isinstance(servers, dict):
-        return []
+        servers = cfg["mcpServers"] = {}
     servers[SERVER_NAME] = _server_entry()
     try:
         Path(mcp_path).write_text(json.dumps(cfg, indent=2) + "\n")
     except OSError:
         return []
-    _ensure_excluded(root)
+    if tracked:
+        _git(root, "update-index", "--skip-worktree", _MCP_FILENAME)
+    else:
+        _ensure_excluded(root)
     return ["--dangerously-load-development-channels", f"server:{SERVER_NAME}"]
+
+
+def release_pane(cwd: str) -> None:
+    """Undo prepare_pane's git hiding for a pane's project root (teardown).
+
+    For a tracked ``.mcp.json`` this clears the skip-worktree bit and restores
+    the committed content, so a non-worktree spawn does not leave the user's
+    config silently un-tracked. Untracked / generated files are left to normal
+    worktree removal. Best-effort and idempotent.
+    """
+    root = project_root(cwd)
+    if not _is_tracked(root):
+        return
+    out = _git(root, "ls-files", "-v", _MCP_FILENAME)
+    if out is None or not out.stdout.startswith("S"):  # 'S' == skip-worktree
+        return
+    _git(root, "update-index", "--no-skip-worktree", _MCP_FILENAME)
+    _git(root, "checkout", "--", _MCP_FILENAME)
 
 
 # --- delivery ---------------------------------------------------------------

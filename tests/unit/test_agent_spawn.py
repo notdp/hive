@@ -231,7 +231,8 @@ def test_send_exits_tmux_copy_mode_before_submitting(monkeypatch):
     canceled: list[str] = []
     monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: True)
     monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda pane: canceled.append(pane))
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="claude")
+    # droid still uses the keystroke path; claude is channel-only (no copy-mode/keys)
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="droid")
 
     agent.send("hello world")
 
@@ -592,6 +593,11 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
         "hive.adapters.codex_app_server.send_to_pane",
         lambda *a: daemon_calls.append(a) or True,
     )
+    channel_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel.send_to_pane",
+        lambda *a: channel_calls.append(a) or True,
+    )
     submitted: list[tuple] = []
     monkeypatch.setattr(
         "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
@@ -600,7 +606,8 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
     Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
 
     assert daemon_calls == []  # codex daemon path not taken for claude
-    assert len(submitted) == 1
+    assert len(channel_calls) == 1  # claude delivers over its MCP channel
+    assert submitted == []  # channel-only: no keystroke fallback
 
 
 def test_spawn_claude_skips_droid_session_detection(monkeypatch):
