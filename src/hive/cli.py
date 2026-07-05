@@ -4320,6 +4320,13 @@ def _exec_claude_managed(args: list[str]) -> None:
         _raw()
     from .adapters import claude_channel
 
+    # A marker left by a previous claude in this pane must not count as the
+    # new launch's readiness — the server it belongs to is gone. Clear before
+    # exec (and before the raw fallback on a failed prepare) so readiness can
+    # only come from the server this launch actually starts.
+    pane = os.environ.get("TMUX_PANE") or (tmux.get_current_pane_id() or "")
+    if pane:
+        claude_channel.clear_ready(pane)
     flags = claude_channel.prepare_pane(os.getcwd())
     if not flags:
         raise SystemExit(1)  # shell wrapper falls back to `command claude`

@@ -26,12 +26,20 @@ def _capture_exec(monkeypatch) -> list[list[str]]:
     return calls
 
 
-def _managed_env(monkeypatch, *, in_tmux=True, flags=None):
+def _managed_env(monkeypatch, *, in_tmux=True, flags=None, pane="%99"):
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: in_tmux)
+    if pane:
+        monkeypatch.setenv("TMUX_PANE", pane)
+    else:
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: pane or None)
     monkeypatch.setattr(
         "hive.adapters.claude_channel.prepare_pane",
         lambda _cwd: list(_FLAGS) if flags is None else list(flags),
     )
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", cleared.append)
+    return cleared
 
 
 def test_claude_bare_in_tmux_appends_channel_flags(runner, monkeypatch):
@@ -48,6 +56,33 @@ def test_claude_user_args_precede_channel_flags(runner, monkeypatch):
     _managed_env(monkeypatch)
     runner.invoke(cli, ["claude", "hello"])
     assert calls == [["claude", "claude", "hello", *_FLAGS]]
+
+
+def test_claude_managed_launch_clears_stale_marker_first(runner, monkeypatch):
+    # a marker left by a previous claude in this pane must not survive into
+    # the new launch: readiness may only come from the new server
+    calls = _capture_exec(monkeypatch)
+    cleared = _managed_env(monkeypatch, pane="%99")
+    runner.invoke(cli, ["claude", "hello"])
+    assert cleared == ["%99"]
+    assert calls  # cleared before the managed exec happened
+
+
+def test_claude_passthrough_does_not_touch_marker(runner, monkeypatch):
+    _capture_exec(monkeypatch)
+    cleared = _managed_env(monkeypatch, pane="%99")
+    runner.invoke(cli, ["claude", "agents", "--json"])
+    assert cleared == []  # raw passthrough leaves pane state alone
+
+
+def test_claude_failed_prepare_still_clears_stale_marker(runner, monkeypatch):
+    # even when the wrapper falls back to `command claude` (exit 1), the pane
+    # must not keep a stale marker claiming a channel that will not exist
+    _capture_exec(monkeypatch)
+    cleared = _managed_env(monkeypatch, flags=[], pane="%99")
+    result = runner.invoke(cli, ["claude", "hello"])
+    assert result.exit_code != 0
+    assert cleared == ["%99"]
 
 
 def test_claude_passthrough_subcommand_runs_raw(runner, monkeypatch):
