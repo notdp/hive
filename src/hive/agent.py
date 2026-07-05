@@ -246,12 +246,11 @@ class Agent:
         resolved_model = model
 
         # Every claude session (fresh, resume, fork — each is a new process
-        # that re-reads the project .mcp.json) registers a per-pane MCP
-        # "channel" so hive can push <HIVE> messages over a socket. Delivery is
-        # channel-only: when the channel cannot be registered (e.g. a tracked
-        # dirty .mcp.json hive refuses to touch, or an unsupported runtime),
-        # the pane could never receive messages, so spawn fails before a pane
-        # is even created instead of leaving an undeliverable agent behind.
+        # picking up the launch flags) registers a per-pane MCP "channel" so
+        # hive can push <HIVE> messages over a socket. Delivery is
+        # channel-only: when the channel config cannot be written, the pane
+        # could never receive messages, so spawn fails before a pane is even
+        # created instead of leaving an undeliverable agent behind.
         channel_flags: list[str] = []
         if cli == "claude":
             from .adapters import claude_channel
@@ -380,9 +379,10 @@ class Agent:
                     tmux.kill_pane(pane_id)
                 raise RuntimeError(
                     f"claude started in pane {pane_id} but never registered "
-                    "the hive channel (unsupported runtime? requires Claude "
-                    "Code >= 2.1.80 with Anthropic auth); claude delivery is "
-                    "channel-only, refusing to keep an undeliverable pane"
+                    "the hive channel; claude delivery is channel-only, "
+                    "refusing to keep an undeliverable pane (channels "
+                    "verified on Claude Code 2.1.198 with Anthropic auth; "
+                    "older versions or Bedrock/Vertex may not support them)"
                 )
 
         if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):

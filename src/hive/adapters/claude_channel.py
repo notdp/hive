@@ -10,12 +10,14 @@ channel-only; on a ``False`` from :func:`send_to_pane`, ``Agent.send`` raises
 failure (the sidecar projects it to ``injectStatus=failed``).
 
 Channel registration: a static MCP config under ``$HIVE_HOME/channel`` passed
-via ``--mcp-config`` -- no project file is ever touched (the earlier project
-``.mcp.json`` merge + git-hiding existed only because ``--mcp-config`` could
-not bring up channels before Claude Code 2.1.198). Both
-``--dangerously-load-development-channels`` and ``--mcp-config`` are variadic,
-so the caller must terminate the flag list (spawn puts ``--`` before the
-positional prompt) or append these flags after all positionals.
+via ``--mcp-config`` -- no project file is ever touched. (An earlier project
+``.mcp.json`` merge + git-hiding mechanism existed only because
+``--mcp-config`` did not bring up channels on the Claude Code available at
+the time: 2.1.187 was known broken, 2.1.198 is verified working, the exact
+minimum is unverified.) Both ``--dangerously-load-development-channels`` and
+``--mcp-config`` are variadic, so the caller must terminate the flag list
+(spawn puts ``--`` before the positional prompt) or append these flags after
+all positionals.
 """
 from __future__ import annotations
 

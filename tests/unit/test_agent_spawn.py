@@ -49,8 +49,8 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
     # Default: claude channel registration succeeds without touching disk and
     # the startup driver reports the channel ready, so spawn tests never write
-    # a .mcp.json or drive the capture loop. Failure paths have dedicated
-    # tests below and in tests/unit/test_claude_channel.py + tests/cli.
+    # the channel config or drive the capture loop. Failure paths have
+    # dedicated tests below and in tests/unit/test_claude_channel.py + tests/cli.
     monkeypatch.setattr(
         "hive.adapters.claude_channel.prepare_pane", lambda _cwd: list(_CHANNEL_FLAGS)
     )
@@ -242,7 +242,7 @@ def test_spawn_claude_resume_registers_channel(monkeypatch):
     Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                 is_first=True, cli="claude", session_id="sess-123")
 
-    # resume/fork re-launches the claude process, which re-reads .mcp.json:
+    # resume/fork re-launches the claude process with the same launch flags:
     # the channel registers exactly like a fresh spawn (channel-only delivery)
     assert flagged == ["/tmp"]
     assert "--dangerously-load-development-channels" in calls[0]
