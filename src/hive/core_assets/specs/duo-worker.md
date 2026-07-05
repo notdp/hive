@@ -9,7 +9,7 @@
 - worker 写代码、提交 handoff、向 human 交付。
 - validator 审 plan、写 VAL、验 handoff。
 - validator 不直接对 human 汇报。
-- validator 发现 bug 且你认账时，validator 可以直接改。
+- duo 内已收敛的小修谁接手谁直接改；validator 接手改完仍由 worker 收口交付。
 
 ---
 
@@ -63,6 +63,10 @@ Hive 是 push 模型：有新消息时 runtime 会注入 `<HIVE>` block 并唤�
 ### worker 站位
 
 validator 给具体反馈，认就改；不认就拿证据回。不要空对空争论。
+
+### 共识后接手改
+
+双方已经明确同意的具体小修、文案/anchor 补记、测试命令补跑、窄 scope 返工，不要再来回转述。当前拿到上下文并能在正确 worktree 里动手的 agent 直接改，随后发短 artifact 说明 diff 和验证。边界不变：未达成共识的设计分歧继续用证据收敛；PR、handoff、对 human 交付仍由 worker 负责。
 
 ### 共享 checkout
 
