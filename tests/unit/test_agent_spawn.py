@@ -1,11 +1,24 @@
 """Tests for Agent.spawn model/skill/env handling."""
 
+import json
+
+import pytest
+
+from hive import agent as agent_mod
 from hive.agent import (
     Agent,
     _build_droid_model_settings,
     detect_current_session_id,
 )
-import json
+
+# The real startup driver, captured before any monkeypatching, for tests that
+# exercise its screen-capture loop instead of the fixture's success stub.
+_REAL_CHANNEL_STARTUP = agent_mod._drive_claude_channel_startup
+
+_CHANNEL_FLAGS = [
+    "--dangerously-load-development-channels", "server:hive-channel",
+    "--mcp-config", "/tmp/hh-test/mcp-config.json",
+]
 
 
 def _setup_tmux_mocks(monkeypatch):
@@ -34,10 +47,16 @@ def _setup_tmux_mocks(monkeypatch):
     # Default: no per-pane codex daemon, so tests never attempt a real socket
     # bind. Tests that exercise the --remote path override this explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
-    # Default: claude channel disabled, so spawn tests neither write a .mcp.json
-    # nor drive the channel-ready capture loop. Channel behavior has dedicated
-    # coverage in tests/unit/test_claude_channel.py + tests/cli.
-    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", lambda _cwd: [])
+    # Default: claude channel registration succeeds without touching disk and
+    # the startup driver reports the channel ready, so spawn tests never write
+    # a .mcp.json or drive the capture loop. Failure paths have dedicated
+    # tests below and in tests/unit/test_claude_channel.py + tests/cli.
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel.prepare_pane", lambda _cwd: list(_CHANNEL_FLAGS)
+    )
+    monkeypatch.setattr(
+        "hive.agent._drive_claude_channel_startup", lambda _pane, _ready: True
+    )
 
     return calls, tags
 
@@ -141,19 +160,13 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     assert calls.count("<Enter>") == 1
 
 
-def test_spawn_claude_enables_channel_and_marks_ready(monkeypatch):
+def test_spawn_claude_launches_with_channel_flags(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    monkeypatch.setattr(
-        "hive.adapters.claude_channel.prepare_pane",
-        lambda _cwd: ["--dangerously-load-development-channels", "server:hive-channel"],
-    )
-    # startup screen already shows the registration notice + ready text
-    monkeypatch.setattr(
-        "hive.agent.tmux.capture_pane",
-        lambda *_a, **_kw: "Claude Code\ninject directly in this session\n",
-    )
-    marked: list[str] = []
-    monkeypatch.setattr("hive.adapters.claude_channel.mark_ready", marked.append)
+    # exercise the real startup driver: readiness comes from the marker the
+    # channel server writes, not from any screen text
+    monkeypatch.setattr("hive.agent._drive_claude_channel_startup", _REAL_CHANNEL_STARTUP)
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
+    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: True)
 
     Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                 is_first=True, cli="claude")
@@ -161,20 +174,115 @@ def test_spawn_claude_enables_channel_and_marks_ready(monkeypatch):
     startup_cmd = calls[0]
     assert "--dangerously-load-development-channels" in startup_cmd
     assert "server:hive-channel" in startup_cmd
-    assert marked == ["%0"]  # channel registration notice -> ready marker
+    assert "--mcp-config" in startup_cmd
 
 
-def test_spawn_claude_resume_skips_channel(monkeypatch):
+def test_spawn_claude_clears_stale_marker_before_launch(monkeypatch):
+    # a marker left by a previous claude on this pane id must not count as
+    # the new server's readiness: spawn clears it, the driver times out, and
+    # the spawn fails instead of silently accepting an undeliverable pane
+    _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr("hive.agent._drive_claude_channel_startup", _REAL_CHANNEL_STARTUP)
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", lambda _pane: None)
+    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 1)
+    monkeypatch.setattr("hive.agent._CHANNEL_NOTICE_GRACE", 0.01)
+
+    stale = {"%0"}  # simulated marker store: pre-seeded stale entry
+    monkeypatch.setattr("hive.adapters.claude_channel.is_ready",
+                        lambda pane: pane in stale)
+    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", stale.discard)
+
+    with pytest.raises(RuntimeError, match="channel"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    is_first=True, cli="claude")
+
+    assert stale == set()  # the stale marker was cleared, never trusted
+
+
+def test_channel_startup_driver_true_when_marker_appears(monkeypatch):
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "")
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: True)
+
+    assert agent_mod._drive_claude_channel_startup("%9", "Claude Code") is True
+
+
+def test_channel_startup_driver_false_on_timeout_without_marker(monkeypatch):
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 0.5)
+    monkeypatch.setattr("hive.agent._CHANNEL_NOTICE_GRACE", 0.01)
+    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: False)
+
+    assert agent_mod._drive_claude_channel_startup("%9", "Claude Code") is False
+
+
+def test_spawn_claude_separates_dashed_prompt_with_double_dash(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                is_first=True, cli="claude", skill="none", prompt="--edge prompt")
+
+    startup_cmd = calls[0]
+    # the channel flags are variadic: without `--` claude would consume the
+    # positional prompt as a flag value and abort launch
+    assert " -- " in startup_cmd
+    assert startup_cmd.index(" -- ") < startup_cmd.index("--edge prompt")
+
+
+def test_spawn_claude_resume_registers_channel(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     flagged: list[str] = []
-    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane",
-                        lambda _cwd: flagged.append(_cwd) or ["--dangerously-load-development-channels"])
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel.prepare_pane",
+        lambda cwd: flagged.append(cwd) or list(_CHANNEL_FLAGS),
+    )
 
     Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                 is_first=True, cli="claude", session_id="sess-123")
 
-    assert flagged == []  # resume/fork claude never registers a channel
-    assert "--dangerously-load-development-channels" not in calls[0]
+    # resume/fork re-launches the claude process, which re-reads .mcp.json:
+    # the channel registers exactly like a fresh spawn (channel-only delivery)
+    assert flagged == ["/tmp"]
+    assert "--dangerously-load-development-channels" in calls[0]
+    assert "sess-123" in calls[0]
+
+
+def test_spawn_claude_channel_refused_fails_before_pane_creation(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    splits: list[str] = []
+    monkeypatch.setattr(
+        "hive.agent.tmux.split_window",
+        lambda target, **_kw: splits.append(target) or target,
+    )
+    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", lambda _cwd: [])
+
+    with pytest.raises(RuntimeError, match="channel"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    is_first=True, cli="claude")
+
+    assert splits == []  # fail-fast: no pane created for an undeliverable agent
+    assert calls == []  # nothing was typed anywhere
+
+
+def test_spawn_claude_startup_without_channel_notice_fails(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hive.agent._drive_claude_channel_startup", lambda _pane, _ready: False
+    )
+    killed: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", killed.append)
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", cleared.append)
+
+    with pytest.raises(RuntimeError, match="channel"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    is_first=True, cli="claude")
+
+    assert killed == ["%0"]  # the half-started pane is not left behind
+    # cleared twice: the pre-launch stale-marker guard and the failure cleanup
+    assert cleared == ["%0", "%0"]
 
 
 def test_load_skill_sends_slash_command(monkeypatch):
@@ -539,6 +647,9 @@ def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
 
 
 def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
+    # pin profile resolution: the real one probes the live tmux pane "%3",
+    # which detects whatever CLI happens to run there on this machine
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
@@ -574,6 +685,9 @@ def test_send_uses_detected_codex_daemon_when_stored_cli_is_stale(monkeypatch):
 
 
 def test_send_codex_falls_back_to_keystrokes_when_daemon_rejects(monkeypatch):
+    # pin profile resolution: the real one probes the live tmux pane "%3",
+    # which detects whatever CLI happens to run there on this machine
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: False
     )
@@ -588,6 +702,9 @@ def test_send_codex_falls_back_to_keystrokes_when_daemon_rejects(monkeypatch):
 
 
 def test_send_claude_never_uses_codex_daemon(monkeypatch):
+    # pin profile resolution: the real one probes the live tmux pane "%3",
+    # which detects whatever CLI happens to run there on this machine
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
     daemon_calls: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",

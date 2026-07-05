@@ -7,10 +7,15 @@ so Claude registers a notification listener, then pushes each inbound line as a
 send-keys delivery into a running Claude session.
 
 Inbound seam: a per-pane unix socket under ``$HIVE_HOME/channel`` whose name is
-derived from ``$TMUX_PANE`` (so one shared project ``.mcp.json`` serves every
-pane in the repo). ``claude_channel.send_to_pane`` connects and writes one JSON
-frame ``{"msg_id": ..., "content": ...}``; this server emits it to Claude. One
-way: replies still go out through the ``hive`` CLI.
+derived from ``$TMUX_PANE`` (so one static ``--mcp-config`` file serves every
+pane). ``claude_channel.send_to_pane`` connects and writes one JSON frame
+``{"msg_id": ..., "content": ...}``; this server emits it to Claude. One way:
+replies still go out through the ``hive`` CLI.
+
+This server also owns the pane's ready marker: written once the socket is
+listening, removed on exit. Claude only spawns this process after the
+dev-channel warning was accepted (rejecting it exits Claude entirely), so a
+live marker means the channel is genuinely deliverable.
 """
 from __future__ import annotations
 
@@ -54,6 +59,11 @@ def socket_path_for_pane(pane: str) -> str:
     return os.path.join(_hive_home(), "channel", f"hive-pane-{slug}.sock")
 
 
+def marker_path_for_socket(sock_path: str) -> str:
+    """Same name shape as ``claude_channel.ready_marker_path``."""
+    return sock_path[: -len(".sock")] + ".ready"
+
+
 def _resolve_socket_path() -> str | None:
     pane = os.environ.get("TMUX_PANE", "")
     return socket_path_for_pane(pane) if pane else None
@@ -91,10 +101,15 @@ def _socket_loop(path: str) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+        srv.listen(16)
     except OSError as e:
         _log(f"bind failed for {path}: {e}")
-        return
-    srv.listen(16)
+        return  # no marker: the pane stays not-ready on bind failure
+    try:
+        with open(marker_path_for_socket(path), "w") as fh:
+            fh.write("1")
+    except OSError as e:
+        _log(f"cannot write ready marker: {e}")
     _log(f"listening on {path}")
     while True:
         try:
@@ -140,11 +155,16 @@ def main() -> None:
     path = _resolve_socket_path()
     if path:
         # Signal handlers must be installed from the main thread; unlink the
-        # socket on SIGTERM/SIGINT (Claude killing the MCP child) since atexit
-        # does not run on signal termination. A stale socket is also cleared
-        # before bind on the next spawn, so this is best-effort tidiness.
-        def _cleanup(*_args: object) -> None:
+        # socket + ready marker on SIGTERM/SIGINT (Claude killing the MCP
+        # child) since atexit does not run on signal termination. A stale
+        # socket is also cleared before bind on the next spawn, and spawn
+        # clears a stale marker before launch, so this is best-effort.
+        def _remove_artifacts() -> None:
             _safe_unlink(path)
+            _safe_unlink(marker_path_for_socket(path))
+
+        def _cleanup(*_args: object) -> None:
+            _remove_artifacts()
             os._exit(0)
 
         try:
@@ -152,7 +172,7 @@ def main() -> None:
             signal.signal(signal.SIGINT, _cleanup)
         except (ValueError, OSError):
             pass
-        atexit.register(lambda: _safe_unlink(path))
+        atexit.register(_remove_artifacts)
         threading.Thread(target=_socket_loop, args=(path,), daemon=True).start()
     else:
         _log("no TMUX_PANE; channel socket disabled (MCP handshake only)")

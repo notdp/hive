@@ -3,16 +3,19 @@
 Mirrors the codex app-server adapter's role for Claude: ``Agent.send`` hands a
 ``<HIVE>`` envelope to :func:`send_to_pane`, which writes it to a per-pane unix
 socket. The channel MCP server (``claude_channel_server``, spawned by Claude
-from a project ``.mcp.json``) turns that into a ``notifications/claude/channel``
+as a stdio MCP child) turns that into a ``notifications/claude/channel``
 push -- no tmux send-keys, no composer draft disturbance. Claude delivery is
-channel-only; a ``False`` from :func:`send_to_pane` is a delivery failure that
-surfaces through the sidecar's msgId-render tracking, not a keystroke fallback.
+channel-only; on a ``False`` from :func:`send_to_pane`, ``Agent.send`` raises
+:class:`ChannelDeliveryError`, which callers surface as an explicit submit
+failure (the sidecar projects it to ``injectStatus=failed``).
 
-Channel registration: write the MCP server into the project ``.mcp.json`` at the
-git root and keep it out of ``git status`` (repo-local ``info/exclude`` for an
-untracked file; ``skip-worktree`` for a clean tracked file inside a worktree).
-The server name resolves for the
-``--dangerously-load-development-channels server:hive-channel`` launch flag.
+Channel registration: a static MCP config under ``$HIVE_HOME/channel`` passed
+via ``--mcp-config`` -- no project file is ever touched (the earlier project
+``.mcp.json`` merge + git-hiding existed only because ``--mcp-config`` could
+not bring up channels before Claude Code 2.1.198). Both
+``--dangerously-load-development-channels`` and ``--mcp-config`` are variadic,
+so the caller must terminate the flag list (spawn puts ``--`` before the
+positional prompt) or append these flags after all positionals.
 """
 from __future__ import annotations
 
@@ -20,15 +23,17 @@ import json
 import os
 import re
 import socket
-import subprocess
 import sys
 from pathlib import Path
 
 SERVER_NAME = "hive-channel"
-_MCP_FILENAME = ".mcp.json"
-_EXCLUDE_PATTERN = "/.mcp.json"
 _MSGID_RE = re.compile(r"msgId=([^\s>]+)")
 _SOCKET_CONNECT_TIMEOUT = 2.0
+
+
+class ChannelDeliveryError(RuntimeError):
+    """claude delivery is channel-only: raised when a pane has no usable
+    channel (never registered, marker missing, or dead socket)."""
 
 
 # --- paths / readiness ------------------------------------------------------
@@ -53,18 +58,9 @@ def channel_socket_path(pane: str) -> Path:
 
 
 def ready_marker_path(pane: str) -> Path:
+    """Written by the channel server once its socket listens; cleared by the
+    server on exit and by spawn before a fresh launch (stale-marker guard)."""
     return _channel_dir() / f"hive-pane-{_slug(pane)}.ready"
-
-
-def mark_ready(pane: str) -> None:
-    """Record that the channel registered for this pane (set at spawn time)."""
-    directory = _channel_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
-    ready_marker_path(pane).write_text("1")
 
 
 def clear_ready(pane: str) -> None:
@@ -76,64 +72,6 @@ def clear_ready(pane: str) -> None:
 
 def is_ready(pane: str) -> bool:
     return ready_marker_path(pane).exists()
-
-
-# --- git / project resolution ----------------------------------------------
-
-def _git(root: str, *args: str) -> subprocess.CompletedProcess | None:
-    try:
-        return subprocess.run(
-            ["git", "-C", root, *args],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def project_root(cwd: str) -> str:
-    """Claude discovers project ``.mcp.json`` at the git root, not an arbitrary
-    cwd. Use the toplevel when in a repo; fall back to cwd otherwise."""
-    out = _git(cwd, "rev-parse", "--show-toplevel")
-    if out is not None and out.returncode == 0 and out.stdout.strip():
-        return out.stdout.strip()
-    return cwd
-
-
-def _exclude_path(root: str) -> str | None:
-    # NOTE: for a linked worktree this resolves to the *repo-local* common
-    # info/exclude (<common-dir>/info/exclude), which git status honors;
-    # a worktree-local exclude is not honored. So .mcp.json is hidden for
-    # every worktree + main, which is fine -- it is always generated.
-    out = _git(root, "rev-parse", "--git-path", "info/exclude")
-    if out is None or out.returncode != 0 or not out.stdout.strip():
-        return None
-    p = out.stdout.strip()
-    return p if os.path.isabs(p) else os.path.join(root, p)
-
-
-def _is_tracked(root: str) -> bool:
-    out = _git(root, "ls-files", "--error-unmatch", _MCP_FILENAME)
-    return out is not None and out.returncode == 0
-
-
-def _ensure_excluded(root: str) -> None:
-    path = _exclude_path(root)
-    if not path:
-        return
-    try:
-        existing = Path(path).read_text() if os.path.exists(path) else ""
-    except OSError:
-        return
-    if any(line.strip() == _EXCLUDE_PATTERN for line in existing.splitlines()):
-        return
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write(_EXCLUDE_PATTERN + "\n")
-    except OSError:
-        pass
 
 
 # --- spawn-time config ------------------------------------------------------
@@ -153,88 +91,49 @@ def _child_pythonpath() -> str:
 
 def _server_entry() -> dict:
     return {
-        "type": "stdio",  # canonical Claude Code project-MCP server shape
+        "type": "stdio",  # canonical Claude Code MCP server shape
         "command": sys.executable,
         "args": ["-m", "hive.adapters.claude_channel_server"],
         "env": {"HIVE_HOME": str(_hive_home()), "PYTHONPATH": _child_pythonpath()},
     }
 
 
-def _in_linked_worktree(root: str) -> bool:
-    out = _git(root, "rev-parse", "--git-dir")
-    return out is not None and out.returncode == 0 and "/worktrees/" in out.stdout
-
-
-def _mcp_dirty(root: str) -> bool:
-    """True if a tracked .mcp.json has uncommitted (working-tree or staged)
-    changes. Anything but a clean exit 0 is treated as unsafe-to-touch."""
-    out = _git(root, "diff", "HEAD", "--quiet", "--", _MCP_FILENAME)
-    return out is None or out.returncode != 0
-
-
-def _channel_unavailable(mcp_path: str, reason: str) -> list[str]:
-    """Surface a hard setup failure (the validator requires this over silently
-    hiding/losing work) and disable the channel for this pane."""
-    sys.stderr.write(
-        f"[hive-channel] channel not registered: {mcp_path} {reason}. "
-        f"This claude pane will not receive hive messages.\n"
-    )
-    return []
+def mcp_config_path() -> Path:
+    return _channel_dir() / "mcp-config.json"
 
 
 def prepare_pane(cwd: str) -> list[str]:
-    """Register the channel MCP server and return Claude launch flags.
+    """Write the static channel MCP config and return Claude launch flags.
 
-    ``.mcp.json`` is a shared project MCP config (Claude Code and Codex both read
-    it), so hive-channel is **merged** into an existing JSON object, preserving
-    every other server and top-level key. A file that is not a JSON object is
-    replaced. Hiding the local addition from git is only safe where it can be
-    cleaned up, so a tracked ``.mcp.json`` is handled conservatively:
+    The config lives under ``$HIVE_HOME/channel`` and is passed with
+    ``--mcp-config``: no project file is created or modified, so any cwd --
+    repo or not, tracked ``.mcp.json`` or not -- works identically. The write
+    is an idempotent overwrite (content depends only on the running hive).
+    Returns ``[]`` only when the config cannot be written (disk error), which
+    the caller must treat as channel-unavailable.
 
-    - **untracked / absent** -> merge/create, hide via repo-local ``info/exclude``;
-    - **tracked, clean, inside a hive worktree** -> merge + ``skip-worktree``;
-      the bit lives in this worktree's index and dies with the worktree on
-      ``hive worktree done`` (verified isolated from the main checkout);
-    - **tracked with uncommitted changes**, or **tracked outside a worktree**
-      (where skip-worktree could not be cleaned up) -> refuse, surface, and
-      never touch the file. Channel-only, so such a pane is unsupported.
+    Both returned flags are variadic in Claude's CLI parser: a positional
+    prompt directly after them is consumed as a flag value and aborts launch.
+    ``--mcp-config <path>`` is kept last so the flag list is safe to follow
+    with another ``--flag``; a positional must be separated with ``--``.
     """
-    root = project_root(cwd)
-    mcp_path = os.path.join(root, _MCP_FILENAME)
-    tracked = os.path.exists(mcp_path) and _is_tracked(root)
-
-    if tracked:
-        if _mcp_dirty(root):
-            return _channel_unavailable(
-                mcp_path, "is tracked and has uncommitted changes (commit or "
-                "stash them, then respawn)")
-        if not _in_linked_worktree(root):
-            return _channel_unavailable(
-                mcp_path, "is tracked outside a hive worktree, where the "
-                "registration could not be cleaned up (spawn in a worktree)")
-
-    cfg: dict = {}
-    if os.path.exists(mcp_path):
-        try:
-            loaded = json.loads(Path(mcp_path).read_text())
-        except (OSError, ValueError):
-            loaded = None
-        if isinstance(loaded, dict):
-            cfg = loaded  # merge: keep the user's / Codex's servers and keys
-
-    servers = cfg.get("mcpServers")
-    if not isinstance(servers, dict):
-        servers = cfg["mcpServers"] = {}
-    servers[SERVER_NAME] = _server_entry()
+    del cwd  # location-independent since the config left the project tree
+    directory = _channel_dir()
+    cfg_path = mcp_config_path()
     try:
-        Path(mcp_path).write_text(json.dumps(cfg, indent=2) + "\n")
-    except OSError:
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        cfg_path.write_text(json.dumps(
+            {"mcpServers": {SERVER_NAME: _server_entry()}}, indent=2) + "\n")
+    except OSError as e:
+        sys.stderr.write(
+            f"[hive-channel] cannot write {cfg_path}: {e}. "
+            f"This claude pane will not receive hive messages.\n")
         return []
-    if tracked:
-        _git(root, "update-index", "--skip-worktree", _MCP_FILENAME)
-    else:
-        _ensure_excluded(root)
-    return ["--dangerously-load-development-channels", f"server:{SERVER_NAME}"]
+    return [
+        "--dangerously-load-development-channels", f"server:{SERVER_NAME}",
+        "--mcp-config", str(cfg_path),
+    ]
 
 
 # --- delivery ---------------------------------------------------------------

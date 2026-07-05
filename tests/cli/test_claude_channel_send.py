@@ -1,5 +1,10 @@
-"""Agent.send dispatch for Claude panes: channel first, send-keys fallback."""
+"""Agent.send dispatch for Claude panes: strictly channel-only, no keystrokes."""
 from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +13,17 @@ from hive.adapters import claude_channel
 from hive.agent import Agent
 
 pytestmark = pytest.mark.cli
+
+
+@pytest.fixture
+def _hive_home(monkeypatch):
+    # Short base required: AF_UNIX sun_path caps at ~104 bytes on macOS, so
+    # per-pane sockets cannot live under pytest's long tmp_path.
+    base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    home = Path(tempfile.mkdtemp(prefix="hh", dir=base))
+    monkeypatch.setenv("HIVE_HOME", str(home))
+    yield home
+    shutil.rmtree(home, ignore_errors=True)
 
 
 def _agent(cli: str = "claude") -> Agent:
@@ -36,14 +52,40 @@ def test_claude_send_uses_channel_and_skips_keystrokes(monkeypatch):
     assert keystrokes == []  # channel succeeded -> no send-keys
 
 
-def test_claude_send_does_not_fall_back_to_keystrokes(monkeypatch):
+def test_claude_send_raises_when_channel_reports_failure(monkeypatch):
     keystrokes = _patch(monkeypatch, "claude")
     monkeypatch.setattr(claude_channel, "send_to_pane", lambda pane, text: False)
 
-    _agent("claude").send("<HIVE>hi</HIVE>")
+    # strictly channel-only: a failed channel is an explicit submit failure
+    # (the sidecar projects the raise to injectStatus=failed), never keystrokes.
+    with pytest.raises(claude_channel.ChannelDeliveryError):
+        _agent("claude").send("<HIVE>hi</HIVE>")
 
-    # channel-only: even when the channel reports failure, claude never types
-    # into the composer (a failed delivery surfaces via msgId-render tracking).
+    assert keystrokes == []
+
+
+def test_claude_send_raises_without_ready_marker(monkeypatch, _hive_home):
+    # real send_to_pane path: channel never registered for this pane
+    keystrokes = _patch(monkeypatch, "claude")
+
+    with pytest.raises(claude_channel.ChannelDeliveryError):
+        _agent("claude").send("<HIVE>hi</HIVE>")
+
+    assert keystrokes == []
+
+
+def test_claude_send_raises_with_marker_but_dead_socket(monkeypatch, _hive_home):
+    # real send_to_pane path: marker present but nothing is listening
+    keystrokes = _patch(monkeypatch, "claude")
+    marker = claude_channel.ready_marker_path("%1")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
+    sock = claude_channel.channel_socket_path("%1")
+    sock.write_text("")  # a plain file, not a live socket
+
+    with pytest.raises(claude_channel.ChannelDeliveryError):
+        _agent("claude").send("<HIVE>hi</HIVE>")
+
     assert keystrokes == []
 
 

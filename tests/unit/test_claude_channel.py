@@ -1,15 +1,16 @@
 """Unit tests for the Claude channel delivery adapter + stdio MCP server.
 
 Covers the VAL contract: socket path derivation, ready-gated send_to_pane with
-exact-byte preservation, prepare_pane registration that stays invisible to git
-(and refuses to touch a tracked .mcp.json), git-root resolution from a subdir,
-and the pure-Python MCP server's initialize/notification framing without Claude.
+exact-byte preservation, prepare_pane writing a static --mcp-config under
+$HIVE_HOME (never a project file), and the pure-Python MCP server's
+initialize/notification framing plus server-owned ready-marker lifecycle.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -38,12 +39,6 @@ def _hive_home(monkeypatch):
     shutil.rmtree(home, ignore_errors=True)
 
 
-def _git_init(path: Path) -> None:
-    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-
-
 # --- paths / readiness ------------------------------------------------------
 
 def test_channel_socket_path_derives_from_hive_home_and_pane(_hive_home):
@@ -53,10 +48,28 @@ def test_channel_socket_path_derives_from_hive_home_and_pane(_hive_home):
 
 def test_ready_marker_lifecycle():
     assert cc.is_ready("%5") is False
-    cc.mark_ready("%5")
+    marker = cc.ready_marker_path("%5")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
     assert cc.is_ready("%5") is True
     cc.clear_ready("%5")
     assert cc.is_ready("%5") is False
+
+
+def test_marker_paths_agree_between_adapter_and_server():
+    # the server derives the marker from its socket path; both sides must
+    # resolve the identical file or readiness gating silently breaks
+    from hive.adapters import claude_channel_server as srv
+    pane = "%42"
+    assert srv.marker_path_for_socket(srv.socket_path_for_pane(pane)) == str(
+        cc.ready_marker_path(pane)
+    )
+
+
+def _make_ready(pane: str) -> None:
+    marker = cc.ready_marker_path(pane)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("1")
 
 
 # --- send_to_pane -----------------------------------------------------------
@@ -66,13 +79,13 @@ def test_send_to_pane_false_without_ready_marker():
 
 
 def test_send_to_pane_false_when_ready_but_no_socket():
-    cc.mark_ready("%901")
+    _make_ready("%901")
     assert cc.send_to_pane("%901", "msg") is False
 
 
 def test_send_to_pane_writes_exact_envelope_and_returns_true():
     pane = "%108"
-    cc.mark_ready(pane)
+    _make_ready(pane)
     sock_path = cc.channel_socket_path(pane)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -106,7 +119,7 @@ def test_send_to_pane_writes_exact_envelope_and_returns_true():
 def test_send_to_pane_false_on_refused_connect():
     # ready marker + a socket *path* that exists as a file but nothing listening
     pane = "%902"
-    cc.mark_ready(pane)
+    _make_ready(pane)
     sock_path = cc.channel_socket_path(pane)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     sock_path.write_text("")  # not a live socket
@@ -115,173 +128,43 @@ def test_send_to_pane_false_on_refused_connect():
 
 # --- prepare_pane -----------------------------------------------------------
 
-def test_prepare_pane_writes_invisible_mcp_json(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    flags = cc.prepare_pane(str(repo))
+def test_prepare_pane_writes_static_config_and_returns_flags(_hive_home, tmp_path):
+    flags = cc.prepare_pane(str(tmp_path))
 
-    assert flags == ["--dangerously-load-development-channels", "server:hive-channel"]
-    assert "--mcp-config" not in flags
-    assert "--strict-mcp-config" not in flags
+    cfg_path = _hive_home / "channel" / "mcp-config.json"
+    assert flags == [
+        "--dangerously-load-development-channels", "server:hive-channel",
+        "--mcp-config", str(cfg_path),
+    ]
+    # --mcp-config is last so a following `--flag` terminates the variadic
+    # list; a positional prompt still needs a `--` separator (spawn adds it).
+    assert flags[-2] == "--mcp-config"
 
-    cfg = json.loads((repo / ".mcp.json").read_text())
+    cfg = json.loads(cfg_path.read_text())
     entry = cfg["mcpServers"]["hive-channel"]
-    assert entry["type"] == "stdio"  # canonical Claude Code server shape
+    assert entry["type"] == "stdio"
     assert entry["command"] == sys.executable
     assert entry["args"] == ["-m", "hive.adapters.claude_channel_server"]
-    assert "PYTHONPATH" in entry["env"] and "HIVE_HOME" in entry["env"]
-
-    # invisible to git: status clean, check-ignore confirms the exclude
-    status = subprocess.run(["git", "-C", str(repo), "status", "--short"],
-                            capture_output=True, text=True).stdout
-    assert ".mcp.json" not in status
-    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", ".mcp.json"],
-                             capture_output=True, text=True)
-    assert ignored.returncode == 0
+    assert entry["env"]["HIVE_HOME"] == str(_hive_home)
+    assert "PYTHONPATH" in entry["env"]
 
 
-def test_prepare_pane_resolves_git_root_from_subdir(tmp_path):
-    repo = tmp_path / "repo"
-    (repo / "sub" / "deep").mkdir(parents=True)
-    _git_init(repo)
-    flags = cc.prepare_pane(str(repo / "sub" / "deep"))
-    assert flags  # channel enabled
-    assert (repo / ".mcp.json").exists()  # at git root
-    assert not (repo / "sub" / "deep" / ".mcp.json").exists()
+def test_prepare_pane_never_touches_the_project_directory(tmp_path):
+    before = set(os.listdir(tmp_path))
+    cc.prepare_pane(str(tmp_path))
+    assert set(os.listdir(tmp_path)) == before  # no .mcp.json, nothing
 
 
-def _commit_mcp(repo: Path, content: str) -> None:
-    (repo / ".mcp.json").write_text(content)
-    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "mcp"], check=True)
+def test_prepare_pane_is_idempotent(_hive_home, tmp_path):
+    first = cc.prepare_pane(str(tmp_path))
+    second = cc.prepare_pane(str(tmp_path))
+    assert first == second
 
 
-def test_prepare_pane_merges_tracked_mcp_json_in_worktree_via_skip_worktree(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    _commit_mcp(repo, '{"mcpServers": {"other": {"command": "x"}}}')
-    # a real linked worktree: skip-worktree there is isolated + auto-cleaned
-    wt = tmp_path / "wt"
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feat", str(wt)], check=True)
-
-    flags = cc.prepare_pane(str(wt))
-    assert flags  # channel registered for a clean tracked config inside a worktree
-
-    cfg = json.loads((wt / ".mcp.json").read_text())
-    assert "other" in cfg["mcpServers"] and "hive-channel" in cfg["mcpServers"]
-    status = subprocess.run(["git", "-C", str(wt), "status", "--short"],
-                            capture_output=True, text=True).stdout
-    assert ".mcp.json" not in status  # hidden via skip-worktree
-    ls = subprocess.run(["git", "-C", str(wt), "ls-files", "-v", ".mcp.json"],
-                        capture_output=True, text=True).stdout
-    assert ls.startswith("S")
-    # the main checkout is untouched while the worktree holds skip-worktree
-    main_ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
-                             capture_output=True, text=True).stdout
-    assert main_ls.startswith("H")
-    assert "hive-channel" not in (repo / ".mcp.json").read_text()
-
-
-def test_prepare_pane_refuses_dirty_tracked_mcp_json(tmp_path):
-    # the validator's repro: never hide/lose a user's uncommitted .mcp.json edits
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    _commit_mcp(repo, '{"mcpServers": {"committed": {"command": "true"}}}')
-    dirty = '{"mcpServers": {"committed": {"command": "true"}, "userWip": {"command": "echo"}}}'
-    (repo / ".mcp.json").write_text(dirty)  # uncommitted user edit
-
-    flags = cc.prepare_pane(str(repo))
-    assert flags == []  # refused (dirty checked before anything is written)
-    assert (repo / ".mcp.json").read_text() == dirty  # user's WIP untouched
-    ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
-                        capture_output=True, text=True).stdout
-    assert ls.startswith("H")  # no skip-worktree applied
-
-
-def test_prepare_pane_refuses_tracked_mcp_json_outside_worktree(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    committed = '{"mcpServers": {"other": {"command": "x"}}}'
-    _commit_mcp(repo, committed)
-
-    flags = cc.prepare_pane(str(repo))  # main checkout, not a linked worktree
-    assert flags == []  # refused: skip-worktree could not be cleaned up here
-    assert (repo / ".mcp.json").read_text() == committed  # untouched
-    ls = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", ".mcp.json"],
-                        capture_output=True, text=True).stdout
-    assert ls.startswith("H")
-
-
-def test_prepare_pane_merges_existing_untracked_mcp_json(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    (repo / ".mcp.json").write_text('{"mcpServers": {"other": {"command": "x"}}}')
-    flags = cc.prepare_pane(str(repo))
-    assert flags
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert "other" in cfg["mcpServers"]  # preserved
-    assert "hive-channel" in cfg["mcpServers"]  # added
-
-
-def test_prepare_pane_preserves_other_top_level_keys(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    (repo / ".mcp.json").write_text('{"someTool": {"k": 1}, "mcpServers": {"a": {}}}')
-    cc.prepare_pane(str(repo))
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert cfg["someTool"] == {"k": 1}  # unrelated top-level key kept
-    assert "a" in cfg["mcpServers"] and "hive-channel" in cfg["mcpServers"]
-
-
-def test_prepare_pane_overwrites_invalid_mcp_json(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    (repo / ".mcp.json").write_text("{not json, not a usable config")
-
-    flags = cc.prepare_pane(str(repo))
-    assert flags  # not a JSON object -> replaced, channel registered
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert "hive-channel" in cfg["mcpServers"]
-
-
-def test_prepare_pane_overwrites_non_object_mcp_json(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    (repo / ".mcp.json").write_text('["valid json", "but not an object"]')
-
-    flags = cc.prepare_pane(str(repo))
-    assert flags
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert isinstance(cfg, dict) and "hive-channel" in cfg["mcpServers"]
-
-
-def test_prepare_pane_replaces_non_object_servers_keeps_keys(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_init(repo)
-    (repo / ".mcp.json").write_text('{"keep": 1, "mcpServers": "not-an-object"}')
-
-    flags = cc.prepare_pane(str(repo))
-    assert flags
-    cfg = json.loads((repo / ".mcp.json").read_text())
-    assert cfg["keep"] == 1  # other keys preserved
-    assert cfg["mcpServers"] == {"hive-channel": cfg["mcpServers"]["hive-channel"]}
-
-
-def test_prepare_pane_outside_git_uses_cwd(tmp_path):
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    flags = cc.prepare_pane(str(plain))
-    assert flags
-    assert (plain / ".mcp.json").exists()
+def test_prepare_pane_returns_empty_when_config_unwritable(_hive_home, tmp_path):
+    # occupy the channel dir path with a plain file so mkdir/write fails
+    (_hive_home / "channel").write_text("not a directory")
+    assert cc.prepare_pane(str(tmp_path)) == []
 
 
 # --- stdio MCP server (no Claude) -------------------------------------------
@@ -296,7 +179,16 @@ def _server_proc(hive_home: Path, pane: str) -> subprocess.Popen:
     )
 
 
-def test_server_initialize_and_notification_framing(_hive_home):
+def _wait_path(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_server_initialize_notification_framing_and_marker(_hive_home):
     proc = _server_proc(_hive_home, "%77")
     try:
         proc.stdin.write(json.dumps({
@@ -310,11 +202,9 @@ def test_server_initialize_and_notification_framing(_hive_home):
         assert resp["result"]["serverInfo"]["name"] == "hive-channel"
 
         sock_path = _hive_home / "channel" / "hive-pane-77.sock"
-        for _ in range(100):
-            if sock_path.exists():
-                break
-            time.sleep(0.05)
-        assert sock_path.exists()  # derived from TMUX_PANE
+        marker = _hive_home / "channel" / "hive-pane-77.ready"
+        assert _wait_path(sock_path)  # derived from TMUX_PANE
+        assert _wait_path(marker)  # server owns readiness: bound => marker
         assert stat.S_IMODE(sock_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(sock_path.parent.stat().st_mode) == 0o700
 
@@ -327,6 +217,45 @@ def test_server_initialize_and_notification_framing(_hive_home):
         assert note["method"] == "notifications/claude/channel"
         assert note["params"]["content"] == "<HIVE>x\ny</HIVE>"
         assert note["params"]["meta"] == {"msg_id": "z9"}
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_server_sigterm_removes_socket_and_marker(_hive_home):
+    proc = _server_proc(_hive_home, "%78")
+    sock_path = _hive_home / "channel" / "hive-pane-78.sock"
+    marker = _hive_home / "channel" / "hive-pane-78.ready"
+    try:
+        assert _wait_path(sock_path) and _wait_path(marker)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        deadline = time.time() + 3
+        while time.time() < deadline and (sock_path.exists() or marker.exists()):
+            time.sleep(0.05)
+        assert not sock_path.exists()
+        assert not marker.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_server_bind_failure_writes_no_marker(_hive_home):
+    # occupy the socket path with a directory: the pre-bind unlink fails and
+    # bind raises, so the server must not report readiness
+    sock_path = _hive_home / "channel" / "hive-pane-79.sock"
+    sock_path.mkdir(parents=True)
+    marker = _hive_home / "channel" / "hive-pane-79.ready"
+    proc = _server_proc(_hive_home, "%79")
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1,
+                                     "method": "initialize", "params": {}}) + "\n")
+        proc.stdin.flush()
+        resp = json.loads(proc.stdout.readline())
+        assert resp["id"] == 1  # handshake still works
+        time.sleep(0.5)  # give the socket thread time to fail the bind
+        assert not marker.exists()
     finally:
         proc.terminate()
         proc.wait(timeout=5)
