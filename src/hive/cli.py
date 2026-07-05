@@ -115,7 +115,7 @@ hive delivery <msgId>                        # trace a send
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "skills", "worktree"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "skills", "worktree"}
 _SEND_GRACE_TIMEOUT = 3.0
 _SEND_GRACE_POLL_INTERVAL = 0.2
 
@@ -681,8 +681,9 @@ def _stderr_is_interactive() -> bool:
 
 # Subcommands that must skip skill drift checks entirely because they are the
 # recovery/diagnostic paths or own their own environment setup.
-_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex", "skills"}
+_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex", "claude", "skills"}
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
+    "claude",
     "codex",
     "config",
     "current",
@@ -2019,7 +2020,9 @@ def inject_cmd(agent_name: str, text: str):
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
     agent = t.get(agent_name)
-    agent.send(text)
+    # Documented low-level bypass: raw composer keystrokes for every CLI, so
+    # delivery paths (channel/RPC) can be debugged from outside themselves.
+    _submit_interactive_text(agent.pane_id, text, agent.cli)
     result = {
         "member": agent_name,
         "action": "inject",
@@ -2050,14 +2053,11 @@ def _compact_target(target: _PaneTarget) -> str:
         if status != "compacted":
             _submit_interactive_text(target.pane_id, "/compact", "codex")
         return status
-    # droid/claude (and embedded codex without a daemon): deliver `/compact`
-    # as a slash command through the interactive composer.
-    Agent(
-        name=target.member_label,
-        team_name=target.team_name,
-        pane_id=target.pane_id,
-        cli=target.cli,
-    ).send("/compact")
+    # droid/claude (and embedded codex without a daemon): `/compact` is a TUI
+    # slash command, so it must go through the composer. A channel message
+    # would arrive as content, not as a command — this is startup/control
+    # keystroke driving, not message delivery.
+    _submit_interactive_text(target.pane_id, "/compact", target.cli)
     return "compacted"
 
 
@@ -4283,9 +4283,69 @@ def codex_cmd(ctx: click.Context):
     _exec_codex_managed(list(ctx.args))
 
 
+_CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
+    "agents", "auth", "auto-mode", "doctor", "gateway", "install", "mcp",
+    "plugin", "plugins", "project", "setup-token", "ultrareview", "update",
+    "upgrade",
+)
+
+# Non-interactive surfaces: -p/--print sessions would hard-block on the
+# dev-channel consent gate, and --help/--version never start a session.
+_CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "--help", "--version"})
+
+
+def _exec_claude_managed(args: list[str]) -> None:
+    """Replace this process with claude, hive channel registered.
+
+    A user-launched interactive claude gets the same per-pane MCP channel as a
+    hive-spawned one, so the pane can receive ``<HIVE>`` messages (claude
+    delivery is channel-only). The channel flags are appended *after* the
+    user's args: both flags are variadic in claude's parser, so this ordering
+    keeps a user positional prompt out of their reach without rewriting the
+    user's argv.
+
+    Degrades to raw ``claude`` outside tmux and for non-interactive surfaces
+    (subcommands, -p/--print, --help/--version). Exits nonzero when the
+    channel config cannot be written, so the shell wrapper falls back to
+    ``command claude``.
+    """
+    def _raw() -> None:
+        os.execvp("claude", ["claude", *args])
+
+    if not tmux.is_inside_tmux():
+        _raw()
+    if args and args[0] in _CLAUDE_PASSTHROUGH_SUBCOMMANDS:
+        _raw()
+    if any(a in _CLAUDE_PASSTHROUGH_FLAGS for a in args):
+        _raw()
+    from .adapters import claude_channel
+
+    flags = claude_channel.prepare_pane(os.getcwd())
+    if not flags:
+        raise SystemExit(1)  # shell wrapper falls back to `command claude`
+    os.execvp("claude", ["claude", *args, *flags])
+
+
+@cli.command(
+    "claude",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    add_help_option=False,
+)
+@click.pass_context
+def claude_cmd(ctx: click.Context):
+    """Launch claude with the hive channel registered (hive-managed).
+
+    Usually invoked through the `hive shell-init` shell function rather than by
+    hand; all arguments are forwarded to claude. Replaces the current process
+    with claude and never returns on success.
+    """
+    _exec_claude_managed(list(ctx.args))
+
+
 _SHELL_INIT_POSIX = """\
-# hive codex integration — bind interactive codex launches to a per-pane daemon.
-# Bypass anytime with `command codex`. Edit/remove by deleting this function.
+# hive agent integration — bind interactive codex/claude launches to hive
+# (per-pane daemon for codex, per-pane message channel for claude).
+# Bypass anytime with `command codex` / `command claude`.
 codex() {
   if [ -z "$TMUX" ]; then command codex "$@"; return; fi
   case "$1" in
@@ -4294,11 +4354,27 @@ codex() {
   esac
   hive codex "$@" || command codex "$@"
 }
+
+claude() {
+  if [ -z "$TMUX" ]; then command claude "$@"; return; fi
+  case "$1" in
+    %(claude_passthrough)s)
+      command claude "$@"; return ;;
+  esac
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      %(claude_flag_passthrough)s)
+        command claude "$@"; return ;;
+    esac
+  done
+  hive claude "$@" || command claude "$@"
+}
 """
 
 _SHELL_INIT_FISH = """\
-# hive codex integration — bind interactive codex launches to a per-pane daemon.
-# Bypass anytime with `command codex`.
+# hive agent integration — bind interactive codex/claude launches to hive
+# (per-pane daemon for codex, per-pane message channel for claude).
+# Bypass anytime with `command codex` / `command claude`.
 function codex
     if test -z "$TMUX"
         command codex $argv
@@ -4311,15 +4387,36 @@ function codex
     end
     hive codex $argv; or command codex $argv
 end
+
+function claude
+    if test -z "$TMUX"
+        command claude $argv
+        return
+    end
+    switch "$argv[1]"
+        case %(claude_passthrough)s
+            command claude $argv
+            return
+    end
+    for a in $argv
+        switch "$a"
+            case %(claude_flag_passthrough)s
+                command claude $argv
+                return
+        end
+    end
+    hive claude $argv; or command claude $argv
+end
 """
 
 
 @cli.command("shell-init")
 @click.argument("shell", required=False, default="")
 def shell_init_cmd(shell: str):
-    """Print the codex shell integration for your shell.
+    """Print the codex + claude shell integration for your shell.
 
-    Add to your shell rc to make interactive `codex` launches hive-managed:
+    Add to your shell rc to make interactive `codex` / `claude` launches
+    hive-managed:
 
     \b
       # ~/.zshrc or ~/.bashrc
@@ -4327,16 +4424,25 @@ def shell_init_cmd(shell: str):
       # ~/.config/fish/config.fish
       hive shell-init fish | source
 
-    The function only acts inside tmux on interactive launches; management
-    subcommands and `command codex` pass straight through to real codex.
+    The functions only act inside tmux on interactive launches; management
+    subcommands, non-interactive flags, and `command codex` / `command claude`
+    pass straight through to the real binaries.
     """
     shell = (shell or os.path.basename(os.environ.get("SHELL", "") or "zsh")).strip()
-    passthrough = " ".join(_CODEX_PASSTHROUGH_SUBCOMMANDS)
+    claude_flags = sorted(_CLAUDE_PASSTHROUGH_FLAGS)
     if shell == "fish":
-        click.echo(_SHELL_INIT_FISH % {"passthrough": passthrough}, nl=False)
+        click.echo(_SHELL_INIT_FISH % {
+            "passthrough": " ".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
+            "claude_passthrough": " ".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
+            "claude_flag_passthrough": " ".join(claude_flags),
+        }, nl=False)
     else:
         # zsh and bash share POSIX function syntax; case patterns use `|`.
-        click.echo(_SHELL_INIT_POSIX % {"passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS)}, nl=False)
+        click.echo(_SHELL_INIT_POSIX % {
+            "passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
+            "claude_passthrough": "|".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
+            "claude_flag_passthrough": "|".join(claude_flags),
+        }, nl=False)
 
 
 @cli.group()
