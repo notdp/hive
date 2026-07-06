@@ -1,4 +1,8 @@
 """CLI tests for `hive claude` managed launch and its shell-init function."""
+import os
+import shutil
+import subprocess
+
 import pytest
 
 from hive.cli import cli
@@ -118,12 +122,37 @@ def test_claude_exits_nonzero_when_channel_unavailable(runner, monkeypatch):
 def test_shell_init_zsh_emits_claude_function(runner):
     result = runner.invoke(cli, ["shell-init", "zsh"])
     assert result.exit_code == 0
-    assert "codex() {" in result.output
-    assert "claude() {" in result.output
+    # zsh gets quoted names: unquoted ones are alias-expanded at parse time,
+    # so a user `alias claude='claude --verbose'` would break the definition
+    assert "'codex'() {" in result.output
+    assert "'claude'() {" in result.output
     assert "hive claude \"$@\" || command claude \"$@\"" in result.output
     # passthrough guards present for both surfaces
     assert "agents" in result.output
     assert "--print" in result.output
+
+
+def test_shell_init_bash_emits_bare_function_names(runner):
+    result = runner.invoke(cli, ["shell-init", "bash"])
+    assert result.exit_code == 0
+    assert "codex() {" in result.output  # bash rejects quoted function names
+    assert "claude() {" in result.output
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
+def test_shell_init_zsh_survives_existing_claude_alias(runner):
+    # regression: sourcing the integration with a pre-existing alias used to
+    # abort with "defining function based on alias `claude'" + parse error
+    script = runner.invoke(cli, ["shell-init", "zsh"]).output
+    # the script rides in an env var so its own quotes survive untouched
+    r = subprocess.run(
+        ["zsh", "-c",
+         "alias claude='claude --verbose'; alias codex='codex -q'; "
+         'eval "$HIVE_SHELL_INIT" && print -r -- "$+functions[claude] $+functions[codex]"'],
+        env={**os.environ, "HIVE_SHELL_INIT": script},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "1 1"  # both functions defined despite aliases
 
 
 def test_shell_init_fish_emits_claude_function(runner):
