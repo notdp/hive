@@ -189,6 +189,13 @@ def _channel_allowlisted() -> bool:
             data = json.loads(Path(path).read_text())
         except (OSError, ValueError):
             continue
+        if not isinstance(data, dict):
+            continue
+        # Require the exact shape the setup hint writes -- the only shape
+        # verified to deliver. An allowlist entry without channelsEnabled is
+        # unverified territory; refusing loudly beats risking a deaf session.
+        if data.get("channelsEnabled") is not True:
+            continue
         for entry in data.get("allowedChannelPlugins", []):
             if (isinstance(entry, dict)
                     and entry.get("marketplace") == MARKETPLACE_NAME

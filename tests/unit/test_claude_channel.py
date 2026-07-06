@@ -30,10 +30,14 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _allowlisted(monkeypatch, tmp_path):
-    # tests must not depend on the host's real managed-settings policy
+    # tests must not depend on the host's real managed-settings policy;
+    # this is the exact shape the setup hint writes (the verified one)
     policy = tmp_path / "managed-settings.json"
-    policy.write_text(json.dumps({"allowedChannelPlugins": [
-        {"marketplace": "hive", "plugin": "hive-channel"}]}))
+    policy.write_text(json.dumps({
+        "channelsEnabled": True,
+        "allowedChannelPlugins": [
+            {"marketplace": "hive", "plugin": "hive-channel"}],
+    }))
     monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
     return policy
 
@@ -376,6 +380,33 @@ def test_prepare_pane_treats_malformed_policy_as_missing(
     _patch_plugin_cmd(monkeypatch, fake)
     policy = tmp_path / "managed-settings.json"
     policy.write_text("{broken")
+    monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert fake.calls == []
+
+
+def test_prepare_pane_fails_when_channels_not_enabled(
+        tmp_path, monkeypatch, capsys):
+    # an allowlist entry without channelsEnabled is not the verified shape the
+    # setup hint writes: refuse loudly instead of risking a deaf session
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    policy = tmp_path / "managed-settings.json"
+    policy.write_text(json.dumps({"allowedChannelPlugins": [
+        {"marketplace": "hive", "plugin": "hive-channel"}]}))
+    monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert "channelsEnabled" in capsys.readouterr().err  # hint shows the fix
+    assert fake.calls == []
+
+
+def test_prepare_pane_treats_non_object_policy_as_missing(
+        tmp_path, monkeypatch):
+    # valid JSON that is not an object must read as "no policy", not crash
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    policy = tmp_path / "managed-settings.json"
+    policy.write_text(json.dumps(["not", "an", "object"]))
     monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
     assert cc.prepare_pane(str(tmp_path)) == []
     assert fake.calls == []
