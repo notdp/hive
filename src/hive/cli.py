@@ -4353,7 +4353,7 @@ _SHELL_INIT_POSIX = """\
 # hive agent integration — bind interactive codex/claude launches to hive
 # (per-pane daemon for codex, per-pane message channel for claude).
 # Bypass anytime with `command codex` / `command claude`.
-%(codex_fn)s() {
+function codex {
   if [ -z "$TMUX" ]; then command codex "$@"; return; fi
   case "$1" in
     %(passthrough)s)
@@ -4362,7 +4362,7 @@ _SHELL_INIT_POSIX = """\
   hive codex "$@" || command codex "$@"
 }
 
-%(claude_fn)s() {
+function claude {
   if [ -z "$TMUX" ]; then command claude "$@"; return; fi
   case "$1" in
     %(claude_passthrough)s)
@@ -4444,16 +4444,12 @@ def shell_init_cmd(shell: str):
             "claude_flag_passthrough": " ".join(claude_flags),
         }, nl=False)
     else:
-        # zsh and bash share POSIX function syntax; case patterns use `|`.
-        # zsh alias-expands unquoted names even in a function definition, so a
-        # user alias like `alias claude='claude --verbose'` breaks the parse;
-        # quoting the name sidesteps expansion while the alias keeps working
-        # at call time. bash rejects quoted function names but also does not
-        # alias-expand here, so it keeps the bare name.
-        quote = shell != "bash"
+        # zsh and bash share this syntax; case patterns use `|`. The ksh-style
+        # `function name {` form bypasses alias expansion of the name in BOTH
+        # shells, so a pre-existing `alias claude=...` cannot break the parse
+        # (an unadorned `claude() {` does break under zsh, and under bash with
+        # expand_aliases). The alias itself keeps working at call time.
         click.echo(_SHELL_INIT_POSIX % {
-            "codex_fn": "'codex'" if quote else "codex",
-            "claude_fn": "'claude'" if quote else "claude",
             "passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
             "claude_passthrough": "|".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
             "claude_flag_passthrough": "|".join(claude_flags),

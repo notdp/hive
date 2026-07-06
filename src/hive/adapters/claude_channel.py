@@ -12,13 +12,15 @@ failure (the sidecar projects it to ``injectStatus=failed``).
 Channel registration: hive owns a plugin marketplace under
 ``$HIVE_HOME/channel/marketplace`` whose single plugin declares this MCP
 server plus a ``channels`` entry; panes launch with plain
-``--channels plugin:hive-channel@hive``. No project file is ever touched, and
-no consent dialog appears (the allowlist accepting a self-added marketplace
-is local 2.1.198 runtime evidence, wider than the docs; if a future Claude
-tightens it, registration fails and spawn fails loudly -- there is no
-fallback path). ``--channels`` is variadic, so the caller must terminate the
-flag list (spawn puts ``--`` before the positional prompt) or append the
-flags after all positionals.
+``--channels plugin:hive-channel@hive``. No project file is ever touched and
+no consent dialog appears -- but ONLY when the machine's managed settings
+allowlist the plugin (``allowedChannelPlugins``). Claude enforces that
+allowlist by silently skipping channel notifications: the server runs and the
+socket comes up while the session stays deaf, so :func:`prepare_pane`
+preflights the policy file and fails loudly with setup instructions instead.
+``--channels`` is variadic, so the caller must terminate the flag list (spawn
+puts ``--`` before the positional prompt) or append the flags after all
+positionals.
 """
 from __future__ import annotations
 
@@ -161,6 +163,40 @@ def _claude_plugin(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
+_MANAGED_SETTINGS_PATHS = (
+    "/Library/Application Support/ClaudeCode/managed-settings.json",  # macOS
+    "/etc/claude-code/managed-settings.json",  # Linux
+)
+
+_ALLOWLIST_SETUP_HINT = (
+    "sudo mkdir -p \"/Library/Application Support/ClaudeCode\" && "
+    "printf '{\\n  \"channelsEnabled\": true,\\n  \"allowedChannelPlugins\": "
+    "[\\n    { \"marketplace\": \"hive\", \"plugin\": \"hive-channel\" }\\n  ]"
+    "\\n}\\n' | sudo tee "
+    "\"/Library/Application Support/ClaudeCode/managed-settings.json\""
+)
+
+
+def _channel_allowlisted() -> bool:
+    """Whether the machine's managed settings allowlist the hive channel.
+
+    Claude enforces the channels allowlist: without this entry it loads the
+    plugin's MCP server but silently skips channel notifications -- socket and
+    marker come up while the session stays deaf. Preflighting the policy file
+    turns that silent black hole into a loud setup error."""
+    for path in _MANAGED_SETTINGS_PATHS:
+        try:
+            data = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            continue
+        for entry in data.get("allowedChannelPlugins", []):
+            if (isinstance(entry, dict)
+                    and entry.get("marketplace") == MARKETPLACE_NAME
+                    and entry.get("plugin") == SERVER_NAME):
+                return True
+    return False
+
+
 def _is_hive_marketplace(location: str) -> bool:
     """Whether a directory binding at ``location`` is provably hive's own
     (re-pointable after a HIVE_HOME move). A dead path serves nothing and is
@@ -219,6 +255,12 @@ def prepare_pane(cwd: str) -> list[str]:
     separated with ``--``.
     """
     del cwd  # location-independent: the marketplace lives under $HIVE_HOME
+    if not _channel_allowlisted():
+        return _unavailable(
+            "the hive channel plugin is not on this machine's managed "
+            "channels allowlist (claude would load the server but silently "
+            "skip channel notifications). One-time setup:\n  "
+            + _ALLOWLIST_SETUP_HINT)
     try:
         _write_plugin_assets()
     except OSError as e:

@@ -122,21 +122,38 @@ def test_claude_exits_nonzero_when_channel_unavailable(runner, monkeypatch):
 def test_shell_init_zsh_emits_claude_function(runner):
     result = runner.invoke(cli, ["shell-init", "zsh"])
     assert result.exit_code == 0
-    # zsh gets quoted names: unquoted ones are alias-expanded at parse time,
-    # so a user `alias claude='claude --verbose'` would break the definition
-    assert "'codex'() {" in result.output
-    assert "'claude'() {" in result.output
+    # ksh-style `function name {` bypasses alias expansion of the name in
+    # both zsh and bash, so pre-existing user aliases cannot break the parse
+    assert "function codex {" in result.output
+    assert "function claude {" in result.output
     assert "hive claude \"$@\" || command claude \"$@\"" in result.output
     # passthrough guards present for both surfaces
     assert "agents" in result.output
     assert "--print" in result.output
 
 
-def test_shell_init_bash_emits_bare_function_names(runner):
+def test_shell_init_bash_emits_function_form(runner):
     result = runner.invoke(cli, ["shell-init", "bash"])
     assert result.exit_code == 0
-    assert "codex() {" in result.output  # bash rejects quoted function names
-    assert "claude() {" in result.output
+    assert "function codex {" in result.output
+    assert "function claude {" in result.output
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_shell_init_bash_survives_existing_aliases(runner):
+    # bash alias-expands function-definition names too when expand_aliases is
+    # on (interactive/bashrc); the function form must survive it
+    script = runner.invoke(cli, ["shell-init", "bash"]).output
+    r = subprocess.run(
+        ["bash", "-c",
+         "shopt -s expand_aliases; "
+         "alias claude='claude --verbose'; alias codex='codex -q'; "
+         'eval "$HIVE_SHELL_INIT" && declare -F claude codex >/dev/null '
+         '&& echo OK'],
+        env={**os.environ, "HIVE_SHELL_INIT": script},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "OK"
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")

@@ -29,6 +29,16 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
+def _allowlisted(monkeypatch, tmp_path):
+    # tests must not depend on the host's real managed-settings policy
+    policy = tmp_path / "managed-settings.json"
+    policy.write_text(json.dumps({"allowedChannelPlugins": [
+        {"marketplace": "hive", "plugin": "hive-channel"}]}))
+    monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
+    return policy
+
+
+@pytest.fixture(autouse=True)
 def _hive_home(monkeypatch):
     # A short base is required: AF_UNIX sun_path caps at ~104 bytes on macOS, so
     # the per-pane socket cannot live under pytest's long tmp_path. Production
@@ -343,6 +353,32 @@ def test_prepare_pane_returns_empty_when_assets_unwritable(
     # occupy the channel dir path with a plain file so mkdir/write fails
     (_hive_home / "channel").write_text("not a directory")
     assert cc.prepare_pane(str(tmp_path)) == []
+
+
+def test_prepare_pane_fails_without_managed_allowlist(
+        tmp_path, monkeypatch, capsys):
+    # claude enforces the channels allowlist by silently dropping channel
+    # notifications: without the policy entry the pane would be a deaf black
+    # hole, so hive must refuse loudly with setup instructions instead
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS",
+                        (str(tmp_path / "absent.json"),))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    err = capsys.readouterr().err
+    assert "allowedChannelPlugins" in err  # setup hint present
+    assert fake.calls == []  # nothing converged for an undeliverable pane
+
+
+def test_prepare_pane_treats_malformed_policy_as_missing(
+        tmp_path, monkeypatch, capsys):
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    policy = tmp_path / "managed-settings.json"
+    policy.write_text("{broken")
+    monkeypatch.setattr(cc, "_MANAGED_SETTINGS_PATHS", (str(policy),))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert fake.calls == []
 
 
 # --- stdio MCP server (no Claude) -------------------------------------------

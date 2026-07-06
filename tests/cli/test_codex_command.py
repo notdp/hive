@@ -146,8 +146,8 @@ def test_codex_falls_back_to_raw_when_daemon_fails(runner, monkeypatch):
 
 def test_shell_init_zsh_emits_guarded_function(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
-    # quoted name: zsh alias-expands bare names at parse time (user aliases)
-    assert "'codex'() {" in out
+    # function form: immune to alias expansion of the name (user aliases)
+    assert "function codex {" in out
     assert 'if [ -z "$TMUX" ]; then command codex "$@"; return; fi' in out
     assert "hive codex \"$@\" || command codex \"$@\"" in out
     # management subcommands stay raw
