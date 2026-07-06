@@ -162,16 +162,18 @@ def _claude_plugin(*args: str) -> subprocess.CompletedProcess | None:
 
 
 def _is_hive_marketplace(location: str) -> bool:
-    """Whether a directory binding at ``location`` is hive's own (re-pointable
-    after a HIVE_HOME move). A dead or unreadable location serves nothing and
-    is safe to re-point; a live one must identify hive's layout."""
-    manifest = Path(location) / ".claude-plugin" / "marketplace.json"
-    if not manifest.exists():
+    """Whether a directory binding at ``location`` is provably hive's own
+    (re-pointable after a HIVE_HOME move). A dead path serves nothing and is
+    safe to re-point; a live one must carry a readable manifest naming hive
+    as owner -- anything unprovable is foreign and never clobbered."""
+    root = Path(location)
+    if not root.exists():
         return True
     try:
-        data = json.loads(manifest.read_text())
+        data = json.loads(
+            (root / ".claude-plugin" / "marketplace.json").read_text())
     except (OSError, ValueError):
-        return True
+        return False
     return data.get("owner", {}).get("name") == "hive"
 
 

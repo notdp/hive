@@ -280,7 +280,7 @@ def test_prepare_pane_fails_on_live_foreign_directory_binding(
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
-def test_prepare_pane_repoints_stale_hive_binding(_hive_home, tmp_path, monkeypatch):
+def test_prepare_pane_repoints_dead_path_binding(_hive_home, tmp_path, monkeypatch):
     # hive's own binding left at a dead path (previous HIVE_HOME): remove it,
     # then converge at the current location
     fake = _FakeClaudePlugin(marketplaces=[
@@ -292,6 +292,49 @@ def test_prepare_pane_repoints_stale_hive_binding(_hive_home, tmp_path, monkeypa
     steps = [" ".join(c[:2]) if c[0] == "marketplace" else c[0] for c in fake.calls]
     assert steps == ["marketplace list", "marketplace remove",
                      "marketplace add", "install", "update"]
+
+
+def test_prepare_pane_repoints_stale_binding_with_hive_manifest(
+        _hive_home, tmp_path, monkeypatch):
+    # a LIVE stale path is re-pointable only when its manifest proves hive
+    stale = tmp_path / "old-hive-home" / "channel" / "marketplace"
+    (stale / ".claude-plugin").mkdir(parents=True)
+    (stale / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
+        {"name": "hive", "owner": {"name": "hive"}, "plugins": []}))
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "directory", "path": str(stale)}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags = cc.prepare_pane(str(tmp_path))
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert ["marketplace", "remove", "hive"] in fake.calls
+
+
+def test_prepare_pane_fails_on_live_binding_without_manifest(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    # a live directory with no manifest cannot be proven hive's: never clobber
+    mystery = tmp_path / "mystery-market"
+    mystery.mkdir()
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "directory", "path": str(mystery)}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert str(mystery) in capsys.readouterr().err
+    assert all(c[0] != "install" and c[:2] != ["marketplace", "remove"]
+               and c[:2] != ["marketplace", "add"] for c in fake.calls)
+
+
+def test_prepare_pane_fails_on_live_binding_with_invalid_manifest(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    broken = tmp_path / "broken-market"
+    (broken / ".claude-plugin").mkdir(parents=True)
+    (broken / ".claude-plugin" / "marketplace.json").write_text("{not json")
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "directory", "path": str(broken)}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert str(broken) in capsys.readouterr().err
+    assert all(c[0] != "install" and c[:2] != ["marketplace", "remove"]
+               and c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
 def test_prepare_pane_returns_empty_when_assets_unwritable(
