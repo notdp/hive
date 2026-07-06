@@ -477,15 +477,22 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
     assert "not alive" in result.output
 
 
-def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
+def test_inject_writes_raw_composer_keystrokes(runner, configure_hive_home, monkeypatch):
+    # inject is the documented low-level bypass: raw keystrokes for every CLI,
+    # never the channel/RPC delivery paths it exists to debug.
     configure_hive_home()
-    sent: list[str] = []
+    typed: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
+    )
 
     class _FakeAgent:
         pane_id = "%11"
+        cli = "claude"
 
         def send(self, text: str) -> None:
-            sent.append(text)
+            raise AssertionError("inject must bypass Agent.send")
 
     class _FakeTeam:
         name = "team-x"
@@ -500,7 +507,7 @@ def test_inject_delegates_to_agent(runner, configure_hive_home, monkeypatch):
 
     result = runner.invoke(cli, ["inject", "claude", "plain prompt"])
     assert result.exit_code == 0
-    assert sent == ["plain prompt"]
+    assert typed == [("%11", "plain prompt", "claude")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "claude",
@@ -516,19 +523,11 @@ def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive
     # is the cross-window same-name bug). A team-bound droid pane delivers
     # /compact through the composer and keeps the team-member output shape.
     configure_hive_home()
-    built: list[dict] = []
-    sent: list[tuple[str, str]] = []
-
-    class _RecordingAgent:
-        def __init__(self, **kwargs):
-            built.append(kwargs)
-            self.pane_id = kwargs.get("pane_id", "")
-            self.cli = kwargs.get("cli", "")
-
-        def send(self, text: str) -> None:
-            sent.append(("send", text))
-
-    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+    typed: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
+    )
 
     def _no_team(*_a, **_kw):
         raise AssertionError("no-`--pane` compact must use current-pane facts, not team resolution")
@@ -550,8 +549,9 @@ def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive
 
     result = runner.invoke(cli, ["compact"])
     assert result.exit_code == 0, result.output
-    assert sent == [("send", "/compact")]
-    assert built[0]["pane_id"] == "%21" and built[0]["cli"] == "droid"
+    # /compact is a TUI slash command: composer keystrokes, never Agent.send
+    # (a channel message would arrive as content, not as a command)
+    assert typed == [("%21", "/compact", "droid")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "orch",
@@ -787,19 +787,11 @@ def test_compact_pane_non_team_non_codex_sends_composer(runner, configure_hive_h
     # pane id as its name.
     configure_hive_home()
     _forbid_team_resolution(monkeypatch)
-    built: list[dict] = []
-    sent: list[tuple[str, str]] = []
-
-    class _RecordingAgent:
-        def __init__(self, **kwargs):
-            built.append(kwargs)
-            self.pane_id = kwargs.get("pane_id", "")
-            self.cli = kwargs.get("cli", "")
-
-        def send(self, text: str) -> None:
-            sent.append((self.pane_id, text))
-
-    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+    typed: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
+    )
 
     pane_options = {("%42", "hive-cli"): "droid"}  # no hive-team / hive-agent
     monkeypatch.setattr(
@@ -809,8 +801,7 @@ def test_compact_pane_non_team_non_codex_sends_composer(runner, configure_hive_h
 
     result = runner.invoke(cli, ["compact", "--pane", "%42"])
     assert result.exit_code == 0, result.output
-    assert sent == [("%42", "/compact")]
-    assert built[0] == {"name": "%42", "team_name": "", "pane_id": "%42", "cli": "droid"}
+    assert typed == [("%42", "/compact", "droid")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "%42",
@@ -860,17 +851,11 @@ def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hiv
     configure_hive_home()
     _forbid_team_resolution(monkeypatch)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%7")
-    sent: list[tuple[str, str]] = []
-
-    class _RecordingAgent:
-        def __init__(self, **kwargs):
-            self.pane_id = kwargs.get("pane_id", "")
-            self.cli = kwargs.get("cli", "")
-
-        def send(self, text: str) -> None:
-            sent.append((self.pane_id, text))
-
-    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+    typed: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
+    )
 
     pane_options = {("%7", "hive-cli"): "droid"}
     monkeypatch.setattr(
@@ -880,7 +865,7 @@ def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hiv
 
     result = runner.invoke(cli, ["compact"])
     assert result.exit_code == 0, result.output
-    assert sent == [("%7", "/compact")]
+    assert typed == [("%7", "/compact", "droid")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "%7",

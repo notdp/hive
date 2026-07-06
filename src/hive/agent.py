@@ -150,6 +150,49 @@ def _resolve_profile_name(pane_id: str, cli: str) -> str:
     return cli
 
 
+_CHANNEL_NOTICE_GRACE = 4.0
+
+
+def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
+    """Answer Claude's one-shot startup prompts (folder trust, MCP-server
+    consent for the project's own servers -- each defaults to the safe first
+    option) until the channel server reports ready.
+
+    Spawn-time startup-consent driving only -- never message delivery. The
+    success signal is the pane's ready marker, written by the channel server
+    itself once its socket is listening (the plugin-provided channel loads
+    with no consent dialog, so a running server means the channel is live).
+    Returns ``False`` when Claude reached ready (or the deadline)
+    without the marker appearing -- the pane cannot receive hive messages and
+    spawn must fail. The caller cleared any stale marker before launch.
+    """
+    from .adapters import claude_channel
+
+    prompts = (
+        "trust this folder",
+        "New MCP server found",
+        "Use this MCP server",
+    )
+    deadline = time.time() + AGENT_STARTUP_TIMEOUT
+    ready_at: float | None = None
+    while time.time() < deadline:
+        if claude_channel.is_ready(pane_id):
+            return True
+        screen = tmux.capture_pane(pane_id, lines=80)
+        if any(p in screen for p in prompts):
+            tmux.send_key(pane_id, "Enter")
+            ready_at = None
+            time.sleep(0.6)
+            continue
+        if ready_text in screen:
+            if ready_at is None:
+                ready_at = time.time()
+            elif time.time() - ready_at > _CHANNEL_NOTICE_GRACE:
+                return False  # TUI is up but the channel server never bound
+        time.sleep(0.4)
+    return claude_channel.is_ready(pane_id)
+
+
 @dataclass
 class Agent:
     name: str
@@ -201,6 +244,24 @@ class Agent:
 
         resolved_model = model
 
+        # Every claude session (fresh, resume, fork — each is a new process
+        # picking up the launch flags) registers a per-pane MCP "channel" so
+        # hive can push <HIVE> messages over a socket. Delivery is
+        # channel-only: when the channel config cannot be written, the pane
+        # could never receive messages, so spawn fails before a pane is even
+        # created instead of leaving an undeliverable agent behind.
+        channel_flags: list[str] = []
+        if cli == "claude":
+            from .adapters import claude_channel
+            channel_flags = claude_channel.prepare_pane(cwd)
+            if not channel_flags:
+                raise RuntimeError(
+                    f"claude channel could not be registered in {cwd} "
+                    "(see [hive-channel] stderr for the reason); claude "
+                    "delivery is channel-only, refusing to spawn an "
+                    "undeliverable pane"
+                )
+
         if split_window:
             pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
         else:
@@ -235,6 +296,8 @@ class Agent:
                     if workspace:
                         from .sidecar import request_connect_codex
                         request_connect_codex(workspace, pane_id)
+        if channel_flags:
+            cmd_parts.extend(channel_flags)
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
@@ -271,6 +334,11 @@ class Agent:
         if prompt:
             initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
         if initial_prompt:
+            if cli == "claude":
+                # Claude's channel flags are variadic: without a `--`
+                # separator the parser consumes the positional prompt as a
+                # flag value and aborts launch.
+                cmd_parts.append("--")
             cmd_parts.append(_shell_escape(initial_prompt))
 
         env_parts: list[str] = []
@@ -284,6 +352,11 @@ class Agent:
         if pre_cmd_parts:
             cmd = f"{cmd} && {' && '.join(pre_cmd_parts)}"
         cmd = f"{cmd} && {' '.join(cmd_parts)}"
+        if channel_flags:
+            # A stale marker from a previous claude in this pane id must not
+            # be mistaken for the new server's readiness.
+            from .adapters import claude_channel
+            claude_channel.clear_ready(pane_id)
         tmux.send_keys(pane_id, cmd)
 
         agent = cls(
@@ -296,6 +369,20 @@ class Agent:
             session_id=session_id,
             cli=cli,
         )
+
+        if channel_flags:
+            if not _drive_claude_channel_startup(pane_id, ready_text):
+                from .adapters import claude_channel
+                claude_channel.clear_ready(pane_id)
+                if split_window:
+                    tmux.kill_pane(pane_id)
+                raise RuntimeError(
+                    f"claude started in pane {pane_id} but never registered "
+                    "the hive channel; claude delivery is channel-only, "
+                    "refusing to keep an undeliverable pane (channels "
+                    "verified on Claude Code 2.1.198 with Anthropic auth; "
+                    "older versions or Bedrock/Vertex may not support them)"
+                )
 
         if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             if cli == "droid":
@@ -317,9 +404,12 @@ class Agent:
         """Send a prompt to the agent.
 
         hive-spawned codex delivers via the per-pane daemon's ``turn/start``
-        RPC, which never touches the composer draft. Embedded (manual) codex and
-        the other CLIs — or a codex pane without a usable daemon/thread — fall
-        back to keystroke injection.
+        RPC and claude via its per-pane MCP channel socket — neither touches the
+        composer draft. claude is strictly channel-only: an unusable channel
+        raises :class:`~hive.adapters.claude_channel.ChannelDeliveryError`
+        (callers surface it as an explicit submit failure; the sidecar projects
+        it to ``injectStatus=failed``). droid, and codex without a usable
+        daemon/thread, use keystroke injection.
         """
         profile_name = _resolve_profile_name(self.pane_id, self.cli)
         if profile_name == "codex":
@@ -327,6 +417,16 @@ class Agent:
 
             if codex_app_server.send_to_pane(self.pane_id, text):
                 return
+        if profile_name == "claude":
+            from .adapters import claude_channel
+
+            if not claude_channel.send_to_pane(self.pane_id, text):
+                raise claude_channel.ChannelDeliveryError(
+                    f"claude pane {self.pane_id} has no usable hive channel "
+                    "(marker or socket missing/dead); claude delivery is "
+                    "channel-only"
+                )
+            return
         _submit_interactive_text(self.pane_id, text, profile_name)
 
     def load_skill(self, skill_name: str) -> None:
