@@ -1,9 +1,10 @@
 """Unit tests for the Claude channel delivery adapter + stdio MCP server.
 
 Covers the VAL contract: socket path derivation, ready-gated send_to_pane with
-exact-byte preservation, prepare_pane writing a static --mcp-config under
-$HIVE_HOME (never a project file), and the pure-Python MCP server's
-initialize/notification framing plus server-owned ready-marker lifecycle.
+exact-byte preservation, prepare_pane converging the hive plugin marketplace
+under $HIVE_HOME (never a project file) and returning plain --channels flags,
+and the pure-Python MCP server's initialize/notification framing plus
+server-owned ready-marker lifecycle.
 """
 from __future__ import annotations
 
@@ -126,42 +127,176 @@ def test_send_to_pane_false_on_refused_connect():
     assert cc.send_to_pane(pane, "msg") is False
 
 
-# --- prepare_pane -----------------------------------------------------------
+# --- prepare_pane (plugin marketplace registration) -------------------------
 
-def test_prepare_pane_writes_static_config_and_returns_flags(_hive_home, tmp_path):
+class _FakeClaudePlugin:
+    """Dispatcher for `claude plugin ...` argv: records calls, serves
+    `marketplace list --json`, returns rc=0 for everything else."""
+
+    def __init__(self, marketplaces=None, fail_step=None, timeout_step=None):
+        self.calls: list[list[str]] = []
+        self.marketplaces = marketplaces
+        self.fail_step = fail_step
+        self.timeout_step = timeout_step
+
+    def __call__(self, argv, capture_output=True, text=True, timeout=None):
+        assert argv[:2] == ["claude", "plugin"]
+        assert timeout is not None  # bounded subprocess calls, always
+        step = argv[2]
+        self.calls.append(argv[2:])
+        if self.timeout_step == step:
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        r = _R()
+        if step == "marketplace" and "list" in argv:
+            entries = self.marketplaces
+            if entries is None:
+                entries = [{"name": "hive", "source": "directory",
+                            "path": str(cc.marketplace_dir())}]
+            r.stdout = json.dumps(entries)
+        if self.fail_step == step:
+            r.returncode = 1
+            r.stderr = "boom"
+        return r
+
+
+def _patch_plugin_cmd(monkeypatch, fake):
+    monkeypatch.setattr(cc.subprocess, "run", fake)
+
+
+def test_prepare_pane_writes_plugin_assets_and_returns_channel_flags(
+        _hive_home, tmp_path, monkeypatch):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
     flags = cc.prepare_pane(str(tmp_path))
 
-    cfg_path = _hive_home / "channel" / "mcp-config.json"
-    assert flags == [
-        "--dangerously-load-development-channels", "server:hive-channel",
-        "--mcp-config", str(cfg_path),
-    ]
-    # --mcp-config is last so a following `--flag` terminates the variadic
-    # list; a positional prompt still needs a `--` separator (spawn adds it).
-    assert flags[-2] == "--mcp-config"
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
 
-    cfg = json.loads(cfg_path.read_text())
-    entry = cfg["mcpServers"]["hive-channel"]
+    market = json.loads(
+        (cc.marketplace_dir() / ".claude-plugin" / "marketplace.json").read_text())
+    assert market["name"] == "hive"
+    assert market["plugins"][0]["name"] == "hive-channel"
+    assert market["plugins"][0]["source"] == "./hive-channel"
+
+    plugin = json.loads(
+        (cc.marketplace_dir() / "hive-channel" / ".claude-plugin" / "plugin.json"
+         ).read_text())
+    assert plugin["channels"] == [{"server": "hive-channel"}]
+    entry = plugin["mcpServers"]["hive-channel"]
     assert entry["type"] == "stdio"
     assert entry["command"] == sys.executable
     assert entry["args"] == ["-m", "hive.adapters.claude_channel_server"]
     assert entry["env"]["HIVE_HOME"] == str(_hive_home)
     assert "PYTHONPATH" in entry["env"]
+    assert plugin["version"] == cc._plugin_version(entry)
 
 
-def test_prepare_pane_never_touches_the_project_directory(tmp_path):
+def test_prepare_pane_converges_via_add_install_update(_hive_home, tmp_path, monkeypatch):
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    cc.prepare_pane(str(tmp_path))
+    steps = [c[0] if c[0] != "marketplace" else " ".join(c[:2]) for c in fake.calls]
+    assert steps == ["marketplace list", "marketplace add", "install", "update"]
+    add = next(c for c in fake.calls if c[:2] == ["marketplace", "add"])
+    assert add[2] == os.path.realpath(str(cc.marketplace_dir()))
+
+
+def test_prepare_pane_never_touches_the_project_directory(tmp_path, monkeypatch):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
     before = set(os.listdir(tmp_path))
     cc.prepare_pane(str(tmp_path))
     assert set(os.listdir(tmp_path)) == before  # no .mcp.json, nothing
 
 
-def test_prepare_pane_is_idempotent(_hive_home, tmp_path):
+def test_prepare_pane_is_idempotent(_hive_home, tmp_path, monkeypatch):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
     first = cc.prepare_pane(str(tmp_path))
+    version1 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
+                           / "plugin.json").read_text())["version"]
     second = cc.prepare_pane(str(tmp_path))
+    version2 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
+                           / "plugin.json").read_text())["version"]
     assert first == second
+    assert version1 == version2  # unchanged content -> stable version, no churn
 
 
-def test_prepare_pane_returns_empty_when_config_unwritable(_hive_home, tmp_path):
+def test_prepare_pane_content_drift_bumps_plugin_version(_hive_home, tmp_path, monkeypatch):
+    fake = _FakeClaudePlugin()
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags1 = cc.prepare_pane(str(tmp_path))
+    v1 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
+                     / "plugin.json").read_text())["version"]
+    monkeypatch.setattr(cc, "_child_pythonpath", lambda: "/different/import/root")
+    flags2 = cc.prepare_pane(str(tmp_path))
+    v2 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
+                     / "plugin.json").read_text())["version"]
+    assert v1 != v2  # drifted server entry -> new version for `plugin update`
+    assert flags1 == flags2  # flags stay stable across drift
+    assert ["update", "hive-channel@hive"] in fake.calls
+
+
+def test_prepare_pane_fails_empty_on_plugin_command_failure(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin(fail_step="install"))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert "install" in capsys.readouterr().err
+
+
+def test_prepare_pane_fails_empty_on_plugin_command_timeout(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin(timeout_step="install"))
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert "will not receive hive messages" in capsys.readouterr().err
+
+
+def test_prepare_pane_fails_loudly_on_foreign_marketplace_name(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "github", "repo": "someone-else/hive"}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    err = capsys.readouterr().err
+    assert "someone-else/hive" in err  # names the conflicting binding
+    # nothing was added/installed over the foreign binding
+    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
+
+
+def test_prepare_pane_fails_on_live_foreign_directory_binding(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    # a directory marketplace named 'hive' that is NOT hive's own layout
+    foreign = tmp_path / "foreign-market"
+    (foreign / ".claude-plugin").mkdir(parents=True)
+    (foreign / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
+        {"name": "hive", "owner": {"name": "someone-else"}, "plugins": []}))
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "directory", "path": str(foreign)}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert str(foreign) in capsys.readouterr().err
+    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
+
+
+def test_prepare_pane_repoints_stale_hive_binding(_hive_home, tmp_path, monkeypatch):
+    # hive's own binding left at a dead path (previous HIVE_HOME): remove it,
+    # then converge at the current location
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "directory",
+         "path": "/tmp/gone-hive-home/channel/marketplace"}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags = cc.prepare_pane(str(tmp_path))
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    steps = [" ".join(c[:2]) if c[0] == "marketplace" else c[0] for c in fake.calls]
+    assert steps == ["marketplace list", "marketplace remove",
+                     "marketplace add", "install", "update"]
+
+
+def test_prepare_pane_returns_empty_when_assets_unwritable(
+        _hive_home, tmp_path, monkeypatch):
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
     # occupy the channel dir path with a plain file so mkdir/write fails
     (_hive_home / "channel").write_text("not a directory")
     assert cc.prepare_pane(str(tmp_path)) == []

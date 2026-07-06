@@ -9,15 +9,16 @@ channel-only; on a ``False`` from :func:`send_to_pane`, ``Agent.send`` raises
 :class:`ChannelDeliveryError`, which callers surface as an explicit submit
 failure (the sidecar projects it to ``injectStatus=failed``).
 
-Channel registration: a static MCP config under ``$HIVE_HOME/channel`` passed
-via ``--mcp-config`` -- no project file is ever touched. (An earlier project
-``.mcp.json`` merge + git-hiding mechanism existed only because
-``--mcp-config`` did not bring up channels on the Claude Code available at
-the time: 2.1.187 was known broken, 2.1.198 is verified working, the exact
-minimum is unverified.) Both ``--dangerously-load-development-channels`` and
-``--mcp-config`` are variadic, so the caller must terminate the flag list
-(spawn puts ``--`` before the positional prompt) or append these flags after
-all positionals.
+Channel registration: hive owns a plugin marketplace under
+``$HIVE_HOME/channel/marketplace`` whose single plugin declares this MCP
+server plus a ``channels`` entry; panes launch with plain
+``--channels plugin:hive-channel@hive``. No project file is ever touched, and
+no consent dialog appears (the allowlist accepting a self-added marketplace
+is local 2.1.198 runtime evidence, wider than the docs; if a future Claude
+tightens it, registration fails and spawn fails loudly -- there is no
+fallback path). ``--channels`` is variadic, so the caller must terminate the
+flag list (spawn puts ``--`` before the positional prompt) or append the
+flags after all positionals.
 """
 from __future__ import annotations
 
@@ -25,10 +26,16 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 SERVER_NAME = "hive-channel"
+MARKETPLACE_NAME = "hive"
+PLUGIN_SPEC = f"plugin:{SERVER_NAME}@{MARKETPLACE_NAME}"
+_PLUGIN_REF = f"{SERVER_NAME}@{MARKETPLACE_NAME}"
+_PLUGIN_CMD_TIMEOUT = 60
 _MSGID_RE = re.compile(r"msgId=([^\s>]+)")
 _SOCKET_CONNECT_TIMEOUT = 2.0
 
@@ -100,42 +107,147 @@ def _server_entry() -> dict:
     }
 
 
-def mcp_config_path() -> Path:
-    return _channel_dir() / "mcp-config.json"
+def marketplace_dir() -> Path:
+    return _channel_dir() / "marketplace"
+
+
+def _plugin_version(entry: dict) -> str:
+    """Deterministic version derived from the server entry: content drift
+    (different python, hive import root, HIVE_HOME) yields a new version, so
+    ``claude plugin update`` installs it; unchanged content is a no-op."""
+    digest = zlib.crc32(json.dumps(entry, sort_keys=True).encode("utf-8"))
+    return f"0.1.{digest}"
+
+
+def _write_plugin_assets() -> None:
+    entry = _server_entry()
+    root = marketplace_dir()
+    description = "hive per-pane message channel for Claude panes"
+    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    plugin_meta = root / SERVER_NAME / ".claude-plugin"
+    plugin_meta.mkdir(parents=True, exist_ok=True)
+    (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps({
+        "name": MARKETPLACE_NAME,
+        "owner": {"name": "hive"},
+        "plugins": [{
+            "name": SERVER_NAME,
+            "source": f"./{SERVER_NAME}",
+            "description": description,
+        }],
+    }, indent=2) + "\n")
+    (plugin_meta / "plugin.json").write_text(json.dumps({
+        "name": SERVER_NAME,
+        "description": description,
+        "version": _plugin_version(entry),
+        "mcpServers": {SERVER_NAME: entry},
+        "channels": [{"server": SERVER_NAME}],
+    }, indent=2) + "\n")
+
+
+def _unavailable(reason: str) -> list[str]:
+    sys.stderr.write(
+        f"[hive-channel] {reason}. "
+        f"This claude pane will not receive hive messages.\n")
+    return []
+
+
+def _claude_plugin(*args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["claude", "plugin", *args],
+            capture_output=True, text=True, timeout=_PLUGIN_CMD_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _is_hive_marketplace(location: str) -> bool:
+    """Whether a directory binding at ``location`` is hive's own (re-pointable
+    after a HIVE_HOME move). A dead or unreadable location serves nothing and
+    is safe to re-point; a live one must identify hive's layout."""
+    manifest = Path(location) / ".claude-plugin" / "marketplace.json"
+    if not manifest.exists():
+        return True
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        return True
+    return data.get("owner", {}).get("name") == "hive"
+
+
+def _marketplace_binding() -> tuple[str, str] | None:
+    """``(source, path_or_repo)`` currently bound to hive's marketplace name,
+    or ``None`` if the name is free or cannot be inspected.
+
+    hive only ever creates a ``directory``-source marketplace named ``hive``,
+    so a directory binding is ours (possibly at a stale path if HIVE_HOME
+    moved -- callers re-point it). Any other source under that name is a third
+    party we must not overwrite.
+    """
+    out = _claude_plugin("marketplace", "list", "--json")
+    if out is None or out.returncode != 0:
+        return None
+    try:
+        entries = json.loads(out.stdout)
+    except ValueError:
+        return None
+    for e in entries:
+        if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME:
+            return str(e.get("source") or ""), str(e.get("path") or e.get("repo") or "")
+    return None
 
 
 def prepare_pane(cwd: str) -> list[str]:
-    """Write the static channel MCP config and return Claude launch flags.
+    """Converge the hive channel plugin and return Claude launch flags.
 
-    The config lives under ``$HIVE_HOME/channel`` and is passed with
-    ``--mcp-config``: no project file is created or modified, so any cwd --
-    repo or not, tracked ``.mcp.json`` or not -- works identically. The write
-    is an idempotent overwrite (content depends only on the running hive).
-    Returns ``[]`` only when the config cannot be written (disk error), which
-    the caller must treat as channel-unavailable.
+    Registration is a hive-owned plugin marketplace under
+    ``$HIVE_HOME/channel/marketplace``: assets are (re)written, then
+    ``claude plugin marketplace add`` / ``install`` / ``update`` run -- each a
+    cheap no-op when already current, so the sequence is idempotent and
+    self-recovers after a removed marketplace or plugin. A ``directory``-source
+    ``hive`` marketplace left at a stale path (HIVE_HOME moved) is re-pointed
+    to the current one. No project file is created or modified in any cwd.
+    Returns ``[]`` when the channel cannot be converged (asset write failure, a
+    non-directory source occupying the ``hive`` name, or a failed/timed-out
+    plugin command); the caller must treat that as channel-unavailable and
+    fail loudly.
 
-    Both returned flags are variadic in Claude's CLI parser: a positional
-    prompt directly after them is consumed as a flag value and aborts launch.
-    ``--mcp-config <path>`` is kept last so the flag list is safe to follow
-    with another ``--flag``; a positional must be separated with ``--``.
+    ``--channels`` is variadic in Claude's CLI parser: a positional prompt
+    directly after it is consumed as a flag value; a positional must be
+    separated with ``--``.
     """
-    del cwd  # location-independent since the config left the project tree
-    directory = _channel_dir()
-    cfg_path = mcp_config_path()
+    del cwd  # location-independent: the marketplace lives under $HIVE_HOME
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
-        cfg_path.write_text(json.dumps(
-            {"mcpServers": {SERVER_NAME: _server_entry()}}, indent=2) + "\n")
+        _write_plugin_assets()
     except OSError as e:
-        sys.stderr.write(
-            f"[hive-channel] cannot write {cfg_path}: {e}. "
-            f"This claude pane will not receive hive messages.\n")
-        return []
-    return [
-        "--dangerously-load-development-channels", f"server:{SERVER_NAME}",
-        "--mcp-config", str(cfg_path),
+        return _unavailable(f"cannot write plugin assets under {marketplace_dir()}: {e}")
+
+    ours = os.path.realpath(str(marketplace_dir()))
+    steps: list[tuple[str, ...]] = [
+        ("marketplace", "add", ours),
+        ("install", _PLUGIN_REF),
+        ("update", _PLUGIN_REF),
     ]
+    binding = _marketplace_binding()
+    if binding is not None:
+        source, location = binding
+        stale = os.path.realpath(location) != ours
+        if source != "directory" or (stale and not _is_hive_marketplace(location)):
+            return _unavailable(
+                f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
+                f"{source} source ({location}); run `claude plugin "
+                f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
+        if stale:
+            # hive's own binding at a stale path (HIVE_HOME moved) -> re-point
+            steps.insert(0, ("marketplace", "remove", MARKETPLACE_NAME))
+
+    for step in steps:
+        out = _claude_plugin(*step)
+        if out is None or out.returncode != 0:
+            detail = ((out.stderr or out.stdout).strip()[-300:]
+                      if out is not None else "launch failure or timeout")
+            return _unavailable(f"`claude plugin {' '.join(step)}` failed: {detail}")
+    return ["--channels", PLUGIN_SPEC]
 
 
 # --- delivery ---------------------------------------------------------------
@@ -151,8 +263,8 @@ def send_to_pane(pane: str, text: str) -> bool:
     Returns ``False`` (a delivery failure -- Claude is channel-only, so there is
     no keystroke fallback) when the channel is not locally ready: no ready marker
     (channel never registered), no socket, or a refused/timed-out connect. A
-    successful write returns ``True``; the ready marker -- set only after Claude
-    printed the channel registration notice -- is what distinguishes a live
+    successful write returns ``True``; the ready marker -- written by the
+    channel server once its socket listens -- is what distinguishes a live
     channel from a silently dropped one (channel notifications are not acked).
     """
     if not pane or not is_ready(pane):

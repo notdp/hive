@@ -154,15 +154,15 @@ _CHANNEL_NOTICE_GRACE = 4.0
 
 
 def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
-    """Answer Claude's one-shot startup prompts (folder trust, dev-channel
-    warning, MCP-server consent for the project's own servers -- each defaults
-    to the safe first option) until the channel server reports ready.
+    """Answer Claude's one-shot startup prompts (folder trust, MCP-server
+    consent for the project's own servers -- each defaults to the safe first
+    option) until the channel server reports ready.
 
     Spawn-time startup-consent driving only -- never message delivery. The
     success signal is the pane's ready marker, written by the channel server
-    itself once its socket is listening (the dev-channel warning is a blocking
-    gate: rejecting it exits Claude, so a running server means the channel was
-    accepted). Returns ``False`` when Claude reached ready (or the deadline)
+    itself once its socket is listening (the plugin-provided channel loads
+    with no consent dialog, so a running server means the channel is live).
+    Returns ``False`` when Claude reached ready (or the deadline)
     without the marker appearing -- the pane cannot receive hive messages and
     spawn must fail. The caller cleared any stale marker before launch.
     """
@@ -170,7 +170,6 @@ def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
 
     prompts = (
         "trust this folder",
-        "I am using this for local development",
         "New MCP server found",
         "Use this MCP server",
     )

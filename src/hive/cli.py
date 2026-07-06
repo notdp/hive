@@ -4306,7 +4306,7 @@ def _exec_claude_managed(args: list[str]) -> None:
 
     Degrades to raw ``claude`` outside tmux and for non-interactive surfaces
     (subcommands, -p/--print, --help/--version). Exits nonzero when the
-    channel config cannot be written, so the shell wrapper falls back to
+    channel plugin cannot be converged, so the shell wrapper falls back to
     ``command claude``.
     """
     def _raw() -> None:

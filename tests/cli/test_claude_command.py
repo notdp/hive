@@ -5,10 +5,7 @@ from hive.cli import cli
 
 pytestmark = pytest.mark.cli
 
-_FLAGS = [
-    "--dangerously-load-development-channels", "server:hive-channel",
-    "--mcp-config", "/tmp/hh/mcp-config.json",
-]
+_FLAGS = ["--channels", "plugin:hive-channel@hive"]
 
 
 class _ExecCalled(Exception):

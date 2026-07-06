@@ -15,10 +15,7 @@ from hive.agent import (
 # exercise its screen-capture loop instead of the fixture's success stub.
 _REAL_CHANNEL_STARTUP = agent_mod._drive_claude_channel_startup
 
-_CHANNEL_FLAGS = [
-    "--dangerously-load-development-channels", "server:hive-channel",
-    "--mcp-config", "/tmp/hh-test/mcp-config.json",
-]
+_CHANNEL_FLAGS = ["--channels", "plugin:hive-channel@hive"]
 
 
 def _setup_tmux_mocks(monkeypatch):
@@ -172,9 +169,8 @@ def test_spawn_claude_launches_with_channel_flags(monkeypatch):
                 is_first=True, cli="claude")
 
     startup_cmd = calls[0]
-    assert "--dangerously-load-development-channels" in startup_cmd
-    assert "server:hive-channel" in startup_cmd
-    assert "--mcp-config" in startup_cmd
+    assert "--channels" in startup_cmd
+    assert "plugin:hive-channel@hive" in startup_cmd
 
 
 def test_spawn_claude_clears_stale_marker_before_launch(monkeypatch):
@@ -245,7 +241,7 @@ def test_spawn_claude_resume_registers_channel(monkeypatch):
     # resume/fork re-launches the claude process with the same launch flags:
     # the channel registers exactly like a fresh spawn (channel-only delivery)
     assert flagged == ["/tmp"]
-    assert "--dangerously-load-development-channels" in calls[0]
+    assert "--channels" in calls[0] and "plugin:hive-channel@hive" in calls[0]
     assert "sess-123" in calls[0]
 
 
