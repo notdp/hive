@@ -7,15 +7,16 @@ so Claude registers a notification listener, then pushes each inbound line as a
 send-keys delivery into a running Claude session.
 
 Inbound seam: a per-pane unix socket under ``$HIVE_HOME/channel`` whose name is
-derived from ``$TMUX_PANE`` (so one static ``--mcp-config`` file serves every
+derived from ``$TMUX_PANE`` (so the plugin's single server entry serves every
 pane). ``claude_channel.send_to_pane`` connects and writes one JSON frame
 ``{"msg_id": ..., "content": ...}``; this server emits it to Claude. One way:
 replies still go out through the ``hive`` CLI.
 
 This server also owns the pane's ready marker: written once the socket is
-listening, removed on exit. Claude only spawns this process after the
-dev-channel warning was accepted (rejecting it exits Claude entirely), so a
-live marker means the channel is genuinely deliverable.
+listening, removed on exit. A live marker only proves this server is up and
+bound; Claude delivering the notifications additionally requires the machine's
+managed-settings channels allowlist, which ``claude_channel.prepare_pane``
+preflights before any launch.
 """
 from __future__ import annotations
 

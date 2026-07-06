@@ -4289,8 +4289,8 @@ _CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
     "upgrade",
 )
 
-# Non-interactive surfaces: -p/--print sessions would hard-block on the
-# dev-channel consent gate, and --help/--version never start a session.
+# Non-interactive surfaces: a -p/--print run has no interactive session for
+# hive to message, and --help/--version never start a session.
 _CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "--help", "--version"})
 
 

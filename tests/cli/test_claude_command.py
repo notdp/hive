@@ -95,7 +95,7 @@ def test_claude_passthrough_subcommand_runs_raw(runner, monkeypatch):
 
 @pytest.mark.parametrize("flag", ["-p", "--print", "--help", "--version"])
 def test_claude_noninteractive_flags_run_raw(runner, monkeypatch, flag):
-    # -p/--print sessions would hard-block on the dev-channel consent gate;
+    # a -p/--print run has no interactive session for hive to message;
     # --help/--version never start a session
     calls = _capture_exec(monkeypatch)
     _managed_env(monkeypatch)
