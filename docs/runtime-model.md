@@ -137,7 +137,7 @@ Meaning:
 
 Important consumer:
 
-- `hive answer`
+- the send gate (`hive send` refuses while the target is `waiting_user`)
 
 ### `turnPhase`
 

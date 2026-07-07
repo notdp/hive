@@ -887,27 +887,6 @@ def request_send(
     )
 
 
-def request_answer(
-    workspace: str,
-    *,
-    team: str,
-    sender_agent: str,
-    target_agent: str,
-    text: str,
-) -> dict[str, Any] | None:
-    return _request_sidecar(
-        workspace,
-        {
-            "action": "answer",
-            "team": team,
-            "senderAgent": sender_agent,
-            "targetAgent": target_agent,
-            "text": text,
-        },
-        timeout=15.0,
-    )
-
-
 def request_delivery(workspace: str, message_id: str) -> dict[str, Any] | None:
     return _request_sidecar(
         workspace,
@@ -1003,7 +982,7 @@ def _check_send_gate(transcript_path: Path | None) -> str:
     result = check_input_gate(transcript_path)
     if result.status == "waiting":
         raise RuntimeError(
-            "target agent is waiting for a user answer; use `hive answer` or answer in the target pane directly"
+            "target agent is waiting for a user answer; answer it in the target pane"
         )
     return result.status
 
@@ -1245,52 +1224,6 @@ def _send_payload(
     return payload
 
 
-def _answer_payload(
-    *,
-    workspace: str,
-    team_name: str,
-    sender_agent: str,
-    target_agent: str,
-    text: str,
-) -> dict[str, Any]:
-    _, target = _resolve_live_agent(team_name, target_agent)
-    transcript_path, _ = _resolve_ack_baseline(target)
-
-    from .adapters.base import check_input_gate, extract_pending_question
-    gate = check_input_gate(transcript_path)
-    if gate.status != "waiting":
-        raise RuntimeError(f"agent '{target_agent}' is not waiting for an answer (inputState: {gate.status})")
-
-    pending_question = extract_pending_question(transcript_path)
-    bus.write_event(
-        workspace,
-        from_agent=sender_agent,
-        to_agent=target_agent,
-        intent="answer",
-        body=text.strip(),
-    )
-
-    from .agent import _submit_interactive_text
-    _submit_interactive_text(target.pane_id, text, target.cli)
-
-    ack_status = "unconfirmed"
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        time.sleep(0.5)
-        result = check_input_gate(transcript_path)
-        if result.status == "clear":
-            ack_status = "confirmed"
-            break
-
-    payload: dict[str, Any] = {
-        "ok": True,
-        "ack": ack_status,
-    }
-    if pending_question:
-        payload["question"] = pending_question
-    return payload
-
-
 def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
     send_event = bus.find_send_event(workspace, message_id)
     if send_event is None:
@@ -1438,8 +1371,6 @@ def _doctor_payload(
             diag["cli"] = runtime["_cli"]
         if "inputReason" in runtime:
             diag["inputReason"] = runtime["inputReason"]
-        if "pendingQuestion" in runtime:
-            diag["pendingQuestion"] = runtime["pendingQuestion"]
         if "_transcript" in runtime:
             diag["transcript"] = runtime["_transcript"]
         if "_transcriptExists" in runtime:
@@ -1522,7 +1453,7 @@ def _agent_runtime_payload(
     runtime_snapshot: RuntimeSnapshot | None = None,
 ) -> dict[str, Any]:
     from . import adapters, tmux
-    from .adapters.base import check_input_gate, extract_pending_question
+    from .adapters.base import check_input_gate
     from .activity import probe_transcript_turn_phase
     from .agent_cli import resolve_model_for_pane
 
@@ -1631,9 +1562,6 @@ def _agent_runtime_payload(
     if gate.status == "waiting":
         runtime["inputState"] = "waiting_user"
         runtime["inputReason"] = "ask_pending"
-        question = extract_pending_question(transcript)
-        if question:
-            runtime["pendingQuestion"] = question
     elif gate.status == "clear":
         runtime["inputState"] = "ready"
         runtime["inputReason"] = ""
@@ -2261,18 +2189,6 @@ def _handle_request(
                 artifact=str(request.get("artifact", "")),
                 reply_to=str(request.get("replyTo", "")),
                 wait=bool(request.get("wait", False)),
-            )
-        except Exception as exc:
-            response = {"ok": False, "error": str(exc)}
-        return response, True
-    if action == "answer":
-        try:
-            response = _answer_payload(
-                workspace=workspace,
-                team_name=str(request.get("team") or team),
-                sender_agent=str(request.get("senderAgent", "")),
-                target_agent=str(request.get("targetAgent", "")),
-                text=str(request.get("text", "")),
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}

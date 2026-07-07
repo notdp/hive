@@ -35,7 +35,6 @@ _COMMAND_HELP_SECTIONS = {
     "team": "Daily",
     "send": "Daily",
     "reply": "Daily",
-    "answer": "Daily",
     "notify": "Daily",
     "compact": "Daily",
     "skills": "Daily",
@@ -101,9 +100,8 @@ hive send dodo "see report" --artifact - <<'EOF'
 - item
 EOF
 
-# Reply & answer (continue an existing thread)
+# Reply (continue an existing thread)
 hive reply dodo "fixed"                      # auto-picks latest unanswered inbound
-hive answer dodo "yes"                       # answer a pending AskUserQuestion
 
 # Handoff, fork, spawn
 hive handoff dodo --artifact /tmp/task.md    # delegate a thread
@@ -499,7 +497,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             "sessionId",
             "inputState",
             "inputReason",
-            "pendingQuestion",
             "turnPhase",
         ):
             value = runtime_fields.get(key)
@@ -598,8 +595,7 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
 
 def _status_migration_failure(command_name: str) -> None:
     _fail(
-        f"`hive {command_name}` was removed; use `hive send` to send messages, "
-        "`hive answer` to respond to pending questions, "
+        f"`hive {command_name}` was removed; use `hive send` to send messages "
         "and `hive team` to inspect runtime input state"
     )
 
@@ -3794,37 +3790,6 @@ def reply(
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     if payload.get("delivery") == "failed":
         sys.exit(2)
-
-
-@cli.command()
-@click.argument("agent_name")
-@click.argument("text")
-def answer(agent_name: str, text: str):
-    """Answer a pending AskUserQuestion in another agent's pane.
-
-    Only works when the target agent is waiting for a user answer.
-    Use ``hive team`` to see which agents need answers.
-    """
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    sender = _resolve_sender(None)
-    ws = _resolve_workspace(t, required=True)
-    from .sidecar import request_answer
-
-    _ensure_team_sidecar(t, ws)
-    payload = request_answer(
-        str(ws),
-        team=t.name,
-        sender_agent=sender,
-        target_agent=agent_name,
-        text=text,
-    )
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "answer failed")))
-    payload.pop("ok", None)
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.command()
