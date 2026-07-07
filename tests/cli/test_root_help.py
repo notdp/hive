@@ -21,7 +21,7 @@ def test_root_help_layers_daily_handoff_debug_sections(runner):
     handoff_block = result.output[handoff_start:debug_start]
     debug_block = result.output[debug_start:]
 
-    for command_name in ("team", "send", "answer", "notify"):
+    for command_name in ("team", "send", "reply", "notify"):
         assert command_name in daily_block
     for command_name in ("handoff", "fork", "spawn", "workflow"):
         assert command_name in handoff_block
