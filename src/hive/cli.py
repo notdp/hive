@@ -3424,7 +3424,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str, 
     # returning success. A fresh CLI pane emits the prompt (inputState=ready)
     # before the skill file has finished loading, so an immediate send after
     # spawn-duo would race the skill. Poll sidecar team-runtime until both
-    # worker and validator report ready + task_closed/turn_closed.
+    # worker and validator report inputState=ready.
     _ensure_team_sidecar(peer_team, workspace)
     not_ready = _wait_for_peer_ready(
         workspace,

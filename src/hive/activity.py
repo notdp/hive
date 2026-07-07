@@ -19,7 +19,8 @@ _MAX_TAIL_BYTES = 128 * 1024
 # - user_prompt_pending: user prompt arrived, assistant has not acknowledged
 # - input_backlog: unresolved queue enqueue is the newest decisive evidence
 #   (a new prompt is waiting in the queue for the assistant to pick up)
-# Used by both root-send active-turn fork routing and idle-notify fire suppression.
+# Used by the sidecar busy probe (_pane_in_active_turn, which also gates
+# idle-notify firing) and the duo pairing idle gate (_pane_is_idle_for_pairing).
 ACTIVE_TURN_PHASES = frozenset({
     "tool_open",
     "tool_result_pending_reply",
