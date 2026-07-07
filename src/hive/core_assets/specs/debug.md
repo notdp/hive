@@ -23,7 +23,6 @@
 ## 协议边界
 
 - `hive send` 永远开新 thread root;`hive reply` 续已有 thread、必带 `in_reply_to`
-- `hive answer` 只在目标 `inputState=waiting_user` 时可用
 - Hive 不是严格可靠消息队列;没有幂等性或 backpressure。
 - 收件箱一律是 pane 内联的 `<HIVE ...>` block。
 - 排障用 `hive thread` / `hive delivery`,不要把内部存储或日志当收件箱轮询。

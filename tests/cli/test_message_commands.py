@@ -101,29 +101,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _request_answer(
-        workspace: str,
-        *,
-        team: str,
-        sender_agent: str,
-        target_agent: str,
-        text: str,
-    ):
-        from hive.sidecar import _answer_payload
-
-        try:
-            return _answer_payload(
-                workspace=workspace,
-                team_name=team,
-                sender_agent=sender_agent,
-                target_agent=target_agent,
-                text=text,
-            )
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-
     monkeypatch.setattr("hive.sidecar.request_send", _request_send)
-    monkeypatch.setattr("hive.sidecar.request_answer", _request_answer)
     monkeypatch.setattr("hive.sidecar.request_team_runtime", _request_team_runtime)
     return pending
 
@@ -1488,121 +1466,6 @@ def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, mon
     assert "gate" not in payload
 
 
-# --- Answer command tests ---
-
-
-def test_answer_when_not_waiting_fails(runner, configure_hive_home, monkeypatch, tmp_path):
-    """answer should fail when the target is not in waiting state."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}}) + "\n"
-    )
-
-    class _FakeAgent:
-        pane_id = "%99"
-        name = "gpt"
-        cli = "claude"
-
-        def is_alive(self) -> bool:
-            return True
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, _name: str):
-            return _FakeAgent()
-
-    team = _FakeTeam()
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
-
-    result = runner.invoke(cli, ["answer", "gpt", "yes"])
-
-    assert result.exit_code != 0
-    assert "not waiting for an answer" in result.output
-
-
-def test_answer_when_waiting_injects_text(runner, configure_hive_home, monkeypatch, tmp_path):
-    """answer should inject text when the target is waiting."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        json.dumps({
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
-                ],
-            },
-        }) + "\n"
-    )
-
-    injected: list[tuple[str, str]] = []
-
-    class _FakeAgent:
-        pane_id = "%99"
-        name = "gpt"
-        cli = "claude"
-
-        def is_alive(self) -> bool:
-            return True
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, _name: str):
-            return _FakeAgent()
-
-    def fake_submit(pane_id, text, cli):
-        injected.append((pane_id, text))
-        # Simulate the answer being accepted — write a user turn.
-        transcript.write_text(
-            transcript.read_text()
-            + json.dumps({"type": "user", "message": {"role": "user", "content": "yes"}}) + "\n"
-        )
-
-    team = _FakeTeam()
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    monkeypatch.setattr("hive.agent._submit_interactive_text", fake_submit)
-    _patch_sidecar_requests(monkeypatch, team)
-
-    result = runner.invoke(cli, ["answer", "gpt", "yes"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["ack"] == "confirmed"
-    assert payload["question"] == "proceed?"
-    assert "from" not in payload
-    assert "to" not in payload
-    assert "answer" not in payload
-    assert len(injected) == 1
-    assert injected[0] == ("%99", "yes")
-    # Event was written
-    events = bus.read_all_events(workspace)
-    assert len(events) == 1
-    assert events[0]["intent"] == "answer"
-
-
 def _patch_send_failed(monkeypatch, workspace):
     """Make _request_send_payload return a delivery=failed payload without touching the sidecar."""
 
@@ -1625,6 +1488,13 @@ def _patch_send_failed(monkeypatch, workspace):
             "delivery": "failed",
         },
     )
+
+
+def test_answer_command_is_removed(runner):
+    """The answer command was removed; the CLI must not know it at all."""
+    result = runner.invoke(cli, ["answer", "gpt", "yes"])
+    assert result.exit_code != 0
+    assert "No such command" in result.output
 
 
 def test_send_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home, monkeypatch, tmp_path):

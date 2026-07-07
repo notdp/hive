@@ -14,14 +14,13 @@ hive send dodo "see attachment" --artifact - <<'EOF'
 - item
 EOF
 hive reply dodo "ack, looking"
-hive answer claude "yes"
 ```
 
 `hive team` 字段：
 
 - `self`：你的 member name。
 - `group`：pane 上的 `@hive-group`，例如 squad 名或 duo group。
-- `inputState=waiting_user`：对方在等答案，用 `hive answer`。
+- `inputState=waiting_user`：对方在等 human 作答（AskUserQuestion 打开中）。别注入消息，等它清掉。
 - `busy=true/false`：tmux 输出层活动，不等于语义上的忙闲。
 - `turnPhase`：比 `busy` 更适合判断发 new root 是否会打断对方。
 

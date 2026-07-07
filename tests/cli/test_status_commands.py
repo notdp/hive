@@ -120,7 +120,6 @@ def test_team_includes_needs_answer_from_daemon(runner, configure_hive_home, mon
                     "alive": True,
                     "inputState": "waiting_user",
                     "inputReason": "ask_pending",
-                    "pendingQuestion": "proceed?",
                 }
             },
             "needsAnswer": ["orch"],
@@ -132,7 +131,8 @@ def test_team_includes_needs_answer_from_daemon(runner, configure_hive_home, mon
     payload = json.loads(result.output)
     assert payload["needsAnswer"] == ["orch"]
     orch = next(member for member in payload["members"] if member["name"] == "orch")
-    assert orch["pendingQuestion"] == "proceed?"
+    assert orch["inputState"] == "waiting_user"
+    assert "pendingQuestion" not in orch
 
 
 def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
