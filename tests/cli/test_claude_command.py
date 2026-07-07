@@ -93,6 +93,48 @@ def test_claude_passthrough_subcommand_runs_raw(runner, monkeypatch):
     assert calls == [["claude", "claude", "agents", "--json"]]
 
 
+def test_claude_leading_flag_before_subcommand_runs_raw(runner, monkeypatch):
+    # ghost-session regression: `alias claude='claude --verbose'` prepends a
+    # flag, and a leading flag also defeats claude's own subcommand dispatch —
+    # a managed exec would turn "daemon status" into a prompt
+    calls = _capture_exec(monkeypatch)
+    cleared = _managed_env(monkeypatch, pane="%99")
+    runner.invoke(cli, ["claude", "--verbose", "daemon", "status"])
+    assert calls == [["claude", "claude", "--verbose", "daemon", "status"]]
+    assert cleared == []  # the pane's live channel marker survives
+
+
+def test_claude_hidden_subcommand_runs_raw(runner, monkeypatch):
+    # daemon/attach/logs/stop/remote-control are absent from `claude --help`
+    # but real; a missing allowlist entry turns them into ghost sessions
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+    runner.invoke(cli, ["claude", "daemon", "status"])
+    assert calls == [["claude", "claude", "daemon", "status"]]
+
+
+def test_claude_flag_value_is_not_a_subcommand(runner, monkeypatch):
+    # `--agent doctor`: "doctor" is the flag's value, not a subcommand
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+    runner.invoke(cli, ["claude", "--agent", "doctor"])
+    assert calls == [["claude", "claude", "--agent", "doctor", *_FLAGS]]
+
+
+def test_claude_double_dash_positional_is_a_prompt(monkeypatch):
+    # `claude -- daemon` explicitly makes "daemon" a prompt, not a subcommand.
+    # Exercised on _exec_claude_managed directly: click strips the first `--`
+    # from `hive claude -- daemon` before ctx.args, so via the CLI this branch
+    # only sees what the shell wrapper forwards without a click layer.
+    from hive.cli import _exec_claude_managed
+
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+    with pytest.raises(_ExecCalled):
+        _exec_claude_managed(["--", "daemon"])
+    assert calls == [["claude", "claude", "--", "daemon", *_FLAGS]]
+
+
 @pytest.mark.parametrize("flag", ["-p", "--print", "--help", "--version"])
 def test_claude_noninteractive_flags_run_raw(runner, monkeypatch, flag):
     # a -p/--print run has no interactive session for hive to message;
@@ -178,3 +220,30 @@ def test_shell_init_fish_emits_claude_function(runner):
     assert "function codex" in result.output
     assert "function claude" in result.output
     assert "hive claude $argv; or command claude $argv" in result.output
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
+def test_shell_init_zsh_routes_aliased_subcommand_raw(runner, tmp_path):
+    # end-to-end ghost-session regression: with a user alias injecting a
+    # leading flag, `claude daemon status` must reach the real binary — not
+    # `hive claude`, whose managed exec would spawn an interactive session
+    # with "daemon status" as the prompt
+    script = runner.invoke(cli, ["shell-init", "zsh"]).output
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\n')
+    (bin_dir / "hive").write_text(f'#!/bin/sh\necho "hive $@" >> {log}\n')
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    # the trailing eval forces a fresh parse so the alias actually expands:
+    # zsh parses the whole -c string before the alias command runs
+    r = subprocess.run(
+        ["zsh", "-c",
+         "alias claude='claude --verbose'; "
+         'eval "$HIVE_SHELL_INIT"; eval \'claude daemon status\''],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    assert log.read_text() == "claude --verbose daemon status\n"
