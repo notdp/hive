@@ -4191,7 +4191,6 @@ _CODEX_PASSTHROUGH_SUBCOMMANDS = (
     "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server",
     "app-server", "remote-control", "app", "completion", "update", "doctor",
     "sandbox", "debug", "apply", "a", "cloud", "exec-server", "features", "help",
-    "--help", "-h", "--version", "-V",
 )
 
 # Global codex options that consume the following token as their value, so the
@@ -4283,15 +4282,54 @@ def codex_cmd(ctx: click.Context):
     _exec_codex_managed(list(ctx.args))
 
 
+# claude subcommands that are not an interactive TUI launch: hive leaves these
+# completely untouched (raw claude). Includes subcommands hidden from
+# `claude --help` (attach, daemon, logs, remote-control, stop — verified on
+# 2.1.198); a missing entry here routes the invocation into `hive claude`,
+# where claude's parser turns it into a prompt and spawns a ghost session.
 _CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
-    "agents", "auth", "auto-mode", "doctor", "gateway", "install", "mcp",
-    "plugin", "plugins", "project", "setup-token", "ultrareview", "update",
-    "upgrade",
+    "agents", "attach", "auth", "auto-mode", "daemon", "doctor", "gateway",
+    "install", "logs", "mcp", "plugin", "plugins", "project", "remote-control",
+    "setup-token", "stop", "ultrareview", "update", "upgrade",
 )
 
 # Non-interactive surfaces: a -p/--print run has no interactive session for
 # hive to message, and --help/--version never start a session.
 _CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "--help", "--version"})
+
+# Global claude options that consume the following token as their value, so
+# the subcommand scan does not mistake that value for the subcommand.
+# `--opt=value` is self-contained and handled by the flag branch.
+_CLAUDE_VALUE_OPTS = frozenset({
+    "--model", "--agent", "--session-id", "--settings", "--permission-mode",
+    "--effort", "-n", "--name", "--add-dir", "--plugin-dir", "--mcp-config",
+    "--setting-sources", "--output-format", "--input-format", "--max-turns",
+    "--allowed-tools", "--disallowed-tools", "--append-system-prompt",
+    "--append-system-prompt-file", "--system-prompt", "--system-prompt-file",
+})
+
+
+def _claude_subcommand(args: list[str]) -> str | None:
+    """First non-option token in `args` — claude's subcommand, if any.
+
+    claude accepts global options before a subcommand, and a user alias like
+    ``alias claude='claude --verbose'`` prepends one unconditionally, so
+    checking only ``args[0]`` misses e.g. ``claude --verbose daemon status``.
+    Worse, a leading flag also defeats claude's own subcommand dispatch: the
+    managed exec would turn "daemon status" into a prompt and spawn a ghost
+    interactive session. Skip option tokens (and the value of value-taking
+    options); ``--`` ends the scan since everything after it is a prompt.
+    """
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return None
+        if a.startswith("-"):
+            i += 2 if (a in _CLAUDE_VALUE_OPTS and "=" not in a) else 1
+            continue
+        return a
+    return None
 
 
 def _exec_claude_managed(args: list[str]) -> None:
@@ -4314,7 +4352,7 @@ def _exec_claude_managed(args: list[str]) -> None:
 
     if not tmux.is_inside_tmux():
         _raw()
-    if args and args[0] in _CLAUDE_PASSTHROUGH_SUBCOMMANDS:
+    if _claude_subcommand(args) in _CLAUDE_PASSTHROUGH_SUBCOMMANDS:
         _raw()
     if any(a in _CLAUDE_PASSTHROUGH_FLAGS for a in args):
         _raw()
@@ -4353,18 +4391,43 @@ _SHELL_INIT_POSIX = """\
 # hive agent integration — bind interactive codex/claude launches to hive
 # (per-pane daemon for codex, per-pane message channel for claude).
 # Bypass anytime with `command codex` / `command claude`.
+# Subcommand detection scans for the first non-flag argument: a user alias
+# (e.g. `alias claude='claude --verbose'`) injects flags before it, and a
+# `--` ends the scan because everything after it is a prompt.
 function codex {
   if [ -z "$TMUX" ]; then command codex "$@"; return; fi
-  case "$1" in
+  _hive_sub=
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      --) break ;;
+      -*) continue ;;
+      *) _hive_sub="$_hive_a"; break ;;
+    esac
+  done
+  case "$_hive_sub" in
     %(passthrough)s)
       command codex "$@"; return ;;
   esac
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      --help|-h|--version|-V)
+        command codex "$@"; return ;;
+    esac
+  done
   hive codex "$@" || command codex "$@"
 }
 
 function claude {
   if [ -z "$TMUX" ]; then command claude "$@"; return; fi
-  case "$1" in
+  _hive_sub=
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      --) break ;;
+      -*) continue ;;
+      *) _hive_sub="$_hive_a"; break ;;
+    esac
+  done
+  case "$_hive_sub" in
     %(claude_passthrough)s)
       command claude "$@"; return ;;
   esac
@@ -4382,15 +4445,37 @@ _SHELL_INIT_FISH = """\
 # hive agent integration — bind interactive codex/claude launches to hive
 # (per-pane daemon for codex, per-pane message channel for claude).
 # Bypass anytime with `command codex` / `command claude`.
+# Subcommand detection scans for the first non-flag argument: a user alias
+# (e.g. `alias claude='claude --verbose'`) injects flags before it, and a
+# `--` ends the scan because everything after it is a prompt.
 function codex
     if test -z "$TMUX"
         command codex $argv
         return
     end
-    switch "$argv[1]"
+    set -l _hive_sub ""
+    for a in $argv
+        switch "$a"
+            case --
+                break
+            case '-*'
+                continue
+            case '*'
+                set _hive_sub "$a"
+                break
+        end
+    end
+    switch "$_hive_sub"
         case %(passthrough)s
             command codex $argv
             return
+    end
+    for a in $argv
+        switch "$a"
+            case --help -h --version -V
+                command codex $argv
+                return
+        end
     end
     hive codex $argv; or command codex $argv
 end
@@ -4400,7 +4485,19 @@ function claude
         command claude $argv
         return
     end
-    switch "$argv[1]"
+    set -l _hive_sub ""
+    for a in $argv
+        switch "$a"
+            case --
+                break
+            case '-*'
+                continue
+            case '*'
+                set _hive_sub "$a"
+                break
+        end
+    end
+    switch "$_hive_sub"
         case %(claude_passthrough)s
             command claude $argv
             return
