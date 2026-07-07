@@ -50,6 +50,81 @@ def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monk
     assert prompted == []
 
 
+def _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%99", session_name="dev")
+    workspace = tmp_path / "ws"
+    assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
+
+    sent: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane",
+        lambda _pane: type(
+            "P", (), {"name": "claude", "fork_cmd": "claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+        )(),
+    )
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
+    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
+    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
+    monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%99", "orch", command="claude", role="lead", agent="orch", team="team-x", cli="claude")],
+    )
+    return sent
+
+
+def test_fork_uses_fresh_runtime_snapshot_without_resolver(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A fresh sidecar snapshot is authoritative: fork must unwrap the nested
+    `snapshot` field of the response and never fall back to pidfile/lsof
+    guessing via resolve_session_id_for_pane."""
+    sent = _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "hive.sidecar.request_runtime_snapshot",
+        lambda *a, **k: {
+            "ok": True,
+            "pane": "%99",
+            "snapshot": {"sessionId": "sid-runtime", "_sessionIdFresh": True},
+        },
+    )
+
+    def _resolver_must_not_run(_pane, profile=None):
+        raise AssertionError("resolve_session_id_for_pane called despite fresh snapshot")
+
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", _resolver_must_not_run)
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0
+    assert len(sent) == 1
+    assert sent[0][1].startswith("claude -r sid-runtime --fork-session")
+
+
+def test_fork_stale_runtime_snapshot_falls_back_to_resolver(runner, configure_hive_home, monkeypatch, tmp_path):
+    sent = _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "hive.sidecar.request_runtime_snapshot",
+        lambda *a, **k: {
+            "ok": True,
+            "pane": "%99",
+            "snapshot": {"sessionId": "sid-old", "_sessionIdFresh": False},
+        },
+    )
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-fallback")
+
+    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
+
+    assert result.exit_code == 0
+    assert len(sent) == 1
+    assert sent[0][1].startswith("claude -r sess-fallback --fork-session")
+
+
 def test_fork_in_squad_prefixes_agent_name(runner, configure_hive_home, monkeypatch, tmp_path):
     """Forking in a squad pane auto-prefixes the derived name with the squad
     namespace (e.g. 'coco' → 'peaky.coco') and sets @hive-group on the new pane

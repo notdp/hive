@@ -289,10 +289,10 @@ class Agent:
                     ])
                     # Bring hive's 2nd client online now — before codex (started
                     # by send_keys at the end of this method) creates its thread
-                    # — so the sidecar receives the full thread/started +
-                    # tokenUsage broadcast live instead of late-joining and
-                    # resuming. Best-effort: a down/slow sidecar just falls back
-                    # to the lazy connect on the next runtime tick.
+                    # — so the sidecar receives the thread/started + status
+                    # broadcast live instead of late-joining and resuming.
+                    # Best-effort: a down/slow sidecar just falls back to the
+                    # lazy connect on the next runtime tick.
                     if workspace:
                         from .sidecar import request_connect_codex
                         request_connect_codex(workspace, pane_id)

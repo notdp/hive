@@ -503,9 +503,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             if value in ("", None):
                 continue
             member[key] = value
-        ctx = runtime_fields.get("context")
-        if isinstance(ctx, dict):
-            member["context"] = ctx
     needs_answer = runtime.get("needsAnswer")
     if isinstance(needs_answer, list) and needs_answer:
         payload["needsAnswer"] = needs_answer
@@ -1015,10 +1012,12 @@ def _fork_source_details(pane_id: str, split: str, *, workspace: str = "") -> tu
     session_id: str | None = None
     if workspace:
         from .sidecar import request_runtime_snapshot
-        snapshot = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
-        sid = snapshot.get("sessionId")
-        if sid and sid != "unresolved" and snapshot.get("_sessionIdFresh", True):
-            session_id = str(sid)
+        payload = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
+        snapshot = payload.get("snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("_sessionIdFresh", True):
+            sid = snapshot.get("sessionId")
+            if sid and sid != "unresolved":
+                session_id = str(sid)
     if not session_id:
         session_id = resolve_session_id_for_pane(current_pane, profile=profile)
     if not session_id:

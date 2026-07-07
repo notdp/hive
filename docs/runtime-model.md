@@ -222,7 +222,7 @@ Droid's simple message-shape probe does not currently emit `task_closed` / `turn
 A born-connected codex pane — hive-spawned, or launched through `hive codex` /
 the `hive shell-init` shell function — runs a per-pane `codex app-server`
 daemon. Hive connects as a second client over that pane's unix socket and reads
-`busy` / `inputState` / `turnPhase` / context **natively** from the daemon's
+`busy` / `inputState` / `turnPhase` **natively** from the daemon's
 notification stream, instead of reverse-engineering them from the transcript.
 The emitted payload is tagged `_runtimeSource: codex_app_server`.
 
@@ -233,8 +233,7 @@ fallback.
 
 State is event-sourced from app-server notifications and stays valid until the
 next event — there is no time-based staleness gate. The relevant notifications
-are `thread/status/changed`, `turn/started`, `turn/completed`, and
-`thread/tokenUsage/updated`.
+are `thread/status/changed`, `turn/started`, and `turn/completed`.
 
 Field mapping (notification → runtime field):
 
@@ -253,11 +252,6 @@ Field mapping (notification → runtime field):
     `waitingOnApproval` or `waitingOnUserInput`; emitted with
     `inputReason=app_server_active_flag`
   - `ready` — any other `active`, or `idle`
-- context
-  - `context.tokens` / `context.window` from `thread/tokenUsage/updated`:
-    `tokenUsage.last.totalTokens` and `modelContextWindow`. `last` is the
-    current context size; the cumulative `total` is deliberately ignored (it
-    grows past the window across turns).
 
 `sessionId` for a daemon-backed pane resolves from app-server thread metadata
 (`thread.sessionId` via `thread/resume`), with an lsof-on-daemon-pid fallback.

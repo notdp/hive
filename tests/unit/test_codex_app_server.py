@@ -101,24 +101,6 @@ def test_on_notification_status_changed():
     assert not c.runtime_for("t1").busy
 
 
-def test_on_notification_token_usage_uses_last_not_total():
-    c = _bare_client()
-    c._on_notification(
-        "thread/tokenUsage/updated",
-        {
-            "threadId": "t1",
-            "tokenUsage": {
-                "last": {"totalTokens": 1234},
-                "total": {"totalTokens": 999999},
-                "modelContextWindow": 200000,
-            },
-        },
-    )
-    rt = c.runtime_for("t1")
-    assert rt.tokens == 1234  # `last`, not cumulative `total`
-    assert rt.window == 200000
-
-
 def test_on_notification_ignores_missing_thread_id():
     c = _bare_client()
     c._on_notification("turn/started", {"turn": {"id": "x"}})
@@ -208,22 +190,15 @@ def test_resume_without_status_still_caches_session_id():
     assert c.runtime_for("t1") is None  # no status -> no runtime fabricated
 
 
-def test_attach_resumes_with_turns_included_for_token_replay():
-    """attach() is the late-join path; it must resume with excludeTurns=False so
-    the daemon replays persisted token usage (the cheap excludeTurns=True path
-    skips the replay, leaving context tokens unrecovered)."""
+def test_attach_resumes_each_loaded_thread():
+    """attach() is the late-join path; it resumes every loaded thread once so
+    the resume response backfills sessionId and current status."""
     c = _bare_client()
-    c.loaded_list = lambda: ["t1"]
-    seen: dict = {}
-
-    def fake_resume(tid, *, exclude_turns=True):
-        seen["tid"] = tid
-        seen["exclude_turns"] = exclude_turns
-        return True
-
-    c.resume = fake_resume
+    c.loaded_list = lambda: ["t1", "t2"]
+    seen: list[str] = []
+    c.resume = lambda tid: seen.append(tid) or True
     c.attach()
-    assert seen == {"tid": "t1", "exclude_turns": False}
+    assert seen == ["t1", "t2"]
 
 
 def test_ensure_session_id_resumes_and_caches(monkeypatch):

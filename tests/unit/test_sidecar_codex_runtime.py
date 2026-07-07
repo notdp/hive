@@ -13,10 +13,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_codex_app_server_runtime_maps_fields(monkeypatch):
-    rt = ThreadRuntime(
-        busy=True, turn_phase="tool_open", input_state="ready",
-        tokens=1234, window=200000,
-    )
+    rt = ThreadRuntime(busy=True, turn_phase="tool_open", input_state="ready")
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: rt
     )
@@ -25,9 +22,6 @@ def test_codex_app_server_runtime_maps_fields(monkeypatch):
     assert out["turnPhase"] == "tool_open"
     assert out["inputState"] == "ready"
     assert out["_runtimeSource"] == "codex_app_server"
-    assert out["context"]["tokens"] == 1234
-    assert out["context"]["window"] == 200000
-    assert out["context"]["source"] == "codex_app_server"
 
 
 def test_codex_app_server_runtime_none_without_daemon(monkeypatch):
@@ -45,15 +39,6 @@ def test_codex_app_server_runtime_waiting_user(monkeypatch):
     out = sidecar._codex_app_server_runtime("%5")
     assert out["inputState"] == "waiting_user"
     assert out["inputReason"] == "app_server_active_flag"
-
-
-def test_codex_app_server_runtime_omits_context_without_tokens(monkeypatch):
-    rt = ThreadRuntime(busy=False, input_state="ready")  # tokens stays None
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: rt
-    )
-    out = sidecar._codex_app_server_runtime("%5")
-    assert "context" not in out
 
 
 def test_session_id_best_effort_via_daemon_lsof(monkeypatch):

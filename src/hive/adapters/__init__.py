@@ -7,7 +7,7 @@ route through :func:`get` by CLI name instead of branching on ``if name == ...``
 
 from __future__ import annotations
 
-from .base import ContextSnapshot, Message, MessagePart, SessionAdapter, SessionMeta
+from .base import Message, MessagePart, SessionAdapter, SessionMeta
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .droid import DroidAdapter
@@ -30,7 +30,6 @@ def available() -> list[str]:
 __all__ = [
     "Message",
     "MessagePart",
-    "ContextSnapshot",
     "REGISTRY",
     "SessionAdapter",
     "SessionMeta",

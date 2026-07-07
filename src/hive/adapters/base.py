@@ -26,14 +26,6 @@ class SessionMeta:
 
 
 @dataclass(frozen=True)
-class ContextSnapshot:
-    tokens: int
-    window: int | None
-    observed_at: datetime | None
-    source: str
-
-
-@dataclass(frozen=True)
 class MessagePart:
     kind: str  # "text" | "tool_use" | "tool_result" | "thinking" | "image" | "unknown"
     text: str | None = None
@@ -84,9 +76,6 @@ class SessionAdapter(Protocol):
 
     def message_from_record(self, payload: dict[str, Any]) -> Message | None:
         """Normalize one raw JSONL record into a :class:`Message` when possible."""
-
-    def extract_context_snapshot(self, path: Path) -> ContextSnapshot | None:
-        """Read the latest context size from a session transcript, or None."""
 
 
 def parse_iso_timestamp(value: Any) -> datetime | None:
