@@ -22,12 +22,10 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from .. import tmux
 from .base import (
     Message,
     MessagePart,
     SessionMeta,
-    normalize_command_token,
     parse_iso_timestamp,
     safe_json_loads,
     safe_mtime,
@@ -50,31 +48,13 @@ class CodexAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        # A codex session is owned by its per-pane app-server daemon, so the
-        # daemon is the authoritative source (thread metadata, then lsof on the
-        # daemon pid). lsof on the *tty* processes only ever finds a rollout
-        # file for a fully embedded codex — one with no daemon socket at all,
-        # running directly in the pane where it holds the jsonl itself — so that
-        # is a last resort, not the primary lookup.
+        # A codex session is owned by its per-pane app-server daemon — thread
+        # metadata, then lsof on the daemon pid. An embedded codex (no daemon
+        # socket) is deliberately unsupported: hive rejects it at team entry,
+        # so with no daemon to ask there is no session to report.
         from .codex_app_server import session_id_for_pane as _daemon_session_id
 
-        sid = _daemon_session_id(pane_id)
-        if sid:
-            return sid
-        return self._session_id_via_tty_lsof(pane_id)
-
-    def _session_id_via_tty_lsof(self, pane_id: str) -> str | None:
-        """Embedded-codex fallback: with no daemon to ask, the rollout jsonl is
-        held by a codex process in the pane's own tty tree."""
-        tty = tmux.get_pane_tty(pane_id) or ""
-        for process in tmux.list_tty_processes(tty):
-            if not _is_codex_process(process.command, process.argv):
-                continue
-            for fpath in tmux.list_open_files(process.pid):
-                session_id = session_id_from_open_file(fpath)
-                if session_id:
-                    return session_id
-        return None
+        return _daemon_session_id(pane_id)
 
     def _sessions_root(self) -> Path:
         return _codex_home() / "sessions"
@@ -377,12 +357,6 @@ def _extract_reasoning_text(body: dict[str, Any]) -> str | None:
     if isinstance(text, str) and text:
         return text
     return None
-
-
-def _is_codex_process(command: str, argv: str) -> bool:
-    if normalize_command_token(command) == "codex":
-        return True
-    return any(normalize_command_token(token) == "codex" for token in (argv or "").split())
 
 
 def session_id_from_open_file(fpath: str) -> str | None:

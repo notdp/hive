@@ -45,7 +45,7 @@ def test_wait_for_peer_ready_returns_immediately_when_all_ready(monkeypatch):
         calls.append((workspace, team))
         return {
             "members": {
-                "squad.worker-1": _member("ready", "task_closed"),
+                "squad.worker-1": _member("ready", "turn_closed"),
                 "squad.validator-1": _member("ready", "turn_closed"),
             }
         }
@@ -79,7 +79,7 @@ def test_wait_for_peer_ready_polls_until_all_eventually_ready(monkeypatch):
         {
             "members": {
                 "squad.worker-1": _member("busy", "tool_open"),
-                "squad.validator-1": _member("ready", "task_closed"),
+                "squad.validator-1": _member("ready", "turn_closed"),
             }
         },
         # Poll 2: worker's bootstrap turn has closed; input gate is clear.
@@ -88,7 +88,7 @@ def test_wait_for_peer_ready_polls_until_all_eventually_ready(monkeypatch):
         {
             "members": {
                 "squad.worker-1": _member("ready", "tool_open"),
-                "squad.validator-1": _member("ready", "task_closed"),
+                "squad.validator-1": _member("ready", "turn_closed"),
             }
         },
     ])

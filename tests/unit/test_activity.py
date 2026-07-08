@@ -143,33 +143,24 @@ def test_probe_transcript_turn_phase_claude_tool_result_is_unknown(tmp_path):
     assert payload["turnPhase"] == "tool_result_pending_reply"
 
 
-def test_probe_transcript_turn_phase_codex_task_close_is_safe(tmp_path):
+def test_probe_transcript_turn_phase_codex_has_no_probe(tmp_path):
+    """Codex state is daemon-native only: even a transcript full of JCL events
+    must not produce a phase (embedded codex is unsupported)."""
     path = tmp_path / "codex.jsonl"
     path.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "type": "event_msg",
-                        "timestamp": "2026-04-16T05:00:00Z",
-                        "payload": {"type": "task_started"},
-                    }
-                ),
-                json.dumps(
-                    {
-                        "type": "event_msg",
-                        "timestamp": "2026-04-16T05:00:01Z",
-                        "payload": {"type": "task_complete"},
-                    }
-                ),
-            ]
+        json.dumps(
+            {
+                "type": "event_msg",
+                "timestamp": "2026-04-16T05:00:00Z",
+                "payload": {"type": "task_started"},
+            }
         )
         + "\n"
     )
 
     payload = probe_transcript_turn_phase("codex", path)
 
-    assert payload["turnPhase"] == "task_closed"
+    assert payload["turnPhase"] == "unknown_evidence"
 
 
 def test_probe_transcript_turn_phase_claude_user_prompt_with_string_content_is_active(tmp_path):

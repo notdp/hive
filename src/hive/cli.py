@@ -1293,7 +1293,7 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
 
     Uses sidecar runtime inspection (turnPhase) with a graceful fallback:
     freshly-opened CLIs without a session yet count as idle, turn_closed
-    and task_closed count as idle, everything else is treated as 'busy'.
+    counts as idle, everything else is treated as 'busy'.
     """
     try:
         from .sidecar import _agent_runtime_payload
@@ -1303,7 +1303,7 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     if not runtime.get("alive", True):
         return False
     phase = str(runtime.get("turnPhase") or "")
-    if phase in {"turn_closed", "task_closed"}:
+    if phase == "turn_closed":
         return True
     if runtime.get("inputReason") == "no_session":
         return True
