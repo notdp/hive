@@ -2,167 +2,69 @@ import json
 
 import pytest
 
+from hive import plugin_manager
 from hive.cli import cli
 
 
-def _frontmatter_keys(text: str) -> set[str]:
-    lines = text.splitlines()
-    assert lines[0] == "---"
-    keys: set[str] = set()
-    for line in lines[1:]:
-        if line == "---":
-            return keys
-        keys.add(line.split(":", 1)[0])
-    raise AssertionError("frontmatter terminator not found")
-
-
-def test_plugin_list_does_not_offer_retired_cvim_or_fork(runner, configure_hive_home):
+def test_plugin_list_does_not_offer_retired_plugins(runner, configure_hive_home):
     configure_hive_home(tmux_inside=False)
     listed = runner.invoke(cli, ["plugin", "list", "--json"])
     assert listed.exit_code == 0
     names = {item["name"] for item in json.loads(listed.output)}
     assert "cvim" not in names
     assert "fork" not in names
-    assert {"notify", "code-review"}.issubset(names)
+    assert "code-review" not in names
+    assert "notify" in names
 
 
-@pytest.mark.parametrize("retired", ["cvim", "fork"])
+@pytest.mark.parametrize("retired", ["cvim", "fork", "code-review"])
 def test_plugin_enable_rejects_retired_plugins(runner, configure_hive_home, retired):
     configure_hive_home(tmux_inside=False)
     result = runner.invoke(cli, ["plugin", "enable", retired])
     assert result.exit_code != 0
-    assert "core hive capability" in result.output
+    assert "retired" in result.output
 
 
-def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_home):
+def test_init_retired_cleanup_removes_legacy_code_review_install(configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
+    claude_home = hive_home.parent / ".claude"
     codex_home = hive_home.parent / ".codex"
-    claude_home = hive_home.parent / ".claude"
 
-    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
+    # Legacy on-disk layout left behind by an old `hive plugin enable code-review`.
+    install_root = hive_home / "plugins" / "installed" / "code-review"
+    (install_root / "skills" / "code-review").mkdir(parents=True)
+    (install_root / "skills" / "code-review" / "SKILL.md").write_text("legacy\n")
+    plugin_links = []
+    for home in (claude_home, codex_home):
+        link = home / "skills" / "code-review"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(install_root / "skills" / "code-review", target_is_directory=True)
+        plugin_links.append(link)
 
-    assert enabled.exit_code == 0
-    assert "Plugin 'code-review' enabled." in enabled.output
-    assert "skills: code-review" in enabled.output
-    for skill_root in (
-        claude_home / "skills",
-        codex_home / "skills",
-    ):
-        assert (skill_root / "code-review").is_symlink()
+    # A user-owned (non-symlink) skill listed in state must survive cleanup.
+    user_skill = claude_home / "skills" / "review"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("---\nname: review\ndescription: user custom\n---\n")
 
-    # --- SKILL.md ---
-    skill = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "SKILL.md"
-    assert skill.exists()
-    skill_text = skill.read_text()
-    assert _frontmatter_keys(skill_text) == {"name", "description"}
-    assert "depends on the `hive` skill" in skill_text
-    assert "load the `hive` skill" in skill_text
-    assert "3 Reviewer + Evidence Verification" in skill_text
-    assert "reviewer-a" in skill_text
-    assert "Evidence" in skill_text
-    assert "hive layout" in skill_text
+    state_path = hive_home / "plugins" / "state.json"
+    state_path.write_text(json.dumps({
+        "plugins": {
+            "code-review": {
+                "installRoot": str(install_root),
+                "skills": [str(link) for link in plugin_links] + [str(user_skill)],
+            }
+        }
+    }))
 
-    # --- Stage files exist ---
-    stages_dir = hive_home / "plugins" / "installed" / "code-review" / "skills" / "code-review" / "stages"
-    expected_stages = [
-        "1-pipeline-orch.md", "1-review-reviewer.md", "1-verify-verifier.md",
-        "2-fix-orch.md", "2-fix-verify.md", "3-summary-orch.md",
-    ]
-    for name in expected_stages:
-        assert (stages_dir / name).exists(), f"Missing stage file: {name}"
+    removed = plugin_manager.cleanup_retired_plugins()
 
-    # --- S1 pipeline ---
-    s1_pipeline = (stages_dir / "1-pipeline-orch.md").read_text()
-    assert "hive spawn reviewer-a" in s1_pipeline
-    assert "hive spawn reviewer-b" in s1_pipeline
-    assert "hive spawn reviewer-c" in s1_pipeline
-    assert "hive kill reviewer-a" in s1_pipeline
-    assert "hive spawn verifier-a" in s1_pipeline
-    assert "hive layout main-vertical" in s1_pipeline
-    assert "hive send orch" in s1_pipeline
-    assert "idle" in s1_pipeline.lower()
-    assert 'RUN_NAME="cr-${RUN_ID}"' in s1_pipeline
-    assert 'ARTIFACT_DIR="$WORKSPACE/artifacts/${RUN_NAME}"' in s1_pipeline
-    assert 'STATE_DIR="$WORKSPACE/state/${RUN_NAME}"' in s1_pipeline
-    assert 'Run Artifact Root: $ARTIFACT_DIR' in s1_pipeline
-    assert 'Run State Root: $STATE_DIR' in s1_pipeline
-    assert 'rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/state" "$WORKSPACE/events"' not in s1_pipeline
-    assert "## Decision Boundaries" in s1_pipeline
-    assert "Agent 自主完成（不问人）：" in s1_pipeline
-    assert "必须升级给人类：" in s1_pipeline
-    assert "gh pr comment（对外可见）" in s1_pipeline
-    assert "review 范围超出原始 diff" in s1_pipeline
-
-    # --- S1 reviewer ---
-    s1_reviewer = (stages_dir / "1-review-reviewer.md").read_text()
-    assert "File:" in s1_reviewer
-    assert "Code:" in s1_reviewer
-    assert "Verify:" in s1_reviewer
-
-    # --- S1 verifier ---
-    s1_verifier = (stages_dir / "1-verify-verifier.md").read_text()
-    assert "confirmed" in s1_verifier
-    assert "fabricated" in s1_verifier
-
-    # --- S2 fix ---
-    s2_fix = (stages_dir / "2-fix-orch.md").read_text()
-    assert "hive spawn fixer" in s2_fix
-    assert "hive spawn checker" in s2_fix
-    assert "hive kill fixer" in s2_fix
-    assert 'printf \'%s\' "$ROUND" > "$STATE_DIR/s2-round"' in s2_fix
-    assert "Run Artifact Root: $ARTIFACT_DIR" in s2_fix
-    assert "Run State Root: $STATE_DIR" in s2_fix
-
-    # --- S3 summary ---
-    s3_summary = (stages_dir / "3-summary-orch.md").read_text()
-    assert "review-summary.md" in s3_summary
-    assert 'printf \'%s\' "$ARTIFACT_DIR/review-summary.md" > "$STATE_DIR/review-summary-artifact"' in s3_summary
-
-    enabled_json = runner.invoke(cli, ["plugin", "enable", "code-review", "--json"])
-    assert enabled_json.exit_code == 0
-    assert json.loads(enabled_json.output)["enabled"] is True
-
-
-def test_plugin_enable_code_review_does_not_touch_existing_user_review_skill(runner, configure_hive_home):
-    hive_home = configure_hive_home(tmux_inside=False)
-    claude_home = hive_home.parent / ".claude"
-
-    user_skill_dir = claude_home / "skills" / "review"
-    user_skill_dir.mkdir(parents=True, exist_ok=True)
-    user_skill_file = user_skill_dir / "SKILL.md"
-    user_skill_file.write_text("---\nname: review\ndescription: my custom review skill\n---\n")
-
-    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
-
-    assert enabled.exit_code == 0
-    assert "skills: code-review" in enabled.output
-    assert "Warning: skipped skill(s) review" not in enabled.output
-    assert user_skill_file.read_text().startswith("---\nname: review\ndescription: my custom review skill")
-    assert not user_skill_dir.is_symlink()
-    assert (claude_home / "skills" / "code-review").is_symlink()
-
-
-def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(runner, configure_hive_home):
-    hive_home = configure_hive_home(tmux_inside=False)
-    claude_home = hive_home.parent / ".claude"
-
-    enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
-    assert enabled.exit_code == 0
-
-    review_skill = claude_home / "skills" / "review"
-    if review_skill.is_symlink():
-        review_skill.unlink()
-    elif review_skill.is_dir():
-        import shutil
-        shutil.rmtree(review_skill)
-    review_skill.mkdir(parents=True, exist_ok=True)
-    (review_skill / "SKILL.md").write_text("---\nname: review\ndescription: user custom\n---\n")
-
-    reenabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
-    assert reenabled.exit_code == 0
-    assert review_skill.exists()
-    assert not review_skill.is_symlink()
-    assert (review_skill / "SKILL.md").read_text().startswith("---\nname: review\ndescription: user custom")
+    assert removed == ["code-review"]
+    for link in plugin_links:
+        assert not link.exists() and not link.is_symlink()
+    assert not install_root.exists()
+    assert user_skill.is_dir() and not user_skill.is_symlink()
+    assert (user_skill / "SKILL.md").read_text().startswith("---\nname: review")
+    assert "code-review" not in json.loads(state_path.read_text())["plugins"]
 
 
 def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, configure_hive_home):

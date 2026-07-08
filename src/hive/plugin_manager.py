@@ -31,28 +31,6 @@ def _installed_root() -> Path:
     return core_hooks.hive_home() / "plugins" / "installed"
 
 
-def _claude_skills_dir() -> Path:
-    return core_hooks.claude_home() / "skills"
-
-
-def _codex_skills_dir() -> Path:
-    return core_hooks.codex_home() / "skills"
-
-
-def _skill_install_dirs() -> list[Path]:
-    """Target directories where real plugin skills are symlinked.
-
-    Command plugins (cvim/vim/vfork/hfork/notify) intentionally do NOT
-    receive Claude or Codex wrappers; those agents are expected to invoke
-    `hive <command>` via their built-in shell escape. Real model skills
-    (e.g. `code-review`) still land in both agent skill dirs.
-    """
-    return [
-        _claude_skills_dir(),
-        _codex_skills_dir(),
-    ]
-
-
 def _load_state() -> dict[str, Any]:
     path = _state_path()
     if not path.exists():
@@ -197,7 +175,12 @@ def _uninstall_tmux_bindings(install_dir: Path) -> bool:
 
 
 def _is_plugin_managed_skill(path: Path) -> bool:
-    """Return True if *path* is a symlink pointing into the hive plugin installed tree."""
+    """Return True if *path* is a symlink pointing into the hive plugin installed tree.
+
+    No shipped plugin installs skills anymore; this guard remains so
+    `disable_plugin` can clean up legacy state entries (e.g. a retired
+    `code-review` install) without touching user-owned skill directories.
+    """
     if not path.is_symlink():
         return False
     try:
@@ -205,39 +188,6 @@ def _is_plugin_managed_skill(path: Path) -> bool:
         return target.is_relative_to(_installed_root())
     except (OSError, ValueError):
         return False
-
-
-def _install_skills(install_dir: Path) -> list[str]:
-    """Install plugin skill directories for Claude Code and Codex.
-
-    Used for real model skills (e.g. `code-review`). Command plugins do not
-    reach this path because their source trees do not ship a `skills/`
-    directory; they only carry `commands/` scripts under the installed origin.
-    """
-    skills_dir = install_dir / "skills"
-    if not skills_dir.is_dir():
-        return []
-    linked: list[str] = []
-    skipped: list[str] = []
-    for target_dir in _skill_install_dirs():
-        for skill_dir in sorted(skills_dir.iterdir()):
-            if skill_dir.name.startswith("."):
-                continue
-            dst = target_dir / skill_dir.name
-            if dst.exists() and not _is_plugin_managed_skill(dst):
-                skipped.append(str(dst))
-                continue
-            _link_path(skill_dir.resolve(), dst)
-            linked.append(str(dst))
-    if skipped:
-        import click
-        click.echo(
-            f"Warning: skipped skill(s) {', '.join(skipped)} — "
-            "already exists and is not managed by a hive plugin. "
-            "Remove or rename the existing skill to allow the plugin to install it.",
-            err=True,
-        )
-    return linked
 
 
 def _substitute_hook_value(value: Any, *, install_dir: Path) -> Any:
@@ -287,15 +237,16 @@ def disable_plugin(name: str, *, missing_ok: bool = False) -> dict[str, object]:
     return {"name": name, "enabled": False}
 
 
-RETIRED_PLUGINS = frozenset({"cvim", "fork"})
+RETIRED_PLUGINS = frozenset({"cvim", "fork", "code-review"})
 
 
 def cleanup_retired_plugins() -> list[str]:
-    """Disable any plugin whose capability was promoted into core hive.
+    """Disable any retired plugin left over from an older install.
 
-    Called during `hive init` so users who previously ran
-    `hive plugin enable cvim` / `... fork` have their legacy command shims,
-    install root and state entries cleaned up automatically.
+    cvim/fork were promoted into core hive; code-review was removed.
+    Called during `hive init` so users who previously enabled them have
+    their legacy command shims, skill symlinks, install root and state
+    entries cleaned up automatically.
     """
     state = _load_state()
     plugins = state.get("plugins", {})
@@ -310,7 +261,7 @@ def cleanup_retired_plugins() -> list[str]:
 def enable_plugin(name: str) -> dict[str, object]:
     if name in RETIRED_PLUGINS:
         raise ValueError(
-            f"'{name}' is now a core hive capability — no plugin enable needed. "
+            f"plugin '{name}' is retired — nothing to enable. "
             "Run `hive init` to clean up any legacy plugin state."
         )
     manifest = load_manifest(name)
@@ -322,7 +273,6 @@ def enable_plugin(name: str) -> dict[str, object]:
     _copy_tree(_plugin_resource_dir(name), install_dir)
 
     _materialize_installed_commands(install_dir)
-    skills = _install_skills(install_dir)
     hook_defs = _plugin_hook_defs(install_dir)
     if hook_defs:
         core_hooks.merge_hook_groups(hook_defs)
@@ -331,7 +281,6 @@ def enable_plugin(name: str) -> dict[str, object]:
     state = _load_state()
     plugin_state: dict[str, object] = {
         "installRoot": str(install_dir),
-        "skills": skills,
         "hooks": hook_defs,
         "enabledAt": int(time.time()),
     }
@@ -345,6 +294,5 @@ def enable_plugin(name: str) -> dict[str, object]:
         "description": manifest.description,
         "enabled": True,
         "installRoot": str(install_dir),
-        "skills": skills,
         "tmux": has_tmux,
     }

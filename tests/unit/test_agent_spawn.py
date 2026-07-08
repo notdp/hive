@@ -74,10 +74,10 @@ def test_spawn_loads_specified_skill(monkeypatch):
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
         model="", cwd="/tmp", is_first=True,
-        skill="code-review",
+        skill="demo-review",
     )
 
-    assert "/code-review" in calls[0]
+    assert "/demo-review" in calls[0]
     # Should NOT send hive bootstrap message
     assert not any("hive teammate" in c for c in calls)
 
@@ -285,19 +285,19 @@ def test_load_skill_sends_slash_command(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0")
 
-    agent.load_skill("code-review")
+    agent.load_skill("demo-review")
 
-    assert calls == ["/code-review", "<Enter>"]
+    assert calls == ["/demo-review", "<Enter>"]
 
 
 def test_load_skill_uses_cli_specific_command(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
 
-    agent.load_skill("code-review")
+    agent.load_skill("demo-review")
 
     # codex skill picker needs two Enters: first picks the entry, second submits.
-    assert calls == ["$code-review", "<Enter>", "<Enter>"]
+    assert calls == ["$demo-review", "<Enter>", "<Enter>"]
 
 
 def test_load_hive_skill_checks_for_drift_before_loading(monkeypatch):

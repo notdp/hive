@@ -47,7 +47,6 @@ $ claude       # もしくは: codex
 ```bash
 # プラグイン
 hive plugin enable notify         # 人間向けデスクトップ通知
-hive plugin enable code-review    # マルチエージェント code review ワークフロー
 hive plugin list
 
 # 診断

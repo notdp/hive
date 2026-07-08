@@ -266,11 +266,11 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: sent.append(text))
 
     team = Team(name="team-a", lead_pane_id="%0")
-    result = team.spawn("claude", workflow="code-review", prompt="start now")
+    result = team.spawn("claude", workflow="demo-review", prompt="start now")
 
     assert result is agent
     assert spawned[0]["target_pane"] == "%0"
-    assert spawned[0]["skill"] == "code-review"
+    assert spawned[0]["skill"] == "demo-review"
     assert spawned[0]["prompt"] == "start now"
     assert tagged == [("%9", "agent", "claude", "team-a")]
     assert sent == []
