@@ -1559,7 +1559,7 @@ def spawn(agent_name: str, model: str, prompt: str,
     \b
     Examples:
       hive spawn dodo --cli codex
-      hive spawn worker1 --prompt "start on task X" --workflow code-review
+      hive spawn worker1 --prompt "start on task X" --workflow demo-review
       hive spawn claude -m claude-opus-4-7 --skill none
     """
     team_name, t = _resolve_scoped_team(None, required=True)
@@ -4076,21 +4076,17 @@ def _render_plugin_mutation_result(action: str, payload: dict[str, object]) -> s
     lines = [f"Plugin '{name}' {action}."]
     install_root = str(payload.get("installRoot", "") or "")
     commands = [str(item) for item in payload.get("commands", [])]
-    skills = [str(item) for item in payload.get("skills", [])]
     command_names = list(
         dict.fromkeys(
             path.stem if path.suffix == ".md" else path.name
             for path in (Path(item) for item in commands)
         )
     )
-    skill_names = list(dict.fromkeys(Path(path).name for path in skills))
 
     if install_root:
         lines.append(f"  install root: {install_root}")
     if command_names:
         lines.append(f"  commands: {', '.join(command_names)}")
-    if skill_names:
-        lines.append(f"  skills: {', '.join(skill_names)}")
     lines.append(
         "  note: existing Codex panes may not reload plugin settings dynamically; "
         "restart them if old hooks or commands still run."
@@ -4122,7 +4118,7 @@ def plugin_list(json_output: bool) -> None:
 @click.argument("name")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def plugin_enable(name: str, json_output: bool) -> None:
-    """Enable a plugin and materialize its commands/skills."""
+    """Enable a plugin and materialize its commands."""
     try:
         payload = plugin_manager.enable_plugin(name)
         if json_output:
@@ -4137,7 +4133,7 @@ def plugin_enable(name: str, json_output: bool) -> None:
 @click.argument("name")
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
 def plugin_disable(name: str, json_output: bool) -> None:
-    """Disable a plugin and remove its commands/skills."""
+    """Disable a plugin and remove its commands."""
     try:
         payload = plugin_manager.disable_plugin(name)
         if json_output:

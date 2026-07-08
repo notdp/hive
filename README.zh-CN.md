@@ -47,7 +47,6 @@ skill 加载后，agent 会运行 `hive init`，把当前 tmux window 绑定成�
 ```bash
 # 插件
 hive plugin enable notify         # 给人的通知弹窗
-hive plugin enable code-review    # 多 agent 代码评审流程
 hive plugin list
 
 # 诊断
