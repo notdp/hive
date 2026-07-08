@@ -136,7 +136,7 @@ if cmd == "display-message":
     values = {
         "#{pane_id}": pane["id"],
         "#{pane_current_path}": pane.get("cwd", "/repo"),
-        "#{pane_current_command}": pane.get("command", "droid"),
+        "#{pane_current_command}": pane.get("command", "claude"),
         "#{pane_title}": pane.get("title", ""),
         "#{session_id}": state.get("session_id", "$1"),
         "#{window_id}": state.get("window_id", "@1"),

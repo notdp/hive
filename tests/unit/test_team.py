@@ -353,7 +353,7 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane: pane != "%dead")
     monkeypatch.setattr(
         "hive.team.tmux.get_pane_current_command",
-        lambda pane: {"%0": "python3.12", "%1": "droid", "%2": "zsh"}.get(pane, ""),
+        lambda pane: {"%0": "python3.12", "%1": "codex", "%2": "zsh"}.get(pane, ""),
     )
     monkeypatch.setattr("hive.team.tmux.get_pane_title", lambda _pane: "")
     monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: "")
@@ -376,7 +376,7 @@ def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
 
 def test_team_status_stays_local_only(configure_hive_home, monkeypatch):
     configure_hive_home()
-    monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "droid" if pane == "%1" else "zsh")
+    monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "codex" if pane == "%1" else "zsh")
 
     team = Team(name="team-a", lead_pane_id="%0")
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
@@ -454,8 +454,8 @@ def test_find_team_window_falls_back_to_tagged_panes(configure_hive_home, monkey
     from hive.tmux import PaneInfo
     def fake_list_panes(target):
         if target == "dev:3":
-            return [PaneInfo("%50", "", "droid", role="agent", agent="rev-a", team="my-team")]
-        return [PaneInfo("%40", "", "droid", role="", agent="", team="")]
+            return [PaneInfo("%50", "", "codex", role="agent", agent="rev-a", team="my-team")]
+        return [PaneInfo("%40", "", "codex", role="", agent="", team="")]
 
     monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
     cleared: list[str] = []

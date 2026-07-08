@@ -32,21 +32,6 @@ def test_is_assistant_ask_claude():
     assert _is_assistant_ask(payload) is True
 
 
-# --- _is_assistant_ask: droid format ---
-
-def test_is_assistant_ask_droid():
-    payload = {
-        "type": "message",
-        "message": {
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "OK?"}},
-            ],
-        },
-    }
-    assert _is_assistant_ask(payload) is True
-
-
 # --- _is_assistant_ask: codex format ---
 
 def test_is_assistant_ask_codex():

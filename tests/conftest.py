@@ -94,7 +94,7 @@ class FakeTmuxState:
                 result.append(PaneInfo(
                     pane_id=pane_id,
                     title="",
-                    command="droid",
+                    command="claude",
                     role=opts.get("hive-role", ""),
                     agent=opts.get("hive-agent", ""),
                     team=opts.get("hive-team", ""),
@@ -109,7 +109,7 @@ class FakeTmuxState:
             result.append(PaneInfo(
                 pane_id=pane_id,
                 title="",
-                command="droid",
+                command="claude",
                 role=opts.get("hive-role", ""),
                 agent=opts.get("hive-agent", ""),
                 team=opts.get("hive-team", ""),
@@ -123,11 +123,9 @@ class FakeTmuxState:
 def configure_hive_home(monkeypatch, tmp_path):
     def _configure(*, tmux_inside: bool = True, current_pane: str = "%0", session_name: str = "dev"):
         hive_home = tmp_path / ".hive"
-        factory_home = tmp_path / ".factory"
         codex_home = tmp_path / ".codex"
         claude_home = tmp_path / ".claude"
         monkeypatch.setenv("HIVE_HOME", str(hive_home))
-        monkeypatch.setenv("FACTORY_HOME", str(factory_home))
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
@@ -152,7 +150,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.team.tmux.get_current_window_target", lambda: f"{session_name}:0")
         monkeypatch.setattr("hive.team.tmux.get_current_window_id", lambda: state.window_id_for_target(f"{session_name}:0"))
         monkeypatch.setattr("hive.team.tmux.get_window_id", lambda target: state.window_id_for_target(target))
-        monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda _pane: "droid")
+        monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda _pane: "claude")
         monkeypatch.setattr("hive.team.tmux.has_session", lambda _name: True)
         monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
         monkeypatch.setattr("hive.team.tmux.tag_pane", state.tag_pane)
@@ -171,7 +169,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: f"{session_name}:0")
         monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: state.window_id_for_target(f"{session_name}:0"))
         monkeypatch.setattr("hive.cli.tmux.get_window_id", lambda target: state.window_id_for_target(target))
-        monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "droid")
+        monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "claude")
         monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: f"{session_name}:0")
         monkeypatch.setattr("hive.cli.tmux.get_pane_option", state.get_pane_option)
         monkeypatch.setattr("hive.cli.tmux.get_window_option", state.get_window_option)

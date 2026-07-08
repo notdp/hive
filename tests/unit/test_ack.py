@@ -37,18 +37,6 @@ def test_get_transcript_baseline_missing_file(tmp_path):
     assert _get_transcript_baseline(tmp_path / "missing.jsonl") == 0
 
 
-def test_is_user_turn_droid():
-    payload = {
-        "type": "message",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": "hello"}],
-        },
-    }
-
-    assert _is_user_turn(payload) is True
-
-
 def test_is_user_turn_claude():
     payload = {
         "type": "user",
@@ -77,13 +65,6 @@ def test_is_user_turn_codex():
 @pytest.mark.parametrize(
     "payload",
     [
-        {
-            "type": "message",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "id: a1b2"}],
-            },
-        },
         {
             "type": "assistant",
             "message": {
@@ -119,7 +100,7 @@ def test_wait_finds_id_after_baseline(tmp_path):
         path,
         [
             {
-                "type": "message",
+                "type": "user",
                 "message": {
                     "role": "user",
                     "content": [{"type": "text", "text": "before"}],
@@ -135,7 +116,7 @@ def test_wait_finds_id_after_baseline(tmp_path):
             handle.write(
                 json.dumps(
                     {
-                        "type": "message",
+                        "type": "user",
                         "message": {
                             "role": "user",
                             "content": [{"type": "text", "text": "id: a1b2 hello"}],
@@ -159,7 +140,7 @@ def test_wait_times_out(tmp_path):
         path,
         [
             {
-                "type": "message",
+                "type": "user",
                 "message": {
                     "role": "user",
                     "content": [{"type": "text", "text": "before"}],
@@ -178,7 +159,7 @@ def test_wait_ignores_id_before_baseline(tmp_path):
         path,
         [
             {
-                "type": "message",
+                "type": "user",
                 "message": {
                     "role": "user",
                     "content": [{"type": "text", "text": "id: a1b2 before"}],
@@ -197,7 +178,7 @@ def test_wait_handles_partial_line(tmp_path):
     baseline = path.stat().st_size
 
     payload = {
-        "type": "message",
+        "type": "user",
         "message": {
             "role": "user",
             "content": [{"type": "text", "text": "id: a1b2 partial"}],

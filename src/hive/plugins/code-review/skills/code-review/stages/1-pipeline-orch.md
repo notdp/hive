@@ -79,9 +79,9 @@ done
 ## Spawn reviewer
 
 ```bash
-hive spawn reviewer-a --cli droid --model custom:Claude-Opus-4.6-0 --workflow code-review
-hive spawn reviewer-b --cli droid --model custom:GPT-5.4-1 --workflow code-review
-hive spawn reviewer-c --cli droid --model custom:Claude-Opus-4.6-0 --workflow code-review
+hive spawn reviewer-a --cli claude --workflow code-review
+hive spawn reviewer-b --cli codex --workflow code-review
+hive spawn reviewer-c --cli claude --workflow code-review
 
 hive layout main-vertical
 ```
@@ -163,7 +163,7 @@ Done Command: hive send orch "verify done verifier=verifier-a artifact=$ARTIFACT
 EOF
 
 hive kill reviewer-a
-hive spawn verifier-a --cli droid --model custom:GPT-5.4-1 --workflow code-review
+hive spawn verifier-a --cli codex --workflow code-review
 hive send verifier-a "evidence verification：执行 verify task $ARTIFACT_DIR/verifier-a-verify-task.md，完成时仅用其中的 Done Command 回传。"
 ```
 

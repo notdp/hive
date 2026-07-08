@@ -31,14 +31,6 @@ def _installed_root() -> Path:
     return core_hooks.hive_home() / "plugins" / "installed"
 
 
-def _factory_commands_dir() -> Path:
-    return core_hooks.factory_home() / "commands"
-
-
-def _factory_skills_dir() -> Path:
-    return core_hooks.factory_home() / "skills"
-
-
 def _claude_skills_dir() -> Path:
     return core_hooks.claude_home() / "skills"
 
@@ -53,10 +45,9 @@ def _skill_install_dirs() -> list[Path]:
     Command plugins (cvim/vim/vfork/hfork/notify) intentionally do NOT
     receive Claude or Codex wrappers; those agents are expected to invoke
     `hive <command>` via their built-in shell escape. Real model skills
-    (e.g. `code-review`) still land in all three agent skill dirs.
+    (e.g. `code-review`) still land in both agent skill dirs.
     """
     return [
-        _factory_skills_dir(),
         _claude_skills_dir(),
         _codex_skills_dir(),
     ]
@@ -184,46 +175,6 @@ def _materialize_installed_commands(install_dir: Path) -> list[Path]:
     return materialized
 
 
-def _generate_factory_shim(command_path: Path) -> str:
-    """Build a thin Factory slash-command shim that delegates to ``hive <name>``.
-
-    The shim preserves all ``# DROID:`` directive comments from the source
-    script so that Droid renders the correct description and honours the
-    "return control immediately" behaviour, but the actual logic is
-    forwarded to the ``hive`` CLI subcommand.
-    """
-    droid_lines: list[str] = []
-    for line in command_path.read_text().splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("# DROID:"):
-            droid_lines.append(stripped)
-    body = "\n".join(droid_lines)
-    name = command_path.name
-    return f"#!/usr/bin/env bash\n{body}\nset -euo pipefail\nexec hive {name} \"$@\"\n"
-
-
-def _install_commands(command_paths: list[Path]) -> list[str]:
-    """Install thin shim scripts under ``~/.factory/commands/``.
-
-    Each shim preserves the ``# DROID:`` comment directives from the plugin
-    source script and delegates execution to ``hive <command-name>``.  The
-    real logic stays in ``~/.hive/plugins/installed/<plugin>/commands/<name>``
-    (the installed origin), which ``hive <name>`` exec's into.
-    """
-    if not command_paths:
-        return []
-    installed: list[str] = []
-    target_dir = _factory_commands_dir()
-    for command_path in command_paths:
-        dst = target_dir / command_path.name
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        _remove_path(dst)
-        dst.write_text(_generate_factory_shim(command_path))
-        _ensure_executable_if_script(dst)
-        installed.append(str(dst))
-    return installed
-
-
 def _source_tmux_conf(conf: Path) -> bool:
     if not conf.is_file():
         return False
@@ -257,11 +208,11 @@ def _is_plugin_managed_skill(path: Path) -> bool:
 
 
 def _install_skills(install_dir: Path) -> list[str]:
-    """Install plugin skill directories for Factory, Claude Code, and Codex.
+    """Install plugin skill directories for Claude Code and Codex.
 
     Used for real model skills (e.g. `code-review`). Command plugins do not
     reach this path because their source trees do not ship a `skills/`
-    directory; they only carry `commands/` scripts that land in Factory.
+    directory; they only carry `commands/` scripts under the installed origin.
     """
     skills_dir = install_dir / "skills"
     if not skills_dir.is_dir():
@@ -343,7 +294,7 @@ def cleanup_retired_plugins() -> list[str]:
     """Disable any plugin whose capability was promoted into core hive.
 
     Called during `hive init` so users who previously ran
-    `hive plugin enable cvim` / `... fork` have their Factory shims,
+    `hive plugin enable cvim` / `... fork` have their legacy command shims,
     install root and state entries cleaned up automatically.
     """
     state = _load_state()
@@ -370,8 +321,7 @@ def enable_plugin(name: str) -> dict[str, object]:
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     _copy_tree(_plugin_resource_dir(name), install_dir)
 
-    command_paths = _materialize_installed_commands(install_dir)
-    commands = _install_commands(command_paths)
+    _materialize_installed_commands(install_dir)
     skills = _install_skills(install_dir)
     hook_defs = _plugin_hook_defs(install_dir)
     if hook_defs:
@@ -381,7 +331,6 @@ def enable_plugin(name: str) -> dict[str, object]:
     state = _load_state()
     plugin_state: dict[str, object] = {
         "installRoot": str(install_dir),
-        "commands": commands,
         "skills": skills,
         "hooks": hook_defs,
         "enabledAt": int(time.time()),
@@ -396,7 +345,6 @@ def enable_plugin(name: str) -> dict[str, object]:
         "description": manifest.description,
         "enabled": True,
         "installRoot": str(install_dir),
-        "commands": commands,
         "skills": skills,
         "tmux": has_tmux,
     }

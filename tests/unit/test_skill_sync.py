@@ -18,7 +18,6 @@ def _configure_skill_homes(monkeypatch, tmp_path: Path) -> None:
     hive_home = tmp_path / ".hive"
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("HIVE_HOME", str(hive_home))
-    monkeypatch.setenv("FACTORY_HOME", str(tmp_path / ".factory"))
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)

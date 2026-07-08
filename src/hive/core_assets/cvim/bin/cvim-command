@@ -56,8 +56,6 @@ fi
 src_cwd="$(tmux display-message -p -t "$src_pane" '#{pane_current_path}')"
 src_session="$(tmux display-message -p -t "$src_pane" '#{session_id}')"
 src_window="$(tmux display-message -p -t "$src_pane" '#{window_id}')"
-src_pane_pid="$(tmux display-message -p -t "$src_pane" '#{pane_pid}')"
-src_pane_tty="$(tmux display-message -p -t "$src_pane" '#{pane_tty}')"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
 src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
 src_workspace="$(tmux display-message -p -t "$src_pane" '#{@hive-workspace}' 2>/dev/null || true)"
@@ -147,49 +145,6 @@ debug_log() {
   cvim_debug_log "$debug_log_file" "$src_workspace" "$debug_run_id" "$$" "$message"
 }
 
-resolve_current_droid_process_info() {
-  python3 - "$src_pane_pid" "$src_pane_tty" <<'PY'
-import subprocess
-import sys
-
-root = int(sys.argv[1])
-pane_tty = sys.argv[2]
-out = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,tty=,comm=,args='], text=True)
-rows = []
-for line in out.splitlines():
-    parts = line.strip().split(None, 4)
-    if len(parts) < 5:
-        continue
-    pid, ppid, tty, comm, args = int(parts[0]), int(parts[1]), parts[2], parts[3], parts[4]
-    rows.append((pid, ppid, tty, comm, args))
-
-by_ppid = {}
-for row in rows:
-    by_ppid.setdefault(row[1], []).append(row)
-
-best = None
-stack = [root]
-seen = set()
-while stack:
-    pid = stack.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    for child in by_ppid.get(pid, []):
-        child_pid, _, tty, comm, args = child
-        if comm == 'droid':
-            if best is None or tty == pane_tty:
-                best = child
-                if tty == pane_tty:
-                    print(f'{child_pid}\t{tty}\t{args}')
-                    raise SystemExit(0)
-        stack.append(child_pid)
-
-if best is not None:
-    print(f'{best[0]}\t{best[2]}\t{best[4]}')
-PY
-}
-
 detect_src_profile() {
   python3 - "$src_pane" <<'PY'
 import importlib
@@ -208,25 +163,11 @@ if [[ -z "$src_profile" ]]; then
 fi
 
 case "$(printf '%s' "$clear_input_before_paste_default" | tr '[:upper:]' '[:lower:]')" in
-  auto)
-    if [[ "$src_profile" == "droid" ]]; then
-      clear_input_before_paste_default="0"
-    else
-      clear_input_before_paste_default="1"
-    fi
-    ;;
-  1|true|yes|on)
-    clear_input_before_paste_default="1"
-    ;;
   0|false|no|off)
     clear_input_before_paste_default="0"
     ;;
   *)
-    if [[ "$src_profile" == "droid" ]]; then
-      clear_input_before_paste_default="0"
-    else
-      clear_input_before_paste_default="1"
-    fi
+    clear_input_before_paste_default="1"
     ;;
 esac
 
@@ -619,15 +560,6 @@ clear_reply_input() {
   debug_log "post.clear_input_settled seconds=$interrupt_settle_delay"
 }
 
-wait_for_idle_input() {
-  if [[ "$reply_profile" != "droid" ]]; then
-    return 0
-  fi
-  local settle="${CVIM_IDLE_SETTLE:-0.30}"
-  debug_log "post.idle_settle seconds=$settle"
-  sleep "$settle"
-}
-
 reply_pane_ready_matcher() {
   local snapshot="$1"
   local profile="${2:-unknown}"
@@ -684,58 +616,42 @@ if [[ -f "$send_file" ]]; then
 fi
 debug_log "post.start tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
 
-if [[ "$reply_profile" == "droid" && "$content_changed" == "1" ]]; then
-  debug_log "post.droid_fast_path start"
+sleep "$paste_delay"
+debug_log "post.after_paste_delay seconds=$paste_delay"
+
+if [[ "$content_changed" == "1" && "$interrupt_before_paste" != "0" ]]; then
   debug_log "post.pre_interrupt action=escape"
   tmux send-keys -t "$reply_pane" Escape
   did_pre_interrupt="1"
-  wait_for_idle_input
-  debug_log "post.paste_buffer bytes=$send_bytes"
-  tmux load-buffer "$send_file"
-  tmux paste-buffer -p -t "$reply_pane"
-  if ! wait_for_submit_ready_input "after_paste"; then
-    debug_log "post.submit_skipped reason=missing_submit_ready_input_after_paste"
-    rm -rf "$tmpdir"
-    exit 0
+  sleep "$interrupt_settle_delay"
+  debug_log "post.pre_interrupt_settled seconds=$interrupt_settle_delay"
+fi
+
+clear_reply_input
+
+if [[ "$content_changed" == "1" ]]; then
+  send_text="$(cat "$send_file")"
+  submit_probe_required="0"
+  if [[ "$send_text" == "<comment on=\""* ]]; then
+    submit_probe_required="1"
   fi
-else
-  sleep "$paste_delay"
-  debug_log "post.after_paste_delay seconds=$paste_delay"
-
-  if [[ "$content_changed" == "1" && "$interrupt_before_paste" != "0" ]]; then
-    debug_log "post.pre_interrupt action=escape"
-    tmux send-keys -t "$reply_pane" Escape
-    did_pre_interrupt="1"
-    sleep "$interrupt_settle_delay"
-    debug_log "post.pre_interrupt_settled seconds=$interrupt_settle_delay"
+  if [[ "$send_text" != *$'\n'* && "$send_text" == /* ]]; then
+    debug_log "post.send_literal bytes=$send_bytes"
+    tmux send-keys -t "$reply_pane" -l "$send_text"
+  else
+    debug_log "post.paste_buffer bytes=$send_bytes"
+    tmux load-buffer "$send_file"
+    tmux paste-buffer -p -t "$reply_pane"
   fi
-
-  clear_reply_input
-
-  if [[ "$content_changed" == "1" ]]; then
-    send_text="$(cat "$send_file")"
-    submit_probe_required="0"
-    if [[ "$send_text" == "<comment on=\""* ]]; then
-      submit_probe_required="1"
-    fi
-    if [[ "$send_text" != *$'\n'* && "$send_text" == /* ]]; then
-      debug_log "post.send_literal bytes=$send_bytes"
-      tmux send-keys -t "$reply_pane" -l "$send_text"
-    else
-      debug_log "post.paste_buffer bytes=$send_bytes"
-      tmux load-buffer "$send_file"
-      tmux paste-buffer -p -t "$reply_pane"
-    fi
-    content_bytes=$(wc -c < "$send_file")
-    paste_settle=$(awk "BEGIN { d = 0.10 + ${content_bytes} / 1024 * 0.03; if (d > 3.0) d = 3.0; printf \"%.2f\", d }")
-    sleep "$paste_settle"
-    debug_log "post.after_paste_settle seconds=$paste_settle"
-    if [[ "$submit_probe_required" == "1" ]]; then
-      if ! wait_for_submit_ready_input "after_paste"; then
-        debug_log "post.submit_skipped reason=missing_submit_ready_input_after_paste"
-        rm -rf "$tmpdir"
-        exit 0
-      fi
+  content_bytes=$(wc -c < "$send_file")
+  paste_settle=$(awk "BEGIN { d = 0.10 + ${content_bytes} / 1024 * 0.03; if (d > 3.0) d = 3.0; printf \"%.2f\", d }")
+  sleep "$paste_settle"
+  debug_log "post.after_paste_settle seconds=$paste_settle"
+  if [[ "$submit_probe_required" == "1" ]]; then
+    if ! wait_for_submit_ready_input "after_paste"; then
+      debug_log "post.submit_skipped reason=missing_submit_ready_input_after_paste"
+      rm -rf "$tmpdir"
+      exit 0
     fi
   fi
 fi
@@ -835,27 +751,11 @@ if [[ $# -gt 0 ]]; then
   printf '%s\n' "$*" > "$msg_file"
   debug_log "seed.args bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
 elif [[ "$seed_mode" == "session" ]]; then
-  transcript_path="$(python3 "$session_helper" "$src_cwd" "" "$src_pane" 2>/dev/null || true)"
+  transcript_path="$(python3 "$session_helper" "$src_cwd" "$src_pane" 2>/dev/null || true)"
   if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
     maybe_prepare_menu "$transcript_path" "$vim_offset"
     debug_log "seed.session transcript_path=$transcript_path offset=$vim_offset menu_mode=$menu_mode bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
-  elif [[ "$src_profile" == "droid" || "$src_profile" == "unknown" ]]; then
-    droid_pid=""
-    droid_tty=""
-    droid_args=""
-    if info="$(resolve_current_droid_process_info 2>/dev/null)" && [[ -n "$info" ]]; then
-      IFS=$'\t' read -r droid_pid droid_tty droid_args <<<"$info"
-    fi
-    transcript_path="$(python3 "$session_helper" "$src_cwd" "$droid_args" "$src_pane" 2>/dev/null || true)"
-    if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-      printf '%s\n' "$transcript_path" > "$tmpdir/transcript_path"
-      maybe_prepare_menu "$transcript_path" "$vim_offset"
-      debug_log "seed.capture profile=$src_profile pid=${droid_pid:-none} tty=${droid_tty:-none} transcript_path=$transcript_path offset=$vim_offset menu_mode=$menu_mode bytes=$(wc -c < "$msg_file" | tr -d '[:space:]')"
-    else
-      : > "$msg_file"
-      debug_log "seed.blank profile=$src_profile reason=missing_droid_transcript pid=${droid_pid:-none} tty=${droid_tty:-none}"
-    fi
   else
     : > "$msg_file"
     debug_log "seed.blank profile=$src_profile reason=missing_session_transcript"

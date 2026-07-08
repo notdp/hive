@@ -1,8 +1,7 @@
-"""Agent: a droid instance running in a tmux pane."""
+"""Agent: an agent CLI instance running in a tmux pane."""
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -14,57 +13,18 @@ from . import skill_sync
 from . import tmux
 from .agent_cli import resolve_session_id_for_pane
 
-DROID_BIN = os.environ.get("DROID_PATH", str(Path.home() / ".local" / "bin" / "droid"))
 AGENT_STARTUP_TIMEOUT = 30
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
 CLI_BINS: dict[str, str] = {
-    "droid": DROID_BIN,
     "claude": "claude",
     "codex": "codex",
 }
 
 
-def _factory_home() -> Path:
-    return Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
-
-
-def _settings_file() -> Path:
-    return _factory_home() / "settings.json"
-
-
-
 def _shell_escape(s: str) -> str:
     """Escape a string for safe shell use."""
     return "'" + s.replace("'", "'\\''") + "'"
-
-
-def _resolve_model_id(model: str, settings: dict[str, Any]) -> str:
-    """Resolve model alias/displayName to canonical model ID from settings.json."""
-    if not model:
-        return model
-
-    base = model.replace("custom:", "", 1)
-    for m in settings.get("customModels", []):
-        model_id = m.get("id")
-        if not model_id:
-            continue
-        if (
-            model_id == model
-            or m.get("model", "") == base
-            or m.get("displayName", "") == base
-        ):
-            return model_id
-    return model
-
-
-def _load_settings() -> dict[str, Any]:
-    settings_file = _settings_file()
-    if not settings_file.is_file():
-        return {}
-    with open(settings_file) as f:
-        return json.load(f)
-
 
 
 def _resolve_session_id_from_runtime(pane_id: str = "") -> str | None:
@@ -75,20 +35,8 @@ def _resolve_session_id_from_runtime(pane_id: str = "") -> str | None:
 
 
 def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> str | None:
-    """Best-effort lookup for the current droid session ID."""
+    """Best-effort lookup for the current pane's agent session ID."""
     return _resolve_session_id_from_runtime(pane_id)
-
-
-def _build_droid_model_settings(model: str) -> tuple[str, str]:
-    """Resolve model ID and return inline JSON for --settings process substitution.
-
-    Returns (json_str, resolved_model_id).  Empty json_str when no model given.
-    """
-    if not model:
-        return "", model
-    settings = _load_settings()
-    target_id = _resolve_model_id(model, settings)
-    return json.dumps({"sessionDefaultSettings": {"model": target_id}}), target_id
 
 
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
@@ -203,7 +151,7 @@ class Agent:
     cwd: str = field(default_factory=os.getcwd)
     session_id: str | None = None
     spawned_at: float = field(default_factory=time.time)
-    cli: str = "droid"
+    cli: str = "claude"
 
     # --- Lifecycle ---
 
@@ -223,10 +171,10 @@ class Agent:
         split_window: bool = True,
         skill: str = "hive",
         extra_env: dict[str, str] | None = None,
-        cli: str = "droid",
+        cli: str = "claude",
         workspace: str = "",
     ) -> Agent:
-        """Spawn an agent CLI (droid/claude/codex) in a tmux pane.
+        """Spawn an agent CLI (claude/codex) in a tmux pane.
 
         If split_window is True (default), splits *target_pane* and runs the
         CLI in the new pane. If False, runs the CLI in *target_pane* itself
@@ -278,56 +226,58 @@ class Agent:
             # keep the right identity, sharing the real CODEX_HOME) and the TUI
             # joins it via --remote. cwd is passed explicitly because Remote
             # workspace mode drops config.cwd. Resume/fork stays embedded (below).
-            # If the daemon can't bind, fall through to a plain embedded codex.
             if not session_id:
                 from .adapters import codex_app_server
-                if codex_app_server.spawn_daemon(pane_id):
-                    sock = codex_app_server.pane_socket_path(pane_id)
-                    cmd_parts.extend([
-                        "--remote", _shell_escape(f"unix://{sock}"),
-                        "--cd", _shell_escape(cwd),
-                    ])
-                    # Bring hive's 2nd client online now — before codex (started
-                    # by send_keys at the end of this method) creates its thread
-                    # — so the sidecar receives the full thread/started +
-                    # tokenUsage broadcast live instead of late-joining and
-                    # resuming. Best-effort: a down/slow sidecar just falls back
-                    # to the lazy connect on the next runtime tick.
-                    if workspace:
-                        from .sidecar import request_connect_codex
-                        request_connect_codex(workspace, pane_id)
+                if not codex_app_server.spawn_daemon(pane_id):
+                    # Codex runtime state is daemon-native only (embedded codex
+                    # is unsupported), so a pane without a daemon would join the
+                    # team stateless. Undo the pane side effects instead of
+                    # leaving a tagged inert member behind.
+                    if split_window:
+                        tmux.kill_pane(pane_id)
+                    else:
+                        tmux.clear_pane_tags(pane_id)
+                        tmux.set_pane_title(pane_id, "")
+                    raise RuntimeError(
+                        f"codex app-server daemon failed to start for pane {pane_id}; "
+                        "codex runtime is daemon-only, refusing to spawn an "
+                        "embedded codex team member"
+                    )
+                sock = codex_app_server.pane_socket_path(pane_id)
+                cmd_parts.extend([
+                    "--remote", _shell_escape(f"unix://{sock}"),
+                    "--cd", _shell_escape(cwd),
+                ])
+                # Bring hive's 2nd client online now — before codex (started
+                # by send_keys at the end of this method) creates its thread
+                # — so the sidecar receives the thread/started + status
+                # broadcast live instead of late-joining and resuming.
+                # Best-effort: a down/slow sidecar just falls back to the
+                # lazy connect on the next runtime tick.
+                if workspace:
+                    from .sidecar import request_connect_codex
+                    request_connect_codex(workspace, pane_id)
         if channel_flags:
             cmd_parts.extend(channel_flags)
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
-            if cli == "droid":
-                json_str, resolved_model = _build_droid_model_settings(model)
-                if json_str:
-                    pre_cmd_parts.extend([
-                        'settings_file=$(mktemp "${TMPDIR:-/tmp}/hive-droid-settings.XXXXXX")',
-                        f"printf '%s' {_shell_escape(json_str)} > \"$settings_file\"",
-                    ])
-                    cmd_parts.extend(["--settings", "\"$settings_file\""])
-            elif cli == "claude":
+            if cli == "claude":
                 cmd_parts.extend(["--model", _shell_escape(model)])
             elif cli == "codex":
                 cmd_parts.extend(["-m", _shell_escape(model)])
 
         # Resume uses the original session's model; no --model flag needed.
         if session_id:
-            if cli == "droid":
-                cmd_parts.extend(["-r", _shell_escape(session_id)])
-            elif cli == "claude":
+            if cli == "claude":
                 cmd_parts.extend(["-r", _shell_escape(session_id), "--fork-session"])
             elif cli == "codex":
                 cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
-        # All three CLIs accept a positional [prompt] arg (codex/claude/droid,
-        # also on resume/fork). Pass skill activation + optional user prompt
-        # here so the CLI auto-submits at startup, bypassing TUI keystroke
-        # injection entirely (avoids the codex picker race and any analogous
-        # races for claude/droid).
+        # Both CLIs accept a positional [prompt] arg (also on resume/fork).
+        # Pass skill activation + optional user prompt here so the CLI
+        # auto-submits at startup, bypassing TUI keystroke injection entirely
+        # (avoids the codex picker race and any analogous races for claude).
         initial_prompt = ""
         if skill and skill != "none":
             initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
@@ -385,11 +335,6 @@ class Agent:
                 )
 
         if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
-            if cli == "droid":
-                detected_session = resolve_session_id_for_pane(pane_id)
-                if detected_session:
-                    agent.session_id = detected_session
-
             time.sleep(1)
 
             # Skill + user prompt were embedded in the [prompt] arg above.
@@ -408,8 +353,8 @@ class Agent:
         composer draft. claude is strictly channel-only: an unusable channel
         raises :class:`~hive.adapters.claude_channel.ChannelDeliveryError`
         (callers surface it as an explicit submit failure; the sidecar projects
-        it to ``injectStatus=failed``). droid, and codex without a usable
-        daemon/thread, use keystroke injection.
+        it to ``injectStatus=failed``). codex without a usable daemon/thread
+        falls back to keystroke injection.
         """
         profile_name = _resolve_profile_name(self.pane_id, self.cli)
         if profile_name == "codex":

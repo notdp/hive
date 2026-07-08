@@ -19,7 +19,8 @@ _MAX_TAIL_BYTES = 128 * 1024
 # - user_prompt_pending: user prompt arrived, assistant has not acknowledged
 # - input_backlog: unresolved queue enqueue is the newest decisive evidence
 #   (a new prompt is waiting in the queue for the assistant to pick up)
-# Used by both root-send active-turn fork routing and idle-notify fire suppression.
+# Used by the sidecar busy probe (_pane_in_active_turn, which also gates
+# idle-notify firing) and the duo pairing idle gate (_pane_is_idle_for_pairing).
 ACTIVE_TURN_PHASES = frozenset({
     "tool_open",
     "tool_result_pending_reply",
@@ -293,163 +294,6 @@ def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
-def _codex_message_has_text(body: dict[str, Any]) -> bool:
-    content = body.get("content")
-    if not isinstance(content, list):
-        return False
-    for part in content:
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") != "output_text":
-            continue
-        if str(part.get("text") or "").strip():
-            return True
-    return False
-
-
-def _probe_codex_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
-    tail = [_raw_record_summary(record) for record in records]
-    for record in reversed(records):
-        record_type = str(record.get("type") or "")
-        body = record.get("payload")
-        if record_type == "event_msg" and isinstance(body, dict):
-            event_type = str(body.get("type") or "")
-            if event_type == "task_started":
-                return _phase_payload(
-                    reason="tool_open",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-            if event_type in {"task_complete", "turn_aborted"}:
-                return _phase_payload(
-                    reason="task_closed",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-            if event_type in {"exec_command_end", "mcp_tool_call_end", "patch_apply_end"}:
-                return _phase_payload(
-                    reason="tool_result_pending_reply",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-            if event_type == "user_message":
-                return _phase_payload(
-                    reason="user_prompt_pending",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-        if record_type == "response_item" and isinstance(body, dict):
-            item_type = str(body.get("type") or "")
-            if item_type in {"function_call", "custom_tool_call"}:
-                return _phase_payload(
-                    reason="tool_open",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-            if item_type in {"function_call_output", "custom_tool_call_output"}:
-                return _phase_payload(
-                    reason="tool_result_pending_reply",
-                    observed_at=_raw_timestamp(record),
-                    evidence_tail=tail,
-                )
-            if item_type == "message":
-                role = str(body.get("role") or "")
-                if role == "user":
-                    return _phase_payload(
-                        reason="user_prompt_pending",
-                        observed_at=_raw_timestamp(record),
-                        evidence_tail=tail,
-                    )
-                if role == "assistant" and _codex_message_has_text(body):
-                    return _phase_payload(
-                        reason="assistant_text_idle",
-                        observed_at=_raw_timestamp(record),
-                        evidence_tail=tail,
-                    )
-
-    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
-
-
-def _droid_real_user_text(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict) or str(message.get("role") or "") != "user":
-        return False
-    saw_non_reminder = False
-    for block in _content_blocks(message):
-        if block.get("type") != "text":
-            continue
-        text = str(block.get("text") or "").strip()
-        if not text:
-            continue
-        if text.startswith("<system-reminder>"):
-            continue
-        saw_non_reminder = True
-    return saw_non_reminder
-
-
-def _droid_has_tool_result(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return False
-    return any(block.get("type") == "tool_result" for block in _content_blocks(message))
-
-
-def _droid_has_tool_use(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return False
-    return any(block.get("type") == "tool_use" for block in _content_blocks(message))
-
-
-def _droid_has_assistant_text(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict) or str(message.get("role") or "") != "assistant":
-        return False
-    return any(
-        block.get("type") == "text" and str(block.get("text") or "").strip()
-        for block in _content_blocks(message)
-    )
-
-
-def _probe_droid_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
-    tail = [_raw_record_summary(record) for record in records]
-    for record in reversed(records):
-        if _droid_has_tool_use(record):
-            return _phase_payload(
-                reason="tool_open",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_has_tool_result(record):
-            return _phase_payload(
-                reason="tool_result_pending_reply",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_real_user_text(record):
-            return _phase_payload(
-                reason="user_prompt_pending",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_has_assistant_text(record):
-            return _phase_payload(
-                reason="assistant_text_idle",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-
-    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
-
-
 def probe_transcript_turn_phase(
     cli_name: str,
     transcript: str | Path,
@@ -464,12 +308,11 @@ def probe_transcript_turn_phase(
     if not records:
         return _phase_payload(reason="unknown_evidence")
 
+    # codex has no transcript probe: a daemon-backed pane reports natively over
+    # its app-server socket, and embedded codex is unsupported (rejected at
+    # team entry), so it falls through to unknown_evidence below.
     if cli_name == "claude":
         return _probe_claude_turn_phase(records)
-    if cli_name == "codex":
-        return _probe_codex_turn_phase(records)
-    if cli_name == "droid":
-        return _probe_droid_turn_phase(records)
     return _phase_payload(
         reason="unknown_evidence",
         evidence_tail=[_raw_record_summary(record) for record in records],

@@ -17,7 +17,7 @@ Tests live under `tests/` and are split by level:
 ## Design Docs
 
 - Runtime design lives in `docs/runtime-model.md`.
-- Raw Claude/Codex/Droid transcript and JCL parsing rules live in `docs/transcript-signals.md`.
+- Raw Claude transcript parsing rules live in `docs/transcript-signals.md`.
 - Keep runtime-field semantics there in sync with code:
   - `busy`
   - `inputState`
@@ -35,7 +35,7 @@ Tests live under `tests/` and are split by level:
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.
 - `PYTHONPATH=src python -m pytest tests/ -m e2e -q` — end-to-end tmux tests.
 - `PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_cvim_payload.py -q` — focused `/cvim` and `/vim` sendback coverage.
-- Plugin/skill materialization and sidecar behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `FACTORY_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's sidecar onto checkout code; the live sidecar stays on the stable install until an intentional upgrade.
+- Plugin/skill materialization and sidecar behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's sidecar onto checkout code; the live sidecar stays on the stable install until an intentional upgrade.
 
 ## Coding Style & Naming Conventions
 
@@ -53,7 +53,7 @@ When touching `/cvim` popup sendback behavior, keep `tests/unit/test_cvim_comman
 
 ## Commit & Pull Request Guidelines
 
-Follow the existing history style: short conventional messages such as `fix: ...`, `refactor: ...`, or `docs: ...`. Keep commits scoped to one logical change. Before opening a PR, run the relevant pytest targets, summarize the behavioral change, and call out tmux/droid assumptions or manual verification steps.
+Follow the existing history style: short conventional messages such as `fix: ...`, `refactor: ...`, or `docs: ...`. Keep commits scoped to one logical change. Before opening a PR, run the relevant pytest targets, summarize the behavioral change, and call out tmux assumptions or manual verification steps.
 
 ## Version Bump
 
@@ -74,7 +74,7 @@ When bumping, scan all commits since the last version bump commit and determine 
 
 ## Security & Runtime Notes
 
-Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux` and Factory `droid`; e2e tests assume tmux is available and use a fake droid binary for isolation.
+Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux`; e2e tests assume tmux is available and cover the CLI-only surfaces (agent spawn/delivery flows are cli-layer tests with mocks).
 The sidecar is a long-lived workspace process. When validating sidecar-related runtime changes manually, restart it from the current workspace before trusting `doctor`, delivery, or activity output.
 
 ## Debug Log Locations

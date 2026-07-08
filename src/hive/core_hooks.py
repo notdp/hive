@@ -12,14 +12,6 @@ def hive_home() -> Path:
     return HIVE_HOME
 
 
-def factory_home() -> Path:
-    return Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
-
-
-def settings_path() -> Path:
-    return factory_home() / "settings.json"
-
-
 def claude_home() -> Path:
     return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
 
@@ -34,22 +26,6 @@ def codex_home() -> Path:
 
 def codex_hooks_path() -> Path:
     return codex_home() / "hooks.json"
-
-
-def load_settings() -> dict[str, Any]:
-    path = settings_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_settings(data: dict[str, Any]) -> None:
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def _load_json_file(path: Path) -> dict[str, Any]:
@@ -138,10 +114,6 @@ def _filter_hook_defs_for_codex(
 
 def merge_hook_groups(hook_defs: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
     added: dict[str, list[dict[str, Any]]] = {}
-    # Droid
-    droid_data = load_settings()
-    if _merge_hooks_in_data(droid_data, hook_defs):
-        save_settings(droid_data)
     # Claude Code
     claude_path = claude_settings_path()
     claude_data = _load_json_file(claude_path)
@@ -155,7 +127,7 @@ def merge_hook_groups(hook_defs: dict[str, list[dict[str, Any]]]) -> dict[str, l
         if _merge_hooks_in_data(codex_data, codex_defs):
             _save_json_file(codex_path, codex_data)
         _ensure_codex_hooks_enabled()
-    # Compute added (for return value, based on droid as reference)
+    # Compute added (for return value)
     for event, groups in hook_defs.items():
         for group in groups:
             added.setdefault(event, []).append(group)
@@ -163,10 +135,6 @@ def merge_hook_groups(hook_defs: dict[str, list[dict[str, Any]]]) -> dict[str, l
 
 
 def remove_hook_groups(hook_defs: dict[str, list[dict[str, Any]]]) -> None:
-    # Droid
-    droid_data = load_settings()
-    if _remove_hooks_in_data(droid_data, hook_defs):
-        save_settings(droid_data)
     # Claude Code
     claude_path = claude_settings_path()
     claude_data = _load_json_file(claude_path)

@@ -5,7 +5,7 @@ description: MANDATORY when the current conversation already contains a system-n
 
 # Code Review - 3 Reviewer + Evidence Verification
 
-这个 skill 直接承接 Droid 内置 `/review`，不要依赖中间转发 alias。
+这个 skill 直接承接 agent CLI（Claude Code / Codex）内置 `/review`，不要依赖中间转发 alias。
 
 Dependency: this skill depends on the `hive` skill. Your first action after entering this skill MUST be to load the `hive` skill (use the Skill tool with skill="hive"). Do nothing else before loading hive.
 

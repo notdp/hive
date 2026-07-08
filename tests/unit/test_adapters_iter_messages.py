@@ -12,88 +12,6 @@ def _write_jsonl(path: Path, lines: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
 
-# --- droid -------------------------------------------------------------------
-
-
-def test_droid_iter_messages_normalizes_text_thinking_tool_use(tmp_path):
-    path = tmp_path / "droid.jsonl"
-    _write_jsonl(
-        path,
-        [
-            {"type": "session_start", "id": "s", "cwd": "/w"},
-            {
-                "type": "message",
-                "id": "m1",
-                "parentId": None,
-                "timestamp": "2026-04-02T05:27:52.478Z",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello"}],
-                },
-            },
-            {
-                "type": "message",
-                "id": "m2",
-                "parentId": "m1",
-                "timestamp": "2026-04-02T05:27:53.000Z",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "thinking", "thinking": "hmm"},
-                        {"type": "text", "text": "world"},
-                        {"type": "tool_use", "name": "Grep", "input": {"pattern": "x"}},
-                    ],
-                },
-            },
-            {
-                "type": "message",
-                "id": "m3",
-                "parentId": "m2",
-                "message": {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "content": [{"type": "text", "text": "match"}],
-                        }
-                    ],
-                },
-            },
-        ],
-    )
-
-    messages = list(adapters.get("droid").iter_messages(path))
-    assert [m.role for m in messages] == ["user", "assistant", "user"]
-    assert messages[0].parts[0].kind == "text"
-    assert messages[0].parts[0].text == "hello"
-
-    kinds = [p.kind for p in messages[1].parts]
-    assert kinds == ["thinking", "text", "tool_use"]
-    assert messages[1].parts[0].text == "hmm"
-    assert messages[1].parts[2].tool_name == "Grep"
-    assert messages[1].parts[2].tool_input == {"pattern": "x"}
-
-    assert messages[2].parts[0].kind == "tool_result"
-    assert messages[2].parts[0].tool_output == "match"
-    assert messages[1].parent_id == "m1"
-
-
-def test_droid_iter_messages_skips_non_message_lines(tmp_path):
-    path = tmp_path / "droid.jsonl"
-    _write_jsonl(
-        path,
-        [
-            {"type": "session_start", "id": "s"},
-            {"type": "file-history-snapshot"},
-            {"type": "message", "message": {"role": "user", "content": "plain text"}},
-        ],
-    )
-    messages = list(adapters.get("droid").iter_messages(path))
-    assert len(messages) == 1
-    assert messages[0].parts[0].kind == "text"
-    assert messages[0].parts[0].text == "plain text"
-
-
 # --- claude ------------------------------------------------------------------
 
 
@@ -314,14 +232,6 @@ def test_codex_iter_messages_normalizes_custom_tool_calls(tmp_path):
 
 def test_all_adapters_return_messages_with_uniform_shape(tmp_path):
     """Regardless of CLI, every Message yields parts with .kind and .role in expected set."""
-    droid_path = tmp_path / "droid.jsonl"
-    _write_jsonl(
-        droid_path,
-        [
-            {"type": "session_start", "id": "s"},
-            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}},
-        ],
-    )
     claude_path = tmp_path / "claude.jsonl"
     _write_jsonl(
         claude_path,
@@ -341,7 +251,7 @@ def test_all_adapters_return_messages_with_uniform_shape(tmp_path):
 
     allowed_kinds = {"text", "thinking", "tool_use", "tool_result", "image", "unknown"}
 
-    for name, path in (("droid", droid_path), ("claude", claude_path), ("codex", codex_path)):
+    for name, path in (("claude", claude_path), ("codex", codex_path)):
         msgs = list(adapters.get(name).iter_messages(path))
         assert msgs, f"{name} yielded no messages"
         for msg in msgs:

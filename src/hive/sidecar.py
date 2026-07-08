@@ -799,7 +799,7 @@ def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
     """Ask the sidecar to bring a per-pane codex 2nd client online now.
 
     Called at spawn time so the client is connected *before* codex creates its
-    thread — it then receives the full thread/started + tokenUsage broadcast
+    thread — it then receives the thread/started + status broadcast
     live, with no late-join resume. Best-effort: returns None when the sidecar
     is down, and the lazy connect on the next runtime tick covers that case.
     """
@@ -1362,8 +1362,6 @@ def _doctor_payload(
         diag["busy"] = bool(runtime["busy"])
     if runtime.get("turnPhase"):
         diag["turnPhase"] = runtime["turnPhase"]
-    if runtime.get("context"):
-        diag["context"] = runtime["context"]
     if verbose:
         diag["pane"] = target.pane_id
         diag["teamMembers"] = len(list(team.agents.values()))
@@ -1394,7 +1392,7 @@ def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
     """Native codex runtime from the per-pane daemon, or None if no daemon.
 
     hive-spawned codex panes run their own app-server daemon; reading
-    busy/turn/context from it is both accurate and cheap versus tailing the
+    busy/turn from it is both accurate and cheap versus tailing the
     transcript. Returns None for embedded (manual) codex so the caller falls
     back to the transcript path.
     """
@@ -1411,13 +1409,6 @@ def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
         "inputReason": "" if input_state != "waiting_user" else "app_server_active_flag",
         "_runtimeSource": "codex_app_server",
     }
-    if rt.tokens is not None:
-        fields["context"] = {
-            "tokens": rt.tokens,
-            "window": rt.window,
-            "observedAt": _now_iso(),
-            "source": "codex_app_server",
-        }
     return fields
 
 
@@ -1489,9 +1480,9 @@ def _agent_runtime_payload(
         return runtime
 
     # hive-spawned codex runs a per-pane app-server daemon: read native runtime
-    # signals (busy / turn / context) over the socket instead of reverse-
-    # engineering them from the transcript. manual codex (embedded, no daemon
-    # socket) falls through to the transcript path below.
+    # signals (busy / turn) over the socket instead of reverse-engineering
+    # them from the transcript. manual codex (embedded, no daemon socket)
+    # falls through to the transcript path below.
     if profile.name == "codex":
         app_runtime = _codex_app_server_runtime(pane_id)
         if app_runtime is not None:
@@ -1542,14 +1533,6 @@ def _agent_runtime_payload(
         return runtime
 
     runtime["_transcriptSize"] = transcript.stat().st_size
-    context = adapter.extract_context_snapshot(transcript)
-    if context:
-        runtime["context"] = {
-            "tokens": context.tokens,
-            "window": context.window,
-            "observedAt": context.observed_at.isoformat() if context.observed_at else None,
-            "source": context.source,
-        }
     safety = probe_transcript_turn_phase(profile.name, transcript)
     runtime["turnPhase"] = str(safety.get("turnPhase") or "unknown_evidence")
     if safety.get("phaseObservedAt"):

@@ -5,8 +5,14 @@ uses for runtime decisions.
 
 It exists to answer a narrow question:
 
-- What do Claude Code, Codex, and Droid transcripts actually look like?
+- What do Claude Code transcripts actually look like?
 - Which events count as open/close/read signals in current code?
+
+Codex has no transcript probe: a daemon-backed codex pane reports
+`busy` / `inputState` / `turnPhase` natively over its app-server socket (see
+"Codex Native Runtime" in `docs/runtime-model.md`). An embedded (daemon-less)
+codex is unsupported as a Hive team member — team entry and team-bound fork
+both reject it — and hive reads no state from one (unresolved/unknown).
 
 It does not define tmux output activity. `busy` is documented separately in
 `docs/runtime-model.md`; `busy` is primarily an output-activity signal and
@@ -49,12 +55,9 @@ This is the basis for the internal reasoning concept often described as
 - a tool/task open event exists
 - the corresponding close event has not appeared yet
 
-Examples:
+Example:
 
 - Claude: `tool_use` without matching `tool_result`
-- Codex: `task_started` without `task_complete` / `turn_aborted`
-- Codex: `function_call` / `custom_tool_call` without matching output
-- Droid: `tool_use` without matching `tool_result`
 
 ### Turn Phase
 
@@ -64,7 +67,7 @@ own subsets (see `docs/runtime-model.md`):
 
 - `tool_open` — hard-busy (tool_use open)
 - `input_backlog` — strategy-level busy (an unresolved queue enqueue is the newest decisive evidence)
-- `task_closed` / `turn_closed` — turn collapsed
+- `turn_closed` — turn collapsed
 - `tool_result_pending_reply` — tool result observed, assistant hasn't continued
 - `user_prompt_pending` — user prompt observed, assistant hasn't acked
 - `assistant_text_idle` — assistant text without stop_reason
@@ -108,68 +111,6 @@ Both map to:
 - real user text
   - => `user_prompt_pending`
 - assistant text without stronger open/close evidence
-  - => `assistant_text_idle`
-
-## Codex JCL / Event JSONL
-
-> Applies to **embedded** codex only. A daemon-backed (born-connected) codex
-> pane is read natively over its per-pane app-server socket, so its
-> `busy` / `inputState` / `turnPhase` do **not** come from the transcript
-> signals below — see "Codex Native Runtime (app-server source)" in
-> `docs/runtime-model.md`. The signals here are the fallback for a codex with
-> no live daemon.
-
-Hive treats Codex session logs as JCL-like event JSONL and looks at:
-
-- top-level `type`
-- `payload.type`
-- `payload.parsed_cmd`
-
-### Signals Used
-
-
-- `event_msg.payload.type = task_started`
-  - => `turnPhase=tool_open`
-- `response_item.payload.type in {function_call, custom_tool_call}`
-  - => `turnPhase=tool_open`
-
-
-- `event_msg.payload.type in {task_complete, turn_aborted}`
-  - => `turnPhase=task_closed`
-
-
-- `event_msg.payload.type in {exec_command_end, mcp_tool_call_end, patch_apply_end}`
-  - => `tool_result_pending_reply`
-- `response_item.payload.type in {function_call_output, custom_tool_call_output}`
-  - => `tool_result_pending_reply`
-- `event_msg.payload.type = user_message`
-  - => `user_prompt_pending`
-- assistant message with text but without stronger evidence
-  - => `assistant_text_idle`
-
-## Droid Transcript
-
-Hive treats Droid transcript as message-oriented JSONL and looks at:
-
-- message role
-- `content[*].type`
-- `tool_use` / `tool_result`
-
-### Signals Used
-
-
-- assistant message containing `tool_use`
-  - => `turnPhase=tool_open`
-
-
-- none from the simple transcript probe alone
-
-
-- `tool_result`
-  - => `tool_result_pending_reply`
-- real user text (ignoring `<system-reminder>`)
-  - => `user_prompt_pending`
-- assistant text without `tool_use`
   - => `assistant_text_idle`
 
 ## What Does Not Count

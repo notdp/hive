@@ -1,6 +1,6 @@
 # Hive
 
-> CLI エージェント向けの tmux ベース協調ランタイム — `claude` / `codex` / `droid` 同士が、インライン `<HIVE>` メッセージ、配信トラッキング、ハンドオフスレッドを通じて会話します。
+> CLI エージェント向けの tmux ベース協調ランタイム — `claude` と `codex` が、インライン `<HIVE>` メッセージ、配信トラッキング、ハンドオフスレッドを通じて会話します。
 
 [English](README.md) · [简体中文](README.zh-CN.md) · **日本語**
 
@@ -18,7 +18,7 @@ Hive はエージェント向けのランタイムであり、人間が手で叩
 # Hive CLI
 pipx install git+https://github.com/notdp/hive.git
 
-# Hive スキル (Claude Code / Codex / Droid 向け)
+# Hive スキル (Claude Code / Codex 向け)
 npx skills add https://github.com/notdp/hive -g --all
 ```
 
@@ -26,13 +26,13 @@ npx skills add https://github.com/notdp/hive -g --all
 
 - `tmux` (`hive cvim` / `hive vim` のポップアップヘルパーには 3.2 以上が必要)
 - Python 3.11 以上
-- 少なくとも 1 つのエージェント CLI: `claude` / `codex` / `droid`
+- 少なくとも 1 つのエージェント CLI: `claude` / `codex`
 
 ## エージェントセッションで起動する
 
 ```bash
 # tmux 内で好きなエージェントを起動
-$ claude       # もしくは: codex, droid
+$ claude       # もしくは: codex
 
 # エージェントセッションで以下を入力:
 /hive
@@ -103,7 +103,7 @@ PYTHONPATH=src python -m pytest tests/ -q
 ## ドキュメント
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) — ランタイムフィールドの意味論 (`busy`, `inputState`, `turnPhase`)
-- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude / Codex / Droid のトランスクリプト解析ルール
+- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude のトランスクリプト解析ルール
 - [`skills/hive/SKILL.md`](skills/hive/SKILL.md) — エージェントの挙動 / prompt 契約 (Hive スキルがランタイムでロード)
 
 ## ライセンス

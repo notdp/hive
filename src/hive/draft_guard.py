@@ -11,8 +11,6 @@ Profiles differ in prompt glyph, baseline cursor_x, and clear-keys cost:
 - claude: `❯ ` with NO-BREAK SPACE (U+00A0) separator; cursor_x=2 in
   empty state; C-u × 30 drains the input box
 - codex:  `› ` (U+203A + 0x20); cursor_x=2 in empty state; C-u × 30
-- droid:  box-bordered `│ > ...│`; cursor_x is unreliable (=0 whether
-  empty or typed); C-u × 15
 """
 
 from __future__ import annotations
@@ -44,7 +42,6 @@ class _StyledChar:
 _PROFILES: dict[str, ProfileConfig] = {
     "claude": ProfileConfig("claude", baseline_cursor_x=2, clear_repetitions=30),
     "codex":  ProfileConfig("codex",  baseline_cursor_x=2, clear_repetitions=30),
-    "droid":  ProfileConfig("droid",  baseline_cursor_x=None, clear_repetitions=15),
 }
 
 
@@ -112,22 +109,9 @@ def _capture_lines(pane_id: str, profile_name: str) -> list[str]:
         lines_arg = max(int(height), 30)
     except ValueError:
         lines_arg = 80
-    if profile_name in {"claude", "codex", "droid"}:
+    if profile_name in {"claude", "codex"}:
         return tmux.capture_pane(pane_id, lines=lines_arg, preserve_styles=True).splitlines()
     return tmux.capture_pane(pane_id, lines=lines_arg).splitlines()
-
-
-def _droid_box_bounds(lines: list[str]) -> tuple[int | None, int | None]:
-    top: int | None = None
-    bot: int | None = None
-    for i in range(len(lines) - 1, -1, -1):
-        line = _visible_text(lines[i])
-        if line.startswith("╰"):
-            bot = i
-        elif line.startswith("╭") and bot is not None:
-            top = i
-            break
-    return top, bot
 
 
 def _parse_claude(lines: list[str]) -> str:
@@ -161,27 +145,6 @@ def _parse_codex(lines: list[str]) -> str:
     if start is None:
         return ""
     return _strip_styled_lines(lines[start : end + 1], first_prefix=_CODEX_PROMPT)
-
-
-def _parse_droid(lines: list[str]) -> str:
-    top, bot = _droid_box_bounds(lines)
-    if top is None or bot is None:
-        return ""
-    rows = lines[top + 1 : bot]
-    stripped: list[str] = []
-    for idx, row in enumerate(rows):
-        inner = _droid_inner_cells(row)
-        if inner is None:
-            continue
-        if idx == 0:
-            cells = _drop_visible_prefix(inner, " > ")
-        else:
-            cells = _drop_visible_prefix(inner, "   ")
-        cells = _drop_autocomplete_hint_cells(cells)
-        stripped.append("".join(cell.value for cell in _rstrip_cells(cells)))
-    if all(not item for item in stripped):
-        return ""
-    return "\n".join(stripped)
 
 
 def _strip_styled_lines(lines: list[str], *, first_prefix: str) -> str:
@@ -219,16 +182,6 @@ def _rstrip_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
     while end > 0 and cells[end - 1].value == " ":
         end -= 1
     return cells[:end]
-
-
-def _droid_inner_cells(row: str) -> list[_StyledChar] | None:
-    cells = _styled_chars(row)
-    visible = "".join(cell.value for cell in cells)
-    if not (visible.startswith("│") and visible.rstrip().endswith("│")):
-        return None
-    cells = _drop_visible_prefix(cells, "│")
-    cells = _rstrip_cells(cells)
-    return _drop_visible_suffix(cells, "│")
 
 
 def _drop_autocomplete_hint_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
@@ -306,5 +259,4 @@ def _apply_sgr(params: list[int], *, dim: bool, reverse: bool) -> tuple[bool, bo
 _PARSERS = {
     "claude": _parse_claude,
     "codex": _parse_codex,
-    "droid": _parse_droid,
 }

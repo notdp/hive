@@ -201,8 +201,6 @@ class ThreadRuntime:
     turn_phase: str = "unknown_evidence"
     input_state: str = ""
     active_turn_id: str | None = None
-    tokens: int | None = None
-    window: int | None = None
     observed_at: float = 0.0
 
 
@@ -307,15 +305,6 @@ class CodexDaemonClient:
                 rt.turn_phase = "turn_closed"
                 if not rt.input_state:
                     rt.input_state = "ready"
-            elif method == "thread/tokenUsage/updated":
-                usage = params.get("tokenUsage") or {}
-                # `last` is the current context size (the most recent turn);
-                # `total` is the cumulative sum across all turns and routinely
-                # exceeds the context window, so it must NOT be used here.
-                last = usage.get("last") or {}
-                rt.tokens = last.get("totalTokens")
-                if usage.get("modelContextWindow") is not None:
-                    rt.window = usage.get("modelContextWindow")
 
     def runtime_for(self, thread_id: str) -> ThreadRuntime | None:
         with self._state_lock:
@@ -377,15 +366,12 @@ class CodexDaemonClient:
         """Recover state for already-active threads (busy late-join).
 
         A client online at thread creation gets the full broadcast; this covers
-        the late-join case by resuming each loaded thread once. ``excludeTurns``
-        is False here so the daemon also replays the persisted token usage as a
-        ``thread/tokenUsage/updated`` notification (the cheap resume path skips
-        it) — that is the only way a late client recovers context tokens without
-        waiting for the next live turn. Resuming an idle, not-yet-rolled-out
-        thread fails with `no rollout found` — harmless.
+        the late-join case by resuming each loaded thread once — the resume
+        response carries sessionId and current status. Resuming an idle,
+        not-yet-rolled-out thread fails with `no rollout found` — harmless.
         """
         for tid in self.loaded_list():
-            self.resume(tid, exclude_turns=False)
+            self.resume(tid)
 
     def thread_list(self, cwd: str) -> list[dict]:
         res = self.call("thread/list", {"cwd": cwd})
@@ -395,8 +381,8 @@ class CodexDaemonClient:
         res = self.call("thread/loaded/list", {})
         return (res.get("result") or {}).get("data") or [] if "result" in res else []
 
-    def resume(self, thread_id: str, *, exclude_turns: bool = True) -> bool:
-        res = self.call("thread/resume", {"threadId": thread_id, "excludeTurns": exclude_turns})
+    def resume(self, thread_id: str) -> bool:
+        res = self.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
         result = res.get("result")
         if not isinstance(result, dict):
             return False
@@ -625,8 +611,8 @@ class CodexClientPool:
 
         Called at spawn time — after the daemon is up but before codex creates
         its thread — so the client is already connected when ``thread/started``
-        and the per-turn ``tokenUsage`` broadcasts fire. Runtime is then tracked
-        live from the broadcast stream; no late-join resume is needed.
+        and the status broadcasts fire. Runtime is then tracked live from the
+        broadcast stream; no late-join resume is needed.
         """
         return self._client_for(pane) is not None
 
@@ -640,8 +626,7 @@ class CodexClientPool:
         text into the running turn, or opens a fresh turn when idle), so hive
         hands it straight to the RPC and lets codex pick the landing — the same
         thing the codex TUI does for a typed message. Keystroke injection is
-        thereby reserved for CLIs without an app-server (droid/claude) and for
-        embedded codex panes that never spawned a daemon.
+        thereby reserved for embedded codex panes that never spawned a daemon.
         """
         client = self._client_for(pane)
         if client is None:

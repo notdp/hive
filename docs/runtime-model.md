@@ -22,8 +22,8 @@ This document does not define:
 - automatic fork/spawn decisions
 - automatic garbage collection
 
-For the raw Claude/Codex/Droid transcript and JCL structures that feed these
-runtime decisions, see `docs/transcript-signals.md`.
+For the raw Claude transcript structures that feed these runtime decisions,
+see `docs/transcript-signals.md`.
 
 ## Runtime Layers
 
@@ -143,14 +143,13 @@ Important consumer:
 
 Source:
 
-- transcript/JCL probe (last observed transcript state)
-- codex app-server thread status for a daemon-backed codex pane (overrides the
-  transcript probe for that pane — see "Codex Native Runtime")
+- transcript probe for claude (last observed transcript state)
+- codex app-server thread status for a daemon-backed codex pane — codex has no
+  transcript probe (see "Codex Native Runtime")
 
 Current values:
 
 - `tool_open`
-- `task_closed`
 - `turn_closed`
 - `input_backlog`
 - `tool_result_pending_reply`
@@ -174,12 +173,9 @@ These are related, but they are not the same concept.
 - a tool/task open event has happened
 - the corresponding close event has not happened yet
 
-Examples:
+Example:
 
 - Claude: `tool_use` without matching `tool_result`
-- Codex: `task_started` without `task_complete` / `turn_aborted`
-- Codex: `function_call` / `custom_tool_call` without matching output
-- Droid: `tool_use` without matching `tool_result`
 
 In `turnPhase` terms, hard busy surfaces as `tool_open`. `input_backlog` is a
 strategy-level non-open state that also matters to consumers but is not hard
@@ -202,39 +198,30 @@ Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 
 ### Codex
 
-- `tool_open` — `task_started` without `task_complete` / `turn_aborted`, or `function_call` / `custom_tool_call` without matching output
-- `task_closed` — `task_complete` or `turn_aborted`
-- `tool_result_pending_reply` — tool output just returned
-- `user_prompt_pending` — user prompt pending
-- `assistant_text_idle` — assistant text without stronger closing/opening evidence
-
-### Droid
-
-- `tool_open` — `tool_use` block without matching `tool_result`
-- `tool_result_pending_reply` — tool result just arrived
-- `user_prompt_pending` — real user text pending
-- `assistant_text_idle` — assistant text without `tool_use`
-
-Droid's simple message-shape probe does not currently emit `task_closed` / `turn_closed`.
+Codex has no transcript/JCL probe. A daemon-backed pane reports natively (see
+"Codex Native Runtime" below); an embedded (daemon-less) codex is unsupported
+and reads as `unknown_evidence`.
 
 ## Codex Native Runtime (app-server source)
 
 A born-connected codex pane — hive-spawned, or launched through `hive codex` /
 the `hive shell-init` shell function — runs a per-pane `codex app-server`
 daemon. Hive connects as a second client over that pane's unix socket and reads
-`busy` / `inputState` / `turnPhase` / context **natively** from the daemon's
+`busy` / `inputState` / `turnPhase` **natively** from the daemon's
 notification stream, instead of reverse-engineering them from the transcript.
 The emitted payload is tagged `_runtimeSource: codex_app_server`.
 
 This path is taken only when a live per-pane daemon answers. An embedded
-(manually launched, non-daemon) codex has no socket and falls through to the
-transcript/JCL evidence above; `docs/transcript-signals.md` describes that
-fallback.
+(manually launched, non-daemon) codex has no socket and is deliberately
+unsupported **as a Hive team member**: `hive init` / `hive duo` reject it at
+team entry, and a team-bound `hive fork` / `hive handoff --fork` refuses to
+clone a codex pane (`codex fork` would launch embedded). A standalone embedded
+codex still runs, but hive reads no state from it — session id stays
+`unresolved`, `turnPhase` stays unknown, and there is no transcript fallback.
 
 State is event-sourced from app-server notifications and stays valid until the
 next event — there is no time-based staleness gate. The relevant notifications
-are `thread/status/changed`, `turn/started`, `turn/completed`, and
-`thread/tokenUsage/updated`.
+are `thread/status/changed`, `turn/started`, and `turn/completed`.
 
 Field mapping (notification → runtime field):
 
@@ -253,11 +240,6 @@ Field mapping (notification → runtime field):
     `waitingOnApproval` or `waitingOnUserInput`; emitted with
     `inputReason=app_server_active_flag`
   - `ready` — any other `active`, or `idle`
-- context
-  - `context.tokens` / `context.window` from `thread/tokenUsage/updated`:
-    `tokenUsage.last.totalTokens` and `modelContextWindow`. `last` is the
-    current context size; the cumulative `total` is deliberately ignored (it
-    grows past the window across turns).
 
 `sessionId` for a daemon-backed pane resolves from app-server thread metadata
 (`thread.sessionId` via `thread/resume`), with an lsof-on-daemon-pid fallback.

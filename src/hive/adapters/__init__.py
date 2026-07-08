@@ -1,19 +1,17 @@
 """Session adapter registry.
 
-Adapters normalize the per-CLI session on-disk format (droid/claude/codex) to
+Adapters normalize the per-CLI session on-disk format (claude/codex) to
 a single :class:`~hive.adapters.base.SessionAdapter` protocol. Callers should
 route through :func:`get` by CLI name instead of branching on ``if name == ...``.
 """
 
 from __future__ import annotations
 
-from .base import ContextSnapshot, Message, MessagePart, SessionAdapter, SessionMeta
+from .base import Message, MessagePart, SessionAdapter, SessionMeta
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
-from .droid import DroidAdapter
 
 REGISTRY: dict[str, SessionAdapter] = {
-    DroidAdapter.name: DroidAdapter(),
     ClaudeAdapter.name: ClaudeAdapter(),
     CodexAdapter.name: CodexAdapter(),
 }
@@ -30,7 +28,6 @@ def available() -> list[str]:
 __all__ = [
     "Message",
     "MessagePart",
-    "ContextSnapshot",
     "REGISTRY",
     "SessionAdapter",
     "SessionMeta",

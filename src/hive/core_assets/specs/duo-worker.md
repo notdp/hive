@@ -89,7 +89,7 @@ commit 前看 `git status --short` 和 `git diff --cached --stat`。不要把别
 1. `hive worktree start <feature>`
 2. 进入 stdout 给出的路径并证明入场：
    - claude 用 `EnterWorktree path=<路径>`。
-   - codex / droid 的每条 repo 命令都把 working directory 设为该路径，并先跑 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
+   - codex 的每条 repo 命令都把 working directory 设为该路径，并先跑 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
 3. feature 名同时是 branch 名和 worktree 目录名：语义化 kebab-case、≤4 词、合法 branch、看名知事。序号和依赖不要塞进名字。
 4. base 默认解析到 default branch。解析不出就带 `--base`。`needs-rebase` 时进 worktree rebase 到提示 base，再重跑 start。
 
@@ -108,7 +108,7 @@ hive duo set-pr <PR号>
 
 ### 2. plan + VAL 先定稿
 
-发 plan 草案给 validator，首条消息必须带 worktree 路径；codex / droid 还要附 entry proof 输出。
+发 plan 草案给 validator，首条消息必须带 worktree 路径；codex 还要附 entry proof 输出。
 
 plan 写清拆解、方案、风险，并引用 worktree 基线的文件/行。validator 挑 plan 并主笔 VAL；worker 不给自己定验收标准。
 
@@ -166,6 +166,6 @@ PR 收束：
 
 ### 7. 退场
 
-先离开 worktree：claude `ExitWorktree action=keep`；codex / droid 后续 repo 命令切回主 checkout。
+先离开 worktree：claude `ExitWorktree action=keep`；codex 后续 repo 命令切回主 checkout。
 
 再跑 `hive worktree done <feature>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用，且先核 status 摘要。

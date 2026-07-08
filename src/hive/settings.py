@@ -1,6 +1,6 @@
 """User-level settings stored at ``$HIVE_HOME/settings.json``.
 
-Dot-path keys (e.g. ``droid.selfPeer``) map to nested JSON. Missing file or
+Dot-path keys (e.g. ``roles.validator.cli``) map to nested JSON. Missing file or
 unreadable JSON returns an empty dict — settings are entirely optional.
 """
 

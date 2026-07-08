@@ -25,7 +25,7 @@ from . import plugin_manager
 from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent, _submit_interactive_text
-from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_peer_spawn, resolve_session_id_for_pane
+from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team
 
 
@@ -87,7 +87,7 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Team": "Create, extend, and wire up the tmux team around the current window.",
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
-    "Extensions": "Manage first-party Hive plugins (Factory, Claude Code, Codex).",
+    "Extensions": "Manage first-party Hive plugins (Claude Code, Codex).",
 }
 _ROOT_HELP_EXAMPLES = '''# Team lifecycle
 hive init                                    # bind current tmux window as a team
@@ -214,7 +214,7 @@ def _resolve_member_cli_name(team: Team, member_name: str) -> str:
     if option_cli in AGENT_CLI_NAMES:
         return option_cli
     profile = detect_profile_for_pane(pane_id) if pane_id else None
-    return profile.name if profile else "droid"
+    return profile.name if profile else "claude"
 
 
 def _ensure_team_matches_current_window(t: Team) -> None:
@@ -503,9 +503,6 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             if value in ("", None):
                 continue
             member[key] = value
-        ctx = runtime_fields.get("context")
-        if isinstance(ctx, dict):
-            member["context"] = ctx
     needs_answer = runtime.get("needsAnswer")
     if isinstance(needs_answer, list) and needs_answer:
         payload["needsAnswer"] = needs_answer
@@ -630,7 +627,7 @@ def _resolve_spawn_cli_name(cli_name: str | None) -> str:
     if option_cli in AGENT_CLI_NAMES:
         return option_cli
     profile = detect_profile_for_pane(current_pane) if current_pane else None
-    return profile.name if profile else "droid"
+    return profile.name if profile else "claude"
 
 
 def _request_send_payload(
@@ -1015,10 +1012,12 @@ def _fork_source_details(pane_id: str, split: str, *, workspace: str = "") -> tu
     session_id: str | None = None
     if workspace:
         from .sidecar import request_runtime_snapshot
-        snapshot = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
-        sid = snapshot.get("sessionId")
-        if sid and sid != "unresolved" and snapshot.get("_sessionIdFresh", True):
-            session_id = str(sid)
+        payload = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
+        snapshot = payload.get("snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("_sessionIdFresh", True):
+            sid = snapshot.get("sessionId")
+            if sid and sid != "unresolved":
+                session_id = str(sid)
     if not session_id:
         session_id = resolve_session_id_for_pane(current_pane, profile=profile)
     if not session_id:
@@ -1110,6 +1109,18 @@ def _fork_registered_agent(
         pane_id, split, workspace=getattr(t, "workspace", ""),
     )
 
+    # `codex fork <sid>` launches an embedded codex (no per-pane daemon), and
+    # embedded codex is unsupported as a team member — the forked pane would
+    # join the team with no session id and no runtime state. Refuse before any
+    # pane is split or registered. Non-team forks (_fork_orphan_clone) stay
+    # allowed: a bare clone belongs to no team and makes no runtime promises.
+    if profile.name == "codex":
+        _fail(
+            "codex team fork requires daemon-backed fork support; "
+            "embedded codex is unsupported as a team member "
+            "(fork it without a team, or start a fresh daemon-backed codex instead)"
+        )
+
     # Boundary text is static across workspaces and forks, so cache it under
     # $HIVE_HOME and expand via shell command substitution when there is no
     # prompt. With --prompt we inline boundary + marker + prompt together so
@@ -1141,7 +1152,7 @@ def _fork_orphan_clone(pane_id: str, split: str, prompt: str = "") -> str:
 
     Mirrors a registered fork — split the pane, fork the parent session via the
     CLI's fork command (``profile.fork_cmd``: ``codex fork`` / ``claude
-    --fork-session`` / ``droid --fork``), then send the boundary — but skips
+    --fork-session``), then send the boundary — but skips
     member registration and writes no ``@hive-*`` pane tags: the clone belongs to
     no team. Uses the orphan boundary so the clone is not told to look up a
     `self` it does not have. Returns the new pane id.
@@ -1294,7 +1305,7 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
 
     Uses sidecar runtime inspection (turnPhase) with a graceful fallback:
     freshly-opened CLIs without a session yet count as idle, turn_closed
-    and task_closed count as idle, everything else is treated as 'busy'.
+    counts as idle, everything else is treated as 'busy'.
     """
     try:
         from .sidecar import _agent_runtime_payload
@@ -1304,7 +1315,7 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     if not runtime.get("alive", True):
         return False
     phase = str(runtime.get("turnPhase") or "")
-    if phase in {"turn_closed", "task_closed"}:
+    if phase == "turn_closed":
         return True
     if runtime.get("inputReason") == "no_session":
         return True
@@ -1373,7 +1384,7 @@ def init_cmd(name: str, workspace: str, notify: bool):
 
     current_pane = tmux.get_current_pane_id()
     if detect_profile_for_pane(current_pane or "") is None:
-        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
+        _fail("current pane must be running claude / codex (this becomes the worker)")
     _require_codex_daemon_backed(current_pane or "")
 
     result = _create_standalone_duo(
@@ -1534,14 +1545,14 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
-@click.option("--cli", "cli_name", type=click.Choice(["droid", "claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
+@click.option("--cli", "cli_name", type=click.Choice(["claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
           cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
     """Spawn an agent pane.
 
     Creates a new tmux pane in the current window and starts the chosen
     agent CLI. By default spawns the same CLI as the current pane; use
-    `--cli droid|claude|codex` to pick a specific one. `--skill` loads
+    `--cli claude|codex` to pick a specific one. `--skill` loads
     a base skill on startup (`hive` by default), `--workflow` stacks a
     workflow skill on top, and `--prompt` sends an initial message.
 
@@ -2049,7 +2060,7 @@ def _compact_target(target: _PaneTarget) -> str:
         if status != "compacted":
             _submit_interactive_text(target.pane_id, "/compact", "codex")
         return status
-    # droid/claude (and embedded codex without a daemon): `/compact` is a TUI
+    # claude (and embedded codex without a daemon): `/compact` is a TUI
     # slash command, so it must go through the composer. A channel message
     # would arrive as content, not as a command — this is startup/control
     # keystroke driving, not message delivery.
@@ -2415,11 +2426,8 @@ def _prepare_duo_placement(
         v_cli = role_cli
         v_model = role_model
     else:
-        v_cli, v_model = resolve_peer_spawn(my_cli=worker_cli, my_family=my_family)
-        if not v_cli:
-            v_cli = anti_peer_cli(worker_cli)
-        if role_model:
-            v_model = role_model
+        v_cli = peer_cli_for_family(my_family)
+        v_model = role_model
 
     window = tmux.get_pane_window_target(current_pane) or ""
     if not window:
@@ -2667,15 +2675,15 @@ def _create_standalone_duo(
 @duo_cmd.command("init")
 @click.option(
     "--validator-cli",
-    type=click.Choice(["claude", "codex", "droid"]),
+    type=click.Choice(["claude", "codex"]),
     default=None,
-    help="CLI for validator (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
+    help="CLI for validator (default: anti-family of current pane's CLI)",
 )
 def duo_init_cmd(validator_cli: str | None):
     """Set up a duo from the current pane: worker (=this pane) + anti-family validator.
 
     Standalone — no prior `hive init` needed. The current pane must be running
-    an agent CLI (claude / codex / droid); it becomes the worker. Realized by
+    an agent CLI (claude / codex); it becomes the worker. Realized by
     the current window's pane count:
 
       1 pane   → split-spawn the validator beside the worker
@@ -2683,8 +2691,8 @@ def duo_init_cmd(validator_cli: str | None):
                  anti-family agent; otherwise treat as 3+
       3+ panes → break the worker out to a fresh window, then spawn
 
-    The validator runs the anti-family CLI (claude↔codex; droid defaults to
-    claude) so review stays independent.
+    The validator runs the anti-family CLI (claude↔codex) so review stays
+    independent.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2692,7 +2700,7 @@ def duo_init_cmd(validator_cli: str | None):
     if not current_pane:
         _fail("cannot determine current pane")
     if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex / droid (this becomes the worker)")
+        _fail("current pane must be running claude / codex (this becomes the worker)")
     _require_codex_daemon_backed(current_pane)
 
     result = _create_standalone_duo(current_pane=current_pane, validator_cli=validator_cli)
@@ -2899,9 +2907,9 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @squad_cmd.command("init")
 @click.option(
     "--peer-cli",
-    type=click.Choice(["claude", "codex", "droid"]),
+    type=click.Choice(["claude", "codex"]),
     default=None,
-    help="CLI for challenger (default: anti-family of current pane's CLI; override if droid wraps an Anthropic model)",
+    help="CLI for challenger (default: anti-family of current pane's CLI)",
 )
 @click.option(
     "--name",
@@ -2916,7 +2924,7 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @click.option(
     "--worker",
     "worker_cli",
-    type=click.Choice(["claude", "codex", "droid"]),
+    type=click.Choice(["claude", "codex"]),
     default=None,
     help="CLI for this squad's duo workers (default: orch's family; validator takes the anti-family review seat). e.g. --worker codex for backend-heavy squads.",
 )
@@ -2924,7 +2932,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     """Break current pane into a dedicated squad window (orch + challenger).
 
     Standalone — no need to run `hive init` first. Must run from a pane that's
-    already running an agent CLI (claude / codex / droid); that CLI becomes
+    already running an agent CLI (claude / codex); that CLI becomes
     orch's session. If the pane isn't yet bound to a team, one is auto-created
     (mirrors `hive init`).
 
@@ -2950,7 +2958,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
 
     profile = detect_profile_for_pane(current_pane)
     if profile is None:
-        _fail("current pane must be running claude / codex / droid (this will become orch)")
+        _fail("current pane must be running claude / codex (this will become orch)")
 
     # Idempotent: a pane already running as a squad orch returns its existing
     # binding untouched — before any squad-name claim, rename/break, retag, or a
@@ -2992,14 +3000,8 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         peer_cli_name = ch_role_cli
         peer_model_id = ch_role_model
     else:
-        peer_cli_name, peer_model_id = resolve_peer_spawn(
-            my_cli=orch_cli,
-            my_family=family_for_pane(current_pane),
-        )
-        if not peer_cli_name:
-            peer_cli_name = anti_peer_cli(orch_cli)
-        if ch_role_model:
-            peer_model_id = ch_role_model
+        peer_cli_name = peer_cli_for_family(family_for_pane(current_pane))
+        peer_model_id = ch_role_model
 
     orch_agent_name = f"{squad_name}.orch"
     challenger_agent_name = f"{squad_name}.challenger"
@@ -3425,7 +3427,7 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str, 
     # returning success. A fresh CLI pane emits the prompt (inputState=ready)
     # before the skill file has finished loading, so an immediate send after
     # spawn-duo would race the skill. Poll sidecar team-runtime until both
-    # worker and validator report ready + task_closed/turn_closed.
+    # worker and validator report inputState=ready.
     _ensure_team_sidecar(peer_team, workspace)
     not_ready = _wait_for_peer_ready(
         workspace,
@@ -4597,7 +4599,7 @@ def worktree_cmd():
     Pool layout: <main checkout>/.claude/worktrees/<feature>, branch == feature.
     Hive creates/removes worktrees and records ownership in git config;
     entering/leaving the directory is the agent's own move (Claude:
-    EnterWorktree path=<path> / ExitWorktree action=keep; Codex/Droid: cd).
+    EnterWorktree path=<path> / ExitWorktree action=keep; Codex: cd).
     """
 
 

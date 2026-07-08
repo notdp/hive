@@ -36,7 +36,6 @@ def test_plugin_enable_rejects_retired_plugins(runner, configure_hive_home, reti
 
 def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
     codex_home = hive_home.parent / ".codex"
     claude_home = hive_home.parent / ".claude"
 
@@ -46,7 +45,6 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
     assert "Plugin 'code-review' enabled." in enabled.output
     assert "skills: code-review" in enabled.output
     for skill_root in (
-        factory_home / "skills",
         claude_home / "skills",
         codex_home / "skills",
     ):
@@ -127,9 +125,9 @@ def test_plugin_enable_code_review_materializes_skill(runner, configure_hive_hom
 
 def test_plugin_enable_code_review_does_not_touch_existing_user_review_skill(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
+    claude_home = hive_home.parent / ".claude"
 
-    user_skill_dir = factory_home / "skills" / "review"
+    user_skill_dir = claude_home / "skills" / "review"
     user_skill_dir.mkdir(parents=True, exist_ok=True)
     user_skill_file = user_skill_dir / "SKILL.md"
     user_skill_file.write_text("---\nname: review\ndescription: my custom review skill\n---\n")
@@ -141,17 +139,17 @@ def test_plugin_enable_code_review_does_not_touch_existing_user_review_skill(run
     assert "Warning: skipped skill(s) review" not in enabled.output
     assert user_skill_file.read_text().startswith("---\nname: review\ndescription: my custom review skill")
     assert not user_skill_dir.is_symlink()
-    assert (factory_home / "skills" / "code-review").is_symlink()
+    assert (claude_home / "skills" / "code-review").is_symlink()
 
 
 def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
+    claude_home = hive_home.parent / ".claude"
 
     enabled = runner.invoke(cli, ["plugin", "enable", "code-review"])
     assert enabled.exit_code == 0
 
-    review_skill = factory_home / "skills" / "review"
+    review_skill = claude_home / "skills" / "review"
     if review_skill.is_symlink():
         review_skill.unlink()
     elif review_skill.is_dir():
@@ -169,7 +167,6 @@ def test_plugin_reenable_preserves_user_skill_that_replaced_old_plugin_symlink(r
 
 def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, configure_hive_home):
     hive_home = configure_hive_home(tmux_inside=False)
-    factory_home = hive_home.parent / ".factory"
     codex_home = hive_home.parent / ".codex"
     claude_home = hive_home.parent / ".claude"
 
@@ -181,11 +178,10 @@ def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, conf
     # enabled state. Enable installs no commands, skills, or hooks.
     assert "commands:" not in enabled.output
     assert "skills:" not in enabled.output
-    assert not (factory_home / "commands" / "notify").exists()
     assert not (claude_home / "commands" / "notify.md").exists()
     assert not (codex_home / "skills" / "notify").exists()
 
-    settings_path = factory_home / "settings.json"
+    settings_path = claude_home / "settings.json"
     settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
     assert "hooks" not in settings
 
