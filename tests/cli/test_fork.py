@@ -431,22 +431,19 @@ def test_fork_join_as_rejects_taken_name_before_split(runner, configure_hive_hom
     assert split_called is False
 
 
-def test_fork_codex_resolves_session_via_daemon(runner, configure_hive_home, monkeypatch, tmp_path):
-    """Regression: fork on a born-connected codex pane.
-
-    The rollout jsonl is held by the per-pane app-server daemon, not by any
-    process in the pane's tty tree, so the lsof adapter returns None. fork must
-    fall back to the daemon session id instead of dying with 'cannot determine
-    session id'. Unlike the other fork tests this does NOT mock
-    resolve_session_id_for_pane — it exercises the real resolver so the daemon
-    fallback is covered end-to-end. (Only codex regressed; claude was fine.)
-    """
+def test_fork_codex_team_bound_is_rejected(runner, configure_hive_home, monkeypatch, tmp_path):
+    """`codex fork <sid>` launches an embedded codex, which is unsupported as a
+    team member (no daemon → no session id, no runtime state). A team-bound
+    codex fork must refuse before splitting a pane or registering a member.
+    Non-team codex fork stays allowed (see
+    test_fork_non_team_codex_resolves_session_via_daemon)."""
     configure_hive_home(current_pane="%99", session_name="dev")
 
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
 
     sent: list[tuple[str, str, bool]] = []
+    splits: list[str] = []
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
     monkeypatch.setattr(
@@ -455,18 +452,16 @@ def test_fork_codex_resolves_session_via_daemon(runner, configure_hive_home, mon
             "P", (), {"name": "codex", "fork_cmd": "codex fork {session_id}", "ready_text": "codex"},
         )(),
     )
-
-    # The real CodexAdapter runs (NOT mocked): it asks the daemon first, so we
-    # only stub the daemon lookup — no real socket needed. This exercises the
-    # actual daemon-first path that fork depends on.
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.session_id_for_pane",
         lambda pane: "sess-daemon" if pane == "%99" else None,
     )
-    # No sidecar in tests -> the snapshot path yields nothing, forcing the resolver.
     monkeypatch.setattr("hive.sidecar.request_runtime_snapshot", lambda *a, **k: None)
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
-    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
+    monkeypatch.setattr(
+        "hive.cli.tmux.split_window",
+        lambda _pane, horizontal=True, cwd=None, detach=False: splits.append(_pane) or "%100",
+    )
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
 
@@ -479,13 +474,15 @@ def test_fork_codex_resolves_session_via_daemon(runner, configure_hive_home, mon
 
     result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["pane"] == "%100"
-    assert payload["team"] == "team-x"
-    # The resume command carries the daemon-resolved session id: fork survived.
-    assert len(sent) == 1 and sent[0][0] == "%100"
-    assert sent[0][1].startswith("codex fork sess-daemon")
+    assert result.exit_code != 0
+    assert "daemon-backed" in result.output
+    assert splits == []  # refused before any pane was split
+    assert sent == []  # no fork command was sent anywhere
+
+    # And nothing was registered into the team.
+    team_result = runner.invoke(cli, ["team"])
+    assert team_result.exit_code == 0
+    assert "%100" not in team_result.output
 
 
 def test_fork_non_team_pane_bare_clone(runner, configure_hive_home, monkeypatch, tmp_path):

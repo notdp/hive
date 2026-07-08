@@ -223,9 +223,11 @@ The emitted payload is tagged `_runtimeSource: codex_app_server`.
 
 This path is taken only when a live per-pane daemon answers. An embedded
 (manually launched, non-daemon) codex has no socket and is deliberately
-unsupported: `hive init` / `hive duo` reject it at team entry, its session id
-resolves to `unresolved`, and its runtime state reads as unknown. There is no
-transcript fallback.
+unsupported **as a Hive team member**: `hive init` / `hive duo` reject it at
+team entry, and a team-bound `hive fork` / `hive handoff --fork` refuses to
+clone a codex pane (`codex fork` would launch embedded). A standalone embedded
+codex still runs, but hive reads no state from it — session id stays
+`unresolved`, `turnPhase` stays unknown, and there is no transcript fallback.
 
 State is event-sourced from app-server notifications and stays valid until the
 next event — there is no time-based staleness gate. The relevant notifications

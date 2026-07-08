@@ -10,9 +10,9 @@ It exists to answer a narrow question:
 
 Codex has no transcript probe: a daemon-backed codex pane reports
 `busy` / `inputState` / `turnPhase` natively over its app-server socket (see
-"Codex Native Runtime" in `docs/runtime-model.md`), and an embedded
-(daemon-less) codex is unsupported — hive rejects it at team entry and its
-runtime state reads as unresolved/unknown.
+"Codex Native Runtime" in `docs/runtime-model.md`). An embedded (daemon-less)
+codex is unsupported as a Hive team member — team entry and team-bound fork
+both reject it — and hive reads no state from one (unresolved/unknown).
 
 It does not define tmux output activity. `busy` is documented separately in
 `docs/runtime-model.md`; `busy` is primarily an output-activity signal and

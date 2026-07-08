@@ -1109,6 +1109,18 @@ def _fork_registered_agent(
         pane_id, split, workspace=getattr(t, "workspace", ""),
     )
 
+    # `codex fork <sid>` launches an embedded codex (no per-pane daemon), and
+    # embedded codex is unsupported as a team member — the forked pane would
+    # join the team with no session id and no runtime state. Refuse before any
+    # pane is split or registered. Non-team forks (_fork_orphan_clone) stay
+    # allowed: a bare clone belongs to no team and makes no runtime promises.
+    if profile.name == "codex":
+        _fail(
+            "codex team fork requires daemon-backed fork support; "
+            "embedded codex is unsupported as a team member "
+            "(fork it without a team, or start a fresh daemon-backed codex instead)"
+        )
+
     # Boundary text is static across workspaces and forks, so cache it under
     # $HIVE_HOME and expand via shell command substitution when there is no
     # prompt. With --prompt we inline boundary + marker + prompt together so
