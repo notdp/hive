@@ -5,7 +5,6 @@ from hive import agent_cli, tmux
 
 
 def test_normalize_command_strips_path_and_aliases():
-    assert agent_cli.normalize_command("droid") == "droid"
     assert agent_cli.normalize_command("/usr/local/bin/claude") == "claude"
     assert agent_cli.normalize_command("claude-code") == "claude"
     assert agent_cli.normalize_command("CODEX") == "codex"
@@ -15,7 +14,6 @@ def test_normalize_command_strips_path_and_aliases():
 
 
 def test_member_role_classifies_agents_and_shells():
-    assert agent_cli.member_role("droid") == "agent"
     assert agent_cli.member_role("claude") == "agent"
     assert agent_cli.member_role("codex") == "agent"
     assert agent_cli.member_role("zsh") == "terminal"
@@ -23,7 +21,6 @@ def test_member_role_classifies_agents_and_shells():
 
 
 def test_profiles_use_expected_skill_commands():
-    assert agent_cli.get_profile("droid").skill_cmd == "/{name}"
     assert agent_cli.get_profile("claude").skill_cmd == "/{name}"
     assert agent_cli.get_profile("codex").skill_cmd == "${name}"
 
@@ -181,7 +178,7 @@ def test_resolve_model_for_pane_no_session_returns_current(monkeypatch):
 
 
 def test_member_role_for_pane_returns_agent_when_profile_detected(monkeypatch):
-    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "droid")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "codex")
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "")
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])

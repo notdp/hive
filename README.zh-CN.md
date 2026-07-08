@@ -1,6 +1,6 @@
 # Hive
 
-> 面向 CLI agent 的 tmux 协作 runtime。`claude`、`codex`、`droid` 通过内联 `<HIVE>` 消息、可追踪的投递状态和 handoff thread 彼此协作。
+> 面向 CLI agent 的 tmux 协作 runtime。`claude` 与 `codex` 通过内联 `<HIVE>` 消息、可追踪的投递状态和 handoff thread 彼此协作。
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md)
 
@@ -18,7 +18,7 @@ Hive 是给 agent 用的 runtime，不是一个主要靠人手动驱动的 CLI�
 # Hive CLI
 pipx install git+https://github.com/notdp/hive.git
 
-# Hive skill，适用于 Claude Code / Codex / Droid
+# Hive skill，适用于 Claude Code / Codex
 npx skills add https://github.com/notdp/hive -g --all
 ```
 
@@ -26,13 +26,13 @@ npx skills add https://github.com/notdp/hive -g --all
 
 - `tmux`（`hive cvim` / `hive vim` 这类弹窗辅助命令需要 3.2+）
 - Python 3.11+
-- 至少一种 agent CLI：`claude`、`codex` 或 `droid`
+- 至少一种 agent CLI：`claude` 或 `codex`
 
 ## 在 agent 会话中开始
 
 ```bash
 # 在 tmux 里启动你要用的 agent
-$ claude       # 或：codex、droid
+$ claude       # 或：codex
 
 # 在 agent 会话里输入：
 /hive
@@ -103,7 +103,7 @@ PYTHONPATH=src python -m pytest tests/ -q
 ## 文档
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) — runtime 字段语义（`busy`、`inputState`、`turnPhase`）
-- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude / Codex / Droid 的 transcript 解析规则
+- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude 的 transcript 解析规则
 - [`skills/hive/SKILL.md`](skills/hive/SKILL.md) — 运行时由 Hive skill 加载的 agent 行为 / prompt contract
 
 ## License

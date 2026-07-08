@@ -2,7 +2,7 @@
 
 Codex stores every session as a JSONL file under
 ``$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<session_id>.jsonl``.
-Unlike droid and claude, the on-disk layout is partitioned by *date* rather
+Unlike claude, the on-disk layout is partitioned by *date* rather
 than by cwd, so ``find_session_file(session_id, cwd=...)`` ignores the cwd hint
 and walks the sessions tree.
 

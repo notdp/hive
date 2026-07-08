@@ -1,4 +1,4 @@
-"""Agent CLI profiles: droid, claude, codex."""
+"""Agent CLI profiles: claude, codex."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from . import adapters
 from . import settings as user_settings
 from . import tmux
 
-AGENT_CLI_NAMES = frozenset({"droid", "claude", "codex"})
+AGENT_CLI_NAMES = frozenset({"claude", "codex"})
 
 # Non-authoritative suggestions for the interactive picker. Custom values
 # always accepted; these just save the user from typing common aliases.
@@ -29,12 +29,6 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
         "claude-sonnet-4-6[1m]", "claude-sonnet-4-6",
     ],
     "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
-    "droid": [
-        "claude-fable-5",
-        "claude-opus-4-8", "claude-opus-4-6[1m]",
-        "claude-sonnet-4-6",
-        "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
-    ],
 }
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
@@ -51,30 +45,22 @@ CLI_ALIASES = {
 # OpenAI) produce more diverse viewpoints than same-family pairs. Used by:
 # - `hive squad init` to pick challenger's CLI
 # - `hive init` peer discovery / spawn fallback
-_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude", "droid": "claude"}
+_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude"}
 
 
 def anti_peer_cli(current_cli: str) -> str:
-    """Return the anti-family peer CLI for *current_cli* (claude↔codex; droid→claude).
-
-    droid wraps arbitrary models; default peer = claude. Callers that know
-    droid is running an Anthropic model (opus/sonnet) should override with
-    'codex' explicitly.
-    """
+    """Return the anti-family peer CLI for *current_cli* (claude↔codex)."""
     return _ANTI_PEER_CLI.get(current_cli, "claude")
 
 
 def classify_model_family(model: str) -> str:
     """Classify a model identifier into a coarse family for peer diversity.
 
-    Returns 'anthropic', 'openai', or 'unknown'. Handles droid's 'custom:'
-    prefix and common aliases.
+    Returns 'anthropic', 'openai', or 'unknown'.
     """
     if not model:
         return "unknown"
     m = model.lower().strip()
-    if m.startswith("custom:"):
-        m = m[len("custom:"):]
     m = m.lstrip("-")
     if "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
         return "anthropic"
@@ -87,7 +73,7 @@ def family_for_pane(pane_id: str) -> str:
     """Best-effort classify the agent pane's model family.
 
     Reads model via resolve_model_for_pane; falls back to CLI identity when
-    the model is unavailable (claude→anthropic, codex→openai, droid→unknown).
+    the model is unavailable (claude→anthropic, codex→openai).
     """
     profile = detect_profile_for_pane(pane_id)
     if not profile:
@@ -110,154 +96,6 @@ def peer_cli_for_family(my_family: str) -> str:
     if my_family == "openai":
         return "claude"
     return "claude"
-
-
-# Cross-family preference list, strongest first. Match the entry's ``model``
-# field exactly. To rank a new model, add it in the right slot. If a real
-# customModels entry isn't in this list, it gets ignored (selfPeer falls
-# back to claude/codex).
-_CROSS_FAMILY_RANKING: dict[str, list[str]] = {
-    "anthropic": [
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-opus-4-5-20251101",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5-20250929",
-        "claude-haiku-4-5-20251001",
-    ],
-    "openai": [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5",
-    ],
-}
-
-
-def _load_factory_settings() -> dict[str, Any]:
-    factory_home = Path(os.environ.get("FACTORY_HOME", str(Path.home() / ".factory")))
-    path = factory_home / "settings.json"
-    try:
-        text = path.read_text()
-    except OSError:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _load_factory_custom_models() -> list[dict[str, Any]]:
-    models = _load_factory_settings().get("customModels")
-    return [m for m in (models or []) if isinstance(m, dict)]
-
-
-def _factory_uses_managed_default() -> bool:
-    """Heuristic for "user has a working Factory managed plan".
-
-    If ``sessionDefaultSettings.model`` is a non-``custom:`` model id, the
-    user is actively running droid against Factory's managed catalog —
-    proof that the plan covers managed inference. When it's a ``custom:``
-    id, missing, or empty, we cannot presume managed access and fall back
-    to claude/codex peer instead of guessing.
-    """
-    default_model = (_load_factory_settings().get("sessionDefaultSettings") or {}).get("model")
-    if not isinstance(default_model, str) or not default_model:
-        return False
-    return not default_model.startswith("custom:")
-
-
-def pick_droid_cross_family_model(
-    lead_family: str,
-    custom_models: list[dict[str, Any]] | None = None,
-) -> str | None:
-    """Pick a cross-family model id for a droid peer spawn.
-
-    1. Walks ``_CROSS_FAMILY_RANKING[opposite_family]`` and returns the
-       **id** of the first BYOK customModels entry whose ``model`` field
-       matches (e.g. ``custom:Claude-Opus-4.7-0``).
-    2. If no BYOK match AND the user's Factory ``sessionDefaultSettings.model``
-       is a managed (non-``custom:``) id — proof the plan covers managed
-       inference — falls back to the **top of the ranking list** as a
-       plain model id (e.g. ``gpt-5.5``).
-    3. Otherwise returns ``None`` so the caller can fall through to the
-       claude/codex peer instead of spawning a managed peer the user has
-       no plan to support.
-    """
-    if lead_family not in {"anthropic", "openai"}:
-        return None
-    target_family = "openai" if lead_family == "anthropic" else "anthropic"
-    ranking = _CROSS_FAMILY_RANKING.get(target_family, [])
-    if not ranking:
-        return None
-
-    by_model: dict[str, str] = {}
-    entries = custom_models if custom_models is not None else _load_factory_custom_models()
-    for entry in entries:
-        if (entry.get("provider") or "").lower() != target_family:
-            continue
-        model = entry.get("model") or ""
-        entry_id = entry.get("id")
-        if model and entry_id and model not in by_model:
-            by_model[model] = str(entry_id)
-
-    for model_name in ranking:
-        if model_name in by_model:
-            return by_model[model_name]
-
-    # Managed fallback: only when the user's sessionDefaultSettings already
-    # points at a managed (non-custom:) model — that's our signal that the
-    # Factory plan covers managed inference. Otherwise we'd silently spawn
-    # a peer the user has no plan to support; better to fall through to
-    # claude/codex peer.
-    if _factory_uses_managed_default():
-        return ranking[0]
-    return None
-
-
-_DROID_SELF_PEER_ENV = "HIVE_DROID_SELF_PEER"
-_TRUTHY = {"1", "true", "yes", "on"}
-
-
-def _droid_self_peer_enabled() -> bool:
-    """Resolve the droid self-peer toggle.
-
-    ``HIVE_DROID_SELF_PEER`` env var (truthy: 1/true/yes/on) takes precedence
-    over the ``droid.selfPeer`` key in ``~/.hive/settings.json``. **Default on**:
-    droid leads spawn droid peers unless explicitly disabled via env or
-    ``hive config set droid.selfPeer false``.
-    """
-    raw = os.environ.get(_DROID_SELF_PEER_ENV)
-    if raw is not None:
-        return raw.strip().lower() in _TRUTHY
-    return bool(user_settings.get_setting("droid.selfPeer", True))
-
-
-def resolve_peer_spawn(
-    *,
-    my_cli: str,
-    my_family: str,
-    custom_models: list[dict[str, Any]] | None = None,
-) -> tuple[str, str]:
-    """Decide ``(peer_cli, peer_model)`` for an anti-family peer spawn.
-
-    Default behavior is unchanged: ``peer_cli_for_family(my_family)`` with an
-    empty model (caller's CLI default applies). When the lead is droid AND
-    selfPeer is enabled (env or settings), returns ``("droid", "<id-or-managed>")``
-    so the peer also runs droid.
-    """
-    default = (peer_cli_for_family(my_family), "")
-    if my_cli != "droid":
-        return default
-    if not _droid_self_peer_enabled():
-        return default
-    model_id = pick_droid_cross_family_model(my_family, custom_models)
-    if not model_id:
-        return default
-    return ("droid", model_id)
 
 
 def normalize_command(command: str) -> str:
@@ -289,12 +127,6 @@ class CLIProfile:
 
 
 PROFILES: dict[str, CLIProfile] = {
-    "droid": CLIProfile(
-        name="droid",
-        ready_text="for help",
-        fork_cmd="droid --fork {session_id}",
-        skill_cmd="/{name}",
-    ),
     "claude": CLIProfile(
         name="claude",
         ready_text="Claude Code",

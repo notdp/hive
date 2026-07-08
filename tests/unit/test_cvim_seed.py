@@ -28,13 +28,9 @@ def _run_seed_helper(
     *,
     cwd: str,
     preferred: Path | None = None,
-    factory_home: Path | None = None,
     offset: int = 0,
 ) -> str:
     dst = tmp_path / "seed.txt"
-    env = os.environ.copy()
-    if factory_home is not None:
-        env["FACTORY_HOME"] = str(factory_home)
     args = [
         sys.executable,
         str(SEED_HELPER),
@@ -44,7 +40,7 @@ def _run_seed_helper(
     ]
     if offset:
         args.append(str(offset))
-    subprocess.run(args, check=True, env=env)
+    subprocess.run(args, check=True, env=os.environ.copy())
     return dst.read_text()
 
 
@@ -135,21 +131,6 @@ def test_seed_helper_survives_realistic_edit_noise_transcript(tmp_path):
     assert _run_seed_helper(tmp_path, cwd="/repo", preferred=transcript) == (
         "# 已按你选的方向改回去\n\n所以这次是按你选的“严格同构 dotfiles 原版”落地了。\n"
     )
-
-
-def test_seed_helper_scans_factory_sessions_when_preferred_missing(tmp_path):
-    factory_home = tmp_path / "factory"
-    transcript_dir = factory_home / "sessions" / "-repo"
-    transcript_dir.mkdir(parents=True)
-    transcript = transcript_dir / "abc.jsonl"
-    _write_jsonl(
-        transcript,
-        [
-            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "from session dir"}]}},
-        ],
-    )
-
-    assert _run_seed_helper(tmp_path, cwd="/repo", factory_home=factory_home) == "from session dir\n"
 
 
 def test_seed_helper_offset_returns_earlier_assistant_message(tmp_path):
@@ -265,7 +246,7 @@ def test_extract_last_assistant_text_skips_codex_skill_turn_commentary(tmp_path)
     assert shared.extract_last_assistant_text(transcript) == "真正要编辑的回答"
 
 
-def test_resolve_transcript_path_for_non_droid_pane_uses_adapter(monkeypatch, tmp_path):
+def test_resolve_transcript_path_for_pane_uses_adapter(monkeypatch, tmp_path):
     shared = _import_shared()
     transcript = tmp_path / "claude.jsonl"
     transcript.write_text("")
@@ -389,7 +370,7 @@ def test_resolve_transcript_path_for_codex_hive_pane_falls_back_to_adapter_when_
     ) == str(transcript)
 
 
-def test_resolve_transcript_path_for_non_droid_pane_returns_none_without_resume(monkeypatch, tmp_path):
+def test_resolve_transcript_path_for_pane_returns_none_without_session(monkeypatch, tmp_path):
     shared = _import_shared()
 
     class MissingAdapter:
@@ -444,13 +425,8 @@ def test_resolve_transcript_path_for_claude_uses_validated_pidfile_fallback(monk
     ) == str(transcript)
 
 
-def test_resolve_transcript_path_for_pane_falls_back_to_resume_transcript(monkeypatch, tmp_path):
+def test_resolve_transcript_path_for_pane_returns_none_when_session_file_missing(monkeypatch, tmp_path):
     shared = _import_shared()
-    factory_home = tmp_path / "factory"
-    monkeypatch.setenv("FACTORY_HOME", str(factory_home))
-    resumed = factory_home / "sessions" / "-repo" / "12345678-1234-1234-1234-123456789abc.jsonl"
-    resumed.parent.mkdir(parents=True)
-    resumed.write_text("")
 
     class PartialAdapter:
         def resolve_current_session_id(self, pane_id: str) -> str | None:
@@ -469,5 +445,4 @@ def test_resolve_transcript_path_for_pane_falls_back_to_resume_transcript(monkey
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
         cwd="/repo",
-        droid_args="droid --resume 12345678-1234-1234-1234-123456789abc",
-    ) == str(resumed)
+    ) is None

@@ -90,7 +90,7 @@ orch 会先发 verify bootstrap 或任务上下文，之后 worker 发 plan 草�
 hive send <squad>.orch "<squad>.validator-<N> idle, awaiting dispatch"
 ```
 
-worker 的首条 plan 必须带 worktree 路径。codex / droid worker 还要带：
+worker 的首条 plan 必须带 worktree 路径。codex worker 还要带：
 
 ```bash
 pwd
@@ -114,11 +114,11 @@ plan 审查和 verify 都在 worker 的 worktree 里跑。站主 checkout 验收
 
 - worktree 路径来自 worker 首条消息；没带就要求补。
 - claude 用 `EnterWorktree path=<路径>` 只读进入。
-- codex / droid 每条 plan/VAL/verify 命令都把 working directory 设为 worktree，并先记录 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
+- codex 每条 plan/VAL/verify 命令都把 working directory 设为 worktree，并先记录 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
 - git 查询可以 `git -C <路径>`；verify 命令必须在 worktree working directory 里跑。
 - `hive worktree start` / `hive worktree done` 是 worker 动作。
 
-final pass 后退出 worktree：claude `ExitWorktree action=keep`；codex / droid 后续 repo 命令切回主 checkout。
+final pass 后退出 worktree：claude `ExitWorktree action=keep`；codex 后续 repo 命令切回主 checkout。
 
 ### 3. handoff 证据面
 

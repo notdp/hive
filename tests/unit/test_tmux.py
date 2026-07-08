@@ -249,7 +249,7 @@ def test_list_panes_with_titles_and_full_parse_rows(monkeypatch):
     outputs = {
         "#{pane_id}\t#{pane_title}": "%1\tmain\n%2\tworker\n",
         tmux._PANE_BASE_FMT: (
-            "%1\tmain\tdroid\tagent\tclaude\tteam-a\t\n"
+            "%1\tmain\tcodex\tagent\tclaude\tteam-a\t\n"
             "%2\tshell\tzsh\tterminal\tterm-1\tteam-a\t\n"
         ),
     }
@@ -264,7 +264,7 @@ def test_list_panes_with_titles_and_full_parse_rows(monkeypatch):
     full = tmux.list_panes_full("dev:0")
 
     assert titled == [tmux.PaneInfo("%1", "main"), tmux.PaneInfo("%2", "worker")]
-    assert full[0] == tmux.PaneInfo("%1", "main", "droid", "agent", "claude", "team-a")
+    assert full[0] == tmux.PaneInfo("%1", "main", "codex", "agent", "claude", "team-a")
     assert full[1].role == "terminal"
 
 

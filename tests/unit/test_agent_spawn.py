@@ -7,7 +7,6 @@ import pytest
 from hive import agent as agent_mod
 from hive.agent import (
     Agent,
-    _build_droid_model_settings,
     detect_current_session_id,
 )
 
@@ -322,85 +321,18 @@ def test_send_submits_text_with_enter(monkeypatch):
     assert calls == ["hello world", "<Enter>"]
 
 
-def test_send_same_for_droid(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="droid")
-
-    agent.send("hello world")
-
-    assert calls == ["hello world", "<Enter>"]
-
-
 def test_send_exits_tmux_copy_mode_before_submitting(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     canceled: list[str] = []
     monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: True)
     monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda pane: canceled.append(pane))
-    # droid still uses the keystroke path; claude is channel-only (no copy-mode/keys)
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="droid")
+    # codex uses the keystroke path; claude is channel-only (no copy-mode/keys)
+    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
 
     agent.send("hello world")
 
     assert canceled == ["%0"]
     assert calls == ["hello world", "<Enter>"]
-
-
-def test_spawn_droid_uses_temp_settings_file_for_model(monkeypatch):
-    calls, tags = _setup_tmux_mocks(monkeypatch)
-
-    monkeypatch.setattr(
-        "hive.agent._build_droid_model_settings",
-        lambda _model: ('{"sessionDefaultSettings":{"model":"custom:Claude-Opus-4.6-0"}}', "custom:Claude-Opus-4.6-0"),
-    )
-
-    Agent.spawn(
-        name="w1", team_name="t", target_pane="%0",
-        model="custom:claude-opus-4-6", cwd="/tmp", is_first=True,
-        skill="none", cli="droid",
-    )
-
-    startup_cmd = calls[0]
-    assert 'settings_file=$(mktemp "${TMPDIR:-/tmp}/hive-droid-settings.XXXXXX")' in startup_cmd
-    assert "--settings \"$settings_file\"" in startup_cmd
-    assert "sessionDefaultSettings" in startup_cmd
-    assert tags == [("%0", "agent", "w1", "t")]
-    _assert_startup_cmd_runs_on_bash(startup_cmd)
-
-
-def _assert_startup_cmd_runs_on_bash(startup_cmd: str) -> None:
-    """Run the generated startup_cmd on the local bash up to (but excluding)
-    the final `exec <cli>` step, to catch shell-level failures like GNU
-    `mktemp -t TEMPLATE` rejecting templates without 3+ X's.
-
-    The real command ends with `exec '.../droid' ...`; we stop before exec
-    by replacing the droid invocation with `true`, then ensure the settings
-    file was actually created.
-    """
-    import os
-    import shlex
-    import shutil
-    import subprocess
-
-    if shutil.which("bash") is None:
-        return
-
-    # Trim everything from the final `exec '` onwards and replace with a no-op
-    # that still consumes the trailing `--settings "$settings_file"` args.
-    exec_idx = startup_cmd.rfind(" && exec '")
-    assert exec_idx > 0, f"startup_cmd missing exec step: {startup_cmd!r}"
-    harness = startup_cmd[:exec_idx] + ' && test -s "$settings_file"'
-
-    result = subprocess.run(
-        ["bash", "-c", harness],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        env={**os.environ, "TMPDIR": "/tmp"},
-    )
-    assert result.returncode == 0, (
-        "generated startup_cmd failed to execute on bash\n"
-        f"cmd={harness!r}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
-    )
 
 
 def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
@@ -409,7 +341,7 @@ def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%9",
-        cwd="/tmp", is_first=True, skill="none", cli="droid",
+        cwd="/tmp", is_first=True, skill="none", cli="claude",
     )
 
     assert calls, "spawn should still start the CLI process"
@@ -445,43 +377,6 @@ def test_spawn_codex_uses_model_flag(monkeypatch):
     assert "codex" in startup_cmd
 
 
-def test_build_droid_model_settings_resolves_custom_model(monkeypatch, tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps({
-        "sessionDefaultSettings": {"model": "opus"},
-        "customModels": [
-            {"model": "claude-opus-4-6", "displayName": "Claude Opus 4.6", "id": "custom:Claude-Opus-4.6-0"}
-        ],
-    }))
-    monkeypatch.setattr("hive.agent._settings_file", lambda: settings_file)
-
-    json_str, resolved = _build_droid_model_settings("custom:claude-opus-4-6")
-    assert resolved == "custom:Claude-Opus-4.6-0"
-    assert json_str
-
-    data = json.loads(json_str)
-    assert data == {"sessionDefaultSettings": {"model": "custom:Claude-Opus-4.6-0"}}
-
-
-def test_build_droid_model_settings_keeps_direct_model(monkeypatch, tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps({
-        "sessionDefaultSettings": {"model": "custom:my-model"},
-    }))
-    monkeypatch.setattr("hive.agent._settings_file", lambda: settings_file)
-
-    json_str, resolved = _build_droid_model_settings("custom:my-model")
-    assert resolved == "custom:my-model"
-    data = json.loads(json_str)
-    assert data == {"sessionDefaultSettings": {"model": "custom:my-model"}}
-
-
-def test_build_droid_model_settings_returns_empty_when_no_model():
-    json_str, resolved = _build_droid_model_settings("")
-    assert json_str == ""
-    assert resolved == ""
-
-
 def test_spawn_rejects_unknown_cli(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
 
@@ -491,19 +386,6 @@ def test_spawn_rejects_unknown_cli(monkeypatch):
         assert "unsupported cli" in str(exc)
     else:
         raise AssertionError("expected ValueError")
-
-
-def test_spawn_droid_resume_uses_dash_r(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-
-    Agent.spawn(
-        name="w1", team_name="t", target_pane="%0",
-        cwd="/tmp", is_first=True, skill="none", cli="droid",
-        session_id="sess-abc",
-    )
-
-    startup_cmd = calls[0]
-    assert "-r 'sess-abc'" in startup_cmd
 
 
 def test_spawn_claude_resume_uses_fork_session(monkeypatch):
@@ -750,7 +632,7 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
     assert submitted == []  # channel-only: no keystroke fallback
 
 
-def test_spawn_claude_skips_droid_session_detection(monkeypatch):
+def test_spawn_claude_skips_session_detection(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
     resolved: list[str] = []
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda pane_id: resolved.append(pane_id) or None)

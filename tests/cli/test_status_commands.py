@@ -348,8 +348,8 @@ def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
         lambda _target: [
-            PaneInfo("%0", "[orch]", command="droid"),
-            PaneInfo("%12", "[claude]", command="droid"),
+            PaneInfo("%0", "[orch]", command="claude"),
+            PaneInfo("%12", "[claude]", command="claude"),
         ],
     )
 

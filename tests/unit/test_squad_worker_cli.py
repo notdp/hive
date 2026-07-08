@@ -41,14 +41,14 @@ def test_defaults_to_orch_family(monkeypatch):
 
 
 def test_window_tag_overrides_all(monkeypatch):
-    _mock(monkeypatch, window_tag="codex", role_cli="droid", config="droid",
+    _mock(monkeypatch, window_tag="codex", role_cli="claude", config="claude",
           orch_cli="claude", role_model="opus")
     assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("codex", "opus")
 
 
 def test_role_config_cli_overrides_legacy_and_orch(monkeypatch):
-    _mock(monkeypatch, role_cli="droid", config="codex", orch_cli="claude")
-    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("droid", "")
+    _mock(monkeypatch, role_cli="claude", config="codex", orch_cli="codex")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("claude", "")
 
 
 def test_legacy_config_still_works(monkeypatch):
@@ -57,8 +57,8 @@ def test_legacy_config_still_works(monkeypatch):
 
 
 def test_tag_beats_role_config(monkeypatch):
-    _mock(monkeypatch, window_tag="droid", role_cli="codex", orch_cli="claude")
-    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("droid", "")
+    _mock(monkeypatch, window_tag="claude", role_cli="codex", orch_cli="codex")
+    assert cli_mod._resolve_squad_worker_config("%1", "dev:1") == ("claude", "")
 
 
 def test_role_model_applies_with_any_cli_source(monkeypatch):

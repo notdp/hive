@@ -1,6 +1,6 @@
 """Base types and Protocol for agent CLI session adapters.
 
-Adapters normalize the three CLIs (droid/claude/codex) around a single
+Adapters normalize the two CLIs (claude/codex) around a single
 interface so callers can discover, locate, and read session JSONL files
 without knowing the per-CLI on-disk layout.
 """
@@ -55,7 +55,7 @@ class SessionAdapter(Protocol):
     def find_session_file(self, session_id: str, *, cwd: str | None = None) -> Path | None:
         """Locate the JSONL file backing *session_id*.
 
-        *cwd* is an optional hint; droid/claude store files under a cwd-slug
+        *cwd* is an optional hint; claude stores files under a cwd-slug
         directory while codex partitions by date, so the hint speeds up the
         former and is ignored by the latter.
         """
@@ -166,7 +166,7 @@ class GateResult:
 
 
 def _extract_content_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract content blocks from a JSONL record, handling droid/claude/codex."""
+    """Extract content blocks from a JSONL record, handling claude/codex."""
     msg = payload.get("message")
     if isinstance(msg, dict):
         content = msg.get("content")
@@ -178,21 +178,11 @@ def _extract_content_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def _is_assistant_ask(payload: dict[str, Any]) -> bool:
     """Check whether a raw JSONL record is an assistant turn with AskUserQuestion.
 
-    Handles all three CLI formats:
-    - droid: {"type": "message", "message": {"role": "assistant", "content": [...]}}
+    Handles both CLI formats:
     - claude: {"type": "assistant", "message": {"role": "assistant", "content": [...]}}
     - codex: {"type": "response_item", "payload": {"type": "function_call", "name": ...}}
     """
     record_type = payload.get("type", "")
-
-    # droid: type == "message", message.role == "assistant"
-    if record_type == "message":
-        msg = payload.get("message")
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            for block in _extract_content_blocks(payload):
-                if block.get("type") == "tool_use" and block.get("name") in _ASK_TOOL_NAMES:
-                    return True
-        return False
 
     # claude: type == "assistant"
     if record_type == "assistant":
@@ -283,8 +273,8 @@ def check_input_gate(path: Path) -> GateResult:
 # --- ACK helpers ---
 # These operate on raw JSONL lines to detect whether a sent message was
 # accepted by the receiver's CLI session transcript.  The _is_user_turn
-# matcher knows the raw record shapes of all three supported CLIs
-# (droid, claude, codex) so the wait helper can stay CLI-agnostic.
+# matcher knows the raw record shapes of both supported CLIs
+# (claude, codex) so the wait helper can stay CLI-agnostic.
 
 
 def get_transcript_baseline(path: Path) -> int:
@@ -298,13 +288,9 @@ def get_transcript_baseline(path: Path) -> int:
 def _is_user_turn(payload: dict[str, Any]) -> bool:
     """Check whether a raw JSONL record represents a user turn.
 
-    Checks all three CLI formats; only one will match for any given file.
+    Checks both CLI formats; only one will match for any given file.
     """
     record_type = payload.get("type", "")
-    # droid: {"type": "message", "message": {"role": "user", ...}}
-    if record_type == "message":
-        msg = payload.get("message")
-        return isinstance(msg, dict) and msg.get("role") == "user"
     # claude: {"type": "user", ...}
     if record_type == "user":
         return True
