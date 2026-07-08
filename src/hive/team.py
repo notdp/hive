@@ -163,7 +163,7 @@ class Team:
                     resolved_cli = pane.cli or normalize_command(pane.command)
                     if resolved_cli not in AGENT_CLI_NAMES:
                         profile = detect_profile_for_pane(pane.pane_id)
-                        resolved_cli = profile.name if profile else "droid"
+                        resolved_cli = profile.name if profile else "claude"
                     agent = Agent(
                         name=pane.agent,
                         team_name=name,
@@ -213,7 +213,7 @@ class Team:
         skill: str = "hive",
         workflow: str = "",
         extra_env: dict[str, str] | None = None,
-        cli: str = "droid",
+        cli: str = "claude",
     ) -> Agent:
         """Spawn a new agent in the team."""
         if name in self.agents:
@@ -405,7 +405,7 @@ class Team:
           1. explicit peer from peer_map (set by `hive peer set`)
           2. otherwise: pick a member that has no explicit peer yet
              (`no-peer`), preferring one whose CLI is anti-family of *name*'s
-             CLI (claude↔codex; droid defaults to claude pairing)
+             CLI (claude↔codex)
           3. fall back to any no-peer member (deterministic sort) if no
              anti-family candidate exists
           4. return None if nobody is available
@@ -433,7 +433,7 @@ class Team:
         return sorted(candidates)[0]
 
     def _member_cli(self, name: str) -> str:
-        """Return the CLI (claude/codex/droid) for *name*, or '' if unknown."""
+        """Return the CLI (claude/codex) for *name*, or '' if unknown."""
         agent = self.agents.get(name)
         if agent:
             return getattr(agent, "cli", "") or ""

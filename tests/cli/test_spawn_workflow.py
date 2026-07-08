@@ -57,7 +57,7 @@ def test_spawn_forwards_cli_options_to_team(runner, configure_hive_home, monkeyp
         "skill": "none",
         "workflow": "code-review",
         "extra_env": {"CR_WORKSPACE": "/tmp/cr", "MODE": "test"},
-        "cli": "droid",
+        "cli": "claude",
     }
     payload = json.loads((hive_home / "contexts" / "pane-55.json").read_text())
     assert payload == {"team": "team-x", "workspace": str(workspace), "agent": "claude"}

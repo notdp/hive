@@ -18,7 +18,7 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     fam = family_map or {}
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: profile)
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda p: fam.get(p, "openai"))
-    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_k: ("claude", ""))
+    monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _f: "claude")
     monkeypatch.setattr(cli_mod, "anti_peer_cli", lambda _c: "claude")
     monkeypatch.setattr(cli_mod, "_require_codex_daemon_backed", lambda _p: None)
     monkeypatch.setattr(cli_mod, "_resolve_spawn_cli_name", lambda _a: "codex")
@@ -475,11 +475,11 @@ def test_duo_init_flag_overrides_role_cli_but_keeps_model(
 
     monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
 
-    result = runner.invoke(cli, ["duo", "init", "--validator-cli", "droid"])
+    result = runner.invoke(cli, ["duo", "init", "--validator-cli", "claude"])
     assert result.exit_code == 0, result.output
 
     assert len(spawned) == 1
-    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["cli"] == "claude"
     assert spawned[0]["model"] == "o3"
 
 
@@ -523,7 +523,7 @@ def test_duo_init_model_only_keeps_default_cli(
 def test_duo_init_role_cli_set_without_model_no_stale_peer_model(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
-    """When roles.validator.cli is set but model is not, no stale resolve_peer_spawn model leaks."""
+    """When roles.validator.cli is set but model is not, no stale peer model leaks."""
     configure_hive_home(current_pane="%100", session_name="dev")
     import hive.cli as cli_mod
 
@@ -534,7 +534,7 @@ def test_duo_init_role_cli_set_without_model_no_stale_peer_model(
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
-            "roles.validator.cli": "droid",
+            "roles.validator.cli": "codex",
         }.get(key, default),
     )
 
@@ -552,5 +552,5 @@ def test_duo_init_role_cli_set_without_model_no_stale_peer_model(
     result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
-    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["cli"] == "codex"
     assert spawned[0]["model"] == ""

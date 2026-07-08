@@ -184,7 +184,7 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
 
     class _FakeAgent:
         pane_id = "%99"
-        cli = "droid"
+        cli = "claude"
 
         def is_alive(self) -> bool:
             return True
@@ -498,7 +498,7 @@ def test_inject_writes_raw_composer_keystrokes(runner, configure_hive_home, monk
 def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive_home, monkeypatch):
     # no --pane: compact resolves the CURRENT pane from its tmux options, never
     # through _resolve_scoped_team / _resolve_sender / t.get (re-resolving by name
-    # is the cross-window same-name bug). A team-bound droid pane delivers
+    # is the cross-window same-name bug). A team-bound claude pane delivers
     # /compact through the composer and keeps the team-member output shape.
     configure_hive_home()
     typed: list[tuple[str, str, str]] = []
@@ -518,7 +518,7 @@ def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive
     pane_options = {
         ("%21", "hive-team"): "team-x",
         ("%21", "hive-agent"): "orch",
-        ("%21", "hive-cli"): "droid",
+        ("%21", "hive-cli"): "claude",
     }
     monkeypatch.setattr(
         "hive.cli.tmux.get_pane_option",
@@ -529,7 +529,7 @@ def test_compact_self_delivers_slash_compact_via_composer(runner, configure_hive
     assert result.exit_code == 0, result.output
     # /compact is a TUI slash command: composer keystrokes, never Agent.send
     # (a channel message would arrive as content, not as a command)
-    assert typed == [("%21", "/compact", "droid")]
+    assert typed == [("%21", "/compact", "claude")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "orch",
@@ -771,7 +771,7 @@ def test_compact_pane_non_team_non_codex_sends_composer(runner, configure_hive_h
         lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
     )
 
-    pane_options = {("%42", "hive-cli"): "droid"}  # no hive-team / hive-agent
+    pane_options = {("%42", "hive-cli"): "claude"}  # no hive-team / hive-agent
     monkeypatch.setattr(
         "hive.cli.tmux.get_pane_option",
         lambda pane, key: pane_options.get((pane, key)),
@@ -779,7 +779,7 @@ def test_compact_pane_non_team_non_codex_sends_composer(runner, configure_hive_h
 
     result = runner.invoke(cli, ["compact", "--pane", "%42"])
     assert result.exit_code == 0, result.output
-    assert typed == [("%42", "/compact", "droid")]
+    assert typed == [("%42", "/compact", "claude")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "%42",
@@ -824,7 +824,7 @@ def test_compact_self_non_team_codex_uses_current_pane(runner, configure_hive_ho
 
 
 def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hive_home, monkeypatch):
-    # no --pane on a non-team droid pane: resolve the CURRENT pane and deliver
+    # no --pane on a non-team claude pane: resolve the CURRENT pane and deliver
     # /compact through the composer.
     configure_hive_home()
     _forbid_team_resolution(monkeypatch)
@@ -835,7 +835,7 @@ def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hiv
         lambda pane, text, cli_name: typed.append((pane, text, cli_name)),
     )
 
-    pane_options = {("%7", "hive-cli"): "droid"}
+    pane_options = {("%7", "hive-cli"): "claude"}
     monkeypatch.setattr(
         "hive.cli.tmux.get_pane_option",
         lambda pane, key: pane_options.get((pane, key)),
@@ -843,7 +843,7 @@ def test_compact_self_non_team_non_codex_uses_current_pane(runner, configure_hiv
 
     result = runner.invoke(cli, ["compact"])
     assert result.exit_code == 0, result.output
-    assert typed == [("%7", "/compact", "droid")]
+    assert typed == [("%7", "/compact", "claude")]
     payload = json.loads(result.output)
     assert payload == {
         "member": "%7",

@@ -626,8 +626,7 @@ class CodexClientPool:
         text into the running turn, or opens a fresh turn when idle), so hive
         hands it straight to the RPC and lets codex pick the landing — the same
         thing the codex TUI does for a typed message. Keystroke injection is
-        thereby reserved for CLIs without an app-server (droid/claude) and for
-        embedded codex panes that never spawned a daemon.
+        thereby reserved for embedded codex panes that never spawned a daemon.
         """
         client = self._client_for(pane)
         if client is None:

@@ -198,24 +198,3 @@ def test_probe_transcript_turn_phase_claude_user_prompt_with_string_content_is_a
 
     assert payload["turnPhase"] == "user_prompt_pending"
     assert payload["phaseObservedAt"] == "2026-04-28T11:11:39Z"
-
-
-def test_probe_transcript_turn_phase_droid_assistant_text_stays_unknown(tmp_path):
-    path = tmp_path / "droid.jsonl"
-    path.write_text(
-        json.dumps(
-            {
-                "type": "message",
-                "timestamp": "2026-04-16T05:00:00Z",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "已完成。"}],
-                },
-            }
-        )
-        + "\n"
-    )
-
-    payload = probe_transcript_turn_phase("droid", path)
-
-    assert payload["turnPhase"] == "assistant_text_idle"

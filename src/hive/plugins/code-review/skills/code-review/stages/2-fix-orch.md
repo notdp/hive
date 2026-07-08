@@ -24,8 +24,8 @@ flowchart TD
 ## Spawn
 
 ```bash
-hive spawn fixer --cli droid --model custom:Claude-Opus-4.6-0 --workflow code-review
-hive spawn checker --cli droid --model custom:GPT-5.4-1 --workflow code-review
+hive spawn fixer --cli claude --workflow code-review
+hive spawn checker --cli codex --workflow code-review
 
 hive layout main-vertical
 ```

@@ -67,8 +67,6 @@ def hive_skill_path_for_cli(cli: str) -> Path:
         return core_hooks.codex_home() / "skills" / _HIVE_SKILL_NAME / "SKILL.md"
     if normalized == "claude":
         return core_hooks.claude_home() / "skills" / _HIVE_SKILL_NAME / "SKILL.md"
-    if normalized == "droid":
-        return core_hooks.factory_home() / "skills" / _HIVE_SKILL_NAME / "SKILL.md"
     raise ValueError(f"unsupported cli '{cli}'")
 
 

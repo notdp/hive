@@ -22,8 +22,8 @@ This document does not define:
 - automatic fork/spawn decisions
 - automatic garbage collection
 
-For the raw Claude/Codex/Droid transcript and JCL structures that feed these
-runtime decisions, see `docs/transcript-signals.md`.
+For the raw Claude transcript structures that feed these runtime decisions,
+see `docs/transcript-signals.md`.
 
 ## Runtime Layers
 
@@ -143,7 +143,7 @@ Important consumer:
 
 Source:
 
-- transcript probe for claude/droid (last observed transcript state)
+- transcript probe for claude (last observed transcript state)
 - codex app-server thread status for a daemon-backed codex pane — codex has no
   transcript probe (see "Codex Native Runtime")
 
@@ -173,10 +173,9 @@ These are related, but they are not the same concept.
 - a tool/task open event has happened
 - the corresponding close event has not happened yet
 
-Examples:
+Example:
 
 - Claude: `tool_use` without matching `tool_result`
-- Droid: `tool_use` without matching `tool_result`
 
 In `turnPhase` terms, hard busy surfaces as `tool_open`. `input_backlog` is a
 strategy-level non-open state that also matters to consumers but is not hard
@@ -202,15 +201,6 @@ Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 Codex has no transcript/JCL probe. A daemon-backed pane reports natively (see
 "Codex Native Runtime" below); an embedded (daemon-less) codex is unsupported
 and reads as `unknown_evidence`.
-
-### Droid
-
-- `tool_open` — `tool_use` block without matching `tool_result`
-- `tool_result_pending_reply` — tool result just arrived
-- `user_prompt_pending` — real user text pending
-- `assistant_text_idle` — assistant text without `tool_use`
-
-Droid's simple message-shape probe does not currently emit `turn_closed`.
 
 ## Codex Native Runtime (app-server source)
 

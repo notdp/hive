@@ -8,9 +8,9 @@ import os
 from hive import adapters, tmux
 
 
-def test_registry_has_three_known_adapters():
-    assert set(adapters.available()) == {"droid", "claude", "codex"}
-    for name in ("droid", "claude", "codex"):
+def test_registry_has_known_adapters():
+    assert set(adapters.available()) == {"claude", "codex"}
+    for name in ("claude", "codex"):
         adapter = adapters.get(name)
         assert adapter is not None
         assert isinstance(adapter, adapters.SessionAdapter)
@@ -20,51 +20,6 @@ def test_registry_has_three_known_adapters():
 def test_get_unknown_adapter_returns_none():
     assert adapters.get("gemini") is None
     assert adapters.get("") is None
-
-
-def test_droid_adapter_resolves_session_id_from_resume_args(monkeypatch, tmp_path):
-    monkeypatch.setenv("FACTORY_HOME", str(tmp_path))
-    monkeypatch.setattr("hive.adapters.droid.tmux.get_pane_tty", lambda _pane: "/dev/ttys100")
-    monkeypatch.setattr("hive.adapters.droid.tmux.list_tty_processes", lambda _tty: [
-        tmux.TTYProcessInfo(pid="111", command="droid", argv="droid --resume 12345678-1234-1234-1234-123456789abc"),
-    ])
-
-    adapter = adapters.get("droid")
-    assert adapter.resolve_current_session_id("%10") == "12345678-1234-1234-1234-123456789abc"
-
-
-def test_droid_adapter_resolves_session_id_from_fork_args(monkeypatch, tmp_path):
-    monkeypatch.setenv("FACTORY_HOME", str(tmp_path))
-    monkeypatch.setattr("hive.adapters.droid.tmux.get_pane_tty", lambda _pane: "/dev/ttys100")
-    monkeypatch.setattr("hive.adapters.droid.tmux.list_tty_processes", lambda _tty: [
-        tmux.TTYProcessInfo(pid="111", command="droid", argv="droid --fork 87654321-4321-4321-4321-cba987654321"),
-    ])
-
-    adapter = adapters.get("droid")
-    assert adapter.resolve_current_session_id("%10") == "87654321-4321-4321-4321-cba987654321"
-
-
-def test_droid_adapter_scans_latest_session_in_cwd_when_args_have_no_session(monkeypatch, tmp_path):
-    sessions_dir = tmp_path / "sessions" / "-repo"
-    sessions_dir.mkdir(parents=True)
-    older = sessions_dir / "sess-old.jsonl"
-    newer = sessions_dir / "sess-new.jsonl"
-    older.write_text(json.dumps({"type": "session_start", "id": "sess-old", "cwd": "/repo"}) + "\n")
-    newer.write_text(json.dumps({"type": "session_start", "id": "sess-new", "cwd": "/repo"}) + "\n")
-    older_ns = 1_700_000_000_000_000_000
-    newer_ns = older_ns + 5_000
-    os.utime(older, ns=(older_ns, older_ns))
-    os.utime(newer, ns=(newer_ns, newer_ns))
-
-    monkeypatch.setenv("FACTORY_HOME", str(tmp_path))
-    monkeypatch.setattr("hive.adapters.droid.tmux.get_pane_tty", lambda _pane: "/dev/ttys100")
-    monkeypatch.setattr("hive.adapters.droid.tmux.list_tty_processes", lambda _tty: [
-        tmux.TTYProcessInfo(pid="111", command="droid", argv="droid"),
-    ])
-    monkeypatch.setattr("hive.adapters.droid.tmux.display_value", lambda _pane, _fmt: "/repo")
-
-    adapter = adapters.get("droid")
-    assert adapter.resolve_current_session_id("%10") == "sess-new"
 
 
 def test_claude_adapter_reads_pidfile_session(monkeypatch, tmp_path):

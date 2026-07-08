@@ -294,86 +294,6 @@ def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
-def _droid_real_user_text(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict) or str(message.get("role") or "") != "user":
-        return False
-    saw_non_reminder = False
-    for block in _content_blocks(message):
-        if block.get("type") != "text":
-            continue
-        text = str(block.get("text") or "").strip()
-        if not text:
-            continue
-        if text.startswith("<system-reminder>"):
-            continue
-        saw_non_reminder = True
-    return saw_non_reminder
-
-
-def _droid_has_tool_result(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return False
-    return any(block.get("type") == "tool_result" for block in _content_blocks(message))
-
-
-def _droid_has_tool_use(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict):
-        return False
-    return any(block.get("type") == "tool_use" for block in _content_blocks(message))
-
-
-def _droid_has_assistant_text(record: dict[str, Any]) -> bool:
-    if record.get("type") != "message":
-        return False
-    message = record.get("message")
-    if not isinstance(message, dict) or str(message.get("role") or "") != "assistant":
-        return False
-    return any(
-        block.get("type") == "text" and str(block.get("text") or "").strip()
-        for block in _content_blocks(message)
-    )
-
-
-def _probe_droid_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
-    tail = [_raw_record_summary(record) for record in records]
-    for record in reversed(records):
-        if _droid_has_tool_use(record):
-            return _phase_payload(
-                reason="tool_open",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_has_tool_result(record):
-            return _phase_payload(
-                reason="tool_result_pending_reply",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_real_user_text(record):
-            return _phase_payload(
-                reason="user_prompt_pending",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-        if _droid_has_assistant_text(record):
-            return _phase_payload(
-                reason="assistant_text_idle",
-                observed_at=_raw_timestamp(record),
-                evidence_tail=tail,
-            )
-
-    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
-
-
 def probe_transcript_turn_phase(
     cli_name: str,
     transcript: str | Path,
@@ -393,8 +313,6 @@ def probe_transcript_turn_phase(
     # team entry), so it falls through to unknown_evidence below.
     if cli_name == "claude":
         return _probe_claude_turn_phase(records)
-    if cli_name == "droid":
-        return _probe_droid_turn_phase(records)
     return _phase_payload(
         reason="unknown_evidence",
         evidence_tail=[_raw_record_summary(record) for record in records],

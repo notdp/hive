@@ -5,7 +5,7 @@ uses for runtime decisions.
 
 It exists to answer a narrow question:
 
-- What do Claude Code and Droid transcripts actually look like?
+- What do Claude Code transcripts actually look like?
 - Which events count as open/close/read signals in current code?
 
 Codex has no transcript probe: a daemon-backed codex pane reports
@@ -55,10 +55,9 @@ This is the basis for the internal reasoning concept often described as
 - a tool/task open event exists
 - the corresponding close event has not appeared yet
 
-Examples:
+Example:
 
 - Claude: `tool_use` without matching `tool_result`
-- Droid: `tool_use` without matching `tool_result`
 
 ### Turn Phase
 
@@ -112,31 +111,6 @@ Both map to:
 - real user text
   - => `user_prompt_pending`
 - assistant text without stronger open/close evidence
-  - => `assistant_text_idle`
-
-## Droid Transcript
-
-Hive treats Droid transcript as message-oriented JSONL and looks at:
-
-- message role
-- `content[*].type`
-- `tool_use` / `tool_result`
-
-### Signals Used
-
-
-- assistant message containing `tool_use`
-  - => `turnPhase=tool_open`
-
-
-- none from the simple transcript probe alone
-
-
-- `tool_result`
-  - => `tool_result_pending_reply`
-- real user text (ignoring `<system-reminder>`)
-  - => `user_prompt_pending`
-- assistant text without `tool_use`
   - => `assistant_text_idle`
 
 ## What Does Not Count

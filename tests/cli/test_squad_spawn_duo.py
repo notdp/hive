@@ -284,15 +284,15 @@ def test_resolve_squad_worker_config_role_cli_in_precedence(monkeypatch):
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
-            "roles.worker.cli": "droid",
+            "roles.worker.cli": "codex",
             "roles.worker.model": "opus",
-            "squad.duoWorker": "codex",
+            "squad.duoWorker": "claude",
         }.get(key, default),
     )
     monkeypatch.setattr(cli_mod.tmux, "get_pane_option", lambda _p, k: "claude" if k == "hive-cli" else "")
 
     cli_name, model = cli_mod._resolve_squad_worker_config("%1", "dev:1")
-    assert cli_name == "droid"
+    assert cli_name == "codex"
     assert model == "opus"
 
 
@@ -303,13 +303,13 @@ def test_resolve_squad_worker_config_validator_role_config(monkeypatch):
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
-            "roles.validator.cli": "droid",
+            "roles.validator.cli": "codex",
             "roles.validator.model": "o3",
         }.get(key, default),
     )
 
     cli_name, model = resolve_role_config("validator")
-    assert cli_name == "droid"
+    assert cli_name == "codex"
     assert model == "o3"
 
 
@@ -346,13 +346,13 @@ def test_squad_spawn_duo_passes_role_config_to_agent_spawn(
     from hive.team import Team
     from types import SimpleNamespace
 
-    # Role config: worker=claude/opus, validator=droid/o3
+    # Role config: worker=claude/opus, validator=codex/o3
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
             "roles.worker.cli": "claude",
             "roles.worker.model": "opus",
-            "roles.validator.cli": "droid",
+            "roles.validator.cli": "codex",
             "roles.validator.model": "o3",
         }.get(key, default),
     )
@@ -461,7 +461,7 @@ def test_squad_spawn_duo_passes_role_config_to_agent_spawn(
     # Validator spawn
     validator_spawn = spawned[1]
     assert validator_spawn["name"] == "peaky.validator-1000"
-    assert validator_spawn["cli"] == "droid"
+    assert validator_spawn["cli"] == "codex"
     assert validator_spawn["model"] == "o3"
 
 

@@ -1,6 +1,6 @@
 # Hive
 
-> tmux-based collaboration runtime for CLI agents — `claude`, `codex`, `droid` talk to each other via inline `<HIVE>` messages, tracked deliveries, and handoff threads.
+> tmux-based collaboration runtime for CLI agents — `claude` and `codex` talk to each other via inline `<HIVE>` messages, tracked deliveries, and handoff threads.
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
@@ -18,7 +18,7 @@ A small set of commands is still yours: installing plugins, checking skill drift
 # Hive CLI
 pipx install git+https://github.com/notdp/hive.git
 
-# Hive skill, for Claude Code / Codex / Droid
+# Hive skill, for Claude Code / Codex
 npx skills add https://github.com/notdp/hive -g --all
 ```
 
@@ -26,13 +26,13 @@ Requires:
 
 - `tmux` (3.2+ is needed for the `hive cvim` / `hive vim` popup helpers)
 - Python 3.11+
-- At least one agent CLI: `claude`, `codex`, or `droid`
+- At least one agent CLI: `claude` or `codex`
 
 ## Start in your agent session
 
 ```bash
 # Inside tmux, start your agent of choice
-$ claude       # or: codex, droid
+$ claude       # or: codex
 
 # In the agent session, type:
 /hive
@@ -94,12 +94,12 @@ For local checkout development, keep source-under-test separate from the live in
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-The global `hive` binary is live agent transport. Keep it on the stable install while developing Hive itself; tests should import the checkout explicitly with `PYTHONPATH=src`. Manual verification that needs plugin materialization or sidecar behavior should use disposable `HIVE_HOME`, `FACTORY_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window rather than the live team. Repository conventions live in [AGENTS.md](AGENTS.md).
+The global `hive` binary is live agent transport. Keep it on the stable install while developing Hive itself; tests should import the checkout explicitly with `PYTHONPATH=src`. Manual verification that needs plugin materialization or sidecar behavior should use disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window rather than the live team. Repository conventions live in [AGENTS.md](AGENTS.md).
 
 ## Docs
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) — runtime field semantics (`busy`, `inputState`, `turnPhase`)
-- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude / Codex / Droid transcript parsing rules
+- [`docs/transcript-signals.md`](docs/transcript-signals.md) — Claude transcript parsing rules
 - [`skills/hive/SKILL.md`](skills/hive/SKILL.md) — agent behavior / prompt contract loaded by the Hive skill at runtime
 
 ## License

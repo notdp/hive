@@ -33,8 +33,8 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
         lambda _target: [
-            PaneInfo("%0", "[orch]", command="droid"),
-            PaneInfo("%12", "[claude]", command="droid"),
+            PaneInfo("%0", "[orch]", command="claude"),
+            PaneInfo("%12", "[claude]", command="claude"),
         ],
     )
 
@@ -196,7 +196,7 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
-        lambda _pane_id: SimpleNamespace(name="droid"),
+        lambda _pane_id: SimpleNamespace(name="claude"),
     )
     monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
@@ -205,7 +205,7 @@ def test_init_stops_existing_sidecar_before_auto_workspace_reset(runner, configu
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "", command="droid")],
+        lambda _target: [PaneInfo("%5", "", command="claude")],
     )
 
     calls: list[tuple[str, str]] = []
@@ -268,15 +268,15 @@ def test_init_self_register_never_injects_hive_slash_into_own_input(
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
         lambda _target: [
-            PaneInfo("%40", "orch", command="droid", role="agent", agent="orch", team="main-3"),
-            PaneInfo("%42", "Claude", command="droid", team="main-3"),
+            PaneInfo("%40", "orch", command="claude", role="agent", agent="orch", team="main-3"),
+            PaneInfo("%42", "Claude", command="claude", team="main-3"),
         ],
     )
     monkeypatch.setattr(
         "hive.team.tmux.list_panes_full",
         lambda _target: [
-            PaneInfo("%40", "orch", command="droid", role="agent", agent="orch", team="main-3"),
-            PaneInfo("%42", "Claude", command="droid", team="main-3"),
+            PaneInfo("%40", "orch", command="claude", role="agent", agent="orch", team="main-3"),
+            PaneInfo("%42", "Claude", command="claude", team="main-3"),
         ],
     )
     monkeypatch.setattr(
@@ -304,7 +304,7 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%9")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
 
     from hive import tmux
     from hive.tmux import PaneInfo
@@ -312,7 +312,7 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     tmux.set_window_option("dev:0", "@hive-team", "ghost")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ghost-ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
-    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%9", "", command="droid")])
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%9", "", command="claude")])
 
     result = runner.invoke(cli, ["init", "--workspace", str(tmp_path / "ws"), "--no-notify"])
 
@@ -333,13 +333,13 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "[orch]", command="droid")],
+        lambda _target: [PaneInfo("%5", "[orch]", command="claude")],
     )
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
 
@@ -411,13 +411,13 @@ def test_init_no_notify(runner, configure_hive_home, monkeypatch, mock_tmux_send
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "0")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%0")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%0", "", command="droid")],
+        lambda _target: [PaneInfo("%0", "", command="claude")],
     )
 
     workspace = tmp_path / "ws"
@@ -438,13 +438,13 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: "@2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
 
     from hive.tmux import PaneInfo
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "", command="droid")],
+        lambda _target: [PaneInfo("%5", "", command="claude")],
     )
 
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
@@ -471,7 +471,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
     monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
     monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     auto_workspace = tmp_path / "auto-ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda _session, _window, _fallback="0": auto_workspace)
 
@@ -479,7 +479,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "", command="droid")],
+        lambda _target: [PaneInfo("%5", "", command="claude")],
     )
 
     bus.init_workspace(auto_workspace)
@@ -517,7 +517,7 @@ def test_init_with_explicit_workspace_does_not_reset_existing_managed_dirs(
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%5", "", command="droid"), PaneInfo("%6", "GPT", command="droid")],
+        lambda _target: [PaneInfo("%5", "", command="claude"), PaneInfo("%6", "GPT", command="claude")],
     )
 
     workspace = tmp_path / "custom-ws"
@@ -549,7 +549,7 @@ def test_init_custom_name(runner, configure_hive_home, monkeypatch, mock_tmux_se
 
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%0", "", command="droid")],
+        lambda _target: [PaneInfo("%0", "", command="claude")],
     )
 
     workspace = tmp_path / "ws2"
@@ -567,7 +567,7 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
 
     from hive.tmux import PaneInfo
 
-    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="droid")])
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="claude")])
 
     # Leftover team dir from a dead team (no corresponding tmux window)
     team_dir = tmp_path / ".hive" / "teams" / "dev-0"
@@ -598,7 +598,7 @@ def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_t
     tmux.set_window_option("dev:0", "@hive-team", "dev-0")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws-0"))
 
-    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="droid")])
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="claude")])
 
     result = runner.invoke(cli, ["init", "--workspace", str(tmp_path / "ws-1"), "--no-notify"])
 
@@ -615,7 +615,7 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     # Origin window dev:0 is crowded (3 panes) → the worker breaks out to dev:3.
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:0")
     monkeypatch.setattr("hive.cli.tmux.get_pane_count", lambda _pane: 3)
@@ -626,7 +626,7 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
 
     from hive.tmux import PaneInfo
 
-    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%5", "", command="droid")])
+    monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%5", "", command="claude")])
 
     sidecar_calls: list[tuple[str, str, str, str]] = []
     monkeypatch.setattr(
@@ -649,7 +649,7 @@ def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_hom
     configure_hive_home(current_pane="%5", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
-    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="droid"))
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
 
     bound = {"team": "dev-w2", "agent": "worker", "role": "agent", "workspace": "/tmp/hive-dev-w2"}
     monkeypatch.setattr("hive.cli._discover_tmux_binding", lambda: bound)

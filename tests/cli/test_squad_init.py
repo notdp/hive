@@ -22,7 +22,7 @@ def test_squad_init_creates_orch_and_challenger_without_board(
     profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: profile)
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda _pane: "openai")
-    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_kwargs: ("claude", ""))
+    monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _family: "claude")
     monkeypatch.setattr(cli_mod.tmux, "get_current_window_index", lambda: "0")
     monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _pane: 1)
     monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda _target, _name: None)
@@ -98,7 +98,7 @@ def test_squad_init_breakout_names_main_team_from_final_window_keeps_readable_sq
     profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: profile)
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda _pane: "openai")
-    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_kwargs: ("claude", ""))
+    monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _family: "claude")
     monkeypatch.setattr(cli_mod.tmux, "get_current_window_index", lambda: "8")
     # Crowded origin → squad breaks out to dev:8 whose id slug (@88) differs from
     # its index (8), proving the main team name is id-derived, not index-derived.
@@ -231,7 +231,7 @@ def _squad_init_mocks(cli_mod, monkeypatch, repo):
     profile = SimpleNamespace(name="codex", skill_cmd="/{name}")
     monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _pane: profile)
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda _pane: "openai")
-    monkeypatch.setattr(cli_mod, "resolve_peer_spawn", lambda **_kwargs: ("claude", ""))
+    monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _family: "claude")
     monkeypatch.setattr(cli_mod, "anti_peer_cli", lambda _c: "claude")
     monkeypatch.setattr(cli_mod.tmux, "get_current_window_index", lambda: "0")
     monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _pane: 1)
@@ -276,7 +276,7 @@ def test_squad_init_uses_role_config_for_challenger(
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
-            "roles.challenger.cli": "droid",
+            "roles.challenger.cli": "codex",
             "roles.challenger.model": "opus",
         }.get(key, default),
     )
@@ -285,7 +285,7 @@ def test_squad_init_uses_role_config_for_challenger(
     assert result.exit_code == 0, result.output
 
     assert len(spawned) == 1
-    assert spawned[0]["cli"] == "droid"
+    assert spawned[0]["cli"] == "codex"
     assert spawned[0]["model"] == "opus"
 
 
@@ -301,7 +301,7 @@ def test_squad_init_flag_overrides_role_cli_keeps_model(
     monkeypatch.setattr(
         "hive.settings.get_setting",
         lambda key, default=None: {
-            "roles.challenger.cli": "droid",
+            "roles.challenger.cli": "codex",
             "roles.challenger.model": "opus",
         }.get(key, default),
     )

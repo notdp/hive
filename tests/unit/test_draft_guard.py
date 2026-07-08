@@ -1,7 +1,7 @@
 """Unit tests for draft_guard parsers.
 
-Fixtures are real `tmux capture-pane` snapshots from Claude Code,
-Codex, and Droid TUIs recorded during feature development.
+Fixtures are real `tmux capture-pane` snapshots from Claude Code
+and Codex TUIs recorded during feature development.
 """
 
 from hive import draft_guard
@@ -152,45 +152,6 @@ def test_parse_codex_multi_line_draft_is_joined():
     )
 
 
-def test_parse_droid_dim_autocomplete_hint_returns_nothing():
-    capture = """
- Auto (High) - allow all commands                                             Claude Opus 4.6 (Max)
-\x1b[38;2;176;176;176m╭─────────────────────────────────────────────────────────────────────────────────────╮
-│\x1b[39m \x1b[38;2;215;95;0m> \x1b[7m\x1b[39mT\x1b[0;2mry "Create a PR with these changes"\x1b[0m                  \x1b[38;2;176;176;176m│
-╰─────────────────────────────────────────────────────────────────────────────────────╯
- ? for help                                                          MCP ✓ GHOSTTY ᗣ
- Claude Opus 4.6 · main                                             ~/Developer/hive
-"""
-    assert draft_guard._parse_droid(_lines(capture)) == ""
-
-
-def test_parse_droid_normal_text_that_looks_like_old_hint_is_preserved():
-    capture = """
- Auto (High) - allow all commands                                             Claude Opus 4.6 (Max)
-╭─────────────────────────────────────────────────────────────────────────────────────╮
-│ > Try "Create a PR with these changes"                                              │
-╰─────────────────────────────────────────────────────────────────────────────────────╯
- ? for help                                                          MCP ✓ GHOSTTY ᗣ
- Claude Opus 4.6 · main                                             ~/Developer/hive
-"""
-    assert draft_guard._parse_droid(_lines(capture)) == 'Try "Create a PR with these changes"'
-
-
-def test_parse_droid_multi_line_draft():
-    capture = """
- Auto (High) - allow all commands                                             Claude Opus 4.6 (Max)
-╭─────────────────────────────────────────────────────────────────────────────────────╮
-│ > 送达发顺丰飒风                                                                    │
-│   的卅风急浪大顺丰                                                                  │
-│   11212123123                                                                       │
-╰─────────────────────────────────────────────────────────────────────────────────────╯
- ? for help                                                          MCP ✓ GHOSTTY ᗣ
-"""
-    assert draft_guard._parse_droid(_lines(capture)) == (
-        "送达发顺丰飒风\n的卅风急浪大顺丰\n11212123123"
-    )
-
-
 def test_suspected_draft_unsupported_profile_returns_false(monkeypatch):
     assert draft_guard.suspected_draft("%999", "unknown") is False
 
@@ -309,38 +270,6 @@ def test_suspected_draft_codex_uses_styled_capture_for_autocomplete(monkeypatch)
     assert seen["preserve_styles"] is True
 
 
-def test_suspected_draft_droid_uses_capture(monkeypatch):
-    capture_with_draft = """
-╭──────╮
-│ > hello                                                         │
-╰──────╯
- status
-"""
-    capture_empty = """
-\x1b[38;2;176;176;176m╭──────╮
-│\x1b[39m \x1b[38;2;215;95;0m> \x1b[7m\x1b[39mT\x1b[0;2mry "Create a PR with these changes"\x1b[0m        \x1b[38;2;176;176;176m│
-╰──────╯
- status
-"""
-    seen: dict[str, bool] = {}
-
-    def fake_capture(_pane, lines=50, preserve_styles=False):
-        seen["preserve_styles"] = preserve_styles
-        return capture_with_draft.lstrip("\n")
-
-    monkeypatch.setattr(draft_guard.tmux, "display_value", lambda *a, **kw: "30")
-    monkeypatch.setattr(draft_guard.tmux, "capture_pane", fake_capture)
-    assert draft_guard.suspected_draft("%999", "droid") is True
-    assert seen["preserve_styles"] is True
-
-    monkeypatch.setattr(
-        draft_guard.tmux,
-        "capture_pane",
-        lambda _pane, lines=50, preserve_styles=False: capture_empty.lstrip("\n"),
-    )
-    assert draft_guard.suspected_draft("%999", "droid") is False
-
-
 def test_parse_codex_first_line_drops_extra_space_from_paste():
     # Codex sometimes renders `›  <text>` (two spaces) when the user
     # pasted with a leading blank; parser should not leak it.
@@ -363,8 +292,6 @@ def test_clear_input_sends_profile_specific_batch(monkeypatch):
     monkeypatch.setattr(draft_guard.tmux, "send_keys_batch", fake_batch)
     draft_guard.clear_input("%42", "claude")
     draft_guard.clear_input("%42", "codex")
-    draft_guard.clear_input("%42", "droid")
-    assert len(sent) == 3
+    assert len(sent) == 2
     assert sent[0][1] == ("C-u",) * 30
     assert sent[1][1] == ("C-u",) * 30
-    assert sent[2][1] == ("C-u",) * 15
