@@ -278,24 +278,37 @@ class Agent:
             # keep the right identity, sharing the real CODEX_HOME) and the TUI
             # joins it via --remote. cwd is passed explicitly because Remote
             # workspace mode drops config.cwd. Resume/fork stays embedded (below).
-            # If the daemon can't bind, fall through to a plain embedded codex.
             if not session_id:
                 from .adapters import codex_app_server
-                if codex_app_server.spawn_daemon(pane_id):
-                    sock = codex_app_server.pane_socket_path(pane_id)
-                    cmd_parts.extend([
-                        "--remote", _shell_escape(f"unix://{sock}"),
-                        "--cd", _shell_escape(cwd),
-                    ])
-                    # Bring hive's 2nd client online now — before codex (started
-                    # by send_keys at the end of this method) creates its thread
-                    # — so the sidecar receives the thread/started + status
-                    # broadcast live instead of late-joining and resuming.
-                    # Best-effort: a down/slow sidecar just falls back to the
-                    # lazy connect on the next runtime tick.
-                    if workspace:
-                        from .sidecar import request_connect_codex
-                        request_connect_codex(workspace, pane_id)
+                if not codex_app_server.spawn_daemon(pane_id):
+                    # Codex runtime state is daemon-native only (embedded codex
+                    # is unsupported), so a pane without a daemon would join the
+                    # team stateless. Undo the pane side effects instead of
+                    # leaving a tagged inert member behind.
+                    if split_window:
+                        tmux.kill_pane(pane_id)
+                    else:
+                        tmux.clear_pane_tags(pane_id)
+                        tmux.set_pane_title(pane_id, "")
+                    raise RuntimeError(
+                        f"codex app-server daemon failed to start for pane {pane_id}; "
+                        "codex runtime is daemon-only, refusing to spawn an "
+                        "embedded codex team member"
+                    )
+                sock = codex_app_server.pane_socket_path(pane_id)
+                cmd_parts.extend([
+                    "--remote", _shell_escape(f"unix://{sock}"),
+                    "--cd", _shell_escape(cwd),
+                ])
+                # Bring hive's 2nd client online now — before codex (started
+                # by send_keys at the end of this method) creates its thread
+                # — so the sidecar receives the thread/started + status
+                # broadcast live instead of late-joining and resuming.
+                # Best-effort: a down/slow sidecar just falls back to the
+                # lazy connect on the next runtime tick.
+                if workspace:
+                    from .sidecar import request_connect_codex
+                    request_connect_codex(workspace, pane_id)
         if channel_flags:
             cmd_parts.extend(channel_flags)
         pre_cmd_parts: list[str] = []

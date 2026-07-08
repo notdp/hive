@@ -141,6 +141,7 @@ def test_spawn_hive_loads_skill_and_sends_prompt(monkeypatch):
 
 def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -431,6 +432,7 @@ def test_spawn_claude_uses_model_flag(monkeypatch):
 
 def test_spawn_codex_uses_model_flag(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -607,19 +609,44 @@ def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
     assert connects == []
 
 
-def test_spawn_codex_new_session_falls_back_when_daemon_fails(monkeypatch):
-    # _setup_tmux_mocks makes spawn_daemon return None (daemon failed to bind).
+def test_spawn_codex_new_session_refuses_when_daemon_fails(monkeypatch):
+    """Embedded codex is unsupported: if the per-pane daemon cannot bind, spawn
+    must not launch a raw codex as a team member — it kills the pane it just
+    split and raises instead of leaving a stateless tagged member behind."""
+    # _setup_tmux_mocks makes spawn_daemon return False (daemon failed to bind).
     calls, _ = _setup_tmux_mocks(monkeypatch)
+    killed: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", lambda pane: killed.append(pane))
 
-    Agent.spawn(
-        name="w1", team_name="t", target_pane="%0",
-        cwd="/work/dir", is_first=True, skill="none", cli="codex",
-    )
+    with pytest.raises(RuntimeError, match="daemon-only"):
+        Agent.spawn(
+            name="w1", team_name="t", target_pane="%0",
+            cwd="/work/dir", is_first=True, skill="none", cli="codex",
+        )
 
-    startup_cmd = calls[0]
-    assert "codex" in startup_cmd
-    assert "--remote" not in startup_cmd  # embedded fallback, no daemon
-    assert "--cwd" not in startup_cmd
+    assert killed == ["%0"]  # the split pane is cleaned up
+    assert calls == []  # no startup command was ever sent
+
+
+def test_spawn_codex_daemon_fail_in_place_clears_tags_instead_of_killing(monkeypatch):
+    """split_window=False spawns into the caller's own shell pane: on daemon
+    failure that pane must survive, but the hive tags just written are undone."""
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    killed: list[str] = []
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", lambda pane: killed.append(pane))
+    monkeypatch.setattr("hive.agent.tmux.clear_pane_tags", lambda pane: cleared.append(pane))
+
+    with pytest.raises(RuntimeError, match="daemon-only"):
+        Agent.spawn(
+            name="w1", team_name="t", target_pane="%0",
+            cwd="/work/dir", is_first=True, skill="none", cli="codex",
+            split_window=False,
+        )
+
+    assert killed == []
+    assert cleared == ["%0"]
+    assert calls == []
 
 
 def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
