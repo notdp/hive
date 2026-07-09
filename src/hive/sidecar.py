@@ -2301,7 +2301,7 @@ def _serve_requests(
             return False
 
 
-def _cleanup_dead_codex_daemons() -> None:
+def _cleanup_dead_codex_daemons(workspace: str) -> None:
     """Reap per-pane codex app-server daemons whose pane has died.
 
     The daemon is started at spawn time (agent.py) with ``start_new_session`` so
@@ -2309,12 +2309,23 @@ def _cleanup_dead_codex_daemons() -> None:
     cleanup. Scan the on-disk sockets and, for any whose pane is gone, kill the
     daemon and remove its socket + pidfile. Independent of team bindings, so it
     also reaps orphans from crashed spawns.
+
+    Killing a daemon takes its ``--remote`` TUI (and pane) down with it, so
+    every reap is logged; ``is_pane_alive`` only reports dead panes from a
+    successful tmux listing, never from a transient tmux failure.
     """
-    from . import tmux
+    from . import notify_debug, tmux
     from .adapters import codex_app_server
 
     for pane in codex_app_server.list_daemon_panes():
         if not tmux.is_pane_alive(pane):
+            try:
+                pid: int | None = int(
+                    codex_app_server.pane_pidfile_path(pane).read_text().strip()
+                )
+            except (OSError, ValueError):
+                pid = None
+            notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
             codex_app_server.kill_pane_daemon(pane)
 
 
@@ -2369,7 +2380,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
             if now - last_daemon_cleanup >= 30.0:
                 last_daemon_cleanup = now
-                _cleanup_dead_codex_daemons()
+                _cleanup_dead_codex_daemons(workspace)
 
             if now - last_owner_check >= SIDECAR_OWNER_CHECK_SECONDS:
                 last_owner_check = now

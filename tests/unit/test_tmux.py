@@ -95,6 +95,15 @@ def test_is_pane_alive_parses_tmux_output(monkeypatch):
     assert tmux.is_pane_alive("%9") is False
 
 
+def test_is_pane_alive_treats_tmux_failure_as_alive(monkeypatch):
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=False, timeout=5: subprocess.CompletedProcess(["tmux", *args], 1, "", "timeout"),
+    )
+
+    assert tmux.is_pane_alive("%1") is True
+
+
 def test_context_helpers_use_environment_and_display_message(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/tmux-1")
     monkeypatch.setenv("TMUX_PANE", "%7")

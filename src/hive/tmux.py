@@ -495,6 +495,11 @@ def is_pane_alive(pane_id: str) -> bool:
         ["list-panes", "-a", "-F", "#{pane_id} #{pane_dead}"],
         check=False,
     )
+    if r.returncode != 0:
+        # tmux didn't answer (timeout / transient failure): unknown is not
+        # dead. Callers take irreversible action on False (daemon reap, team
+        # GC), so only a successful listing may declare a pane dead.
+        return True
     for line in r.stdout.strip().split("\n"):
         parts = line.split()
         if len(parts) >= 2 and parts[0] == pane_id:
