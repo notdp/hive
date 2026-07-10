@@ -221,3 +221,30 @@ def test_writer_never_leaks_sessions_across_instances(store, monkeypatch):
     prev = resume.load_snapshot("0-w2.prev")
     assert prev is not None and prev["createdAt"] == "123.0"
     assert {m["sessionId"] for m in prev["members"]} == {"OLD-W", "OLD-V"}
+
+
+def test_prev_namespace_is_reserved_for_archives(store, monkeypatch):
+    """A real team named foo.prev must never collide with foo's archive slot."""
+    # the store refuses .prev as a primary handle — no silent overwrite target
+    impostor = _snap(handle="foo.prev", created_at="50.0")
+    impostor["team"] = "foo.prev"
+    assert resume.save_snapshot(impostor, now="t0") == "rejected"
+    assert resume.load_snapshot("foo.prev") is None
+
+    # foo's own archive flow now owns that name unambiguously
+    assert resume.save_snapshot(_snap(handle="foo", created_at="100.0"), now="t1") == "written"
+    assert resume.save_snapshot(_snap(handle="foo", created_at="200.0"), now="t2") == "written"
+    prev = resume.load_snapshot("foo.prev")
+    assert prev is not None and prev["createdAt"] == "100.0" and prev["team"] == "foo"
+
+    # and team creation rejects the reserved suffix before any tmux mutation
+    from hive.team import Team
+
+    calls: list[str] = []
+    monkeypatch.setattr("hive.team.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.team.tmux.get_window_option", lambda *a: calls.append("read") or None)
+    monkeypatch.setattr("hive.team.tmux.set_window_option", lambda *a: calls.append("write"))
+    monkeypatch.setattr("hive.team.tmux.tag_pane", lambda *a, **k: calls.append("write"))
+    with pytest.raises(ValueError, match="reserved"):
+        Team.create_for_window("foo.prev", window_target="dev:0")
+    assert "write" not in calls

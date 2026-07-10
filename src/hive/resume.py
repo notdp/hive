@@ -58,6 +58,16 @@ def safe_handle(handle: str) -> str | None:
     return handle
 
 
+def is_archive_handle(handle: str) -> bool:
+    """True for the reserved ``<team>.prev`` predecessor-archive namespace.
+
+    Archive handles stay loadable and listable, but they are never a valid
+    primary team handle: a real team named ``foo.prev`` would collide with
+    ``foo``'s archive slot and silently lose one of the two snapshots.
+    """
+    return handle.endswith(_PREV_SUFFIX)
+
+
 def snapshot_path(handle: str) -> Path | None:
     stem = safe_handle(handle)
     if stem is None:
@@ -185,7 +195,10 @@ def save_snapshot(
     """
     if not _valid(snap):
         return "rejected"
-    path = snapshot_path(str(snap["handle"]))
+    handle = str(snap["handle"])
+    if is_archive_handle(handle):
+        return "rejected"  # the .prev namespace is written only by archiving
+    path = snapshot_path(handle)
     if path is None:
         return "rejected"
 
