@@ -653,3 +653,90 @@ def test_detect_current_session_id_delegates_to_resolve(monkeypatch):
 
     assert detect_current_session_id("/tmp/test", pane_id="%11") == "map-sess-1"
     assert detect_current_session_id("/tmp/test", pane_id="%99") is None
+
+
+# --- session_mode: fork vs resume (VAL B5-B7) ---
+
+
+def test_spawn_claude_fork_and_resume_session_flags(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="claude", session_id="sess-1")
+    fork_cmd = calls[-2]
+    assert "-r 'sess-1'" in fork_cmd or "-r sess-1" in fork_cmd
+    assert "--fork-session" in fork_cmd
+
+    calls.clear()
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="claude", session_id="sess-1", session_mode="resume")
+    resume_cmd = calls[-2]
+    assert "-r 'sess-1'" in resume_cmd or "-r sess-1" in resume_cmd
+    assert "--fork-session" not in resume_cmd
+
+
+def test_spawn_codex_fork_contract_unchanged(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    # fork never touches the daemon; the default spawn_daemon mock returning
+    # False must not matter.
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="codex", session_id="roll-1")
+
+    cmd = calls[0]
+    assert "fork 'roll-1'" in cmd or "fork roll-1" in cmd
+    assert "--remote" not in cmd
+    assert "resume" not in cmd
+
+
+def test_spawn_codex_resume_is_daemon_native(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    connects: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_codex",
+        lambda ws, pane: connects.append((ws, pane)),
+    )
+
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/repo",
+                cli="codex", session_id="roll-1", session_mode="resume",
+                skill="none", workspace="/ws")
+
+    cmd = calls[0]
+    assert "--remote 'unix:///home/.codex/app-server-control/hive-pane-0.sock'" in cmd
+    assert "--cd '/repo'" in cmd
+    assert "resume 'roll-1'" in cmd
+    assert "fork" not in cmd
+    assert connects == [("/ws", "%0")]
+
+
+def test_spawn_codex_resume_daemon_failure_never_falls_back_embedded(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    killed: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", lambda pane: killed.append(pane))
+
+    # split path: new pane is killed
+    with pytest.raises(RuntimeError, match="daemon"):
+        Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                    cli="codex", session_id="roll-1", session_mode="resume")
+    assert killed == ["%0"]
+    assert calls == []  # no command was ever typed — no embedded fallback
+
+    # in-place path: tags/title cleared instead
+    cleared: list[str] = []
+    titles: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.agent.tmux.clear_pane_tags", lambda pane: cleared.append(pane))
+    monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda pane, title: titles.append((pane, title)))
+    with pytest.raises(RuntimeError, match="daemon"):
+        Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                    cli="codex", session_id="roll-1", session_mode="resume",
+                    split_window=False)
+    assert cleared == ["%0"]
+    assert ("%0", "") in titles
+    assert calls == []
+
+
+def test_spawn_rejects_unknown_session_mode(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    with pytest.raises(ValueError, match="session_mode"):
+        Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                    cli="claude", session_id="s", session_mode="clone")

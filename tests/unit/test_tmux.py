@@ -482,3 +482,20 @@ def test_list_panes_full_or_none_is_status_aware(monkeypatch):
     empty = subprocess.CompletedProcess(["tmux"], 0, "", "")
     monkeypatch.setattr("hive.tmux._run", lambda args, check=False, timeout=5: empty)
     assert tmux.list_panes_full_or_none("dev:0") == []
+
+
+def test_pane_scan_status_maps_no_server_variants(monkeypatch):
+    for stderr in ("no server running on /tmp/tmux-501/default", "error connecting to /x/tmux-501/default (No such file or directory)"):
+        monkeypatch.setattr(
+            "hive.tmux._run",
+            lambda args, check=False, timeout=5, _e=stderr: subprocess.CompletedProcess(["tmux", *args], 1, "", _e),
+        )
+        assert tmux.list_panes_all_status() == (None, "no-server")
+        assert tmux.list_team_windows_status() == (None, "no-server")
+
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=False, timeout=5: subprocess.CompletedProcess(["tmux", *args], 1, "", "timeout"),
+    )
+    assert tmux.list_panes_all_status() == (None, "unknown")
+    assert tmux.list_team_windows_status() == (None, "unknown")
