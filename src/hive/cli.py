@@ -3018,8 +3018,12 @@ def _build_ls_payload() -> dict[str, object]:
                 entry["window"] = win.get("window", "")
                 entry["state"] = "live-incomplete" if missing else "live-complete"
                 # Live truth beats whatever the snapshot recorded back then.
+                # For pr, present-and-empty IS the truth (hive duo clear-pr);
+                # only a row lacking the key (old fixture/data) keeps the
+                # snapshot value.
                 entry["windowName"] = win.get("windowName", "") or entry["windowName"]
-                entry["pr"] = win.get("pr", "") or entry["pr"]
+                if "pr" in win:
+                    entry["pr"] = win["pr"]
                 entry.update(_live_team_context(live))
                 consumed_live.add(team_name)
             elif live:

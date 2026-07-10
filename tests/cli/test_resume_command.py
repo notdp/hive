@@ -677,3 +677,21 @@ def test_ls_human_groups_other_states_separately(runner, configure_hive_home, mo
     assert result.exit_code == 0, result.output
     assert "OTHER" in result.output
     assert "LIVE" not in result.output and "RESTORABLE" not in result.output
+
+
+def test_ls_live_overlay_clears_stale_snapshot_pr(runner, configure_hive_home, monkeypatch):
+    """`hive duo clear-pr` removed the stamp: live empty pr must win over snapshot."""
+    configure_hive_home()
+    snap = _save_snap("0-w2")
+    snap["pr"] = "52"
+    assert resume_store.save_snapshot(snap, now="t2") == "written"
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%1", "0-w2", "worker", "claude"), _pane("%2", "0-w2", "validator", "codex")],
+        window_list=[{"window": "dev:3", "windowName": "pair", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0", "pr": ""}],
+    )
+
+    result = runner.invoke(cli, ["ls", "--json"])
+    entry = next(e for e in json.loads(result.output)["teams"] if e["team"] == "0-w2")
+    assert entry["pr"] == ""
+    assert "PR#" not in runner.invoke(cli, ["ls"]).output

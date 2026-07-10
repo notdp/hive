@@ -2378,7 +2378,9 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
     window_name = dict(tmux.list_window_names()).get(t.tmux_window, "") or str(
         (existing or {}).get("windowName", "")
     )
-    pr = tmux.get_window_option(t.tmux_window, "hive-pr") or str((existing or {}).get("pr", ""))
+    # The window option is current truth: cleared (hive duo clear-pr) means
+    # empty — never resurrect the previous snapshot's PR stamp.
+    pr = tmux.get_window_option(t.tmux_window, "hive-pr") or ""
     snap = resume_store.build_snapshot(
         handle=t.name,
         team=t.name,

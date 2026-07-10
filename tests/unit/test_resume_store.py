@@ -319,3 +319,16 @@ def test_age_renders_relative_time_and_degrades_safely():
     assert resume.age(iso(-3600), now=now) == "just now"  # future stamp degrades
     assert resume.age("", now=now) == "?"
     assert resume.age("not-a-date", now=now) == "not-a-date"
+
+
+def test_writer_clears_pr_after_window_stamp_removed(store, monkeypatch):
+    worker = _fake_agent("%1", "claude")
+    sidecar = _writer_mocks(monkeypatch, _fake_team({"worker": worker}), {"%1": "sid-w"})
+    monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: "52" if key == "hive-pr" else None)
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+    assert resume.load_snapshot("0-w2")["pr"] == "52"
+
+    # hive duo clear-pr removed the option: the next write persists empty truth
+    monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: None)
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+    assert resume.load_snapshot("0-w2")["pr"] == ""
