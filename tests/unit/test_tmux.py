@@ -499,3 +499,14 @@ def test_pane_scan_status_maps_no_server_variants(monkeypatch):
     )
     assert tmux.list_panes_all_status() == (None, "unknown")
     assert tmux.list_team_windows_status() == (None, "unknown")
+
+
+def test_pane_scan_status_keeps_permission_denied_unknown(monkeypatch):
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=False, timeout=5: subprocess.CompletedProcess(
+            ["tmux", *args], 1, "", "error connecting to /private/tmp/tmux-501/default (Permission denied)"
+        ),
+    )
+    assert tmux.list_panes_all_status() == (None, "unknown")
+    assert tmux.list_team_windows_status() == (None, "unknown")

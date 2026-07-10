@@ -2951,14 +2951,13 @@ def _build_ls_payload() -> dict[str, object]:
             win_by_team.setdefault(w["team"], w)
 
     teams: list[dict[str, object]] = []
-    snapshot_teams: set[str] = set()
+    consumed_live: set[str] = set()
     for snap in snapshots:
         handle = str(snap.get("handle", ""))
         if snap.get("corrupt"):
             teams.append({"handle": handle, "state": "corrupt"})
             continue
         team_name = str(snap.get("team", ""))
-        snapshot_teams.add(team_name)
         entry: dict[str, object] = {
             "handle": handle,
             "team": team_name,
@@ -2992,15 +2991,18 @@ def _build_ls_payload() -> dict[str, object]:
                 missing = [m.get("name") for m in snap.get("members", []) if m.get("name") not in live]
                 entry["window"] = win.get("window", "")
                 entry["state"] = "live-incomplete" if missing else "live-complete"
+                consumed_live.add(team_name)
             elif live:
-                entry["state"] = "superseded"  # a different live instance owns the name
+                # A different live instance owns the name: the old snapshot is
+                # superseded, but the live team itself still gets its own row.
+                entry["state"] = "superseded"
             else:
                 entry["state"] = "restorable"
         teams.append(entry)
 
     if tmux_status == "ok":
         for team_name, members in sorted(live_members.items()):
-            if team_name in snapshot_teams:
+            if team_name in consumed_live:
                 continue
             teams.append({
                 "handle": "",
@@ -3078,6 +3080,8 @@ def _resume_members_into_live_team(
         _fail(f"live team window {window} has no workspace binding; not guessing")
     anchor_pane = next(iter(live.values())).pane_id
     spawned: list[tuple[str, str]] = []
+    peer_team = None
+    prior_peers: dict[str, str] | None = None
     try:
         count = len(live)
         for m in _resume_member_order(missing):
@@ -3096,18 +3100,27 @@ def _resume_members_into_live_team(
                 session_mode="resume",
                 workspace=ws,
             )
+            # Track the pane the moment it exists: every later failure —
+            # tagging, context, peer, layout — must be able to kill it.
+            spawned.append((str(m["name"]), agent.pane_id))
             tmux.set_pane_option(agent.pane_id, "hive-group", "duo")
             hive_context.save_context_for_pane(
                 agent.pane_id, team=team_name, workspace=ws, agent=str(m["name"])
             )
-            spawned.append((str(m["name"]), agent.pane_id))
-        t = Team.load(team_name, prefer_pane=anchor_pane)
-        if "worker" in t.agents and "validator" in t.agents:
-            t.set_peer("worker", "validator")
+        peer_team = Team.load(team_name, prefer_pane=anchor_pane)
+        prior_peers = dict(peer_team.peer_map)
+        if "worker" in peer_team.agents and "validator" in peer_team.agents:
+            peer_team.set_peer("worker", "validator")
         layout_mod.apply_adaptive(window)
     except Exception as e:  # noqa: BLE001 — any failure must clean up the new panes only
         for _name, pane in spawned:
             tmux.kill_pane(pane)
+        if peer_team is not None and prior_peers is not None and peer_team.peer_map != prior_peers:
+            try:
+                peer_team.peer_map = prior_peers
+                peer_team.save()
+            except Exception:
+                pass
         _fail(f"resume failed while reviving members: {e} (survivors untouched, snapshot kept)")
     return {
         "resumed": "members",
@@ -3174,11 +3187,16 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
         if "worker" in reloaded.agents and "validator" in reloaded.agents:
             reloaded.set_peer("worker", "validator")
         layout_mod.apply_adaptive(window)
-        _ensure_team_sidecar(t, Path(ws))
+        # Commit the continuation identity BEFORE the sidecar starts: its
+        # writer fires immediately and would otherwise see the old createdAt
+        # and archive the very snapshot being continued.
         continued = dict(snap)
         continued["createdAt"] = str(t.created_at)
         continued["windowName"] = window_name
-        resume_store.save_snapshot(continued, now=_utc_now_iso(), archive_on_new_instance=False)
+        saved = resume_store.save_snapshot(continued, now=_utc_now_iso(), archive_on_new_instance=False)
+        if saved == "rejected":
+            raise RuntimeError("continuation snapshot rejected by the store")
+        _ensure_team_sidecar(t, Path(ws))
     except Exception as e:  # noqa: BLE001 — roll the whole window back, keep the snapshot
         tmux.kill_window(window)
         _fail(f"resume failed: {e} — new window removed, snapshot kept for retry")
@@ -3222,8 +3240,8 @@ def resume_cmd(handle: str):
         _fail(f"snapshot group '{snap.get('group')}' is not resumable yet (duo only)")
     members = list(snap.get("members", []))
     names = [str(m.get("name") or "") for m in members]
-    if not members or "" in names or len(set(names)) != len(names):
-        _fail("snapshot roster is invalid: member names must be present and unique")
+    if sorted(names) != ["validator", "worker"]:
+        _fail("snapshot roster must be exactly worker + validator (duo contract)")
     no_session = [n for n, m in zip(names, members) if not m.get("sessionId")]
     if no_session:
         _fail(

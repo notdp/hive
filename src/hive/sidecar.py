@@ -2364,7 +2364,12 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
         })
 
     existing = resume_store.load_snapshot(t.name)
-    prior = list(existing.get("members", [])) if existing else []
+    prior: list[dict[str, str]] = []
+    if existing is not None and str(existing.get("createdAt")) == str(t.created_at):
+        # Same team instance: keep last-known fields for members whose pane
+        # died. A *different* instance must never inherit the old sessions —
+        # start from what we observe and let the store archive the predecessor.
+        prior = list(existing.get("members", []))
     members = resume_store.merge_members(prior, observed)
     repo_cwd = next(
         (m.get("cwd", "") for m in members if m.get("name") == "worker" and m.get("cwd")),

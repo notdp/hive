@@ -162,6 +162,7 @@ def _resume_mocks(monkeypatch, *, team_obj="default"):
             name="0-w2",
             created_at=555.0,
             agents={"worker": SimpleNamespace(pane_id="%71"), "validator": SimpleNamespace(pane_id="%72")},
+            peer_map={},
             set_peer=lambda a, b: rec.peers.append((a, b)),
         )
     monkeypatch.setattr("hive.cli.Team.create_for_window", staticmethod(lambda name, **kw: team_obj))
@@ -444,7 +445,8 @@ def test_resume_full_restore_rolls_back_on_peer_and_sidecar_failure(
     assert rec.killed_windows == ["dev:7"]
     assert resume_store.load_snapshot("0-w2")["createdAt"] == "100.0"
 
-    # sidecar failure
+    # sidecar failure (starts last, after the continuation snapshot commit:
+    # the window still rolls back and the snapshot stays retryable)
     rec2 = _resume_mocks(monkeypatch)
     def bad_sidecar(t, ws):
         raise RuntimeError("sidecar spawn failed")
@@ -452,7 +454,7 @@ def test_resume_full_restore_rolls_back_on_peer_and_sidecar_failure(
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code != 0
     assert rec2.killed_windows == ["dev:7"]
-    assert resume_store.load_snapshot("0-w2")["createdAt"] == "100.0"
+    assert resume_store.load_snapshot("0-w2") is not None  # retryable
 
 
 def test_ls_works_outside_tmux(runner, configure_hive_home, monkeypatch):
@@ -473,3 +475,119 @@ def test_resume_requires_tmux_session(runner, configure_hive_home, monkeypatch):
 
     result = runner.invoke(cli, ["resume", "whatever"])
     assert result.exit_code != 0
+
+
+# --- round-2 regressions (validator findings) ---
+
+
+def test_ls_superseded_snapshot_does_not_hide_live_team(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    _save_snap("0-w2", created_at="100.0")
+    _tmux_state(
+        monkeypatch,
+        pane_list=[
+            _pane("%1", "0-w2", "worker", "claude"),
+            _pane("%2", "0-w2", "validator", "codex"),
+        ],
+        window_list=[{"window": "dev:2", "windowName": "hive", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "999.0"}],
+    )
+
+    result = runner.invoke(cli, ["ls", "--json"])
+    payload = json.loads(result.output)
+    rows = [e for e in payload["teams"] if (e.get("team") or e.get("handle")) == "0-w2"]
+    states = sorted(str(e["state"]) for e in rows)
+    assert states == ["live-complete", "superseded"]
+    live_row = next(e for e in rows if e["state"] == "live-complete")
+    assert live_row["window"] == "dev:2"
+
+
+def test_resume_rejects_non_duo_roster_shape(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _tmux_state(monkeypatch, pane_list=[], window_list=[])
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    _save_snap("odd", cwd=good_cwd, members=[
+        {"name": "worker", "cli": "claude", "sessionId": "s1", "cwd": good_cwd},
+        {"name": "observer", "cli": "codex", "sessionId": "s2", "cwd": good_cwd},
+    ])
+
+    result = runner.invoke(cli, ["resume", "odd"])
+    assert result.exit_code != 0
+    assert "worker + validator" in result.output
+    _assert_zero_mutation(rec)
+
+
+def test_resume_member_tag_failure_kills_fresh_pane(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
+
+    def bad_tag(*_a):
+        raise RuntimeError("tag failed")
+
+    monkeypatch.setattr("hive.cli.tmux.set_pane_option", bad_tag)
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code != 0
+    assert rec.killed_panes == ["%71"]  # pane tracked from birth, not after tagging
+    assert rec.killed_windows == []
+
+
+def test_resume_member_layout_failure_restores_prior_peer_map(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
+
+    saves: list[dict] = []
+    team = SimpleNamespace(
+        name="0-w2",
+        created_at=100.0,
+        agents={"worker": SimpleNamespace(pane_id="%1"), "validator": SimpleNamespace(pane_id="%71")},
+        peer_map={},
+    )
+
+    def fake_set_peer(a, b):
+        team.peer_map = {a: b, b: a}
+
+    team.set_peer = fake_set_peer
+    team.save = lambda: saves.append(dict(team.peer_map))
+    monkeypatch.setattr("hive.cli.Team.load", staticmethod(lambda name, prefer_pane="": team))
+
+    def bad_layout(_t):
+        raise RuntimeError("layout failed")
+
+    monkeypatch.setattr("hive.layout.apply_adaptive", bad_layout)
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code != 0
+    assert rec.killed_panes == ["%71"]
+    assert team.peer_map == {}  # prior (empty) peer state restored
+    assert saves and saves[-1] == {}
+
+
+def test_resume_full_restore_commits_snapshot_before_sidecar(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)
+
+    order: list[str] = []
+    real_save = resume_store.save_snapshot
+
+    def spy_save(snap, *, now, archive_on_new_instance=True):
+        order.append("save")
+        return real_save(snap, now=now, archive_on_new_instance=archive_on_new_instance)
+
+    monkeypatch.setattr("hive.resume.save_snapshot", spy_save)
+    monkeypatch.setattr(
+        "hive.cli._ensure_team_sidecar",
+        lambda t, ws: order.append("sidecar") or 1,
+    )
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    assert order == ["save", "sidecar"]  # identity committed before the sidecar can race

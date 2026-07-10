@@ -193,3 +193,31 @@ def test_writer_skips_non_duo_and_unloadable_teams(store, monkeypatch):
     monkeypatch.setattr("hive.team.Team.load", staticmethod(_boom))
     sidecar._write_resume_snapshot("/ws", "0-w2")
     assert resume.load_snapshot("0-w2") is None
+
+
+def test_writer_never_leaks_sessions_across_instances(store, monkeypatch):
+    """A same-handle NEW team must not inherit the previous instance's sessions."""
+    old_worker = _fake_agent("%1", "claude")
+    old_val = _fake_agent("%2", "codex")
+    sidecar = _writer_mocks(
+        monkeypatch,
+        _fake_team({"worker": old_worker, "validator": old_val}),
+        {"%1": "OLD-W", "%2": "OLD-V"},
+    )
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+    assert resume.load_snapshot("0-w2")["createdAt"] == "123.0"
+
+    # new instance (createdAt differs), only a worker observed, session unresolved
+    new_team = _fake_team({"worker": _fake_agent("%9", "claude")})
+    new_team.created_at = 200.0
+    sidecar2 = _writer_mocks(monkeypatch, new_team, {})
+    sidecar2._write_resume_snapshot("/ws", "0-w2")
+
+    cur = resume.load_snapshot("0-w2")
+    assert cur["createdAt"] == "200.0"
+    names = {m["name"]: m for m in cur["members"]}
+    assert set(names) == {"worker"}  # old validator did not cross instances
+    assert names["worker"]["sessionId"] == ""  # OLD-W did not leak in
+    prev = resume.load_snapshot("0-w2.prev")
+    assert prev is not None and prev["createdAt"] == "123.0"
+    assert {m["sessionId"] for m in prev["members"]} == {"OLD-W", "OLD-V"}

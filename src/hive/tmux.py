@@ -936,14 +936,17 @@ def list_panes_all() -> list[PaneInfo]:
 
 
 def _stderr_means_no_server(stderr: str | None) -> bool:
-    """True when tmux stderr proves there is no server to talk to.
+    """True only when tmux stderr proves there is no server to talk to.
 
-    tmux phrases this differently by cause: "no server running on <path>"
-    (clean shutdown) vs "error connecting to <path> (...)" (socket missing
-    or stale). Both mean nothing can be live; anything else stays unknown.
+    Proven messages: "no server running on <path>" (clean shutdown) and
+    "error connecting to <path> (No such file or directory)" (socket gone).
+    Anything else — permission denied, connection refused, unexpected text —
+    stays unknown: a server may well be alive behind the failure.
     """
     low = (stderr or "").lower()
-    return "no server" in low or "error connecting" in low
+    if "no server running" in low:
+        return True
+    return "error connecting" in low and "no such file or directory" in low
 
 
 def list_panes_all_status() -> tuple[list[PaneInfo] | None, str]:
