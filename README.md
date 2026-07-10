@@ -46,8 +46,8 @@ Commands commonly run by humans:
 
 ```bash
 # Plugins
-hive plugin enable notify         # sidecar idle watcher toggle (manual `hive notify` stays available either way)
-hive plugin list
+hive plugin enable notify --plain # sidecar idle watcher toggle (manual `hive notify` stays available either way)
+hive plugin list --plain          # human-readable listing (default output is JSON)
 
 # Diagnostics
 hive doctor --skills              # check for hive skill drift after upgrades

@@ -71,6 +71,10 @@ _COMMAND_HELP_SECTIONS = {
     # Extensions.
     "plugin": "Extensions",
     "config": "Extensions",
+    # Launchers — hive-managed claude/codex entry points + shell integration.
+    "claude": "Launchers",
+    "codex": "Launchers",
+    "shell-init": "Launchers",
 }
 _COMMAND_HELP_SECTION_ORDER = [
     "Daily",
@@ -80,6 +84,7 @@ _COMMAND_HELP_SECTION_ORDER = [
     "Human Helpers",
     "Debug",
     "Extensions",
+    "Launchers",
     "Other Commands",
 ]
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
@@ -90,6 +95,11 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
     "Extensions": "Manage first-party Hive plugins (Claude Code, Codex).",
+    "Launchers": (
+        "hive-managed launchers, usually invoked through the `hive shell-init` shell "
+        "integration rather than by hand. All arguments are forwarded verbatim, so "
+        "`hive claude --help` shows claude's own help, not this wrapper's."
+    ),
 }
 _ROOT_HELP_EXAMPLES = '''# Team lifecycle
 hive init                                    # bind current tmux window as a team
@@ -318,14 +328,22 @@ def _reject_legacy_recipient_options(
     command: str,
     to_agent: str,
 ) -> None:
-    """Reject --to/--msg misuse and require a positional target agent."""
+    """Reject --to/--msg misuse and require a positional target agent.
+
+    Raises UsageError so these argument-shape failures exit 2 with usage,
+    matching Click's own parser errors; business validation stays exit 1.
+    """
     if to_option is None and msg_option is None:
         if to_agent:
             return
-        _fail(f"hive {command} requires <agent>. Usage: hive {command} <agent> \"<body>\".")
-    _fail(
+        raise click.UsageError(
+            f"hive {command} requires <agent>. Usage: hive {command} <agent> \"<body>\".",
+            ctx=click.get_current_context(silent=True),
+        )
+    raise click.UsageError(
         f"hive {command} takes positional args: hive {command} <agent> \"<body>\". "
-        "Drop --to/--msg."
+        "Drop --to/--msg.",
+        ctx=click.get_current_context(silent=True),
     )
 
 
@@ -357,6 +375,26 @@ def _validate_root_send_protocol(body: str, artifact: str) -> None:
 def _fail(msg: str) -> None:
     click.echo(f"Error: {msg}", err=True)
     sys.exit(1)
+
+
+def _json_default_options(f):
+    """JSON-default output contract: visible --plain plus hidden no-op --json.
+
+    Default (and the legacy --json flag) emit JSON; --plain renders the human
+    form. --plain wins when both are passed: --json is parsed but never
+    reaches the callback (expose_value=False), it only exists so old
+    invocations keep working.
+    """
+    f = click.option(
+        "--json",
+        "legacy_json",
+        is_flag=True,
+        hidden=True,
+        expose_value=False,
+        help="Deprecated no-op (JSON is the default output)",
+    )(f)
+    f = click.option("--plain", is_flag=True, help="Human-readable output instead of the default JSON")(f)
+    return f
 
 
 def _resolve_workspace(team: Team | None = None, required: bool = False) -> str:
@@ -394,18 +432,14 @@ def _default_auto_workspace_path(session_name: str, window_id: str, fallback_ind
     return Path(f"/tmp/hive-{session_name}-{_window_id_slug(window_id, fallback_index)}")
 
 
-def _default_team_name_for_window(
-    session_name: str, window_id: str, window_index: str = "0", explicit_name: str = ""
-) -> str:
+def _default_team_name_for_window(session_name: str, window_id: str, window_index: str = "0") -> str:
     """Default team name derived from a window's stable id.
 
     Team name is a routing key, not a display title, so it must stay unique and
     stable. tmux window ids are never reused within a session, which avoids the
     cross-window collisions that window-index-derived names hit after break-out
-    or window reorder (Bug A). An explicit ``--name`` always wins.
+    or window reorder (Bug A).
     """
-    if explicit_name:
-        return explicit_name
     return f"{session_name}-{_window_id_slug(window_id, window_index)}"
 
 
@@ -731,7 +765,24 @@ def _warn_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
     skill_sync.maybe_warn_hive_skill_drift(cli_name)
 
 
-@click.group(cls=SectionedHelpGroup)
+def _hive_version() -> str:
+    """Installed distribution version, falling back to pyproject in a source checkout."""
+    import importlib.metadata as _md
+
+    try:
+        return _md.version("hive")
+    except _md.PackageNotFoundError:
+        try:
+            import tomllib
+
+            pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+            return str(tomllib.loads(pyproject.read_text())["project"]["version"])
+        except Exception:
+            return "unknown"
+
+
+@click.group(cls=SectionedHelpGroup, context_settings={"help_option_names": ["-h", "--help"]})
+@click.version_option(version=_hive_version(), prog_name="hive")
 @click.pass_context
 def cli(ctx: click.Context):
     """Hive - tmux-first multi-agent collaboration runtime."""
@@ -1370,32 +1421,36 @@ def _require_codex_daemon_backed(pane: str) -> None:
     )
 
 
-@cli.command("init")
-@click.option("--name", "-n", default="", help="Team name (default: tmux session name)")
-@click.option("--workspace", "-w", default="", help="Workspace path (default: /tmp/hive-<session>-<window>/)")
-@click.option("--notify/--no-notify", default=True, help="Push hive skill + context to other panes")
-def init_cmd(name: str, workspace: str, notify: bool):
-    """Initialize a duo from the current tmux window: worker (= this pane) + anti-family validator.
-
-    `hive init` is the bare entry into the duo topology (`/duo` and `/squad`
-    are the explicit ones). Idempotent: re-running in a bound window reports the
-    existing binding.
-    """
+def _run_duo_init(validator_cli: str | None) -> None:
+    """Shared callback body for the equivalent `hive init` / `hive duo init`."""
     if not tmux.is_inside_tmux():
         _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
-
-    current_pane = tmux.get_current_pane_id()
-    if detect_profile_for_pane(current_pane or "") is None:
+    current_pane = tmux.get_current_pane_id() or ""
+    if not current_pane:
+        _fail("cannot determine current pane")
+    if detect_profile_for_pane(current_pane) is None:
         _fail("current pane must be running claude / codex (this becomes the worker)")
-    _require_codex_daemon_backed(current_pane or "")
+    _require_codex_daemon_backed(current_pane)
 
-    result = _create_standalone_duo(
-        current_pane=current_pane or "",
-        explicit_name=name,
-        explicit_workspace=workspace,
-        validator_cli=None,
-    )
+    result = _create_standalone_duo(current_pane=current_pane, validator_cli=validator_cli)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+@cli.command("init")
+@click.option(
+    "--validator-cli",
+    type=click.Choice(["claude", "codex"]),
+    default=None,
+    help="CLI for validator (default: anti-family of current pane's CLI)",
+)
+def init_cmd(validator_cli: str | None):
+    """Initialize a duo in this window (equivalent to `hive duo init`).
+
+    Worker = this pane, validator = anti-family spawn. Team name and
+    workspace derive from the final window. Idempotent: re-running in a
+    bound window reports the existing binding.
+    """
+    _run_duo_init(validator_cli)
 
 
 @cli.command("register")
@@ -1826,28 +1881,30 @@ _SENTINEL_CONFIG = object()
 
 
 @config_cmd.command("roles")
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
-def config_roles(as_json: bool):
-    """Configure per-role CLI + model overrides.
+@_json_default_options
+def config_roles(plain: bool):
+    """Show or configure per-role CLI + model overrides.
 
-    Interactive picker when run from a TTY; JSON output with --json or
-    when piped.
+    Default output is the current role config as JSON (never interactive).
+    `--plain` opens the interactive picker and requires a terminal.
     """
     from . import settings as user_settings
 
-    if as_json or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        result: dict[str, dict[str, object]] = {}
-        for role in sorted(user_settings.CONFIGURABLE_ROLES):
-            cli, model = user_settings.resolve_role_config(role)
-            result[role] = {
-                "cli": cli,
-                "model": model,
-                "applied": role in user_settings.APPLIED_ROLES,
-            }
-        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    if plain:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            _fail("config roles --plain opens the interactive picker and requires a terminal; use the default JSON output when piped")
+        _interactive_role_config()
         return
 
-    _interactive_role_config()
+    result: dict[str, dict[str, object]] = {}
+    for role in sorted(user_settings.CONFIGURABLE_ROLES):
+        cli, model = user_settings.resolve_role_config(role)
+        result[role] = {
+            "cli": cli,
+            "model": model,
+            "applied": role in user_settings.APPLIED_ROLES,
+        }
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
 def _show_current_roles() -> None:
@@ -2004,7 +2061,7 @@ def _apply_role_action(key: str, action: tuple[str, str]) -> None:
         user_settings.unset_setting(key)
 
 
-@cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def wait_status(legacy_args: tuple[str, ...]):
     """Removed legacy status polling command."""
@@ -2272,6 +2329,12 @@ def skills_list_cmd():
     click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
 
 
+@skills_cmd.command("ls", hidden=True)
+def skills_ls_cmd():
+    """Hidden alias of `hive skills list`."""
+    skills_list_cmd.callback()
+
+
 def _inject_role_bootstrap(pane: str, role: str) -> bool:
     """Inject the full role bootstrap prompt into *pane* as its first input.
 
@@ -2304,7 +2367,14 @@ def _role_bootstrap_prompt(role: str) -> str:
 
 @cli.group("duo")
 def duo_cmd():
-    """DUO atom (worker + anti-family validator) management."""
+    """DUO atom (worker + anti-family validator) management.
+
+    \b
+    Examples:
+      hive duo init                          # worker (= this pane) + anti-family validator
+      hive duo init --validator-cli codex    # pick the validator CLI explicitly
+      hive duo set-pr 57                     # pin PR 57 on the window status
+    """
 
 
 def _duo_neighbor_for_pairing(
@@ -2717,8 +2787,6 @@ def _claim_team_name(team_name: str, *, this_window: str, explicit: bool) -> Non
 def _create_standalone_duo(
     *,
     current_pane: str,
-    explicit_name: str = "",
-    explicit_workspace: str = "",
     validator_cli: str | None = None,
 ) -> dict[str, object]:
     """Shared duo bring-up for `hive init` and `hive duo init`.
@@ -2746,25 +2814,17 @@ def _create_standalone_duo(
     final_window_id = tmux.get_window_id(final_window) or ""
     final_index = final_window.rsplit(":", 1)[-1] if ":" in final_window else "0"
 
-    team_name = _default_team_name_for_window(session_name, final_window_id, final_index, explicit_name)
+    team_name = _default_team_name_for_window(session_name, final_window_id, final_index)
     _prepare_window_for_new_team(final_window, current_pane=placement.worker_pane)
-    _claim_team_name(team_name, this_window=final_window, explicit=bool(explicit_name))
+    _claim_team_name(team_name, this_window=final_window, explicit=False)
 
-    using_auto_workspace = not explicit_workspace
-    ws_path = (
-        Path(explicit_workspace).expanduser()
-        if explicit_workspace
-        else _default_auto_workspace_path(session_name, final_window_id, final_index)
-    )
-    if using_auto_workspace:
-        # A fresh duo on a reused window must not inherit the previous team's
-        # event log or artifacts from the default auto workspace.
-        from .sidecar import stop_sidecar
+    ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
+    # A fresh duo on a reused window must not inherit the previous team's
+    # event log or artifacts from the default auto workspace.
+    from .sidecar import stop_sidecar
 
-        stop_sidecar(str(ws_path))
-        bus.reset_workspace(ws_path)
-    else:
-        bus.init_workspace(ws_path)
+    stop_sidecar(str(ws_path))
+    bus.reset_workspace(ws_path)
 
     try:
         t = Team.create_for_window(
@@ -2796,7 +2856,7 @@ def _create_standalone_duo(
 def duo_init_cmd(validator_cli: str | None):
     """Set up a duo from the current pane: worker (=this pane) + anti-family validator.
 
-    Standalone — no prior `hive init` needed. The current pane must be running
+    Equivalent to `hive init`. The current pane must be running
     an agent CLI (claude / codex); it becomes the worker. Realized by
     the current window's pane count:
 
@@ -2808,17 +2868,7 @@ def duo_init_cmd(validator_cli: str | None):
     The validator runs the anti-family CLI (claude↔codex) so review stays
     independent.
     """
-    if not tmux.is_inside_tmux():
-        _fail("must run inside tmux")
-    current_pane = tmux.get_current_pane_id() or ""
-    if not current_pane:
-        _fail("cannot determine current pane")
-    if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex (this becomes the worker)")
-    _require_codex_daemon_backed(current_pane)
-
-    result = _create_standalone_duo(current_pane=current_pane, validator_cli=validator_cli)
-    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    _run_duo_init(validator_cli)
 
 
 # Replaces the bare index token in a window-status format with a conditional
@@ -2851,8 +2901,8 @@ def _derive_pr_window_status(global_format: str | None) -> str | None:
 @duo_cmd.command("set-pr")
 @click.argument("number", type=int)
 @click.argument("title", required=False, default=None)
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def duo_set_pr_cmd(number: int, title: str | None, as_json: bool):
+@_json_default_options
+def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
     """Label the current duo window with its PR number (and optionally rename it).
 
     Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the
@@ -2888,20 +2938,20 @@ def duo_set_pr_cmd(number: int, title: str | None, as_json: bool):
             continue
         tmux.set_window_option(window, option, derived)
         display[option] = "derived"
-    if as_json:
+    if plain:
+        summary = ", ".join(f"{key}={value}" for key, value in display.items())
+        title_note = f", title={title}" if title else ""
+        click.echo(f"window {window} labeled @hive-pr={number}{title_note} ({summary})")
+    else:
         result: dict[str, object] = {"window": window, "pr": number, "display": display}
         if title:
             result["title"] = title
         click.echo(json.dumps(result, indent=2))
-    else:
-        summary = ", ".join(f"{key}={value}" for key, value in display.items())
-        title_note = f", title={title}" if title else ""
-        click.echo(f"window {window} labeled @hive-pr={number}{title_note} ({summary})")
 
 
 @duo_cmd.command("clear-pr")
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def duo_clear_pr_cmd(as_json: bool):
+@_json_default_options
+def duo_clear_pr_cmd(plain: bool):
     """Clear the current duo window's PR number stamp."""
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2915,7 +2965,7 @@ def duo_clear_pr_cmd(as_json: bool):
         )
     previous = tmux.get_window_option(window, "hive-pr")
     tmux.clear_window_option(window, "@hive-pr")
-    if as_json:
+    if not plain:
         click.echo(json.dumps({"window": window, "previous": previous}, indent=2))
     elif previous:
         click.echo(f"window {window} cleared @hive-pr={previous}")
@@ -3059,8 +3109,8 @@ def _build_ls_payload() -> dict[str, object]:
 
 
 @cli.command("ls")
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def ls_cmd(as_json: bool):
+@_json_default_options
+def ls_cmd(plain: bool):
     """List hive teams: live windows plus resumable snapshots.
 
     Live teams show their window; dead ones show the handle to pass to
@@ -3068,7 +3118,7 @@ def ls_cmd(as_json: bool):
     listed; nothing can be live without a server).
     """
     payload = _build_ls_payload()
-    if as_json:
+    if not plain:
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     for line in _format_ls_human(payload):
@@ -3441,7 +3491,14 @@ def resume_cmd(handle: str):
 
 @cli.group("squad")
 def squad_cmd():
-    """Squad (orch + challenger + on-demand duos) management."""
+    """Squad (orch + challenger + on-demand duos) management.
+
+    \b
+    Examples:
+      hive squad init                        # orch (= this pane) + challenger
+      hive squad spawn-duo --feature-id login-flow --task /tmp/task.md
+      hive squad layout                      # re-apply the squad window layout
+    """
 
 
 def _wait_for_peer_ready(
@@ -3818,8 +3875,8 @@ def _copy_squad_integration_option(squad_window: str, peer_window: str) -> None:
 
 @squad_cmd.command("set-integration-branch")
 @click.argument("ref")
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def squad_set_integration_branch_cmd(ref: str, as_json: bool):
+@_json_default_options
+def squad_set_integration_branch_cmd(ref: str, plain: bool):
     """Declare the squad's integration branch (the base of every sub-PR).
 
     Run from the squad window after creating the branch; duos spawned
@@ -3839,10 +3896,10 @@ def squad_set_integration_branch_cmd(ref: str, as_json: bool):
         _fail(str(e))
         raise AssertionError("unreachable")
     tmux.set_window_option(window, "@hive-squad-integration-branch", ref)
-    if as_json:
-        click.echo(json.dumps({"squad": squad_name, "integrationBranch": ref, "oid": oid, "window": window}, indent=2))
-    else:
+    if plain:
         click.echo(f"squad '{squad_name}' integration branch set: {ref} ({oid[:12]})")
+    else:
+        click.echo(json.dumps({"squad": squad_name, "integrationBranch": ref, "oid": oid, "window": window}, indent=2))
 
 
 @squad_cmd.command("spawn-duo")
@@ -4236,7 +4293,7 @@ def squad_cleanup_cmd():
     }, indent=2))
 
 
-@cli.command("status-set", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("status-set", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def status_set(legacy_args: tuple[str, ...]):
     """Removed legacy status publishing command."""
@@ -4244,7 +4301,7 @@ def status_set(legacy_args: tuple[str, ...]):
     _status_migration_failure("status-set")
 
 
-@cli.command("status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def status_cmd(legacy_args: tuple[str, ...]):
     """Removed projected-status command."""
@@ -4252,7 +4309,7 @@ def status_cmd(legacy_args: tuple[str, ...]):
     _status_migration_failure("status")
 
 
-@cli.command("statuses", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("statuses", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def statuses_cmd(legacy_args: tuple[str, ...]):
     """Backward-compatible alias for removed `hive status`."""
@@ -4260,7 +4317,7 @@ def statuses_cmd(legacy_args: tuple[str, ...]):
     _status_migration_failure("statuses")
 
 
-@cli.command("status-show", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("status-show", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
 def status_show(legacy_args: tuple[str, ...]):
     """Backward-compatible alias for removed `hive status`."""
@@ -4614,21 +4671,23 @@ def _exec_cvim(mode: str, args: tuple[str, ...]) -> None:
     os.execvp("bash", ["bash", str(_CVIM_BINARY), mode, *args])
 
 
-@cli.command("cvim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("cvim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def cvim_cmd(args: tuple[str, ...]) -> None:
-    """Human-only: open vim seeded with the previous assistant message and send the diff back.
+    """Human-only: edit the last assistant message in vim, send it back.
 
-    Intended to be typed by the human via the agent's shell escape (e.g. `!hive cvim`)
-    in Claude Code or Codex. Not meant for the model to invoke on its own.
+    Opens a popup vim seeded with the previous assistant message and sends the
+    edited result back to the agent pane. Intended to be typed by the human via
+    the agent's shell escape (e.g. `!hive cvim`) in Claude Code or Codex. Not
+    meant for the model to invoke on its own.
     """
     _exec_cvim("cvim", args)
 
 
-@cli.command("vim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("vim", context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def vim_cmd(args: tuple[str, ...]) -> None:
-    """Human-only: open a blank vim buffer and send the final result back to the agent pane.
+    """Human-only: compose in a blank vim buffer, send it to the agent pane.
 
     Intended to be typed by the human via the agent's shell escape (e.g. `!hive vim`)
     in Claude Code or Codex. Not meant for the model to invoke on its own.
@@ -4652,7 +4711,7 @@ def _exec_fork_split(split: str, args: tuple[str, ...]) -> None:
         )
 
 
-@cli.command("vfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("vfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def vfork_cmd(args: tuple[str, ...]) -> None:
     """Human-only: fork the current Hive session into a vertical split.
@@ -4663,7 +4722,7 @@ def vfork_cmd(args: tuple[str, ...]) -> None:
     _exec_fork_split("v", args)
 
 
-@cli.command("hfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@cli.command("hfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def hfork_cmd(args: tuple[str, ...]) -> None:
     """Human-only: fork the current Hive session into a horizontal split.
@@ -4725,11 +4784,11 @@ def _render_plugin_mutation_result(action: str, payload: dict[str, object]) -> s
 
 
 @plugin.command("list")
-@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
-def plugin_list(json_output: bool) -> None:
+@_json_default_options
+def plugin_list(plain: bool) -> None:
     """List available plugins and whether they are enabled."""
     rows = plugin_manager.list_plugins()
-    if json_output:
+    if not plain:
         click.echo(json.dumps(rows, ensure_ascii=False))
         return
 
@@ -4744,14 +4803,21 @@ def plugin_list(json_output: bool) -> None:
         click.echo(f"  {str(row.get('name', '')):<{name_width}}  {status:<8}  {row.get('description', '')}")
 
 
+@plugin.command("ls", hidden=True)
+@_json_default_options
+def plugin_ls(plain: bool) -> None:
+    """Hidden alias of `hive plugin list`."""
+    plugin_list.callback(plain=plain)
+
+
 @plugin.command("enable")
 @click.argument("name")
-@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
-def plugin_enable(name: str, json_output: bool) -> None:
+@_json_default_options
+def plugin_enable(name: str, plain: bool) -> None:
     """Enable a plugin and materialize its commands."""
     try:
         payload = plugin_manager.enable_plugin(name)
-        if json_output:
+        if not plain:
             click.echo(json.dumps(payload, ensure_ascii=False))
             return
         click.echo(_render_plugin_mutation_result("enabled", payload))
@@ -4761,12 +4827,12 @@ def plugin_enable(name: str, json_output: bool) -> None:
 
 @plugin.command("disable")
 @click.argument("name")
-@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON")
-def plugin_disable(name: str, json_output: bool) -> None:
+@_json_default_options
+def plugin_disable(name: str, plain: bool) -> None:
     """Disable a plugin and remove its commands."""
     try:
         payload = plugin_manager.disable_plugin(name)
-        if json_output:
+        if not plain:
             click.echo(json.dumps(payload, ensure_ascii=False))
             return
         click.echo(_render_plugin_mutation_result("disabled", payload))
@@ -4862,7 +4928,7 @@ def _codex_args_set_cwd(args: list[str]) -> bool:
 
 @cli.command(
     "codex",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
 )
 @click.pass_context
 def codex_cmd(ctx: click.Context):
@@ -4966,7 +5032,7 @@ def _exec_claude_managed(args: list[str]) -> None:
 
 @cli.command(
     "claude",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
     add_help_option=False,
 )
 @click.pass_context
@@ -5226,6 +5292,12 @@ def worktree_cmd():
     Hive creates/removes worktrees and records ownership in git config;
     entering/leaving the directory is the agent's own move (Claude:
     EnterWorktree path=<path> / ExitWorktree action=keep; Codex: cd).
+
+    \b
+    Examples:
+      hive worktree start login-flow         # create worktree + branch, print JSON with path
+      hive worktree status                   # pool state for this repo
+      hive worktree done login-flow          # remove the worktree, keep the branch
     """
 
 
@@ -5237,9 +5309,9 @@ def worktree_cmd():
     default=None,
     help="Base ref override (default: squad integration branch, else detected default branch)",
 )
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def worktree_start_cmd(feature: str, base_ref: str | None, as_json: bool):
-    """Create (or re-attach) the worktree for FEATURE and print its path.
+@_json_default_options
+def worktree_start_cmd(feature: str, base_ref: str | None, plain: bool):
+    """Create (or re-attach) the worktree for FEATURE and print its path as JSON.
 
     Exit 0 = ready (mode created/existing/attached/adopted-existing-branch).
     Exit 1 with mode=needs-rebase = branch exists but does not contain the
@@ -5263,13 +5335,13 @@ def worktree_start_cmd(feature: str, base_ref: str | None, as_json: bool):
     except wt_mod.WorktreeError as e:
         _fail(str(e))
         raise AssertionError("unreachable")
-    if as_json:
-        click.echo(json.dumps(result.to_json(), indent=2))
-    else:
+    if plain:
         click.echo(result.path)
         click.echo(f"mode={result.mode} branch={result.branch} base={result.base}@{result.base_oid[:12]}")
         for w in result.warnings:
             click.echo(f"warning: {w}", err=True)
+    else:
+        click.echo(json.dumps(result.to_json(), indent=2))
     if not result.ready:
         sys.exit(1)
 
@@ -5277,8 +5349,8 @@ def worktree_start_cmd(feature: str, base_ref: str | None, as_json: bool):
 @worktree_cmd.command("done")
 @click.argument("feature")
 @click.option("--force", is_flag=True, help="Discard uncommitted work (destructive; prints a status summary first)")
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def worktree_done_cmd(feature: str, force: bool, as_json: bool):
+@_json_default_options
+def worktree_done_cmd(feature: str, force: bool, plain: bool):
     """Remove FEATURE's worktree. The branch is always kept (PRs live on it).
 
     Refuses while you are inside the worktree, while a git operation is in
@@ -5292,7 +5364,7 @@ def worktree_done_cmd(feature: str, force: bool, as_json: bool):
     except wt_mod.WorktreeError as e:
         _fail(str(e))
         raise AssertionError("unreachable")
-    if as_json:
+    if not plain:
         click.echo(json.dumps(result.to_json(), indent=2))
         return
     if result.status_summary:
@@ -5303,8 +5375,8 @@ def worktree_done_cmd(feature: str, force: bool, as_json: bool):
 
 @worktree_cmd.command("status")
 @click.argument("feature", required=False)
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
-def worktree_status_cmd(feature: str | None, as_json: bool):
+@_json_default_options
+def worktree_status_cmd(feature: str | None, plain: bool):
     """Read-only lifecycle view of FEATURE (or every hive-labeled worktree)."""
     from . import worktree as wt_mod
 
@@ -5318,7 +5390,7 @@ def worktree_status_cmd(feature: str | None, as_json: bool):
     except wt_mod.WorktreeError as e:
         _fail(str(e))
         raise AssertionError("unreachable")
-    if as_json:
+    if not plain:
         click.echo(json.dumps(payload, indent=2))
         return
     rows = payload if isinstance(payload, list) else [payload]

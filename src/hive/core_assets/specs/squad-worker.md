@@ -102,7 +102,7 @@ hive send <squad>.orch "<squad>.worker-<N> idle, awaiting dispatch"
 hive worktree start <feature-id>
 ```
 
-进入 stdout 给出的路径并证明入场：
+取输出 JSON 的 `path` 字段，进入该路径并证明入场：
 
 - claude 用 `EnterWorktree path=<路径>`。
 - codex 的每条 repo 命令都把 working directory 设为该路径，并先跑 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
@@ -206,6 +206,6 @@ PR 收束：
 
 先离开 worktree：claude `ExitWorktree action=keep`；codex 后续 repo 命令切回主 checkout。
 
-再跑 `hive worktree done <feature-id>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用，且先核 status 摘要。
+再跑 `hive worktree done <feature-id>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用，且先核输出 JSON 的 `statusSummary`。
 
 做完这条 feature 即 retire。不复用、不接第二条，等 human 显式 `hive squad cleanup`。

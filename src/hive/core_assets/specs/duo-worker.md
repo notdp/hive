@@ -86,8 +86,8 @@ commit 前看 `git status --short` 和 `git diff --cached --stat`。不要把别
 
 ### 1. 开 worktree，并钉 PR 锚
 
-1. `hive worktree start <feature>`
-2. 进入 stdout 给出的路径并证明入场：
+1. `hive worktree start <feature>`（输出 JSON）
+2. 取输出 JSON 的 `path` 字段，进入该路径并证明入场：
    - claude 用 `EnterWorktree path=<路径>`。
    - codex 的每条 repo 命令都把 working directory 设为该路径，并先跑 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
 3. feature 名同时是 branch 名和 worktree 目录名：语义化 kebab-case、≤4 词、合法 branch、看名知事。序号和依赖不要塞进名字。
@@ -168,4 +168,4 @@ PR 收束：
 
 先离开 worktree：claude `ExitWorktree action=keep`；codex 后续 repo 命令切回主 checkout。
 
-再跑 `hive worktree done <feature>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用，且先核 status 摘要。
+再跑 `hive worktree done <feature>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用，且先核输出 JSON 的 `statusSummary`。

@@ -62,11 +62,23 @@ def test_set_pr_stamps_option_and_derives_display_json(runner, configure_hive_ho
     assert renames == []
 
 
-def test_set_pr_default_output_is_human_line(runner, configure_hive_home):
+def test_set_pr_default_output_is_json(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
     result = runner.invoke(cli, ["duo", "set-pr", "87"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["pr"] == 87
+    assert payload["display"]
+
+
+def test_set_pr_plain_output_is_human_line(runner, configure_hive_home):
+    configure_hive_home()
+    _bind_team()
+
+    result = runner.invoke(cli, ["duo", "set-pr", "87", "--plain"])
 
     assert result.exit_code == 0, result.output
     assert "@hive-pr=87" in result.output
@@ -145,7 +157,7 @@ def test_clear_pr_human_output_reports_previous_stamp(runner, configure_hive_hom
     _bind_team()
     assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
 
-    result = runner.invoke(cli, ["duo", "clear-pr"])
+    result = runner.invoke(cli, ["duo", "clear-pr", "--plain"])
 
     assert result.exit_code == 0, result.output
     assert "cleared" in result.output

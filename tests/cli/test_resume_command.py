@@ -657,7 +657,7 @@ def test_ls_human_output_is_grouped(runner, configure_hive_home, monkeypatch, tm
         window_list=[{"window": "dev:3", "windowName": "pair", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0", "pr": "52"}],
     )
 
-    result = runner.invoke(cli, ["ls"])
+    result = runner.invoke(cli, ["ls", "--plain"])
     assert result.exit_code == 0, result.output
     out = result.output
     # structural facts, not prose: group headers in order, one per section
@@ -678,7 +678,7 @@ def test_ls_human_groups_other_states_separately(runner, configure_hive_home, mo
     (tmp_path / ".hive" / "state" / "resume" / "broken.json").write_text("{nope")
     _tmux_state(monkeypatch, pane_list=[], window_list=[])
 
-    result = runner.invoke(cli, ["ls"])
+    result = runner.invoke(cli, ["ls", "--plain"])
     assert result.exit_code == 0, result.output
     assert "OTHER" in result.output
     assert "LIVE" not in result.output and "RESTORABLE" not in result.output
@@ -877,6 +877,6 @@ def test_exact_handle_beats_short_id_and_hint_falls_back(
     assert json.loads(result.stdout)["team"] == other_sid
 
     # hint: victim's row must not advertise a token that resolves elsewhere
-    ls = runner.invoke(cli, ["ls"])
+    ls = runner.invoke(cli, ["ls", "--plain"])
     victim_line = next(l for l in ls.output.splitlines() if l.strip().startswith("victim"))
     assert "hive resume victim" in victim_line
