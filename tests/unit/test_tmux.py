@@ -464,3 +464,21 @@ def test_wait_for_text_success_and_timeout(monkeypatch):
     monkeypatch.setattr("hive.tmux.time.time", lambda: next(times))
 
     assert tmux.wait_for_text("%1", "for help", timeout=0.5, interval=0) is False
+
+
+def test_list_panes_full_or_none_is_status_aware(monkeypatch):
+    ok = subprocess.CompletedProcess(["tmux"], 0, "%1\t[w]\tzsh\tagent\tworker\tt1\tclaude\tduo\t\n", "")
+    fail = subprocess.CompletedProcess(["tmux"], 1, "", "timeout")
+
+    monkeypatch.setattr("hive.tmux._run", lambda args, check=False, timeout=5: ok)
+    panes = tmux.list_panes_full_or_none("dev:0")
+    assert panes is not None and panes[0].pane_id == "%1"
+    assert tmux.list_panes_full("dev:0")[0].pane_id == "%1"
+
+    monkeypatch.setattr("hive.tmux._run", lambda args, check=False, timeout=5: fail)
+    assert tmux.list_panes_full_or_none("dev:0") is None
+    assert tmux.list_panes_full("dev:0") == []
+
+    empty = subprocess.CompletedProcess(["tmux"], 0, "", "")
+    monkeypatch.setattr("hive.tmux._run", lambda args, check=False, timeout=5: empty)
+    assert tmux.list_panes_full_or_none("dev:0") == []

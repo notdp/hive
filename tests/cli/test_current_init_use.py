@@ -618,7 +618,11 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     # Origin window dev:0 is crowded (3 panes) → the worker breaks out to dev:3.
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:0")
-    monkeypatch.setattr("hive.cli.tmux.get_pane_count", lambda _pane: 3)
+    from hive.tmux import PaneInfo as _PI
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full_or_none",
+        lambda _t: [_PI("%5", ""), _PI("%6", ""), _PI("%7", "")],
+    )
     monkeypatch.setattr("hive.cli.tmux.break_pane", lambda p, **k: ("dev:3", "%200"))
     # The final window's id slug (@42) differs from origin (@0) and index (3),
     # so a passing assertion proves the name is final-window-id-derived.

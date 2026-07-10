@@ -2306,15 +2306,17 @@ def duo_cmd():
 
 
 def _duo_neighbor_for_pairing(
-    current_pane: str, window: str, my_family: str
+    current_pane: str, panes: list[tmux.PaneInfo], my_family: str
 ) -> tmux.PaneInfo | None:
-    """The current window's sole other pane, if it qualifies as the validator.
+    """The sole other pane in the *panes* snapshot, if it qualifies as validator.
 
     Qualifies = an idle, unowned, anti-family agent. Returns None otherwise.
     Duo only ever conscripts here — the 2-pane case. 3+ panes break out
-    rather than guess which neighbor to grab.
+    rather than guess which neighbor to grab. Consumes the caller's already
+    successful window snapshot instead of re-listing, so an unknown listing
+    can never masquerade as "no neighbor".
     """
-    others = [p for p in tmux.list_panes_full(window) if p.pane_id != current_pane]
+    others = [p for p in panes if p.pane_id != current_pane]
     if len(others) != 1:
         return None
     neighbor = others[0]
@@ -2403,6 +2405,18 @@ def _unique_duo_window_name(base: str, this_window: str) -> str:
     return f"{base}-{n}"
 
 
+def _resolve_validator_cli_model(my_family: str, explicit_cli: str | None) -> tuple[str, str]:
+    """Validator ``(cli, model)``: explicit flag > role settings > anti-family."""
+    from . import settings as user_settings
+
+    role_cli, role_model = user_settings.resolve_role_config("validator")
+    if explicit_cli:
+        return explicit_cli, role_model
+    if role_cli:
+        return role_cli, role_model
+    return peer_cli_for_family(my_family), role_model
+
+
 def _prepare_duo_placement(
     current_pane: str, *, validator_cli: str | None = None
 ) -> _DuoPlacement:
@@ -2415,29 +2429,25 @@ def _prepare_duo_placement(
     """
     worker_cli = _resolve_spawn_cli_name(None)
     my_family = family_for_pane(current_pane)
-
-    from . import settings as user_settings
-    role_cli, role_model = user_settings.resolve_role_config("validator")
-
-    if validator_cli:
-        v_cli = validator_cli
-        v_model = role_model
-    elif role_cli:
-        v_cli = role_cli
-        v_model = role_model
-    else:
-        v_cli = peer_cli_for_family(my_family)
-        v_model = role_model
+    v_cli, v_model = _resolve_validator_cli_model(my_family, validator_cli)
 
     window = tmux.get_pane_window_target(current_pane) or ""
     if not window:
         _fail("cannot determine current window")
-    count = tmux.get_pane_count(current_pane)
+    # One successful snapshot drives both the pane count and the neighbor
+    # choice: placement mutates windows (break_pane / spawn), so an unknown
+    # listing must abort here instead of masquerading as a 1-pane window.
+    panes = tmux.list_panes_full_or_none(window)
+    if panes is None:
+        _fail(f"tmux did not answer the pane listing for {window}; rerun init")
+    if not any(p.pane_id == current_pane for p in panes):
+        _fail(f"current pane {current_pane} missing from {window} listing; rerun init")
+    count = len(panes)
     worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
     window_name = _duo_window_name(worker_cwd)
 
     # Decide adopt-vs-spawn before mutating any windows.
-    adopt = _duo_neighbor_for_pairing(current_pane, window, my_family) if count == 2 else None
+    adopt = _duo_neighbor_for_pairing(current_pane, panes, my_family) if count == 2 else None
 
     worker_pane = current_pane
     adopt_pane, adopt_cli = "", ""
@@ -2463,6 +2473,111 @@ def _prepare_duo_placement(
         adopt_cli=adopt_cli,
         window_name=window_name,
     )
+
+
+def _spawn_duo_validator(
+    t: Team,
+    *,
+    window: str,
+    worker_pane: str,
+    worker_cwd: str,
+    ws: str,
+    cli: str,
+    model: str,
+    pane_count_after: int,
+) -> Agent:
+    """Spawn a duo validator beside *worker_pane* and wire its identity.
+
+    Shared by fresh duo formation and the init-time revive of a dead
+    validator, so the spawn parameters can't drift between the two paths.
+    Peer declaration and layout stay with the caller.
+    """
+    from . import layout as layout_mod
+
+    validator_agent = Agent.spawn(
+        name="validator",
+        team_name=t.name,
+        target_pane=worker_pane,
+        cwd=worker_cwd,
+        split_horizontal=layout_mod.split_horizontal(window, pane_count_after),
+        split_size="50%",
+        cli=cli,
+        model=model,
+        skill="none",
+        prompt=_role_bootstrap_prompt("duo-validator"),
+        workspace=ws,
+    )
+    t.agents["validator"] = validator_agent
+    tmux.set_pane_option(validator_agent.pane_id, "hive-group", "duo")
+    hive_context.save_context_for_pane(
+        validator_agent.pane_id, team=t.name, workspace=ws, agent="validator"
+    )
+    return validator_agent
+
+
+def _revive_missing_duo_validator(
+    existing: dict[str, str], *, validator_cli: str | None = None
+) -> dict[str, object] | None:
+    """Respawn a duo's validator when the binding survived but its pane died.
+
+    Runs on the idempotent init path. Conservative by contract: only a
+    successful pane listing may prove the validator missing — a tmux failure
+    is unknown and never spawns — and the loaded team must actually contain
+    this worker. Returns the respawned validator descriptor, or None when
+    nothing was (or could safely be) done.
+    """
+    if existing.get("group") != "duo" or existing.get("agent") != "worker":
+        return None
+    team_name = existing.get("team") or ""
+    window = existing.get("tmuxWindow") or ""
+    worker_pane = existing.get("pane") or ""
+    if not team_name or not window or not worker_pane:
+        return None
+    panes = tmux.list_panes_full_or_none(window)
+    if panes is None:
+        return None  # tmux didn't answer: unknown is not missing
+    me = next((p for p in panes if p.pane_id == worker_pane), None)
+    if me is None or me.team != team_name or me.agent != "worker" or me.group != "duo":
+        return None  # binding out of sync with the listing — don't guess
+    if any(p.team == team_name and p.agent == "validator" for p in panes):
+        return None
+    try:
+        t = Team.load(team_name, prefer_pane=worker_pane)
+    except (FileNotFoundError, KeyError, ValueError):
+        return None
+    loaded_worker = t.agents.get("worker")
+    if loaded_worker is None or loaded_worker.pane_id != worker_pane or t.tmux_window != window:
+        return None  # stale team state — never spawn into the wrong pane/window
+    # Workspace comes from the identity-verified team, not the binding payload
+    # (whose window-option read folds tmux failures into ""); a validator
+    # spawned with an unknown workspace would join with a broken context.
+    ws = t.workspace or ""
+    if not ws:
+        return None
+    worker_cwd = tmux.display_value(worker_pane, "#{pane_current_path}") or ws
+    v_cli, v_model = _resolve_validator_cli_model(family_for_pane(worker_pane), validator_cli)
+    validator_agent = _spawn_duo_validator(
+        t,
+        window=window,
+        worker_pane=worker_pane,
+        worker_cwd=worker_cwd,
+        ws=ws,
+        cli=v_cli,
+        model=v_model,
+        pane_count_after=len(panes) + 1,
+    )
+    # t was identity-checked above and _spawn_duo_validator registered the
+    # validator in t.agents, so peer restoration must succeed — let it raise.
+    t.set_peer("worker", "validator")
+    from . import layout as layout_mod
+
+    layout_mod.apply_adaptive(window)
+    return {
+        "pane": validator_agent.pane_id,
+        "name": "validator",
+        "cli": v_cli,
+        "mode": "respawned",
+    }
 
 
 def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[str, object]:
@@ -2507,23 +2622,15 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
         )
         validator_pane, validator_cli_used, mode = placement.adopt_pane, placement.adopt_cli, "paired"
     else:
-        validator_agent = Agent.spawn(
-            name="validator",
-            team_name=t.name,
-            target_pane=worker_pane,
-            cwd=worker_cwd,
-            split_horizontal=layout_mod.split_horizontal(window, 2),
-            split_size="50%",
+        validator_agent = _spawn_duo_validator(
+            t,
+            window=window,
+            worker_pane=worker_pane,
+            worker_cwd=worker_cwd,
+            ws=ws,
             cli=placement.validator_cli,
             model=placement.validator_model,
-            skill="none",
-            prompt=_role_bootstrap_prompt("duo-validator"),
-            workspace=ws,
-        )
-        t.agents["validator"] = validator_agent
-        tmux.set_pane_option(validator_agent.pane_id, "hive-group", "duo")
-        hive_context.save_context_for_pane(
-            validator_agent.pane_id, team=t.name, workspace=ws, agent="validator"
+            pane_count_after=2,
         )
         validator_pane, validator_cli_used, mode = validator_agent.pane_id, placement.validator_cli, "spawned"
 
@@ -2617,14 +2724,19 @@ def _create_standalone_duo(
     Decides placement (which may break the worker out to a fresh window),
     derives the team name + workspace from the *final* window, creates the team
     there, then forms the duo. Idempotent: if the current pane is already bound
-    the existing binding is returned untouched.
+    the existing binding is returned — reviving a dead validator first, so a
+    duo worker can heal its pair by re-running init.
     """
     _gc_dead_teams()
     plugin_manager.cleanup_retired_plugins()
 
     existing = _discover_tmux_binding()
     if existing.get("team"):
-        return existing
+        result: dict[str, object] = dict(existing)
+        revived = _revive_missing_duo_validator(existing, validator_cli=validator_cli)
+        if revived:
+            result["validator"] = revived
+        return result
 
     session_name = tmux.get_current_session_name() or "hive"
     placement = _prepare_duo_placement(current_pane, validator_cli=validator_cli)

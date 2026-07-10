@@ -25,8 +25,14 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod, "_pane_is_idle_for_pairing", lambda _p: True)
     monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _p: pane_count)
     monkeypatch.setattr(cli_mod.tmux, "get_pane_window_target", lambda _p: "dev:0")
-    if panes is not None:
-        monkeypatch.setattr(cli_mod.tmux, "list_panes_full", lambda _w: panes)
+    # Placement reads one successful window snapshot (count + neighbors); tests
+    # that don't pass explicit panes get one synthesized from pane_count.
+    if panes is None:
+        panes = [SimpleNamespace(pane_id="%100", team="", group="")] + [
+            SimpleNamespace(pane_id=f"%15{i}", team="", group="") for i in range(pane_count - 1)
+        ]
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: panes)
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full", lambda _w: panes)
     monkeypatch.setattr(
         cli_mod.tmux,
         "display_value",
@@ -554,3 +560,461 @@ def test_duo_init_role_cli_set_without_model_no_stale_peer_model(
 
     assert spawned[0]["cli"] == "codex"
     assert spawned[0]["model"] == ""
+
+
+# --- init-time revive of a dead validator (idempotent path) ---
+
+
+def _revive_binding(ws: str) -> dict:
+    return {
+        "team": "dev-w2",
+        "workspace": ws,
+        "agent": "worker",
+        "role": "agent",
+        "pane": "%100",
+        "tmuxSession": "dev",
+        "tmuxWindow": "dev:0",
+        "group": "duo",
+    }
+
+
+def _worker_pane_info():
+    from hive.tmux import PaneInfo
+
+    return PaneInfo(pane_id="%100", title="[worker]", team="dev-w2", agent="worker", group="duo")
+
+
+def _validator_pane_info():
+    from hive.tmux import PaneInfo
+
+    return PaneInfo(pane_id="%101", title="[validator]", team="dev-w2", agent="validator", group="duo")
+
+
+def _revive_mocks(cli_mod, monkeypatch, tmp_path, *, panes, binding, team="default"):
+    """Stubs for the idempotent-init revive path. Returns (spawned, peered, layouts)."""
+    spawned: list[dict] = []
+    peered: list[tuple] = []
+    layouts: list[str] = []
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%100")
+    monkeypatch.setattr(
+        cli_mod, "detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude", skill_cmd="/{name}")
+    )
+    monkeypatch.setattr(cli_mod, "_require_codex_daemon_backed", lambda _p: None)
+    monkeypatch.setattr(cli_mod, "_discover_tmux_binding", lambda: binding)
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: panes)
+    monkeypatch.setattr(cli_mod, "family_for_pane", lambda _p: "anthropic")
+    monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _f: "codex")
+    monkeypatch.setattr(cli_mod.tmux, "display_value", lambda _p, _fmt: str(tmp_path / "repo"))
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr(cli_mod.hive_context, "save_context_for_pane", lambda *_a, **_k: None)
+    monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
+    monkeypatch.setattr("hive.layout.apply_adaptive", lambda t: layouts.append(t))
+    if team == "default":
+        team = SimpleNamespace(
+            name=binding["team"],
+            tmux_window=binding["tmuxWindow"],
+            workspace=binding["workspace"],
+            agents={"worker": SimpleNamespace(pane_id=binding["pane"])},
+            set_peer=lambda a, b: peered.append((a, b)),
+        )
+    if isinstance(team, Exception):
+        def _load(_name, prefer_pane=""):
+            raise team
+        monkeypatch.setattr(cli_mod.Team, "load", staticmethod(_load))
+    else:
+        monkeypatch.setattr(cli_mod.Team, "load", staticmethod(lambda _n, prefer_pane="": team))
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return Agent(
+            name=str(kwargs["name"]),
+            team_name=str(kwargs["team_name"]),
+            pane_id="%777",
+            cli=str(kwargs["cli"]),
+        )
+
+    monkeypatch.setattr(cli_mod.Agent, "spawn", staticmethod(fake_spawn))
+    return spawned, peered, layouts
+
+
+def test_duo_init_revives_missing_validator(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    ws = str(tmp_path / "ws")
+    spawned, peered, layouts = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=_revive_binding(ws)
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert len(spawned) == 1
+    assert spawned[0]["name"] == "validator"
+    assert spawned[0]["cli"] == "codex"  # anti-family of the claude worker
+    assert spawned[0]["skill"] == "none"
+    assert spawned[0]["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    assert spawned[0]["workspace"] == ws
+    assert spawned[0]["cwd"] == str(tmp_path / "repo")
+    assert peered == [("worker", "validator")]
+    assert layouts == ["dev:0"]
+    assert payload["team"] == "dev-w2"
+    assert payload["validator"] == {
+        "pane": "%777",
+        "name": "validator",
+        "cli": "codex",
+        "mode": "respawned",
+    }
+
+
+def test_hive_init_revives_missing_validator(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    ws = str(tmp_path / "ws")
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=_revive_binding(ws)
+    )
+
+    result = runner.invoke(cli, ["init", "--no-notify"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert len(spawned) == 1
+    assert payload["validator"]["mode"] == "respawned"
+
+
+def test_duo_init_rerun_with_live_validator_spawns_nothing(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    ws = str(tmp_path / "ws")
+    binding = _revive_binding(ws)
+    spawned, _, _ = _revive_mocks(
+        cli_mod,
+        monkeypatch,
+        tmp_path,
+        panes=[_worker_pane_info(), _validator_pane_info()],
+        binding=binding,
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert spawned == []
+    assert payload == binding  # existing binding shape, untouched
+
+
+def test_duo_init_does_not_revive_on_tmux_listing_failure(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """A tmux failure is unknown, not 'validator missing' — never spawn on it."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    ws = str(tmp_path / "ws")
+    binding = _revive_binding(ws)
+    spawned, _, _ = _revive_mocks(cli_mod, monkeypatch, tmp_path, panes=None, binding=binding)
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert spawned == []
+    assert "validator" not in payload
+
+
+def test_duo_init_does_not_revive_when_worker_absent_from_listing(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[], binding=_revive_binding(str(tmp_path / "ws"))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert spawned == []
+
+
+def test_duo_init_does_not_revive_non_duo_or_non_worker(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    for patch in ({"group": "squad"}, {"agent": "validator"}):
+        binding = {**_revive_binding(str(tmp_path / "ws")), **patch}
+        spawned, _, _ = _revive_mocks(
+            cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=binding
+        )
+        result = runner.invoke(cli, ["duo", "init"])
+        assert result.exit_code == 0, result.output
+        assert spawned == []
+
+
+def test_duo_init_does_not_revive_when_team_load_fails(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    spawned, _, _ = _revive_mocks(
+        cli_mod,
+        monkeypatch,
+        tmp_path,
+        panes=[_worker_pane_info()],
+        binding=_revive_binding(str(tmp_path / "ws")),
+        team=ValueError("gone"),
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    assert spawned == []
+
+
+def test_duo_init_does_not_revive_when_worker_not_in_team(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    lonely = SimpleNamespace(name="dev-w2", agents={}, set_peer=lambda a, b: None)
+    spawned, _, _ = _revive_mocks(
+        cli_mod,
+        monkeypatch,
+        tmp_path,
+        panes=[_worker_pane_info()],
+        binding=_revive_binding(str(tmp_path / "ws")),
+        team=lonely,
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    assert spawned == []
+
+
+def test_revive_uses_role_config_for_validator(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=_revive_binding(str(tmp_path / "ws"))
+    )
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "codex",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "codex"
+    assert spawned[0]["model"] == "o3"
+
+
+def test_revive_flag_overrides_role_cli_but_keeps_model(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=_revive_binding(str(tmp_path / "ws"))
+    )
+    monkeypatch.setattr(
+        "hive.settings.get_setting",
+        lambda key, default=None: {
+            "roles.validator.cli": "codex",
+            "roles.validator.model": "o3",
+        }.get(key, default),
+    )
+
+    result = runner.invoke(cli, ["duo", "init", "--validator-cli", "claude"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["cli"] == "claude"
+    assert spawned[0]["model"] == "o3"
+
+
+def test_duo_init_does_not_revive_when_listed_pane_identity_mismatches(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Same pane id in the listing but wrong team/agent/group — stale binding, zero spawn."""
+    from hive.tmux import PaneInfo
+
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    intruder = PaneInfo(pane_id="%100", title="", team="other", agent="intruder", group="squad")
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[intruder], binding=_revive_binding(str(tmp_path / "ws"))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert spawned == []
+    assert "validator" not in payload
+
+
+def test_duo_init_does_not_revive_when_loaded_team_mismatches_binding(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Loaded team pointing at another window or worker pane — zero spawn."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    wrong_window = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:9",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    wrong_worker_pane = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        agents={"worker": SimpleNamespace(pane_id="%999")},
+        set_peer=lambda a, b: None,
+    )
+    for stale in (wrong_window, wrong_worker_pane):
+        spawned, _, _ = _revive_mocks(
+            cli_mod,
+            monkeypatch,
+            tmp_path,
+            panes=[_worker_pane_info()],
+            binding=_revive_binding(str(tmp_path / "ws")),
+            team=stale,
+        )
+        result = runner.invoke(cli, ["duo", "init"])
+        assert result.exit_code == 0, result.output
+        assert spawned == []
+        assert "validator" not in json.loads(result.output)
+
+
+def test_duo_init_aborts_before_mutation_on_listing_failure(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """An unanswered pane listing must abort fresh placement before any
+    break_pane / spawn — unknown is not a 1-pane window."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    breaks: list[str] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=2)
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: None)
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn", staticmethod(lambda **k: spawned.append(k))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+
+    assert result.exit_code != 0
+    assert breaks == []
+    assert spawned == []
+
+
+def test_duo_init_aborts_when_current_pane_missing_from_listing(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    breaks: list[str] = []
+    _duo_mocks(
+        cli_mod,
+        monkeypatch,
+        repo,
+        pane_count=2,
+        panes=[SimpleNamespace(pane_id="%777", team="", group="")],
+    )
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn", staticmethod(lambda **k: spawned.append(k))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+
+    assert result.exit_code != 0
+    assert breaks == []
+    assert spawned == []
+
+
+def test_revive_uses_verified_team_workspace_over_binding(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """The binding's workspace read can fold a tmux failure into ''; spawn and
+    context must use the identity-verified team's workspace instead."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    binding = _revive_binding("")
+    team = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        workspace="/real/ws",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=binding, team=team
+    )
+    contexts: list[tuple] = []
+    monkeypatch.setattr(
+        cli_mod.hive_context,
+        "save_context_for_pane",
+        lambda pane, **kw: contexts.append((pane, kw)),
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["workspace"] == "/real/ws"
+    assert contexts and contexts[0][1]["workspace"] == "/real/ws"
+
+
+def test_revive_zero_spawn_when_team_workspace_unknown(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    binding = _revive_binding("")
+    team = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        workspace="",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=binding, team=team
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert spawned == []
+    assert "validator" not in json.loads(result.output)

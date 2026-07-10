@@ -505,12 +505,14 @@ def _window_has_live_team_members(window_target: str, team_name: str) -> bool:
 
     A window with live members is a real team, not a stale leftover — duplicate
     resolution must never strip its tags, even when another window claims the
-    same name.
+    same name. Callers destroy window options on False, so a failed tmux
+    listing (unknown) conservatively counts as live: only a successful listing
+    can prove a window stale.
     """
-    return any(
-        p.team == team_name and (p.agent or p.role)
-        for p in tmux.list_panes_full(window_target)
-    )
+    panes = tmux.list_panes_full_or_none(window_target)
+    if panes is None:
+        return True
+    return any(p.team == team_name and (p.agent or p.role) for p in panes)
 
 
 def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[str, str]]:

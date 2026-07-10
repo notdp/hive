@@ -912,7 +912,20 @@ _PANE_BASE_FMT = "\t".join([
 
 def list_panes_full(target: str) -> list[PaneInfo]:
     """List all panes with command and hive identity (@hive-*)."""
+    panes = list_panes_full_or_none(target)
+    return panes if panes is not None else []
+
+
+def list_panes_full_or_none(target: str) -> list[PaneInfo] | None:
+    """Status-aware ``list_panes_full``: None when tmux did not answer.
+
+    A successful-but-empty listing is a real empty window; None means the
+    caller cannot tell missing panes from a transient tmux failure and must
+    not take irreversible action on it (same contract as ``is_pane_alive``).
+    """
     r = _run(["list-panes", "-t", target, "-F", _PANE_BASE_FMT], check=False)
+    if r.returncode != 0:
+        return None
     return _parse_panes_full(r.stdout)
 
 

@@ -430,7 +430,7 @@ def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, 
     )
     monkeypatch.setattr("hive.team.tmux.get_pane_window_target", lambda pane: "dev:3" if pane == "%99" else None)
     # No live member panes anywhere → the losing window dev:2 is provably stale.
-    monkeypatch.setattr("hive.team.tmux.list_panes_full", lambda target: [])
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", lambda target: [])
     cleared: list[tuple[str, str]] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
 
@@ -457,7 +457,7 @@ def test_find_team_window_falls_back_to_tagged_panes(configure_hive_home, monkey
             return [PaneInfo("%50", "", "codex", role="agent", agent="rev-a", team="my-team")]
         return [PaneInfo("%40", "", "codex", role="", agent="", team="")]
 
-    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", fake_list_panes)
     cleared: list[str] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
 
@@ -470,7 +470,7 @@ def test_find_team_window_falls_back_to_tagged_panes(configure_hive_home, monkey
 def test_gc_stale_team_windows_clears_non_kept(configure_hive_home, monkeypatch):
     configure_hive_home()
     # All duplicates are stale (no live member panes) → all non-kept get cleared.
-    monkeypatch.setattr("hive.team.tmux.list_panes_full", lambda target: [])
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", lambda target: [])
     cleared: list[tuple[str, str]] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
 
@@ -491,7 +491,7 @@ def test_gc_stale_team_windows_skips_live_duplicate(configure_hive_home, monkeyp
             return [PaneInfo("%40", "", "codex", role="agent", agent="validator", team="my-team")]
         return []
 
-    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", fake_list_panes)
     cleared: list[str] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
 
@@ -499,6 +499,18 @@ def test_gc_stale_team_windows_skips_live_duplicate(configure_hive_home, monkeyp
 
     assert "dev:2" not in cleared  # live duplicate preserved
     assert "dev:4" in cleared      # stale duplicate still cleared
+
+
+def test_gc_stale_team_windows_skips_cleanup_on_tmux_failure(configure_hive_home, monkeypatch):
+    """A failed pane listing is unknown, not proof of staleness — clear nothing."""
+    configure_hive_home()
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", lambda target: None)
+    cleared: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append((wt, key)))
+
+    _gc_stale_team_windows("my-team", keep="dev:3", all_windows=["dev:2", "dev:3", "dev:4"])
+
+    assert cleared == []
 
 
 def test_find_team_window_keeps_live_duplicate(configure_hive_home, monkeypatch):
@@ -528,7 +540,7 @@ def test_find_team_window_keeps_live_duplicate(configure_hive_home, monkeypatch)
             ]
         return []
 
-    monkeypatch.setattr("hive.team.tmux.list_panes_full", fake_list_panes)
+    monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", fake_list_panes)
     cleared: list[str] = []
     monkeypatch.setattr("hive.team.tmux.clear_window_option", lambda wt, key: cleared.append(wt))
 
