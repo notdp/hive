@@ -159,6 +159,9 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.team.tmux.get_window_option", state.get_window_option)
         monkeypatch.setattr("hive.team.tmux.clear_window_option", state.clear_window_option)
         monkeypatch.setattr("hive.team.tmux.list_panes_full", state.list_panes_full)
+        # Status-aware variant: the fake tmux always answers, so a state-backed
+        # listing counts as successful (never None/unknown).
+        monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", state.list_panes_full)
         monkeypatch.setattr("hive.team._find_team_window", state.find_team_window)
         monkeypatch.setattr("hive.team.list_teams", state.list_teams)
 
