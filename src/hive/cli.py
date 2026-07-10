@@ -2984,6 +2984,7 @@ def _build_ls_payload() -> dict[str, object]:
         team_name = str(snap.get("team", ""))
         entry: dict[str, object] = {
             "handle": handle,
+            "shortId": resume_store.short_id(snap),
             "team": team_name,
             "savedAt": snap.get("savedAt", ""),
             "branch": snap.get("branch", ""),
@@ -3097,6 +3098,38 @@ def _ls_roster(entry: dict[str, object]) -> str:
     )
 
 
+def _resume_ref_hint(entry: dict[str, object], teams: list[dict[str, object]]) -> str:
+    """The copyable resume command for a row — short id only when it resolves.
+
+    The short id is shown only if it is unique among valid snapshots and does
+    not collide with another row's exact handle (exact handles win in the
+    resolver, so such a command would resume something else).
+    """
+    handle = str(entry.get("handle") or "")
+    sid = str(entry.get("shortId") or "")
+    if sid:
+        others = [e for e in teams if e is not entry]
+        unique = all(str(e.get("shortId") or "") != sid for e in others)
+        shadowed = any(str(e.get("handle") or "") == sid for e in others)
+        if unique and not shadowed:
+            return f"hive resume {sid}"
+    return f"hive resume {handle}"
+
+
+def _resolve_short_resume_ref(ref: str) -> dict[str, object] | None:
+    """Snapshot whose short id is *ref*, or None; ambiguity fails loudly."""
+    from . import resume as resume_store
+
+    matches = [
+        s for s in resume_store.list_snapshots()
+        if not s.get("corrupt") and resume_store.short_id(s) == ref
+    ]
+    if len(matches) > 1:
+        cmds = "; ".join(f"hive resume {s['handle']}" for s in matches)
+        _fail(f"short id '{ref}' is ambiguous — use a full handle: {cmds}")
+    return matches[0] if matches else None
+
+
 def _format_ls_human(payload: dict[str, object]) -> list[str]:
     teams = list(payload.get("teams") or [])
     if not teams:
@@ -3119,7 +3152,7 @@ def _format_ls_human(payload: dict[str, object]) -> list[str]:
                 missing = [
                     str(m.get("name")) for m in e.get("members", []) if not m.get("live")
                 ]
-                row += f"  ! missing {'+'.join(missing)} → hive resume {e.get('handle')}"
+                row += f"  ! missing {'+'.join(missing)} → {_resume_ref_hint(e, teams)}"
             lines.append(row)
     if restorable:
         if lines and lines[-1] != "":
@@ -3129,7 +3162,7 @@ def _format_ls_human(payload: dict[str, object]) -> list[str]:
             lines.append(
                 f"  {e.get('handle')}  {_ls_row_label(e)}  "
                 f"saved {resume_store.age(str(e.get('savedAt') or ''))} · {_ls_roster(e)}"
-                f"  → hive resume {e.get('handle')}"
+                f"  → {_resume_ref_hint(e, teams)}"
             )
     if other:
         if lines and lines[-1] != "":
@@ -3341,7 +3374,11 @@ def resume_cmd(handle: str):
 
     snap = resume_store.load_snapshot(handle)
     if snap is None:
+        # Not an exact handle: try the 4-char short id shown by `hive ls`.
+        snap = _resolve_short_resume_ref(handle)
+    if snap is None:
         _fail(f"no usable snapshot for '{handle}' — run `hive ls` (missing or corrupt)")
+    handle = str(snap["handle"])
     if snap.get("group") != "duo":
         _fail(f"snapshot group '{snap.get('group')}' is not resumable yet (duo only)")
     members = list(snap.get("members", []))

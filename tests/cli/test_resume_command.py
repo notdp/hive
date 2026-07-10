@@ -664,9 +664,11 @@ def test_ls_human_output_is_grouped(runner, configure_hive_home, monkeypatch, tm
     assert out.index("LIVE") < out.index("RESTORABLE")
     live_line = next(l for l in out.splitlines() if "dev:3" in l)
     assert "liverepo @ livebranch" in live_line and "PR#52" in live_line
-    assert "missing validator" in live_line and "hive resume 0-w2" in live_line
+    sid_w2 = resume_store.short_id({"handle": "0-w2", "createdAt": "100.0"})
+    assert "missing validator" in live_line and f"hive resume {sid_w2}" in live_line
     dead_line = next(l for l in out.splitlines() if "0-w5" in l and "resume" in l)
-    assert "hive resume 0-w5" in dead_line and "ago" in dead_line or "?" in dead_line
+    sid_w5 = resume_store.short_id({"handle": "0-w5", "createdAt": "100.0"})
+    assert f"hive resume {sid_w5}" in dead_line and ("ago" in dead_line or "?" in dead_line)
     assert "OTHER" not in out  # no unknown/corrupt rows → no group
 
 
@@ -800,3 +802,81 @@ def test_resume_failure_keeps_stage_hints_and_no_success_json(
     err = result.stderr
     assert "resuming worker" in err and "resuming validator" in err  # stages kept
     assert "codex daemon failed to bind" in err  # final error visible
+
+
+# --- short resume ids ---
+
+
+def test_ls_json_short_ids_on_valid_snapshots_only(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _save_snap("0-w2", created_at="100.0")   # → prev after new instance
+    _save_snap("0-w2", created_at="200.0")
+    (tmp_path / ".hive" / "state" / "resume" / "broken.json").write_text("{nope")
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%9", "liveonly", "worker", "claude")],
+        window_list=[{"window": "dev:9", "windowName": "x", "windowId": "@9", "team": "liveonly", "workspace": "/w", "created": "1.0", "pr": ""}],
+    )
+
+    result = runner.invoke(cli, ["ls", "--json"])
+    rows = {e.get("handle") or e.get("team"): e for e in json.loads(result.stdout)["teams"]}
+    assert rows["0-w2"]["shortId"] == "775b"
+    assert rows["0-w2.prev"]["shortId"] == resume_store.short_id({"handle": "0-w2.prev", "createdAt": "100.0"})
+    assert "shortId" not in rows["broken"]
+    assert "shortId" not in rows["liveonly"]
+
+
+def test_resume_short_id_resolves_to_full_restore(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)  # handle 0-w2, createdAt 100.0 → sid 0582
+
+    result = runner.invoke(cli, ["resume", "0582"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["resumed"] == "full" and payload["team"] == "0-w2"
+    assert len(rec.spawns) == 2  # identical restore path as the full handle
+    assert rec.selects == ["dev:7"]
+
+
+def test_resume_short_id_collision_fails_with_full_handles(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _tmux_state(monkeypatch, pane_list=[], window_list=[])
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    _save_snap("teamA", cwd=good_cwd)
+    _save_snap("teamB", cwd=good_cwd)
+    sid = resume_store.short_id({"handle": "teamA", "createdAt": "100.0"})
+    monkeypatch.setattr("hive.resume.short_id", lambda _s: sid)  # force a collision
+
+    result = runner.invoke(cli, ["resume", sid])
+    assert result.exit_code != 0
+    assert "hive resume teamA" in result.output and "hive resume teamB" in result.output
+    _assert_zero_mutation(rec)
+
+
+def test_exact_handle_beats_short_id_and_hint_falls_back(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _tmux_state(monkeypatch, pane_list=[], window_list=[])
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    # a snapshot literally named like the other one's short id
+    other_sid = resume_store.short_id({"handle": "victim", "createdAt": "100.0"})
+    _save_snap(other_sid, cwd=good_cwd)
+    _save_snap("victim", cwd=good_cwd)
+
+    # resolver: the token hits the exact handle, never the victim
+    result = runner.invoke(cli, ["resume", other_sid])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["team"] == other_sid
+
+    # hint: victim's row must not advertise a token that resolves elsewhere
+    ls = runner.invoke(cli, ["ls"])
+    victim_line = next(l for l in ls.output.splitlines() if l.strip().startswith("victim"))
+    assert "hive resume victim" in victim_line

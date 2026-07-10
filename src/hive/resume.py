@@ -92,6 +92,19 @@ def git_branch(cwd: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def short_id(snap: dict[str, Any]) -> str:
+    """4-char typeable id for a snapshot, derived — never stored.
+
+    Stable per team instance (handle + createdAt), so `hive ls` and
+    `hive resume` always agree, and a new same-name instance gets a new id
+    with no schema change or migration.
+    """
+    import hashlib
+
+    seed = f"{snap.get('handle', '')}:{snap.get('createdAt', '')}"
+    return hashlib.sha256(seed.encode()).hexdigest()[:4]
+
+
 def store_dir() -> Path:
     home = Path(os.environ.get("HIVE_HOME", str(Path.home() / ".hive")))
     return home / "state" / "resume"
