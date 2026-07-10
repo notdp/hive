@@ -332,3 +332,12 @@ def test_writer_clears_pr_after_window_stamp_removed(store, monkeypatch):
     monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: None)
     sidecar._write_resume_snapshot("/ws", "0-w2")
     assert resume.load_snapshot("0-w2")["pr"] == ""
+
+
+def test_short_id_is_a_locked_sha256_vector():
+    # Locked vectors: silently changing the algorithm would orphan every id
+    # a human has seen in `hive ls`.
+    assert resume.short_id({"handle": "0-w2", "createdAt": "100.0"}) == "0582"
+    assert resume.short_id({"handle": "0-w2", "createdAt": "100.0"}) == "0582"  # stable
+    assert resume.short_id({"handle": "0-w2", "createdAt": "200.0"}) == "775b"  # new instance
+    assert resume.short_id({"handle": "foo", "createdAt": "100.0"}) == "0541"  # other handle
