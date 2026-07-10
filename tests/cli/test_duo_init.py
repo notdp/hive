@@ -607,7 +607,8 @@ def _revive_mocks(cli_mod, monkeypatch, tmp_path, *, panes, binding, team="defau
     if team == "default":
         team = SimpleNamespace(
             name=binding["team"],
-            agents={"worker": object()},
+            tmux_window=binding["tmuxWindow"],
+            agents={"worker": SimpleNamespace(pane_id=binding["pane"])},
             set_peer=lambda a, b: peered.append((a, b)),
         )
     if isinstance(team, Exception):
@@ -840,3 +841,59 @@ def test_revive_flag_overrides_role_cli_but_keeps_model(
     assert len(spawned) == 1
     assert spawned[0]["cli"] == "claude"
     assert spawned[0]["model"] == "o3"
+
+
+def test_duo_init_does_not_revive_when_listed_pane_identity_mismatches(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Same pane id in the listing but wrong team/agent/group — stale binding, zero spawn."""
+    from hive.tmux import PaneInfo
+
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    intruder = PaneInfo(pane_id="%100", title="", team="other", agent="intruder", group="squad")
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[intruder], binding=_revive_binding(str(tmp_path / "ws"))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert spawned == []
+    assert "validator" not in payload
+
+
+def test_duo_init_does_not_revive_when_loaded_team_mismatches_binding(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Loaded team pointing at another window or worker pane — zero spawn."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    wrong_window = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:9",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    wrong_worker_pane = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        agents={"worker": SimpleNamespace(pane_id="%999")},
+        set_peer=lambda a, b: None,
+    )
+    for stale in (wrong_window, wrong_worker_pane):
+        spawned, _, _ = _revive_mocks(
+            cli_mod,
+            monkeypatch,
+            tmp_path,
+            panes=[_worker_pane_info()],
+            binding=_revive_binding(str(tmp_path / "ws")),
+            team=stale,
+        )
+        result = runner.invoke(cli, ["duo", "init"])
+        assert result.exit_code == 0, result.output
+        assert spawned == []
+        assert "validator" not in json.loads(result.output)

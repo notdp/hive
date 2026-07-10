@@ -2526,7 +2526,8 @@ def _revive_missing_duo_validator(
     panes = tmux.list_panes_full_or_none(window)
     if panes is None:
         return None  # tmux didn't answer: unknown is not missing
-    if not any(p.pane_id == worker_pane for p in panes):
+    me = next((p for p in panes if p.pane_id == worker_pane), None)
+    if me is None or me.team != team_name or me.agent != "worker" or me.group != "duo":
         return None  # binding out of sync with the listing — don't guess
     if any(p.team == team_name and p.agent == "validator" for p in panes):
         return None
@@ -2534,8 +2535,9 @@ def _revive_missing_duo_validator(
         t = Team.load(team_name, prefer_pane=worker_pane)
     except (FileNotFoundError, KeyError, ValueError):
         return None
-    if "worker" not in t.agents:
-        return None
+    loaded_worker = t.agents.get("worker")
+    if loaded_worker is None or loaded_worker.pane_id != worker_pane or t.tmux_window != window:
+        return None  # stale team state — never spawn into the wrong pane/window
     ws = existing.get("workspace") or ""
     worker_cwd = tmux.display_value(worker_pane, "#{pane_current_path}") or ws
     v_cli, v_model = _resolve_validator_cli_model(family_for_pane(worker_pane), validator_cli)
@@ -2549,11 +2551,9 @@ def _revive_missing_duo_validator(
         model=v_model,
         pane_count_after=len(panes) + 1,
     )
-    try:
-        reloaded = Team.load(team_name, prefer_pane=worker_pane)
-        reloaded.set_peer("worker", "validator")
-    except (FileNotFoundError, KeyError, ValueError):
-        pass
+    # t was identity-checked above and _spawn_duo_validator registered the
+    # validator in t.agents, so peer restoration must succeed — let it raise.
+    t.set_peer("worker", "validator")
     from . import layout as layout_mod
 
     layout_mod.apply_adaptive(window)
