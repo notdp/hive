@@ -79,6 +79,13 @@ class Team:
         """
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
+        from .resume import is_archive_handle
+
+        if is_archive_handle(name):
+            raise ValueError(
+                f"team name '{name}' is invalid: the '.prev' suffix is reserved "
+                "for resume snapshot archives"
+            )
 
         existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
         if existing_team:

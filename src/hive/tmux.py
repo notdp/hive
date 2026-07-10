@@ -935,6 +935,70 @@ def list_panes_all() -> list[PaneInfo]:
     return _parse_panes_full(r.stdout)
 
 
+def _stderr_means_no_server(stderr: str | None) -> bool:
+    """True only when tmux stderr proves there is no server to talk to.
+
+    Proven messages: "no server running on <path>" (clean shutdown) and
+    "error connecting to <path> (No such file or directory)" (socket gone).
+    Anything else — permission denied, connection refused, unexpected text —
+    stays unknown: a server may well be alive behind the failure.
+    """
+    low = (stderr or "").lower()
+    if "no server running" in low:
+        return True
+    return "error connecting" in low and "no such file or directory" in low
+
+
+def list_panes_all_status() -> tuple[list[PaneInfo] | None, str]:
+    """Status-aware ``list_panes_all``: ``(panes, "ok")`` on success.
+
+    ``(None, "no-server")`` when no tmux server is running (nothing can be
+    live), ``(None, "unknown")`` on any other failure — callers must not
+    read unknown as "dead" (same contract as ``is_pane_alive``).
+    """
+    r = _run(["list-panes", "-a", "-F", _PANE_BASE_FMT], check=False)
+    if r.returncode == 0:
+        return _parse_panes_full(r.stdout), "ok"
+    if _stderr_means_no_server(r.stderr):
+        return None, "no-server"
+    return None, "unknown"
+
+
+def list_team_windows_status() -> tuple[list[dict[str, str]] | None, str]:
+    """Status-aware scan of windows carrying ``@hive-team``.
+
+    Same (value, status) contract as :func:`list_panes_all_status`. Each
+    entry: window target/name/id plus the team, workspace, and created
+    options — everything `hive ls` / `hive resume` need to match a live
+    team instance against a snapshot.
+    """
+    r = _run([
+        "list-windows", "-a", "-F",
+        "#{session_name}:#{window_index}\t#{window_name}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-created}",
+    ], check=False)
+    if r.returncode != 0:
+        if _stderr_means_no_server(r.stderr):
+            return None, "no-server"
+        return None, "unknown"
+    out: list[dict[str, str]] = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 6:
+            parts.append("")
+        if parts[3]:
+            out.append({
+                "window": parts[0],
+                "windowName": parts[1],
+                "windowId": parts[2],
+                "team": parts[3],
+                "workspace": parts[4],
+                "created": parts[5],
+            })
+    return out, "ok"
+
+
 def list_window_indices(session: str) -> list[int]:
     """Return tmux window indices in *session*, ignoring non-numeric output."""
     r = _run(["list-windows", "-t", session, "-F", "#{window_index}"], check=False)

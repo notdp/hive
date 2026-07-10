@@ -2329,6 +2329,69 @@ def _cleanup_dead_codex_daemons(workspace: str) -> None:
             codex_app_server.kill_pane_daemon(pane)
 
 
+def _write_resume_snapshot(workspace: str, team: str) -> None:
+    """Persist the team's durable resume snapshot (`hive ls` / `hive resume`).
+
+    Roster-merged: members observed live update their fields; a member whose
+    pane died stays in the snapshot with its last known sessionId — that
+    entry is exactly what `hive resume` brings back. The store only touches
+    the file when the effective payload changed.
+    """
+    from . import resume as resume_store
+    from . import tmux
+    from .agent_cli import resolve_model_for_pane
+    from .team import Team
+
+    try:
+        t = Team.load(team)
+    except (FileNotFoundError, KeyError, ValueError):
+        return
+    if not t.name or not t.tmux_window or not t.agents:
+        return
+    if not any(t.member_groups.get(name) == "duo" for name in t.agents):
+        return  # only duo snapshots are resumable today
+
+    observed: list[dict[str, str]] = []
+    for name, agent in sorted(t.agents.items()):
+        session_id = _fresh_snapshot_session_id(agent.pane_id) or (agent.session_id or "")
+        model = resolve_model_for_pane(agent.pane_id, cli_name=agent.cli, current_model="")
+        observed.append({
+            "name": name,
+            "cli": agent.cli,
+            "model": model or agent.model,
+            "sessionId": session_id,
+            "cwd": agent.cwd,
+        })
+
+    existing = resume_store.load_snapshot(t.name)
+    prior: list[dict[str, str]] = []
+    if existing is not None and str(existing.get("createdAt")) == str(t.created_at):
+        # Same team instance: keep last-known fields for members whose pane
+        # died. A *different* instance must never inherit the old sessions —
+        # start from what we observe and let the store archive the predecessor.
+        prior = list(existing.get("members", []))
+    members = resume_store.merge_members(prior, observed)
+    repo_cwd = next(
+        (m.get("cwd", "") for m in members if m.get("name") == "worker" and m.get("cwd")),
+        members[0].get("cwd", "") if members else "",
+    )
+    window_name = dict(tmux.list_window_names()).get(t.tmux_window, "") or str(
+        (existing or {}).get("windowName", "")
+    )
+    snap = resume_store.build_snapshot(
+        handle=t.name,
+        team=t.name,
+        group="duo",
+        window_name=window_name,
+        workspace=workspace,
+        repo_cwd=repo_cwd,
+        branch=resume_store.git_branch(repo_cwd),
+        created_at=str(t.created_at),
+        members=members,
+    )
+    resume_store.save_snapshot(snap, now=_now_iso())
+
+
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
     from . import tmux
 
@@ -2381,6 +2444,11 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             if now - last_daemon_cleanup >= 30.0:
                 last_daemon_cleanup = now
                 _cleanup_dead_codex_daemons(workspace)
+                try:
+                    _write_resume_snapshot(workspace, team)
+                except Exception:
+                    # Snapshot persistence must never take the sidecar down.
+                    pass
 
             if now - last_owner_check >= SIDECAR_OWNER_CHECK_SECONDS:
                 last_owner_check = now

@@ -173,15 +173,24 @@ class Agent:
         extra_env: dict[str, str] | None = None,
         cli: str = "claude",
         workspace: str = "",
+        session_mode: str = "fork",
     ) -> Agent:
         """Spawn an agent CLI (claude/codex) in a tmux pane.
 
         If split_window is True (default), splits *target_pane* and runs the
         CLI in the new pane. If False, runs the CLI in *target_pane* itself
         (target must be a shell pane, not already running an agent).
+
+        With a *session_id*, *session_mode* picks the semantics: ``fork``
+        (default, existing behavior) branches a copy of the session; ``resume``
+        continues it — claude drops ``--fork-session``, codex runs the
+        daemon-native ``resume`` subcommand (a resumed team member is
+        first-class, so the embedded shortcut fork uses is not allowed).
         """
         if cli not in CLI_BINS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
+        if session_mode not in ("fork", "resume"):
+            raise ValueError(f"unsupported session_mode '{session_mode}', must be fork or resume")
         cwd = cwd or os.getcwd()
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
@@ -221,12 +230,13 @@ class Agent:
         cmd_parts = ["exec", _shell_escape(bin_path)]
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
-            # A new codex session runs against a per-pane app-server daemon: hive
-            # starts the daemon (injecting this pane's TMUX_PANE so shell tools
-            # keep the right identity, sharing the real CODEX_HOME) and the TUI
-            # joins it via --remote. cwd is passed explicitly because Remote
-            # workspace mode drops config.cwd. Resume/fork stays embedded (below).
-            if not session_id:
+            # A new or resumed codex session runs against a per-pane app-server
+            # daemon: hive starts the daemon (injecting this pane's TMUX_PANE so
+            # shell tools keep the right identity, sharing the real CODEX_HOME)
+            # and the TUI joins it via --remote. cwd is passed explicitly
+            # because Remote workspace mode drops config.cwd. Only the fork
+            # handoff shortcut stays embedded (below).
+            if not session_id or session_mode == "resume":
                 from .adapters import codex_app_server
                 if not codex_app_server.spawn_daemon(pane_id):
                     # Codex runtime state is daemon-native only (embedded codex
@@ -267,12 +277,18 @@ class Agent:
             elif cli == "codex":
                 cmd_parts.extend(["-m", _shell_escape(model)])
 
-        # Resume uses the original session's model; no --model flag needed.
+        # Resume/fork uses the original session's model; no --model flag needed.
         if session_id:
             if cli == "claude":
-                cmd_parts.extend(["-r", _shell_escape(session_id), "--fork-session"])
+                cmd_parts.extend(["-r", _shell_escape(session_id)])
+                if session_mode == "fork":
+                    cmd_parts.append("--fork-session")
             elif cli == "codex":
-                cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
+                if session_mode == "resume":
+                    # Daemon flags (--remote/--cd) are already on cmd_parts.
+                    cmd_parts.extend(["resume", _shell_escape(session_id)])
+                else:
+                    cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
         # Both CLIs accept a positional [prompt] arg (also on resume/fork).
         # Pass skill activation + optional user prompt here so the CLI
