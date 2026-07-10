@@ -2926,6 +2926,30 @@ def duo_clear_pr_cmd(as_json: bool):
 # --- hive ls / hive resume: durable team snapshots ---
 
 
+def _live_anchor_pane(members: dict[str, tmux.PaneInfo]) -> tmux.PaneInfo:
+    """The pane whose cwd best represents what a live team is working on."""
+    for pick in ("worker", "orch"):
+        if pick in members:
+            return members[pick]
+    return members[sorted(members)[0]]
+
+
+def _live_team_context(members: dict[str, tmux.PaneInfo]) -> dict[str, str]:
+    """repo/branch context for a live team, resolved once from its anchor pane."""
+    from . import resume as resume_store
+
+    cwd = tmux.display_value(_live_anchor_pane(members).pane_id, "#{pane_current_path}") or ""
+    return {
+        "repoCwd": cwd,
+        "repo": resume_store.repo_label(cwd),
+        "branch": resume_store.git_branch(cwd),
+    }
+
+
+def _sorted_member_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(rows, key=lambda m: (m.get("name") != "worker", str(m.get("name"))))
+
+
 def _build_ls_payload() -> dict[str, object]:
     """Merged view of live team windows and persisted resume snapshots."""
     from . import resume as resume_store
@@ -2964,8 +2988,10 @@ def _build_ls_payload() -> dict[str, object]:
             "savedAt": snap.get("savedAt", ""),
             "branch": snap.get("branch", ""),
             "repoCwd": snap.get("repoCwd", ""),
+            "repo": snap.get("repo", "") or resume_store.repo_label(str(snap.get("repoCwd", ""))),
+            "pr": snap.get("pr", ""),
             "windowName": snap.get("windowName", ""),
-            "members": [
+            "members": _sorted_member_rows([
                 {
                     "name": m.get("name", ""),
                     "cli": m.get("cli", ""),
@@ -2973,7 +2999,7 @@ def _build_ls_payload() -> dict[str, object]:
                     "session": bool(m.get("sessionId")),
                 }
                 for m in snap.get("members", [])
-            ],
+            ]),
         }
         if tmux_status == "unknown":
             # A failed listing can't distinguish live from dead — never
@@ -2991,6 +3017,10 @@ def _build_ls_payload() -> dict[str, object]:
                 missing = [m.get("name") for m in snap.get("members", []) if m.get("name") not in live]
                 entry["window"] = win.get("window", "")
                 entry["state"] = "live-incomplete" if missing else "live-complete"
+                # Live truth beats whatever the snapshot recorded back then.
+                entry["windowName"] = win.get("windowName", "") or entry["windowName"]
+                entry["pr"] = win.get("pr", "") or entry["pr"]
+                entry.update(_live_team_context(live))
                 consumed_live.add(team_name)
             elif live:
                 # A different live instance owns the name: the old snapshot is
@@ -3004,16 +3034,21 @@ def _build_ls_payload() -> dict[str, object]:
         for team_name, members in sorted(live_members.items()):
             if team_name in consumed_live:
                 continue
-            teams.append({
+            win = win_by_team.get(team_name, {})
+            row: dict[str, object] = {
                 "handle": "",
                 "team": team_name,
                 "state": "live-complete",
-                "window": win_by_team.get(team_name, {}).get("window", ""),
-                "members": [
+                "window": win.get("window", ""),
+                "windowName": win.get("windowName", ""),
+                "pr": win.get("pr", ""),
+                "members": _sorted_member_rows([
                     {"name": n, "cli": p.cli, "live": True}
-                    for n, p in sorted(members.items())
-                ],
-            })
+                    for n, p in members.items()
+                ]),
+            }
+            row.update(_live_team_context(members))
+            teams.append(row)
 
     return {"tmux": tmux_status, "teams": teams}
 
@@ -3031,33 +3066,75 @@ def ls_cmd(as_json: bool):
     if as_json:
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
-    teams = payload["teams"]
+    for line in _format_ls_human(payload):
+        click.echo(line)
+
+
+def _ls_row_label(entry: dict[str, object]) -> str:
+    """`repo @ branch` as the row's identity, degrading to what exists."""
+    repo = str(entry.get("repo") or "")
+    branch = str(entry.get("branch") or "")
+    if repo and branch:
+        label = f"{repo} @ {branch}"
+    else:
+        label = repo or branch or str(entry.get("team") or entry.get("handle") or "?")
+    window_name = str(entry.get("windowName") or "")
+    if window_name and window_name != repo:
+        label = f"{label} ({window_name})"
+    if entry.get("pr"):
+        label = f"{label}  PR#{entry['pr']}"
+    return label
+
+
+def _ls_roster(entry: dict[str, object]) -> str:
+    members = entry.get("members") or []
+    return "+".join(
+        str(m.get("cli") or m.get("name") or "?") for m in members  # worker-first already
+    )
+
+
+def _format_ls_human(payload: dict[str, object]) -> list[str]:
+    teams = list(payload.get("teams") or [])
     if not teams:
-        click.echo("no hive teams (live or resumable)")
-        return
-    if payload["tmux"] == "unknown":
-        click.echo("! tmux did not answer — live/dead state unknown this pass")
-    for entry in teams:  # type: ignore[union-attr]
-        state = entry.get("state", "")
-        members = entry.get("members", [])
-        roster = "+".join(
-            f"{m.get('name')}({m.get('cli')})" if m.get("cli") else str(m.get("name"))
-            for m in members
-        )
-        if state == "corrupt":
-            click.echo(f"corrupt      {entry.get('handle')}  (unreadable snapshot)")
-        elif state in ("live-complete", "live-incomplete"):
-            hint = f"  → hive resume {entry.get('handle')}" if state == "live-incomplete" else ""
-            click.echo(f"{state:<12} {entry.get('team')}  window {entry.get('window')}  {roster}{hint}")
-        elif state == "restorable":
-            saved = entry.get("savedAt") or "?"
-            branch = entry.get("branch") or "-"
-            click.echo(
-                f"{state:<12} {entry.get('handle')}  saved {saved}  branch {branch}  {roster}"
-                f"  → hive resume {entry.get('handle')}"
+        return ["no hive teams (live or resumable)"]
+    lines: list[str] = []
+    if payload.get("tmux") == "unknown":
+        lines.append("! tmux did not answer — live/dead state unknown this pass")
+
+    live = [e for e in teams if e.get("state") in ("live-complete", "live-incomplete")]
+    restorable = [e for e in teams if e.get("state") == "restorable"]
+    other = [e for e in teams if e not in live and e not in restorable]
+
+    from . import resume as resume_store
+
+    if live:
+        lines.append("LIVE")
+        for e in sorted(live, key=lambda e: str(e.get("window", ""))):
+            row = f"  {e.get('window') or '?'}  {_ls_row_label(e)}  {e.get('team')} · {_ls_roster(e)}"
+            if e.get("state") == "live-incomplete":
+                missing = [
+                    str(m.get("name")) for m in e.get("members", []) if not m.get("live")
+                ]
+                row += f"  ! missing {'+'.join(missing)} → hive resume {e.get('handle')}"
+            lines.append(row)
+    if restorable:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("RESTORABLE  — hive resume <handle>")
+        for e in sorted(restorable, key=lambda e: str(e.get("savedAt", "")), reverse=True):
+            lines.append(
+                f"  {e.get('handle')}  {_ls_row_label(e)}  "
+                f"saved {resume_store.age(str(e.get('savedAt') or ''))} · {_ls_roster(e)}"
+                f"  → hive resume {e.get('handle')}"
             )
-        else:
-            click.echo(f"{state:<12} {entry.get('handle') or entry.get('team')}  {roster}")
+    if other:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("OTHER")
+        for e in other:
+            what = "unreadable snapshot" if e.get("state") == "corrupt" else str(e.get("state"))
+            lines.append(f"  {e.get('handle') or e.get('team')}  {what}  {_ls_roster(e)}")
+    return lines
 
 
 def _resume_member_order(members: list[dict[str, str]]) -> list[dict[str, str]]:

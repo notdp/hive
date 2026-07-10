@@ -28,6 +28,52 @@ _PREV_SUFFIX = ".prev"
 _MEMBER_FIELDS = ("name", "cli", "model", "sessionId", "cwd")
 
 
+def repo_label(cwd: str) -> str:
+    """Human repo name for *cwd*: the main checkout's basename.
+
+    A linked worktree's own directory is named after the feature, which is
+    exactly what a "repo" column must not show — resolve through the git
+    common dir instead. Non-git (or vanished) paths fall back to the cwd
+    basename; empty stays empty.
+    """
+    if not cwd:
+        return ""
+    try:
+        from .worktree import repo_anchor
+
+        return repo_anchor(cwd).name
+    except Exception:
+        return os.path.basename(cwd.rstrip("/"))
+
+
+def age(saved_at: str, *, now: float | None = None) -> str:
+    """Relative rendering of a UTC ``savedAt`` stamp ("2h ago").
+
+    Bad/empty/future input degrades safely (never raises): empty → "?",
+    unparseable → the raw value, future → "just now". Timezone-independent —
+    the stamp is explicit UTC and *now* is epoch seconds.
+    """
+    if not saved_at:
+        return "?"
+    import datetime as _dt
+    import time as _time
+
+    try:
+        stamp = _dt.datetime.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc
+        )
+    except (ValueError, TypeError):
+        return saved_at
+    delta = (now if now is not None else _time.time()) - stamp.timestamp()
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
 def git_branch(cwd: str) -> str:
     """Current git branch of *cwd*, or "" (not a repo / detached / no cwd)."""
     if not cwd:
@@ -86,6 +132,8 @@ def build_snapshot(
     branch: str,
     created_at: str,
     members: list[dict[str, str]],
+    repo: str = "",
+    pr: str = "",
 ) -> dict[str, Any]:
     return {
         "schema": SCHEMA_VERSION,
@@ -95,7 +143,9 @@ def build_snapshot(
         "windowName": window_name,
         "workspace": workspace,
         "repoCwd": repo_cwd,
+        "repo": repo,
         "branch": branch,
+        "pr": pr,
         "createdAt": created_at,
         "savedAt": "",
         "members": [

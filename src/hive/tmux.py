@@ -897,17 +897,38 @@ def list_panes_with_titles(target: str) -> list[PaneInfo]:
     return result
 
 
-_PANE_BASE_FMT = "\t".join([
-    "#{pane_id}",
-    "#{pane_title}",
-    "#{pane_current_command}",
-    "#{@hive-role}",
-    "#{@hive-agent}",
-    "#{@hive-team}",
-    "#{@hive-cli}",
-    "#{@hive-group}",
-    "#{@hive-owner}",
-])
+# Field tables drive both the tmux format string and the parser: adding a
+# column means adding one row here — no count literals to keep in sync.
+_PANE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("pane_id", "#{pane_id}"),
+    ("title", "#{pane_title}"),
+    ("command", "#{pane_current_command}"),
+    ("role", "#{@hive-role}"),
+    ("agent", "#{@hive-agent}"),
+    ("team", "#{@hive-team}"),
+    ("cli", "#{@hive-cli}"),
+    ("group", "#{@hive-group}"),
+    ("owner", "#{@hive-owner}"),
+)
+_PANE_BASE_FMT = "\t".join(fmt for _name, fmt in _PANE_FIELDS)
+
+_TEAM_WINDOW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("window", "#{session_name}:#{window_index}"),
+    ("windowName", "#{window_name}"),
+    ("windowId", "#{window_id}"),
+    ("team", "#{@hive-team}"),
+    ("workspace", "#{@hive-workspace}"),
+    ("created", "#{@hive-created}"),
+    ("pr", "#{@hive-pr}"),
+)
+_TEAM_WINDOW_FMT = "\t".join(fmt for _name, fmt in _TEAM_WINDOW_FIELDS)
+
+
+def _split_fields(line: str, fields: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    parts = line.split("\t")
+    while len(parts) < len(fields):
+        parts.append("")
+    return {name: parts[i] for i, (name, _fmt) in enumerate(fields)}
 
 
 def list_panes_full(target: str) -> list[PaneInfo]:
@@ -972,10 +993,7 @@ def list_team_windows_status() -> tuple[list[dict[str, str]] | None, str]:
     options — everything `hive ls` / `hive resume` need to match a live
     team instance against a snapshot.
     """
-    r = _run([
-        "list-windows", "-a", "-F",
-        "#{session_name}:#{window_index}\t#{window_name}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-created}",
-    ], check=False)
+    r = _run(["list-windows", "-a", "-F", _TEAM_WINDOW_FMT], check=False)
     if r.returncode != 0:
         if _stderr_means_no_server(r.stderr):
             return None, "no-server"
@@ -984,18 +1002,9 @@ def list_team_windows_status() -> tuple[list[dict[str, str]] | None, str]:
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("\t")
-        while len(parts) < 6:
-            parts.append("")
-        if parts[3]:
-            out.append({
-                "window": parts[0],
-                "windowName": parts[1],
-                "windowId": parts[2],
-                "team": parts[3],
-                "workspace": parts[4],
-                "created": parts[5],
-            })
+        entry = _split_fields(line, _TEAM_WINDOW_FIELDS)
+        if entry["team"]:
+            out.append(entry)
     return out, "ok"
 
 
@@ -1027,20 +1036,7 @@ def _parse_panes_full(stdout: str) -> list[PaneInfo]:
     for line in stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("\t")
-        while len(parts) < 9:
-            parts.append("")
-        result.append(PaneInfo(
-            pane_id=parts[0],
-            title=parts[1],
-            command=parts[2],
-            role=parts[3] or "",
-            agent=parts[4] or "",
-            team=parts[5] or "",
-            cli=parts[6] or "",
-            group=parts[7] or "",
-            owner=parts[8] or "",
-        ))
+        result.append(PaneInfo(**_split_fields(line, _PANE_FIELDS)))
     return result
 
 

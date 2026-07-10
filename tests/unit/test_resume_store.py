@@ -248,3 +248,74 @@ def test_prev_namespace_is_reserved_for_archives(store, monkeypatch):
     with pytest.raises(ValueError, match="reserved"):
         Team.create_for_window("foo.prev", window_target="dev:0")
     assert "write" not in calls
+
+
+def test_snapshot_repo_and_pr_round_trip_and_backcompat(store):
+    snap = _snap()
+    snap["repo"] = "hive"
+    snap["pr"] = "52"
+    assert resume.save_snapshot(snap, now="t1") == "written"
+    loaded = resume.load_snapshot("0-w2")
+    assert loaded["repo"] == "hive" and loaded["pr"] == "52"
+
+    # old snapshots without the fields stay valid and listable
+    legacy = {k: v for k, v in _snap(handle="old-one").items() if k not in ("repo", "pr")}
+    legacy["handle"] = "old-one"
+    legacy["team"] = "old-one"
+    assert resume.save_snapshot(legacy, now="t2") == "written"
+    assert resume.load_snapshot("old-one") is not None
+    assert any(s.get("handle") == "old-one" for s in resume.list_snapshots())
+
+
+def test_writer_records_window_pr_and_repo(store, monkeypatch):
+    worker = _fake_agent("%1", "claude")
+    sidecar = _writer_mocks(monkeypatch, _fake_team({"worker": worker}), {"%1": "sid-w"})
+    monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: "52" if key == "hive-pr" else None)
+    monkeypatch.setattr("hive.resume.repo_label", lambda cwd: "hive" if cwd else "")
+
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+    snap = resume.load_snapshot("0-w2")
+    assert snap["pr"] == "52"
+    assert snap["repo"] == "hive"
+
+
+def test_repo_label_resolves_main_repo_from_linked_worktree(tmp_path):
+    import subprocess
+
+    main = tmp_path / "myrepo"
+    main.mkdir()
+    env_git = lambda *args, cwd=main: subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+        env={**__import__("os").environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    env_git("init", "-q", "-b", "main")
+    (main / "f").write_text("x")
+    env_git("add", "f")
+    env_git("commit", "-qm", "init")
+    wt = tmp_path / "pool" / "feature-x"
+    env_git("worktree", "add", "-q", "-b", "feature-x", str(wt))
+
+    assert resume.repo_label(str(wt)) == "myrepo"  # not the worktree basename
+    assert resume.git_branch(str(wt)) == "feature-x"
+
+    plain = tmp_path / "plaindir"
+    plain.mkdir()
+    assert resume.repo_label(str(plain)) == "plaindir"  # non-git fallback
+    assert resume.repo_label("") == ""
+
+
+def test_age_renders_relative_time_and_degrades_safely():
+    now = 1_800_000_000.0
+    from datetime import datetime, timezone
+
+    def iso(delta):
+        return datetime.fromtimestamp(now - delta, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    assert resume.age(iso(30), now=now) == "just now"
+    assert resume.age(iso(120), now=now) == "2m ago"
+    assert resume.age(iso(7200), now=now) == "2h ago"
+    assert resume.age(iso(3 * 86400), now=now) == "3d ago"
+    assert resume.age(iso(-3600), now=now) == "just now"  # future stamp degrades
+    assert resume.age("", now=now) == "?"
+    assert resume.age("not-a-date", now=now) == "not-a-date"

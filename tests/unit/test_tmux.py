@@ -510,3 +510,19 @@ def test_pane_scan_status_keeps_permission_denied_unknown(monkeypatch):
     )
     assert tmux.list_panes_all_status() == (None, "unknown")
     assert tmux.list_team_windows_status() == (None, "unknown")
+
+
+def test_team_window_scan_parses_pr_and_tolerates_short_lines(monkeypatch):
+    ok = subprocess.CompletedProcess(
+        ["tmux"], 0,
+        "dev:1\thive\t@1\t0-w2\t/tmp/ws\t100.0\t52\n"
+        "dev:2\tother\t@2\t0-w9\t/tmp/w9\t50.0\n",  # old 6-field line: pr backfills ""
+        "",
+    )
+    monkeypatch.setattr("hive.tmux._run", lambda args, check=False, timeout=5: ok)
+
+    windows, status = tmux.list_team_windows_status()
+    assert status == "ok"
+    assert windows[0]["pr"] == "52"
+    assert windows[1]["pr"] == ""
+    assert windows[1]["team"] == "0-w9"

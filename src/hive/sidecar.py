@@ -2378,6 +2378,7 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
     window_name = dict(tmux.list_window_names()).get(t.tmux_window, "") or str(
         (existing or {}).get("windowName", "")
     )
+    pr = tmux.get_window_option(t.tmux_window, "hive-pr") or str((existing or {}).get("pr", ""))
     snap = resume_store.build_snapshot(
         handle=t.name,
         team=t.name,
@@ -2385,7 +2386,9 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
         window_name=window_name,
         workspace=workspace,
         repo_cwd=repo_cwd,
+        repo=resume_store.repo_label(repo_cwd),
         branch=resume_store.git_branch(repo_cwd),
+        pr=pr,
         created_at=str(t.created_at),
         members=members,
     )
