@@ -3174,6 +3174,9 @@ def _resume_members_into_live_team(
     peer_team = None
     prior_peers: dict[str, str] | None = None
     try:
+        # Same reason as the full restore: revive happens where the team
+        # lives, so put the human in front of it.
+        tmux.select_window(window)
         count = len(live)
         for m in _resume_member_order(missing):
             count += 1
@@ -3243,8 +3246,11 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
     window, first_pane = tmux.new_window(session_name, name=window_name, cwd=str(members[0]["cwd"]), detach=True)
     if not window or not first_pane:
         _fail("failed to create a window for the resumed team")
-    _resume_progress(f"window {window} created")
+    _resume_progress(f"window {window} created — switching there")
     try:
+        # The human asked for this team: take them to it and let them watch
+        # the members come up instead of staring at a silent prompt.
+        tmux.select_window(window)
         _prepare_window_for_new_team(window, current_pane=first_pane)
         _claim_team_name(team_name, this_window=window, explicit=True)
         bus.init_workspace(Path(ws))

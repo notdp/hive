@@ -190,6 +190,7 @@ def _assert_zero_mutation(rec):
     assert rec.new_windows == []
     assert rec.killed_windows == []
     assert rec.killed_panes == []
+    assert rec.selects == []  # never switch the human's window before preflight passes
 
 
 # --- hive resume prechecks (VAL D10) ---
@@ -296,6 +297,7 @@ def test_resume_revives_missing_validator_with_session(runner, configure_hive_ho
     assert rec.peers == [("worker", "validator")]
     assert rec.layouts == ["dev:2"]
     assert rec.new_windows == []  # revived into the existing window
+    assert rec.selects == ["dev:2"]  # human is taken to the team window
 
 
 def test_resume_revives_missing_worker_too(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -396,7 +398,8 @@ def test_resume_full_restore_rebuilds_team_in_new_window(runner, configure_hive_
 
     assert rec.peers == [("worker", "validator")]
     assert rec.sidecars and rec.sidecars[0][0] == "0-w2"
-    assert rec.selects == []  # never yank the human's current window
+    # The human asked for the team: resume switches them to the new window.
+    assert rec.selects == ["dev:7"]
     assert rec.killed_windows == []
 
     # continuation snapshot: new instance identity, no .prev archive
@@ -748,6 +751,7 @@ def test_resume_progress_ordering_locked_by_call_log(
 
     log: list[str] = []
     monkeypatch.setattr(cli_mod, "_resume_progress", lambda msg: log.append(f"progress:{msg.split(' ')[0]}:{msg.split(' ')[1] if ' ' in msg else ''}"))
+    monkeypatch.setattr("hive.cli.tmux.select_window", lambda t: log.append(f"select:{t}"))
 
     pane_seq = iter(["%71", "%72"])
 
@@ -762,6 +766,7 @@ def test_resume_progress_ordering_locked_by_call_log(
     assert result.exit_code == 0, result.output
     assert log == [
         "progress:window:dev:7",
+        "select:dev:7",
         "progress:resuming:worker",
         "spawn:worker",
         "progress:worker:ready",
