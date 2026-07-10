@@ -25,8 +25,14 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod, "_pane_is_idle_for_pairing", lambda _p: True)
     monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _p: pane_count)
     monkeypatch.setattr(cli_mod.tmux, "get_pane_window_target", lambda _p: "dev:0")
-    if panes is not None:
-        monkeypatch.setattr(cli_mod.tmux, "list_panes_full", lambda _w: panes)
+    # Placement reads one successful window snapshot (count + neighbors); tests
+    # that don't pass explicit panes get one synthesized from pane_count.
+    if panes is None:
+        panes = [SimpleNamespace(pane_id="%100", team="", group="")] + [
+            SimpleNamespace(pane_id=f"%15{i}", team="", group="") for i in range(pane_count - 1)
+        ]
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: panes)
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full", lambda _w: panes)
     monkeypatch.setattr(
         cli_mod.tmux,
         "display_value",
@@ -897,3 +903,58 @@ def test_duo_init_does_not_revive_when_loaded_team_mismatches_binding(
         assert result.exit_code == 0, result.output
         assert spawned == []
         assert "validator" not in json.loads(result.output)
+
+
+def test_duo_init_aborts_before_mutation_on_listing_failure(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """An unanswered pane listing must abort fresh placement before any
+    break_pane / spawn — unknown is not a 1-pane window."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    breaks: list[str] = []
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=2)
+    monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: None)
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn", staticmethod(lambda **k: spawned.append(k))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+
+    assert result.exit_code != 0
+    assert breaks == []
+    assert spawned == []
+
+
+def test_duo_init_aborts_when_current_pane_missing_from_listing(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spawned: list[dict] = []
+    breaks: list[str] = []
+    _duo_mocks(
+        cli_mod,
+        monkeypatch,
+        repo,
+        pane_count=2,
+        panes=[SimpleNamespace(pane_id="%777", team="", group="")],
+    )
+    monkeypatch.setattr(cli_mod.tmux, "break_pane", lambda p, **k: breaks.append(p) or ("dev:1", "%200"))
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn", staticmethod(lambda **k: spawned.append(k))
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+
+    assert result.exit_code != 0
+    assert breaks == []
+    assert spawned == []

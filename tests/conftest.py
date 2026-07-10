@@ -159,9 +159,24 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.team.tmux.get_window_option", state.get_window_option)
         monkeypatch.setattr("hive.team.tmux.clear_window_option", state.clear_window_option)
         monkeypatch.setattr("hive.team.tmux.list_panes_full", state.list_panes_full)
+
         # Status-aware variant: the fake tmux always answers, so a state-backed
-        # listing counts as successful (never None/unknown).
-        monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", state.list_panes_full)
+        # listing counts as successful (never None/unknown). Duo placement
+        # derives pane count + neighbors from this snapshot and aborts when the
+        # current pane is missing, so the default snapshot always contains the
+        # current pane (as an untagged single pane → no break-out), mirroring
+        # the old get_pane_count=1 safety default.
+        def _fake_list_panes_full_or_none(target):
+            from hive import tmux as tmux_mod
+
+            panes = list(state.list_panes_full(target))
+            # Resolve at call time: tests override get_current_pane_id per-case.
+            cur = tmux_mod.get_current_pane_id() or current_pane
+            if not any(p.pane_id == cur for p in panes):
+                panes.append(PaneInfo(pane_id=cur, title=""))
+            return panes
+
+        monkeypatch.setattr("hive.team.tmux.list_panes_full_or_none", _fake_list_panes_full_or_none)
         monkeypatch.setattr("hive.team._find_team_window", state.find_team_window)
         monkeypatch.setattr("hive.team.list_teams", state.list_teams)
 

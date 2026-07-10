@@ -2306,15 +2306,17 @@ def duo_cmd():
 
 
 def _duo_neighbor_for_pairing(
-    current_pane: str, window: str, my_family: str
+    current_pane: str, panes: list[tmux.PaneInfo], my_family: str
 ) -> tmux.PaneInfo | None:
-    """The current window's sole other pane, if it qualifies as the validator.
+    """The sole other pane in the *panes* snapshot, if it qualifies as validator.
 
     Qualifies = an idle, unowned, anti-family agent. Returns None otherwise.
     Duo only ever conscripts here — the 2-pane case. 3+ panes break out
-    rather than guess which neighbor to grab.
+    rather than guess which neighbor to grab. Consumes the caller's already
+    successful window snapshot instead of re-listing, so an unknown listing
+    can never masquerade as "no neighbor".
     """
-    others = [p for p in tmux.list_panes_full(window) if p.pane_id != current_pane]
+    others = [p for p in panes if p.pane_id != current_pane]
     if len(others) != 1:
         return None
     neighbor = others[0]
@@ -2432,12 +2434,20 @@ def _prepare_duo_placement(
     window = tmux.get_pane_window_target(current_pane) or ""
     if not window:
         _fail("cannot determine current window")
-    count = tmux.get_pane_count(current_pane)
+    # One successful snapshot drives both the pane count and the neighbor
+    # choice: placement mutates windows (break_pane / spawn), so an unknown
+    # listing must abort here instead of masquerading as a 1-pane window.
+    panes = tmux.list_panes_full_or_none(window)
+    if panes is None:
+        _fail(f"tmux did not answer the pane listing for {window}; rerun init")
+    if not any(p.pane_id == current_pane for p in panes):
+        _fail(f"current pane {current_pane} missing from {window} listing; rerun init")
+    count = len(panes)
     worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
     window_name = _duo_window_name(worker_cwd)
 
     # Decide adopt-vs-spawn before mutating any windows.
-    adopt = _duo_neighbor_for_pairing(current_pane, window, my_family) if count == 2 else None
+    adopt = _duo_neighbor_for_pairing(current_pane, panes, my_family) if count == 2 else None
 
     worker_pane = current_pane
     adopt_pane, adopt_cli = "", ""
