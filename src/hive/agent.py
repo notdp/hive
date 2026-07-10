@@ -141,6 +141,33 @@ def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
     return claude_channel.is_ready(pane_id)
 
 
+def _wait_codex_thread_ready(
+    pane_id: str,
+    *,
+    timeout: float = AGENT_STARTUP_TIMEOUT,
+    interval: float = 0.5,
+) -> bool:
+    """Wait for the pane's app-server daemon to expose a live thread runtime.
+
+    The TUI joining the daemon (fresh or resume) creates/attaches its thread;
+    that runtime appearing is the readiness signal — no screen scraping. Polls
+    through the persistent client pool (no per-round reconnect). Best-effort
+    like the banner wait it replaces: a timeout is not fatal.
+    """
+    from .adapters import codex_app_server
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if codex_app_server.runtime_for_pane(pane_id) is not None:
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
 @dataclass
 class Agent:
     name: str
@@ -228,6 +255,7 @@ class Agent:
 
         bin_path = CLI_BINS[cli]
         cmd_parts = ["exec", _shell_escape(bin_path)]
+        codex_daemon_native = False
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
             # A new or resumed codex session runs against a per-pane app-server
@@ -253,6 +281,7 @@ class Agent:
                         "codex runtime is daemon-only, refusing to spawn an "
                         "embedded codex team member"
                     )
+                codex_daemon_native = True
                 sock = codex_app_server.pane_socket_path(pane_id)
                 cmd_parts.extend([
                     "--remote", _shell_escape(f"unix://{sock}"),
@@ -350,12 +379,22 @@ class Agent:
                     "older versions or Bedrock/Vertex may not support them)"
                 )
 
-        if tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
+        # Readiness comes from runtime signals, not screen text: the channel
+        # marker (claude, proven above) and the app-server thread (codex
+        # daemon) can only appear once the agent is actually up. A resumed
+        # claude session never renders the welcome banner, so a banner wait
+        # here ate its full timeout on every resume. Only the embedded codex
+        # fork (no daemon) has nothing better than the banner.
+        if channel_flags:
+            pass
+        elif codex_daemon_native:
+            _wait_codex_thread_ready(pane_id)
+        elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             time.sleep(1)
 
-            # Skill + user prompt were embedded in the [prompt] arg above.
-            if skill == "hive":
-                skill_sync.maybe_warn_hive_skill_drift(cli)
+        # Skill + user prompt were embedded in the [prompt] arg above.
+        if skill == "hive":
+            skill_sync.maybe_warn_hive_skill_drift(cli)
 
         return agent
 

@@ -423,14 +423,7 @@ def test_spawn_codex_new_session_uses_remote_daemon(monkeypatch):
     from pathlib import Path
 
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    # Daemon comes up: spawn_daemon returns True; socket path is fixed.
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
-    )
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.pane_socket_path",
-        lambda pane: Path(f"/home/.codex/app-server-control/hive-pane-{pane.replace('%', '')}.sock"),
-    )
+    _mock_daemon_up(monkeypatch)  # daemon up + first-round runtime ready
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -447,6 +440,10 @@ def _mock_daemon_up(monkeypatch):
     from pathlib import Path
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
+    )
+    # Readiness polls the daemon runtime; tests answer on the first round.
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: object()
     )
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.pane_socket_path",
@@ -740,3 +737,99 @@ def test_spawn_rejects_unknown_session_mode(monkeypatch):
     with pytest.raises(ValueError, match="session_mode"):
         Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
                     cli="claude", session_id="s", session_mode="clone")
+
+
+# --- readiness oracles: runtime signals, not screen text (VAL 1-7) ---
+
+
+def _watch_banner_and_sleep(monkeypatch):
+    banner_waits: list[tuple] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "hive.agent.tmux.wait_for_text",
+        lambda pane, text, timeout=0: banner_waits.append((pane, text)) or True,
+    )
+    monkeypatch.setattr("hive.agent.time.sleep", lambda d: sleeps.append(d))
+    return banner_waits, sleeps
+
+
+def test_spawn_claude_channel_readiness_skips_banner_and_settle(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
+
+    # fresh and resume: the channel marker is the oracle, the banner (which a
+    # resumed session never renders) is not consulted at all
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp", cli="claude")
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="claude", session_id="sess-1", session_mode="resume")
+
+    assert banner_waits == []
+    assert 1 not in sleeps  # no fixed 1s settle either
+
+
+def test_spawn_codex_daemon_native_waits_on_runtime_not_banner(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
+
+    probes: list[str] = []
+    runtimes = iter([None, None, object()])
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.runtime_for_pane",
+        lambda pane: probes.append(pane) or next(runtimes),
+    )
+
+    Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="codex", skill="none", session_id="roll-1", session_mode="resume")
+
+    assert banner_waits == []
+    assert probes == ["%0", "%0", "%0"]  # polled until the thread appeared
+    assert sleeps.count(0.5) == 2  # one interval sleep per empty round
+
+    # fresh session, runtime present on the first round: zero sleeps
+    sleeps.clear()
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: object()
+    )
+    Agent.spawn(name="v2", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="codex", skill="none")
+    assert banner_waits == []
+    assert sleeps == []
+
+
+def test_wait_codex_thread_ready_timeout_is_deterministic_and_nonfatal(monkeypatch):
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: None
+    )
+    assert agent_mod._wait_codex_thread_ready("%9", timeout=0, interval=0) is False
+
+    # spawn survives a readiness timeout and still warns about skill drift once
+    _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    monkeypatch.setattr("hive.agent._wait_codex_thread_ready", lambda _p: False)
+    warns: list[str] = []
+    monkeypatch.setattr(
+        "hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda cli: warns.append(cli)
+    )
+
+    a = Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
+                    cli="codex", skill="hive")
+    assert a.pane_id == "%0"
+    assert warns == ["codex"]
+
+
+def test_spawn_codex_embedded_fork_keeps_banner_wait(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
+    probes: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.runtime_for_pane",
+        lambda pane: probes.append(pane) or object(),
+    )
+
+    Agent.spawn(name="f", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="codex", session_id="roll-1")  # fork mode: no daemon
+
+    assert len(banner_waits) == 1  # legacy oracle stays for the embedded fork
+    assert 1 in sleeps  # old settle preserved
+    assert probes == []  # daemon runtime never consulted — flag-driven, not cli-driven
