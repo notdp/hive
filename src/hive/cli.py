@@ -2548,7 +2548,12 @@ def _revive_missing_duo_validator(
     loaded_worker = t.agents.get("worker")
     if loaded_worker is None or loaded_worker.pane_id != worker_pane or t.tmux_window != window:
         return None  # stale team state — never spawn into the wrong pane/window
-    ws = existing.get("workspace") or ""
+    # Workspace comes from the identity-verified team, not the binding payload
+    # (whose window-option read folds tmux failures into ""); a validator
+    # spawned with an unknown workspace would join with a broken context.
+    ws = t.workspace or ""
+    if not ws:
+        return None
     worker_cwd = tmux.display_value(worker_pane, "#{pane_current_path}") or ws
     v_cli, v_model = _resolve_validator_cli_model(family_for_pane(worker_pane), validator_cli)
     validator_agent = _spawn_duo_validator(

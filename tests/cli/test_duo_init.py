@@ -614,6 +614,7 @@ def _revive_mocks(cli_mod, monkeypatch, tmp_path, *, panes, binding, team="defau
         team = SimpleNamespace(
             name=binding["team"],
             tmux_window=binding["tmuxWindow"],
+            workspace=binding["workspace"],
             agents={"worker": SimpleNamespace(pane_id=binding["pane"])},
             set_peer=lambda a, b: peered.append((a, b)),
         )
@@ -958,3 +959,62 @@ def test_duo_init_aborts_when_current_pane_missing_from_listing(
     assert result.exit_code != 0
     assert breaks == []
     assert spawned == []
+
+
+def test_revive_uses_verified_team_workspace_over_binding(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """The binding's workspace read can fold a tmux failure into ''; spawn and
+    context must use the identity-verified team's workspace instead."""
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    binding = _revive_binding("")
+    team = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        workspace="/real/ws",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=binding, team=team
+    )
+    contexts: list[tuple] = []
+    monkeypatch.setattr(
+        cli_mod.hive_context,
+        "save_context_for_pane",
+        lambda pane, **kw: contexts.append((pane, kw)),
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert len(spawned) == 1
+    assert spawned[0]["workspace"] == "/real/ws"
+    assert contexts and contexts[0][1]["workspace"] == "/real/ws"
+
+
+def test_revive_zero_spawn_when_team_workspace_unknown(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home(current_pane="%100", session_name="dev")
+    import hive.cli as cli_mod
+
+    binding = _revive_binding("")
+    team = SimpleNamespace(
+        name="dev-w2",
+        tmux_window="dev:0",
+        workspace="",
+        agents={"worker": SimpleNamespace(pane_id="%100")},
+        set_peer=lambda a, b: None,
+    )
+    spawned, _, _ = _revive_mocks(
+        cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=binding, team=team
+    )
+
+    result = runner.invoke(cli, ["duo", "init"])
+    assert result.exit_code == 0, result.output
+
+    assert spawned == []
+    assert "validator" not in json.loads(result.output)
