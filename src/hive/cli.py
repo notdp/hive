@@ -3141,6 +3141,16 @@ def _format_ls_human(payload: dict[str, object]) -> list[str]:
     return lines
 
 
+def _resume_progress(message: str) -> None:
+    """Stage feedback for `hive resume` on stderr — stdout stays JSON-only.
+
+    Resuming replays whole agent sessions (a long claude transcript alone can
+    take tens of seconds, members start serially), so a silent prompt reads
+    as a hang.
+    """
+    click.echo(message, err=True)
+
+
 def _resume_member_order(members: list[dict[str, str]]) -> list[dict[str, str]]:
     return sorted(members, key=lambda m: m.get("name") != "worker")
 
@@ -3167,6 +3177,9 @@ def _resume_members_into_live_team(
         count = len(live)
         for m in _resume_member_order(missing):
             count += 1
+            _resume_progress(
+                f"resuming {m['name']} ({m['cli']}) — replaying its session, this can take a while…"
+            )
             agent = Agent.spawn(
                 name=str(m["name"]),
                 team_name=team_name,
@@ -3184,6 +3197,7 @@ def _resume_members_into_live_team(
             # Track the pane the moment it exists: every later failure —
             # tagging, context, peer, layout — must be able to kill it.
             spawned.append((str(m["name"]), agent.pane_id))
+            _resume_progress(f"{m['name']} ready in {agent.pane_id}")
             tmux.set_pane_option(agent.pane_id, "hive-group", "duo")
             hive_context.save_context_for_pane(
                 agent.pane_id, team=team_name, workspace=ws, agent=str(m["name"])
@@ -3229,6 +3243,7 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
     window, first_pane = tmux.new_window(session_name, name=window_name, cwd=str(members[0]["cwd"]), detach=True)
     if not window or not first_pane:
         _fail("failed to create a window for the resumed team")
+    _resume_progress(f"window {window} created")
     try:
         _prepare_window_for_new_team(window, current_pane=first_pane)
         _claim_team_name(team_name, this_window=window, explicit=True)
@@ -3244,6 +3259,9 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
         )
         results: list[tuple[str, str]] = []
         for i, m in enumerate(members):
+            _resume_progress(
+                f"resuming {m['name']} ({m['cli']}) — replaying its session, this can take a while…"
+            )
             agent = Agent.spawn(
                 name=str(m["name"]),
                 team_name=team_name,
@@ -3264,6 +3282,7 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
                 agent.pane_id, team=team_name, workspace=ws, agent=str(m["name"])
             )
             results.append((str(m["name"]), agent.pane_id))
+            _resume_progress(f"{m['name']} ready in {agent.pane_id}")
         reloaded = Team.load(team_name, prefer_pane=first_pane)
         if "worker" in reloaded.agents and "validator" in reloaded.agents:
             reloaded.set_peer("worker", "validator")

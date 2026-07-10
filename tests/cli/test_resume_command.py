@@ -284,7 +284,7 @@ def test_resume_revives_missing_validator_with_session(runner, configure_hive_ho
 
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
 
     assert payload["resumed"] == "members"
     assert len(rec.spawns) == 1
@@ -379,7 +379,7 @@ def test_resume_full_restore_rebuilds_team_in_new_window(runner, configure_hive_
 
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
 
     assert payload["resumed"] == "full" and payload["window"] == "dev:7"
     assert rec.new_windows == [{"session": "dev", "name": "hive", "cwd": good_cwd, "detach": True}]
@@ -695,3 +695,103 @@ def test_ls_live_overlay_clears_stale_snapshot_pr(runner, configure_hive_home, m
     entry = next(e for e in json.loads(result.output)["teams"] if e["team"] == "0-w2")
     assert entry["pr"] == ""
     assert "PR#" not in runner.invoke(cli, ["ls"]).output
+
+
+# --- resume progress feedback (stderr) ---
+
+
+def test_resume_progress_streams_to_stderr_stdout_stays_json(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)  # stdout parses standalone
+    assert payload["resumed"] == "full"
+    assert "resuming" not in result.stdout and "ready in" not in result.stdout
+    err = result.stderr
+    assert "window dev:7" in err
+    for name, pane in (("worker", "%71"), ("validator", "%72")):
+        assert f"resuming {name}" in err
+        assert f"{name} ready in {pane}" in err
+
+
+def test_resume_member_progress_has_no_window_line(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    _resume_mocks(monkeypatch)
+    _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["resumed"] == "members"
+    err = result.stderr
+    assert "window" not in err  # member revive reuses the live window
+    assert "resuming validator" in err and "validator ready in %71" in err
+
+
+def test_resume_progress_ordering_locked_by_call_log(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Progress must precede each spawn and follow each return — order, not
+    just final stderr content."""
+    configure_hive_home()
+    import hive.cli as cli_mod
+
+    rec = _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)
+
+    log: list[str] = []
+    monkeypatch.setattr(cli_mod, "_resume_progress", lambda msg: log.append(f"progress:{msg.split(' ')[0]}:{msg.split(' ')[1] if ' ' in msg else ''}"))
+
+    pane_seq = iter(["%71", "%72"])
+
+    def logging_spawn(**kwargs):
+        log.append(f"spawn:{kwargs['name']}")
+        rec.spawns.append(kwargs)
+        return Agent(name=str(kwargs["name"]), team_name="0-w2", pane_id=next(pane_seq), cli=str(kwargs["cli"]))
+
+    monkeypatch.setattr("hive.cli.Agent.spawn", staticmethod(logging_spawn))
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    assert log == [
+        "progress:window:dev:7",
+        "progress:resuming:worker",
+        "spawn:worker",
+        "progress:worker:ready",
+        "progress:resuming:validator",
+        "spawn:validator",
+        "progress:validator:ready",
+    ]
+
+
+def test_resume_failure_keeps_stage_hints_and_no_success_json(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)
+
+    calls = {"n": 0}
+
+    def flaky_spawn(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("codex daemon failed to bind")
+        rec.spawns.append(kwargs)
+        return Agent(name=str(kwargs["name"]), team_name="0-w2", pane_id="%71", cli=str(kwargs["cli"]))
+
+    monkeypatch.setattr("hive.cli.Agent.spawn", staticmethod(flaky_spawn))
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code != 0
+    assert "resumed" not in result.stdout  # no phantom success JSON
+    err = result.stderr
+    assert "resuming worker" in err and "resuming validator" in err  # stages kept
+    assert "codex daemon failed to bind" in err  # final error visible
