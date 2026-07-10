@@ -41,6 +41,10 @@ def _tmux_state(monkeypatch, *, panes="ok", windows="ok", pane_list=None, window
         "hive.cli.tmux.list_team_windows_status",
         lambda: (window_list if windows == "ok" else None, windows if windows != "ok" else "ok"),
     )
+    # Live-context enrichment must never touch the real tmux/git in tests.
+    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _p, _fmt: "/live/repo-cwd")
+    monkeypatch.setattr("hive.resume.repo_label", lambda cwd: "liverepo" if cwd else "")
+    monkeypatch.setattr("hive.resume.git_branch", lambda cwd: "livebranch" if cwd else "")
 
 
 # --- hive ls (VAL C8-C9) ---
@@ -591,3 +595,103 @@ def test_resume_full_restore_commits_snapshot_before_sidecar(
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code == 0, result.output
     assert order == ["save", "sidecar"]  # identity committed before the sidecar can race
+
+
+# --- hive ls enrichment + grouped output (design D) ---
+
+
+def test_ls_json_live_rows_carry_repo_context(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    _save_snap("0-w2", window_name="pair")
+    _tmux_state(
+        monkeypatch,
+        pane_list=[
+            _pane("%1", "0-w2", "worker", "claude"),
+            _pane("%2", "0-w2", "validator", "codex"),
+            _pane("%5", "0-w9", "worker", "codex"),
+        ],
+        window_list=[
+            {"window": "dev:3", "windowName": "pair", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0", "pr": "52"},
+            {"window": "dev:9", "windowName": "other", "windowId": "@9", "team": "0-w9", "workspace": "/tmp/w9", "created": "50.0", "pr": ""},
+        ],
+    )
+
+    result = runner.invoke(cli, ["ls", "--json"])
+    assert result.exit_code == 0, result.output
+    by_team = {e["team"]: e for e in json.loads(result.output)["teams"]}
+
+    merged = by_team["0-w2"]
+    assert merged["state"] == "live-complete"
+    assert merged["window"] == "dev:3" and merged["windowName"] == "pair"
+    assert merged["pr"] == "52"
+    # live truth overrides whatever the snapshot recorded
+    assert merged["repo"] == "liverepo" and merged["branch"] == "livebranch"
+    assert merged["repoCwd"] == "/live/repo-cwd"
+    assert [m["name"] for m in merged["members"]][0] == "worker"  # worker-first
+
+    live_only = by_team["0-w9"]
+    assert live_only["repo"] == "liverepo" and live_only["windowName"] == "other"
+
+
+def test_ls_anchor_prefers_worker_then_orch_then_first(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    import hive.cli as cli_mod
+    from hive.cli import _live_anchor_pane
+
+    worker, orch, zeta = _pane("%1", "t", "worker", "claude"), _pane("%2", "t", "orch", "claude"), _pane("%3", "t", "zeta", "codex")
+    assert _live_anchor_pane({"worker": worker, "orch": orch, "zeta": zeta}).pane_id == "%1"
+    assert _live_anchor_pane({"orch": orch, "zeta": zeta}).pane_id == "%2"
+    assert _live_anchor_pane({"zeta": zeta, "alpha": _pane("%4", "t", "alpha", "codex")}).pane_id == "%4"
+
+
+def test_ls_human_output_is_grouped(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    _save_snap("0-w5")  # restorable
+    _save_snap("0-w2", window_name="pair")  # live-incomplete (validator dead)
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%1", "0-w2", "worker", "claude")],
+        window_list=[{"window": "dev:3", "windowName": "pair", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0", "pr": "52"}],
+    )
+
+    result = runner.invoke(cli, ["ls"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    # structural facts, not prose: group headers in order, one per section
+    assert out.index("LIVE") < out.index("RESTORABLE")
+    live_line = next(l for l in out.splitlines() if "dev:3" in l)
+    assert "liverepo @ livebranch" in live_line and "PR#52" in live_line
+    assert "missing validator" in live_line and "hive resume 0-w2" in live_line
+    dead_line = next(l for l in out.splitlines() if "0-w5" in l and "resume" in l)
+    assert "hive resume 0-w5" in dead_line and "ago" in dead_line or "?" in dead_line
+    assert "OTHER" not in out  # no unknown/corrupt rows → no group
+
+
+def test_ls_human_groups_other_states_separately(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    (tmp_path / ".hive" / "state" / "resume").mkdir(parents=True)
+    (tmp_path / ".hive" / "state" / "resume" / "broken.json").write_text("{nope")
+    _tmux_state(monkeypatch, pane_list=[], window_list=[])
+
+    result = runner.invoke(cli, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert "OTHER" in result.output
+    assert "LIVE" not in result.output and "RESTORABLE" not in result.output
+
+
+def test_ls_live_overlay_clears_stale_snapshot_pr(runner, configure_hive_home, monkeypatch):
+    """`hive duo clear-pr` removed the stamp: live empty pr must win over snapshot."""
+    configure_hive_home()
+    snap = _save_snap("0-w2")
+    snap["pr"] = "52"
+    assert resume_store.save_snapshot(snap, now="t2") == "written"
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%1", "0-w2", "worker", "claude"), _pane("%2", "0-w2", "validator", "codex")],
+        window_list=[{"window": "dev:3", "windowName": "pair", "windowId": "@2", "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0", "pr": ""}],
+    )
+
+    result = runner.invoke(cli, ["ls", "--json"])
+    entry = next(e for e in json.loads(result.output)["teams"] if e["team"] == "0-w2")
+    assert entry["pr"] == ""
+    assert "PR#" not in runner.invoke(cli, ["ls"]).output
