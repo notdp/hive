@@ -213,15 +213,22 @@ def test_resume_precheck_failures_never_mutate(runner, configure_hive_home, monk
     # corrupt schema
     (tmp_path / ".hive" / "state" / "resume" / "bad.json").write_text("{nope")
     cases.append((["resume", "bad"], "no usable snapshot"))
-    # missing sessionId
+    # missing sessionId for the worker — hard failure naming the worker only
+    # (a validator-only miss degrades to a fresh spawn instead of failing)
     _save_snap("nosess", cwd=good_cwd, members=[
-        {"name": "worker", "cli": "claude", "sessionId": "sid-w", "cwd": good_cwd},
-        {"name": "validator", "cli": "codex", "sessionId": "", "cwd": good_cwd},
+        {"name": "worker", "cli": "claude", "sessionId": "", "cwd": good_cwd},
+        {"name": "validator", "cli": "codex", "sessionId": "sid-v", "cwd": good_cwd},
     ])
-    cases.append((["resume", "nosess"], "validator"))
+    cases.append((["resume", "nosess"], "missing sessionId for worker"))
     # missing cwd on disk
     _save_snap("nocwd", cwd=str(tmp_path / "gone"))
     cases.append((["resume", "nocwd"], "missing on disk"))
+    # a validator WITH a saved session keeps its own cwd requirement
+    _save_snap("vcwd", cwd=good_cwd, members=[
+        {"name": "worker", "cli": "claude", "sessionId": "sid-w", "cwd": good_cwd},
+        {"name": "validator", "cli": "codex", "sessionId": "sid-v", "cwd": str(tmp_path / "gone-v")},
+    ])
+    cases.append((["resume", "vcwd"], "missing on disk"))
 
     for args, needle in cases:
         result = runner.invoke(cli, args)
@@ -880,3 +887,172 @@ def test_exact_handle_beats_short_id_and_hint_falls_back(
     ls = runner.invoke(cli, ["ls", "--plain"])
     victim_line = next(l for l in ls.output.splitlines() if l.strip().startswith("victim"))
     assert "hive resume victim" in victim_line
+
+
+# --- hive resume: validator without a saved session comes back fresh ---
+
+
+def _fresh_validator_members(worker_cwd, validator_cwd):
+    return [
+        {"name": "worker", "cli": "claude", "model": "m1", "sessionId": "sid-w", "cwd": worker_cwd},
+        {"name": "validator", "cli": "codex", "model": "m2", "sessionId": "", "cwd": validator_cwd},
+    ]
+
+
+def test_resume_full_restore_spawns_fresh_validator_without_session(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Dead team, worker session saved, validator session empty and its cwd
+    deleted: resume succeeds — worker resumes, validator respawns fresh with
+    its role bootstrap in the worker's cwd."""
+    import hive.cli as cli_mod
+
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    gone_cwd = str(tmp_path / "deleted-worktree")  # never created on disk
+    _save_snap(
+        "0-w2", cwd=good_cwd, workspace=str(tmp_path / "ws"),
+        members=_fresh_validator_members(good_cwd, gone_cwd),
+    )
+    _tmux_state(monkeypatch, pane_list=[], window_list=[])
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+
+    # window opens in the worker's cwd; worker spawns first
+    assert rec.new_windows[0]["cwd"] == good_cwd
+    worker, validator = rec.spawns
+    assert worker["name"] == "worker"
+    assert worker["session_id"] == "sid-w" and worker["session_mode"] == "resume"
+    assert worker["cwd"] == good_cwd and worker["skill"] == "none"
+    # fresh validator: role bootstrap prompt, no session resume, worker's cwd,
+    # snapshot cli/model
+    assert validator["name"] == "validator"
+    assert "session_id" not in validator and "session_mode" not in validator
+    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    assert validator["skill"] == "none"
+    assert validator["cwd"] == good_cwd
+    assert validator["cli"] == "codex" and validator["model"] == "m2"
+
+    sessions = {m["name"]: m["session"] for m in payload["members"]}
+    assert sessions == {"worker": "resumed", "validator": "fresh"}
+    # progress must not claim the fresh validator is replaying a session
+    assert "spawning fresh validator" in result.stderr
+    assert "resuming validator" not in result.stderr
+    # transaction tail unchanged: peer, layout, sidecar
+    assert rec.peers == [("worker", "validator")]
+    assert rec.sidecars and rec.sidecars[0][0] == "0-w2"
+
+
+def test_resume_live_revive_spawns_fresh_validator_in_live_worker_cwd(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Live worker + missing validator with no saved session: fresh spawn into
+    the existing window, following the live worker pane's current cwd."""
+    import hive.cli as cli_mod
+
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    _save_snap(
+        "0-w2", cwd=good_cwd, workspace="/tmp/ws",
+        members=_fresh_validator_members(good_cwd, str(tmp_path / "gone")),
+    )
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%1", "0-w2", "worker", "claude")],
+        window_list=[{
+            "window": "dev:3", "windowName": "pair", "windowId": "@3",
+            "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0",
+        }],
+    )
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+
+    assert payload["resumed"] == "members"
+    assert rec.new_windows == []  # no new window for a live team
+    (validator,) = rec.spawns
+    assert validator["name"] == "validator"
+    assert "session_id" not in validator and "session_mode" not in validator
+    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    # live worker pane's current cwd (mocked display_value), not the snapshot's
+    assert validator["cwd"] == "/live/repo-cwd"
+    sessions = {m["name"]: m["session"] for m in payload["members"]}
+    assert sessions == {"validator": "fresh"}
+    assert "spawning fresh validator" in result.stderr
+
+
+def test_resume_live_missing_worker_resumes_worker_only(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """Reverse protection: live validator + missing worker (worker session
+    saved, validator's empty) resumes the worker only — the live validator is
+    never respawned or duplicated."""
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    _save_snap(
+        "0-w2", cwd=good_cwd, workspace="/tmp/ws",
+        members=_fresh_validator_members(good_cwd, str(tmp_path / "gone")),
+    )
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%2", "0-w2", "validator", "codex")],
+        window_list=[{
+            "window": "dev:3", "windowName": "pair", "windowId": "@3",
+            "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0",
+        }],
+    )
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+
+    (worker,) = rec.spawns
+    assert worker["name"] == "worker"
+    assert worker["session_id"] == "sid-w" and worker["session_mode"] == "resume"
+    sessions = {m["name"]: m["session"] for m in payload["members"]}
+    assert sessions == {"worker": "resumed"}
+
+
+def test_resume_live_fresh_validator_rolls_back_pane_on_layout_failure(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """The fresh-spawn branch keeps the live-revive transaction: a layout
+    failure after the fresh validator spawned kills only the new pane and
+    leaves the live worker and window untouched."""
+    configure_hive_home()
+    rec = _resume_mocks(monkeypatch)
+    good_cwd = str(tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    _save_snap(
+        "0-w2", cwd=good_cwd, workspace="/tmp/ws",
+        members=_fresh_validator_members(good_cwd, str(tmp_path / "gone")),
+    )
+    _tmux_state(
+        monkeypatch,
+        pane_list=[_pane("%1", "0-w2", "worker", "claude")],
+        window_list=[{
+            "window": "dev:3", "windowName": "pair", "windowId": "@3",
+            "team": "0-w2", "workspace": "/tmp/ws", "created": "100.0",
+        }],
+    )
+
+    def boom(_target):
+        raise RuntimeError("layout boom")
+
+    monkeypatch.setattr("hive.layout.apply_adaptive", boom)
+
+    result = runner.invoke(cli, ["resume", "0-w2"])
+    assert result.exit_code != 0
+    assert rec.killed_panes == ["%71"]  # only the fresh validator pane
+    assert rec.killed_windows == []    # live window survives
+    # snapshot is kept for retry
+    assert resume_store.load_snapshot("0-w2") is not None

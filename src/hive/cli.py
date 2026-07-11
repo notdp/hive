@@ -3243,8 +3243,14 @@ def _resume_members_into_live_team(
     win: dict[str, str],
     live: dict[str, tmux.PaneInfo],
     missing: list[dict[str, str]],
+    fresh_members: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
-    """Spawn *missing* members back into a live team with their sessions."""
+    """Spawn *missing* members back into a live team.
+
+    Members with a saved session resume it; a member in *fresh_members*
+    (validator without a sessionId) is spawned fresh with its role bootstrap,
+    following the live worker's current cwd.
+    """
     from . import layout as layout_mod
 
     team_name = str(snap["team"])
@@ -3253,6 +3259,9 @@ def _resume_members_into_live_team(
     if not ws:
         _fail(f"live team window {window} has no workspace binding; not guessing")
     anchor_pane = next(iter(live.values())).pane_id
+    snap_worker_cwd = next(
+        (str(m.get("cwd") or "") for m in snap.get("members", []) if m.get("name") == "worker"), ""  # type: ignore[union-attr]
+    )
     spawned: list[tuple[str, str]] = []
     peer_team = None
     prior_peers: dict[str, str] | None = None
@@ -3263,22 +3272,36 @@ def _resume_members_into_live_team(
         count = len(live)
         for m in _resume_member_order(missing):
             count += 1
-            _resume_progress(
-                f"resuming {m['name']} ({m['cli']}) — replaying its session, this can take a while…"
-            )
+            name = str(m["name"])
+            fresh = name in fresh_members
+            if fresh:
+                _resume_progress(
+                    f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
+                )
+                live_worker = live.get("worker")
+                live_cwd = (
+                    tmux.display_value(live_worker.pane_id, "#{pane_current_path}") if live_worker else ""
+                )
+                cwd = live_cwd or snap_worker_cwd
+                session_kwargs: dict[str, str] = {"prompt": _role_bootstrap_prompt("duo-validator")}
+            else:
+                _resume_progress(
+                    f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
+                )
+                cwd = str(m["cwd"])
+                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume"}
             agent = Agent.spawn(
-                name=str(m["name"]),
+                name=name,
                 team_name=team_name,
                 target_pane=anchor_pane,
-                cwd=str(m["cwd"]),
+                cwd=cwd,
                 split_horizontal=layout_mod.split_horizontal(window, count),
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
                 skill="none",
-                session_id=str(m["sessionId"]),
-                session_mode="resume",
                 workspace=ws,
+                **session_kwargs,
             )
             # Track the pane the moment it exists: every later failure —
             # tagging, context, peer, layout — must be able to kill it.
@@ -3308,13 +3331,21 @@ def _resume_members_into_live_team(
         "team": team_name,
         "window": window,
         "members": [
-            {"name": name, "pane": pane, "session": "resumed"} for name, pane in spawned
+            {"name": name, "pane": pane, "session": "fresh" if name in fresh_members else "resumed"}
+            for name, pane in spawned
         ],
     }
 
 
-def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]:
-    """Rebuild a dead team in a fresh window; transactional per VAL."""
+def _resume_full_team(
+    handle: str, snap: dict[str, object], fresh_members: frozenset[str] = frozenset()
+) -> dict[str, object]:
+    """Rebuild a dead team in a fresh window; transactional per VAL.
+
+    Members with a saved session resume it; a member in *fresh_members*
+    (validator without a sessionId) is spawned fresh with its role bootstrap
+    in the snapshot worker's cwd.
+    """
     from . import layout as layout_mod
     from . import resume as resume_store
 
@@ -3323,6 +3354,7 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
     if not ws:
         _fail("snapshot has no workspace; cannot resume")
     members = _resume_member_order(list(snap.get("members", [])))  # type: ignore[arg-type]
+    worker_cwd = str(members[0]["cwd"])  # worker-first order; preflight proved it exists
     session_name = tmux.get_current_session_name() or "hive"
     window_name = str(snap.get("windowName") or "duo")
 
@@ -3348,30 +3380,38 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
         )
         results: list[tuple[str, str]] = []
         for i, m in enumerate(members):
-            _resume_progress(
-                f"resuming {m['name']} ({m['cli']}) — replaying its session, this can take a while…"
-            )
+            name = str(m["name"])
+            fresh = name in fresh_members
+            if fresh:
+                _resume_progress(
+                    f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
+                )
+                session_kwargs: dict[str, str] = {"prompt": _role_bootstrap_prompt("duo-validator")}
+            else:
+                _resume_progress(
+                    f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
+                )
+                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume"}
             agent = Agent.spawn(
-                name=str(m["name"]),
+                name=name,
                 team_name=team_name,
                 target_pane=first_pane,
-                cwd=str(m["cwd"]),
+                cwd=(worker_cwd if fresh else str(m["cwd"])),
                 split_window=i > 0,
                 split_horizontal=layout_mod.split_horizontal(window, i + 1),
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
                 skill="none",
-                session_id=str(m["sessionId"]),
-                session_mode="resume",
                 workspace=ws,
+                **session_kwargs,
             )
             tmux.set_pane_option(agent.pane_id, "hive-group", "duo")
             hive_context.save_context_for_pane(
-                agent.pane_id, team=team_name, workspace=ws, agent=str(m["name"])
+                agent.pane_id, team=team_name, workspace=ws, agent=name
             )
-            results.append((str(m["name"]), agent.pane_id))
-            _resume_progress(f"{m['name']} ready in {agent.pane_id}")
+            results.append((name, agent.pane_id))
+            _resume_progress(f"{name} ready in {agent.pane_id}")
         reloaded = Team.load(team_name, prefer_pane=first_pane)
         if "worker" in reloaded.agents and "validator" in reloaded.agents:
             reloaded.set_peer("worker", "validator")
@@ -3395,7 +3435,8 @@ def _resume_full_team(handle: str, snap: dict[str, object]) -> dict[str, object]
         "window": window,
         "workspace": ws,
         "members": [
-            {"name": name, "pane": pane, "session": "resumed"} for name, pane in results
+            {"name": name, "pane": pane, "session": "fresh" if name in fresh_members else "resumed"}
+            for name, pane in results
         ],
     }
 
@@ -3411,9 +3452,10 @@ def _utc_now_iso() -> str:
 def resume_cmd(handle: str):
     """Rebuild a dead team — or revive its missing members — from a snapshot.
 
-    Every member comes back with its original agent session (claude ``-r``,
-    codex ``resume``) in its original working directory; no manual ``cd``.
-    Run ``hive ls`` to see resumable handles.
+    The worker comes back with its original agent session (claude ``-r``,
+    codex ``resume``) in its original working directory. A validator whose
+    snapshot has no saved session is respawned fresh with its role bootstrap,
+    following the worker's cwd. Run ``hive ls`` to see resumable handles.
     """
     if not handle:
         _fail("missing handle — run `hive ls` to see resumable teams")
@@ -3435,16 +3477,23 @@ def resume_cmd(handle: str):
     names = [str(m.get("name") or "") for m in members]
     if sorted(names) != ["validator", "worker"]:
         _fail("snapshot roster must be exactly worker + validator (duo contract)")
-    no_session = [n for n, m in zip(names, members) if not m.get("sessionId")]
-    if no_session:
+    roster = dict(zip(names, members))
+    if not roster["worker"].get("sessionId"):
         _fail(
-            f"cannot resume with original context: missing sessionId for {', '.join(no_session)} "
+            "cannot resume with original context: missing sessionId for worker "
             "— start a fresh duo instead (hive duo init)"
         )
+    # A validator without a saved session cannot be resumed, but the worker's
+    # context is the whole point of resume: bring the validator back fresh.
+    fresh_members = frozenset(n for n, m in zip(names, members) if not m.get("sessionId"))
     bad_cli = [n for n, m in zip(names, members) if m.get("cli") not in CLI_BINS]
     if bad_cli:
         _fail(f"unsupported cli for member(s): {', '.join(bad_cli)}")
-    gone_cwd = [n for n, m in zip(names, members) if not os.path.isdir(str(m.get("cwd") or ""))]
+    gone_cwd = [
+        n
+        for n, m in zip(names, members)
+        if n not in fresh_members and not os.path.isdir(str(m.get("cwd") or ""))
+    ]
     if gone_cwd:
         _fail(
             f"working directory missing on disk for: {', '.join(gone_cwd)} "
@@ -3471,7 +3520,6 @@ def resume_cmd(handle: str):
             _fail(
                 f"a different live team already owns '{team_name}' — this snapshot is superseded; nothing to resume"
             )
-        roster = {str(m["name"]): m for m in members}
         extras = sorted(n for n in live if n not in roster)
         if extras:
             _fail(f"live team has members not in the snapshot ({', '.join(extras)}); not guessing")
@@ -3483,9 +3531,9 @@ def resume_cmd(handle: str):
         missing = [roster[n] for n in roster if n not in live]
         if not missing:
             _fail(f"team '{team_name}' is live and complete — nothing to resume")
-        result = _resume_members_into_live_team(snap, win, live, missing)
+        result = _resume_members_into_live_team(snap, win, live, missing, fresh_members)
     else:
-        result = _resume_full_team(handle, snap)
+        result = _resume_full_team(handle, snap, fresh_members)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
