@@ -100,6 +100,11 @@ ACCEPTED_LEGACY_SOCKET = "legacySocketAccepted"
 
 _RECEIPT_TIMEOUT = 10.0
 
+# Worst-case local submission budget for one send_to_pane call (connect plus
+# receipt wait). The sidecar derives its request budgets from this so a valid
+# slow acceptance can never outlive the caller's socket timeout.
+SUBMIT_TIMEOUT = _SOCKET_CONNECT_TIMEOUT + _RECEIPT_TIMEOUT
+
 
 def marker_version(pane: str) -> str:
     """Content of the pane's ready marker ('' when absent/unreadable)."""

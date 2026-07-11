@@ -409,3 +409,75 @@ def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypa
         ("cleanup", str(tmp_path)),
     ]
     assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+
+
+# --- request budgets (VAL fail-r1 finding 1) ---
+
+
+def test_send_request_budget_covers_native_submission_plus_window():
+    """The CLI socket budget is strictly longer than worst-case native
+    transport submission plus the confirmation window: a valid slow
+    acceptance must never surface as `sidecar unavailable`."""
+    from hive.adapters import claude_channel, codex_app_server
+
+    native = max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    assert sidecar._send_request_timeout(False) > native + sidecar.SEND_GRACE_TIMEOUT
+    assert sidecar._send_request_timeout(True) > native + sidecar.OBSERVATION_TIMEOUT
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatch, wait):
+    """A sidecar that answers after a native-budget-scale delay still gets its
+    truthful queued response back to the CLI (no duplicate-inviting None)."""
+    import os
+    import shutil
+    import socket as socket_mod
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    # AF_UNIX sun_path caps at ~104 bytes: the socket cannot live under
+    # pytest's long tmp_path, so use a short throwaway dir like production.
+    base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    run_dir = Path(tempfile.mkdtemp(prefix="hsq", dir=base))
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(sidecar, "_run_dir", lambda _ws: run_dir)
+
+    # shrink every budget component so the test runs in <1s while keeping the
+    # invariant shape: delay < derived budget
+    monkeypatch.setattr("hive.adapters.claude_channel.SUBMIT_TIMEOUT", 0.6)
+    monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
+    monkeypatch.setattr(sidecar, "SEND_GRACE_TIMEOUT", 0.0)
+    monkeypatch.setattr(sidecar, "OBSERVATION_TIMEOUT", 0.0)
+    monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
+
+    srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+    srv.bind(str(run_dir / "sidecar.sock"))
+    srv.listen(1)
+
+    def _slow_reply():
+        conn, _ = srv.accept()
+        with conn:
+            while conn.recv(65536):
+                pass  # drain request until client half-closes
+            time.sleep(0.8)  # valid latency: within native budget, above old 5s-analogue
+            conn.sendall(b'{"ok": true, "msgId": "x1", "delivery": "queued"}\n')
+
+    threading.Thread(target=_slow_reply, daemon=True).start()
+    try:
+        response = sidecar.request_send(
+            str(workspace),
+            team="t",
+            sender_agent="a",
+            sender_pane="%1",
+            target_agent="b",
+            body="hello",
+            wait=wait,
+        )
+    finally:
+        srv.close()
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    assert response is not None
+    assert response["delivery"] == "queued"

@@ -163,18 +163,31 @@ def _socket_loop(path: str) -> None:
 
 
 def _maybe_publish_marker(path: str) -> None:
+    """Publish the readiness marker atomically once both gates are open.
+
+    The visible marker path must never expose empty/partial content (a
+    concurrent ``marker_version()`` would fail closed), so the content is
+    written to a same-directory temp file and ``os.replace``d into place.
+    The published flag is only set after a successful replace: a failed
+    publish stays retryable on the next gate event.
+    """
     global _marker_published
     if not (_initialized.is_set() and _socket_ready.is_set()):
         return
     with _marker_once:
         if _marker_published:
             return
+        marker = marker_path_for_socket(path)
+        tmp = marker + ".tmp"
+        try:
+            with open(tmp, "w") as fh:
+                fh.write(MARKER_RECEIPT_CAPABLE)
+            os.replace(tmp, marker)
+        except OSError as e:
+            _safe_unlink(tmp)
+            _log(f"cannot write ready marker: {e}")
+            return
         _marker_published = True
-    try:
-        with open(marker_path_for_socket(path), "w") as fh:
-            fh.write(MARKER_RECEIPT_CAPABLE)
-    except OSError as e:
-        _log(f"cannot write ready marker: {e}")
 
 
 def _handle_request(method: str, params: dict) -> dict:

@@ -70,6 +70,16 @@ def save_context_for_pane(pane_id: str, *, team: str = "", workspace: str = "", 
     return path
 
 
+def clear_context_for_pane(pane_id: str) -> None:
+    """Remove a pane's saved context (registration rollback)."""
+    slug = pane_id.replace("%", "pane-") if pane_id else "default"
+    path = CONTEXT_DIR / f"{slug}.json"
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def clear_current_context() -> None:
     path = _context_file()
     if path.exists():

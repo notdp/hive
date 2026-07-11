@@ -705,3 +705,96 @@ def test_layout_rejects_unknown_preset(runner, configure_hive_home, tmp_path):
 
     result = runner.invoke(cli, ["layout", "bogus"])
     assert result.exit_code != 0
+
+
+# --- transactional registration (VAL fail-r1 finding 3) ---
+
+
+def _register_probe_team(tmp_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name="team-x",
+        workspace=str(tmp_path / "ws"),
+        agents={},
+    )
+
+
+def test_register_rolls_back_everything_when_native_join_refused(
+    configure_hive_home, monkeypatch, tmp_path
+):
+    """A pane whose native transport refuses the join message must not linger
+    half-registered: no member entry, no tmux tags, no saved pane context."""
+    import pytest
+
+    import hive.cli as cli_mod
+    from hive.agent import DeliveryError
+    from hive import context as hive_context
+
+    configure_hive_home()
+    t = _register_probe_team(tmp_path)
+    tags: list = []
+    cleared: list = []
+    monkeypatch.setattr(cli_mod.tmux, "tag_pane", lambda *a, **k: tags.append(a))
+    monkeypatch.setattr(cli_mod.tmux, "clear_pane_tags", lambda pane: cleared.append(pane))
+
+    def _refuse(self, text):
+        raise DeliveryError("no transport")
+
+    monkeypatch.setattr("hive.agent.Agent.send", _refuse)
+
+    with pytest.raises(SystemExit):
+        cli_mod._register_agent_member(
+            t,
+            pane_id="%42",
+            team_name="team-x",
+            agent_name="new",
+            pane_cli="codex",
+            cwd="/tmp",
+            notify=True,
+        )
+
+    assert t.agents == {}                      # member entry rolled back
+    assert cleared == ["%42"]                  # tmux tags rolled back
+    ctx = hive_context.CONTEXT_DIR / "pane-42.json"
+    assert not ctx.exists()                    # saved context rolled back
+
+    # a later retry starts clean and succeeds
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: "mcpWriteAccepted")
+    agent = cli_mod._register_agent_member(
+        t,
+        pane_id="%42",
+        team_name="team-x",
+        agent_name="new",
+        pane_cli="codex",
+        cwd="/tmp",
+        notify=True,
+    )
+    assert t.agents["new"] is agent
+
+
+def test_register_no_notify_registers_without_reachability_proof(
+    configure_hive_home, monkeypatch, tmp_path
+):
+    """--no-notify is the deliberate escape hatch: it registers a pane without
+    proving the native transport deliverable (documented in the option help)."""
+    import hive.cli as cli_mod
+
+    configure_hive_home()
+    t = _register_probe_team(tmp_path)
+    monkeypatch.setattr(cli_mod.tmux, "tag_pane", lambda *a, **k: None)
+
+    def _boom(self, text):
+        raise AssertionError("no-notify must not touch the transport")
+
+    monkeypatch.setattr("hive.agent.Agent.send", _boom)
+    agent = cli_mod._register_agent_member(
+        t,
+        pane_id="%43",
+        team_name="team-x",
+        agent_name="loner",
+        pane_cli="codex",
+        cwd="/tmp",
+        notify=False,
+    )
+    assert t.agents["loner"] is agent

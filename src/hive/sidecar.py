@@ -46,7 +46,23 @@ OBSERVATION_TIMEOUT = 60.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 SEND_GRACE_TIMEOUT = 3.0
-SEND_REQUEST_TIMEOUT = SEND_GRACE_TIMEOUT + 2.0
+# The CLI's socket budget must be strictly longer than the work it asks the
+# sidecar to perform: worst-case native transport submission (claude channel
+# receipt / codex daemon RPC) plus the confirmation window, plus slack for
+# scheduling and payload plumbing. A valid slow acceptance must never surface
+# as "sidecar unavailable" while the sidecar goes on to record queued.
+REQUEST_SLACK = 5.0
+
+
+def _native_submit_timeout() -> float:
+    from .adapters import claude_channel, codex_app_server
+
+    return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+
+
+def _send_request_timeout(wait: bool) -> float:
+    window = OBSERVATION_TIMEOUT if wait else SEND_GRACE_TIMEOUT
+    return _native_submit_timeout() + window + REQUEST_SLACK
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
@@ -819,7 +835,7 @@ def request_send(
     reply_to: str = "",
     wait: bool = False,
 ) -> dict[str, Any] | None:
-    timeout = OBSERVATION_TIMEOUT if wait else SEND_REQUEST_TIMEOUT
+    timeout = _send_request_timeout(wait)
     return _request_sidecar(
         workspace,
         {

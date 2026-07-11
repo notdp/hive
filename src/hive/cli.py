@@ -1003,7 +1003,24 @@ def _register_agent_member(
     if ws:
         hive_context.save_context_for_pane(pane_id, team=team_name, workspace=ws, agent=agent_name)
     if notify:
-        agent.send(_hive_join_message(agent_name, team_name))
+        from .agent import DeliveryError
+
+        try:
+            agent.send(_hive_join_message(agent_name, team_name))
+        except DeliveryError as e:
+            # Registration is transactional: a pane whose native transport
+            # refused the join must not linger half-registered (tagged and
+            # routable but proven undeliverable). Roll every mutation back so
+            # a later retry starts clean.
+            t.agents.pop(agent_name, None)
+            tmux.clear_pane_tags(pane_id)
+            if ws:
+                hive_context.clear_context_for_pane(pane_id)
+            _fail(
+                f"pane {pane_id} is not reachable over its native transport ({e}); "
+                "nothing was registered. Fix the channel/daemon and retry, "
+                "or use --no-notify to register without a reachability check."
+            )
     return agent
 
 
@@ -1455,7 +1472,7 @@ def init_cmd(validator_cli: str | None):
 @cli.command("register")
 @click.argument("pane_id")
 @click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
-@click.option("--notify/--no-notify", default=True, help="Push hive skill + join message to the pane")
+@click.option("--notify/--no-notify", default=True, help="Deliver the join message over the native transport (doubles as a reachability check; --no-notify registers without proving the pane deliverable)")
 @click.option("--group", "group_name", default="", help="Cross-team group tag for display and namespace reservation (optional; qualified-name routing works without it).")
 def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str):
     """Register an external pane into the current team."""

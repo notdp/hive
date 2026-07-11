@@ -49,6 +49,11 @@ from pathlib import Path
 
 _HANDSHAKE_TIMEOUT = 5.0
 _CALL_TIMEOUT = 10.0
+
+# Worst-case local submission budget for one send_to_pane call (fresh daemon
+# handshake plus the turn/start RPC). The sidecar derives its request budgets
+# from this so a valid slow acceptance can never outlive the caller's timeout.
+SUBMIT_TIMEOUT = _HANDSHAKE_TIMEOUT + _CALL_TIMEOUT
 _DAEMON_START_TIMEOUT = 8.0
 _CONNECT_COOLDOWN = 5.0
 _RESUME_COOLDOWN = 5.0

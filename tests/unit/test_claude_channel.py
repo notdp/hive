@@ -637,3 +637,73 @@ def test_server_survives_legacy_client_and_serves_next_frame(_hive_home):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+# --- atomic marker publication (VAL fail-r1 finding 2) ---
+
+
+@pytest.fixture
+def _srv_module(monkeypatch, _hive_home):
+    """claude_channel_server with fresh readiness state per test."""
+    from hive.adapters import claude_channel_server as srv
+
+    monkeypatch.setattr(srv, "_initialized", threading.Event())
+    monkeypatch.setattr(srv, "_socket_ready", threading.Event())
+    monkeypatch.setattr(srv, "_marker_published", False)
+    return srv
+
+
+def test_marker_publish_is_atomic_and_never_empty(_srv_module, _hive_home, monkeypatch):
+    """The visible marker path must never carry empty/partial content: the
+    write goes to a temp file and lands via os.replace."""
+    srv = _srv_module
+    sock_path = srv.socket_path_for_pane("%60")
+    Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
+    marker = Path(srv.marker_path_for_socket(sock_path))
+    observed: list[str] = []
+
+    real_replace = os.replace
+
+    def _spy_replace(src, dst):
+        # the instant before publication: the final path must not exist yet
+        observed.append("exists-before" if marker.exists() else "absent-before")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(srv.os, "replace", _spy_replace)
+    srv._initialized.set()
+    srv._socket_ready.set()
+    srv._maybe_publish_marker(sock_path)
+
+    assert observed == ["absent-before"]
+    assert marker.read_text() == srv.MARKER_RECEIPT_CAPABLE
+    assert not Path(str(marker) + ".tmp").exists()
+
+
+def test_marker_publish_failure_is_retryable(_srv_module, _hive_home, monkeypatch):
+    """A failed publish must not latch the published flag: the next gate
+    event retries and succeeds."""
+    srv = _srv_module
+    sock_path = srv.socket_path_for_pane("%61")
+    Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
+    marker = Path(srv.marker_path_for_socket(sock_path))
+
+    calls = {"n": 0}
+    real_replace = os.replace
+
+    def _flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk hiccup")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(srv.os, "replace", _flaky_replace)
+    srv._initialized.set()
+    srv._socket_ready.set()
+
+    srv._maybe_publish_marker(sock_path)
+    assert not marker.exists()  # failed publish leaves no empty marker
+    assert not Path(str(marker) + ".tmp").exists()  # temp cleaned
+    assert srv._marker_published is False
+
+    srv._maybe_publish_marker(sock_path)  # retry succeeds
+    assert marker.read_text() == srv.MARKER_RECEIPT_CAPABLE
