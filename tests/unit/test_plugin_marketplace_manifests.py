@@ -66,8 +66,11 @@ def test_codex_marketplace_lists_only_hive():
     entry = entries[0]
     assert entry["source"] == {"source": "local", "path": "./plugins/hive"}
     assert (REPO / entry["source"]["path"]).is_dir()
-    assert "installation" in entry["policy"]
-    assert "authentication" in entry["policy"]
+    # codex ingestion enums are strict: unknown variants reject the whole
+    # marketplace file (validator r1: "NONE" failed `codex plugin marketplace add`)
+    assert entry["policy"]["installation"] == "AVAILABLE"
+    assert entry["policy"]["authentication"] == "ON_INSTALL"
+    assert entry["policy"]["authentication"] in {"ON_INSTALL", "ON_USE"}
     assert "category" in entry
     raw = CODEX_MARKETPLACE.read_text()
     assert "hive-channel" not in raw
