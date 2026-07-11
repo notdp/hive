@@ -678,7 +678,7 @@ def test_hive_init_revives_missing_validator(runner, configure_hive_home, monkey
         cli_mod, monkeypatch, tmp_path, panes=[_worker_pane_info()], binding=_revive_binding(ws)
     )
 
-    result = runner.invoke(cli, ["init", "--no-notify"])
+    result = runner.invoke(cli, ["init"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
 

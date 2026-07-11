@@ -370,7 +370,8 @@ def test_send_rejects_legacy_to_option_with_positional_hint(runner, configure_hi
 
     result = runner.invoke(cli, ["send", "--to", "gpt", "--msg", "hello"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2  # UsageError: argument-shape failures match Click parser errors
+    assert "Usage: " in result.output
     assert "hive send takes positional args" in result.output
     assert "Drop --to/--msg" in result.output
     assert called == []  # Guard must short-circuit before touching the team.
@@ -389,7 +390,9 @@ def test_send_without_agent_surfaces_usage_hint(runner, configure_hive_home, mon
 
     result = runner.invoke(cli, ["send"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2
+    assert "Usage: " in result.output
+    assert "for help" in result.output  # Click's Try-help hint line
     assert "hive send requires <agent>" in result.output
     assert "Drop --to/--msg" not in result.output
     assert called == []
@@ -408,7 +411,8 @@ def test_reply_rejects_legacy_msg_option_with_positional_hint(runner, configure_
 
     result = runner.invoke(cli, ["reply", "dodo", "--msg", "hello"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2
+    assert "Usage: " in result.output
     assert "hive reply takes positional args" in result.output
     assert "Drop --to/--msg" in result.output
     assert called == []
