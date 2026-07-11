@@ -34,7 +34,7 @@ hive reply dodo "ack, looking"
 
 - 标签里的 `body` 是短摘要。
 - `artifact=<path>` 是正文；需要细节时直接打开这个文件。
-- 以 `<HIVE>` block 为准。`hive thread` / `hive delivery` 只用于排障；需要时取 `hive skills get debug`。
+- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时取 `hive skills get debug`。
 
 ### 发消息：send 还是 reply
 

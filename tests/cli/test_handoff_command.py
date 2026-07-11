@@ -43,7 +43,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
             return _send_payload(
                 workspace=workspace,
                 team_name=team,
-                pending=pending,
                 sender_agent=sender_agent,
                 sender_pane=sender_pane,
                 target_agent=target_agent,
@@ -114,7 +113,7 @@ def test_handoff_direct_uses_send_path_for_delegate_and_announce(runner, configu
     assert payload["delegate"]["to"] == "dodo"
     assert payload["delegate"]["artifact"] == str(artifact)
     assert payload["announce"]["to"] == "lulu"
-    assert payload["announce"]["delivery"] == "queued"
+    assert payload["announce"]["msgId"]  # accepted announce carries its message id
 
     events = bus.read_all_events(workspace)
     delegate = [event for event in events if event.get("intent") == "send" and event.get("to") == "dodo"][-1]

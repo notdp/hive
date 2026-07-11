@@ -1,8 +1,9 @@
-"""Team-scoped sidecar for pending send lifecycle tracking.
+"""Team-scoped sidecar: message transport, runtime signals, notify watcher.
 
-The sidecar owns runtime pending-send state in memory and exposes a tiny
-workspace-local Unix socket for enqueue/status/shutdown. Durable facts still
-land in the workspace database as observation events.
+Delivery has exactly one state: the native transport (claude channel /
+codex daemon) either accepted the message or refused it. There is no
+tracked in-between and no confirmation oracle — acceptance means the
+target's own runtime owns it from there.
 """
 
 from __future__ import annotations
@@ -24,12 +25,8 @@ from . import devlog
 from . import notify_ui
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
-    delivery_guidance,
     format_hive_envelope,
-    present_delivery_state,
-    present_send_state,
     project_thread_event,
-    send_guidance,
 )
 from .runtime_snapshot import RuntimeSnapshot, RuntimeSnapshotStore
 
@@ -42,7 +39,6 @@ NOTIFY_DEBUG_HEARTBEAT_SECONDS = 30.0
 SIDECAR_CODE_CHECK_SECONDS = 5.0
 SIDECAR_OWNER_CHECK_SECONDS = 5.0
 _SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
-OBSERVATION_TIMEOUT = 60.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 # The CLI's socket budget must be strictly longer than the work it asks the
@@ -62,7 +58,6 @@ def _native_submit_timeout() -> float:
 def _send_request_timeout() -> float:
     return _native_submit_timeout() + REQUEST_SLACK
 SIDECAR_API_VERSION = 5
-_FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
 # Session snapshots stay event-invalidated for consumers. This low-rate
 # maintenance probe only bounds sidecar drift without paying per-tick ps/fd
@@ -111,12 +106,8 @@ def _stale_disk_build_hash_for_reexec(
     state: dict[str, Any],
     *,
     now: float,
-    pending_empty: bool,
 ) -> str | None:
     """Return a stable changed build hash that should trigger sidecar reexec."""
-    if not pending_empty:
-        return None
-
     last_check = float(state.get("last_code_check_at", 0.0))
     if now - last_check < SIDECAR_CODE_CHECK_SECONDS:
         return None
@@ -668,84 +659,6 @@ def _cleanup_socket_if_owner(workspace: str, owner_token: str) -> None:
     _cleanup_owner_if_current(workspace, owner_token)
 
 
-def _write_observation(
-    workspace: str,
-    message_id: str,
-    result: str,
-    *,
-    metadata: dict[str, str] | None = None,
-) -> None:
-    ts = _now_iso()
-    event_metadata: dict[str, str] = {
-        "msgId": message_id,
-        "result": result,
-        "observedAt": ts,
-    }
-    if metadata:
-        for key, value in metadata.items():
-            if value in ("", None):
-                continue
-            event_metadata[key] = value
-    bus.write_event(
-        workspace,
-        from_agent="_system",
-        to_agent="",
-        intent="observation",
-        message_id=message_id,
-        metadata=event_metadata,
-    )
-
-
-def _effective_deadline(record: dict[str, Any]) -> float:
-    deadline = record.get("deadlineAt", 0)
-    return float(deadline) if isinstance(deadline, (int, float)) else 0.0
-
-
-def _pending_delivery_state(record: dict[str, Any], observation: dict[str, Any] | None = None) -> dict[str, Any]:
-    inject_status = "submitted"
-    turn_observed = "pending"
-    observation_result = ""
-    observed_at = ""
-    confirmation_source = str(record.get("confirmationSource", ""))
-
-    if observation is not None:
-        metadata = observation.get("metadata", {})
-        if isinstance(metadata, dict):
-            raw_result = str(metadata.get("result") or "")
-            if raw_result in ("", "pending", "queued"):
-                observation_result = ""  # unconfirmed projects to queued
-            else:
-                observation_result = "success" if raw_result == "success" else "failed"
-            observed_at = str(metadata.get("observedAt") or "")
-            inject_status = (
-                str(metadata.get("injectStatus", ""))
-                or ("failed" if observation_result == "failed" else "submitted")
-            )
-            turn_observed = str(metadata.get("turnObserved", "")) or turn_observed
-            confirmation_source = str(metadata.get("confirmationSource", "")) or confirmation_source
-
-    if not turn_observed:
-        turn_observed = "confirmed" if observation_result == "success" else "pending"
-
-    payload: dict[str, Any] = {
-        "delivery": present_delivery_state(
-            inject_status=inject_status,
-            turn_observed=turn_observed,
-            observation_result=observation_result,
-        ),
-        "injectStatus": inject_status,
-        "turnObserved": turn_observed,
-    }
-    if observed_at:
-        payload["observedAt"] = observed_at
-    if confirmation_source and payload["delivery"] == "success":
-        payload["confirmationSource"] = confirmation_source
-    guidance = delivery_guidance(payload["delivery"])
-    if guidance is not None:
-        payload.update(guidance)
-    return payload
-
-
 def _socket_alive(workspace: str) -> bool:
     response = request_ping(workspace)
     return bool(
@@ -849,14 +762,6 @@ def request_send(
     )
 
 
-def request_delivery(workspace: str, message_id: str) -> dict[str, Any] | None:
-    return _request_sidecar(
-        workspace,
-        {"action": "delivery", "msgId": message_id},
-        timeout=SOCKET_RETRY_INTERVAL,
-    )
-
-
 def request_doctor(
     workspace: str,
     *,
@@ -949,43 +854,10 @@ def _check_send_gate(transcript_path: Path | None) -> str:
     return result.status
 
 
-def _pending_record(
-    *,
-    message_id: str,
-    sender_agent: str,
-    sender_pane: str,
-    target_agent: str,
-    target_pane: str,
-    target_cli: str,
-    transcript_path: str,
-    baseline: int,
-) -> dict[str, Any]:
-    return {
-        "msgId": message_id,
-        "senderAgent": sender_agent,
-        "senderPane": sender_pane,
-        "targetAgent": target_agent,
-        "targetPane": target_pane,
-        "targetCli": target_cli,
-        "targetTranscript": transcript_path,
-        "baseline": baseline,
-        "createdAt": _now_iso(),
-        "deadlineAt": time.time() + OBSERVATION_TIMEOUT,
-    }
-
-
-def _target_cli_name(target: Any) -> str:
-    profile = detect_profile_for_pane(getattr(target, "pane_id", "") or "")
-    if profile and profile.name:
-        return profile.name
-    return str(getattr(target, "cli", "") or "")
-
-
 def _send_payload(
     *,
     workspace: str,
     team_name: str,
-    pending: dict[str, dict[str, Any]],
     sender_agent: str,
     sender_pane: str,
     target_agent: str,
@@ -995,13 +867,10 @@ def _send_payload(
 ) -> dict[str, Any]:
     team, target = _resolve_live_agent(team_name, target_agent)
     normalized_body = body.strip()
-    target_cli = _target_cli_name(target)
 
-    message_id = ""
     transcript_path: Path | None = None
-    baseline = 0
     try:
-        transcript_path, baseline = _resolve_ack_baseline(target)
+        transcript_path, _ = _resolve_ack_baseline(target)
     except Exception:
         transcript_path = None
 
@@ -1026,231 +895,22 @@ def _send_payload(
         reply_to=reply_to,
     )
 
-    inject_status = "submitted"
-    transport_accepted = ""
+    # Fire-and-forget past this point: the transport verdict is the only
+    # delivery state. The daemon/channel either accepted the message (its
+    # own contract queues and processes it) or refused it — there is no
+    # tracked in-between, no confirmation oracle, and nothing to poll.
     try:
-        transport_accepted = str(target.send(envelope) or "")
-    except Exception:
-        inject_status = "failed"
-
-    turn_observed = "pending"
-    confirmation_source = ""
-    profile = detect_profile_for_pane(target.pane_id)
-
-    def _add_to_pending() -> None:
-        pending[message_id] = _pending_record(
-            message_id=message_id,
-            sender_agent=sender_agent,
-            sender_pane=sender_pane,
-            target_agent=target_agent,
-            target_pane=target.pane_id,
-            target_cli=profile.name if profile else "",
-            transcript_path=str(transcript_path) if transcript_path is not None else "",
-            baseline=baseline,
-        )
-
-    if inject_status == "failed":
-        turn_observed = "unavailable"
-        _write_observation(
-            workspace,
-            message_id,
-            "failed",
-            metadata={
-                "injectStatus": "failed",
-                "turnObserved": "unavailable",
-            },
-        )
-    else:
-        # Durable BEFORE returning: a sidecar restart while this message sits
-        # in the in-memory tracker must never turn a transport-accepted send
-        # into tracking_lost/failed. The tracking inputs ride along so a
-        # query-time transcript check can still upgrade queued -> success.
-        _write_observation(
-            workspace,
-            message_id,
-            "queued",
-            metadata={
-                "injectStatus": "submitted",
-                "turnObserved": "pending",
-                "transportAccepted": transport_accepted,
-                "targetPane": target.pane_id,
-                "targetTranscript": str(transcript_path) if transcript_path is not None else "",
-                "baseline": str(baseline),
-            },
-        )
-    if inject_status != "failed":
-        # Fire-and-track: the send returns the moment the transport accepted.
-        # Confirmation is asynchronous — the background tracker (and the
-        # query-time transcript check after a restart) upgrades queued to
-        # success; a sender that wants certainty polls `hive delivery`.
-        _add_to_pending()
+        target.send(envelope)
+    except Exception as exc:
+        return {"ok": False, "error": f"transport refused {target_agent}: {exc}", "msgId": message_id}
 
     payload: dict[str, Any] = {
         "ok": True,
         "to": target_agent,
         "msgId": message_id,
-        "delivery": present_send_state(
-            inject_status=inject_status,
-            turn_observed=turn_observed,
-        ),
     }
     if artifact:
         payload["artifact"] = artifact
-    if confirmation_source and payload["delivery"] == "success":
-        payload["confirmationSource"] = confirmation_source
-    guidance = send_guidance(payload["delivery"])
-    if guidance is not None:
-        payload.update(guidance)
-    return payload
-
-
-def _query_time_transcript_upgrade(
-    workspace: str, message_id: str, metadata: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Upgrade a durable queued record to success if its transcript now shows
-    the message. Returns the fresh observation event, or None (still queued)."""
-    from .adapters.base import transcript_has_id_in_new_user_turn
-
-    transcript = str(metadata.get("targetTranscript", "") or "")
-    try:
-        baseline = int(str(metadata.get("baseline", "0") or "0"))
-    except ValueError:
-        baseline = 0
-    if not transcript or not Path(transcript).exists():
-        return None
-    if not transcript_has_id_in_new_user_turn(Path(transcript), message_id, baseline):
-        return None
-    _write_observation(
-        workspace,
-        message_id,
-        "success",
-        metadata={
-            "injectStatus": "submitted",
-            "turnObserved": "confirmed",
-            "confirmationSource": "transcript",
-        },
-    )
-    return bus.find_latest_observation(workspace, message_id)
-
-
-def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
-    send_event = bus.find_send_event(workspace, message_id)
-    if send_event is None:
-        return {"ok": False, "error": f"no send event found with msgId '{message_id}'"}
-
-    obs = bus.find_latest_observation(workspace, message_id)
-    if obs is None and message_id not in pending:
-        payload: dict[str, Any] = {
-            "ok": True,
-            "msgId": message_id,
-            "to": send_event.get("to", ""),
-            "delivery": "failed",
-            "reason": "tracking_lost",
-            "injectStatus": "submitted",
-            "turnObserved": "unavailable",
-        }
-        guidance = delivery_guidance("failed")
-        if guidance is not None:
-            payload.update(guidance)
-        return payload
-
-    inject_status = "submitted"
-    turn_observed = "pending"
-
-    if message_id in pending:
-        record = pending[message_id]
-        delivery = _pending_delivery_state(record, obs)
-        payload: dict[str, Any] = {
-            "ok": True,
-            "msgId": message_id,
-            "to": send_event.get("to", ""),
-        }
-        payload.update(delivery)
-        return payload
-
-    if obs is not None:
-        metadata = obs.get("metadata", {})
-        result = metadata.get("result", "") if isinstance(metadata, dict) else ""
-
-        if result == "queued" and isinstance(metadata, dict):
-            # Sidecar may have restarted since the send: the in-memory tracker
-            # is gone, but the durable observation carries the tracking inputs.
-            # Check the transcript now and upgrade in place on a hit; a miss
-            # keeps the record queued forever — never tracking_lost/failed.
-            upgraded = _query_time_transcript_upgrade(workspace, message_id, metadata)
-            if upgraded is not None:
-                obs = upgraded
-                metadata = obs.get("metadata", {})
-                result = metadata.get("result", "") if isinstance(metadata, dict) else ""
-
-        observed_at = metadata.get("observedAt", "") if isinstance(metadata, dict) else ""
-        inject_status = (
-            str(metadata.get("injectStatus", ""))
-            if isinstance(metadata, dict)
-            else ""
-        ) or ("failed" if result == "failed" else "submitted")
-        turn_observed = (
-            str(metadata.get("turnObserved", ""))
-            if isinstance(metadata, dict)
-            else ""
-        )
-        # Unconfirmed states ("", pending, queued) stay open; any other
-        # non-success terminal result — including legacy values like
-        # "unconfirmed"/"tracking_lost" left in hive.db — folds to "failed"
-        # and is never retroactively promoted.
-        if result in ("", "pending", "queued"):
-            normalized_result = "pending"
-            if turn_observed in ("unconfirmed", "unavailable"):
-                turn_observed = "pending"
-        else:
-            normalized_result = "success" if result == "success" else "failed"
-        if not turn_observed:
-            if normalized_result == "success":
-                turn_observed = "confirmed"
-            elif normalized_result == "failed":
-                turn_observed = "unconfirmed" if inject_status == "submitted" else "unavailable"
-            else:
-                turn_observed = "pending"
-        confirmation_source = (
-            str(metadata.get("confirmationSource", ""))
-            if isinstance(metadata, dict)
-            else ""
-        )
-        payload = {
-            "ok": True,
-            "msgId": message_id,
-            "to": send_event.get("to", ""),
-            "delivery": present_delivery_state(
-                inject_status=inject_status,
-                turn_observed=turn_observed,
-                observation_result=normalized_result,
-            ),
-            "injectStatus": inject_status,
-            "turnObserved": turn_observed,
-        }
-        if confirmation_source and payload["delivery"] == "success":
-            payload["confirmationSource"] = confirmation_source
-        if observed_at:
-            payload["observedAt"] = observed_at
-        guidance = delivery_guidance(payload["delivery"])
-        if guidance is not None:
-            payload.update(guidance)
-        return payload
-
-    payload = {
-        "ok": True,
-        "msgId": message_id,
-        "to": send_event.get("to", ""),
-        "delivery": present_delivery_state(
-            inject_status=inject_status,
-            turn_observed=turn_observed,
-        ),
-        "injectStatus": inject_status,
-        "turnObserved": turn_observed,
-    }
-    guidance = delivery_guidance(payload["delivery"])
-    if guidance is not None:
-        payload.update(guidance)
     return payload
 
 
@@ -1882,11 +1542,10 @@ def _idle_notify_tick(
         debug_state["last_heartbeat"] = now
 
 
-def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
+def _thread_payload(workspace: str, message_id: str) -> dict[str, Any]:
     events = bus.read_events_with_ns(workspace)
     send_events: dict[str, tuple[int, dict[str, object]]] = {}
     children: dict[str, list[str]] = defaultdict(list)
-    latest_observations: dict[str, tuple[int, dict[str, object]]] = {}
 
     for seq, event in events:
         event_msg_id = str(event.get("msgId") or "")
@@ -1898,8 +1557,6 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
             parent = str(event.get("inReplyTo") or "")
             if parent:
                 children[parent].append(event_msg_id)
-        elif intent == "observation":
-            latest_observations[event_msg_id] = (seq, event)
 
     if message_id not in send_events:
         return {"ok": False, "error": f"no send event found with msgId '{message_id}'"}
@@ -1934,25 +1591,6 @@ def _thread_payload(workspace: str, pending: dict[str, dict[str, Any]], message_
         item["depth"] = depth_map.get(thread_msg_id, 0)
         if thread_msg_id == message_id:
             item["focus"] = True
-
-        if thread_msg_id in pending:
-            record = pending[thread_msg_id]
-            observation = latest_observations.get(thread_msg_id, (None, None))[1]
-            item["delivery"] = _pending_delivery_state(record, observation)
-        elif thread_msg_id in latest_observations:
-            _, observation = latest_observations[thread_msg_id]
-            metadata = observation.get("metadata", {})
-            if isinstance(metadata, dict):
-                result = str(metadata.get("result") or "pending")
-                delivery_value = result if result in ("pending", "success", "failed") else "pending"
-                info: dict[str, Any] = {"delivery": delivery_value}
-                if metadata.get("observedAt"):
-                    info["observedAt"] = metadata["observedAt"]
-                guidance = delivery_guidance(delivery_value)
-                if guidance is not None:
-                    info.update(guidance)
-                item["delivery"] = info
-
         items.append(item)
 
     return {
@@ -2058,13 +1696,6 @@ def _open_server_socket(workspace: str) -> socket.socket:
     return server
 
 
-def _live_state(record: dict[str, Any]) -> str:
-    terminal_result = _pending_terminal_result(record)
-    if terminal_result:
-        return terminal_result
-    return "pending"
-
-
 def _handle_request(
     *,
     workspace: str,
@@ -2072,7 +1703,6 @@ def _handle_request(
     tmux_window: str,
     tmux_window_id: str,
     sidecar_started_at: str,
-    pending: dict[str, dict[str, Any]],
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     sidecar = _sidecar_metadata(sidecar_started_at)
@@ -2092,7 +1722,6 @@ def _handle_request(
             response = _send_payload(
                 workspace=workspace,
                 team_name=str(request.get("team") or team),
-                pending=pending,
                 sender_agent=str(request.get("senderAgent", "")),
                 sender_pane=str(request.get("senderPane", "")),
                 target_agent=str(request.get("targetAgent", "")),
@@ -2103,14 +1732,6 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
-    if action == "enqueue":
-        record = request.get("record")
-        if not isinstance(record, dict) or not record.get("msgId"):
-            return {"ok": False, "error": "invalid record"}, True
-        pending[str(record["msgId"])] = record
-        return {"ok": True, "delivery": _live_state(record)}, True
-    if action == "delivery":
-        return _delivery_payload(workspace, pending, str(request.get("msgId", ""))), True
     if action == "doctor":
         try:
             response = _doctor_payload(
@@ -2137,7 +1758,7 @@ def _handle_request(
         return response, True
     if action == "thread":
         try:
-            response = _thread_payload(workspace, pending, str(request.get("msgId", "")))
+            response = _thread_payload(workspace, str(request.get("msgId", "")))
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
@@ -2150,21 +1771,6 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
-    if action == "status":
-        message_id = request.get("msgId", "")
-        if message_id in pending:
-            record = pending[message_id]
-            return {
-                "ok": True,
-                "tracked": True,
-                "delivery": _live_state(record),
-            }, True
-        obs = bus.find_latest_observation(workspace, str(message_id))
-        if obs is not None:
-            metadata = obs.get("metadata", {})
-            result = metadata.get("result", "") if isinstance(metadata, dict) else ""
-            return {"ok": True, "tracked": False, "result": result}, True
-        return {"ok": True, "tracked": False}, True
     if action == "shutdown":
         return {"ok": True}, False
     return {"ok": False, "error": "unknown action"}, True
@@ -2178,7 +1784,6 @@ def _serve_requests(
     tmux_window: str,
     tmux_window_id: str,
     sidecar_started_at: str,
-    pending: dict[str, dict[str, Any]],
     timeout: float,
 ) -> bool:
     end = time.monotonic() + timeout
@@ -2217,7 +1822,6 @@ def _serve_requests(
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
                 sidecar_started_at=sidecar_started_at,
-                pending=pending,
                 request=request if isinstance(request, dict) else {},
             )
             try:
@@ -2330,7 +1934,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     from . import notify_debug
 
     sidecar_started_at = _now_iso()
-    pending: dict[str, dict[str, Any]] = {}
     idle_notify: dict[str, dict[str, Any]] = {}
     notify_debug_state: dict[str, Any] = {}
     code_reexec_state: dict[str, Any] = {}
@@ -2400,7 +2003,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             stale_hash = _stale_disk_build_hash_for_reexec(
                 code_reexec_state,
                 now=now,
-                pending_empty=not pending,
             )
             if stale_hash:
                 def _emit_reexec() -> None:
@@ -2435,8 +2037,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
                 sidecar_started_at=sidecar_started_at,
-                pending=pending,
-                timeout=ACTIVE_SLEEP if pending else IDLE_NOTIFY_TICK_SECONDS,
+                timeout=IDLE_NOTIFY_TICK_SECONDS,
             ):
                 return
 
@@ -2451,22 +2052,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 members=tick_members,
             )
 
-            for message_id, record in list(pending.items()):
-                result = _check_pending(record)
-                if result is None:
-                    continue
-                if result == _FINALIZE_PENDING:
-                    # Stop tracking; the durable queued observation stands and
-                    # the sender pane is never disturbed about it.
-                    pending.pop(message_id, None)
-                    continue
-                _write_observation(
-                    workspace,
-                    message_id,
-                    result,
-                    metadata=_observation_metadata_for_pending(record, result),
-                )
-                pending.pop(message_id, None)
     finally:
         _release_reexec_lock_fd(inherited_reexec_lock_fd)
         if busy_monitor is not None:
@@ -2477,40 +2062,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
         except OSError:
             pass
         _cleanup_socket_if_owner(workspace, owner_token)
-
-
-def _check_pending(record: dict[str, Any]) -> str | None:
-    """Check a pending record. Returns 'success' / _FINALIZE_PENDING / None.
-
-    Transcript is the only confirmation oracle. Tracking-deadline expiry stops
-    the in-memory watch but never fails the message: the durable observation
-    written at send time keeps it queued, and a later transcript hit (seen at
-    query time) can still upgrade it to success.
-    """
-    from .adapters.base import transcript_has_id_in_new_user_turn
-
-    transcript_path = Path(record.get("targetTranscript", ""))
-    message_id = record.get("msgId", "")
-    baseline = record.get("baseline", 0)
-
-    if transcript_path.exists() and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
-        record["confirmationSource"] = "transcript"
-        return "success"
-
-    if time.time() > _effective_deadline(record):
-        return _FINALIZE_PENDING
-    return None
-
-
-def _observation_metadata_for_pending(record: dict[str, Any], result: str) -> dict[str, str]:
-    metadata: dict[str, str] = {
-        "injectStatus": "submitted",
-        "turnObserved": "confirmed",
-    }
-    source = str(record.get("confirmationSource", ""))
-    if source:
-        metadata["confirmationSource"] = source
-    return metadata
 
 
 def stop_sidecar(workspace: str) -> None:

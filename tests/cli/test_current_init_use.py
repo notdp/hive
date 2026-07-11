@@ -657,7 +657,6 @@ def test_root_help_groups_commands_by_area(runner):
 
     for short_help in (
         "Show team overview.",
-        "Check delivery status of a sent message by ID.",
         "Show a reply thread rooted at a msgId.",
         "Manage first-party Hive plugins.",
     ):

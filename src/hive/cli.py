@@ -61,7 +61,6 @@ _COMMAND_HELP_SECTIONS = {
     "hfork": "Human Helpers",
     # Debug — troubleshooting, rarely on the happy path.
     "doctor": "Debug",
-    "delivery": "Debug",
     "thread": "Debug",
     "capture": "Debug",
     "inject": "Debug",
@@ -119,8 +118,7 @@ hive handoff dodo --artifact /tmp/task.md    # delegate a thread
 hive fork                                    # split the current pane into a clone
 hive spawn claude                            # bring up a new agent pane
 
-# Debug delivery / connectivity
-hive delivery <msgId>                        # trace a send
+# Debug connectivity
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
@@ -4394,12 +4392,9 @@ def send(
     lines.
 
     \b
-    Delivery outcomes (in the `delivery` field of the response):
-      success   The target's transcript shows the message in a new user turn.
-      queued    Transport write accepted; final delivery unconfirmed — the
-                target may be mid-turn (channel events queue). Do not resend.
-      failed    The transport itself refused the message (no channel/daemon,
-                write error, no receipt). CLI exits with status 2.
+    Delivery is binary: the native transport (claude channel / codex daemon)
+    either accepted the message — its runtime owns it from there — or the
+    command fails with the transport error. Nothing to poll afterwards.
 
     \b
     Examples:
@@ -4430,8 +4425,6 @@ def send(
         _fail(str(exc))
         return
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    if payload.get("delivery") == "failed":
-        sys.exit(2)
 
 
 @cli.command()
@@ -4507,35 +4500,6 @@ def reply(
         return
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    if payload.get("delivery") == "failed":
-        sys.exit(2)
-
-
-@cli.command()
-@click.argument("message_id")
-def delivery(message_id: str):
-    """Check delivery status of a sent message by ID.
-
-    Use after `hive send` returned `delivery=pending` or `failed` to
-    see the sidecar's tracking state and any observation events.
-
-    \b
-    Example:
-      hive delivery aBc1
-    """
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    from .sidecar import request_delivery
-
-    _ensure_team_sidecar(t, ws)
-    payload = request_delivery(str(ws), message_id)
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "delivery lookup failed")))
-    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

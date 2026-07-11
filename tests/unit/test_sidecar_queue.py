@@ -6,27 +6,6 @@ import pytest
 import hive.sidecar as sidecar
 
 
-def test_check_pending_finalizes_after_deadline_without_failing(monkeypatch, tmp_path):
-    """Deadline expiry only stops tracking; the message stays durably queued
-    (the sender is never notified of a failure that did not happen)."""
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    now = 400.0
-    monkeypatch.setattr(sidecar.time, "time", lambda: now)
-
-    record = {
-        "msgId": "ab12",
-        "targetTranscript": str(transcript),
-        "targetPane": "%1",
-        "targetCli": "codex",
-        "baseline": 0,
-        "deadlineAt": now - 30,
-    }
-
-    assert sidecar._check_pending(record) == sidecar._FINALIZE_PENDING
-
-
 def test_socket_alive_requires_matching_api_version(monkeypatch):
     monkeypatch.setattr(
         sidecar,
@@ -100,7 +79,6 @@ def test_handle_request_ping_returns_sidecar_identity():
         tmux_window="dev:3",
         tmux_window_id="@99",
         sidecar_started_at="2026-04-17T00:00:00Z",
-        pending={},
         request={"action": "ping"},
     )
 
@@ -131,7 +109,6 @@ def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
         tmux_window="dev:3",
         tmux_window_id="@99",
         sidecar_started_at="2026-04-17T00:00:00Z",
-        pending={},
         request={"action": "connect-codex", "pane": "%5"},
     )
 
@@ -203,25 +180,17 @@ def test_stale_disk_build_hash_requires_stable_changed_hash(monkeypatch):
     monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: next(values))
     state: dict[str, object] = {}
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert state["candidate_hash"] == "new-hash"
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9, pending_empty=True) is None
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0, pending_empty=True) == "new-hash"
-
-
-def test_stale_disk_build_hash_does_not_trigger_while_pending(monkeypatch):
-    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: "new-hash")
-    state: dict[str, object] = {}
-
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=False) is None
-    assert state == {}
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0) == "new-hash"
 
 
 def test_stale_disk_build_hash_clears_candidate_when_code_matches(monkeypatch):
     state: dict[str, object] = {"candidate_hash": "new-hash"}
     monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: sidecar.SIDECAR_BUILD_HASH)
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert "candidate_hash" not in state
 
 

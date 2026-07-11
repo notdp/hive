@@ -60,7 +60,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
             return _send_payload(
                 workspace=workspace,
                 team_name=team,
-                pending=pending,
                 sender_agent=sender_agent,
                 sender_pane=sender_pane,
                 target_agent=target_agent,
@@ -179,5 +178,4 @@ def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_ho
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["msgId"] == FIXED_ID
-    assert payload["delivery"] == "queued"
     assert result.stderr == ""

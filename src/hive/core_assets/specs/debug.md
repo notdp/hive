@@ -5,7 +5,6 @@
 ## Debug / 排障
 
 - `hive doctor [agent] [--skills]` — agent 连通性 / 本地 skill drift
-- `hive delivery <msgId>` — 某条消息的投递状态
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
 - `hive capture / inject / interrupt / kill` — 低层 pane 操作
 
@@ -25,5 +24,5 @@
 - `hive send` 永远开新 thread root;`hive reply` 续已有 thread、必带 `in_reply_to`
 - Hive 不是严格可靠消息队列;没有幂等性或 backpressure。
 - 收件箱一律是 pane 内联的 `<HIVE ...>` block。
-- 排障用 `hive thread` / `hive delivery`,不要把内部存储或日志当收件箱轮询。
+- 排障用 `hive thread`,不要把内部存储或日志当收件箱轮询。
 - GitHub PR comment / review 属于 workflow 层职责,直接用 `gh` / `gh api`;Hive kernel 命令保持单一职责
