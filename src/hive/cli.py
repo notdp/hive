@@ -5037,8 +5037,19 @@ def claude_cmd(ctx: click.Context):
     Usually invoked through the `hive shell-init` shell function rather than by
     hand; all arguments are forwarded to claude. Replaces the current process
     with claude and never returns on success.
+
+    Internal seam: the exact argv `channel-server` runs the per-pane channel
+    MCP server in-process instead of launching claude. Published plugin
+    manifests point at this entry (`hive claude channel-server`) so they stay
+    free of machine-specific interpreter paths.
     """
-    _exec_claude_managed(list(ctx.args))
+    args = list(ctx.args)
+    if args == ["channel-server"]:
+        from .adapters.claude_channel_server import main as _channel_server_main
+
+        _channel_server_main()
+        return
+    _exec_claude_managed(args)
 
 
 _SHELL_INIT_POSIX = """\

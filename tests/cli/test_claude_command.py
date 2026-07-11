@@ -121,6 +121,33 @@ def test_claude_flag_value_is_not_a_subcommand(runner, monkeypatch):
     assert calls == [["claude", "claude", "--agent", "doctor", *_FLAGS]]
 
 
+def test_claude_channel_server_dispatch_runs_server_main(runner, monkeypatch):
+    # published plugin manifests invoke `hive claude channel-server`; the
+    # exact argv must run the MCP server in-process, never exec claude
+    calls = _capture_exec(monkeypatch)
+    served: list[bool] = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel_server.main", lambda: served.append(True)
+    )
+    result = runner.invoke(cli, ["claude", "channel-server"])
+    assert result.exit_code == 0
+    assert served == [True]
+    assert calls == []
+
+
+def test_claude_channel_server_with_extra_args_is_not_dispatch(runner, monkeypatch):
+    # anything beyond the exact internal argv stays on the passthrough path
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+
+    def _fail() -> None:
+        raise AssertionError("server main must not run for non-exact argv")
+
+    monkeypatch.setattr("hive.adapters.claude_channel_server.main", _fail)
+    runner.invoke(cli, ["claude", "channel-server", "--verbose"])
+    assert calls == [["claude", "claude", "channel-server", "--verbose", *_FLAGS]]
+
+
 def test_claude_double_dash_positional_is_a_prompt(monkeypatch):
     # `claude -- daemon` explicitly makes "daemon" a prompt, not a subcommand.
     # Exercised on _exec_claude_managed directly: click strips the first `--`

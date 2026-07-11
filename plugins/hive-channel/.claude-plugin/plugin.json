@@ -1,0 +1,21 @@
+{
+  "name": "hive-channel",
+  "version": "0.1.0",
+  "description": "hive per-pane message channel for Claude panes (transport only).",
+  "author": {
+    "name": "notdp",
+    "url": "https://github.com/notdp"
+  },
+  "mcpServers": {
+    "hive-channel": {
+      "type": "stdio",
+      "command": "hive",
+      "args": ["claude", "channel-server"]
+    }
+  },
+  "channels": [
+    {
+      "server": "hive-channel"
+    }
+  ]
+}

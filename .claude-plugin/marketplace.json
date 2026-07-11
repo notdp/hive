@@ -1,0 +1,19 @@
+{
+  "name": "hive",
+  "owner": {
+    "name": "notdp",
+    "url": "https://github.com/notdp"
+  },
+  "plugins": [
+    {
+      "name": "hive",
+      "source": "./plugins/hive",
+      "description": "Hive multi-agent collaboration entrypoint: role discovery skill for tmux duo/squad teams."
+    },
+    {
+      "name": "hive-channel",
+      "source": "./plugins/hive-channel",
+      "description": "hive per-pane message channel for Claude panes (transport only)."
+    }
+  ]
+}

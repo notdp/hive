@@ -37,6 +37,7 @@ from pathlib import Path
 
 SERVER_NAME = "hive-channel"
 MARKETPLACE_NAME = "hive"
+PUBLISHED_REPO = "notdp/hive"
 PLUGIN_SPEC = f"plugin:{SERVER_NAME}@{MARKETPLACE_NAME}"
 _PLUGIN_REF = f"{SERVER_NAME}@{MARKETPLACE_NAME}"
 _PLUGIN_CMD_TIMEOUT = 60
@@ -253,10 +254,10 @@ def _marketplace_binding() -> tuple[str, str] | None:
     """``(source, path_or_repo)`` currently bound to hive's marketplace name,
     or ``None`` if the name is free or cannot be inspected.
 
-    hive only ever creates a ``directory``-source marketplace named ``hive``,
-    so a directory binding is ours (possibly at a stale path if HIVE_HOME
-    moved -- callers re-point it). Any other source under that name is a third
-    party we must not overwrite.
+    A ``directory`` binding is the legacy locally-generated marketplace
+    (possibly at a stale path if HIVE_HOME moved -- callers re-point it). A
+    github binding at ``PUBLISHED_REPO`` is the published hive marketplace.
+    Anything else under that name is a third party we must not overwrite.
     """
     out = _claude_plugin("marketplace", "list", "--json")
     if out is None or out.returncode != 0:
@@ -274,17 +275,19 @@ def _marketplace_binding() -> tuple[str, str] | None:
 def prepare_pane(cwd: str) -> list[str]:
     """Converge the hive channel plugin and return Claude launch flags.
 
-    Registration is a hive-owned plugin marketplace under
-    ``$HIVE_HOME/channel/marketplace``: assets are (re)written, then
-    ``claude plugin marketplace add`` / ``install`` / ``update`` run -- each a
-    cheap no-op when already current, so the sequence is idempotent and
-    self-recovers after a removed marketplace or plugin. A ``directory``-source
-    ``hive`` marketplace left at a stale path (HIVE_HOME moved) is re-pointed
-    to the current one. No project file is created or modified in any cwd.
-    Returns ``[]`` when the channel cannot be converged (asset write failure, a
-    non-directory source occupying the ``hive`` name, or a failed/timed-out
-    plugin command); the caller must treat that as channel-unavailable and
-    fail loudly.
+    When the ``hive`` marketplace name is bound to the published github
+    marketplace (``PUBLISHED_REPO``), the plugin is converged against it with
+    ``install`` / ``update`` and no local assets are written. Otherwise the
+    legacy hive-owned marketplace under ``$HIVE_HOME/channel/marketplace`` is
+    used: assets are (re)written, then ``claude plugin marketplace add`` /
+    ``install`` / ``update`` run -- each a cheap no-op when already current,
+    so the sequence is idempotent and self-recovers after a removed
+    marketplace or plugin. A ``directory``-source ``hive`` marketplace left at
+    a stale path (HIVE_HOME moved) is re-pointed to the current one. No
+    project file is created or modified in any cwd. Returns ``[]`` when the
+    channel cannot be converged (asset write failure, a foreign source
+    occupying the ``hive`` name, or a failed/timed-out plugin command); the
+    caller must treat that as channel-unavailable and fail loudly.
 
     ``--channels`` is variadic in Claude's CLI parser: a positional prompt
     directly after it is consumed as a flag value; a positional must be
@@ -297,6 +300,29 @@ def prepare_pane(cwd: str) -> list[str]:
             "channels allowlist (claude would load the server but silently "
             "skip channel notifications). One-time setup:\n  "
             + _ALLOWLIST_SETUP_HINT)
+
+    binding = _marketplace_binding()
+    if binding is not None and binding[0] != "directory":
+        source, location = binding
+        # the published identity is exact: github AND notdp/hive -- a url/npm
+        # source whose location parses to the same string is still foreign
+        if source != "github" or location != PUBLISHED_REPO:
+            return _unavailable(
+                f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
+                f"{source} source ({location}); run `claude plugin "
+                f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
+        # The published marketplace owns the name: converge the plugin
+        # against it and skip local asset generation entirely.
+        for step in (("install", _PLUGIN_REF), ("update", _PLUGIN_REF)):
+            out = _claude_plugin(*step)
+            if out is None or out.returncode != 0:
+                detail = ((out.stderr or out.stdout).strip()[-300:]
+                          if out is not None else "launch failure or timeout")
+                return _unavailable(f"`claude plugin {' '.join(step)}` failed: {detail}")
+        return ["--channels", PLUGIN_SPEC]
+
+    # Legacy locally-generated marketplace (retires once the published
+    # marketplace is the only registration path).
     try:
         _write_plugin_assets()
     except OSError as e:
@@ -308,14 +334,13 @@ def prepare_pane(cwd: str) -> list[str]:
         ("install", _PLUGIN_REF),
         ("update", _PLUGIN_REF),
     ]
-    binding = _marketplace_binding()
     if binding is not None:
-        source, location = binding
+        _source, location = binding
         stale = os.path.realpath(location) != ours
-        if source != "directory" or (stale and not _is_hive_marketplace(location)):
+        if stale and not _is_hive_marketplace(location):
             return _unavailable(
                 f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
-                f"{source} source ({location}); run `claude plugin "
+                f"directory source ({location}); run `claude plugin "
                 f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
         if stale:
             # hive's own binding at a stale path (HIVE_HOME moved) -> re-point
