@@ -279,6 +279,31 @@ def test_prepare_pane_fails_loudly_on_foreign_marketplace_name(
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
+def test_prepare_pane_accepts_published_marketplace_binding(
+        _hive_home, tmp_path, monkeypatch):
+    # the published github marketplace owns the name: converge install/update
+    # against it, write no local assets, never add the local directory
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "github", "repo": "notdp/hive"}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags = cc.prepare_pane(str(tmp_path))
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert not cc.marketplace_dir().exists()  # no local asset generation
+    steps = [c[0] for c in fake.calls]
+    assert "install" in steps and "update" in steps
+    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
+
+
+def test_prepare_pane_published_binding_fails_empty_on_install_failure(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    fake = _FakeClaudePlugin(
+        marketplaces=[{"name": "hive", "source": "github", "repo": "notdp/hive"}],
+        fail_step="install")
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert "install" in capsys.readouterr().err
+
+
 def test_prepare_pane_fails_on_live_foreign_directory_binding(
         _hive_home, tmp_path, monkeypatch, capsys):
     # a directory marketplace named 'hive' that is NOT hive's own layout

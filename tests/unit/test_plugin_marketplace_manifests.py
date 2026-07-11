@@ -43,11 +43,12 @@ def test_all_manifests_parse():
         assert isinstance(_load(path), dict), path
 
 
-def test_marketplace_name_is_not_legacy():
+def test_marketplace_name_matches_runtime_identity():
+    # single-user cutover (human directive): the published marketplace takes
+    # over the same name the runtime already uses, so PLUGIN_SPEC and
+    # enabledPlugins keys stay hive-channel@hive verbatim
     for path in (CC_MARKETPLACE, CODEX_MARKETPLACE):
-        name = _load(path)["name"]
-        assert name == "hive-plugins", path
-        assert name != claude_channel.MARKETPLACE_NAME
+        assert _load(path)["name"] == claude_channel.MARKETPLACE_NAME == "hive", path
 
 
 def test_cc_marketplace_lists_both_plugins_with_real_sources():

@@ -1,5 +1,5 @@
 {
-  "name": "hive-plugins",
+  "name": "hive",
   "interface": {
     "displayName": "Hive Plugins"
   },
