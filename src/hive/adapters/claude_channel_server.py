@@ -9,14 +9,21 @@ send-keys delivery into a running Claude session.
 Inbound seam: a per-pane unix socket under ``$HIVE_HOME/channel`` whose name is
 derived from ``$TMUX_PANE`` (so the plugin's single server entry serves every
 pane). ``claude_channel.send_to_pane`` connects and writes one JSON frame
-``{"msg_id": ..., "content": ...}``; this server emits it to Claude. One way:
-replies still go out through the ``hive`` CLI.
+``{"msg_id": ..., "content": ...}``; this server emits it to Claude and then
+answers with a single-byte **local MCP-write receipt** (``b"1"``) on the same
+connection. The receipt only proves the notification was written+flushed to
+this process's MCP stdio transport — the boundary the Channels contract itself
+defines (``mcp.notification()`` resolves on transport write). It is NOT a
+Claude-processing or final-delivery acknowledgement: per the contract,
+notifications are unacknowledged and an unloaded/policy-blocked channel drops
+them silently. Replies still go out through the ``hive`` CLI (one way).
 
-This server also owns the pane's ready marker: written once the socket is
-listening, removed on exit. A live marker only proves this server is up and
-bound; Claude delivering the notifications additionally requires the machine's
-managed-settings channels allowlist, which ``claude_channel.prepare_pane``
-preflights before any launch.
+This server also owns the pane's ready marker: content ``2`` (receipt-capable),
+written only after the MCP ``initialize`` response has itself been emitted and
+flushed, removed on exit. Legacy servers wrote ``1`` (no receipt). A live
+marker only proves this server is up and initialized; Claude delivering the
+notifications additionally requires the machine's managed-settings channels
+allowlist, which ``claude_channel.prepare_pane`` preflights before any launch.
 """
 from __future__ import annotations
 
@@ -37,6 +44,16 @@ INSTRUCTIONS = (
 )
 
 _stdout_lock = threading.Lock()
+# The ready marker is published only once BOTH gates are open: the socket is
+# bound+listening AND the MCP initialize response has been emitted+flushed.
+# A sender can therefore never observe "ready" before the MCP session exists,
+# and a failed bind never advertises a dead socket. Frames arriving before
+# initialize are dropped without a receipt (the sender reports failure).
+_initialized = threading.Event()
+_socket_ready = threading.Event()
+_marker_once = threading.Lock()
+_marker_published = False
+MARKER_RECEIPT_CAPABLE = "2"
 
 
 def _emit(obj: dict) -> None:
@@ -106,12 +123,9 @@ def _socket_loop(path: str) -> None:
     except OSError as e:
         _log(f"bind failed for {path}: {e}")
         return  # no marker: the pane stays not-ready on bind failure
-    try:
-        with open(marker_path_for_socket(path), "w") as fh:
-            fh.write("1")
-    except OSError as e:
-        _log(f"cannot write ready marker: {e}")
-    _log(f"listening on {path}")
+    _socket_ready.set()
+    _maybe_publish_marker(path)
+    _log(f"listening on {path} (marker published after MCP initialize)")
     while True:
         try:
             conn, _ = srv.accept()
@@ -119,20 +133,48 @@ def _socket_loop(path: str) -> None:
             break
         with conn:
             raw = _recv_frame(conn)
-        if not raw:
-            continue
-        try:
-            frame = json.loads(raw.decode("utf-8"))
-            content = frame["content"]
-            msg_id = frame.get("msg_id") or ""
-        except (ValueError, KeyError, UnicodeDecodeError):
-            continue
-        meta = {"msg_id": msg_id} if msg_id else {}
-        _emit({
-            "jsonrpc": "2.0",
-            "method": "notifications/claude/channel",
-            "params": {"content": content, "meta": meta},
-        })
+            if not raw:
+                continue
+            if not _initialized.is_set():
+                continue  # pre-initialize frame: close without receipt
+            try:
+                frame = json.loads(raw.decode("utf-8"))
+                content = frame["content"]
+                msg_id = frame.get("msg_id") or ""
+            except (ValueError, KeyError, UnicodeDecodeError):
+                continue  # malformed frame: close without receipt
+            meta = {"msg_id": msg_id} if msg_id else {}
+            try:
+                _emit({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/claude/channel",
+                    "params": {"content": content, "meta": meta},
+                })
+            except Exception as e:  # noqa: BLE001 — MCP stdio gone: no receipt
+                _log(f"MCP emit failed: {e}")
+                continue
+            try:
+                # Local MCP-write receipt: the notification is on the MCP
+                # stdio transport. A legacy client that already closed its
+                # read side raises here — ignore and keep serving.
+                conn.sendall(b"1")
+            except OSError:
+                pass
+
+
+def _maybe_publish_marker(path: str) -> None:
+    global _marker_published
+    if not (_initialized.is_set() and _socket_ready.is_set()):
+        return
+    with _marker_once:
+        if _marker_published:
+            return
+        _marker_published = True
+    try:
+        with open(marker_path_for_socket(path), "w") as fh:
+            fh.write(MARKER_RECEIPT_CAPABLE)
+    except OSError as e:
+        _log(f"cannot write ready marker: {e}")
 
 
 def _handle_request(method: str, params: dict) -> dict:
@@ -190,6 +232,12 @@ def main() -> None:
         try:
             result = _handle_request(msg.get("method", ""), msg.get("params") or {})
             _emit({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+            # Readiness strictly follows the initialize RESPONSE reaching the
+            # MCP transport — never the request handling alone. Only now may a
+            # sender observe the pane as channel-ready.
+            if msg.get("method") == "initialize" and path and not _initialized.is_set():
+                _initialized.set()
+                _maybe_publish_marker(path)
         except _MethodNotFound as e:
             _emit({
                 "jsonrpc": "2.0",

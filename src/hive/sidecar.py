@@ -24,7 +24,6 @@ from . import devlog
 from . import notify_ui
 from .agent_cli import detect_profile_for_pane
 from .runtime_state import (
-    delivery_exception_body,
     delivery_guidance,
     format_hive_envelope,
     present_delivery_state,
@@ -44,7 +43,6 @@ SIDECAR_CODE_CHECK_SECONDS = 5.0
 SIDECAR_OWNER_CHECK_SECONDS = 5.0
 _SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
 OBSERVATION_TIMEOUT = 60.0
-POST_EXCEPTION_FOLLOWUP_TIMEOUT = 10.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 SEND_GRACE_TIMEOUT = 3.0
@@ -569,13 +567,6 @@ def _idle_notify_target_pane(panes: list[str], record: dict[str, Any], busy_moni
     return panes[0]
 
 
-def _saw_msg_id(pane_id: str, msg_id: str) -> bool:
-    monitor = _OUTPUT_BUSY_MONITOR
-    if monitor is None or not pane_id or not msg_id:
-        return False
-    return bool(monitor.saw_msg_id(pane_id, msg_id))
-
-
 def _run_dir(workspace: str) -> Path:
     return devlog.run_dir(workspace)
 
@@ -691,62 +682,26 @@ def _write_observation(
     )
 
 
-def _inject_exception(pane_id: str, message_id: str, target_agent: str, result: str) -> None:
-    """Inject a HIVE-SYSTEM exception block into the sender's pane."""
-    from .agent import _submit_interactive_text
-
-    body = delivery_exception_body(
-        result,
-        message_id=message_id,
-        target_agent=target_agent,
-        timeout_seconds=OBSERVATION_TIMEOUT,
-    )
-    if body is None:
-        return
-
-    block = (
-        f"<HIVE-SYSTEM type=delivery-exception msgId={message_id} "
-        f"result={result} to={target_agent}>\n{body}\n</HIVE-SYSTEM>"
-    )
-    try:
-        profile = detect_profile_for_pane(pane_id)
-        cli_name = profile.name if profile else ""
-        _submit_interactive_text(pane_id, block, cli_name)
-    except Exception:
-        pass
-
-
 def _effective_deadline(record: dict[str, Any]) -> float:
     deadline = record.get("deadlineAt", 0)
     return float(deadline) if isinstance(deadline, (int, float)) else 0.0
 
 
-def _pending_terminal_result(record: dict[str, Any]) -> str:
-    result = str(record.get("terminalNotifiedResult", "") or "")
-    if result == "failed":
-        return result
-    return ""
-
-
-def _exception_followup_active(record: dict[str, Any], *, now: float) -> bool:
-    followup_until = record.get("terminalFollowupUntil", 0)
-    if not isinstance(followup_until, (int, float)):
-        return False
-    return now <= float(followup_until)
-
-
 def _pending_delivery_state(record: dict[str, Any], observation: dict[str, Any] | None = None) -> dict[str, Any]:
     inject_status = "submitted"
     turn_observed = "pending"
-    observation_result = _pending_terminal_result(record)
+    observation_result = ""
     observed_at = ""
     confirmation_source = str(record.get("confirmationSource", ""))
 
     if observation is not None:
         metadata = observation.get("metadata", {})
         if isinstance(metadata, dict):
-            raw_result = metadata.get("result") or observation_result
-            observation_result = "success" if raw_result == "success" else ("pending" if raw_result in ("", "pending") else "failed")
+            raw_result = str(metadata.get("result") or "")
+            if raw_result in ("", "pending", "queued"):
+                observation_result = ""  # unconfirmed projects to queued
+            else:
+                observation_result = "success" if raw_result == "success" else "failed"
             observed_at = str(metadata.get("observedAt") or "")
             inject_status = (
                 str(metadata.get("injectStatus", ""))
@@ -756,12 +711,7 @@ def _pending_delivery_state(record: dict[str, Any], observation: dict[str, Any] 
             confirmation_source = str(metadata.get("confirmationSource", "")) or confirmation_source
 
     if not turn_observed:
-        if observation_result == "success":
-            turn_observed = "confirmed"
-        elif observation_result == "failed":
-            turn_observed = "unconfirmed" if inject_status == "submitted" else "unavailable"
-        else:
-            turn_observed = "pending"
+        turn_observed = "confirmed" if observation_result == "success" else "pending"
 
     payload: dict[str, Any] = {
         "delivery": present_delivery_state(
@@ -1004,8 +954,6 @@ def _wait_for_delivery_confirmation(
             transcript_path, message_id, baseline
         ):
             return "transcript"
-        if _saw_msg_id(pane_id, message_id):
-            return "stream"
         time.sleep(0.2)
     return ""
 
@@ -1019,8 +967,8 @@ def _observe_send_grace(
 ) -> tuple[str, str]:
     """Short synchronous grace loop. Returns (state, confirmation_source).
 
-    state is "confirmed" or "pending". confirmation_source is "transcript",
-    "stream", or "" for pending.
+    state is "confirmed" or "pending". confirmation_source is "transcript"
+    (the only oracle) or "" for pending.
     """
     from .adapters.base import transcript_has_id_in_new_user_turn
 
@@ -1029,9 +977,6 @@ def _observe_send_grace(
     while True:
         if transcript_path is not None and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
             return "confirmed", "transcript"
-
-        if _saw_msg_id(pane_id, message_id):
-            return "confirmed", "stream"
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1118,8 +1063,9 @@ def _send_payload(
     )
 
     inject_status = "submitted"
+    transport_accepted = ""
     try:
-        target.send(envelope)
+        transport_accepted = str(target.send(envelope) or "")
     except Exception:
         inject_status = "failed"
 
@@ -1156,6 +1102,26 @@ def _send_payload(
                 "turnObserved": "unavailable",
             },
         )
+    else:
+        # Durable BEFORE returning: a sidecar restart while this message sits
+        # in the in-memory tracker must never turn a transport-accepted send
+        # into tracking_lost/failed. The tracking inputs ride along so a
+        # query-time transcript check can still upgrade queued -> success.
+        _write_observation(
+            workspace,
+            message_id,
+            "queued",
+            metadata={
+                "injectStatus": "submitted",
+                "turnObserved": "pending",
+                "transportAccepted": transport_accepted,
+                "targetPane": target.pane_id,
+                "targetTranscript": str(transcript_path) if transcript_path is not None else "",
+                "baseline": str(baseline),
+            },
+        )
+    if inject_status == "failed":
+        pass
     elif wait:
         grace_state, grace_source = _observe_send_grace(
             pane_id=target.pane_id,
@@ -1180,16 +1146,11 @@ def _send_payload(
                 confirmation_source = wait_source
                 _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(wait_source))
             else:
-                turn_observed = "unconfirmed"
-                _write_observation(
-                    workspace,
-                    message_id,
-                    "failed",
-                    metadata={
-                        "injectStatus": "submitted",
-                        "turnObserved": "unconfirmed",
-                    },
-                )
+                # Deadline expiry is not failure: the durable queued
+                # observation stands, and background/query-time transcript
+                # checks may still upgrade it.
+                _add_to_pending()
+                turn_observed = "pending"
     else:
         grace_state, grace_source = _observe_send_grace(
             pane_id=target.pane_id,
@@ -1222,6 +1183,35 @@ def _send_payload(
     if guidance is not None:
         payload.update(guidance)
     return payload
+
+
+def _query_time_transcript_upgrade(
+    workspace: str, message_id: str, metadata: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Upgrade a durable queued record to success if its transcript now shows
+    the message. Returns the fresh observation event, or None (still queued)."""
+    from .adapters.base import transcript_has_id_in_new_user_turn
+
+    transcript = str(metadata.get("targetTranscript", "") or "")
+    try:
+        baseline = int(str(metadata.get("baseline", "0") or "0"))
+    except ValueError:
+        baseline = 0
+    if not transcript or not Path(transcript).exists():
+        return None
+    if not transcript_has_id_in_new_user_turn(Path(transcript), message_id, baseline):
+        return None
+    _write_observation(
+        workspace,
+        message_id,
+        "success",
+        metadata={
+            "injectStatus": "submitted",
+            "turnObserved": "confirmed",
+            "confirmationSource": "transcript",
+        },
+    )
+    return bus.find_latest_observation(workspace, message_id)
 
 
 def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], message_id: str) -> dict[str, Any]:
@@ -1262,6 +1252,18 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
     if obs is not None:
         metadata = obs.get("metadata", {})
         result = metadata.get("result", "") if isinstance(metadata, dict) else ""
+
+        if result == "queued" and isinstance(metadata, dict):
+            # Sidecar may have restarted since the send: the in-memory tracker
+            # is gone, but the durable observation carries the tracking inputs.
+            # Check the transcript now and upgrade in place on a hit; a miss
+            # keeps the record queued forever — never tracking_lost/failed.
+            upgraded = _query_time_transcript_upgrade(workspace, message_id, metadata)
+            if upgraded is not None:
+                obs = upgraded
+                metadata = obs.get("metadata", {})
+                result = metadata.get("result", "") if isinstance(metadata, dict) else ""
+
         observed_at = metadata.get("observedAt", "") if isinstance(metadata, dict) else ""
         inject_status = (
             str(metadata.get("injectStatus", ""))
@@ -1273,9 +1275,16 @@ def _delivery_payload(workspace: str, pending: dict[str, dict[str, Any]], messag
             if isinstance(metadata, dict)
             else ""
         )
-        # Any non-success terminal result — including legacy values like
-        # "unconfirmed"/"tracking_lost" left in hive.db — folds to "failed".
-        normalized_result = "success" if result == "success" else ("pending" if result in ("", "pending") else "failed")
+        # Unconfirmed states ("", pending, queued) stay open; any other
+        # non-success terminal result — including legacy values like
+        # "unconfirmed"/"tracking_lost" left in hive.db — folds to "failed"
+        # and is never retroactively promoted.
+        if result in ("", "pending", "queued"):
+            normalized_result = "pending"
+            if turn_observed in ("unconfirmed", "unavailable"):
+                turn_observed = "pending"
+        else:
+            normalized_result = "success" if result == "success" else "failed"
         if not turn_observed:
             if normalized_result == "success":
                 turn_observed = "confirmed"
@@ -2529,6 +2538,8 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 if result is None:
                     continue
                 if result == _FINALIZE_PENDING:
+                    # Stop tracking; the durable queued observation stands and
+                    # the sender pane is never disturbed about it.
                     pending.pop(message_id, None)
                     continue
                 _write_observation(
@@ -2537,14 +2548,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     result,
                     metadata=_observation_metadata_for_pending(record, result),
                 )
-                if result == "failed":
-                    sender_pane = record.get("senderPane", "")
-                    target_agent = record.get("targetAgent", "")
-                    record["terminalNotifiedResult"] = result
-                    record["terminalFollowupUntil"] = time.time() + POST_EXCEPTION_FOLLOWUP_TIMEOUT
-                    if sender_pane:
-                        _inject_exception(sender_pane, message_id, target_agent, result)
-                    continue
                 pending.pop(message_id, None)
     finally:
         _release_reexec_lock_fd(inherited_reexec_lock_fd)
@@ -2559,44 +2562,35 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
 
 def _check_pending(record: dict[str, Any]) -> str | None:
-    """Check a pending record. Returns 'success' / 'failed' / None (still pending)."""
+    """Check a pending record. Returns 'success' / _FINALIZE_PENDING / None.
+
+    Transcript is the only confirmation oracle. Tracking-deadline expiry stops
+    the in-memory watch but never fails the message: the durable observation
+    written at send time keeps it queued, and a later transcript hit (seen at
+    query time) can still upgrade it to success.
+    """
     from .adapters.base import transcript_has_id_in_new_user_turn
 
     transcript_path = Path(record.get("targetTranscript", ""))
-    pane_id = record.get("targetPane", "")
     message_id = record.get("msgId", "")
     baseline = record.get("baseline", 0)
-    deadline = _effective_deadline(record)
-    now = time.time()
 
     if transcript_path.exists() and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
         record["confirmationSource"] = "transcript"
         return "success"
 
-    if _saw_msg_id(pane_id, message_id):
-        record["confirmationSource"] = "stream"
-        return "success"
-
-    if _pending_terminal_result(record):
-        if _exception_followup_active(record, now=now):
-            return None
+    if time.time() > _effective_deadline(record):
         return _FINALIZE_PENDING
-
-    if now > deadline:
-        return "failed"
     return None
 
 
 def _observation_metadata_for_pending(record: dict[str, Any], result: str) -> dict[str, str]:
     metadata: dict[str, str] = {
         "injectStatus": "submitted",
+        "turnObserved": "confirmed",
     }
-    if result == "success":
-        metadata["turnObserved"] = "confirmed"
-    elif result == "failed":
-        metadata["turnObserved"] = "unconfirmed"
     source = str(record.get("confirmationSource", ""))
-    if result == "success" and source:
+    if source:
         metadata["confirmationSource"] = source
     return metadata
 

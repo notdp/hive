@@ -115,7 +115,7 @@ def test_delivery_reads_legacy_tracking_lost_as_failed(configure_hive_home, tmp_
     assert payload["delivery"] == "failed"
 
 
-def test_delivery_reports_pending_when_tracker_still_running(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_reports_queued_when_tracker_still_running(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -140,7 +140,7 @@ def test_delivery_reports_pending_when_tracker_still_running(runner, configure_h
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["msgId"] == "q1"
-    assert payload["delivery"] == "pending"
+    assert payload["delivery"] == "queued"
     assert payload["injectStatus"] == "submitted"
     assert payload["turnObserved"] == "pending"
 
@@ -265,7 +265,9 @@ def test_delivery_unconfirmed_from_observation_retains_failure_projection(runner
     assert payload["turnObserved"] == "unconfirmed"
 
 
-def test_delivery_pending_record_retains_failed_delivery_during_followup(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_delivery_historical_failed_observation_stays_failed(runner, configure_hive_home, monkeypatch, tmp_path):
+    """VAL-8: a durable failed observation (however old) is never
+    retroactively promoted, even while a tracker record exists."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -280,13 +282,17 @@ def test_delivery_pending_record_retains_failed_delivery_during_followup(runner,
         body="slow msg",
         message_id="u2",
     )
+    bus.write_event(
+        workspace,
+        from_agent="_system",
+        to_agent="",
+        intent="observation",
+        message_id="u2",
+        metadata={"msgId": "u2", "result": "failed", "injectStatus": "failed",
+                  "turnObserved": "unavailable", "observedAt": "2026-01-01T00:00:00Z"},
+    )
 
-    pending = {
-        "u2": {
-            "terminalNotifiedResult": "failed",
-            "terminalFollowupUntil": 9999999999.0,
-        }
-    }
+    pending = {"u2": {}}
     monkeypatch.setattr(
         "hive.sidecar.request_delivery",
         lambda ws, message_id: sidecar._delivery_payload(
@@ -300,11 +306,6 @@ def test_delivery_pending_record_retains_failed_delivery_during_followup(runner,
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "failed"
-    assert payload["injectStatus"] == "submitted"
-    assert payload["turnObserved"] == "pending"
-
-
-# --- doctor ---
 
 
 def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):

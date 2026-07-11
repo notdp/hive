@@ -117,7 +117,7 @@ def test_handoff_direct_uses_send_path_for_delegate_and_announce(runner, configu
     assert payload["delegate"]["to"] == "dodo"
     assert payload["delegate"]["artifact"] == str(artifact)
     assert payload["announce"]["to"] == "lulu"
-    assert payload["announce"]["delivery"] == "pending"
+    assert payload["announce"]["delivery"] == "queued"
 
     events = bus.read_all_events(workspace)
     delegate = [event for event in events if event.get("intent") == "send" and event.get("to") == "dodo"][-1]

@@ -90,32 +90,9 @@ def test_spawn_writes_context_for_new_agent(runner, configure_hive_home, monkeyp
     assert payload == {"team": "team-x", "workspace": str(workspace), "agent": "luxun-fan"}
 
 
-def test_workflow_load_loads_skill_and_optional_prompt(runner, configure_hive_home, monkeypatch):
-    configure_hive_home()
-    calls: list[str] = []
-
-    class _FakeAgent:
-        def load_skill(self, skill_name: str) -> None:
-            calls.append(f"skill:{skill_name}")
-
-        def send(self, text: str) -> None:
-            calls.append(f"send:{text}")
-
-    class _FakeTeam:
-        name = "team-x"
-        tmux_session = "dev"
-        tmux_window = "dev:0"
-
-        def get(self, _name: str):
-            return _FakeAgent()
-
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
-
-    result = runner.invoke(
-        cli,
-        ["workflow", "load", "claude", "demo-review", "--prompt", "start now"],
-    )
-
-    assert result.exit_code == 0
-    assert calls == ["skill:demo-review", "send:start now"]
-    assert "Workflow 'demo-review' loaded into claude." in result.output
+def test_workflow_group_is_removed(runner):
+    """`hive workflow load` was the last send-keys-era skill injector; the
+    whole group is gone and invoking it fails like any unknown command."""
+    result = runner.invoke(cli, ["workflow", "load", "claude", "demo-review"])
+    assert result.exit_code == 2
+    assert "No such command 'workflow'" in result.output

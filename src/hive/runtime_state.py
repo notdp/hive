@@ -52,14 +52,18 @@ def format_body_warning(*, command: str, hint: dict[str, object]) -> str:
 
 
 def present_send_state(*, inject_status: str, turn_observed: str) -> str:
-    """Collapse internal delivery details into one outcome: pending | success | failed."""
+    """Collapse internal delivery details into one outcome: queued | success | failed.
+
+    Failed means the transport itself refused the message (synchronously
+    visible). A transport-accepted send whose transcript confirmation has not
+    appeared yet is queued — never failed: per the Channels contract busy
+    sessions queue events, so absence of confirmation is not proof of failure.
+    """
     if inject_status == "failed":
         return "failed"
     if turn_observed == "confirmed":
         return "success"
-    if turn_observed in ("unconfirmed", "unavailable"):
-        return "failed"
-    return "pending"
+    return "queued"
 
 
 def present_delivery_state(
@@ -68,7 +72,13 @@ def present_delivery_state(
     turn_observed: str,
     observation_result: str = "",
 ) -> str:
-    """Collapse persisted delivery detail into one outcome: pending | success | failed."""
+    """Collapse persisted delivery detail into one outcome: queued | success | failed.
+
+    Historical terminal records keep their meaning: a durable ``failed``
+    observation stays failed and is never retroactively promoted; a durable
+    ``success`` stays success. Everything transport-accepted but unconfirmed
+    projects to queued.
+    """
     if inject_status == "failed":
         return "failed"
     if observation_result == "success":
@@ -77,32 +87,25 @@ def present_delivery_state(
         return "failed"
     if turn_observed == "confirmed":
         return "success"
-    if turn_observed in ("unconfirmed", "unavailable"):
-        return "failed"
-    return "pending"
+    return "queued"
+
+
+_QUEUED_GUIDANCE = (
+    "transport write accepted; final delivery unconfirmed — the target may be "
+    "mid-turn (channel events queue and deliver on its next turn). Do not resend."
+)
 
 
 def send_guidance(delivery: str) -> dict[str, str] | None:
+    if delivery == "queued":
+        return {"guidance": _QUEUED_GUIDANCE}
     return None
 
 
 def delivery_guidance(delivery: str) -> dict[str, str] | None:
+    if delivery == "queued":
+        return {"guidance": _QUEUED_GUIDANCE}
     return None
-
-
-def delivery_exception_body(
-    delivery: str,
-    *,
-    message_id: str,
-    target_agent: str,
-    timeout_seconds: float,
-) -> str | None:
-    if delivery != "failed":
-        return None
-    return (
-        f"Message {message_id} to {target_agent} failed to deliver within "
-        f"{int(timeout_seconds)}s. Retry only if duplicate delivery is acceptable."
-    )
 
 
 def project_thread_event(event: dict[str, object]) -> dict[str, object]:

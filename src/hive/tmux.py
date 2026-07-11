@@ -32,7 +32,6 @@ _CONTROL_MODE_OUTPUT_RE = re.compile(
     r"^%(?P<kind>extended-output|output) (?P<pane>%[0-9]+)\b"
 )
 _CONTROL_MODE_RESTART_DELAY = 1.0
-_OUTPUT_BUFFER_MAX = 64 * 1024
 _OCTAL_DIGITS = frozenset("01234567")
 _ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:"
@@ -105,7 +104,6 @@ class ControlModeOutputMonitor:
         self._proc: subprocess.Popen[bytes] | None = None
         self._master_fd: int | None = None
         self._last_output_at: dict[str, float] = {}
-        self._output_buffer: dict[str, str] = {}
 
     def start(self) -> None:
         if not self.session_target:
@@ -143,28 +141,9 @@ class ControlModeOutputMonitor:
             return None
         return max(0.0, time.monotonic() - last)
 
-    def saw_msg_id(self, pane_id: str, msg_id: str) -> bool:
-        if not pane_id or not msg_id:
-            return False
-        with self._lock:
-            buffer = self._output_buffer.get(pane_id, "")
-        return msg_id in buffer
-
-    def _append_output(self, pane_id: str, payload: str) -> None:
-        if not pane_id or not payload:
-            return
-        with self._lock:
-            current = self._output_buffer.get(pane_id, "")
-            combined = current + payload
-            if len(combined) > _OUTPUT_BUFFER_MAX:
-                combined = combined[-_OUTPUT_BUFFER_MAX:]
-            self._output_buffer[pane_id] = combined
-
     def _record_control_mode_output(self, pane_id: str, payload: str) -> None:
         if not pane_id:
             return
-        if payload:
-            self._append_output(pane_id, payload)
         if not _control_mode_payload_has_activity(payload):
             return
         with self._lock:

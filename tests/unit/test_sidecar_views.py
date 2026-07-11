@@ -85,5 +85,5 @@ def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):
     assert [item["msgId"] for item in payload["messages"]] == ["a001", "a002", "a003"]
     assert [item["depth"] for item in payload["messages"]] == [0, 1, 2]
     assert payload["messages"][1]["delivery"]["delivery"] == "success"
-    assert payload["messages"][2]["delivery"]["delivery"] == "pending"
+    assert payload["messages"][2]["delivery"]["delivery"] == "queued"
     assert payload["messages"][2]["focus"] is True

@@ -6,6 +6,7 @@ import pytest
 
 from hive import agent as agent_mod
 from hive.agent import (
+    DeliveryError,
     Agent,
     detect_current_session_id,
 )
@@ -281,60 +282,6 @@ def test_spawn_claude_startup_without_channel_notice_fails(monkeypatch):
     assert cleared == ["%0", "%0"]
 
 
-def test_load_skill_sends_slash_command(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    agent = Agent(name="w1", team_name="t", pane_id="%0")
-
-    agent.load_skill("demo-review")
-
-    assert calls == ["/demo-review", "<Enter>"]
-
-
-def test_load_skill_uses_cli_specific_command(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
-
-    agent.load_skill("demo-review")
-
-    # codex skill picker needs two Enters: first picks the entry, second submits.
-    assert calls == ["$demo-review", "<Enter>", "<Enter>"]
-
-
-def test_load_hive_skill_checks_for_drift_before_loading(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    warned: list[str] = []
-    monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda cli: warned.append(cli))
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
-
-    agent.load_skill("hive")
-
-    assert warned == ["codex"]
-    assert calls == ["$hive", "<Enter>", "<Enter>"]
-
-
-def test_send_submits_text_with_enter(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
-
-    agent.send("hello world")
-
-    assert calls == ["hello world", "<Enter>"]
-
-
-def test_send_exits_tmux_copy_mode_before_submitting(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    canceled: list[str] = []
-    monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: True)
-    monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda pane: canceled.append(pane))
-    # codex uses the keystroke path; claude is channel-only (no copy-mode/keys)
-    agent = Agent(name="w1", team_name="t", pane_id="%0", cli="codex")
-
-    agent.send("hello world")
-
-    assert canceled == ["%0"]
-    assert calls == ["hello world", "<Enter>"]
-
-
 def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
     calls, tags = _setup_tmux_mocks(monkeypatch)
     monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: False)
@@ -586,21 +533,69 @@ def test_send_uses_detected_codex_daemon_when_stored_cli_is_stale(monkeypatch):
     assert submitted == []
 
 
-def test_send_codex_falls_back_to_keystrokes_when_daemon_rejects(monkeypatch):
+def test_send_codex_accepted_returns_classification_without_keystrokes(monkeypatch):
     # pin profile resolution: the real one probes the live tmux pane "%3",
     # which detects whatever CLI happens to run there on this machine
     monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: False
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda pane, text: "turnStartAccepted",
+    )
+
+    accepted = Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert accepted == "turnStartAccepted"
+    assert calls == []  # native transport only — the composer is never touched
+
+
+def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
+    """VAL-5: any codex transport failure (no daemon, no thread, RPC error,
+    exception — the adapter folds them all to None) raises DeliveryError and
+    never falls back to keystroke injection."""
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: None
     )
     submitted: list[tuple] = []
     monkeypatch.setattr(
         "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
     )
 
-    Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+    with pytest.raises(DeliveryError):
+        Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
 
-    assert len(submitted) == 1  # fell back to keystroke injection
+    assert submitted == []
+    assert calls == []
+
+
+def test_send_claude_accepted_passes_classification_through(monkeypatch):
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    for classification in ("mcpWriteAccepted", "legacySocketAccepted"):
+        monkeypatch.setattr(
+            "hive.adapters.claude_channel.send_to_pane",
+            lambda pane, text, _c=classification: _c,
+        )
+        agent = Agent(name="w", team_name="t", pane_id="%3", cli="claude")
+        assert agent.send("hi") == classification
+    assert calls == []
+
+
+def test_send_unknown_profile_raises_without_keystrokes(monkeypatch):
+    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: "")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    with pytest.raises(DeliveryError):
+        Agent(name="w", team_name="t", pane_id="%3", cli="mystery").send("hi")
+
+    assert submitted == []
+    assert calls == []
 
 
 def test_send_claude_never_uses_codex_daemon(monkeypatch):

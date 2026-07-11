@@ -81,34 +81,20 @@ def test_marker_paths_agree_between_adapter_and_server():
     )
 
 
-def _make_ready(pane: str) -> None:
+def _make_ready(pane: str, version: str = cc.MARKER_RECEIPT_CAPABLE) -> None:
     marker = cc.ready_marker_path(pane)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("1")
+    marker.write_text(version)
 
 
-# --- send_to_pane -----------------------------------------------------------
-
-def test_send_to_pane_false_without_ready_marker():
-    assert cc.send_to_pane("%900", "msg") is False
-
-
-def test_send_to_pane_false_when_ready_but_no_socket():
-    _make_ready("%901")
-    assert cc.send_to_pane("%901", "msg") is False
-
-
-def test_send_to_pane_writes_exact_envelope_and_returns_true():
-    pane = "%108"
-    _make_ready(pane)
-    sock_path = cc.channel_socket_path(pane)
+def _accept_server(sock_path: Path, *, receipt: bytes | None, received: dict) -> socket.socket:
+    """One-shot fake channel server: read a frame to EOF, optionally answer."""
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(sock_path))
     srv.listen(1)
-    received: dict[str, bytes] = {}
 
-    def _accept() -> None:
+    def _serve() -> None:
         conn, _ = srv.accept()
         chunks = []
         while True:
@@ -117,28 +103,98 @@ def test_send_to_pane_writes_exact_envelope_and_returns_true():
                 break
             chunks.append(buf)
         received["raw"] = b"".join(chunks)
+        if receipt is not None:
+            try:
+                conn.sendall(receipt)
+            except OSError:
+                pass
         conn.close()
 
-    threading.Thread(target=_accept, daemon=True).start()
+    threading.Thread(target=_serve, daemon=True).start()
+    return srv
+
+
+# --- send_to_pane -----------------------------------------------------------
+
+def test_send_to_pane_fails_without_ready_marker():
+    assert cc.send_to_pane("%900", "msg") is None
+
+
+def test_send_to_pane_fails_when_ready_but_no_socket():
+    _make_ready("%901")
+    assert cc.send_to_pane("%901", "msg") is None
+
+
+@pytest.mark.parametrize("marker", ["", "3", "receipt"])
+def test_send_to_pane_fails_closed_on_unknown_marker(marker):
+    # An empty/corrupt/future marker must never be guessed as legacy.
+    _make_ready("%903", version=marker)
+    assert cc.send_to_pane("%903", "msg") is None
+
+
+def test_send_to_pane_receipt_accepts_and_preserves_envelope():
+    pane = "%108"
+    _make_ready(pane)  # marker "2": receipt required
+    received: dict[str, bytes] = {}
+    srv = _accept_server(cc.channel_socket_path(pane), receipt=b"1", received=received)
     envelope = "<HIVE from=w to=v msgId=abc1>\nbody `tick` $(x)\nline3\n</HIVE>"
     try:
-        assert cc.send_to_pane(pane, envelope) is True
+        assert cc.send_to_pane(pane, envelope) == cc.ACCEPTED_MCP_WRITE
         time.sleep(0.3)
     finally:
         srv.close()
     frame = json.loads(received["raw"].decode())
-    assert frame["content"] == envelope  # multi-line + shell metachars intact
+    assert frame["content"] == envelope
     assert frame["msg_id"] == "abc1"
 
 
-def test_send_to_pane_false_on_refused_connect():
+def test_send_to_pane_legacy_marker_accepts_without_receipt():
+    pane = "%109"
+    _make_ready(pane, version=cc.MARKER_LEGACY)
+    received: dict[str, bytes] = {}
+    srv = _accept_server(cc.channel_socket_path(pane), receipt=None, received=received)
+    try:
+        # Old server never answers; the legacy path must not wait for a
+        # receipt (and must never time out into a failure).
+        assert cc.send_to_pane(pane, "<HIVE from=w to=v msgId=led1>x</HIVE>") == cc.ACCEPTED_LEGACY_SOCKET
+        time.sleep(0.3)
+    finally:
+        srv.close()
+    assert json.loads(received["raw"].decode())["msg_id"] == "led1"
+
+
+def test_send_to_pane_fails_when_receipt_server_closes_without_receipt():
+    # Race per VAL-1: the UNIX write succeeded but the server died before the
+    # MCP emit — the frame must count as lost, never as accepted/queued.
+    pane = "%110"
+    _make_ready(pane)
+    received: dict[str, bytes] = {}
+    srv = _accept_server(cc.channel_socket_path(pane), receipt=None, received=received)
+    try:
+        assert cc.send_to_pane(pane, "<HIVE from=w to=v msgId=rce1>x</HIVE>") is None
+    finally:
+        srv.close()
+
+
+def test_send_to_pane_fails_on_wrong_receipt_byte():
+    pane = "%111"
+    _make_ready(pane)
+    received: dict[str, bytes] = {}
+    srv = _accept_server(cc.channel_socket_path(pane), receipt=b"0", received=received)
+    try:
+        assert cc.send_to_pane(pane, "<HIVE from=w to=v msgId=wrb1>x</HIVE>") is None
+    finally:
+        srv.close()
+
+
+def test_send_to_pane_fails_on_refused_connect():
     # ready marker + a socket *path* that exists as a file but nothing listening
     pane = "%902"
     _make_ready(pane)
     sock_path = cc.channel_socket_path(pane)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     sock_path.write_text("")  # not a live socket
-    assert cc.send_to_pane(pane, "msg") is False
+    assert cc.send_to_pane(pane, "msg") is None
 
 
 # --- prepare_pane (plugin marketplace registration) -------------------------
@@ -472,6 +528,10 @@ def test_server_sigterm_removes_socket_and_marker(_hive_home):
     sock_path = _hive_home / "channel" / "hive-pane-78.sock"
     marker = _hive_home / "channel" / "hive-pane-78.ready"
     try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 0,
+                                     "method": "initialize", "params": {}}) + "\n")
+        proc.stdin.flush()
+        assert json.loads(proc.stdout.readline())["id"] == 0
         assert _wait_path(sock_path) and _wait_path(marker)
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5)
@@ -522,6 +582,58 @@ def test_server_without_tmux_pane_skips_socket(_hive_home):
         resp = json.loads(proc.stdout.readline())
         assert resp["id"] == 1  # handshake still works
         assert not (_hive_home / "channel").exists()  # no socket dir created
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_server_publishes_no_marker_before_initialize(_hive_home):
+    proc = _server_proc(_hive_home, "%80")
+    sock_path = _hive_home / "channel" / "hive-pane-80.sock"
+    marker = _hive_home / "channel" / "hive-pane-80.ready"
+    try:
+        assert _wait_path(sock_path)  # socket may listen early
+        time.sleep(0.4)
+        assert not marker.exists()  # but readiness waits for initialize
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 0,
+                                     "method": "initialize", "params": {}}) + "\n")
+        proc.stdin.flush()
+        assert json.loads(proc.stdout.readline())["id"] == 0
+        assert _wait_path(marker)
+        assert marker.read_text() == cc.MARKER_RECEIPT_CAPABLE
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_server_survives_legacy_client_and_serves_next_frame(_hive_home):
+    """An old client closes before the receipt lands (BrokenPipe on the
+    server's reply). The socket loop must survive and deliver a second frame."""
+    pane = "%81"
+    proc = _server_proc(_hive_home, pane)
+    sock_path = _hive_home / "channel" / f"hive-pane-{pane.replace('%', '')}.sock"
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 0,
+                                     "method": "initialize", "params": {}}) + "\n")
+        proc.stdin.flush()
+        assert json.loads(proc.stdout.readline())["id"] == 0
+        assert _wait_path(sock_path)
+
+        # frame 1: legacy-style client — write, half-close, then full-close
+        # immediately without reading the receipt
+        legacy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        legacy.connect(str(sock_path))
+        legacy.sendall(json.dumps({"msg_id": "old1", "content": "first"}).encode())
+        legacy.shutdown(socket.SHUT_WR)
+        legacy.close()
+        note1 = json.loads(proc.stdout.readline())
+        assert note1["method"] == "notifications/claude/channel"
+        assert note1["params"]["meta"]["msg_id"] == "old1"
+
+        # frame 2: new client — the loop must still be alive and answer
+        assert cc.send_to_pane(pane, "<HIVE from=a to=b msgId=new2>second</HIVE>") == cc.ACCEPTED_MCP_WRITE
+        note2 = json.loads(proc.stdout.readline())
+        assert note2["params"]["meta"]["msg_id"] == "new2"
     finally:
         proc.terminate()
         proc.wait(timeout=5)

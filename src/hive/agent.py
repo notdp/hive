@@ -39,6 +39,12 @@ def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> s
     return _resolve_session_id_from_runtime(pane_id)
 
 
+class DeliveryError(RuntimeError):
+    """A native transport (codex daemon / claude channel) did not accept the
+    message. Normal hive delivery never falls back to keystrokes; callers
+    surface this as an explicit submit failure (injectStatus=failed)."""
+
+
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
     """Submit text to an interactive agent TUI, preserving any pending draft."""
     if tmux.is_pane_in_mode(pane_id):
@@ -400,59 +406,47 @@ class Agent:
 
     # --- Control ---
 
-    def send(self, text: str) -> None:
-        """Send a prompt to the agent.
+    def send(self, text: str) -> str:
+        """Send a prompt to the agent; return the accepted-transport class.
 
-        hive-spawned codex delivers via the per-pane daemon's ``turn/start``
-        RPC and claude via its per-pane MCP channel socket — neither touches the
-        composer draft. claude is strictly channel-only: an unusable channel
-        raises :class:`~hive.adapters.claude_channel.ChannelDeliveryError`
-        (callers surface it as an explicit submit failure; the sidecar projects
-        it to ``injectStatus=failed``). codex without a usable daemon/thread
-        falls back to keystroke injection.
+        Delivery is native-transport-only: codex goes through the per-pane
+        daemon's ``turn/start`` RPC, claude through its per-pane MCP channel
+        socket. Neither touches the composer, and there is no keystroke
+        fallback on any failure — a transport that did not accept the message
+        raises :class:`DeliveryError` (callers surface it as an explicit
+        submit failure). The returned classification names which transport
+        boundary was crossed (``turnStartAccepted`` / ``mcpWriteAccepted`` /
+        ``legacySocketAccepted``); none of them proves the agent processed
+        the message — that final confirmation only ever comes from the
+        target's transcript.
         """
         profile_name = _resolve_profile_name(self.pane_id, self.cli)
         if profile_name == "codex":
             from .adapters import codex_app_server
 
-            if codex_app_server.send_to_pane(self.pane_id, text):
-                return
+            accepted = codex_app_server.send_to_pane(self.pane_id, text)
+            if accepted is None:
+                raise DeliveryError(
+                    f"codex pane {self.pane_id} did not accept the turn "
+                    "(no daemon/thread, RPC error, or connection failure)"
+                )
+            return accepted
         if profile_name == "claude":
             from .adapters import claude_channel
 
-            if not claude_channel.send_to_pane(self.pane_id, text):
-                raise claude_channel.ChannelDeliveryError(
-                    f"claude pane {self.pane_id} has no usable hive channel "
-                    "(marker or socket missing/dead); claude delivery is "
-                    "channel-only"
+            accepted = claude_channel.send_to_pane(self.pane_id, text)
+            if accepted is None:
+                raise DeliveryError(
+                    f"claude pane {self.pane_id} channel transport failed "
+                    "(marker/socket missing, write error, or no MCP-write "
+                    "receipt); claude delivery is channel-only"
                 )
-            return
-        _submit_interactive_text(self.pane_id, text, profile_name)
-
-    def load_skill(self, skill_name: str) -> None:
-        """Load a skill in the pane using the CLI-specific command.
-
-        Uses raw `tmux.send_keys` instead of `_submit_interactive_text` —
-        skill loading happens at spawn time on a fresh pane with no user
-        draft to preserve, and the draft-guard placeholder detection can
-        misidentify CLI placeholder hints (e.g. codex's rotating
-        `Find and fix a bug in @filename`) as drafts and paste them back
-        as real input after the skill submits.
-        """
-        if not skill_name or skill_name == "none":
-            return
-        if skill_name == "hive":
-            skill_sync.maybe_warn_hive_skill_drift(self.cli)
-        from .agent_cli import get_profile
-        profile = get_profile(self.cli)
-        text = profile.skill_cmd.format(name=skill_name) if profile else f"/{skill_name}"
-        # Type + wait for picker to open; codex skill picker = 2 Enters
-        # (pick entry, then submit), others = 1.
-        tmux.send_keys(self.pane_id, text, enter=False)
-        time.sleep(0.1)
-        for _ in range(2 if self.cli == "codex" else 1):
-            tmux.send_key(self.pane_id, "Enter")
-        time.sleep(2)
+            return accepted
+        raise DeliveryError(
+            f"pane {self.pane_id} runs no supported agent CLI "
+            f"(profile={profile_name or 'unknown'}); hive delivers over "
+            "native transports only"
+        )
 
     def interrupt(self) -> None:
         """Press Escape to interrupt."""

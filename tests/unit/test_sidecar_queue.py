@@ -6,28 +6,9 @@ import pytest
 import hive.sidecar as sidecar
 
 
-def test_check_pending_keeps_followup_window_open_after_unconfirmed(monkeypatch, tmp_path):
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    now = 300.0
-    monkeypatch.setattr(sidecar.time, "time", lambda: now)
-
-    record = {
-        "msgId": "ab12",
-        "targetTranscript": str(transcript),
-        "targetPane": "%1",
-        "targetCli": "codex",
-        "baseline": 0,
-        "deadlineAt": now - 30,
-        "terminalNotifiedResult": "failed",
-        "terminalFollowupUntil": now + 5,
-    }
-
-    assert sidecar._check_pending(record) is None
-
-
-def test_check_pending_finalizes_after_followup_window_expires(monkeypatch, tmp_path):
+def test_check_pending_finalizes_after_deadline_without_failing(monkeypatch, tmp_path):
+    """Deadline expiry only stops tracking; the message stays durably queued
+    (the sender is never notified of a failure that did not happen)."""
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("")
 
@@ -41,31 +22,9 @@ def test_check_pending_finalizes_after_followup_window_expires(monkeypatch, tmp_
         "targetCli": "codex",
         "baseline": 0,
         "deadlineAt": now - 30,
-        "terminalNotifiedResult": "failed",
-        "terminalFollowupUntil": now - 1,
     }
 
     assert sidecar._check_pending(record) == sidecar._FINALIZE_PENDING
-
-
-def test_inject_exception_uses_honest_failed_wording(monkeypatch):
-    sent: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(
-        sidecar,
-        "detect_profile_for_pane",
-        lambda _pane_id: type("Profile", (), {"name": "codex"})(),
-    )
-    monkeypatch.setattr(
-        "hive.agent._submit_interactive_text",
-        lambda pane_id, text, cli: sent.append((pane_id, text, cli)),
-    )
-
-    sidecar._inject_exception("%1", "ab12", "orch", "failed")
-
-    assert len(sent) == 1
-    assert "failed to deliver within" in sent[0][1]
-    assert "Retry only if duplicate delivery is acceptable." in sent[0][1]
-    assert sent[0][2] == "codex"
 
 
 def test_socket_alive_requires_matching_api_version(monkeypatch):

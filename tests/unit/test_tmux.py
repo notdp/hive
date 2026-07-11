@@ -386,14 +386,17 @@ def test_control_mode_payload_activity_accepts_visible_text_between_dcs_and_osc(
     assert tmux._control_mode_payload_has_activity(payload) is True
 
 
-def test_control_mode_monitor_keeps_buffer_but_does_not_mark_repaint_busy():
+def test_control_mode_monitor_ignores_repaint_only_output():
+    """Repaint-only control sequences never mark a pane busy; the monitor
+    keeps no payload buffer (the pane-content msgId oracle is gone — delivery
+    confirmation is transcript-only)."""
     monitor = tmux.ControlModeOutputMonitor("613")
     payload = "\033[?2026h\033[49;2H\033[K\033[?2026l"
 
     monitor._record_control_mode_output("%9", payload)
 
     assert monitor.is_busy("%9", threshold_seconds=3.0) is False
-    assert monitor._output_buffer["%9"] == payload
+    assert not hasattr(monitor, "_output_buffer")
 
 
 def test_control_mode_monitor_marks_visible_text_busy():

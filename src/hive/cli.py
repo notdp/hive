@@ -43,7 +43,6 @@ _COMMAND_HELP_SECTIONS = {
     "fork": "Handoff",
     "spawn": "Handoff",
     # Workflow — higher-level flows on top of Hive.
-    "workflow": "Workflow",
     "squad": "Workflow",
     "duo": "Workflow",
     "worktree": "Workflow",
@@ -90,7 +89,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Daily": "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
     "Handoff": "Hand a thread to another worker — same pane, a fresh spawn, or a forked clone.",
-    "Workflow": "Higher-level flows on top of Hive: load workflows and run squads.",
+    "Workflow": "Higher-level flows on top of Hive: duos, squads, worktrees.",
     "Team": "Create, extend, and wire up the tmux team around the current window.",
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
@@ -971,7 +970,8 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Hive messages will arrive inline as "
+        "Context is pre-bound. Run `hive skills get core` first and follow "
+        "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; reply on an existing thread with "
         "`hive reply <name> \"...\"`; open a new thread with "
@@ -1003,7 +1003,6 @@ def _register_agent_member(
     if ws:
         hive_context.save_context_for_pane(pane_id, team=team_name, workspace=ws, agent=agent_name)
     if notify:
-        agent.load_skill("hive")
         agent.send(_hive_join_message(agent_name, team_name))
     return agent
 
@@ -1799,27 +1798,6 @@ def handoff(
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-@cli.group()
-def workflow():
-    """Workflow helpers on top of Hive."""
-    pass
-
-
-@workflow.command("load")
-@click.argument("agent_name")
-@click.argument("workflow_name")
-@click.option("--prompt", default="", help="Optional prompt to send after loading the workflow")
-def workflow_load(agent_name: str, workflow_name: str, prompt: str):
-    """Load a workflow into an existing agent pane."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    agent = t.get(agent_name)
-    agent.load_skill(workflow_name)
-    if prompt:
-        agent.send(prompt)
-    click.echo(f"Workflow '{workflow_name}' loaded into {agent_name}.")
-
-
 @cli.group("config")
 def config_cmd():
     """Read / write user-level settings (~/.hive/settings.json)."""
@@ -2336,18 +2314,24 @@ def skills_ls_cmd():
 
 
 def _inject_role_bootstrap(pane: str, role: str) -> bool:
-    """Inject the full role bootstrap prompt into *pane* as its first input.
+    """Deliver the role bootstrap prompt to *pane* over its native transport.
 
     Same text a spawned pane gets as its launch prompt (identity +
     ``hive skills get <role>`` + idle discipline) — adoption only changes the
-    delivery channel, never the wording. Returns True if the pane runs a
-    known agent CLI; otherwise sends nothing.
+    delivery channel, never the wording. Returns True when the pane's
+    transport accepted it; False when the pane runs no known agent CLI or the
+    transport refused (delivery is native-only, no keystroke fallback).
     """
-    if detect_profile_for_pane(pane) is None:
+    from .agent import Agent, DeliveryError
+
+    profile = detect_profile_for_pane(pane)
+    if profile is None:
         return False
-    tmux.send_keys(pane, _role_bootstrap_prompt(role), enter=False)
-    time.sleep(0.1)
-    tmux.send_key(pane, "Enter")
+    adopter = Agent(name=role, team_name="", pane_id=pane, cli=profile.name)
+    try:
+        adopter.send(_role_bootstrap_prompt(role))
+    except DeliveryError:
+        return False
     return True
 
 
@@ -4380,7 +4364,7 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.option(
     "--wait",
     is_flag=True,
-    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
+    help="Block up to 60s for transcript confirmation; deadline expiry returns delivery=queued",
 )
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
@@ -4404,10 +4388,11 @@ def send(
 
     \b
     Delivery outcomes (in the `delivery` field of the response):
-      success   Target pane rendered the msgId (via transcript or stream).
-      pending   Submit OK; background tracking continues for up to 60s.
-      failed    Submit error OR msgId never rendered before timeout.
-                Retry; CLI also exits with status 2.
+      success   The target's transcript shows the message in a new user turn.
+      queued    Transport write accepted; final delivery unconfirmed — the
+                target may be mid-turn (channel events queue). Do not resend.
+      failed    The transport itself refused the message (no channel/daemon,
+                write error, no receipt). CLI exits with status 2.
 
     \b
     Examples:
@@ -4457,7 +4442,7 @@ def send(
 @click.option(
     "--wait",
     is_flag=True,
-    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
+    help="Block up to 60s for transcript confirmation; deadline expiry returns delivery=queued",
 )
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
