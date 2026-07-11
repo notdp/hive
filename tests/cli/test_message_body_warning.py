@@ -20,7 +20,6 @@ def _patch_ack(monkeypatch):
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
 
 
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
@@ -54,7 +53,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         body: str,
         artifact: str = "",
         reply_to: str = "",
-        wait: bool = False,
     ):
         from hive.sidecar import _send_payload
 
@@ -69,7 +67,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
                 body=body,
                 artifact=artifact,
                 reply_to=reply_to,
-                wait=wait,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

@@ -45,12 +45,11 @@ _SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
 OBSERVATION_TIMEOUT = 60.0
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
-SEND_GRACE_TIMEOUT = 3.0
 # The CLI's socket budget must be strictly longer than the work it asks the
 # sidecar to perform: worst-case native transport submission (claude channel
-# receipt / codex daemon RPC) plus the confirmation window, plus slack for
-# scheduling and payload plumbing. A valid slow acceptance must never surface
-# as "sidecar unavailable" while the sidecar goes on to record queued.
+# receipt / codex daemon RPC) plus slack for scheduling and payload plumbing.
+# A send blocks on nothing else — it returns queued the moment the transport
+# accepts; confirmation is asynchronous (background tracker / query-time).
 REQUEST_SLACK = 5.0
 
 
@@ -60,9 +59,8 @@ def _native_submit_timeout() -> float:
     return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
 
 
-def _send_request_timeout(wait: bool) -> float:
-    window = OBSERVATION_TIMEOUT if wait else SEND_GRACE_TIMEOUT
-    return _native_submit_timeout() + window + REQUEST_SLACK
+def _send_request_timeout() -> float:
+    return _native_submit_timeout() + REQUEST_SLACK
 SIDECAR_API_VERSION = 5
 _FINALIZE_PENDING = "__finalize__"
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
@@ -833,9 +831,8 @@ def request_send(
     body: str,
     artifact: str = "",
     reply_to: str = "",
-    wait: bool = False,
 ) -> dict[str, Any] | None:
-    timeout = _send_request_timeout(wait)
+    timeout = _send_request_timeout()
     return _request_sidecar(
         workspace,
         {
@@ -847,7 +844,6 @@ def request_send(
             "body": body,
             "artifact": artifact,
             "replyTo": reply_to,
-            "wait": wait,
         },
         timeout=timeout,
     )
@@ -953,53 +949,6 @@ def _check_send_gate(transcript_path: Path | None) -> str:
     return result.status
 
 
-def _wait_for_delivery_confirmation(
-    *,
-    pane_id: str,
-    transcript_path: Path | None,
-    message_id: str,
-    baseline: int,
-    timeout: float,
-) -> str:
-    """Block up to *timeout* seconds. Return 'transcript' / 'stream' on confirm, '' on timeout."""
-    from .adapters.base import transcript_has_id_in_new_user_turn
-
-    deadline = time.monotonic() + max(0.0, timeout)
-    while time.monotonic() < deadline:
-        if transcript_path is not None and transcript_has_id_in_new_user_turn(
-            transcript_path, message_id, baseline
-        ):
-            return "transcript"
-        time.sleep(0.2)
-    return ""
-
-
-def _observe_send_grace(
-    *,
-    pane_id: str,
-    transcript_path: Path | None,
-    message_id: str,
-    baseline: int,
-) -> tuple[str, str]:
-    """Short synchronous grace loop. Returns (state, confirmation_source).
-
-    state is "confirmed" or "pending". confirmation_source is "transcript"
-    (the only oracle) or "" for pending.
-    """
-    from .adapters.base import transcript_has_id_in_new_user_turn
-
-    deadline = time.monotonic() + SEND_GRACE_TIMEOUT
-
-    while True:
-        if transcript_path is not None and transcript_has_id_in_new_user_turn(transcript_path, message_id, baseline):
-            return "confirmed", "transcript"
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return "pending", ""
-        time.sleep(min(0.2, remaining))
-
-
 def _pending_record(
     *,
     message_id: str,
@@ -1043,7 +992,6 @@ def _send_payload(
     body: str,
     artifact: str,
     reply_to: str,
-    wait: bool,
 ) -> dict[str, Any]:
     team, target = _resolve_live_agent(team_name, target_agent)
     normalized_body = body.strip()
@@ -1089,12 +1037,6 @@ def _send_payload(
     confirmation_source = ""
     profile = detect_profile_for_pane(target.pane_id)
 
-    def _confirmed_metadata(source: str) -> dict[str, str]:
-        meta = {"injectStatus": "submitted", "turnObserved": "confirmed"}
-        if source:
-            meta["confirmationSource"] = source
-        return meta
-
     def _add_to_pending() -> None:
         pending[message_id] = _pending_record(
             message_id=message_id,
@@ -1136,51 +1078,12 @@ def _send_payload(
                 "baseline": str(baseline),
             },
         )
-    if inject_status == "failed":
-        pass
-    elif wait:
-        grace_state, grace_source = _observe_send_grace(
-            pane_id=target.pane_id,
-            transcript_path=transcript_path,
-            message_id=message_id,
-            baseline=baseline,
-        )
-        if grace_state == "confirmed":
-            turn_observed = "confirmed"
-            confirmation_source = grace_source
-            _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(grace_source))
-        else:
-            wait_source = _wait_for_delivery_confirmation(
-                pane_id=target.pane_id,
-                transcript_path=transcript_path,
-                message_id=message_id,
-                baseline=baseline,
-                timeout=OBSERVATION_TIMEOUT - SEND_GRACE_TIMEOUT,
-            )
-            if wait_source:
-                turn_observed = "confirmed"
-                confirmation_source = wait_source
-                _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(wait_source))
-            else:
-                # Deadline expiry is not failure: the durable queued
-                # observation stands, and background/query-time transcript
-                # checks may still upgrade it.
-                _add_to_pending()
-                turn_observed = "pending"
-    else:
-        grace_state, grace_source = _observe_send_grace(
-            pane_id=target.pane_id,
-            transcript_path=transcript_path,
-            message_id=message_id,
-            baseline=baseline,
-        )
-        if grace_state == "confirmed":
-            turn_observed = "confirmed"
-            confirmation_source = grace_source
-            _write_observation(workspace, message_id, "success", metadata=_confirmed_metadata(grace_source))
-        else:
-            _add_to_pending()
-            turn_observed = "pending"
+    if inject_status != "failed":
+        # Fire-and-track: the send returns the moment the transport accepted.
+        # Confirmation is asynchronous — the background tracker (and the
+        # query-time transcript check after a restart) upgrades queued to
+        # success; a sender that wants certainty polls `hive delivery`.
+        _add_to_pending()
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -2196,7 +2099,6 @@ def _handle_request(
                 body=str(request.get("body", "")),
                 artifact=str(request.get("artifact", "")),
                 reply_to=str(request.get("replyTo", "")),
-                wait=bool(request.get("wait", False)),
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}

@@ -414,19 +414,17 @@ def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypa
 # --- request budgets (VAL fail-r1 finding 1) ---
 
 
-def test_send_request_budget_covers_native_submission_plus_window():
-    """The CLI socket budget is strictly longer than worst-case native
-    transport submission plus the confirmation window: a valid slow
-    acceptance must never surface as `sidecar unavailable`."""
+def test_send_request_budget_covers_native_submission():
+    """The CLI socket budget is strictly longer than the worst-case native
+    transport submission: a valid slow acceptance must never surface as
+    `sidecar unavailable`."""
     from hive.adapters import claude_channel, codex_app_server
 
     native = max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
-    assert sidecar._send_request_timeout(False) > native + sidecar.SEND_GRACE_TIMEOUT
-    assert sidecar._send_request_timeout(True) > native + sidecar.OBSERVATION_TIMEOUT
+    assert sidecar._send_request_timeout() > native
 
 
-@pytest.mark.parametrize("wait", [False, True])
-def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatch, wait):
+def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatch):
     """A sidecar that answers after a native-budget-scale delay still gets its
     truthful queued response back to the CLI (no duplicate-inviting None)."""
     import os
@@ -448,8 +446,6 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
     # invariant shape: delay < derived budget
     monkeypatch.setattr("hive.adapters.claude_channel.SUBMIT_TIMEOUT", 0.6)
     monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
-    monkeypatch.setattr(sidecar, "SEND_GRACE_TIMEOUT", 0.0)
-    monkeypatch.setattr(sidecar, "OBSERVATION_TIMEOUT", 0.0)
     monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
 
     srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
@@ -473,7 +469,6 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
             sender_pane="%1",
             target_agent="b",
             body="hello",
-            wait=wait,
         )
     finally:
         srv.close()

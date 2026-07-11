@@ -200,7 +200,6 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("hive.sidecar._check_send_gate", lambda _p: None)
     monkeypatch.setattr("hive.sidecar.detect_profile_for_pane", lambda _p: None)
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
 
     pending: dict[str, dict] = {}
     results = []
@@ -215,7 +214,6 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
             body=body,
             artifact="",
             reply_to="",
-            wait=False,
         ))
 
     # ordered transport submissions, one per message, no duplicates

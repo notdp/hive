@@ -125,8 +125,6 @@ hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "skills", "worktree", "ls"}
-_SEND_GRACE_TIMEOUT = 3.0
-_SEND_GRACE_POLL_INTERVAL = 0.2
 
 
 class SectionedHelpGroup(click.Group):
@@ -674,7 +672,6 @@ def _request_send_payload(
     body: str,
     artifact: str = "",
     reply_to: str = "",
-    wait: bool = False,
     command_name: str = "send",
     warn_on_long_body: bool = True,
 ) -> dict[str, object]:
@@ -692,7 +689,6 @@ def _request_send_payload(
         body=body,
         artifact=artifact,
         reply_to=reply_to,
-        wait=wait,
     )
     if not payload:
         raise RuntimeError("sidecar unavailable")
@@ -4378,18 +4374,12 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option(
-    "--wait",
-    is_flag=True,
-    help="Block up to 60s for transcript confirmation; deadline expiry returns delivery=queued",
-)
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
 def send(
     to_agent: str,
     body: str,
     artifact: str,
-    wait: bool,
     to_option: str | None,
     msg_option: str | None,
 ):
@@ -4418,7 +4408,6 @@ def send(
       # Findings
       - item
       EOF
-      hive send dodo "ack" --wait     # block up to 60s for confirmed delivery
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     team_name, t = _resolve_send_target_team(to_agent)
@@ -4435,7 +4424,6 @@ def send(
             body=body,
             artifact=resolved_artifact,
             reply_to="",
-            wait=wait,
             command_name="send",
         )
     except RuntimeError as exc:
@@ -4456,11 +4444,6 @@ def send(
     default="",
     help="Override the auto-resolved msgId. Required when the latest inbound has already been replied to.",
 )
-@click.option(
-    "--wait",
-    is_flag=True,
-    help="Block up to 60s for transcript confirmation; deadline expiry returns delivery=queued",
-)
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
 def reply(
@@ -4468,7 +4451,6 @@ def reply(
     body: str,
     artifact: str,
     reply_to_override: str,
-    wait: bool,
     to_option: str | None,
     msg_option: str | None,
 ):
@@ -4518,7 +4500,6 @@ def reply(
             body=body,
             artifact=resolved_artifact,
             reply_to=resolved_reply_to,
-            wait=wait,
             command_name="reply",
         )
     except RuntimeError as exc:

@@ -17,22 +17,12 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
 
 
 def _patch_ack(monkeypatch):
-    """Disable ACK resolution so tests don't need a real transcript.
-
-    Also collapses the send-grace window to 0 so the loop runs exactly
-    once instead of polling for 3s. The real `_observe_send_grace`
-    still executes — it hits the transcript check, runs the probe, and
-    captures its result — which keeps the regression surface intact
-    for tests that happen to route through a transcript-less fake
-    agent. Tests that genuinely exercise grace timing set up their own
-    ack/probe and don't call this helper.
-    """
+    """Disable ACK resolution so tests don't need a real transcript."""
     monkeypatch.setattr(
         "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
 
 
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
@@ -81,7 +71,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         body: str,
         artifact: str = "",
         reply_to: str = "",
-        wait: bool = False,
     ):
         from hive.sidecar import _send_payload
 
@@ -96,7 +85,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
                 body=body,
                 artifact=artifact,
                 reply_to=reply_to,
-                wait=wait,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -982,8 +970,8 @@ def test_notify_fails_outside_tmux(runner, monkeypatch):
 # --- ACK-specific tests ---
 
 
-def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
-    """ACK returns confirmed when nonce appears in transcript."""
+def test_send_queues_then_transcript_confirms_async(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Transcript confirmation is asynchronous: send returns queued, the delivery query shows the upgrade."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1025,16 +1013,24 @@ def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
+    # The send itself returns queued immediately (no synchronous confirmation
+    # window); the transcript hit is observed asynchronously and upgrades the
+    # durable record — visible via `hive delivery`.
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["delivery"] == "success"
-    assert "followUp" not in payload
+    assert payload["delivery"] == "queued"
+
+    from hive import sidecar as sidecar_mod
+
+    delivery = sidecar_mod._delivery_payload(str(workspace), {}, payload["msgId"])
+    assert delivery["delivery"] == "success"
+    assert delivery["confirmationSource"] == "transcript"
 
 
-def test_send_wait_deadline_expiry_returns_queued(runner, configure_hive_home, monkeypatch, tmp_path):
-    """--wait deadline expiry stays queued (exit 0), never failed."""
+def test_send_returns_queued_immediately_without_confirmation(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A send returns queued the moment the transport accepts — no synchronous confirmation window exists anymore."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1065,17 +1061,12 @@ def test_send_wait_deadline_expiry_returns_queued(runner, configure_hive_home, m
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.sidecar._wait_for_delivery_confirmation", lambda **_kw: "")
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    # The test drives the unconfirmed branch via _wait_for_delivery_confirmation; we
-    # don't need the grace loop to wall-clock through its 3s before that runs.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
+    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
-    # Deadline expiry is not failure: the transport accepted the message and
-    # busy targets queue channel events, so --wait returns queued with exit 0.
+    # The transport accepted the message; confirmation is asynchronous.
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["delivery"] == "queued"
@@ -1219,7 +1210,6 @@ def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkey
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     # Nothing confirms during grace; collapse the 3s window so tests don't wait.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team, pending=pending)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
@@ -1330,10 +1320,8 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
-    monkeypatch.setattr("hive.sidecar._wait_for_delivery_confirmation", lambda **_kw: "")
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     # Gate tests only care about the gate projection; collapse the 3s grace loop.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
     return workspace, transcript, sent
