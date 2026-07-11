@@ -1,0 +1,9 @@
+{
+  "name": "hive",
+  "version": "0.1.0",
+  "description": "Hive multi-agent collaboration entrypoint: role discovery skill for tmux duo/squad teams.",
+  "author": {
+    "name": "notdp",
+    "url": "https://github.com/notdp"
+  }
+}

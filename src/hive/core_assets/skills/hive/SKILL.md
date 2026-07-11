@@ -1,1 +1,1 @@
-../../../../../skills/hive/SKILL.md
+../../../../../plugins/hive/skills/hive/SKILL.md

@@ -1,0 +1,20 @@
+{
+  "name": "hive-plugins",
+  "interface": {
+    "displayName": "Hive Plugins"
+  },
+  "plugins": [
+    {
+      "name": "hive",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hive"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "NONE"
+      },
+      "category": "Engineering"
+    }
+  ]
+}
