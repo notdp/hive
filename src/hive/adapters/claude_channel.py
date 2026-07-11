@@ -275,7 +275,9 @@ def prepare_pane(cwd: str) -> list[str]:
     binding = _marketplace_binding()
     if binding is not None and binding[0] != "directory":
         source, location = binding
-        if location != PUBLISHED_REPO:
+        # the published identity is exact: github AND notdp/hive -- a url/npm
+        # source whose location parses to the same string is still foreign
+        if source != "github" or location != PUBLISHED_REPO:
             return _unavailable(
                 f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
                 f"{source} source ({location}); run `claude plugin "
