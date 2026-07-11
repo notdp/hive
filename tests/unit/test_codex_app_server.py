@@ -242,14 +242,53 @@ def test_pool_send_to_pane_turn_starts_even_when_busy(monkeypatch):
             return {"result": {}}
 
     monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
-    assert pool.send_to_pane("%1", "hi") is True
+    assert pool.send_to_pane("%1", "hi") == m.TURN_START_ACCEPTED
     assert sent == [("t1", "hi")]
 
 
-def test_pool_send_to_pane_falls_back_without_daemon(monkeypatch):
+def test_pool_send_to_pane_fails_without_daemon(monkeypatch):
     pool = m.CodexClientPool()
     monkeypatch.setattr(pool, "_client_for", lambda _pane: None)
-    assert pool.send_to_pane("%1", "hi") is False  # no daemon -> keystroke fallback
+    assert pool.send_to_pane("%1", "hi") is None  # no daemon -> transport failure
+
+
+def test_pool_send_to_pane_fails_without_thread(monkeypatch):
+    pool = m.CodexClientPool()
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return ""
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is None
+
+
+def test_pool_send_to_pane_fails_on_rpc_error_response(monkeypatch):
+    pool = m.CodexClientPool()
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def turn_start(self, tid, text):
+            return {"error": {"code": -1, "message": "boom"}}
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is None
+
+
+def test_pool_send_to_pane_fails_on_rpc_exception(monkeypatch):
+    pool = m.CodexClientPool()
+
+    class FakeClient:
+        def latest_thread_id(self):
+            return "t1"
+
+        def turn_start(self, tid, text):
+            raise OSError("socket reset")
+
+    monkeypatch.setattr(pool, "_client_for", lambda _pane: FakeClient())
+    assert pool.send_to_pane("%1", "hi") is None
 
 
 def test_pool_compact_pane_compacts_when_idle(monkeypatch):

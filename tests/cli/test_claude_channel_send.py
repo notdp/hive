@@ -10,7 +10,7 @@ import pytest
 
 from hive import agent as agent_mod
 from hive.adapters import claude_channel
-from hive.agent import Agent
+from hive.agent import DeliveryError, Agent
 
 pytestmark = pytest.mark.cli
 
@@ -54,11 +54,11 @@ def test_claude_send_uses_channel_and_skips_keystrokes(monkeypatch):
 
 def test_claude_send_raises_when_channel_reports_failure(monkeypatch):
     keystrokes = _patch(monkeypatch, "claude")
-    monkeypatch.setattr(claude_channel, "send_to_pane", lambda pane, text: False)
+    monkeypatch.setattr(claude_channel, "send_to_pane", lambda pane, text: None)
 
     # strictly channel-only: a failed channel is an explicit submit failure
     # (the sidecar projects the raise to injectStatus=failed), never keystrokes.
-    with pytest.raises(claude_channel.ChannelDeliveryError):
+    with pytest.raises(DeliveryError):
         _agent("claude").send("<HIVE>hi</HIVE>")
 
     assert keystrokes == []
@@ -68,7 +68,7 @@ def test_claude_send_raises_without_ready_marker(monkeypatch, _hive_home):
     # real send_to_pane path: channel never registered for this pane
     keystrokes = _patch(monkeypatch, "claude")
 
-    with pytest.raises(claude_channel.ChannelDeliveryError):
+    with pytest.raises(DeliveryError):
         _agent("claude").send("<HIVE>hi</HIVE>")
 
     assert keystrokes == []
@@ -83,7 +83,7 @@ def test_claude_send_raises_with_marker_but_dead_socket(monkeypatch, _hive_home)
     sock = claude_channel.channel_socket_path("%1")
     sock.write_text("")  # a plain file, not a live socket
 
-    with pytest.raises(claude_channel.ChannelDeliveryError):
+    with pytest.raises(DeliveryError):
         _agent("claude").send("<HIVE>hi</HIVE>")
 
     assert keystrokes == []

@@ -30,7 +30,7 @@ class _FakeTeam:
         return self._peer_map.get(name)
 
 
-def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):
+def test_thread_payload_projects_pure_send_chain(tmp_path):
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -73,17 +73,13 @@ def test_thread_payload_projects_send_chain_and_delivery_states(tmp_path):
         },
     )
 
-    payload = sidecar._thread_payload(
-        str(workspace),
-        {"a003": {}},
-        "a003",
-    )
+    payload = sidecar._thread_payload(str(workspace), "a003")
 
     assert payload["ok"] is True
     assert payload["rootMsgId"] == "a001"
     assert payload["focusMsgId"] == "a003"
     assert [item["msgId"] for item in payload["messages"]] == ["a001", "a002", "a003"]
     assert [item["depth"] for item in payload["messages"]] == [0, 1, 2]
-    assert payload["messages"][1]["delivery"]["delivery"] == "success"
-    assert payload["messages"][2]["delivery"]["delivery"] == "pending"
     assert payload["messages"][2]["focus"] is True
+    # threads are pure message chains: no delivery decoration exists
+    assert all("delivery" not in item for item in payload["messages"])

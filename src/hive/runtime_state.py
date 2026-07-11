@@ -51,60 +51,6 @@ def format_body_warning(*, command: str, hint: dict[str, object]) -> str:
     )
 
 
-def present_send_state(*, inject_status: str, turn_observed: str) -> str:
-    """Collapse internal delivery details into one outcome: pending | success | failed."""
-    if inject_status == "failed":
-        return "failed"
-    if turn_observed == "confirmed":
-        return "success"
-    if turn_observed in ("unconfirmed", "unavailable"):
-        return "failed"
-    return "pending"
-
-
-def present_delivery_state(
-    *,
-    inject_status: str,
-    turn_observed: str,
-    observation_result: str = "",
-) -> str:
-    """Collapse persisted delivery detail into one outcome: pending | success | failed."""
-    if inject_status == "failed":
-        return "failed"
-    if observation_result == "success":
-        return "success"
-    if observation_result == "failed":
-        return "failed"
-    if turn_observed == "confirmed":
-        return "success"
-    if turn_observed in ("unconfirmed", "unavailable"):
-        return "failed"
-    return "pending"
-
-
-def send_guidance(delivery: str) -> dict[str, str] | None:
-    return None
-
-
-def delivery_guidance(delivery: str) -> dict[str, str] | None:
-    return None
-
-
-def delivery_exception_body(
-    delivery: str,
-    *,
-    message_id: str,
-    target_agent: str,
-    timeout_seconds: float,
-) -> str | None:
-    if delivery != "failed":
-        return None
-    return (
-        f"Message {message_id} to {target_agent} failed to deliver within "
-        f"{int(timeout_seconds)}s. Retry only if duplicate delivery is acceptable."
-    )
-
-
 def project_thread_event(event: dict[str, object]) -> dict[str, object]:
     """Project durable send events into the smaller thread-facing shape."""
     projected: dict[str, object] = {}

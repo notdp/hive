@@ -4,10 +4,12 @@ Mirrors the codex app-server adapter's role for Claude: ``Agent.send`` hands a
 ``<HIVE>`` envelope to :func:`send_to_pane`, which writes it to a per-pane unix
 socket. The channel MCP server (``claude_channel_server``, spawned by Claude
 as a stdio MCP child) turns that into a ``notifications/claude/channel``
-push -- no tmux send-keys, no composer draft disturbance. Claude delivery is
-channel-only; on a ``False`` from :func:`send_to_pane`, ``Agent.send`` raises
-:class:`ChannelDeliveryError`, which callers surface as an explicit submit
-failure (the sidecar projects it to ``injectStatus=failed``).
+push -- no tmux send-keys, no composer draft disturbance -- and answers with a
+single-byte local MCP-write receipt. Claude delivery is channel-only: a
+``None`` from :func:`send_to_pane` is a transport failure that ``Agent.send``
+raises as :class:`hive.agent.DeliveryError` (the sidecar projects it to
+``injectStatus=failed``); an accepted classification maps to the durable
+``queued`` delivery state until the target's transcript confirms the turn.
 
 Channel registration: hive owns a plugin marketplace under
 ``$HIVE_HOME/channel/marketplace`` whose single plugin declares this MCP
@@ -42,11 +44,6 @@ _MSGID_RE = re.compile(r"msgId=([^\s>]+)")
 _SOCKET_CONNECT_TIMEOUT = 2.0
 
 
-class ChannelDeliveryError(RuntimeError):
-    """claude delivery is channel-only: raised when a pane has no usable
-    channel (never registered, marker missing, or dead socket)."""
-
-
 # --- paths / readiness ------------------------------------------------------
 
 def _hive_home() -> Path:
@@ -69,8 +66,9 @@ def channel_socket_path(pane: str) -> Path:
 
 
 def ready_marker_path(pane: str) -> Path:
-    """Written by the channel server once its socket listens; cleared by the
-    server on exit and by spawn before a fresh launch (stale-marker guard)."""
+    """Written by the channel server once its MCP initialize response has been
+    emitted (content advertises receipt capability); cleared by the server on
+    exit and by spawn before a fresh launch (stale-marker guard)."""
     return _channel_dir() / f"hive-pane-{_slug(pane)}.ready"
 
 
@@ -83,6 +81,37 @@ def clear_ready(pane: str) -> None:
 
 def is_ready(pane: str) -> bool:
     return ready_marker_path(pane).exists()
+
+
+# Marker content advertises the server's receipt capability. "2" = the server
+# answers each frame with a single-byte local MCP-write receipt; "1" = legacy
+# pre-receipt server (accepted on local socket write, old contract — removable
+# once every live pane has restarted onto a "2" server). Anything else (empty,
+# corrupt, future) fails closed: better a failed send than a guessed boundary.
+MARKER_LEGACY = "1"
+MARKER_RECEIPT_CAPABLE = "2"
+
+# Accepted-transport classifications for the sidecar's durable delivery
+# observations. Neither claims Claude processed the message: per the Channels
+# contract, notifications are unacknowledged and may be silently dropped at
+# policy/load boundaries. They only name which local boundary was crossed.
+ACCEPTED_MCP_WRITE = "mcpWriteAccepted"
+ACCEPTED_LEGACY_SOCKET = "legacySocketAccepted"
+
+_RECEIPT_TIMEOUT = 10.0
+
+# Worst-case local submission budget for one send_to_pane call (connect plus
+# receipt wait). The sidecar derives its request budgets from this so a valid
+# slow acceptance can never outlive the caller's socket timeout.
+SUBMIT_TIMEOUT = _SOCKET_CONNECT_TIMEOUT + _RECEIPT_TIMEOUT
+
+
+def marker_version(pane: str) -> str:
+    """Content of the pane's ready marker ('' when absent/unreadable)."""
+    try:
+        return ready_marker_path(pane).read_text().strip()
+    except OSError:
+        return ""
 
 
 # --- spawn-time config ------------------------------------------------------
@@ -308,21 +337,31 @@ def _extract_msg_id(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def send_to_pane(pane: str, text: str) -> bool:
+def send_to_pane(pane: str, text: str) -> str | None:
     """Deliver ``text`` over the pane's channel socket.
 
-    Returns ``False`` (a delivery failure -- Claude is channel-only, so there is
-    no keystroke fallback) when the channel is not locally ready: no ready marker
-    (channel never registered), no socket, or a refused/timed-out connect. A
-    successful write returns ``True``; the ready marker -- written by the
-    channel server once its socket listens -- is what distinguishes a live
-    channel from a silently dropped one (channel notifications are not acked).
+    Returns an accepted-transport classification, or ``None`` on transport
+    failure (Claude is channel-only — there is no keystroke fallback):
+
+    - ``ACCEPTED_MCP_WRITE``: a marker-``2`` server answered with its
+      single-byte local MCP-write receipt, i.e. the notification was written
+      and flushed to the MCP stdio transport — the boundary the Channels
+      contract defines for ``mcp.notification()``. Not a Claude-processing or
+      final-delivery acknowledgement.
+    - ``ACCEPTED_LEGACY_SOCKET``: a legacy marker-``1`` server took the frame
+      on its local socket (pre-receipt contract); never failed by timeout.
+    - ``None``: no/unknown marker (fail-closed), no socket, connect/write
+      error, or a marker-``2`` server that did not return exactly the receipt
+      byte (server died before the MCP write — the frame must count as lost).
     """
-    if not pane or not is_ready(pane):
-        return False
+    if not pane:
+        return None
+    version = marker_version(pane)
+    if version not in (MARKER_LEGACY, MARKER_RECEIPT_CAPABLE):
+        return None
     sock_path = channel_socket_path(pane)
     if not sock_path.exists():
-        return False
+        return None
     payload = json.dumps({"msg_id": _extract_msg_id(text), "content": text})
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(_SOCKET_CONNECT_TIMEOUT)
@@ -330,8 +369,12 @@ def send_to_pane(pane: str, text: str) -> bool:
         conn.connect(str(sock_path))
         conn.sendall(payload.encode("utf-8"))
         conn.shutdown(socket.SHUT_WR)
-        return True
+        if version == MARKER_LEGACY:
+            return ACCEPTED_LEGACY_SOCKET
+        conn.settimeout(_RECEIPT_TIMEOUT)
+        receipt = conn.recv(1)
+        return ACCEPTED_MCP_WRITE if receipt == b"1" else None
     except OSError:
-        return False
+        return None
     finally:
         conn.close()

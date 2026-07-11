@@ -43,7 +43,6 @@ _COMMAND_HELP_SECTIONS = {
     "fork": "Handoff",
     "spawn": "Handoff",
     # Workflow — higher-level flows on top of Hive.
-    "workflow": "Workflow",
     "squad": "Workflow",
     "duo": "Workflow",
     "worktree": "Workflow",
@@ -62,7 +61,6 @@ _COMMAND_HELP_SECTIONS = {
     "hfork": "Human Helpers",
     # Debug — troubleshooting, rarely on the happy path.
     "doctor": "Debug",
-    "delivery": "Debug",
     "thread": "Debug",
     "capture": "Debug",
     "inject": "Debug",
@@ -90,7 +88,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Daily": "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
     "Handoff": "Hand a thread to another worker — same pane, a fresh spawn, or a forked clone.",
-    "Workflow": "Higher-level flows on top of Hive: load workflows and run squads.",
+    "Workflow": "Higher-level flows on top of Hive: duos, squads, worktrees.",
     "Team": "Create, extend, and wire up the tmux team around the current window.",
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
@@ -120,14 +118,11 @@ hive handoff dodo --artifact /tmp/task.md    # delegate a thread
 hive fork                                    # split the current pane into a clone
 hive spawn claude                            # bring up a new agent pane
 
-# Debug delivery / connectivity
-hive delivery <msgId>                        # trace a send
+# Debug connectivity
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 _TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "skills", "worktree", "ls"}
-_SEND_GRACE_TIMEOUT = 3.0
-_SEND_GRACE_POLL_INTERVAL = 0.2
 
 
 class SectionedHelpGroup(click.Group):
@@ -675,7 +670,6 @@ def _request_send_payload(
     body: str,
     artifact: str = "",
     reply_to: str = "",
-    wait: bool = False,
     command_name: str = "send",
     warn_on_long_body: bool = True,
 ) -> dict[str, object]:
@@ -693,7 +687,6 @@ def _request_send_payload(
         body=body,
         artifact=artifact,
         reply_to=reply_to,
-        wait=wait,
     )
     if not payload:
         raise RuntimeError("sidecar unavailable")
@@ -971,7 +964,8 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Hive messages will arrive inline as "
+        "Context is pre-bound. Run `hive skills get core` first and follow "
+        "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; reply on an existing thread with "
         "`hive reply <name> \"...\"`; open a new thread with "
@@ -1003,8 +997,24 @@ def _register_agent_member(
     if ws:
         hive_context.save_context_for_pane(pane_id, team=team_name, workspace=ws, agent=agent_name)
     if notify:
-        agent.load_skill("hive")
-        agent.send(_hive_join_message(agent_name, team_name))
+        from .agent import DeliveryError
+
+        try:
+            agent.send(_hive_join_message(agent_name, team_name))
+        except DeliveryError as e:
+            # Registration is transactional: a pane whose native transport
+            # refused the join must not linger half-registered (tagged and
+            # routable but proven undeliverable). Roll every mutation back so
+            # a later retry starts clean.
+            t.agents.pop(agent_name, None)
+            tmux.clear_pane_tags(pane_id)
+            if ws:
+                hive_context.clear_context_for_pane(pane_id)
+            _fail(
+                f"pane {pane_id} is not reachable over its native transport ({e}); "
+                "nothing was registered. Fix the channel/daemon and retry, "
+                "or use --no-notify to register without a reachability check."
+            )
     return agent
 
 
@@ -1456,7 +1466,7 @@ def init_cmd(validator_cli: str | None):
 @cli.command("register")
 @click.argument("pane_id")
 @click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
-@click.option("--notify/--no-notify", default=True, help="Push hive skill + join message to the pane")
+@click.option("--notify/--no-notify", default=True, help="Deliver the join message over the native transport (doubles as a reachability check; --no-notify registers without proving the pane deliverable)")
 @click.option("--group", "group_name", default="", help="Cross-team group tag for display and namespace reservation (optional; qualified-name routing works without it).")
 def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str):
     """Register an external pane into the current team."""
@@ -1797,27 +1807,6 @@ def handoff(
         "announce": announce_payload,
     }
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-@cli.group()
-def workflow():
-    """Workflow helpers on top of Hive."""
-    pass
-
-
-@workflow.command("load")
-@click.argument("agent_name")
-@click.argument("workflow_name")
-@click.option("--prompt", default="", help="Optional prompt to send after loading the workflow")
-def workflow_load(agent_name: str, workflow_name: str, prompt: str):
-    """Load a workflow into an existing agent pane."""
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    agent = t.get(agent_name)
-    agent.load_skill(workflow_name)
-    if prompt:
-        agent.send(prompt)
-    click.echo(f"Workflow '{workflow_name}' loaded into {agent_name}.")
 
 
 @cli.group("config")
@@ -2336,18 +2325,24 @@ def skills_ls_cmd():
 
 
 def _inject_role_bootstrap(pane: str, role: str) -> bool:
-    """Inject the full role bootstrap prompt into *pane* as its first input.
+    """Deliver the role bootstrap prompt to *pane* over its native transport.
 
     Same text a spawned pane gets as its launch prompt (identity +
     ``hive skills get <role>`` + idle discipline) — adoption only changes the
-    delivery channel, never the wording. Returns True if the pane runs a
-    known agent CLI; otherwise sends nothing.
+    delivery channel, never the wording. Returns True when the pane's
+    transport accepted it; False when the pane runs no known agent CLI or the
+    transport refused (delivery is native-only, no keystroke fallback).
     """
-    if detect_profile_for_pane(pane) is None:
+    from .agent import Agent, DeliveryError
+
+    profile = detect_profile_for_pane(pane)
+    if profile is None:
         return False
-    tmux.send_keys(pane, _role_bootstrap_prompt(role), enter=False)
-    time.sleep(0.1)
-    tmux.send_key(pane, "Enter")
+    adopter = Agent(name=role, team_name="", pane_id=pane, cli=profile.name)
+    try:
+        adopter.send(_role_bootstrap_prompt(role))
+    except DeliveryError:
+        return False
     return True
 
 
@@ -4377,18 +4372,12 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option(
-    "--wait",
-    is_flag=True,
-    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
-)
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
 def send(
     to_agent: str,
     body: str,
     artifact: str,
-    wait: bool,
     to_option: str | None,
     msg_option: str | None,
 ):
@@ -4403,11 +4392,9 @@ def send(
     lines.
 
     \b
-    Delivery outcomes (in the `delivery` field of the response):
-      success   Target pane rendered the msgId (via transcript or stream).
-      pending   Submit OK; background tracking continues for up to 60s.
-      failed    Submit error OR msgId never rendered before timeout.
-                Retry; CLI also exits with status 2.
+    Delivery is binary: the native transport (claude channel / codex daemon)
+    either accepted the message — its runtime owns it from there — or the
+    command fails with the transport error. Nothing to poll afterwards.
 
     \b
     Examples:
@@ -4416,7 +4403,6 @@ def send(
       # Findings
       - item
       EOF
-      hive send dodo "ack" --wait     # block up to 60s for confirmed delivery
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     team_name, t = _resolve_send_target_team(to_agent)
@@ -4433,15 +4419,12 @@ def send(
             body=body,
             artifact=resolved_artifact,
             reply_to="",
-            wait=wait,
             command_name="send",
         )
     except RuntimeError as exc:
         _fail(str(exc))
         return
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    if payload.get("delivery") == "failed":
-        sys.exit(2)
 
 
 @cli.command()
@@ -4454,11 +4437,6 @@ def send(
     default="",
     help="Override the auto-resolved msgId. Required when the latest inbound has already been replied to.",
 )
-@click.option(
-    "--wait",
-    is_flag=True,
-    help="Block up to 60s for target pane to render msgId; otherwise delivery=failed",
-)
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
 def reply(
@@ -4466,7 +4444,6 @@ def reply(
     body: str,
     artifact: str,
     reply_to_override: str,
-    wait: bool,
     to_option: str | None,
     msg_option: str | None,
 ):
@@ -4516,7 +4493,6 @@ def reply(
             body=body,
             artifact=resolved_artifact,
             reply_to=resolved_reply_to,
-            wait=wait,
             command_name="reply",
         )
     except RuntimeError as exc:
@@ -4524,35 +4500,6 @@ def reply(
         return
     if not reply_to_override:
         payload["autoReplyTo"] = resolved_reply_to
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    if payload.get("delivery") == "failed":
-        sys.exit(2)
-
-
-@cli.command()
-@click.argument("message_id")
-def delivery(message_id: str):
-    """Check delivery status of a sent message by ID.
-
-    Use after `hive send` returned `delivery=pending` or `failed` to
-    see the sidecar's tracking state and any observation events.
-
-    \b
-    Example:
-      hive delivery aBc1
-    """
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    ws = _resolve_workspace(t, required=True)
-    from .sidecar import request_delivery
-
-    _ensure_team_sidecar(t, ws)
-    payload = request_delivery(str(ws), message_id)
-    if not payload:
-        _fail("sidecar unavailable")
-    if payload.get("ok") is False:
-        _fail(str(payload.get("error", "delivery lookup failed")))
-    payload.pop("ok", None)
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

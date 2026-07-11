@@ -17,22 +17,12 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
 
 
 def _patch_ack(monkeypatch):
-    """Disable ACK resolution so tests don't need a real transcript.
-
-    Also collapses the send-grace window to 0 so the loop runs exactly
-    once instead of polling for 3s. The real `_observe_send_grace`
-    still executes — it hits the transcript check, runs the probe, and
-    captures its result — which keeps the regression surface intact
-    for tests that happen to route through a transcript-less fake
-    agent. Tests that genuinely exercise grace timing set up their own
-    ack/probe and don't call this helper.
-    """
+    """Disable ACK resolution so tests don't need a real transcript."""
     monkeypatch.setattr(
         "hive.sidecar._resolve_ack_baseline",
         lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
         raising=False,
     )
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
 
 
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
@@ -81,7 +71,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         body: str,
         artifact: str = "",
         reply_to: str = "",
-        wait: bool = False,
     ):
         from hive.sidecar import _send_payload
 
@@ -89,14 +78,12 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
             return _send_payload(
                 workspace=workspace,
                 team_name=team,
-                pending=pending,
                 sender_agent=sender_agent,
                 sender_pane=sender_pane,
                 target_agent=target_agent,
                 body=body,
                 artifact=artifact,
                 reply_to=reply_to,
-                wait=wait,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -161,15 +148,15 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     assert payload["to"] == "gpt"
     assert payload["artifact"] == artifact
     assert "summary" not in payload
-    assert payload["delivery"] == "pending"
+    assert "delivery" not in payload
     assert "injectStatus" not in payload
     assert "turnObserved" not in payload
     assert "followUp" not in payload
     assert len(sent) == 1
     assert payload["msgId"] == FIXED_ID
     assert sent == [f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
-    assert len(bus.read_all_events(workspace)) == 1
-    assert bus.read_all_events(workspace)[0]["intent"] == "send"
+    events = bus.read_all_events(workspace)
+    assert [e["intent"] for e in events] == ["send"]
 
 
 
@@ -221,7 +208,7 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["delivery"] != "deferred"
+    assert payload["msgId"]
     assert len(sent) == 1
     assert sent[0].startswith("<HIVE from=claude to=gpt ")
 
@@ -980,200 +967,6 @@ def test_notify_fails_outside_tmux(runner, monkeypatch):
 # --- ACK-specific tests ---
 
 
-def test_send_ack_confirmed(runner, configure_hive_home, monkeypatch, tmp_path):
-    """ACK returns confirmed when nonce appears in transcript."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    artifact = _write_artifact(tmp_path, "ack-confirmed.md")
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    sent: list[str] = []
-
-    class _FakeAgent:
-        pane_id = "%99"
-
-        def is_alive(self) -> bool:
-            return True
-
-        def send(self, text: str) -> None:
-            sent.append(text)
-            # Simulate CLI accepting input — write a user turn with the id.
-            transcript.write_text(
-                '{"type": "user", "message": {"role": "user", "content": "'
-                + f"id: {FIXED_ID}"
-                + '"}}\n'
-            )
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, name: str):
-            return _FakeAgent()
-
-    team = _FakeTeam()
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team)
-
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "success"
-    assert "followUp" not in payload
-
-
-def test_send_ack_unconfirmed_on_timeout(runner, configure_hive_home, monkeypatch, tmp_path):
-    """ACK returns unconfirmed when transcript never shows the nonce."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    artifact = _write_artifact(tmp_path, "ack-timeout.md")
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    class _FakeAgent:
-        pane_id = "%99"
-
-        def is_alive(self) -> bool:
-            return True
-
-        def send(self, text: str) -> None:
-            pass
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, name: str):
-            return _FakeAgent()
-
-    team = _FakeTeam()
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.sidecar._wait_for_delivery_confirmation", lambda **_kw: "")
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    # The test drives the unconfirmed branch via _wait_for_delivery_confirmation; we
-    # don't need the grace loop to wall-clock through its 3s before that runs.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
-    _patch_sidecar_requests(monkeypatch, team)
-
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
-
-    # delivery=failed exits 2 (P0-2: unix contract — exit 0 means success).
-    assert result.exit_code == 2
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "failed"
-    assert "followUp" not in payload
-
-
-def test_send_wait_confirms_via_stream_when_transcript_silent(runner, configure_hive_home, monkeypatch, tmp_path):
-    """--wait branch confirms via pane output stream when transcript never carries msgId."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-    bus.init_workspace(workspace)
-    artifact = _write_artifact(tmp_path, "stream-confirm.md")
-
-    class _FakeAgent:
-        pane_id = "%99"
-
-        def is_alive(self) -> bool:
-            return True
-
-        def send(self, text: str) -> None:
-            pass
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, name: str):
-            return _FakeAgent()
-
-    team = _FakeTeam()
-
-    class _FakeMonitor:
-        def saw_msg_id(self, pane_id: str, msg_id: str) -> bool:
-            return bool(pane_id) and bool(msg_id)
-
-        def is_busy(self, pane_id: str, *, threshold_seconds: float) -> bool:
-            return False
-
-    monkeypatch.setattr("hive.sidecar._OUTPUT_BUSY_MONITOR", _FakeMonitor(), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
-    _patch_sidecar_requests(monkeypatch, team)
-
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact, "--wait"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "success"
-
-
-def test_check_pending_confirms_via_stream_output():
-    """Background pending check accepts stream output as delivery confirmation."""
-    import time
-
-    from hive import sidecar
-
-    class _FakeMonitor:
-        def saw_msg_id(self, pane_id: str, msg_id: str) -> bool:
-            return pane_id == "%99" and msg_id == "abc1"
-
-    original = sidecar._OUTPUT_BUSY_MONITOR
-    sidecar._set_output_busy_monitor(_FakeMonitor())
-    try:
-        record: dict[str, object] = {
-            "msgId": "abc1",
-            "targetPane": "%99",
-            "targetTranscript": "",
-            "baseline": 0,
-            "queueProbeText": "",
-            "targetCli": "codex",
-            "deadlineAt": time.time() + 60.0,
-        }
-        result = sidecar._check_pending(record)
-        assert result == "success"
-        assert record.get("confirmationSource") == "stream"
-    finally:
-        sidecar._set_output_busy_monitor(original)
-
-
-def test_control_mode_monitor_saw_msg_id_via_parsed_payload():
-    """Monitor's rolling buffer captures payload substring for msgId lookups."""
-    from hive.tmux import ControlModeOutputMonitor, parse_control_mode_output
-
-    pane_id, payload = parse_control_mode_output("%output %99 <HIVE msgId=abc1 from=x to=y />")
-    assert pane_id == "%99"
-    assert "msgId=abc1" in payload
-
-    monitor = ControlModeOutputMonitor("dev")
-    monitor._append_output(pane_id, payload)
-    assert monitor.saw_msg_id("%99", "abc1") is True
-    assert monitor.saw_msg_id("%99", "zzzz") is False
-    assert monitor.saw_msg_id("%77", "abc1") is False
-
-
 def test_parse_control_mode_output_decodes_octal_escape():
     """Decode \\NNN sequences so all-digit msgIds don't false-match escape boundaries."""
     from hive.tmux import parse_control_mode_output
@@ -1230,55 +1023,8 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["delivery"] == "pending"
-    assert "injectStatus" not in payload
+    assert "delivery" not in payload
     assert "followUp" not in payload
-
-
-def test_send_async_pending_enqueues_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    artifact = _write_artifact(tmp_path, "async-pending.md")
-
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    class _FakeAgent:
-        pane_id = "%99"
-
-        def is_alive(self) -> bool:
-            return True
-
-        def send(self, text: str) -> None:
-            pass
-
-    class _FakeTeam:
-        def __init__(self):
-            self.workspace = str(workspace)
-            self.name = "team-x"
-            self.tmux_session = "dev"
-            self.tmux_window = "dev:0"
-
-        def get(self, name: str):
-            return _FakeAgent()
-
-    pending = {}
-    team = _FakeTeam()
-    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
-    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    # Nothing confirms during grace; collapse the 3s window so tests don't wait.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
-    _patch_sidecar_requests(monkeypatch, team, pending=pending)
-
-    result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "pending"
-    assert "followUp" not in payload
-    assert len(pending) == 1
 
 
 def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -1317,14 +1063,9 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
-    # delivery=failed exits 2 (P0-2: unix contract — exit 0 means success).
-    assert result.exit_code == 2
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "failed"
-    assert "injectStatus" not in payload
-    assert "turnObserved" not in payload
-    assert "observerPid" not in payload
-    assert "followUp" not in payload
+    # transport refusal surfaces as a standard operational failure
+    assert result.exit_code == 1
+    assert "transport refused" in result.output
 
 
 def test_send_help_explains_delivery_states(runner):
@@ -1332,16 +1073,9 @@ def test_send_help_explains_delivery_states(runner):
     help_text = " ".join(result.output.split())
 
     assert result.exit_code == 0
-    assert "success Target pane rendered the msgId" in help_text
-    assert "pending Submit OK; background tracking continues" in help_text
-    assert "failed Submit error OR msgId never rendered" in help_text
-    assert "`queued`" not in help_text
-    assert "`unconfirmed`" not in help_text
-    assert "`deferred`" not in help_text
-    assert "--force" not in help_text
-
-
-# --- Send gate tests ---
+    assert "Delivery is binary" in help_text
+    assert "queued" not in help_text
+    assert "pending" not in help_text
 
 
 def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
@@ -1382,10 +1116,8 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
-    monkeypatch.setattr("hive.sidecar._wait_for_delivery_confirmation", lambda **_kw: "")
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     # Gate tests only care about the gate projection; collapse the 3s grace loop.
-    monkeypatch.setattr("hive.sidecar.SEND_GRACE_TIMEOUT", 0.0)
     _patch_sidecar_requests(monkeypatch, team)
 
     return workspace, transcript, sent
@@ -1448,7 +1180,7 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["delivery"] == "pending"
+    assert "delivery" not in payload
     # gate field was removed — send still succeeds fail-open without a transcript.
     assert "gate" not in payload
     assert "injectStatus" not in payload
@@ -1486,11 +1218,7 @@ def _patch_send_failed(monkeypatch, workspace):
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr(
         "hive.cli._request_send_payload",
-        lambda **_kw: {
-            "to": "gpt",
-            "msgId": FIXED_ID,
-            "delivery": "failed",
-        },
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("transport refused gpt: no channel")),
     )
 
 
@@ -1501,7 +1229,7 @@ def test_answer_command_is_removed(runner):
     assert "No such command" in result.output
 
 
-def test_send_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_exits_nonzero_when_transport_refuses(runner, configure_hive_home, monkeypatch, tmp_path):
     """`hive send` must exit non-zero when delivery=failed so shell `&&` chains respect failure."""
     configure_hive_home()
     workspace = tmp_path / "ws"
@@ -1510,13 +1238,12 @@ def test_send_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home,
 
     result = runner.invoke(cli, ["send", "gpt", "please review"])
 
-    assert result.exit_code == 2, f"expected exit 2 on delivery=failed, got {result.exit_code}: {result.output}"
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "failed"
+    assert result.exit_code == 1, f"expected exit 1 on transport refusal, got {result.exit_code}: {result.output}"
+    assert "transport refused" in result.output
 
 
-def test_reply_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home, monkeypatch, tmp_path):
-    """`hive reply` must mirror `send` and exit non-zero on delivery=failed."""
+def test_reply_exits_nonzero_when_transport_refuses(runner, configure_hive_home, monkeypatch, tmp_path):
+    """`hive reply` must mirror `send` and exit non-zero on transport refusal."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1524,13 +1251,12 @@ def test_reply_exits_nonzero_when_delivery_is_failed(runner, configure_hive_home
     # reply needs an anchor msgId; pass one explicitly so auto-resolution isn't required
     result = runner.invoke(cli, ["reply", "gpt", "ack", "--reply-to", FIXED_ID])
 
-    assert result.exit_code == 2, f"expected exit 2 on delivery=failed, got {result.exit_code}: {result.output}"
-    payload = json.loads(result.output)
-    assert payload["delivery"] == "failed"
+    assert result.exit_code == 1, f"expected exit 1 on transport refusal, got {result.exit_code}: {result.output}"
+    assert "transport refused" in result.output
 
 
-def test_send_exits_zero_on_delivery_pending(runner, configure_hive_home, monkeypatch, tmp_path):
-    """delivery=pending is async-not-failure — must stay exit 0."""
+def test_send_exits_zero_on_accepted(runner, configure_hive_home, monkeypatch, tmp_path):
+    """An accepted send exits 0 with just the message identity."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1551,11 +1277,10 @@ def test_send_exits_zero_on_delivery_pending(runner, configure_hive_home, monkey
         lambda **_kw: {
             "to": "gpt",
             "msgId": FIXED_ID,
-            "delivery": "pending",
         },
     )
 
     result = runner.invoke(cli, ["send", "gpt", "hi"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["delivery"] == "pending"
+    assert "delivery" not in payload

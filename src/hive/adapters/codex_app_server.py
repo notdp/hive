@@ -49,6 +49,11 @@ from pathlib import Path
 
 _HANDSHAKE_TIMEOUT = 5.0
 _CALL_TIMEOUT = 10.0
+
+# Worst-case local submission budget for one send_to_pane call (fresh daemon
+# handshake plus the turn/start RPC). The sidecar derives its request budgets
+# from this so a valid slow acceptance can never outlive the caller's timeout.
+SUBMIT_TIMEOUT = _HANDSHAKE_TIMEOUT + _CALL_TIMEOUT
 _DAEMON_START_TIMEOUT = 8.0
 _CONNECT_COOLDOWN = 5.0
 _RESUME_COOLDOWN = 5.0
@@ -99,6 +104,10 @@ def _pane_from_socket_name(name: str) -> str | None:
 # --------------------------------------------------------------------------
 # transport: minimal RFC6455 client over a unix socket (text frames, masked)
 # --------------------------------------------------------------------------
+# Accepted-transport classification for durable delivery observations: the
+# per-pane daemon took the turn. Not proof the turn produced output.
+TURN_START_ACCEPTED = "turnStartAccepted"
+
 class _WSConn:
     def __init__(self, path: str, timeout: float = _HANDSHAKE_TIMEOUT):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -616,25 +625,31 @@ class CodexClientPool:
         """
         return self._client_for(pane) is not None
 
-    def send_to_pane(self, pane: str, text: str) -> bool:
+    def send_to_pane(self, pane: str, text: str) -> str | None:
         """Deliver text as a new turn over the pane's daemon.
 
-        Returns False (caller falls back to keystroke injection) only when the
-        pane has no usable daemon path — no daemon (embedded/manual codex) or no
-        thread yet. A *busy* thread is no longer bounced to the composer:
-        ``turn/start`` already carries steer semantics in core (it steers the
-        text into the running turn, or opens a fresh turn when idle), so hive
-        hands it straight to the RPC and lets codex pick the landing — the same
-        thing the codex TUI does for a typed message. Keystroke injection is
-        thereby reserved for embedded codex panes that never spawned a daemon.
+        Returns ``TURN_START_ACCEPTED`` when ``turn/start`` answered with a
+        result — the daemon accepted the turn, which is codex's transport
+        boundary (not proof the turn ran to completion). Returns ``None`` on
+        transport failure: no daemon (embedded/manual codex), no thread yet,
+        an RPC error response, or a connection failure. There is no keystroke
+        fallback — normal hive delivery never touches the composer. A *busy*
+        thread is not bounced: ``turn/start`` carries steer semantics in core
+        (it steers the text into the running turn, or opens a fresh turn when
+        idle), so hive hands it straight to the RPC and lets codex pick the
+        landing — the same thing the codex TUI does for a typed message.
         """
         client = self._client_for(pane)
         if client is None:
-            return False
+            return None
         tid = client.latest_thread_id()
         if not tid:
-            return False
-        return "result" in client.turn_start(tid, text)
+            return None
+        try:
+            response = client.turn_start(tid, text)
+        except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
+            return None
+        return TURN_START_ACCEPTED if "result" in response else None
 
     def compact_pane(self, pane: str) -> str:
         """Start context compaction over the pane's daemon.
@@ -725,7 +740,7 @@ def connect_pane(pane: str) -> bool:
     return pool().connect(pane)
 
 
-def send_to_pane(pane: str, text: str) -> bool:
+def send_to_pane(pane: str, text: str) -> str | None:
     return pool().send_to_pane(pane, text)
 
 

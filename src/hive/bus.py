@@ -328,6 +328,20 @@ def read_all_events(workspace: str | Path) -> list[dict[str, object]]:
     return [_row_to_event(row) for row in rows]
 
 
+def find_send_event(workspace: str | Path, message_id: str) -> dict[str, object] | None:
+    with _connect(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE intent = 'send' AND msg_id = ?
+            ORDER BY seq ASC
+            LIMIT 1
+            """,
+            (message_id,),
+        ).fetchone()
+    return _row_to_event(row) if row is not None else None
+
+
 def read_events_with_ns(workspace: str | Path) -> list[tuple[int, dict[str, object]]]:
     """Return sorted list of (monotonic sequence, event_data) tuples."""
     with _connect(workspace) as conn:
@@ -339,20 +353,6 @@ def count_events(workspace: str | Path) -> int:
     with _connect(workspace) as conn:
         row = conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
     return int(row["count"]) if row is not None else 0
-
-
-def find_send_event(workspace: str | Path, message_id: str) -> dict[str, object] | None:
-    with _connect(workspace) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM messages
-            WHERE msg_id = ? AND intent = 'send'
-            ORDER BY seq ASC
-            LIMIT 1
-            """,
-            (message_id,),
-        ).fetchone()
-    return _row_to_event(row) if row is not None else None
 
 
 def latest_inbound_send_event(
@@ -433,15 +433,3 @@ def has_send_reply_to(
     return row is not None
 
 
-def find_latest_observation(workspace: str | Path, message_id: str) -> dict[str, object] | None:
-    with _connect(workspace) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM messages
-            WHERE intent = 'observation' AND msg_id = ?
-            ORDER BY seq DESC
-            LIMIT 1
-            """,
-            (message_id,),
-        ).fetchone()
-    return _row_to_event(row) if row is not None else None

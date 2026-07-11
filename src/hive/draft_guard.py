@@ -1,9 +1,12 @@
-"""Protect user drafts when injecting Hive messages into TUI input boxes.
+"""Protect user drafts when injecting text into TUI input boxes.
 
-A Hive send that naively does `send-keys -l <msg>` + Enter concatenates
-whatever the user was typing with our message. This module saves the
-draft, clears the input box, lets the caller inject + submit, then
-pastes the draft back via bracketed paste so multi-line content does
+Normal Hive delivery never touches the composer — claude goes over its
+per-pane MCP channel and codex over its per-pane daemon RPC. This module
+only serves the retained keystroke surfaces (`hive inject` debugging and
+the `/compact` TUI control): a naive `send-keys -l <msg>` + Enter would
+concatenate whatever the user was typing with the injected text, so this
+saves the draft, clears the input box, lets the caller inject + submit,
+then pastes the draft back via bracketed paste so multi-line content does
 not trigger an accidental submit.
 
 Profiles differ in prompt glyph, baseline cursor_x, and clear-keys cost:

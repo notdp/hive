@@ -6,68 +6,6 @@ import pytest
 import hive.sidecar as sidecar
 
 
-def test_check_pending_keeps_followup_window_open_after_unconfirmed(monkeypatch, tmp_path):
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    now = 300.0
-    monkeypatch.setattr(sidecar.time, "time", lambda: now)
-
-    record = {
-        "msgId": "ab12",
-        "targetTranscript": str(transcript),
-        "targetPane": "%1",
-        "targetCli": "codex",
-        "baseline": 0,
-        "deadlineAt": now - 30,
-        "terminalNotifiedResult": "failed",
-        "terminalFollowupUntil": now + 5,
-    }
-
-    assert sidecar._check_pending(record) is None
-
-
-def test_check_pending_finalizes_after_followup_window_expires(monkeypatch, tmp_path):
-    transcript = tmp_path / "session.jsonl"
-    transcript.write_text("")
-
-    now = 400.0
-    monkeypatch.setattr(sidecar.time, "time", lambda: now)
-
-    record = {
-        "msgId": "ab12",
-        "targetTranscript": str(transcript),
-        "targetPane": "%1",
-        "targetCli": "codex",
-        "baseline": 0,
-        "deadlineAt": now - 30,
-        "terminalNotifiedResult": "failed",
-        "terminalFollowupUntil": now - 1,
-    }
-
-    assert sidecar._check_pending(record) == sidecar._FINALIZE_PENDING
-
-
-def test_inject_exception_uses_honest_failed_wording(monkeypatch):
-    sent: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(
-        sidecar,
-        "detect_profile_for_pane",
-        lambda _pane_id: type("Profile", (), {"name": "codex"})(),
-    )
-    monkeypatch.setattr(
-        "hive.agent._submit_interactive_text",
-        lambda pane_id, text, cli: sent.append((pane_id, text, cli)),
-    )
-
-    sidecar._inject_exception("%1", "ab12", "orch", "failed")
-
-    assert len(sent) == 1
-    assert "failed to deliver within" in sent[0][1]
-    assert "Retry only if duplicate delivery is acceptable." in sent[0][1]
-    assert sent[0][2] == "codex"
-
-
 def test_socket_alive_requires_matching_api_version(monkeypatch):
     monkeypatch.setattr(
         sidecar,
@@ -141,7 +79,6 @@ def test_handle_request_ping_returns_sidecar_identity():
         tmux_window="dev:3",
         tmux_window_id="@99",
         sidecar_started_at="2026-04-17T00:00:00Z",
-        pending={},
         request={"action": "ping"},
     )
 
@@ -172,7 +109,6 @@ def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
         tmux_window="dev:3",
         tmux_window_id="@99",
         sidecar_started_at="2026-04-17T00:00:00Z",
-        pending={},
         request={"action": "connect-codex", "pane": "%5"},
     )
 
@@ -244,25 +180,17 @@ def test_stale_disk_build_hash_requires_stable_changed_hash(monkeypatch):
     monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: next(values))
     state: dict[str, object] = {}
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert state["candidate_hash"] == "new-hash"
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9, pending_empty=True) is None
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0, pending_empty=True) == "new-hash"
-
-
-def test_stale_disk_build_hash_does_not_trigger_while_pending(monkeypatch):
-    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: "new-hash")
-    state: dict[str, object] = {}
-
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=False) is None
-    assert state == {}
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0) == "new-hash"
 
 
 def test_stale_disk_build_hash_clears_candidate_when_code_matches(monkeypatch):
     state: dict[str, object] = {"candidate_hash": "new-hash"}
     monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: sidecar.SIDECAR_BUILD_HASH)
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0, pending_empty=True) is None
+    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert "candidate_hash" not in state
 
 
@@ -450,3 +378,70 @@ def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypa
         ("cleanup", str(tmp_path)),
     ]
     assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+
+
+# --- request budgets (VAL fail-r1 finding 1) ---
+
+
+def test_send_request_budget_covers_native_submission():
+    """The CLI socket budget is strictly longer than the worst-case native
+    transport submission: a valid slow acceptance must never surface as
+    `sidecar unavailable`."""
+    from hive.adapters import claude_channel, codex_app_server
+
+    native = max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    assert sidecar._send_request_timeout() > native
+
+
+def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatch):
+    """A sidecar that answers after a native-budget-scale delay still gets its
+    truthful queued response back to the CLI (no duplicate-inviting None)."""
+    import os
+    import shutil
+    import socket as socket_mod
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    # AF_UNIX sun_path caps at ~104 bytes: the socket cannot live under
+    # pytest's long tmp_path, so use a short throwaway dir like production.
+    base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    run_dir = Path(tempfile.mkdtemp(prefix="hsq", dir=base))
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(sidecar, "_run_dir", lambda _ws: run_dir)
+
+    # shrink every budget component so the test runs in <1s while keeping the
+    # invariant shape: delay < derived budget
+    monkeypatch.setattr("hive.adapters.claude_channel.SUBMIT_TIMEOUT", 0.6)
+    monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
+    monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
+
+    srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+    srv.bind(str(run_dir / "sidecar.sock"))
+    srv.listen(1)
+
+    def _slow_reply():
+        conn, _ = srv.accept()
+        with conn:
+            while conn.recv(65536):
+                pass  # drain request until client half-closes
+            time.sleep(0.8)  # valid latency: within native budget, above old 5s-analogue
+            conn.sendall(b'{"ok": true, "msgId": "x1", "delivery": "queued"}\n')
+
+    threading.Thread(target=_slow_reply, daemon=True).start()
+    try:
+        response = sidecar.request_send(
+            str(workspace),
+            team="t",
+            sender_agent="a",
+            sender_pane="%1",
+            target_agent="b",
+            body="hello",
+        )
+    finally:
+        srv.close()
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    assert response is not None
+    assert response["delivery"] == "queued"

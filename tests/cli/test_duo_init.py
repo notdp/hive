@@ -8,7 +8,9 @@ from hive.cli import cli, _attach_duo_to_team as _real_attach_duo_to_team
 def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes=None):
     """Shared duo-init stubs: codex worker (openai family), claude validator.
 
-    Returns the list of (pane, text) captured from cli-layer tmux.send_keys —
+    Returns the list of (pane, text) captured from cli-layer tmux.send_keys
+    plus native Agent.send deliveries (adoption bootstrap goes over the
+    native transport now) —
     role injection into the current pane would show up here."""
     sent: list = []
     # configure_hive_home stubs _attach_duo_to_team; restore the real one so
@@ -45,6 +47,10 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _t: None)
     monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hive.agent.Agent.send",
+        lambda self, text: sent.append((self.pane_id, text)) or "mcpWriteAccepted",
+    )
     monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _ws: None)
     monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda _t: SimpleNamespace(orientation="horizontal"))
@@ -377,18 +383,42 @@ def test_unique_duo_window_name_appends_counter_on_collision(monkeypatch):
 
 def test_inject_role_bootstrap_sends_full_prompt_once(monkeypatch):
     """Adoption delivers the same bootstrap prompt as a spawn launch — exact
-    text from _role_bootstrap_prompt, one submit."""
+    text from _role_bootstrap_prompt, over the pane's native transport (no
+    keystrokes)."""
+    from types import SimpleNamespace
+
     import hive.cli as cli_mod
 
     sent: list = []
     keys: list = []
-    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: object())
-    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: sent.append((pane, text)))
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude"))
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: keys.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda pane, key: keys.append((pane, key)))
-    monkeypatch.setattr(cli_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        "hive.agent.Agent.send", lambda self, text: sent.append((self.pane_id, text)) or "mcpWriteAccepted"
+    )
     assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is True
     assert sent == [("%9", cli_mod._role_bootstrap_prompt("duo-validator"))]
-    assert keys == [("%9", "Enter")]
+    assert keys == []
+
+
+def test_inject_role_bootstrap_fails_when_transport_refuses(monkeypatch):
+    """A refused native transport returns False — never a keystroke fallback."""
+    from types import SimpleNamespace
+
+    import hive.cli as cli_mod
+    from hive.agent import DeliveryError
+
+    keys: list = []
+    monkeypatch.setattr(cli_mod, "detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude"))
+    monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: keys.append((pane, text)))
+
+    def _refuse(self, text):
+        raise DeliveryError("no channel")
+
+    monkeypatch.setattr("hive.agent.Agent.send", _refuse)
+    assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is False
+    assert keys == []
 
 
 def test_inject_role_bootstrap_noop_without_agent_profile(monkeypatch):
