@@ -17,14 +17,18 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "hive"
 _TMUX_ARGV = re.compile(r'''[\[(]\s*['"]tmux['"]\s*,''')
 
 
+def _scan(text: str) -> list[int]:
+    """Line numbers of tmux-argv matches in full text (multiline included)."""
+    return [text.count("\n", 0, m.start()) + 1 for m in _TMUX_ARGV.finditer(text)]
+
+
 def _offenders() -> list[str]:
     found = []
     for path in sorted(SRC.rglob("*.py")):
         if path.name == "tmux.py":
             continue
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if _TMUX_ARGV.search(line):
-                found.append(f"{path.relative_to(SRC)}:{lineno}: {line.strip()[:80]}")
+        for lineno in _scan(path.read_text()):
+            found.append(f"{path.relative_to(SRC)}:{lineno}")
     return found
 
 
@@ -36,9 +40,12 @@ def test_only_the_facade_builds_tmux_argv():
     'subprocess.run(["tmux", "display-message"])',
     "cmd = ['tmux', 'display-popup']",
     'result = _run(  [ "tmux" , "ls"])',
+    # multiline argv is the common formatter shape; must hit the same
+    # scanner path as the tree walk (validator r1)
+    'result = subprocess.run(\n    [\n        "tmux",\n        "ls",\n    ]\n)',
 ])
 def test_scan_rejects_argv_shapes(snippet):
-    assert _TMUX_ARGV.search(snippet)
+    assert _scan(snippet), snippet
 
 
 @pytest.mark.parametrize("snippet", [
@@ -48,4 +55,9 @@ def test_scan_rejects_argv_shapes(snippet):
     'payload.get("tmux") == "unknown"',     # lookup
 ])
 def test_scan_ignores_non_argv_uses(snippet):
-    assert not _TMUX_ARGV.search(snippet)
+    assert not _scan(snippet)
+
+
+def test_scan_reports_correct_line_number():
+    text = 'x = 1\ny = subprocess.run(\n    ["tmux",\n     "ls"])\n'
+    assert _scan(text) == [3]
