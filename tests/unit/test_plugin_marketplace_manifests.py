@@ -112,3 +112,26 @@ def test_canonical_skill_is_regular_and_symlinks_resolve_to_it():
 
 def test_skill_sync_canonical_bytes_match_canonical_file():
     assert skill_sync._canonical_hive_skill_bytes() == CANONICAL_SKILL.read_bytes()
+
+
+# --- bootstrap hook (invisible-update contract) ------------------------------
+
+HOOKS_FILE = REPO / "plugins" / "hive" / "hooks" / "hooks.json"
+
+
+def test_both_hive_manifests_declare_the_hooks_file():
+    for manifest in (HIVE_CC, HIVE_CODEX):
+        rel = _load(manifest)["hooks"]
+        assert rel.startswith("./"), manifest
+        assert (manifest.parent.parent / rel).resolve() == HOOKS_FILE.resolve()
+
+
+def test_bootstrap_hook_runs_script_via_plugin_root():
+    data = _load(HOOKS_FILE)
+    groups = data["hooks"]["SessionStart"]
+    commands = [h["command"] for g in groups for h in g["hooks"]]
+    assert any("${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py" in c for c in commands)
+    raw = HOOKS_FILE.read_text()
+    for needle in ["/Users/", "/private/", str(REPO)]:
+        assert needle not in raw, needle
+    assert (REPO / "plugins" / "hive" / "scripts" / "bootstrap.py").is_file()
