@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
+
+from hive import tmux
 
 
 POPUP_CODE = r"""
@@ -155,14 +156,7 @@ sys.stdout.flush()
 
 
 def tmux_value(target: str, fmt: str) -> str:
-    result = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", target, fmt],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=2,
-    )
-    return result.stdout.strip()
+    return tmux.display_value(target, fmt) or ""
 
 
 pane = os.environ.get("HIVE_NOTIFY_PANE", "").strip()
@@ -192,22 +186,7 @@ y = "#{popup_pane_top}"
 agent = tmux_value(pane, "#{@hive-agent}") or "target"
 window_target = tmux_value(pane, "#{session_name}:#{window_index}") or ""
 
-cmd = ["tmux", "display-popup"]
-if client:
-    cmd.extend(["-c", client])
-cmd.extend([
-    "-t",
-    pane,
-    "-B",
-    "-x",
-    x,
-    "-y",
-    y,
-    "-w",
-    str(popup_w),
-    "-h",
-    str(popup_h),
-    "-E",
+payload = (
     "HIVE_NOTIFY_AGENT="
     + shlex.quote(agent)
     + " HIVE_NOTIFY_WINDOW="
@@ -216,10 +195,20 @@ cmd.extend([
     + shlex.quote(pane)
     + " python3 - <<'PYPOPUP'\n"
     + POPUP_CODE
-    + "\nPYPOPUP",
-])
+    + "\nPYPOPUP"
+)
 
-subprocess.run(cmd, check=False, timeout=5)
+tmux.display_popup(
+    pane,
+    payload,
+    client=client,
+    x=x,
+    y=y,
+    width=str(popup_w),
+    height=str(popup_h),
+    borderless=True,
+    close_on_exit=True,
+)
 '''
 
 
@@ -243,7 +232,7 @@ cleanup() {{
 trap cleanup EXIT
 
 tmux set-option -p -t "$QP" @{PANE_NOTIFY_ACTIVE_KEY} "$TOKEN" >/dev/null 2>&1 || true
-HIVE_NOTIFY_PANE="$QP" HIVE_NOTIFY_CLIENT="$CLIENT" python3 <<'PY'
+HIVE_NOTIFY_PANE="$QP" HIVE_NOTIFY_CLIENT="$CLIENT" {shlex.quote(sys.executable)} <<'PY'
 {_PANE_ATTENTION_PYTHON}
 PY
 

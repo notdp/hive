@@ -529,3 +529,82 @@ def test_team_window_scan_parses_pr_and_tolerates_short_lines(monkeypatch):
     assert windows[0]["pr"] == "52"
     assert windows[1]["pr"] == ""
     assert windows[1]["team"] == "0-w9"
+
+
+# --- facade-hygiene helpers (exact command contracts) -------------------------
+
+def _capture_run(monkeypatch, rc=0, out=""):
+    calls = []
+
+    def _fake_run(args, check=True, timeout=5):
+        calls.append((list(args), check, timeout))
+        return subprocess.CompletedProcess(["tmux", *args], rc, out, "")
+
+    monkeypatch.setattr("hive.tmux._run", _fake_run)
+    return calls
+
+
+def _raising_run(monkeypatch, exc):
+    def _boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr("hive.tmux._run", _boom)
+
+
+def test_window_exists_requires_exact_id_echo(monkeypatch):
+    calls = _capture_run(monkeypatch, out="@7\n")
+    assert tmux.window_exists("@7") is True
+    assert calls == [(["display-message", "-t", "@7", "-p", "#{window_id}"], False, 5)]
+
+
+def test_window_exists_false_paths(monkeypatch):
+    assert tmux.window_exists("") is False  # no subprocess for empty id
+    _capture_run(monkeypatch, out="@8\n")
+    assert tmux.window_exists("@7") is False  # mismatched id
+    _capture_run(monkeypatch, rc=1, out="@7\n")
+    assert tmux.window_exists("@7") is False  # nonzero exit
+    _raising_run(monkeypatch, FileNotFoundError("no tmux"))
+    assert tmux.window_exists("@7") is False  # missing binary never raises
+
+
+def test_display_popup_preserves_argv_order_and_never_raises(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    tmux.display_popup(
+        "%5", "run-me", client="/dev/ttys001", x="#{popup_pane_left}",
+        y="#{popup_pane_top}", width="40", height="20",
+        borderless=True, close_on_exit=True)
+    assert calls == [([
+        "display-popup", "-c", "/dev/ttys001", "-t", "%5", "-B",
+        "-x", "#{popup_pane_left}", "-y", "#{popup_pane_top}",
+        "-w", "40", "-h", "20", "-E", "run-me",
+    ], False, 5)]
+    _raising_run(monkeypatch, FileNotFoundError("no tmux"))
+    tmux.display_popup("%5", "run-me")  # non-raising
+
+
+def test_display_popup_omits_optional_flags(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    tmux.display_popup("%5", "run-me")
+    assert calls == [(["display-popup", "-t", "%5", "run-me"], False, 5)]
+
+
+def test_run_shell_detached_passes_command_byte_for_byte(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    cmd = "sleep 0.2 && tmux send-keys -t '%9' Escape"
+    tmux.run_shell_detached(cmd)
+    assert calls == [(["run-shell", "-b", cmd], False, 5)]
+
+
+def test_source_file_bool_contract(monkeypatch):
+    calls = _capture_run(monkeypatch)
+    assert tmux.source_file("/x/enable.conf") is True
+    assert calls == [(["source-file", "/x/enable.conf"], False, 5)]
+    _capture_run(monkeypatch, rc=1)
+    assert tmux.source_file("/x/enable.conf") is False
+    _raising_run(monkeypatch, FileNotFoundError("no tmux"))
+    assert tmux.source_file("/x/enable.conf") is False
+
+
+def test_display_value_none_on_failure(monkeypatch):
+    _capture_run(monkeypatch, rc=1, out="")
+    assert tmux.display_value("%5", "#{pane_left}") is None

@@ -1602,21 +1602,9 @@ def _thread_payload(workspace: str, message_id: str) -> dict[str, Any]:
 
 
 def _is_tmux_window_alive(tmux_window_id: str) -> bool:
-    import subprocess
+    from . import tmux
 
-    if not tmux_window_id:
-        return False
-    try:
-        result = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_window_id, "-p", "#{window_id}"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        return result.returncode == 0 and result.stdout.strip() == tmux_window_id
-    except Exception:
-        return False
+    return tmux.window_exists(tmux_window_id)
 
 
 def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int | None:

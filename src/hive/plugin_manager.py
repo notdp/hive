@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import core_hooks
+from . import tmux
 
 
 @dataclass
@@ -156,14 +157,7 @@ def _materialize_installed_commands(install_dir: Path) -> list[Path]:
 def _source_tmux_conf(conf: Path) -> bool:
     if not conf.is_file():
         return False
-    try:
-        subprocess.run(
-            ["tmux", "source-file", str(conf)],
-            capture_output=True, check=True, timeout=5,
-        )
-        return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+    return tmux.source_file(str(conf))
 
 
 def _install_tmux_bindings(install_dir: Path) -> bool:
