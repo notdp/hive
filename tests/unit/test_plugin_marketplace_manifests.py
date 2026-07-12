@@ -94,13 +94,15 @@ def test_no_machine_paths_in_any_manifest():
             assert needle not in raw, f"{path}: {needle}"
 
 
-def test_plugin_versions_are_semver_and_dual_manifests_agree():
-    hive_cc = _load(HIVE_CC)["version"]
-    hive_codex = _load(HIVE_CODEX)["version"]
-    channel = _load(CHANNEL_CC)["version"]
-    assert hive_cc == hive_codex
-    for version in (hive_cc, channel):
-        assert SEMVER.match(version), version
+def test_plugin_versions_track_the_cli_version():
+    # single version concept (human directive): every published plugin
+    # manifest carries the pyproject version, so a CLI bump ships plugins too
+    import tomllib
+
+    cli_version = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
+    assert SEMVER.match(cli_version), cli_version
+    for manifest in (HIVE_CC, HIVE_CODEX, CHANNEL_CC):
+        assert _load(manifest)["version"] == cli_version, manifest
 
 
 def test_canonical_skill_is_regular_and_symlinks_resolve_to_it():
