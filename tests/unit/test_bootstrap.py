@@ -170,6 +170,10 @@ def test_old_hive_shadowed_binary_fails_closed_zero_install():
     json.dumps({"venvs": {}}),
     json.dumps({"venvs": {"hive": {"metadata": {}}}}),
     json.dumps({"venvs": {"hive": {"metadata": {"main_package": {"app_paths": [42]}}}}}),
+    # dict iterates by keys: a key equal to the active realpath must not
+    # authorize a force install (validator r1)
+    json.dumps({"venvs": {"hive": {"metadata": {"main_package": {"app_paths": {PIPX_BIN: 42}}}}}}),
+    json.dumps({"venvs": {"hive": {"metadata": {"main_package": {"app_paths": PIPX_BIN}}}}}),
 ])
 def test_old_hive_unprovable_ownership_fails_closed(pipx_out):
     runner = runner_for([

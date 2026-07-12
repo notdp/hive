@@ -92,6 +92,12 @@ def _pipx_app_paths(runner=subprocess.run) -> list[str]:
             "cannot determine pipx ownership of `hive` (pipx list --json is "
             "malformed or has no hive venv); reinstall manually: "
             f"pipx install --force {REPO_URL}")
+    if not isinstance(raw_paths, list):
+        # a dict iterates by keys and a str by chars -- both are unknown
+        # schemas that must never authorize a force install
+        raise BootstrapError(
+            "unrecognized app_paths shape in pipx list --json; reinstall "
+            f"manually: pipx install --force {REPO_URL}")
     paths: list[str] = []
     for entry in raw_paths:
         if isinstance(entry, str):
