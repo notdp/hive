@@ -10,7 +10,7 @@ _This README is maintained in English. Translations may lag behind the canonical
 
 Hive is a runtime for agents, not a CLI you drive by hand. Day-to-day work — sending messages, replying on threads, handing off tasks, tracking delivery — happens inside the agent session, and your agent runs the commands. The main day-to-day entry point for humans is `/hive`, which loads the Hive skill into your agent so it can bootstrap the team.
 
-A small set of commands is still yours: installing plugins, checking skill drift, the popup editor (`hive cvim` / `hive vim`), and local dev setup.
+A small set of commands is still yours: installing plugins, the popup editor (`hive cvim` / `hive vim`), and local dev setup.
 
 ## Install
 
@@ -61,7 +61,6 @@ hive plugin enable notify --plain # sidecar idle watcher toggle (manual `hive no
 hive plugin list --plain          # human-readable listing (default output is JSON)
 
 # Diagnostics
-hive doctor --skills              # check for hive skill drift after upgrades
 
 # Popup editor (tmux 3.2+)
 hive cvim                         # tmux popup editor

@@ -197,23 +197,29 @@ def test_send_to_pane_fails_on_refused_connect():
     assert cc.send_to_pane(pane, "msg") is None
 
 
-# --- prepare_pane (plugin marketplace registration) -------------------------
+# --- prepare_pane (published marketplace convergence) ------------------------
 
 class _FakeClaudePlugin:
     """Dispatcher for `claude plugin ...` argv: records calls, serves
     `marketplace list --json`, returns rc=0 for everything else."""
 
-    def __init__(self, marketplaces=None, fail_step=None, timeout_step=None):
+    def __init__(self, marketplaces=None, list_stdout=None, list_rc=0,
+                 fail_step=None, timeout_step=None, launch_fail=False):
         self.calls: list[list[str]] = []
-        self.marketplaces = marketplaces
-        self.fail_step = fail_step
+        self.marketplaces = [] if marketplaces is None else marketplaces
+        self.list_stdout = list_stdout
+        self.list_rc = list_rc
+        self.fail_step = fail_step        # e.g. "install", "add"
         self.timeout_step = timeout_step
+        self.launch_fail = launch_fail
 
     def __call__(self, argv, capture_output=True, text=True, timeout=None):
         assert argv[:2] == ["claude", "plugin"]
         assert timeout is not None  # bounded subprocess calls, always
-        step = argv[2]
+        step = argv[3] if argv[2] == "marketplace" else argv[2]
         self.calls.append(argv[2:])
+        if self.launch_fail:
+            raise OSError("claude binary missing")
         if self.timeout_step == step:
             raise subprocess.TimeoutExpired(argv, timeout)
 
@@ -223,12 +229,10 @@ class _FakeClaudePlugin:
             stderr = ""
 
         r = _R()
-        if step == "marketplace" and "list" in argv:
-            entries = self.marketplaces
-            if entries is None:
-                entries = [{"name": "hive", "source": "directory",
-                            "path": str(cc.marketplace_dir())}]
-            r.stdout = json.dumps(entries)
+        if step == "list":
+            r.returncode = self.list_rc
+            r.stdout = (self.list_stdout if self.list_stdout is not None
+                        else json.dumps(self.marketplaces))
         if self.fail_step == step:
             r.returncode = 1
             r.stderr = "boom"
@@ -239,100 +243,7 @@ def _patch_plugin_cmd(monkeypatch, fake):
     monkeypatch.setattr(cc.subprocess, "run", fake)
 
 
-def test_prepare_pane_writes_plugin_assets_and_returns_channel_flags(
-        _hive_home, tmp_path, monkeypatch):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
-    flags = cc.prepare_pane(str(tmp_path))
-
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
-
-    market = json.loads(
-        (cc.marketplace_dir() / ".claude-plugin" / "marketplace.json").read_text())
-    assert market["name"] == "hive"
-    assert market["plugins"][0]["name"] == "hive-channel"
-    assert market["plugins"][0]["source"] == "./hive-channel"
-
-    plugin = json.loads(
-        (cc.marketplace_dir() / "hive-channel" / ".claude-plugin" / "plugin.json"
-         ).read_text())
-    assert plugin["channels"] == [{"server": "hive-channel"}]
-    entry = plugin["mcpServers"]["hive-channel"]
-    assert entry["type"] == "stdio"
-    assert entry["command"] == sys.executable
-    assert entry["args"] == ["-m", "hive.adapters.claude_channel_server"]
-    assert entry["env"]["HIVE_HOME"] == str(_hive_home)
-    assert "PYTHONPATH" in entry["env"]
-    assert plugin["version"] == cc._plugin_version(entry)
-
-
-def test_prepare_pane_converges_via_add_install_update(_hive_home, tmp_path, monkeypatch):
-    fake = _FakeClaudePlugin()
-    _patch_plugin_cmd(monkeypatch, fake)
-    cc.prepare_pane(str(tmp_path))
-    steps = [c[0] if c[0] != "marketplace" else " ".join(c[:2]) for c in fake.calls]
-    assert steps == ["marketplace list", "marketplace add", "install", "update"]
-    add = next(c for c in fake.calls if c[:2] == ["marketplace", "add"])
-    assert add[2] == os.path.realpath(str(cc.marketplace_dir()))
-
-
-def test_prepare_pane_never_touches_the_project_directory(tmp_path, monkeypatch):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
-    before = set(os.listdir(tmp_path))
-    cc.prepare_pane(str(tmp_path))
-    assert set(os.listdir(tmp_path)) == before  # no .mcp.json, nothing
-
-
-def test_prepare_pane_is_idempotent(_hive_home, tmp_path, monkeypatch):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
-    first = cc.prepare_pane(str(tmp_path))
-    version1 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
-                           / "plugin.json").read_text())["version"]
-    second = cc.prepare_pane(str(tmp_path))
-    version2 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
-                           / "plugin.json").read_text())["version"]
-    assert first == second
-    assert version1 == version2  # unchanged content -> stable version, no churn
-
-
-def test_prepare_pane_content_drift_bumps_plugin_version(_hive_home, tmp_path, monkeypatch):
-    fake = _FakeClaudePlugin()
-    _patch_plugin_cmd(monkeypatch, fake)
-    flags1 = cc.prepare_pane(str(tmp_path))
-    v1 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
-                     / "plugin.json").read_text())["version"]
-    monkeypatch.setattr(cc, "_child_pythonpath", lambda: "/different/import/root")
-    flags2 = cc.prepare_pane(str(tmp_path))
-    v2 = json.loads((cc.marketplace_dir() / "hive-channel" / ".claude-plugin"
-                     / "plugin.json").read_text())["version"]
-    assert v1 != v2  # drifted server entry -> new version for `plugin update`
-    assert flags1 == flags2  # flags stay stable across drift
-    assert ["update", "hive-channel@hive"] in fake.calls
-
-
-def test_prepare_pane_fails_empty_on_plugin_command_failure(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin(fail_step="install"))
-    assert cc.prepare_pane(str(tmp_path)) == []
-    assert "install" in capsys.readouterr().err
-
-
-def test_prepare_pane_fails_empty_on_plugin_command_timeout(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin(timeout_step="install"))
-    assert cc.prepare_pane(str(tmp_path)) == []
-    assert "will not receive hive messages" in capsys.readouterr().err
-
-
-def test_prepare_pane_fails_loudly_on_foreign_marketplace_name(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "github", "repo": "someone-else/hive"}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    assert cc.prepare_pane(str(tmp_path)) == []
-    err = capsys.readouterr().err
-    assert "someone-else/hive" in err  # names the conflicting binding
-    # nothing was added/installed over the foreign binding
-    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
+_PUBLISHED = [{"name": "hive", "source": "github", "repo": "notdp/hive"}]
 
 
 def _published_config(monkeypatch, tmp_path, installed=True):
@@ -344,26 +255,100 @@ def _published_config(monkeypatch, tmp_path, installed=True):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
 
 
+def _no_mutations(fake):
+    return all(c[0] != "install" and c[0] != "update"
+               and c[:2] != ["marketplace", "add"]
+               and c[:2] != ["marketplace", "remove"] for c in fake.calls)
+
+
+# -- uninspectable binding: zero mutation (VAL-2.1) --
+
+@pytest.mark.parametrize("fake_kwargs", [
+    {"launch_fail": True},                 # claude binary missing
+    {"timeout_step": "list"},              # list timeout
+    {"list_rc": 1},                        # nonzero exit
+    {"list_stdout": "not json"},           # malformed JSON
+    {"list_stdout": json.dumps({"x": 1})}, # unknown top-level shape
+])
+def test_prepare_pane_uninspectable_list_fails_closed(
+        _hive_home, tmp_path, monkeypatch, capsys, fake_kwargs):
+    _published_config(monkeypatch, tmp_path, installed=True)
+    fake = _FakeClaudePlugin(**fake_kwargs)
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert capsys.readouterr().err  # loud
+    assert _no_mutations(fake)
+    assert not (cc._channel_dir() / "marketplace").exists()
+
+
+# -- inspected absence: one-time marketplace self-heal (VAL-2.2) --
+
+def test_prepare_pane_absent_binding_adds_published_marketplace(
+        _hive_home, tmp_path, monkeypatch):
+    _published_config(monkeypatch, tmp_path, installed=False)
+    fake = _FakeClaudePlugin(marketplaces=[])
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags = cc.prepare_pane(str(tmp_path))
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert fake.calls == [
+        ["marketplace", "list", "--json"],
+        ["marketplace", "add", "notdp/hive"],
+        ["install", "hive-channel@hive"],
+    ]
+
+
+def test_prepare_pane_add_failure_stops_before_install(
+        _hive_home, tmp_path, monkeypatch, capsys):
+    _published_config(monkeypatch, tmp_path, installed=False)
+    fake = _FakeClaudePlugin(marketplaces=[], fail_step="add")
+    _patch_plugin_cmd(monkeypatch, fake)
+    assert cc.prepare_pane(str(tmp_path)) == []
+    assert "add" in capsys.readouterr().err
+    assert all(c[0] != "install" for c in fake.calls)
+
+
+def test_prepare_pane_never_touches_the_project_directory(tmp_path, monkeypatch, _hive_home):
+    _published_config(monkeypatch, tmp_path / "cfg-root", installed=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    before = set(os.listdir(project))
+    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin(marketplaces=[]))
+    cc.prepare_pane(str(project))
+    assert set(os.listdir(project)) == before  # no .mcp.json, nothing
+
+
+# -- published binding: file-read fast path (VAL-2.3/2.4/2.6) --
+
 def test_prepare_pane_published_binding_installed_is_subprocess_free(
         _hive_home, tmp_path, monkeypatch):
     # freshness belongs to auto-update / the bootstrap hook: an installed
     # plugin costs one marketplace-list probe, never install/update (a
     # github-marketplace `plugin update` git-fetches and cost 5-10s/launch)
     _published_config(monkeypatch, tmp_path, installed=True)
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "github", "repo": "notdp/hive"}])
+    fake = _FakeClaudePlugin(marketplaces=_PUBLISHED)
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
     assert flags == ["--channels", "plugin:hive-channel@hive"]
-    assert not cc.marketplace_dir().exists()  # no local asset generation
     assert fake.calls == [["marketplace", "list", "--json"]]
+    assert not (cc._channel_dir() / "marketplace").exists()
+
+
+def test_prepare_pane_converged_repeat_stays_on_fast_path(
+        _hive_home, tmp_path, monkeypatch):
+    _published_config(monkeypatch, tmp_path, installed=True)
+    fake = _FakeClaudePlugin(marketplaces=_PUBLISHED)
+    _patch_plugin_cmd(monkeypatch, fake)
+    first = cc.prepare_pane(str(tmp_path))
+    second = cc.prepare_pane(str(tmp_path))
+    assert first == second == ["--channels", "plugin:hive-channel@hive"]
+    assert fake.calls == [["marketplace", "list", "--json"]] * 2
+    assert not (cc._channel_dir() / "marketplace").exists()
 
 
 def test_prepare_pane_published_binding_missing_plugin_self_heals_once(
         _hive_home, tmp_path, monkeypatch):
     _published_config(monkeypatch, tmp_path, installed=False)
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "github", "repo": "notdp/hive"}])
+    fake = _FakeClaudePlugin(marketplaces=_PUBLISHED)
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
     assert flags == ["--channels", "plugin:hive-channel@hive"]
@@ -372,109 +357,32 @@ def test_prepare_pane_published_binding_missing_plugin_self_heals_once(
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
-def test_prepare_pane_rejects_non_github_source_with_published_location(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    # identity is source AND repo: a url-source binding whose location parses
-    # to notdp/hive is still foreign -- fail closed, zero mutation
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "url", "repo": "notdp/hive"}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    assert cc.prepare_pane(str(tmp_path)) == []
-    assert "foreign" in capsys.readouterr().err
-    mutations = {"install", "update"}
-    assert all(c[0] not in mutations for c in fake.calls)
-    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
-
-
 def test_prepare_pane_published_binding_fails_empty_on_install_failure(
         _hive_home, tmp_path, monkeypatch, capsys):
     _published_config(monkeypatch, tmp_path, installed=False)
-    fake = _FakeClaudePlugin(
-        marketplaces=[{"name": "hive", "source": "github", "repo": "notdp/hive"}],
-        fail_step="install")
+    fake = _FakeClaudePlugin(marketplaces=_PUBLISHED, fail_step="install")
     _patch_plugin_cmd(monkeypatch, fake)
     assert cc.prepare_pane(str(tmp_path)) == []
     assert "install" in capsys.readouterr().err
 
 
-def test_prepare_pane_fails_on_live_foreign_directory_binding(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    # a directory marketplace named 'hive' that is NOT hive's own layout
-    foreign = tmp_path / "foreign-market"
-    (foreign / ".claude-plugin").mkdir(parents=True)
-    (foreign / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
-        {"name": "hive", "owner": {"name": "someone-else"}, "plugins": []}))
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "directory", "path": str(foreign)}])
+# -- foreign occupants: fail loudly, zero mutation (VAL-2.5) --
+
+@pytest.mark.parametrize("binding", [
+    {"name": "hive", "source": "github", "repo": "someone-else/hive"},
+    {"name": "hive", "source": "url", "repo": "notdp/hive"},   # exact-identity lookalike
+    {"name": "hive", "source": "directory", "path": "/anywhere/marketplace"},  # legacy is foreign now
+])
+def test_prepare_pane_foreign_occupant_fails_closed(
+        _hive_home, tmp_path, monkeypatch, capsys, binding):
+    _published_config(monkeypatch, tmp_path, installed=True)
+    fake = _FakeClaudePlugin(marketplaces=[binding])
     _patch_plugin_cmd(monkeypatch, fake)
     assert cc.prepare_pane(str(tmp_path)) == []
-    assert str(foreign) in capsys.readouterr().err
-    assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
-
-
-def test_prepare_pane_repoints_dead_path_binding(_hive_home, tmp_path, monkeypatch):
-    # hive's own binding left at a dead path (previous HIVE_HOME): remove it,
-    # then converge at the current location
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "directory",
-         "path": "/tmp/gone-hive-home/channel/marketplace"}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    flags = cc.prepare_pane(str(tmp_path))
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
-    steps = [" ".join(c[:2]) if c[0] == "marketplace" else c[0] for c in fake.calls]
-    assert steps == ["marketplace list", "marketplace remove",
-                     "marketplace add", "install", "update"]
-
-
-def test_prepare_pane_repoints_stale_binding_with_hive_manifest(
-        _hive_home, tmp_path, monkeypatch):
-    # a LIVE stale path is re-pointable only when its manifest proves hive
-    stale = tmp_path / "old-hive-home" / "channel" / "marketplace"
-    (stale / ".claude-plugin").mkdir(parents=True)
-    (stale / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
-        {"name": "hive", "owner": {"name": "hive"}, "plugins": []}))
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "directory", "path": str(stale)}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    flags = cc.prepare_pane(str(tmp_path))
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
-    assert ["marketplace", "remove", "hive"] in fake.calls
-
-
-def test_prepare_pane_fails_on_live_binding_without_manifest(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    # a live directory with no manifest cannot be proven hive's: never clobber
-    mystery = tmp_path / "mystery-market"
-    mystery.mkdir()
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "directory", "path": str(mystery)}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    assert cc.prepare_pane(str(tmp_path)) == []
-    assert str(mystery) in capsys.readouterr().err
-    assert all(c[0] != "install" and c[:2] != ["marketplace", "remove"]
-               and c[:2] != ["marketplace", "add"] for c in fake.calls)
-
-
-def test_prepare_pane_fails_on_live_binding_with_invalid_manifest(
-        _hive_home, tmp_path, monkeypatch, capsys):
-    broken = tmp_path / "broken-market"
-    (broken / ".claude-plugin").mkdir(parents=True)
-    (broken / ".claude-plugin" / "marketplace.json").write_text("{not json")
-    fake = _FakeClaudePlugin(marketplaces=[
-        {"name": "hive", "source": "directory", "path": str(broken)}])
-    _patch_plugin_cmd(monkeypatch, fake)
-    assert cc.prepare_pane(str(tmp_path)) == []
-    assert str(broken) in capsys.readouterr().err
-    assert all(c[0] != "install" and c[:2] != ["marketplace", "remove"]
-               and c[:2] != ["marketplace", "add"] for c in fake.calls)
-
-
-def test_prepare_pane_returns_empty_when_assets_unwritable(
-        _hive_home, tmp_path, monkeypatch):
-    _patch_plugin_cmd(monkeypatch, _FakeClaudePlugin())
-    # occupy the channel dir path with a plain file so mkdir/write fails
-    (_hive_home / "channel").write_text("not a directory")
-    assert cc.prepare_pane(str(tmp_path)) == []
+    err = capsys.readouterr().err
+    assert "foreign" in err
+    assert "marketplace remove hive" in err and "marketplace add notdp/hive" in err
+    assert _no_mutations(fake)
 
 
 def test_prepare_pane_fails_without_managed_allowlist(

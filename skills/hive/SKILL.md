@@ -1,1 +1,0 @@
-../../plugins/hive/skills/hive/SKILL.md

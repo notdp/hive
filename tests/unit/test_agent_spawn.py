@@ -40,7 +40,6 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _profile: False)
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
-    monkeypatch.setattr("hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda *_args, **_kwargs: None)
     # Default: no per-pane codex daemon, so tests never attempt a real socket
     # bind. Tests that exercise the --remote path override this explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
@@ -798,19 +797,14 @@ def test_wait_codex_thread_ready_timeout_is_deterministic_and_nonfatal(monkeypat
     )
     assert agent_mod._wait_codex_thread_ready("%9", timeout=0, interval=0) is False
 
-    # spawn survives a readiness timeout and still warns about skill drift once
+    # spawn survives a readiness timeout and still completes
     _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
     monkeypatch.setattr("hive.agent._wait_codex_thread_ready", lambda _p: False)
-    warns: list[str] = []
-    monkeypatch.setattr(
-        "hive.agent.skill_sync.maybe_warn_hive_skill_drift", lambda cli: warns.append(cli)
-    )
 
     a = Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
                     cli="codex", skill="hive")
     assert a.pane_id == "%0"
-    assert warns == ["codex"]
 
 
 def test_spawn_codex_embedded_fork_keeps_banner_wait(monkeypatch):

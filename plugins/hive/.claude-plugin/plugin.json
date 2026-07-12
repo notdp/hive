@@ -5,6 +5,5 @@
   "author": {
     "name": "notdp",
     "url": "https://github.com/notdp"
-  },
-  "hooks": "./hooks/hooks.json"
+  }
 }

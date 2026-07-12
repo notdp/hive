@@ -11,9 +11,9 @@ raises as :class:`hive.agent.DeliveryError` (the sidecar projects it to
 ``injectStatus=failed``); an accepted classification maps to the durable
 ``queued`` delivery state until the target's transcript confirms the turn.
 
-Channel registration: hive owns a plugin marketplace under
-``$HIVE_HOME/channel/marketplace`` whose single plugin declares this MCP
-server plus a ``channels`` entry; panes launch with plain
+Channel registration: the published github marketplace (``notdp/hive``)
+ships the ``hive-channel`` plugin declaring this MCP server plus a
+``channels`` entry; panes launch with plain
 ``--channels plugin:hive-channel@hive``. No project file is ever touched and
 no consent dialog appears -- but ONLY when the machine's managed settings
 allowlist the plugin (``allowedChannelPlugins``). Claude enforces that
@@ -32,7 +32,6 @@ import re
 import socket
 import subprocess
 import sys
-import zlib
 from pathlib import Path
 
 SERVER_NAME = "hive-channel"
@@ -115,67 +114,6 @@ def marker_version(pane: str) -> str:
         return ""
 
 
-# --- spawn-time config ------------------------------------------------------
-
-def _hive_import_root() -> str:
-    """Directory to put on the child's PYTHONPATH so the spawned MCP server
-    imports the *same* hive as this process (source lane vs installed)."""
-    import hive
-    return str(Path(hive.__file__).resolve().parent.parent)
-
-
-def _child_pythonpath() -> str:
-    root = _hive_import_root()
-    current = os.environ.get("PYTHONPATH", "")
-    return root + (os.pathsep + current if current else "")
-
-
-def _server_entry() -> dict:
-    return {
-        "type": "stdio",  # canonical Claude Code MCP server shape
-        "command": sys.executable,
-        "args": ["-m", "hive.adapters.claude_channel_server"],
-        "env": {"HIVE_HOME": str(_hive_home()), "PYTHONPATH": _child_pythonpath()},
-    }
-
-
-def marketplace_dir() -> Path:
-    return _channel_dir() / "marketplace"
-
-
-def _plugin_version(entry: dict) -> str:
-    """Deterministic version derived from the server entry: content drift
-    (different python, hive import root, HIVE_HOME) yields a new version, so
-    ``claude plugin update`` installs it; unchanged content is a no-op."""
-    digest = zlib.crc32(json.dumps(entry, sort_keys=True).encode("utf-8"))
-    return f"0.1.{digest}"
-
-
-def _write_plugin_assets() -> None:
-    entry = _server_entry()
-    root = marketplace_dir()
-    description = "hive per-pane message channel for Claude panes"
-    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-    plugin_meta = root / SERVER_NAME / ".claude-plugin"
-    plugin_meta.mkdir(parents=True, exist_ok=True)
-    (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps({
-        "name": MARKETPLACE_NAME,
-        "owner": {"name": "hive"},
-        "plugins": [{
-            "name": SERVER_NAME,
-            "source": f"./{SERVER_NAME}",
-            "description": description,
-        }],
-    }, indent=2) + "\n")
-    (plugin_meta / "plugin.json").write_text(json.dumps({
-        "name": SERVER_NAME,
-        "description": description,
-        "version": _plugin_version(entry),
-        "mcpServers": {SERVER_NAME: entry},
-        "channels": [{"server": SERVER_NAME}],
-    }, indent=2) + "\n")
-
-
 def _unavailable(reason: str) -> list[str]:
     sys.stderr.write(
         f"[hive-channel] {reason}. "
@@ -234,38 +172,32 @@ def _channel_allowlisted() -> bool:
     return False
 
 
-def _is_hive_marketplace(location: str) -> bool:
-    """Whether a directory binding at ``location`` is provably hive's own
-    (re-pointable after a HIVE_HOME move). A dead path serves nothing and is
-    safe to re-point; a live one must carry a readable manifest naming hive
-    as owner -- anything unprovable is foreign and never clobbered."""
-    root = Path(location)
-    if not root.exists():
-        return True
-    try:
-        data = json.loads(
-            (root / ".claude-plugin" / "marketplace.json").read_text())
-    except (OSError, ValueError):
-        return False
-    return data.get("owner", {}).get("name") == "hive"
+class _MarketplaceUninspectable(Exception):
+    """The marketplace list could not be read; absence is NOT established."""
 
 
 def _marketplace_binding() -> tuple[str, str] | None:
-    """``(source, path_or_repo)`` currently bound to hive's marketplace name,
-    or ``None`` if the name is free or cannot be inspected.
+    """``(source, path_or_repo)`` bound to hive's marketplace name.
 
-    A ``directory`` binding is the legacy locally-generated marketplace
-    (possibly at a stale path if HIVE_HOME moved -- callers re-point it). A
-    github binding at ``PUBLISHED_REPO`` is the published hive marketplace.
-    Anything else under that name is a third party we must not overwrite.
+    ``None`` means the list was successfully inspected and has no ``hive``
+    entry -- only that state may authorize registering the published
+    marketplace. Launch failure, nonzero exit, malformed JSON, or an unknown
+    top-level shape raise ``_MarketplaceUninspectable``: an uninspectable
+    binding must never authorize any mutation.
     """
     out = _claude_plugin("marketplace", "list", "--json")
     if out is None or out.returncode != 0:
-        return None
+        raise _MarketplaceUninspectable(
+            "`claude plugin marketplace list` failed; cannot establish the "
+            f"'{MARKETPLACE_NAME}' marketplace binding")
     try:
         entries = json.loads(out.stdout)
     except ValueError:
-        return None
+        raise _MarketplaceUninspectable(
+            "`claude plugin marketplace list --json` returned malformed JSON")
+    if not isinstance(entries, list):
+        raise _MarketplaceUninspectable(
+            "`claude plugin marketplace list --json` returned an unknown shape")
     for e in entries:
         if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME:
             return str(e.get("source") or ""), str(e.get("path") or e.get("repo") or "")
@@ -290,30 +222,30 @@ def _installed_plugin_refs() -> set[str] | None:
         return None
 
 
+def _step_failed(step: tuple[str, ...], out) -> list[str]:
+    detail = ((out.stderr or out.stdout).strip()[-300:]
+              if out is not None else "launch failure or timeout")
+    return _unavailable(f"`claude plugin {' '.join(step)}` failed: {detail}")
+
+
 def prepare_pane(cwd: str) -> list[str]:
     """Converge the hive channel plugin and return Claude launch flags.
 
-    When the ``hive`` marketplace name is bound to the published github
-    marketplace (``PUBLISHED_REPO``), presence of the installed plugin is
-    checked via a local file read (freshness belongs to Claude's auto-update
-    and the plugin's bootstrap hook, never the launch path) and only a
-    missing plugin pays a one-time ``install``. Otherwise the
-    legacy hive-owned marketplace under ``$HIVE_HOME/channel/marketplace`` is
-    used: assets are (re)written, then ``claude plugin marketplace add`` /
-    ``install`` / ``update`` run -- each a cheap no-op when already current,
-    so the sequence is idempotent and self-recovers after a removed
-    marketplace or plugin. A ``directory``-source ``hive`` marketplace left at
-    a stale path (HIVE_HOME moved) is re-pointed to the current one. No
-    project file is created or modified in any cwd. Returns ``[]`` when the
-    channel cannot be converged (asset write failure, a foreign source
-    occupying the ``hive`` name, or a failed/timed-out plugin command); the
-    caller must treat that as channel-unavailable and fail loudly.
+    The published github marketplace (``PUBLISHED_REPO``) is the only
+    registration path. A successfully-inspected list with no ``hive`` entry
+    self-heals with a one-time ``marketplace add``; any other occupant of the
+    name -- including legacy ``directory`` bindings -- fails loudly with a
+    remove+add remediation. Plugin presence is a local file read (freshness
+    belongs to Claude's startup auto-update and the bootstrap hook, never the
+    launch path); only a missing plugin pays a one-time ``install``. Returns
+    ``[]`` when the channel cannot be converged; the caller must treat that
+    as channel-unavailable and fail loudly.
 
     ``--channels`` is variadic in Claude's CLI parser: a positional prompt
     directly after it is consumed as a flag value; a positional must be
     separated with ``--``.
     """
-    del cwd  # location-independent: the marketplace lives under $HIVE_HOME
+    del cwd  # location-independent
     if not _channel_allowlisted():
         return _unavailable(
             "the hive channel plugin is not on this machine's managed "
@@ -321,61 +253,32 @@ def prepare_pane(cwd: str) -> list[str]:
             "skip channel notifications). One-time setup:\n  "
             + _ALLOWLIST_SETUP_HINT)
 
-    binding = _marketplace_binding()
-    if binding is not None and binding[0] != "directory":
+    try:
+        binding = _marketplace_binding()
+    except _MarketplaceUninspectable as e:
+        return _unavailable(str(e))
+    if binding is None:
+        step = ("marketplace", "add", PUBLISHED_REPO)
+        out = _claude_plugin(*step)
+        if out is None or out.returncode != 0:
+            return _step_failed(step, out)
+    else:
         source, location = binding
-        # the published identity is exact: github AND notdp/hive -- a url/npm
-        # source whose location parses to the same string is still foreign
+        # the published identity is exact: github AND notdp/hive -- anything
+        # else (url/npm lookalikes, legacy directory bindings) is foreign
         if source != "github" or location != PUBLISHED_REPO:
             return _unavailable(
                 f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
                 f"{source} source ({location}); run `claude plugin "
-                f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
-        # The published marketplace owns the name. Freshness is owned by
-        # Claude's startup auto-update and the plugin's bootstrap hook -- the
-        # launch path must not update (`plugin update` git-fetches the
-        # marketplace and cost 5-10s per launch). Presence is a local file
-        # read; only a missing plugin pays a one-time self-heal install.
-        if _PLUGIN_REF in (_installed_plugin_refs() or ()):
-            return ["--channels", PLUGIN_SPEC]
-        out = _claude_plugin("install", _PLUGIN_REF)
-        if out is None or out.returncode != 0:
-            detail = ((out.stderr or out.stdout).strip()[-300:]
-                      if out is not None else "launch failure or timeout")
-            return _unavailable(f"`claude plugin install {_PLUGIN_REF}` failed: {detail}")
+                f"marketplace remove {MARKETPLACE_NAME}` then `claude plugin "
+                f"marketplace add {PUBLISHED_REPO}`")
+
+    if _PLUGIN_REF in (_installed_plugin_refs() or ()):
         return ["--channels", PLUGIN_SPEC]
-
-    # Legacy locally-generated marketplace (retires once the published
-    # marketplace is the only registration path).
-    try:
-        _write_plugin_assets()
-    except OSError as e:
-        return _unavailable(f"cannot write plugin assets under {marketplace_dir()}: {e}")
-
-    ours = os.path.realpath(str(marketplace_dir()))
-    steps: list[tuple[str, ...]] = [
-        ("marketplace", "add", ours),
-        ("install", _PLUGIN_REF),
-        ("update", _PLUGIN_REF),
-    ]
-    if binding is not None:
-        _source, location = binding
-        stale = os.path.realpath(location) != ours
-        if stale and not _is_hive_marketplace(location):
-            return _unavailable(
-                f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
-                f"directory source ({location}); run `claude plugin "
-                f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
-        if stale:
-            # hive's own binding at a stale path (HIVE_HOME moved) -> re-point
-            steps.insert(0, ("marketplace", "remove", MARKETPLACE_NAME))
-
-    for step in steps:
-        out = _claude_plugin(*step)
-        if out is None or out.returncode != 0:
-            detail = ((out.stderr or out.stdout).strip()[-300:]
-                      if out is not None else "launch failure or timeout")
-            return _unavailable(f"`claude plugin {' '.join(step)}` failed: {detail}")
+    step = ("install", _PLUGIN_REF)
+    out = _claude_plugin(*step)
+    if out is None or out.returncode != 0:
+        return _step_failed(step, out)
     return ["--channels", PLUGIN_SPEC]
 
 

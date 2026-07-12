@@ -2,8 +2,7 @@
 
 These lock the executable contract of the plugin distribution foundation:
 portable channel command, no machine-specific paths, dual-manifest version
-consistency, and the canonical-skill symlink shape that skill_sync and wheel
-packaging depend on.
+consistency, and the plugin-owned canonical skill.
 """
 import json
 import re
@@ -11,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from hive import skill_sync
 from hive.adapters import claude_channel
 
 pytestmark = pytest.mark.unit
@@ -26,10 +24,6 @@ CHANNEL_CC = REPO / "plugins" / "hive-channel" / ".claude-plugin" / "plugin.json
 ALL_MANIFESTS = [CC_MARKETPLACE, CODEX_MARKETPLACE, HIVE_CC, HIVE_CODEX, CHANNEL_CC]
 
 CANONICAL_SKILL = REPO / "plugins" / "hive" / "skills" / "hive" / "SKILL.md"
-SKILL_SYMLINKS = [
-    REPO / "skills" / "hive" / "SKILL.md",
-    REPO / "src" / "hive" / "core_assets" / "skills" / "hive" / "SKILL.md",
-]
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -105,15 +99,11 @@ def test_plugin_versions_track_the_cli_version():
         assert _load(manifest)["version"] == cli_version, manifest
 
 
-def test_canonical_skill_is_regular_and_symlinks_resolve_to_it():
+def test_canonical_skill_is_the_only_shipped_copy():
     assert CANONICAL_SKILL.is_file() and not CANONICAL_SKILL.is_symlink()
-    for link in SKILL_SYMLINKS:
-        assert link.is_symlink(), link
-        assert link.resolve() == CANONICAL_SKILL.resolve(), link
-
-
-def test_skill_sync_canonical_bytes_match_canonical_file():
-    assert skill_sync._canonical_hive_skill_bytes() == CANONICAL_SKILL.read_bytes()
+    # the npx-era copies are retired: the plugin owns the single source
+    assert not (REPO / "skills").exists()
+    assert not (REPO / "src" / "hive" / "core_assets" / "skills").exists()
 
 
 # --- bootstrap hook (invisible-update contract) ------------------------------
@@ -121,11 +111,14 @@ def test_skill_sync_canonical_bytes_match_canonical_file():
 HOOKS_FILE = REPO / "plugins" / "hive" / "hooks" / "hooks.json"
 
 
-def test_both_hive_manifests_declare_the_hooks_file():
-    for manifest in (HIVE_CC, HIVE_CODEX):
-        rel = _load(manifest)["hooks"]
-        assert rel.startswith("./"), manifest
-        assert (manifest.parent.parent / rel).resolve() == HOOKS_FILE.resolve()
+def test_hooks_declarations_are_asymmetric_by_design():
+    # Claude auto-loads hooks/hooks.json; an explicit manifest entry makes it
+    # load twice ("Duplicate hooks file detected"). Codex needs the explicit
+    # reference. So: absent on the Claude side, declared on the Codex side.
+    assert "hooks" not in _load(HIVE_CC)
+    rel = _load(HIVE_CODEX)["hooks"]
+    assert rel.startswith("./")
+    assert (HIVE_CODEX.parent.parent / rel).resolve() == HOOKS_FILE.resolve()
 
 
 def test_bootstrap_hook_runs_script_via_plugin_root():
