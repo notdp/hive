@@ -1,6 +1,6 @@
 {
   "name": "hive-channel",
-  "version": "0.1.0",
+  "version": "0.9.5",
   "description": "hive per-pane message channel for Claude panes (transport only).",
   "author": {
     "name": "notdp",
@@ -10,7 +10,10 @@
     "hive-channel": {
       "type": "stdio",
       "command": "hive",
-      "args": ["claude", "channel-server"]
+      "args": [
+        "claude",
+        "channel-server"
+      ]
     }
   },
   "channels": [

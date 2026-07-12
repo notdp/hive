@@ -14,12 +14,23 @@ A small set of commands is still yours: installing plugins, checking skill drift
 
 ## Install
 
-```bash
-# Hive CLI
-pipx install git+https://github.com/notdp/hive.git
+The repo itself is a plugin marketplace for both CLIs. Installing the plugins is enough: a session-start hook bootstraps the rest (installs or upgrades the hive CLI via pipx, enables the marketplace's auto-update).
 
-# Hive skill, for Claude Code / Codex
-npx skills add https://github.com/notdp/hive -g --all
+```bash
+# Claude Code
+claude plugin marketplace add notdp/hive
+claude plugin install hive@hive
+claude plugin install hive-channel@hive
+
+# Codex
+codex plugin marketplace add https://github.com/notdp/hive.git
+codex plugin add hive@hive
+```
+
+To install the CLI up front instead of waiting for the hook:
+
+```bash
+pipx install git+https://github.com/notdp/hive.git
 ```
 
 Requires:
@@ -78,12 +89,15 @@ Everything else — `hive send`, `hive reply`, `hive team`, `hive doctor <agent>
 
 ## Upgrade
 
+Plugins upgrade themselves: Claude Code auto-updates the marketplace at startup (the bootstrap hook enables this), and codex tracks the git ref. Plugin manifest versions follow the CLI version, so a CLI release ships plugin updates with it.
+
+The CLI upgrades via the same hook, or manually:
+
 ```bash
-pipx upgrade hive           # upgrade the CLI
-npx skills update hive -g   # upgrade the skill (GitHub-sourced installs only)
+pipx install --force git+https://github.com/notdp/hive.git
 ```
 
-The CLI and the skill upgrade separately. Upgrading the CLI does not refresh the skill. When the skill is stale, `hive` commands run from an agent pane warn on stderr and continue, and `hive doctor --skills` shows the mismatch.
+(`pipx upgrade` misreports VCS installs as up-to-date when the version number is unchanged — use `--force`.)
 
 For local checkout development, keep source-under-test separate from the live install — see the contributor section below.
 
