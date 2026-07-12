@@ -642,6 +642,63 @@ def display_value(target: str, fmt: str) -> str | None:
     return r.stdout.strip() or None
 
 
+def window_exists(window_id: str) -> bool:
+    """True only when tmux resolves ``window_id`` to itself.
+
+    Never raises: a missing tmux binary, timeout, nonzero exit, or mismatched
+    id all mean "not alive" to callers making reap decisions.
+    """
+    if not window_id:
+        return False
+    try:
+        r = _run(["display-message", "-t", window_id, "-p", "#{window_id}"], check=False)
+    except OSError:
+        return False
+    return r.returncode == 0 and r.stdout.strip() == window_id
+
+
+def display_popup(target: str, shell_command: str, *, client: str = "",
+                  x: str = "", y: str = "", width: str = "", height: str = "",
+                  borderless: bool = False, close_on_exit: bool = False,
+                  timeout: int = 5) -> None:
+    """Open a popup over ``target`` running ``shell_command``. Never raises."""
+    args = ["display-popup"]
+    if client:
+        args += ["-c", client]
+    args += ["-t", target]
+    if borderless:
+        args.append("-B")
+    if x:
+        args += ["-x", x]
+    if y:
+        args += ["-y", y]
+    if width:
+        args += ["-w", width]
+    if height:
+        args += ["-h", height]
+    if close_on_exit:
+        args.append("-E")
+    args.append(shell_command)
+    try:
+        _run(args, check=False, timeout=timeout)
+    except OSError:
+        pass
+
+
+def run_shell_detached(command: str) -> None:
+    """``run-shell -b <command>``: the shell string is passed byte-for-byte."""
+    _run(["run-shell", "-b", command], check=False)
+
+
+def source_file(path: str) -> bool:
+    """Source a tmux conf; False on missing tmux, timeout, or nonzero exit."""
+    try:
+        r = _run(["source-file", path], check=False)
+    except OSError:
+        return False
+    return r.returncode == 0
+
+
 def get_most_recent_client_tty(session_name: str | None = None) -> str | None:
     rows = _list_terminal_clients(session_name)
     return rows[0][2] if rows else None

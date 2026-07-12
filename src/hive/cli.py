@@ -4700,10 +4700,7 @@ def _exec_fork_split(split: str, args: tuple[str, ...]) -> None:
         start_new_session=True,
     )
     if reply_pane:
-        subprocess.run(
-            ["tmux", "run-shell", "-b", f"sleep 0.2 && tmux send-keys -t {shlex.quote(reply_pane)} Escape"],
-            check=False,
-        )
+        tmux.run_shell_detached(f"sleep 0.2 && tmux send-keys -t {shlex.quote(reply_pane)} Escape")
 
 
 @cli.command("vfork", context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})

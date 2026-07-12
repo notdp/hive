@@ -333,3 +333,41 @@ def test_pane_attention_animation_timing_is_fast():
         assert "sleep 0.18" in script.read_text()
     finally:
         script.unlink(missing_ok=True)
+
+
+def test_pane_attention_script_executes_via_facade(tmp_path):
+    # the embedded script now imports hive.tmux, so it must run end-to-end
+    # under an interpreter that has the package (sys.executable contract)
+    import os
+    import subprocess
+    import sys
+
+    repo_src = Path(__file__).resolve().parents[2] / "src"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "tmux.log"
+    fake = bin_dir / "tmux"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {log}\n"
+        "case \"$*\" in\n"
+        "  *pane_left*) echo '1 2 40 20' ;;\n"
+        "  *) echo 'stub' ;;\n"
+        "esac\n")
+    fake.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYTHONPATH"] = str(repo_src)
+    env["HIVE_NOTIFY_PANE"] = "%7"
+    env["HIVE_NOTIFY_CLIENT"] = ""
+
+    result = subprocess.run(
+        [sys.executable, "-c", notify_ui._PANE_ATTENTION_PYTHON],
+        env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr[-300:]
+    entries = log.read_text().splitlines()
+    popup = [e for e in entries if e.startswith("display-popup")]
+    assert len(popup) == 1
+    assert " -B " in popup[0] and " -E " in popup[0]
+    assert "PYPOPUP" in popup[0]  # inner animation heredoc still delivered
