@@ -335,18 +335,40 @@ def test_prepare_pane_fails_loudly_on_foreign_marketplace_name(
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
-def test_prepare_pane_accepts_published_marketplace_binding(
+def _published_config(monkeypatch, tmp_path, installed=True):
+    cfg = tmp_path / "claude-cfg"
+    (cfg / "plugins").mkdir(parents=True)
+    if installed:
+        (cfg / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"hive-channel@hive": [{"scope": "user"}]}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+
+def test_prepare_pane_published_binding_installed_is_subprocess_free(
         _hive_home, tmp_path, monkeypatch):
-    # the published github marketplace owns the name: converge install/update
-    # against it, write no local assets, never add the local directory
+    # freshness belongs to auto-update / the bootstrap hook: an installed
+    # plugin costs one marketplace-list probe, never install/update (a
+    # github-marketplace `plugin update` git-fetches and cost 5-10s/launch)
+    _published_config(monkeypatch, tmp_path, installed=True)
     fake = _FakeClaudePlugin(marketplaces=[
         {"name": "hive", "source": "github", "repo": "notdp/hive"}])
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
     assert flags == ["--channels", "plugin:hive-channel@hive"]
     assert not cc.marketplace_dir().exists()  # no local asset generation
-    steps = [c[0] for c in fake.calls]
-    assert "install" in steps and "update" in steps
+    assert fake.calls == [["marketplace", "list", "--json"]]
+
+
+def test_prepare_pane_published_binding_missing_plugin_self_heals_once(
+        _hive_home, tmp_path, monkeypatch):
+    _published_config(monkeypatch, tmp_path, installed=False)
+    fake = _FakeClaudePlugin(marketplaces=[
+        {"name": "hive", "source": "github", "repo": "notdp/hive"}])
+    _patch_plugin_cmd(monkeypatch, fake)
+    flags = cc.prepare_pane(str(tmp_path))
+    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert ["install", "hive-channel@hive"] in fake.calls
+    assert all(c[0] != "update" for c in fake.calls)
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)
 
 
@@ -366,6 +388,7 @@ def test_prepare_pane_rejects_non_github_source_with_published_location(
 
 def test_prepare_pane_published_binding_fails_empty_on_install_failure(
         _hive_home, tmp_path, monkeypatch, capsys):
+    _published_config(monkeypatch, tmp_path, installed=False)
     fake = _FakeClaudePlugin(
         marketplaces=[{"name": "hive", "source": "github", "repo": "notdp/hive"}],
         fail_step="install")

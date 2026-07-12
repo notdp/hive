@@ -272,12 +272,32 @@ def _marketplace_binding() -> tuple[str, str] | None:
     return None
 
 
+def _installed_plugin_refs() -> set[str] | None:
+    """Plugin refs from installed_plugins.json, ``None`` if uninspectable.
+
+    A local file read keeps the published-branch launch path free of
+    subprocesses; any unreadable or unknown shape falls back to the
+    self-heal install rather than guessing.
+    """
+    root = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    try:
+        data = json.loads((Path(root) / "plugins" / "installed_plugins.json").read_text())
+        plugins = data["plugins"]
+        if not isinstance(plugins, dict):
+            return None
+        return set(plugins)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def prepare_pane(cwd: str) -> list[str]:
     """Converge the hive channel plugin and return Claude launch flags.
 
     When the ``hive`` marketplace name is bound to the published github
-    marketplace (``PUBLISHED_REPO``), the plugin is converged against it with
-    ``install`` / ``update`` and no local assets are written. Otherwise the
+    marketplace (``PUBLISHED_REPO``), presence of the installed plugin is
+    checked via a local file read (freshness belongs to Claude's auto-update
+    and the plugin's bootstrap hook, never the launch path) and only a
+    missing plugin pays a one-time ``install``. Otherwise the
     legacy hive-owned marketplace under ``$HIVE_HOME/channel/marketplace`` is
     used: assets are (re)written, then ``claude plugin marketplace add`` /
     ``install`` / ``update`` run -- each a cheap no-op when already current,
@@ -311,14 +331,18 @@ def prepare_pane(cwd: str) -> list[str]:
                 f"marketplace name '{MARKETPLACE_NAME}' is bound to a foreign "
                 f"{source} source ({location}); run `claude plugin "
                 f"marketplace remove {MARKETPLACE_NAME}` if that is not hive's")
-        # The published marketplace owns the name: converge the plugin
-        # against it and skip local asset generation entirely.
-        for step in (("install", _PLUGIN_REF), ("update", _PLUGIN_REF)):
-            out = _claude_plugin(*step)
-            if out is None or out.returncode != 0:
-                detail = ((out.stderr or out.stdout).strip()[-300:]
-                          if out is not None else "launch failure or timeout")
-                return _unavailable(f"`claude plugin {' '.join(step)}` failed: {detail}")
+        # The published marketplace owns the name. Freshness is owned by
+        # Claude's startup auto-update and the plugin's bootstrap hook -- the
+        # launch path must not update (`plugin update` git-fetches the
+        # marketplace and cost 5-10s per launch). Presence is a local file
+        # read; only a missing plugin pays a one-time self-heal install.
+        if _PLUGIN_REF in (_installed_plugin_refs() or ()):
+            return ["--channels", PLUGIN_SPEC]
+        out = _claude_plugin("install", _PLUGIN_REF)
+        if out is None or out.returncode != 0:
+            detail = ((out.stderr or out.stdout).strip()[-300:]
+                      if out is not None else "launch failure or timeout")
+            return _unavailable(f"`claude plugin install {_PLUGIN_REF}` failed: {detail}")
         return ["--channels", PLUGIN_SPEC]
 
     # Legacy locally-generated marketplace (retires once the published
