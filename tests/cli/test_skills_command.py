@@ -36,20 +36,6 @@ def test_skills_get_unknown_lists_available(runner):
     assert "core" in result.output  # error names the available specs
 
 
-def test_skills_get_bypasses_stale_skill_gate(runner, monkeypatch):
-    """`skills get` is the recovery/bootstrap path — it must serve specs even
-    when the installed stub is stale, otherwise the stub→`skills get core`
-    handoff would deadlock behind the drift gate."""
-    monkeypatch.setattr(
-        "hive.cli.skill_sync.diagnose_hive_skill",
-        lambda *_args, **_kwargs: {"state": "stale"},
-    )
-    monkeypatch.setattr("hive.cli._current_pane_agent_cli", lambda: "claude")
-    result = runner.invoke(cli, ["skills", "get", "core"])
-    assert result.exit_code == 0, result.output
-    assert result.output.strip()
-
-
 def test_skills_get_serves_role_specs(runner):
     """Role content lives in CLI-served specs now (no per-role SKILL.md). Every
     role a spawn dispatches `hive skills get <role>` for must be fetchable."""

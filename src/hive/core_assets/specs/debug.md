@@ -4,7 +4,7 @@
 
 ## Debug / 排障
 
-- `hive doctor [agent] [--skills]` — agent 连通性 / 本地 skill drift
+- `hive doctor [agent]` — agent 连通性
 - `hive thread <msgId>` — 某条消息的 reply / observation 串联
 - `hive capture / inject / interrupt / kill` — 低层 pane 操作
 

@@ -22,7 +22,6 @@ from . import context as hive_context
 from . import squad_names
 from . import notify_ui
 from . import plugin_manager
-from . import skill_sync
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent, _submit_interactive_text
 from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
@@ -635,21 +634,6 @@ def _tmux_runtime_required(argv: list[str]) -> bool:
     return positional[0] not in _TMUX_OPTIONAL_ROOT_COMMANDS
 
 
-def _current_pane_agent_cli() -> str:
-    if not tmux.is_inside_tmux():
-        return ""
-    pane_id = tmux.get_current_pane_id() or ""
-    if not pane_id:
-        return ""
-    option_cli = normalize_command(tmux.get_pane_option(pane_id, "hive-cli") or "")
-    if option_cli in AGENT_CLI_NAMES:
-        return option_cli
-    profile = detect_profile_for_pane(pane_id)
-    if profile:
-        return profile.name
-    return ""
-
-
 def _resolve_spawn_cli_name(cli_name: str | None) -> str:
     if cli_name in AGENT_CLI_NAMES:
         return cli_name
@@ -701,9 +685,6 @@ def _stderr_is_interactive() -> bool:
     return sys.stderr.isatty()
 
 
-# Subcommands that must skip skill drift checks entirely because they are the
-# recovery/diagnostic paths or own their own environment setup.
-_SKILL_DRIFT_BYPASS_COMMANDS = {"doctor", "plugin", "shell-init", "codex", "claude", "skills"}
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "claude",
     "codex",
@@ -748,14 +729,6 @@ def _require_codex_native(invoked: str | None) -> None:
     _fail(_codex_relaunch_message())
 
 
-def _warn_if_current_pane_hive_skill_is_stale(invoked: str | None) -> None:
-    """Keep transport commands running even when the installed hive skill drifts."""
-    if invoked in _SKILL_DRIFT_BYPASS_COMMANDS:
-        return
-    cli_name = _current_pane_agent_cli()
-    if not cli_name:
-        return
-    skill_sync.maybe_warn_hive_skill_drift(cli_name)
 
 
 def _hive_version() -> str:
@@ -784,7 +757,6 @@ def cli(ctx: click.Context):
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         return
     _require_codex_native(ctx.invoked_subcommand)
-    _warn_if_current_pane_hive_skill_is_stale(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         _fail(_TMUX_REQUIRED_MESSAGE)
 
@@ -4532,23 +4504,17 @@ def thread(message_id: str):
 
 @cli.command()
 @click.argument("agent_name", required=False, default="")
-@click.option("--skills", "include_skills", is_flag=True, help="Include local hive skill installation diagnostics for the target CLI.")
-def doctor(agent_name: str, include_skills: bool):
+def doctor(agent_name: str):
     """Diagnose agent connectivity and session state.
 
     With no argument, probes yourself. With an agent name, probes that
     peer — pane liveness, transcript readability, sidecar heartbeat,
-    runtime input state. `--skills` adds local `hive` skill installation
-    diagnostics (version, path, drift vs. shipped SKILL.md) for the
-    target CLI; useful after `pipx upgrade hive` when agents start
-    warning about stale skills.
+    runtime input state.
 
     \b
     Examples:
       hive doctor                  # probe self
       hive doctor dodo             # probe a peer
-      hive doctor --skills         # check for hive skill drift on self's CLI
-      hive doctor dodo --skills
     """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
@@ -4570,8 +4536,6 @@ def doctor(agent_name: str, include_skills: bool):
     dupes = duplicate_team_bindings()
     if dupes:
         payload["duplicateTeams"] = dupes
-    if include_skills:
-        payload["skills"] = skill_sync.diagnose_hive_skill(_resolve_member_cli_name(t, target_name))
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from . import draft_guard
-from . import skill_sync
 from . import tmux
 from .agent_cli import resolve_session_id_for_pane
 
@@ -398,9 +397,6 @@ class Agent:
         elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             time.sleep(1)
 
-        # Skill + user prompt were embedded in the [prompt] arg above.
-        if skill == "hive":
-            skill_sync.maybe_warn_hive_skill_drift(cli)
 
         return agent
 

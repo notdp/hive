@@ -61,7 +61,6 @@ hive plugin enable notify --plain # sidecar idle watcher toggle (manual `hive no
 hive plugin list --plain          # human-readable listing (default output is JSON)
 
 # Diagnostics
-hive doctor --skills              # check for hive skill drift after upgrades
 
 # Popup editor (tmux 3.2+)
 hive cvim                         # tmux popup editor
