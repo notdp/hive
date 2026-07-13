@@ -102,7 +102,7 @@ gh pr create --draft --base <default-branch>
 hive duo set-pr <PR号>
 ```
 
-`hive duo set-pr` 只改当前窗口状态栏，不 rename、不动 index。PR 创建失败就记录原因，final pass 后补建。实质 push / ready / merge 仍要 human 授权；这里的空提交 draft 锚是默认例外。
+`hive duo set-pr` 更新当前窗口状态栏，并把窗口 rename 成 feature 名（缺省取当前 hive worktree 的 branch；传第二个参数可覆盖）；不动 index。PR 创建失败就记录原因，final pass 后补建。实质 push / ready / merge 仍要 human 授权；这里的空提交 draft 锚是默认例外。
 
 `hive worktree start` / `hive worktree done` 只由 worker 跑。
 
