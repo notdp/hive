@@ -1,5 +1,10 @@
 """CLI tests for `hive codex` managed launch and `hive shell-init`."""
+import json
 import os
+import re
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -313,3 +318,184 @@ def test_codex_degraded_bypass_command_reaches_own_error(runner, monkeypatch):
     assert result.exit_code == 1
     assert "hive codex resume" not in result.stderr
     assert "was removed" in result.stderr
+
+
+# --- resume-hint (codex) -----------------------------------------------------
+
+
+def _fake_rollout(codex_home, day, stem, session_id, cwd, mtime):
+    d = codex_home / "sessions" / "2026" / "07" / day
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{stem}.jsonl"
+    p.write_text(json.dumps({
+        "type": "session_meta",
+        "timestamp": "2026-07-13T00:00:00.000Z",
+        "payload": {"id": session_id, "cwd": cwd},
+    }) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def _codex_hint_env(monkeypatch, tmp_path, *, pane=None):
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    if pane is None:
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+    else:
+        monkeypatch.setenv("TMUX_PANE", pane)
+    return home
+
+
+def test_codex_resume_hint_picks_newest_session_for_cwd_and_quotes(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path)
+    cwd = os.getcwd()
+    evil_id = "id; rm -rf ~"
+    _fake_rollout(home, "01", "rollout-old", "old-id", cwd, 1000.0)
+    _fake_rollout(home, "02", "rollout-new", evil_id, cwd, 2000.0)
+    _fake_rollout(home, "03", "rollout-distractor", "other-id", "/elsewhere", 3000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && codex resume {shlex.quote(evil_id)}\n"
+    )
+
+
+def test_codex_resume_hint_since_excludes_stale_sessions(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path)
+    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "5000"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+@pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not available")
+def test_codex_resume_hint_own_pane_daemon_holder_stays_eligible(runner, monkeypatch, tmp_path):
+    # the per-pane app-server daemon is detached and outlives the TUI: its
+    # open handle on the just-exited rollout must not disqualify the session
+    home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
+    ctrl = home / "app-server-control"
+    ctrl.mkdir(parents=True)
+    (ctrl / "hive-pane-77.pid").write_text(str(os.getpid()))
+    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
+    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
+    with newest.open():  # this test process *is* the "daemon" holding the file
+        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert "new-id" in result.output
+
+
+@pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not available")
+def test_codex_resume_hint_foreign_holder_excluded(runner, monkeypatch, tmp_path):
+    # no pane daemon pidfile → every live holder is foreign (claude-style)
+    home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
+    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
+    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
+    with newest.open():
+        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert "old-id" in result.output and "new-id" not in result.output
+
+
+def test_codex_resume_hint_lsof_failure_degrades_to_newest(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path)
+    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
+
+    def _no_lsof(*_a, **_k):
+        raise OSError("lsof missing")
+
+    monkeypatch.setattr("hive.cli.subprocess.run", _no_lsof)
+    with newest.open():
+        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert "new-id" in result.output
+
+
+def test_shell_init_posix_codex_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "zsh"]).output
+    assert 'hive resume-hint codex --since "$_hive_t" 2>/dev/null' in out
+    assert out.count('hive resume-hint codex --since') == 1
+
+
+def test_shell_init_fish_codex_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "fish"]).output
+    assert "hive resume-hint codex --since $_hive_t 2>/dev/null" in out
+    assert out.count("hive resume-hint codex --since") == 1
+
+
+def _codex_hint_stub_bins(tmp_path):
+    """Stub hive/codex that log calls: managed launch fails (exit 1) so the
+    function falls back to raw codex, which exits 7."""
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $@" >> {log}\nexit 7\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 1\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    return log, bin_dir
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_codex_hint_runs_after_codex_and_keeps_exit_code(runner, tmp_path, shell):
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log, bin_dir = _codex_hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        [shell, "-c",
+         'eval "$HIVE_SHELL_INIT"; codex hello; echo "rc=$?"; codex --help; true'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive codex hello"  # managed attempt (stub exits 1)
+    assert lines[1] == "codex hello"  # raw fallback (stub exits 7)
+    assert re.fullmatch(r"hive resume-hint codex --since \d+", lines[2])
+    assert lines[3] == "codex --help"  # passthrough stays raw and hint-free
+    assert len(lines) == 4
+    assert "rc=7" in r.stdout  # the hint call must not eat codex's exit code
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_codex_hint_runs_after_codex_and_keeps_exit_code(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log, bin_dir = _codex_hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; '
+         'codex hello; echo "rc=$status"; codex --help; true'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+             "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive codex hello"
+    assert lines[1] == "codex hello"
+    assert re.fullmatch(r"hive resume-hint codex --since \d+", lines[2])
+    assert lines[3] == "codex --help"
+    assert len(lines) == 4
+    assert "rc=7" in r.stdout
+
+
+def test_codex_resume_hint_control_bytes_in_session_id_silence_hint(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path)
+    _fake_rollout(home, "01", "rollout-evil", "ok\x1b]52;c;AAAA\x07", os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_codex_resume_hint_leading_dash_session_id_silences_hint(runner, monkeypatch, tmp_path):
+    # option injection: `codex resume [SESSION_ID]` also accepts flags there
+    home = _codex_hint_env(monkeypatch, tmp_path)
+    _fake_rollout(home, "01", "rollout-evil", "--dangerously-bypass-approvals-and-sandbox",
+                  os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""

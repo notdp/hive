@@ -279,7 +279,7 @@ def test_shell_init_zsh_routes_aliased_subcommand_raw(runner, tmp_path):
     assert log.read_text() == "claude --verbose daemon status\n"
 
 
-# --- claude-resume-hint -----------------------------------------------------
+# --- resume-hint (claude) -----------------------------------------------------
 
 
 def _fake_session(claude_home, slug, stem, session_id, cwd, mtime):
@@ -311,7 +311,7 @@ def test_resume_hint_picks_newest_session_for_cwd_and_quotes(runner, monkeypatch
     _fake_session(home, "slug-a", "old", "old-id", cwd, 1000.0)
     _fake_session(home, "slug-a", "new", evil_id, cwd, 2000.0)
     _fake_session(home, "slug-b", "distractor", "other-id", "/elsewhere", 3000.0)
-    result = runner.invoke(cli, ["claude-resume-hint", "--since", "900"])
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
     assert result.exit_code == 0
     assert result.output == (
         "Resume from anywhere:\n"
@@ -326,14 +326,14 @@ def test_resume_hint_since_excludes_stale_sessions(runner, monkeypatch, tmp_path
     monkeypatch.setenv("CLAUDE_HOME", str(home))
     monkeypatch.chdir(tmp_path)
     _fake_session(home, "slug", "old", "old-id", os.getcwd(), 1000.0)
-    result = runner.invoke(cli, ["claude-resume-hint", "--since", "5000"])
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "5000"])
     assert result.exit_code == 0
     assert result.output == ""
 
 
 def test_resume_hint_without_projects_dir_is_silent(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "empty"))
-    result = runner.invoke(cli, ["claude-resume-hint", "--since", "0"])
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "0"])
     assert result.exit_code == 0
     assert result.output == ""
 
@@ -344,7 +344,7 @@ def test_resume_hint_bypasses_tmux_and_codex_gates(runner, monkeypatch, tmp_path
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
     monkeypatch.setenv("CODEX_THREAD_ID", "t1")
     monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "empty"))
-    result = runner.invoke(cli, ["claude-resume-hint", "--since", "0"])
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "0"])
     assert result.exit_code == 0
     assert result.output == ""
 
@@ -352,18 +352,18 @@ def test_resume_hint_bypasses_tmux_and_codex_gates(runner, monkeypatch, tmp_path
 def test_shell_init_posix_claude_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
     assert "_hive_t=$(date +%s)" in out
-    assert 'hive claude-resume-hint --since "$_hive_t" 2>/dev/null' in out
+    assert 'hive resume-hint claude --since "$_hive_t" 2>/dev/null' in out
     assert "return $_hive_rc" in out
     # claude only: the codex function stays hint-free
-    assert out.count("claude-resume-hint") == 1
+    assert out.count("hive resume-hint claude --since") == 1
 
 
 def test_shell_init_fish_claude_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "fish"]).output
     assert "set -l _hive_t (date +%s)" in out
-    assert "hive claude-resume-hint --since $_hive_t 2>/dev/null" in out
+    assert "hive resume-hint claude --since $_hive_t 2>/dev/null" in out
     assert "return $_hive_rc" in out
-    assert out.count("claude-resume-hint") == 1
+    assert out.count("hive resume-hint claude --since") == 1
 
 
 def _hint_stub_bins(tmp_path):
@@ -397,7 +397,7 @@ def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp
     lines = log.read_text().splitlines()
     assert lines[0] == "hive claude hello"  # managed attempt (stub exits 1)
     assert lines[1] == "claude hello"  # raw fallback (stub exits 7)
-    assert re.fullmatch(r"hive claude-resume-hint --since \d+", lines[2])
+    assert re.fullmatch(r"hive resume-hint claude --since \d+", lines[2])
     assert lines[3] == "claude --help"  # passthrough stays raw and hint-free
     assert len(lines) == 4
     assert "rc=7" in r.stdout  # the hint call must not eat claude's exit code
@@ -428,7 +428,167 @@ def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_
     lines = log.read_text().splitlines()
     assert lines[0] == "hive claude hello"
     assert lines[1] == "claude hello"
-    assert re.fullmatch(r"hive claude-resume-hint --since \d+", lines[2])
+    assert re.fullmatch(r"hive resume-hint claude --since \d+", lines[2])
     assert lines[3] == "claude --help"
     assert len(lines) == 4
     assert "rc=7" in r.stdout
+
+
+def _fake_pidfile(claude_home, pid, session_id):
+    d = claude_home / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{pid}.json").write_text(json.dumps({"pid": pid, "sessionId": session_id}))
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_resume_hint_skips_sessions_owned_by_live_claude(runner, monkeypatch, tmp_path):
+    # same-cwd concurrency: an idle exit next to an active sibling pane must
+    # not print the sibling's live session id. claude appends-and-closes its
+    # transcript (no file handle to observe), so ownership comes from the
+    # $CLAUDE_HOME/sessions pidfile map: sessionId of any alive pid is live.
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    cwd = os.getcwd()
+    _fake_session(home, "s", "old", "old-id", cwd, 1000.0)
+    _fake_session(home, "s", "new", "new-id", cwd, 2000.0)
+    _fake_pidfile(home, os.getpid(), "new-id")  # this test is the live owner
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert "old-id" in result.output and "new-id" not in result.output
+
+
+def test_resume_hint_all_candidates_live_prints_nothing(runner, monkeypatch, tmp_path):
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "only", "only-id", os.getcwd(), 2000.0)
+    _fake_pidfile(home, os.getpid(), "only-id")
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_dead_pid_entry_does_not_exclude(runner, monkeypatch, tmp_path):
+    # a crash leftover pidfile fails the liveness probe: the just-exited
+    # session it names stays suggestible
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "new", "new-id", os.getcwd(), 2000.0)
+    _fake_pidfile(home, _dead_pid(), "new-id")
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert "new-id" in result.output
+
+
+def test_resume_hint_pidfile_garbage_never_aborts_or_excludes(runner, monkeypatch, tmp_path):
+    # exclusion is a refinement, never a gate: invalid JSON, valid non-object
+    # JSON, a non-numeric name, and a non-positive pid naming the newest
+    # session are each skipped without excluding anything or raising
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "new", "new-id", os.getcwd(), 2000.0)
+    d = home / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "notapid.json").write_text("{ not json")
+    (d / "12345.json").write_text('["valid", "json", "wrong", "shape"]')
+    (d / "-1.json").write_text(json.dumps({"pid": -1, "sessionId": "new-id"}))
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert "new-id" in result.output
+
+
+def test_resume_hint_pid_probe_oserror_means_not_alive(runner, monkeypatch, tmp_path):
+    # a failed probe proves nothing — do not exclude on it
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "new", "new-id", os.getcwd(), 2000.0)
+    _fake_pidfile(home, 12345, "new-id")
+
+    def _probe_fails(_pid, _sig):
+        raise OSError("probe failed")
+
+    monkeypatch.setattr("hive.cli.os.kill", _probe_fails)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert "new-id" in result.output
+
+
+def test_resume_hint_pid_probe_permissionerror_means_alive(runner, monkeypatch, tmp_path):
+    # EPERM = the process exists but is not ours: conservatively live
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "old", "old-id", os.getcwd(), 1000.0)
+    _fake_session(home, "s", "new", "new-id", os.getcwd(), 2000.0)
+    _fake_pidfile(home, 12345, "new-id")
+
+    def _probe_eperm(_pid, _sig):
+        raise PermissionError("not ours")
+
+    monkeypatch.setattr("hive.cli.os.kill", _probe_eperm)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert "old-id" in result.output and "new-id" not in result.output
+
+
+@pytest.mark.parametrize("evil_id", [
+    "ok\x1b]52;c;AAAA\x07",  # OSC 52 clipboard write, ESC + BEL
+    "ok\nrm -rf ~",          # newline splits the printed command line
+])
+def test_resume_hint_control_bytes_in_session_id_silence_hint(runner, monkeypatch, tmp_path, evil_id):
+    # the id is untrusted file content headed for automatic terminal output;
+    # quoting protects a later shell parse, not the print itself
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "evil", evil_id, os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_control_bytes_in_cwd_silence_hint(runner, monkeypatch, tmp_path):
+    evil_dir = tmp_path / "d\x1b]0;pwned\x07ir"
+    evil_dir.mkdir()
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(evil_dir)
+    _fake_session(home, "s", "new", "new-id", os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_since_is_a_strict_lower_bound(runner, monkeypatch, tmp_path):
+    # date +%s truncates: the real launch instant is never before --since, so
+    # a pre-launch mtime in the previous second must not slip through
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "stale", "stale-id", os.getcwd(), 99.5)
+    _fake_session(home, "s", "fresh", "fresh-id", os.getcwd(), 100.0)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "100"])
+    assert result.exit_code == 0
+    assert "fresh-id" in result.output and "stale-id" not in result.output
+
+
+def test_resume_hint_leading_dash_session_id_silences_hint(runner, monkeypatch, tmp_path):
+    # option injection: a printable id that is really a CLI flag must never
+    # be suggested — quoting cannot demote an option token to data because
+    # `claude --resume` takes an optional value
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "s", "evil", "--dangerously-skip-permissions", os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "claude", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
