@@ -4951,12 +4951,12 @@ def _exec_claude_managed(args: list[str]) -> None:
     keeps a user positional prompt out of their reach without rewriting the
     user's argv.
 
-    Degrades to raw ``claude`` outside tmux and for non-interactive surfaces
-    (subcommands, -p/--print, --help/--version). Exits 127 — the shell's own
-    command-not-found code, which a real claude run can't produce — when the
-    channel plugin cannot be converged, so the shell wrapper falls back to
-    ``command claude`` on exactly that code and never relaunches a claude
-    that exited nonzero on its own.
+    Degrades to raw ``claude`` outside tmux, for non-interactive surfaces
+    (subcommands, -p/--print, --help/--version), and when the channel plugin
+    cannot be converged. Always ends in an exec: no exit code of this
+    process is a fallback signal, because after the exec the status belongs
+    to claude and any value 0-255 is legitimate — the shell function only
+    special-cases a missing ``hive`` binary.
     """
     def _raw() -> None:
         os.execvp("claude", ["claude", *args])
@@ -4978,7 +4978,7 @@ def _exec_claude_managed(args: list[str]) -> None:
         claude_channel.clear_ready(pane)
     flags = claude_channel.prepare_pane(os.getcwd())
     if not flags:
-        raise SystemExit(127)  # wrapper declined: shell falls back to `command claude`
+        _raw()  # channel unavailable: a raw claude beats no claude
     os.execvp("claude", ["claude", *args, *flags])
 
 
@@ -5140,16 +5140,13 @@ function codex {
         command codex "$@"; return ;;
     esac
   done
-  hive codex "$@"
-  _hive_rc=$?
-  # 127 = wrapper declined (or hive itself missing); any other status is
-  # codex's own exit and must not trigger a second launch.
-  if [ "$_hive_rc" -eq 127 ]; then
-    command codex "$@"
-    _hive_rc=$?
-  fi
+  if ! command -v hive >/dev/null 2>&1; then command codex "$@"; return; fi
+  # The launcher always ends in an exec (managed or raw), so the status here
+  # is codex's own — never a fallback signal. The if-condition keeps errexit
+  # shells from bailing before the status is saved.
+  if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # print a cd-ready resume hint for the session that just ended.
-  hive resume-hint codex 2>/dev/null
+  hive resume-hint codex 2>/dev/null || true
   return $_hive_rc
 }
 
@@ -5173,16 +5170,13 @@ function claude {
         command claude "$@"; return ;;
     esac
   done
-  hive claude "$@"
-  _hive_rc=$?
-  # 127 = wrapper declined (or hive itself missing); any other status is
-  # claude's own exit and must not trigger a second launch.
-  if [ "$_hive_rc" -eq 127 ]; then
-    command claude "$@"
-    _hive_rc=$?
-  fi
+  if ! command -v hive >/dev/null 2>&1; then command claude "$@"; return; fi
+  # The launcher always ends in an exec (managed or raw), so the status here
+  # is claude's own — never a fallback signal. The if-condition keeps errexit
+  # shells from bailing before the status is saved.
+  if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # claude's own resume hint omits the directory; print a cd-ready one.
-  hive resume-hint claude 2>/dev/null
+  hive resume-hint claude 2>/dev/null || true
   return $_hive_rc
 }
 """
@@ -5223,14 +5217,14 @@ function codex
                 return
         end
     end
+    if not type -q hive
+        command codex $argv
+        return
+    end
+    # the launcher always ends in an exec (managed or raw): the status is
+    # codex's own, never a fallback signal
     hive codex $argv
     set -l _hive_rc $status
-    # 127 = wrapper declined (or hive itself missing); any other status is
-    # codex's own exit and must not trigger a second launch.
-    if test $_hive_rc -eq 127
-        command codex $argv
-        set _hive_rc $status
-    end
     # print a cd-ready resume hint for the session that just ended.
     hive resume-hint codex 2>/dev/null
     return $_hive_rc
@@ -5265,14 +5259,14 @@ function claude
                 return
         end
     end
+    if not type -q hive
+        command claude $argv
+        return
+    end
+    # the launcher always ends in an exec (managed or raw): the status is
+    # claude's own, never a fallback signal
     hive claude $argv
     set -l _hive_rc $status
-    # 127 = wrapper declined (or hive itself missing); any other status is
-    # claude's own exit and must not trigger a second launch.
-    if test $_hive_rc -eq 127
-        command claude $argv
-        set _hive_rc $status
-    end
     # claude's own resume hint omits the directory; print a cd-ready one.
     hive resume-hint claude 2>/dev/null
     return $_hive_rc

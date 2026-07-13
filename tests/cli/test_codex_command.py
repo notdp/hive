@@ -154,8 +154,8 @@ def test_shell_init_zsh_emits_guarded_function(runner):
     # function form: immune to alias expansion of the name (user aliases)
     assert "function codex {" in out
     assert 'if [ -z "$TMUX" ]; then command codex "$@"; return; fi' in out
-    assert 'hive codex "$@"' in out
-    assert 'if [ "$_hive_rc" -eq 127 ]; then' in out
+    assert 'if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi' in out
+    assert "command -v hive" in out
     # management subcommands stay raw
     assert "app-server" in out and "exec" in out and "--version" in out
 
@@ -165,7 +165,7 @@ def test_shell_init_fish_emits_function(runner):
     assert "function codex" in out
     assert "command codex $argv" in out
     assert "hive codex $argv" in out
-    assert "if test $_hive_rc -eq 127" in out
+    assert "if not type -q hive" in out
 
 
 # --- init gate: embedded codex must relaunch daemon-backed ---
@@ -366,14 +366,14 @@ def test_shell_init_fish_codex_tail_calls_resume_hint(runner):
 
 
 def _codex_hint_stub_bins(tmp_path):
-    """Stub hive/codex that log calls: the managed launch declines with the
-    reserved 127, so the function falls back to raw codex, which exits 7."""
+    """Stub hive/codex that log calls: the managed launch (stub hive) exits
+    with codex's own status 7 and must not trigger any second launch."""
     log = tmp_path / "calls.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $@" >> {log}\nexit 7\n')
     (bin_dir / "hive").write_text(
-        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 127\nexit 0\n'
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 7\nexit 0\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -394,11 +394,10 @@ def test_shell_init_posix_codex_hint_runs_after_codex_and_keeps_exit_code(runner
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    assert lines[0] == "hive codex hello"  # managed attempt (stub declines: 127)
-    assert lines[1] == "codex hello"  # raw fallback on 127 (stub exits 7)
-    assert lines[2] == "hive resume-hint codex"
-    assert lines[3] == "codex --help"  # passthrough stays raw and hint-free
-    assert len(lines) == 4
+    assert lines[0] == "hive codex hello"  # the launcher IS the codex run (exits 7)
+    assert lines[1] == "hive resume-hint codex"  # no second launch in between
+    assert lines[2] == "codex --help"  # passthrough stays raw and hint-free
+    assert len(lines) == 3
     assert "rc=7" in r.stdout  # the hint call must not eat codex's exit code
 
 
@@ -417,10 +416,9 @@ def test_shell_init_fish_codex_hint_runs_after_codex_and_keeps_exit_code(runner,
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
     assert lines[0] == "hive codex hello"
-    assert lines[1] == "codex hello"
-    assert lines[2] == "hive resume-hint codex"
-    assert lines[3] == "codex --help"
-    assert len(lines) == 4
+    assert lines[1] == "hive resume-hint codex"
+    assert lines[2] == "codex --help"
+    assert len(lines) == 3
     assert "rc=7" in r.stdout
 
 
@@ -485,7 +483,8 @@ def test_codex_resume_hint_untagged_pane_prints_nothing(runner, monkeypatch, tmp
 
 
 @pytest.mark.parametrize("shell", ["zsh", "bash"])
-def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, shell):
+@pytest.mark.parametrize("own_rc", [7, 127])
+def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, shell, own_rc):
     # regression: `hive codex || command codex` used to start a SECOND raw
     # codex whenever the exec'd codex exited nonzero on its own
     if shutil.which(shell) is None:
@@ -496,7 +495,7 @@ def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, s
     bin_dir.mkdir()
     (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $@" >> {log}\nexit 0\n')
     (bin_dir / "hive").write_text(
-        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 7\nexit 0\n'
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit {own_rc}\nexit 0\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -507,7 +506,33 @@ def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, s
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    assert lines[0] == "hive codex hello"  # exits 7: codex's own status
+    assert lines[0] == "hive codex hello"  # codex's own status
+    assert lines[1] == "hive resume-hint codex"  # no raw relaunch in between
+    assert len(lines) == 2
+    assert f"rc={own_rc}" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 7\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; codex hello; echo "rc=$status"'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive codex hello"
     assert lines[1] == "hive resume-hint codex"  # no raw relaunch in between
     assert len(lines) == 2
     assert "rc=7" in r.stdout
