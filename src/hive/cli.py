@@ -5063,10 +5063,10 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
         or session_id.startswith("-")
     ):
         return None
-    return (
-        "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && {resume_cmd} {shlex.quote(session_id)}"
-    )
+    command = f"cd {shlex.quote(cwd)} && {resume_cmd} {shlex.quote(session_id)}"
+    # cyan matches the CLI's own resume line; click strips the styling
+    # whenever stdout is not a real terminal (pipes, tests, logs)
+    return f"Resume from anywhere:\n  {click.style(command, fg='cyan')}"
 
 
 def _pane_team_identity() -> tuple[str, str, str] | None:

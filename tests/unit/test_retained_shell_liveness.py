@@ -302,3 +302,39 @@ def test_retained_shell_running_rg_codex_is_not_a_cli(monkeypatch, tmp_path):
     assert payload["ok"] is False
     assert "cli_exited" in payload["error"]
     assert [e["intent"] for e in bus.read_all_events(workspace)] == ["send"]
+
+
+def test_resume_hint_colors_command_on_terminals_only(monkeypatch, tmp_path):
+    # cyan on a real terminal, plain text everywhere else (pipes/tests/logs):
+    # click strips the styling when stdout is not a tty
+    from click.testing import CliRunner
+
+    from hive.cli import cli as hive_cli
+
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive-home"))
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    tags = {"hive-team": "t1", "hive-agent": "worker"}
+    monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _p, key: tags.get(key))
+    d = tmp_path / "hive-home" / "state" / "resume"
+    d.mkdir(parents=True)
+    import json as _json
+
+    (d / "t1.json").write_text(_json.dumps({
+        "schema": 1, "handle": "t1", "team": "t1", "group": "duo",
+        "windowName": "", "workspace": "", "repoCwd": "", "repo": "",
+        "branch": "", "pr": "", "createdAt": "1", "savedAt": "now",
+        "members": [{"name": "worker", "sessionId": "sid-1"}],
+    }))
+
+    colored = CliRunner().invoke(hive_cli, ["resume-hint", "claude"], color=True)
+    assert colored.exit_code == 0
+    assert "\x1b[36m" in colored.output and "\x1b[0m" in colored.output
+    assert "claude --resume sid-1" in colored.output
+
+    plain = CliRunner().invoke(hive_cli, ["resume-hint", "claude"])
+    assert plain.exit_code == 0
+    assert "\x1b[" not in plain.output
+    assert "claude --resume sid-1" in plain.output
