@@ -259,7 +259,9 @@ class Agent:
         tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
         bin_path = CLI_BINS[cli]
-        cmd_parts = ["exec", _shell_escape(bin_path)]
+        # No `exec`: the CLI runs as the pane shell's foreground child, so
+        # the pane (and a usable shell) survives the CLI exiting.
+        cmd_parts = [_shell_escape(bin_path)]
         codex_daemon_native = False
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
@@ -322,7 +324,7 @@ class Agent:
                     # Daemon flags (--remote/--cd) are already on cmd_parts.
                     cmd_parts.extend(["resume", _shell_escape(session_id)])
                 else:
-                    cmd_parts = ["exec", _shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
+                    cmd_parts = [_shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
         # Both CLIs accept a positional [prompt] arg (also on resume/fork).
         # Pass skill activation + optional user prompt here so the CLI
@@ -416,7 +418,23 @@ class Agent:
         the message — that final confirmation only ever comes from the
         target's transcript.
         """
-        profile_name = _resolve_profile_name(self.pane_id, self.cli)
+        # Native transports require a live CLI process on the pane TTY. A
+        # retained shell can carry a stale title, the declared cli tag, and
+        # (for codex) a surviving per-pane daemon with an open thread — none
+        # of that may route a message into a pane nobody is watching.
+        probe = None
+        try:
+            from .agent_cli import detect_cli_process_for_pane
+
+            probe = detect_cli_process_for_pane(self.pane_id)
+        except Exception:
+            probe = None
+        if probe is None:
+            raise DeliveryError(
+                f"no live CLI process on pane {self.pane_id} (cli_exited): "
+                "refusing native transport to a retained shell"
+            )
+        profile_name = probe.name
         if profile_name == "codex":
             from .adapters import codex_app_server
 

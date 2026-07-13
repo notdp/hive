@@ -164,34 +164,65 @@ def detect_profile_from_text(text: str) -> CLIProfile | None:
     return None
 
 
-def detect_profile_from_argv(argv: str) -> CLIProfile | None:
+# Script runtimes whose argv[1] is the launched CLI's entry script — the one
+# verified wrapper shape (codex runs as `node /.../codex ...`). Anything else
+# in argv is ordinary argument text and must never identify a CLI.
+_SCRIPT_RUNTIMES = frozenset({"node"})
+
+
+def detect_profile_from_process(command: str, argv: str) -> CLIProfile | None:
+    """CLI identity from process fields, not argument text.
+
+    Matches the executable itself (ps comm / argv[0]) or the verified script
+    runtime shape ``node <.../codex|claude> ...``. Later argv tokens are the
+    process's own arguments — ``rg codex src`` is a search, not a CLI — so
+    they are never scanned.
+    """
+    profile = get_profile(command)
+    if profile:
+        return profile
     try:
         parts = shlex.split(argv or "")
     except ValueError:
         parts = (argv or "").split()
-    for token in parts[:4]:
-        profile = get_profile(token)
+    if not parts:
+        return None
+    profile = get_profile(parts[0])
+    if profile:
+        return profile
+    if len(parts) >= 2 and normalize_command(parts[0]) in _SCRIPT_RUNTIMES:
+        return get_profile(parts[1])
+    return None
+
+
+def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
+    """CLI profile from live process evidence only — never the pane title.
+
+    A retained shell keeps the pane (and often a stale title naming a CLI)
+    after the agent process exits, so title text must not count as liveness
+    evidence. Evidence is the pane's current command and its TTY process
+    table, parsed by the same matchers as :func:`detect_profile_for_pane`.
+    Any probe failure fails closed to None.
+    """
+    try:
+        profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
         if profile:
             return profile
+        tty = tmux.get_pane_tty(pane_id) or ""
+        for process in tmux.list_tty_processes(tty):
+            profile = detect_profile_from_process(process.command, process.argv)
+            if profile:
+                return profile
+    except Exception:
+        return None
     return None
 
 
 def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
-    profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
+    profile = detect_cli_process_for_pane(pane_id)
     if profile:
         return profile
-    profile = detect_profile_from_text(tmux.get_pane_title(pane_id) or "")
-    if profile:
-        return profile
-    tty = tmux.get_pane_tty(pane_id) or ""
-    for process in tmux.list_tty_processes(tty):
-        profile = detect_profile_from_pane_command(process.command)
-        if profile:
-            return profile
-        profile = detect_profile_from_argv(process.argv)
-        if profile:
-            return profile
-    return None
+    return detect_profile_from_text(tmux.get_pane_title(pane_id) or "")
 
 
 def member_role_for_pane(pane_id: str) -> str:

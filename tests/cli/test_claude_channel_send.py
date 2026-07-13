@@ -31,7 +31,12 @@ def _agent(cli: str = "claude") -> Agent:
 
 
 def _patch(monkeypatch, profile: str):
-    monkeypatch.setattr(agent_mod, "_resolve_profile_name", lambda pane, cli: profile)
+    from hive.agent_cli import get_profile
+
+    pinned = get_profile(profile) if profile else None
+    monkeypatch.setattr(
+        "hive.agent_cli.detect_cli_process_for_pane", lambda _pane: pinned
+    )
     keystrokes: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         agent_mod, "_submit_interactive_text",

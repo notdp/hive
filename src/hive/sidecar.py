@@ -23,7 +23,7 @@ from typing import Any
 from . import bus
 from . import devlog
 from . import notify_ui
-from .agent_cli import detect_profile_for_pane
+from .agent_cli import detect_cli_process_for_pane, detect_profile_for_pane
 from .runtime_state import (
     format_hive_envelope,
     project_thread_event,
@@ -297,6 +297,11 @@ def _runtime_snapshot_tick(
         if not pane_id or not cli_name:
             continue
         if not _requires_tick_session_capture(cli_name):
+            continue
+        if detect_cli_process_for_pane(pane_id) is None:
+            # Retained shell: its PTY output is not a session-rotation signal
+            # and must not stale the member's last-known session. Capture
+            # resumes as soon as a CLI process is back on the TTY.
             continue
         snapshot = snapshot_store.get(pane_id)
         recent_output = _pane_has_recent_output(pane_id)
@@ -940,6 +945,8 @@ def _doctor_payload(
         diag["sidecar"] = sidecar
     runtime = _member_runtime_payload(target.pane_id, role="agent")
     diag["alive"] = bool(runtime.get("alive", alive))
+    if "cliAlive" in runtime:
+        diag["cliAlive"] = bool(runtime["cliAlive"])
     if runtime.get("model"):
         diag["model"] = runtime["model"]
     if runtime.get("sessionId"):
@@ -1041,12 +1048,23 @@ def _agent_runtime_payload(
     }
     runtime.update(_busy_output_payload(pane_id))
     if not runtime["alive"]:
+        runtime["cliAlive"] = False
+        runtime["busy"] = False
         runtime["inputState"] = "offline"
         runtime["inputReason"] = "pane_dead"
         return runtime
 
-    profile = detect_profile_for_pane(pane_id)
+    # Liveness is process evidence only: a retained shell keeps the pane, a
+    # stale title, the @hive-cli tag and (for codex) the per-pane daemon
+    # alive, and none of that makes it an agent runtime.
+    profile = detect_cli_process_for_pane(pane_id)
+    runtime["cliAlive"] = profile is not None
     runtime["_cli"] = profile.name if profile else "unknown"
+    if not profile:
+        runtime["busy"] = False  # shell output is not agent activity
+        runtime["inputState"] = "offline"
+        runtime["inputReason"] = "cli_exited"
+        return runtime
 
     resolved_model = resolve_model_for_pane(
         pane_id,
@@ -1055,11 +1073,6 @@ def _agent_runtime_payload(
     )
     if resolved_model:
         runtime["model"] = resolved_model
-
-    if not profile:
-        runtime["inputState"] = "unknown"
-        runtime["inputReason"] = "no_session"
-        return runtime
 
     adapter = adapters.get(profile.name)
     if not adapter:
@@ -1235,7 +1248,12 @@ def _idle_notify_agent_panes(team_name: str) -> list[str]:
         if member.get("role") not in _AGENT_NOTIFY_ROLES:
             continue
         pane_id = str(member.get("pane") or "")
-        if pane_id and pane_id not in panes and tmux.is_pane_alive(pane_id):
+        if (
+            pane_id
+            and pane_id not in panes
+            and tmux.is_pane_alive(pane_id)
+            and detect_cli_process_for_pane(pane_id) is not None
+        ):
             panes.append(pane_id)
     return panes
 
@@ -1269,7 +1287,12 @@ def _idle_notify_tick(
             if member.get("role") not in _AGENT_NOTIFY_ROLES:
                 continue
             pane_id = str(member.get("pane") or "")
-            if pane_id and pane_id not in agent_panes and tmux.is_pane_alive(pane_id):
+            if (
+                pane_id
+                and pane_id not in agent_panes
+                and tmux.is_pane_alive(pane_id)
+                and detect_cli_process_for_pane(pane_id) is not None
+            ):
                 agent_panes.append(pane_id)
     else:
         agent_panes = _idle_notify_agent_panes(team_name)

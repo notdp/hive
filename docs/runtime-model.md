@@ -116,6 +116,29 @@ Notes:
   the probe can't recognise can be gated as a false negative; the
   threshold is intentionally conservative
 
+### `cliAlive`
+
+Source — live process evidence on the pane's TTY only: the pane's current
+command and its TTY process table, parsed by the shared CLI matchers
+(`agent_cli.detect_cli_process_for_pane`). Never the pane title, the
+`@hive-cli` tag, a surviving codex app-server daemon/thread, or
+transcript/session metadata — all of those outlive the CLI process. Probe
+failures fail closed to `false`.
+
+Meaning — the member's CLI process is actually running. Spawned launches do
+not `exec` over the pane shell, so the pane (and `alive`) survives its CLI
+exiting; the retained shell is not an agent runtime. The three states:
+
+| state | `alive` | `cliAlive` | `inputState` | `inputReason` | `busy` |
+|---|---|---|---|---|---|
+| pane dead | false | false | offline | pane_dead | false |
+| retained shell (CLI exited) | true | false | offline | cli_exited | false |
+| live CLI | true | true | per runtime | per runtime | per runtime |
+
+Consumers — delivery refuses a retained shell before any native transport
+(the send event stays durable on the bus); idle notify, session-snapshot
+capture, and duo pairing all skip retained shells.
+
 ### `inputState`
 
 Source:

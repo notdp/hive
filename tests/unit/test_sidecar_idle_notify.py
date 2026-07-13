@@ -496,5 +496,8 @@ def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):
         },
     )
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: pane != "%4")
+    monkeypatch.setattr(
+        sidecar, "detect_cli_process_for_pane", lambda pane: object()
+    )
 
     assert sidecar._idle_notify_agent_panes("team-a") == ["%1", "%3"]
