@@ -266,3 +266,39 @@ def test_team_payload_merge_carries_cli_alive(monkeypatch):
     assert member["alive"] is True
     assert member["cliAlive"] is False
     assert member["inputState"] == "offline"
+
+
+def test_retained_shell_running_rg_codex_is_not_a_cli(monkeypatch, tmp_path):
+    # r1 blocker regression: a retained shell whose foreground command merely
+    # MENTIONS a CLI name (`rg codex src tests`) must not flip cliAlive nor
+    # reopen native transport
+    _pane_env(
+        monkeypatch,
+        command="rg",
+        procs=[_proc("rg", "rg codex src tests"), _proc("-zsh")],
+    )
+    _forbid(monkeypatch, "hive.sidecar._codex_app_server_runtime",
+            "daemon runtime must not be consulted")
+    rt = sidecar._agent_runtime_payload("%9")
+    assert rt["cliAlive"] is False
+    assert rt["inputState"] == "offline"
+    assert rt["inputReason"] == "cli_exited"
+
+    # the real send boundary, real probe (no pin): both transports forbidden
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    _forbid(monkeypatch, "hive.adapters.codex_app_server.send_to_pane",
+            "native codex transport must not be called")
+    _forbid(monkeypatch, "hive.adapters.claude_channel.send_to_pane",
+            "native claude transport must not be called")
+    _forbid(monkeypatch, "hive.agent._submit_interactive_text",
+            "keystroke fallback is forbidden")
+    agent = Agent(name="v", team_name="team-x", pane_id="%9", cli="codex")
+    _wire_send(monkeypatch, workspace, agent)
+    payload = sidecar._send_payload(
+        workspace=str(workspace), team_name="team-x", sender_agent="w",
+        sender_pane="%1", target_agent="v", body="hi", artifact="", reply_to="",
+    )
+    assert payload["ok"] is False
+    assert "cli_exited" in payload["error"]
+    assert [e["intent"] for e in bus.read_all_events(workspace)] == ["send"]

@@ -193,3 +193,29 @@ def test_member_role_for_pane_returns_terminal_for_shell(monkeypatch):
     monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [])
 
     assert agent_cli.member_role_for_pane("%2") == "terminal"
+
+
+# --- strict process matcher: argument text is never CLI identity ---
+
+
+def test_process_matcher_rejects_cli_names_in_arguments():
+    from hive.agent_cli import detect_profile_from_process
+
+    # ordinary shell commands mentioning a CLI name must not read as a CLI
+    assert detect_profile_from_process("rg", "rg codex src tests") is None
+    assert detect_profile_from_process("git", "git grep claude") is None
+    assert detect_profile_from_process("python", "python script.py codex") is None
+    # a non-runtime argv[0] with a CLI-named script arg is not the wrapper shape
+    assert detect_profile_from_process("node", "node script.js codex") is None
+
+
+def test_process_matcher_accepts_executable_and_node_wrapper():
+    from hive.agent_cli import detect_profile_from_process
+
+    assert detect_profile_from_process("claude", "claude --verbose").name == "claude"
+    assert detect_profile_from_process("claude.exe", "").name == "claude"
+    assert detect_profile_from_process(
+        "node", "node /opt/homebrew/bin/codex --remote unix:///s"
+    ).name == "codex"
+    # argv[0] identity works even when ps comm is generic
+    assert detect_profile_from_process("something", "/usr/local/bin/claude --continue").name == "claude"
