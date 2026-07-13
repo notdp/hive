@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import shlex
 import sys
@@ -244,8 +245,14 @@ sleep 0.18
 
 
 def _select_hook_command() -> str:
+    # run-shell executes with the tmux server's environment, not this
+    # process's: a source-checkout registration (PYTHONPATH=src) would
+    # otherwise install a hook whose `-m hive.notify_ui` can never import
+    # hive — the flash then sticks until the sidecar sweep.
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    env_prefix = f"PYTHONPATH={shlex.quote(pythonpath)} " if pythonpath else ""
     cleanup_cmd = (
-        f"{shlex.quote(sys.executable)} -m hive.notify_ui "
+        f"{env_prefix}{shlex.quote(sys.executable)} -m hive.notify_ui "
         "--cleanup-selected '#{session_name}:#{window_index}' "
         "--client '#{client_tty}'"
     )

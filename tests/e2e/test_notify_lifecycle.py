@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import uuid
@@ -48,15 +47,23 @@ def test_e2e_cleanup_selected_window_clears_durable_state_without_hook():
         subprocess.run(["tmux", "kill-session", "-t", session], text=True, capture_output=True, timeout=5, check=False)
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None or not os.environ.get("TMUX"), reason="attached tmux client is required")
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
 def test_e2e_notify_select_hook_cleans_selected_window():
-    original_window = run_tmux(["display-message", "-p", "#{session_name}:#{window_index}"]).stdout.strip()
-    session = run_tmux(["display-message", "-p", "#{session_name}"]).stdout.strip()
-    window_target = ""
+    # after-select-window is a command hook: a scripted `select-window` fires
+    # it on a detached session too, so the whole flow runs inside its own
+    # session. The previous version required an attached client, created its
+    # window in the developer's live session, and stole the focus.
+    session = f"hive-e2e-notify-{uuid.uuid4().hex[:8]}"
     try:
+        run_tmux([
+            "new-session", "-d", "-x", "80", "-y", "24",
+            "-s", session, "-n", "home", "sleep", "60",
+        ])
         window_target = run_tmux([
             "new-window",
             "-d",
+            "-t",
+            f"{session}:",
             "-P",
             "-F",
             "#{session_name}:#{window_index}",
@@ -91,7 +98,4 @@ def test_e2e_notify_select_hook_cleans_selected_window():
         assert run_tmux(["show-window-option", "-v", "-t", window_target, "window-status-style"]).stdout.strip() == ""
         assert run_tmux(["show-window-option", "-v", "-t", window_target, "window-status-current-style"]).stdout.strip() == ""
     finally:
-        subprocess.run(["tmux", "select-window", "-t", original_window], text=True, capture_output=True, timeout=5, check=False)
-        subprocess.run(["tmux", "set-hook", "-ut", session, notify_ui.SELECT_HOOK_NAME], text=True, capture_output=True, timeout=5, check=False)
-        if window_target:
-            subprocess.run(["tmux", "kill-window", "-t", window_target], text=True, capture_output=True, timeout=5, check=False)
+        subprocess.run(["tmux", "kill-session", "-t", session], text=True, capture_output=True, timeout=5, check=False)

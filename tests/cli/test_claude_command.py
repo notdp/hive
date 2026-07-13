@@ -1,5 +1,8 @@
 """CLI tests for `hive claude` managed launch and its shell-init function."""
+import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 
@@ -179,13 +182,13 @@ def test_claude_outside_tmux_runs_raw(runner, monkeypatch):
     assert calls == [["claude", "claude", "hello"]]
 
 
-def test_claude_exits_nonzero_when_channel_unavailable(runner, monkeypatch):
-    # nonzero exit lets the shell function fall back to `command claude`
+def test_claude_channel_unavailable_runs_raw(runner, monkeypatch):
+    # the launcher always ends in an exec: channel prepare failing means a
+    # raw claude, never an exit code the shell must interpret
     calls = _capture_exec(monkeypatch)
     _managed_env(monkeypatch, flags=[])
-    result = runner.invoke(cli, ["claude", "hello"])
-    assert result.exit_code != 0
-    assert calls == []  # neither managed nor raw exec: the wrapper decides
+    runner.invoke(cli, ["claude", "hello"])
+    assert calls == [["claude", "claude", "hello"]]
 
 
 def test_shell_init_zsh_emits_claude_function(runner):
@@ -195,7 +198,9 @@ def test_shell_init_zsh_emits_claude_function(runner):
     # both zsh and bash, so pre-existing user aliases cannot break the parse
     assert "function codex {" in result.output
     assert "function claude {" in result.output
-    assert "hive claude \"$@\" || command claude \"$@\"" in result.output
+    # errexit-safe status capture; raw fallback lives inside the launcher
+    assert 'if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi' in result.output
+    assert "command -v hive" in result.output
     # passthrough guards present for both surfaces
     assert "agents" in result.output
     assert "--print" in result.output
@@ -246,7 +251,8 @@ def test_shell_init_fish_emits_claude_function(runner):
     assert result.exit_code == 0
     assert "function codex" in result.output
     assert "function claude" in result.output
-    assert "hive claude $argv; or command claude $argv" in result.output
+    assert "hive claude $argv" in result.output
+    assert "if not type -q hive" in result.output
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
@@ -274,3 +280,306 @@ def test_shell_init_zsh_routes_aliased_subcommand_raw(runner, tmp_path):
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     assert log.read_text() == "claude --verbose daemon status\n"
+
+
+# --- resume-hint (claude) -----------------------------------------------------
+
+
+def test_shell_init_posix_claude_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "zsh"]).output
+    assert 'hive resume-hint claude 2>/dev/null' in out
+    assert "return $_hive_rc" in out
+    # claude only: the codex function stays hint-free
+    assert out.count("hive resume-hint claude 2>/dev/null") == 1
+
+
+def test_shell_init_fish_claude_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "fish"]).output
+    assert "hive resume-hint claude 2>/dev/null" in out
+    assert "return $_hive_rc" in out
+    assert out.count("hive resume-hint claude 2>/dev/null") == 1
+
+
+def _hint_stub_bins(tmp_path):
+    """Stub hive/claude that log calls: the managed launch (stub hive) exits
+    with claude's own status 7 — the launcher execs, so its status IS the
+    CLI's — and must not trigger any second launch."""
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 7\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 7\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    return log, bin_dir
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_path, shell):
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log, bin_dir = _hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        [shell, "-c",
+         'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"; claude --help; true'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"  # the launcher IS the claude run (exits 7)
+    assert lines[1] == "hive resume-hint claude"  # no second launch in between
+    assert lines[2] == "claude --help"  # passthrough stays raw and hint-free
+    assert len(lines) == 3
+    assert "rc=7" in r.stdout  # the hint call must not eat claude's exit code
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_script_parses(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    r = subprocess.run(["fish", "-n", str(script_file)],
+                       capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log, bin_dir = _hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; '
+         'claude hello; echo "rc=$status"; claude --help; true'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+             "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"
+    assert lines[1] == "hive resume-hint claude"
+    assert lines[2] == "claude --help"
+    assert len(lines) == 3
+    assert "rc=7" in r.stdout
+
+def _fake_snapshot(hive_home, team, members):
+    d = hive_home / "state" / "resume"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{team}.json").write_text(json.dumps({
+        "schema": 1, "handle": team, "team": team, "group": "duo",
+        "windowName": "", "workspace": "", "repoCwd": "", "repo": "",
+        "branch": "", "pr": "", "createdAt": "1", "savedAt": "now",
+        "members": members,
+    }))
+
+
+def _member_pane_env(monkeypatch, tmp_path, *, pane="%5", team="t1", agent="worker"):
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive-home"))
+    monkeypatch.setenv("TMUX_PANE", pane)
+    tags = {"hive-team": team, "hive-agent": agent}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option", lambda _p, key: tags.get(key)
+    )
+    return tmp_path / "hive-home"
+
+
+def test_resume_hint_reads_team_snapshot_and_quotes(runner, monkeypatch, tmp_path):
+    # the sidecar already records each member's sessionId into the resume
+    # store and the entry survives the pane's process exiting — the hint
+    # reads that, never the filesystem; cwd and id are still quoted
+    work = tmp_path / "wo rk"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    home = _member_pane_env(monkeypatch, tmp_path)
+    evil_id = "id; rm -rf ~"
+    _fake_snapshot(home, "t1", [
+        {"name": "validator", "cli": "codex", "sessionId": "other"},
+        {"name": "worker", "cli": "claude", "sessionId": evil_id},
+    ])
+    cwd = os.getcwd()
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && claude --resume {shlex.quote(evil_id)}\n"
+    )
+
+
+def test_resume_hint_untagged_pane_prints_nothing(runner, monkeypatch, tmp_path):
+    # not a team member: tracking arbitrary user panes is not this feature's
+    # job, so there is nothing to suggest
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive-home"))
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _p, _k: None)
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_no_pane_env_prints_nothing(runner, monkeypatch, tmp_path):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_missing_snapshot_or_member_prints_nothing(runner, monkeypatch, tmp_path):
+    home = _member_pane_env(monkeypatch, tmp_path)
+    r_no_snap = runner.invoke(cli, ["resume-hint", "claude"])
+    _fake_snapshot(home, "t1", [{"name": "someone-else", "sessionId": "x"}])
+    r_no_member = runner.invoke(cli, ["resume-hint", "claude"])
+    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": ""}])
+    r_no_session = runner.invoke(cli, ["resume-hint", "claude"])
+    for r in (r_no_snap, r_no_member, r_no_session):
+        assert r.exit_code == 0
+        assert r.output == ""
+
+
+@pytest.mark.parametrize("evil_id", [
+    "ok\x1b]52;c;AAAA\x07",   # OSC 52 clipboard write, ESC + BEL
+    "ok\nrm -rf ~",           # newline splits the printed command line
+    "--dangerously-skip-permissions",  # option-shaped id
+])
+def test_resume_hint_snapshot_id_untrusted_gates(runner, monkeypatch, tmp_path, evil_id):
+    # snapshot content is still untrusted for printing: quoting protects a
+    # later shell parse, not the automatic print, and a leading-dash id
+    # would parse as a flag (`claude --resume` takes an optional value)
+    home = _member_pane_env(monkeypatch, tmp_path)
+    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": evil_id}])
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_control_bytes_in_cwd_silence_hint(runner, monkeypatch, tmp_path):
+    evil_dir = tmp_path / "d\x1b]0;pwned\x07ir"
+    evil_dir.mkdir()
+    home = _member_pane_env(monkeypatch, tmp_path)
+    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": "good-id"}])
+    monkeypatch.chdir(evil_dir)
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+@pytest.mark.parametrize("own_rc", [7, 127])
+def test_shell_init_posix_no_relaunch_on_claude_own_exit_code(runner, tmp_path, shell, own_rc):
+    # regression: `hive claude || command claude` used to relaunch raw on any
+    # nonzero exit of the exec'd claude — including a legitimate 127, which
+    # no exit-code sentinel can distinguish from "command not found"
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit {own_rc}\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    r = subprocess.run(
+        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"  # claude's own status
+    assert lines[1] == "hive resume-hint claude"  # no raw relaunch in between
+    assert len(lines) == 2
+    assert f"rc={own_rc}" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+@pytest.mark.parametrize("own_rc", [7, 127])
+def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path, own_rc):
+    # 127 discriminates against any exit-code-sentinel fallback
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit {own_rc}\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; claude hello; echo "rc=$status"'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"
+    assert lines[1] == "hive resume-hint claude"
+    assert len(lines) == 2
+    assert f"rc={own_rc}" in r.stdout
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_survives_errexit_and_keeps_status(runner, tmp_path, shell):
+    # under `set -e`, a bare `hive claude "$@"` returning nonzero would kill
+    # the shell before the status is saved; the if-condition capture must
+    # keep the function alive through claude's own nonzero exit
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 7\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    # bare call: a `claude ... || capture` at the call site would suppress
+    # errexit inside the whole function body and prove nothing
+    r = subprocess.run(
+        [shell, "-c",
+         'set -e; eval "$HIVE_SHELL_INIT"; claude hello; echo unreachable'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    # errexit is genuinely armed: the function's nonzero return kills the
+    # outer shell with claude's own status...
+    assert r.returncode == 7, r.stderr
+    assert "unreachable" not in r.stdout
+    # ...but INSIDE the function the status was captured and the hint still
+    # ran — the old bare-command form died before either happened
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"
+    assert lines[1] == "hive resume-hint claude"
+    assert len(lines) == 2
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_missing_hive_runs_raw(runner, tmp_path, shell):
+    # no hive binary on PATH → straight to `command claude`, no hint attempt
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 7\n')
+    (bin_dir / "claude").chmod(0o755)
+    r = subprocess.run(
+        # absolute shell path: the child PATH below intentionally lacks the
+        # dirs where real hive (and the shells) live
+        [shutil.which(shell), "-c", 'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:/usr/bin:/bin", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    assert log.read_text() == "claude hello\n"
+    assert "rc=7" in r.stdout

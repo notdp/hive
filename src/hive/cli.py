@@ -121,7 +121,7 @@ hive spawn claude                            # bring up a new agent pane
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "skills", "worktree", "ls"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "resume-hint", "skills", "worktree", "ls"}
 
 
 class SectionedHelpGroup(click.Group):
@@ -627,13 +627,6 @@ def _status_migration_failure(command_name: str) -> None:
     )
 
 
-def _tmux_runtime_required(argv: list[str]) -> bool:
-    positional = [arg for arg in argv if arg and not arg.startswith("-")]
-    if not positional:
-        return False
-    return positional[0] not in _TMUX_OPTIONAL_ROOT_COMMANDS
-
-
 def _resolve_spawn_cli_name(cli_name: str | None) -> str:
     if cli_name in AGENT_CLI_NAMES:
         return cli_name
@@ -693,6 +686,7 @@ _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "doctor",
     "inject",
     "plugin",
+    "resume-hint",
     "shell-init",
     "skills",
     "status",
@@ -4957,10 +4951,12 @@ def _exec_claude_managed(args: list[str]) -> None:
     keeps a user positional prompt out of their reach without rewriting the
     user's argv.
 
-    Degrades to raw ``claude`` outside tmux and for non-interactive surfaces
-    (subcommands, -p/--print, --help/--version). Exits nonzero when the
-    channel plugin cannot be converged, so the shell wrapper falls back to
-    ``command claude``.
+    Degrades to raw ``claude`` outside tmux, for non-interactive surfaces
+    (subcommands, -p/--print, --help/--version), and when the channel plugin
+    cannot be converged. Always ends in an exec: no exit code of this
+    process is a fallback signal, because after the exec the status belongs
+    to claude and any value 0-255 is legitimate — the shell function only
+    special-cases a missing ``hive`` binary.
     """
     def _raw() -> None:
         os.execvp("claude", ["claude", *args])
@@ -4982,7 +4978,7 @@ def _exec_claude_managed(args: list[str]) -> None:
         claude_channel.clear_ready(pane)
     flags = claude_channel.prepare_pane(os.getcwd())
     if not flags:
-        raise SystemExit(1)  # shell wrapper falls back to `command claude`
+        _raw()  # channel unavailable: a raw claude beats no claude
     os.execvp("claude", ["claude", *args, *flags])
 
 
@@ -5013,6 +5009,110 @@ def claude_cmd(ctx: click.Context):
     _exec_claude_managed(args)
 
 
+@cli.command("resume-hint", hidden=True)
+@click.argument("cli_name", type=click.Choice(["claude", "codex"]))
+def resume_hint_cmd(cli_name: str):
+    """Print a cd-ready resume command for the session this pane just ran.
+
+    Called by the shell-init claude/codex functions after a managed launch
+    exits: claude's own "Resume this session with" line omits the directory
+    and codex prints none at all. Resolution rides hive's existing session
+    truth only — codex asks the pane's detached app-server daemon (it
+    outlives the TUI), claude reads this pane's team-member entry in the
+    resume snapshot (the sidecar keeps recording it and the entry survives
+    the process). A pane outside a hive team gets no hint; tracking
+    arbitrary user panes is not this feature's job. Prints nothing and
+    exits 0 on any failure: a hint must never break the wrapper.
+    """
+    try:
+        hint = _resume_hint(cli_name, os.getcwd())
+    except Exception:
+        return
+    if hint:
+        click.echo(hint)
+
+
+def _resume_hint(cli_name: str, cwd: str) -> str | None:
+    identity = _pane_team_identity()
+    if identity is None:
+        return None
+    pane, team, agent = identity
+    if cli_name == "codex":
+        session_id = _pane_codex_session_id(pane)
+        resume_cmd = "codex resume"
+    else:
+        session_id = _member_snapshot_session_id(team, agent)
+        resume_cmd = "claude --resume"
+    if not session_id:
+        return None
+    # Both fields are untrusted content headed for automatic terminal output:
+    # shlex.quote protects a later shell parse, not the print itself, so
+    # control/non-printable bytes (ESC/OSC/BEL/newline) silence the hint. So
+    # does a leading "-", which would parse as a CLI option instead of a
+    # session id when pasted (`claude --resume` takes an *optional* value,
+    # codex `resume [SESSION_ID]` likewise) — quoting cannot demote an
+    # option token to data.
+    if (
+        not cwd.isprintable()
+        or not session_id.isprintable()
+        or session_id.startswith("-")
+    ):
+        return None
+    return (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && {resume_cmd} {shlex.quote(session_id)}"
+    )
+
+
+def _pane_team_identity() -> tuple[str, str, str] | None:
+    """(pane, team, agent) when this pane is a tagged team member, else None.
+
+    The team gate is shared by both CLIs: any tmux user gets a per-pane codex
+    daemon from the managed launch, so daemon reachability alone must not
+    qualify a pane for a hint — only hive team member panes are in scope.
+    """
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if not pane:
+        return None
+    team = tmux.get_pane_option(pane, "hive-team") or ""
+    agent = tmux.get_pane_option(pane, "hive-agent") or ""
+    if not team or not agent:
+        return None
+    return pane, team, agent
+
+
+def _pane_codex_session_id(pane: str) -> str | None:
+    """This pane's codex session id, from the runtime's existing authority.
+
+    The per-pane app-server daemon is detached and outlives the TUI, so right
+    after exit it still answers with its thread's session id — the same
+    ``codex_app_server.session_id_for_pane`` the sidecar uses. No daemon or
+    unresolved → None: no answer means no hint.
+    """
+    from .adapters import codex_app_server
+
+    return codex_app_server.session_id_for_pane(pane)
+
+
+def _member_snapshot_session_id(team: str, agent: str) -> str | None:
+    """The member's claude session, from the team resume snapshot.
+
+    The sidecar keeps recording every member's sessionId into the resume
+    store, and a member entry survives its pane's process exiting — that
+    store is hive's own answer to "which session did this pane run". No
+    snapshot, no member, or no recorded session → None.
+    """
+    from . import resume as resume_store
+
+    snap = resume_store.load_snapshot(team)
+    if not snap:
+        return None
+    for member in snap.get("members", []):
+        if member.get("name") == agent:
+            return str(member.get("sessionId") or "") or None
+    return None
+
+
 _SHELL_INIT_POSIX = """\
 # hive agent integration — bind interactive codex/claude launches to hive
 # (per-pane daemon for codex, per-pane message channel for claude).
@@ -5040,7 +5140,14 @@ function codex {
         command codex "$@"; return ;;
     esac
   done
-  hive codex "$@" || command codex "$@"
+  if ! command -v hive >/dev/null 2>&1; then command codex "$@"; return; fi
+  # The launcher always ends in an exec (managed or raw), so the status here
+  # is codex's own — never a fallback signal. The if-condition keeps errexit
+  # shells from bailing before the status is saved.
+  if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi
+  # print a cd-ready resume hint for the session that just ended.
+  hive resume-hint codex 2>/dev/null || true
+  return $_hive_rc
 }
 
 function claude {
@@ -5063,7 +5170,14 @@ function claude {
         command claude "$@"; return ;;
     esac
   done
-  hive claude "$@" || command claude "$@"
+  if ! command -v hive >/dev/null 2>&1; then command claude "$@"; return; fi
+  # The launcher always ends in an exec (managed or raw), so the status here
+  # is claude's own — never a fallback signal. The if-condition keeps errexit
+  # shells from bailing before the status is saved.
+  if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi
+  # claude's own resume hint omits the directory; print a cd-ready one.
+  hive resume-hint claude 2>/dev/null || true
+  return $_hive_rc
 }
 """
 
@@ -5103,7 +5217,17 @@ function codex
                 return
         end
     end
-    hive codex $argv; or command codex $argv
+    if not type -q hive
+        command codex $argv
+        return
+    end
+    # the launcher always ends in an exec (managed or raw): the status is
+    # codex's own, never a fallback signal
+    hive codex $argv
+    set -l _hive_rc $status
+    # print a cd-ready resume hint for the session that just ended.
+    hive resume-hint codex 2>/dev/null
+    return $_hive_rc
 end
 
 function claude
@@ -5135,7 +5259,17 @@ function claude
                 return
         end
     end
-    hive claude $argv; or command claude $argv
+    if not type -q hive
+        command claude $argv
+        return
+    end
+    # the launcher always ends in an exec (managed or raw): the status is
+    # claude's own, never a fallback signal
+    hive claude $argv
+    set -l _hive_rc $status
+    # claude's own resume hint omits the directory; print a cd-ready one.
+    hive resume-hint claude 2>/dev/null
+    return $_hive_rc
 end
 """
 
