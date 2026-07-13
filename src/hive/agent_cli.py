@@ -176,22 +176,37 @@ def detect_profile_from_argv(argv: str) -> CLIProfile | None:
     return None
 
 
-def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
-    profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
-    if profile:
-        return profile
-    profile = detect_profile_from_text(tmux.get_pane_title(pane_id) or "")
-    if profile:
-        return profile
-    tty = tmux.get_pane_tty(pane_id) or ""
-    for process in tmux.list_tty_processes(tty):
-        profile = detect_profile_from_pane_command(process.command)
+def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
+    """CLI profile from live process evidence only — never the pane title.
+
+    A retained shell keeps the pane (and often a stale title naming a CLI)
+    after the agent process exits, so title text must not count as liveness
+    evidence. Evidence is the pane's current command and its TTY process
+    table, parsed by the same matchers as :func:`detect_profile_for_pane`.
+    Any probe failure fails closed to None.
+    """
+    try:
+        profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
         if profile:
             return profile
-        profile = detect_profile_from_argv(process.argv)
-        if profile:
-            return profile
+        tty = tmux.get_pane_tty(pane_id) or ""
+        for process in tmux.list_tty_processes(tty):
+            profile = detect_profile_from_pane_command(process.command)
+            if profile:
+                return profile
+            profile = detect_profile_from_argv(process.argv)
+            if profile:
+                return profile
+    except Exception:
+        return None
     return None
+
+
+def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
+    profile = detect_cli_process_for_pane(pane_id)
+    if profile:
+        return profile
+    return detect_profile_from_text(tmux.get_pane_title(pane_id) or "")
 
 
 def member_role_for_pane(pane_id: str) -> str:

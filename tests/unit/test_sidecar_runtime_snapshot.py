@@ -14,6 +14,11 @@ def _patch_team(monkeypatch, *, cli: str = "claude"):
         lead_agent=lambda: None,
     )
     monkeypatch.setattr("hive.team.Team.load", lambda _team_name: fake_team)
+    # the tick's retained-shell guard: default to "CLI process present" so the
+    # capture/stale behaviors under test stay reachable
+    monkeypatch.setattr(
+        sidecar, "detect_cli_process_for_pane", lambda _pane: object()
+    )
 
 
 def test_runtime_snapshot_tick_records_positive_session_hit(monkeypatch):
@@ -406,7 +411,7 @@ def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkey
 
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
     monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _pane_id: {"busy": False})
-    monkeypatch.setattr(sidecar, "detect_profile_for_pane", lambda _pane_id: fake_profile)
+    monkeypatch.setattr(sidecar, "detect_cli_process_for_pane", lambda _pane_id: fake_profile)
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_args, **_kwargs: "")
     monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
     monkeypatch.setattr(sidecar, "_probe_session_id_from_pidfile", lambda *_args, **_kwargs: None)

@@ -18,6 +18,16 @@ _REAL_CHANNEL_STARTUP = agent_mod._drive_claude_channel_startup
 _CHANNEL_FLAGS = ["--channels", "plugin:hive-channel@hive"]
 
 
+def _pin_cli_probe(monkeypatch, name):
+    """Pin the send gate's process probe (the real one inspects live tmux)."""
+    from hive.agent_cli import get_profile
+
+    profile = get_profile(name) if name else None
+    monkeypatch.setattr(
+        "hive.agent_cli.detect_cli_process_for_pane", lambda _pane: profile
+    )
+
+
 def _setup_tmux_mocks(monkeypatch):
     calls: list[str] = []
     tags: list[tuple[object, ...]] = []
@@ -495,9 +505,9 @@ def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
 
 
 def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
-    # pin profile resolution: the real one probes the live tmux pane "%3",
+    # pin the process probe: the real one inspects the live tmux pane "%3",
     # which detects whatever CLI happens to run there on this machine
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    _pin_cli_probe(monkeypatch, "codex")
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
@@ -516,7 +526,7 @@ def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
 
 def test_send_uses_detected_codex_daemon_when_stored_cli_is_stale(monkeypatch):
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, _cli: "codex")
+    _pin_cli_probe(monkeypatch, "codex")
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
         lambda pane, text: sent.append((pane, text)) or True,
@@ -533,9 +543,9 @@ def test_send_uses_detected_codex_daemon_when_stored_cli_is_stale(monkeypatch):
 
 
 def test_send_codex_accepted_returns_classification_without_keystrokes(monkeypatch):
-    # pin profile resolution: the real one probes the live tmux pane "%3",
+    # pin the process probe: the real one inspects the live tmux pane "%3",
     # which detects whatever CLI happens to run there on this machine
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    _pin_cli_probe(monkeypatch, "codex")
     calls, _ = _setup_tmux_mocks(monkeypatch)
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
@@ -552,7 +562,7 @@ def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
     """VAL-5: any codex transport failure (no daemon, no thread, RPC error,
     exception — the adapter folds them all to None) raises DeliveryError and
     never falls back to keystroke injection."""
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    _pin_cli_probe(monkeypatch, "codex")
     calls, _ = _setup_tmux_mocks(monkeypatch)
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane", lambda pane, text: None
@@ -570,7 +580,7 @@ def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
 
 
 def test_send_claude_accepted_passes_classification_through(monkeypatch):
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    _pin_cli_probe(monkeypatch, "claude")
     calls, _ = _setup_tmux_mocks(monkeypatch)
     for classification in ("mcpWriteAccepted", "legacySocketAccepted"):
         monkeypatch.setattr(
@@ -583,7 +593,8 @@ def test_send_claude_accepted_passes_classification_through(monkeypatch):
 
 
 def test_send_unknown_profile_raises_without_keystrokes(monkeypatch):
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: "")
+    # no CLI process on the pane TTY: the send gate refuses before any transport
+    _pin_cli_probe(monkeypatch, "")
     calls, _ = _setup_tmux_mocks(monkeypatch)
     submitted: list[tuple] = []
     monkeypatch.setattr(
@@ -598,9 +609,7 @@ def test_send_unknown_profile_raises_without_keystrokes(monkeypatch):
 
 
 def test_send_claude_never_uses_codex_daemon(monkeypatch):
-    # pin profile resolution: the real one probes the live tmux pane "%3",
-    # which detects whatever CLI happens to run there on this machine
-    monkeypatch.setattr("hive.agent._resolve_profile_name", lambda _pane, cli: cli)
+    _pin_cli_probe(monkeypatch, "claude")
     daemon_calls: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
@@ -822,3 +831,67 @@ def test_spawn_codex_embedded_fork_keeps_banner_wait(monkeypatch):
     assert len(banner_waits) == 1  # legacy oracle stays for the embedded fork
     assert 1 in sleeps  # old settle preserved
     assert probes == []  # daemon runtime never consulted — flag-driven, not cli-driven
+
+
+# --- V1: the launch never execs — the pane shell must survive the CLI ---
+
+
+def _assert_launch_keeps_shell(startup_cmd: str) -> None:
+    """The CLI must run as the shell's foreground child: no `exec` token may
+    appear in the launch pipeline (quoted prompt text does not count as a
+    token, so this cannot green on substrings)."""
+    import shlex as _shlex
+
+    for segment in startup_cmd.split("&&"):
+        try:
+            tokens = _shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        assert "exec" not in tokens, startup_cmd
+
+
+def test_launch_guard_catches_the_old_exec_form():
+    # negative control: the pre-change launch shape must trip the assertion
+    with pytest.raises(AssertionError):
+        _assert_launch_keeps_shell("cd '/w' && exec /bin/codex --remote 'unix:///s'")
+
+
+def test_spawn_claude_fresh_launch_keeps_shell(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none")
+    _assert_launch_keeps_shell(calls[0])
+    assert "claude" in calls[0]
+
+
+def test_spawn_claude_resume_launch_keeps_shell(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none",
+        session_id="sess-1", session_mode="resume",
+    )
+    startup_cmd = calls[0]
+    _assert_launch_keeps_shell(startup_cmd)
+    assert "-r 'sess-1'" in startup_cmd  # resume flags unchanged
+
+
+def test_spawn_codex_daemon_native_launch_keeps_shell(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        cwd="/work/dir", is_first=True, skill="none", cli="codex",
+    )
+    startup_cmd = calls[0]
+    _assert_launch_keeps_shell(startup_cmd)
+    assert "--remote" in startup_cmd  # daemon-native flags unchanged
+
+
+def test_spawn_codex_fork_shortcut_launch_keeps_shell(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none",
+        cli="codex", session_id="sess-abc",
+    )
+    startup_cmd = calls[0]
+    _assert_launch_keeps_shell(startup_cmd)
+    assert "fork" in startup_cmd and "sess-abc" in startup_cmd

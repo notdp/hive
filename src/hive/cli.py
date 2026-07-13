@@ -522,6 +522,7 @@ def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> d
             continue
         for key in (
             "alive",
+            "cliAlive",
             "busy",
             "model",
             "sessionId",
@@ -2355,7 +2356,11 @@ def _duo_neighbor_for_pairing(
     neighbor = others[0]
     if neighbor.team or neighbor.group:
         return None
-    if detect_profile_for_pane(neighbor.pane_id) is None:
+    # Process evidence only: a retained shell with a stale CLI title must
+    # not be conscripted as a validator.
+    from .agent_cli import detect_cli_process_for_pane
+
+    if detect_cli_process_for_pane(neighbor.pane_id) is None:
         return None
     other_family = family_for_pane(neighbor.pane_id)
     if my_family != "unknown" and other_family != "unknown" and my_family == other_family:
