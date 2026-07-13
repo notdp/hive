@@ -21,7 +21,7 @@ _SPEC = importlib.util.spec_from_file_location(
 bootstrap = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bootstrap)
 
-GOOD = "hive, version 0.10.0\n"
+GOOD = "hive, version 0.10.1\n"
 OLD = "hive, version 0.9.4\n"
 PIPX_BIN = "/fake/pipx/venvs/hive/bin/hive"
 
@@ -65,7 +65,7 @@ def pipx_json(app_path=PIPX_BIN):
 
 def test_probe_version_parses_exact_click_shape():
     runner = runner_for([(["/x/hive", "--version"], R(out=GOOD))])
-    assert bootstrap.probe_version(which_for({"hive": "/x/hive"}), runner) == (0, 10, 0)
+    assert bootstrap.probe_version(which_for({"hive": "/x/hive"}), runner) == (0, 10, 1)
 
 
 def test_probe_version_missing_binary_is_none():
@@ -151,7 +151,7 @@ def test_old_hive_owned_by_pipx_forces_reinstall_and_reprobes():
         (["pipx", "install", "--force", bootstrap.REPO_URL], R()),
     ])
     summary = bootstrap.ensure_cli(which_for({"hive": PIPX_BIN, "pipx": "/x/pipx"}), runner)
-    assert "--force" in summary and "0.10.0" in summary
+    assert "--force" in summary and "0.10.1" in summary
     assert ["pipx", "install", "--force", bootstrap.REPO_URL] in runner.calls
 
 
