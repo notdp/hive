@@ -5016,38 +5016,33 @@ def claude_cmd(ctx: click.Context):
 
 @cli.command("resume-hint", hidden=True)
 @click.argument("cli_name", type=click.Choice(["claude", "codex"]))
-@click.option("--since", type=float, default=0.0)
-def resume_hint_cmd(cli_name: str, since: float):
+def resume_hint_cmd(cli_name: str):
     """Print a cd-ready resume command for the session this pane just ran.
 
     Called by the shell-init claude/codex functions after a managed launch
     exits: claude's own "Resume this session with" line omits the directory
-    and codex prints none at all. codex resolves exactly through the
-    runtime's existing authority — the pane's detached app-server daemon
-    outlives the TUI and knows its thread's session id. claude has no
-    surviving pane-scoped authority after a clean exit (process gone,
-    pidfile removed), so it falls back to the newest transcript whose
-    recorded cwd matches $PWD and whose mtime is >= ``--since`` (the launch
-    epoch; the projects slug flattens ``/``, ``.`` and ``_`` alike, so the
-    on-disk layout cannot be matched instead). Prints nothing and exits 0 on
-    any failure: a hint must never break the shell wrapper it rides in.
+    and codex prints none at all. Resolution rides hive's existing session
+    truth only — codex asks the pane's detached app-server daemon (it
+    outlives the TUI), claude reads this pane's team-member entry in the
+    resume snapshot (the sidecar keeps recording it and the entry survives
+    the process). A pane outside a hive team gets no hint; tracking
+    arbitrary user panes is not this feature's job. Prints nothing and
+    exits 0 on any failure: a hint must never break the wrapper.
     """
     try:
-        hint = _resume_hint(cli_name, os.getcwd(), since)
+        hint = _resume_hint(cli_name, os.getcwd())
     except Exception:
         return
     if hint:
         click.echo(hint)
 
 
-def _resume_hint(cli_name: str, cwd: str, since: float) -> str | None:
+def _resume_hint(cli_name: str, cwd: str) -> str | None:
     if cli_name == "codex":
-        session_id = _pane_codex_session_id() or _newest_session_id_for_cwd(
-            "codex", cwd, since
-        )
+        session_id = _pane_codex_session_id()
         resume_cmd = "codex resume"
     else:
-        session_id = _newest_session_id_for_cwd("claude", cwd, since)
+        session_id = _pane_member_claude_session_id()
         resume_cmd = "claude --resume"
     if not session_id:
         return None
@@ -5086,39 +5081,29 @@ def _pane_codex_session_id() -> str | None:
     return codex_app_server.session_id_for_pane(pane)
 
 
-def _newest_session_id_for_cwd(cli_name: str, cwd: str, since: float) -> str | None:
-    """Newest transcript recorded in *cwd* since launch — a heuristic.
+def _pane_member_claude_session_id() -> str | None:
+    """This pane's claude session, from the team resume snapshot.
 
-    Accepted ceiling for a printed suggestion: with two sessions live in the
-    same cwd, the sibling's transcript can be the newest match. `date +%s`
-    truncates, so nothing this run wrote can predate ``since``; a distinct
-    pre-launch write in the same second can still slip in.
+    The sidecar keeps recording every member's sessionId into the resume
+    store, and a member entry survives its pane's process exiting — that
+    store is hive's own answer to "which session did this pane run". Pane
+    not tagged as a team member, no snapshot, or no recorded session → None.
     """
-    from .adapters.base import safe_mtime
-
-    if cli_name == "claude":
-        from .adapters.claude import ClaudeAdapter
-
-        adapter = ClaudeAdapter()
-        root = adapter._projects_root()
-    else:
-        from .adapters.codex import CodexAdapter
-
-        adapter = CodexAdapter()
-        root = adapter._sessions_root()
-    if not root.is_dir():
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if not pane:
         return None
-    # ponytail: codex's sessions tree is date-sharded; a full rglob is fine
-    # at current volume, prune by date directories if it ever drags.
-    fresh = sorted(
-        (p for p in root.rglob("*.jsonl") if safe_mtime(p) >= since),
-        key=safe_mtime,
-        reverse=True,
-    )
-    for path in fresh:
-        meta = adapter.read_meta(path)
-        if meta and meta.cwd == cwd:
-            return meta.session_id
+    team = tmux.get_pane_option(pane, "hive-team") or ""
+    agent = tmux.get_pane_option(pane, "hive-agent") or ""
+    if not team or not agent:
+        return None
+    from . import resume as resume_store
+
+    snap = resume_store.load_snapshot(team)
+    if not snap:
+        return None
+    for member in snap.get("members", []):
+        if member.get("name") == agent:
+            return str(member.get("sessionId") or "") or None
     return None
 
 
@@ -5149,11 +5134,10 @@ function codex {
         command codex "$@"; return ;;
     esac
   done
-  _hive_t=$(date +%%s)
   hive codex "$@" || command codex "$@"
   _hive_rc=$?
   # print a cd-ready resume hint for the session that just ended.
-  hive resume-hint codex --since "$_hive_t" 2>/dev/null
+  hive resume-hint codex 2>/dev/null
   return $_hive_rc
 }
 
@@ -5177,11 +5161,10 @@ function claude {
         command claude "$@"; return ;;
     esac
   done
-  _hive_t=$(date +%%s)
   hive claude "$@" || command claude "$@"
   _hive_rc=$?
   # claude's own resume hint omits the directory; print a cd-ready one.
-  hive resume-hint claude --since "$_hive_t" 2>/dev/null
+  hive resume-hint claude 2>/dev/null
   return $_hive_rc
 }
 """
@@ -5222,11 +5205,10 @@ function codex
                 return
         end
     end
-    set -l _hive_t (date +%%s)
     hive codex $argv; or command codex $argv
     set -l _hive_rc $status
     # print a cd-ready resume hint for the session that just ended.
-    hive resume-hint codex --since $_hive_t 2>/dev/null
+    hive resume-hint codex 2>/dev/null
     return $_hive_rc
 end
 
@@ -5259,11 +5241,10 @@ function claude
                 return
         end
     end
-    set -l _hive_t (date +%%s)
     hive claude $argv; or command claude $argv
     set -l _hive_rc $status
     # claude's own resume hint omits the directory; print a cd-ready one.
-    hive resume-hint claude --since $_hive_t 2>/dev/null
+    hive resume-hint claude 2>/dev/null
     return $_hive_rc
 end
 """

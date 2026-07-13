@@ -347,39 +347,16 @@ def _codex_hint_env(monkeypatch, tmp_path, *, pane=None):
     return home
 
 
-def test_codex_resume_hint_picks_newest_session_for_cwd_and_quotes(runner, monkeypatch, tmp_path):
-    home = _codex_hint_env(monkeypatch, tmp_path)
-    cwd = os.getcwd()
-    evil_id = "id; rm -rf ~"
-    _fake_rollout(home, "01", "rollout-old", "old-id", cwd, 1000.0)
-    _fake_rollout(home, "02", "rollout-new", evil_id, cwd, 2000.0)
-    _fake_rollout(home, "03", "rollout-distractor", "other-id", "/elsewhere", 3000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert result.output == (
-        "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && codex resume {shlex.quote(evil_id)}\n"
-    )
-
-
-def test_codex_resume_hint_since_excludes_stale_sessions(runner, monkeypatch, tmp_path):
-    home = _codex_hint_env(monkeypatch, tmp_path)
-    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "5000"])
-    assert result.exit_code == 0
-    assert result.output == ""
-
-
 def test_shell_init_posix_codex_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
-    assert 'hive resume-hint codex --since "$_hive_t" 2>/dev/null' in out
-    assert out.count('hive resume-hint codex --since') == 1
+    assert 'hive resume-hint codex 2>/dev/null' in out
+    assert out.count('hive resume-hint codex 2>/dev/null') == 1
 
 
 def test_shell_init_fish_codex_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "fish"]).output
-    assert "hive resume-hint codex --since $_hive_t 2>/dev/null" in out
-    assert out.count("hive resume-hint codex --since") == 1
+    assert "hive resume-hint codex 2>/dev/null" in out
+    assert out.count("hive resume-hint codex 2>/dev/null") == 1
 
 
 def _codex_hint_stub_bins(tmp_path):
@@ -413,7 +390,7 @@ def test_shell_init_posix_codex_hint_runs_after_codex_and_keeps_exit_code(runner
     lines = log.read_text().splitlines()
     assert lines[0] == "hive codex hello"  # managed attempt (stub exits 1)
     assert lines[1] == "codex hello"  # raw fallback (stub exits 7)
-    assert re.fullmatch(r"hive resume-hint codex --since \d+", lines[2])
+    assert lines[2] == "hive resume-hint codex"
     assert lines[3] == "codex --help"  # passthrough stays raw and hint-free
     assert len(lines) == 4
     assert "rc=7" in r.stdout  # the hint call must not eat codex's exit code
@@ -435,65 +412,26 @@ def test_shell_init_fish_codex_hint_runs_after_codex_and_keeps_exit_code(runner,
     lines = log.read_text().splitlines()
     assert lines[0] == "hive codex hello"
     assert lines[1] == "codex hello"
-    assert re.fullmatch(r"hive resume-hint codex --since \d+", lines[2])
+    assert lines[2] == "hive resume-hint codex"
     assert lines[3] == "codex --help"
     assert len(lines) == 4
     assert "rc=7" in r.stdout
 
 
-def test_codex_resume_hint_control_bytes_in_session_id_silence_hint(runner, monkeypatch, tmp_path):
-    home = _codex_hint_env(monkeypatch, tmp_path)
-    _fake_rollout(home, "01", "rollout-evil", "ok\x1b]52;c;AAAA\x07", os.getcwd(), 2000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert result.output == ""
-
-
-def test_codex_resume_hint_leading_dash_session_id_silences_hint(runner, monkeypatch, tmp_path):
-    # option injection: `codex resume [SESSION_ID]` also accepts flags there
-    home = _codex_hint_env(monkeypatch, tmp_path)
-    _fake_rollout(home, "01", "rollout-evil", "--dangerously-bypass-approvals-and-sandbox",
-                  os.getcwd(), 2000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert result.output == ""
-
-
-def test_codex_resume_hint_prefers_pane_daemon_session(runner, monkeypatch, tmp_path):
-    # the pane's detached app-server daemon outlives the TUI and is the exact
-    # authority for the session that just ran — no transcript scan needed
-    _codex_hint_env(monkeypatch, tmp_path, pane="%77")
-    seen = {}
-
-    def _daemon_sid(pane):
-        seen["pane"] = pane
-        return "daemon-id"
-
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane", _daemon_sid
-    )
-    cwd = os.getcwd()
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert seen["pane"] == "%77"
-    assert result.output == (
-        "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && codex resume daemon-id\n"
-    )
-
-
-def test_codex_resume_hint_daemon_unresolved_falls_back_to_scan(runner, monkeypatch, tmp_path):
+def test_codex_resume_hint_daemon_unresolved_yields_no_hint(runner, monkeypatch, tmp_path):
+    # no daemon answer means no hint: a transcript scan would reintroduce a
+    # second source of truth (a fresh rollout in cwd proves nothing is scanned)
     home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: None
     )
     _fake_rollout(home, "01", "rollout", "scan-id", os.getcwd(), 2000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    result = runner.invoke(cli, ["resume-hint", "codex"])
     assert result.exit_code == 0
-    assert "scan-id" in result.output
+    assert result.output == ""
 
 
-def test_codex_resume_hint_no_pane_skips_daemon_lookup(runner, monkeypatch, tmp_path):
+def test_codex_resume_hint_no_pane_yields_no_hint(runner, monkeypatch, tmp_path):
     home = _codex_hint_env(monkeypatch, tmp_path)  # TMUX_PANE removed
 
     def _must_not_call(_p):
@@ -503,19 +441,21 @@ def test_codex_resume_hint_no_pane_skips_daemon_lookup(runner, monkeypatch, tmp_
         "hive.adapters.codex_app_server.session_id_for_pane", _must_not_call
     )
     _fake_rollout(home, "01", "rollout", "scan-id", os.getcwd(), 2000.0)
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    result = runner.invoke(cli, ["resume-hint", "codex"])
     assert result.exit_code == 0
-    assert "scan-id" in result.output
+    assert result.output == ""
 
 
-def test_codex_resume_hint_daemon_id_is_still_gated(runner, monkeypatch, tmp_path):
-    # authority or not, the id is untrusted for printing: option-shaped ids
-    # stay silenced
+@pytest.mark.parametrize("evil_id", [
+    "ok\x1b]52;c;AAAA\x07",  # OSC 52 clipboard write, ESC + BEL
+    "--dangerously-bypass-approvals-and-sandbox",  # option-shaped id
+])
+def test_codex_resume_hint_daemon_id_untrusted_gates(runner, monkeypatch, tmp_path, evil_id):
+    # authority or not, the id is untrusted for printing
     _codex_hint_env(monkeypatch, tmp_path, pane="%77")
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane",
-        lambda _p: "--dangerously-bypass-approvals-and-sandbox",
+        "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: evil_id
     )
-    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    result = runner.invoke(cli, ["resume-hint", "codex"])
     assert result.exit_code == 0
     assert result.output == ""
