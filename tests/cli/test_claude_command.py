@@ -498,7 +498,9 @@ def test_shell_init_posix_no_relaunch_on_claude_own_exit_code(runner, tmp_path, 
 
 
 @pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
-def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path):
+@pytest.mark.parametrize("own_rc", [7, 127])
+def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path, own_rc):
+    # 127 discriminates against any exit-code-sentinel fallback
     script_file = tmp_path / "init.fish"
     script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
     log = tmp_path / "calls.log"
@@ -506,7 +508,7 @@ def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path):
     bin_dir.mkdir()
     (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
     (bin_dir / "hive").write_text(
-        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 7\nexit 0\n'
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit {own_rc}\nexit 0\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -520,7 +522,7 @@ def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path):
     assert lines[0] == "hive claude hello"
     assert lines[1] == "hive resume-hint claude"
     assert len(lines) == 2
-    assert "rc=7" in r.stdout
+    assert f"rc={own_rc}" in r.stdout
 
 
 @pytest.mark.parametrize("shell", ["zsh", "bash"])
@@ -540,19 +542,24 @@ def test_shell_init_posix_survives_errexit_and_keeps_status(runner, tmp_path, sh
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
+    # bare call: a `claude ... || capture` at the call site would suppress
+    # errexit inside the whole function body and prove nothing
     r = subprocess.run(
         [shell, "-c",
-         'set -e; eval "$HIVE_SHELL_INIT"; claude hello || _rc=$?; '
-         'echo "rc=${_rc:-0}"; echo survived'],
+         'set -e; eval "$HIVE_SHELL_INIT"; claude hello; echo unreachable'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
              "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
-    assert r.returncode == 0, r.stderr
+    # errexit is genuinely armed: the function's nonzero return kills the
+    # outer shell with claude's own status...
+    assert r.returncode == 7, r.stderr
+    assert "unreachable" not in r.stdout
+    # ...but INSIDE the function the status was captured and the hint still
+    # ran — the old bare-command form died before either happened
     lines = log.read_text().splitlines()
     assert lines[0] == "hive claude hello"
-    assert lines[1] == "hive resume-hint claude"  # hint ran despite errexit
+    assert lines[1] == "hive resume-hint claude"
     assert len(lines) == 2
-    assert "rc=7" in r.stdout and "survived" in r.stdout
 
 
 @pytest.mark.parametrize("shell", ["zsh", "bash"])

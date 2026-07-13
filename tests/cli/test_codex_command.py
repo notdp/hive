@@ -513,7 +513,9 @@ def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, s
 
 
 @pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
-def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path):
+@pytest.mark.parametrize("own_rc", [7, 127])
+def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path, own_rc):
+    # 127 discriminates against any exit-code-sentinel fallback
     script_file = tmp_path / "init.fish"
     script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
     log = tmp_path / "calls.log"
@@ -521,7 +523,7 @@ def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path):
     bin_dir.mkdir()
     (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $@" >> {log}\nexit 0\n')
     (bin_dir / "hive").write_text(
-        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit 7\nexit 0\n'
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "codex" ] && exit {own_rc}\nexit 0\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -535,4 +537,4 @@ def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path):
     assert lines[0] == "hive codex hello"
     assert lines[1] == "hive resume-hint codex"  # no raw relaunch in between
     assert len(lines) == 2
-    assert "rc=7" in r.stdout
+    assert f"rc={own_rc}" in r.stdout
