@@ -1,6 +1,6 @@
 {
   "name": "hive-channel",
-  "version": "0.9.5",
+  "version": "0.10.0",
   "description": "hive per-pane message channel for Claude panes (transport only).",
   "author": {
     "name": "notdp",

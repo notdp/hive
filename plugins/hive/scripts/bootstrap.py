@@ -30,7 +30,7 @@ from pathlib import Path
 
 REPO_URL = "git+https://github.com/notdp/hive"
 MARKETPLACE_SOURCE = {"source": "github", "repo": "notdp/hive"}
-MIN_CLI_VERSION = (0, 9, 5)
+MIN_CLI_VERSION = (0, 10, 0)
 _VERSION_RE = re.compile(r"^hive, version (\d+)\.(\d+)\.(\d+)$")
 _SUBPROCESS_TIMEOUT = 300
 
