@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -82,7 +83,29 @@ def _remove_hooks_in_data(
     return changed
 
 
+# `hooks = true` is a suffix of the legacy `codex_hooks = true`, so both
+# checks must anchor on the start of the assignment, never on substrings
+_HOOKS_ASSIGN_RE = re.compile(r"^\s*hooks\s*=")
+_LEGACY_HOOKS_ASSIGN_RE = re.compile(r"^\s*codex_hooks\s*=")
+
+
+def _features_span(lines: list[str]) -> tuple[int, int] | None:
+    """[start, end) line span of the [features] section body."""
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if start is None:
+            if stripped.startswith("[features]"):
+                rest = stripped[len("[features]"):].strip()
+                if rest == "" or rest.startswith("#"):
+                    start = i + 1
+        elif stripped.startswith("["):
+            return (start, i)
+    return None if start is None else (start, len(lines))
+
+
 def _ensure_codex_hooks_enabled() -> None:
+    """Converge [features].hooks = true; codex_hooks is the retired spelling."""
     config_path = codex_home() / "config.toml"
     content = ""
     if config_path.exists():
@@ -90,15 +113,34 @@ def _ensure_codex_hooks_enabled() -> None:
             content = config_path.read_text()
         except OSError:
             return
-    if "codex_hooks" in content:
-        return
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    section = "\n[features]\ncodex_hooks = true\n"
-    if "[features]" in content:
-        content = content.replace("[features]", "[features]\ncodex_hooks = true", 1)
+    original = content
+    lines = content.splitlines(keepends=True)
+    span = _features_span(lines)
+    if span is None:
+        section = "[features]\nhooks = true\n"
+        if not content:
+            content = section
+        elif content.endswith("\n"):
+            content += section
+        else:
+            content += "\n" + section
     else:
-        content = content.rstrip() + section
-    config_path.write_text(content)
+        start, end = span
+        body = lines[start:end]
+        kept = [line for line in body if not _LEGACY_HOOKS_ASSIGN_RE.match(line)]
+        changed = len(kept) != len(body)
+        if not any(_HOOKS_ASSIGN_RE.match(line) for line in kept):
+            kept.insert(0, "hooks = true\n")
+            changed = True
+        if not changed:
+            return
+        if start > 0 and not lines[start - 1].endswith("\n"):
+            lines[start - 1] += "\n"
+        lines[start:end] = kept
+        content = "".join(lines)
+    if content != original:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(content)
 
 
 CODEX_SUPPORTED_HOOK_EVENTS = {
