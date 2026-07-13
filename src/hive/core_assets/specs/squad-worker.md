@@ -120,7 +120,7 @@ gh pr create --draft --base <integration-branch>
 hive duo set-pr <PR号>
 ```
 
-`--base` 要显式传；忘了就查 `git config branch.<feature-id>.gh-merge-base`。`hive duo set-pr` 只改当前窗口状态栏，不 rename、不动 index。
+`--base` 要显式传；忘了就查 `git config branch.<feature-id>.gh-merge-base`。`hive duo set-pr` 更新当前窗口状态栏，并把窗口 rename 成 feature 名（缺省取当前 hive worktree 的 branch；传第二个参数可覆盖）；不动 index。
 
 `gh pr create` 报 base 不存在（`Base sha can't be blank` / `Base ref must be a branch`）时，上报 `<squad>.orch`；不要 push 集成分支。集成分支是 orch 资产。
 

@@ -2864,20 +2864,42 @@ def _derive_pr_window_status(global_format: str | None) -> str | None:
     return _WINDOW_INDEX_TOKEN_RE.sub(_PR_INDEX_TOKEN, global_format)
 
 
+def _feature_title_for_cwd(cwd: str) -> str:
+    """Feature branch of *cwd* when it is a hive-started worktree, else "".
+
+    Only branches carrying real ``hive-*`` metadata qualify — a bare
+    ``gh-merge-base`` (left behind after ``worktree done``) is not evidence,
+    and neither is an arbitrary user branch. Best-effort: any probe failure
+    means "no title", never a failed set-pr.
+    """
+    branch = _git_branch_for_cwd(cwd)
+    if not branch:
+        return ""
+    from . import worktree as wt_mod
+
+    try:
+        meta = wt_mod.read_meta(wt_mod.repo_anchor(cwd), branch)
+    except wt_mod.WorktreeError:
+        return ""
+    return branch if any(key in meta for key in wt_mod.META_KEYS) else ""
+
+
 @duo_cmd.command("set-pr")
 @click.argument("number", type=int)
 @click.argument("title", required=False, default=None)
 @_json_default_options
 def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
-    """Label the current duo window with its PR number (and optionally rename it).
+    """Label the current duo window with its PR number and rename it to the feature.
 
     Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the
     current tmux window and installs a per-window status-bar display derived
     from the global ``window-status-format`` / ``window-status-current-format``
     (the index position renders ``PR<n>``; user styling and padding are
-    preserved). When TITLE is provided the window is also renamed (short
-    kebab-case recommended — this is a tmux tab, not a PR description).
-    Idempotent — re-running replaces the stamp and re-derives the display.
+    preserved). The window is renamed to TITLE when provided (short kebab-case
+    recommended — this is a tmux tab, not a PR description); without TITLE it
+    is renamed to the cwd's hive feature branch when there is one, else left
+    alone. Idempotent — re-running replaces the stamp and re-derives the
+    display.
     """
     if not tmux.is_inside_tmux():
         _fail("must run inside tmux")
@@ -2892,6 +2914,8 @@ def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
             "run set-pr from your duo window"
         )
     tmux.set_window_option(window, "@hive-pr", str(number))
+    if not title:
+        title = _feature_title_for_cwd(os.getcwd()) or None
     if title:
         tmux.rename_window(window, title)
     display: dict[str, str] = {}

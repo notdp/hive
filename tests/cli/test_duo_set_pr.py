@@ -3,8 +3,10 @@
 set-pr writes window-local state only — the `@hive-pr` data option plus
 per-window `window-status-format` / `window-status-current-format` derived
 from the *global* values (the index position renders `PR<n>`, user styling
-preserved). It must never rename the window, touch its index, or write
-global options; every failure path must leave all three options unwritten.
+preserved). It also renames the window to the feature: explicit TITLE wins,
+otherwise the cwd's hive feature branch; with neither the name is left
+alone. It must never touch the window index or write global options; every
+failure path must leave all options unwritten.
 """
 
 import json
@@ -16,6 +18,24 @@ from hive.cli import cli
 pytestmark = pytest.mark.cli
 
 DERIVED_DEFAULT = "#{?#{@hive-pr},PR#{@hive-pr},#I}:#W#{?window_flags,#{window_flags}, }"
+
+
+@pytest.fixture(autouse=True)
+def no_feature_cwd(monkeypatch):
+    """Pin title derivation to "no feature": the test process itself runs on
+    some real git branch, which must never leak into assertions. Rename-path
+    tests override this explicitly."""
+    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "")
+
+
+def _capture_renames(monkeypatch) -> list:
+    """Swap the conftest no-op rename_window for a recorder — must run *after*
+    configure_hive_home(), which installs its own patch."""
+    calls: list = []
+    monkeypatch.setattr(
+        "hive.cli.tmux.rename_window", lambda *a, **k: calls.append((a, k))
+    )
+    return calls
 
 
 def _bind_team(window: str = "dev:0", team: str = "t-duo") -> None:
@@ -39,8 +59,7 @@ def _assert_nothing_written() -> None:
 def test_set_pr_stamps_option_and_derives_display_json(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     _bind_team()
-    renames: list = []
-    monkeypatch.setattr("hive.cli.tmux.rename_window", lambda *a, **k: renames.append((a, k)))
+    renames = _capture_renames(monkeypatch)
 
     result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
 
@@ -59,7 +78,38 @@ def test_set_pr_stamps_option_and_derives_display_json(runner, configure_hive_ho
     # index token is swapped for the PR conditional, nothing else changes.
     assert _window_option("window-status-format") == DERIVED_DEFAULT
     assert _window_option("window-status-current-format") == DERIVED_DEFAULT
+    # No explicit TITLE and no hive feature branch in cwd → name left alone.
     assert renames == []
+
+
+def test_set_pr_auto_renames_to_feature_branch(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    _bind_team()
+    renames = _capture_renames(monkeypatch)
+    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "my-feature")
+
+    result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["title"] == "my-feature"
+    assert renames == [(("dev:0", "my-feature"), {})]
+    assert _window_option("hive-pr") == "87"
+    assert _window_option("window-status-format") == DERIVED_DEFAULT
+
+
+def test_set_pr_explicit_title_beats_derivation(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    _bind_team()
+    renames = _capture_renames(monkeypatch)
+    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "derived-branch")
+
+    result = runner.invoke(cli, ["duo", "set-pr", "87", "given-title", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["title"] == "given-title"
+    assert renames == [(("dev:0", "given-title"), {})]
 
 
 def test_set_pr_default_output_is_json(runner, configure_hive_home):
@@ -221,14 +271,17 @@ def test_set_pr_rejects_non_integer(runner, configure_hive_home):
     assert _window_option("hive-pr") is None
 
 
-def test_set_pr_requires_hive_team_window(runner, configure_hive_home):
+def test_set_pr_requires_hive_team_window(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
+    renames = _capture_renames(monkeypatch)
+    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "my-feature")
 
     result = runner.invoke(cli, ["duo", "set-pr", "87"])
 
     assert result.exit_code == 1
     assert "@hive-team" in result.output
     _assert_nothing_written()
+    assert renames == []
 
 
 def test_no_top_level_pr_jump_command(runner):
