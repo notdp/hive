@@ -370,48 +370,6 @@ def test_codex_resume_hint_since_excludes_stale_sessions(runner, monkeypatch, tm
     assert result.output == ""
 
 
-@pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not available")
-def test_codex_resume_hint_own_pane_daemon_holder_stays_eligible(runner, monkeypatch, tmp_path):
-    # the per-pane app-server daemon is detached and outlives the TUI: its
-    # open handle on the just-exited rollout must not disqualify the session
-    home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
-    ctrl = home / "app-server-control"
-    ctrl.mkdir(parents=True)
-    (ctrl / "hive-pane-77.pid").write_text(str(os.getpid()))
-    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
-    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
-    with newest.open():  # this test process *is* the "daemon" holding the file
-        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert "new-id" in result.output
-
-
-@pytest.mark.skipif(shutil.which("lsof") is None, reason="lsof not available")
-def test_codex_resume_hint_foreign_holder_excluded(runner, monkeypatch, tmp_path):
-    # no pane daemon pidfile → every live holder is foreign (claude-style)
-    home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
-    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
-    _fake_rollout(home, "01", "rollout-old", "old-id", os.getcwd(), 1000.0)
-    with newest.open():
-        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert "old-id" in result.output and "new-id" not in result.output
-
-
-def test_codex_resume_hint_lsof_failure_degrades_to_newest(runner, monkeypatch, tmp_path):
-    home = _codex_hint_env(monkeypatch, tmp_path)
-    newest = _fake_rollout(home, "02", "rollout-new", "new-id", os.getcwd(), 2000.0)
-
-    def _no_lsof(*_a, **_k):
-        raise OSError("lsof missing")
-
-    monkeypatch.setattr("hive.cli.subprocess.run", _no_lsof)
-    with newest.open():
-        result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
-    assert result.exit_code == 0
-    assert "new-id" in result.output
-
-
 def test_shell_init_posix_codex_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
     assert 'hive resume-hint codex --since "$_hive_t" 2>/dev/null' in out
@@ -496,6 +454,68 @@ def test_codex_resume_hint_leading_dash_session_id_silences_hint(runner, monkeyp
     home = _codex_hint_env(monkeypatch, tmp_path)
     _fake_rollout(home, "01", "rollout-evil", "--dangerously-bypass-approvals-and-sandbox",
                   os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_codex_resume_hint_prefers_pane_daemon_session(runner, monkeypatch, tmp_path):
+    # the pane's detached app-server daemon outlives the TUI and is the exact
+    # authority for the session that just ran — no transcript scan needed
+    _codex_hint_env(monkeypatch, tmp_path, pane="%77")
+    seen = {}
+
+    def _daemon_sid(pane):
+        seen["pane"] = pane
+        return "daemon-id"
+
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane", _daemon_sid
+    )
+    cwd = os.getcwd()
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert seen["pane"] == "%77"
+    assert result.output == (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && codex resume daemon-id\n"
+    )
+
+
+def test_codex_resume_hint_daemon_unresolved_falls_back_to_scan(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path, pane="%77")
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: None
+    )
+    _fake_rollout(home, "01", "rollout", "scan-id", os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert "scan-id" in result.output
+
+
+def test_codex_resume_hint_no_pane_skips_daemon_lookup(runner, monkeypatch, tmp_path):
+    home = _codex_hint_env(monkeypatch, tmp_path)  # TMUX_PANE removed
+
+    def _must_not_call(_p):
+        raise AssertionError("daemon lookup must not run without a pane")
+
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane", _must_not_call
+    )
+    _fake_rollout(home, "01", "rollout", "scan-id", os.getcwd(), 2000.0)
+    result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
+    assert result.exit_code == 0
+    assert "scan-id" in result.output
+
+
+def test_codex_resume_hint_daemon_id_is_still_gated(runner, monkeypatch, tmp_path):
+    # authority or not, the id is untrusted for printing: option-shaped ids
+    # stay silenced
+    _codex_hint_env(monkeypatch, tmp_path, pane="%77")
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane",
+        lambda _p: "--dangerously-bypass-approvals-and-sandbox",
+    )
     result = runner.invoke(cli, ["resume-hint", "codex", "--since", "900"])
     assert result.exit_code == 0
     assert result.output == ""

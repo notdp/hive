@@ -5018,18 +5018,19 @@ def claude_cmd(ctx: click.Context):
 @click.argument("cli_name", type=click.Choice(["claude", "codex"]))
 @click.option("--since", type=float, default=0.0)
 def resume_hint_cmd(cli_name: str, since: float):
-    """Print a cd-ready resume command for the session this cwd just ran.
+    """Print a cd-ready resume command for the session this pane just ran.
 
     Called by the shell-init claude/codex functions after a managed launch
     exits: claude's own "Resume this session with" line omits the directory
-    and codex prints none at all. ``--since`` is the launch epoch, a
-    best-effort narrowing to sessions touched during this run (second
-    resolution: a same-second pre-launch write can slip in). Sessions are
-    matched by
-    the cwd recorded inside the transcript, never by the on-disk layout
-    (claude's projects slug flattens ``/``, ``.`` and ``_`` alike and cannot
-    be inverted). Prints nothing and exits 0 on any failure: a hint must
-    never break the shell wrapper it rides in.
+    and codex prints none at all. codex resolves exactly through the
+    runtime's existing authority — the pane's detached app-server daemon
+    outlives the TUI and knows its thread's session id. claude has no
+    surviving pane-scoped authority after a clean exit (process gone,
+    pidfile removed), so it falls back to the newest transcript whose
+    recorded cwd matches $PWD and whose mtime is >= ``--since`` (the launch
+    epoch; the projects slug flattens ``/``, ``.`` and ``_`` alike, so the
+    on-disk layout cannot be matched instead). Prints nothing and exits 0 on
+    any failure: a hint must never break the shell wrapper it rides in.
     """
     try:
         hint = _resume_hint(cli_name, os.getcwd(), since)
@@ -5040,6 +5041,59 @@ def resume_hint_cmd(cli_name: str, since: float):
 
 
 def _resume_hint(cli_name: str, cwd: str, since: float) -> str | None:
+    if cli_name == "codex":
+        session_id = _pane_codex_session_id() or _newest_session_id_for_cwd(
+            "codex", cwd, since
+        )
+        resume_cmd = "codex resume"
+    else:
+        session_id = _newest_session_id_for_cwd("claude", cwd, since)
+        resume_cmd = "claude --resume"
+    if not session_id:
+        return None
+    # Both fields are untrusted content headed for automatic terminal output:
+    # shlex.quote protects a later shell parse, not the print itself, so
+    # control/non-printable bytes (ESC/OSC/BEL/newline) silence the hint. So
+    # does a leading "-", which would parse as a CLI option instead of a
+    # session id when pasted (`claude --resume` takes an *optional* value,
+    # codex `resume [SESSION_ID]` likewise) — quoting cannot demote an
+    # option token to data.
+    if (
+        not cwd.isprintable()
+        or not session_id.isprintable()
+        or session_id.startswith("-")
+    ):
+        return None
+    return (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && {resume_cmd} {shlex.quote(session_id)}"
+    )
+
+
+def _pane_codex_session_id() -> str | None:
+    """This pane's codex session id, from the runtime's existing authority.
+
+    The per-pane app-server daemon is detached and outlives the TUI, so right
+    after exit it still answers with its thread's session id — the same
+    ``codex_app_server.session_id_for_pane`` the sidecar uses. No pane, no
+    daemon, or unresolved → None (caller falls back to the cwd scan).
+    """
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if not pane:
+        return None
+    from .adapters import codex_app_server
+
+    return codex_app_server.session_id_for_pane(pane)
+
+
+def _newest_session_id_for_cwd(cli_name: str, cwd: str, since: float) -> str | None:
+    """Newest transcript recorded in *cwd* since launch — a heuristic.
+
+    Accepted ceiling for a printed suggestion: with two sessions live in the
+    same cwd, the sibling's transcript can be the newest match. `date +%s`
+    truncates, so nothing this run wrote can predate ``since``; a distinct
+    pre-launch write in the same second can still slip in.
+    """
     from .adapters.base import safe_mtime
 
     if cli_name == "claude":
@@ -5047,173 +5101,25 @@ def _resume_hint(cli_name: str, cwd: str, since: float) -> str | None:
 
         adapter = ClaudeAdapter()
         root = adapter._projects_root()
-        resume_cmd = "claude --resume"
     else:
         from .adapters.codex import CodexAdapter
 
         adapter = CodexAdapter()
         root = adapter._sessions_root()
-        resume_cmd = "codex resume"
     if not root.is_dir():
         return None
-    # `date +%s` truncates, so the real launch instant is never before
-    # --since and anything this run wrote has mtime >= since. Seconds
-    # precision can still admit a distinct pre-launch write in the same
-    # second: --since is a best-effort narrowing, not an exact fence.
-    # ponytail: codex's sessions tree is date-sharded; a full rglob is fine at
-    # current volume, prune by date directories if it ever drags.
+    # ponytail: codex's sessions tree is date-sharded; a full rglob is fine
+    # at current volume, prune by date directories if it ever drags.
     fresh = sorted(
         (p for p in root.rglob("*.jsonl") if safe_mtime(p) >= since),
         key=safe_mtime,
         reverse=True,
     )
-    candidates = [
-        (path, meta)
-        for path in fresh
-        if (meta := adapter.read_meta(path)) and meta.cwd == cwd
-    ]
-    if not candidates:
-        return None
-    # A session owned by a still-running CLI must not be suggested — it is
-    # someone else's live conversation (same-cwd sibling pane). Each CLI has
-    # its own ownership signal: the claude builds observed so far append and
-    # close the transcript between writes (no reliable handle to observe), so
-    # ownership comes from the live-pid pidfile map; codex's detached per-pane
-    # daemon may keep the rollout open (observed, not guaranteed — daemon
-    # lsof can expose no handle, letting a live codex session evade
-    # exclusion), so file holders minus this pane's own daemon are foreign.
-    if cli_name == "claude":
-        live_ids = _live_claude_session_ids()
-        eligible = (m for _, m in candidates if m.session_id not in live_ids)
-    else:
-        held = _held_by_pids([path for path, _ in candidates])
-        own_pids = _own_codex_daemon_pids()
-        eligible = (
-            m
-            for path, m in candidates
-            if not held.get(os.path.realpath(str(path)), set()) - own_pids
-        )
-    meta = next(eligible, None)
-    if meta is None:
-        return None
-    # Both fields are untrusted file content headed for automatic terminal
-    # output: shlex.quote protects a later shell parse, not the print itself,
-    # so control/non-printable bytes (ESC/OSC/BEL/newline) silence the hint.
-    # A leading "-" would parse as a CLI option instead of a session id when
-    # pasted (`claude --resume` takes an *optional* value and codex `resume
-    # [SESSION_ID]` likewise) — quoting cannot demote an option token to data.
-    if (
-        not cwd.isprintable()
-        or not meta.session_id.isprintable()
-        or meta.session_id.startswith("-")
-    ):
-        return None
-    return (
-        "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && {resume_cmd} {shlex.quote(meta.session_id)}"
-    )
-
-
-def _live_claude_session_ids() -> set[str]:
-    """Session ids owned by a still-running claude, per the pidfile map.
-
-    ``$CLAUDE_HOME/sessions/<pid>.json`` entries are maintained while claude
-    runs and removed on clean exit; a crash leftover normally fails the
-    liveness probe. No ``updatedAt`` freshness check on top: an idle claude
-    stops heartbeating but still owns its session. Known ceilings: right
-    after /clear an entry can lag on the pane's previous session id (a live
-    pane's *new* session then evades exclusion — a wrong hint, not just
-    silence), and a crash-stale entry whose pid the OS reused reads as live,
-    wrongly excluding that stale session id. Any single bad entry is skipped,
-    never fatal.
-    """
-    from .adapters.claude import _claude_home
-
-    sessions_dir = _claude_home() / "sessions"
-    out: set[str] = set()
-    try:
-        pidfiles = list(sessions_dir.glob("*.json"))
-    except OSError:
-        return out
-    for pidfile in pidfiles:
-        try:
-            pid = int(pidfile.stem)
-            payload = json.loads(pidfile.read_text())
-        except (OSError, ValueError):
-            continue
-        if pid <= 0 or not isinstance(payload, dict):
-            continue
-        session_id = str(payload.get("sessionId") or "")
-        if not session_id:
-            continue
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            continue
-        except PermissionError:
-            pass  # process exists but is not ours: conservatively live
-        except OSError:
-            continue  # probe failed — liveness unproven, do not exclude
-        out.add(session_id)
-    return out
-
-
-def _own_codex_daemon_pids() -> set[int]:
-    """The current pane's codex app-server PID, when that daemon is alive.
-
-    The per-pane daemon is detached and outlives the TUI, so it may still hold
-    the just-exited rollout open — its handle must not count as a foreign
-    owner. No pane / pidfile / live process → empty set, i.e. every holder is
-    foreign (claude-style exclusion).
-    """
-    pane = os.environ.get("TMUX_PANE", "").strip()
-    if not pane:
-        return set()
-    from .adapters import codex_app_server
-
-    try:
-        pid = int(codex_app_server.pane_pidfile_path(pane).read_text().strip())
-    except (OSError, ValueError):
-        return set()
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return set()
-    except PermissionError:
-        pass
-    return {pid}
-
-
-def _held_by_pids(paths: list[Path]) -> dict[str, set[int]]:
-    """realpath → live PIDs holding the file open, via one ``lsof -Fpn`` call.
-
-    Exclusion is a refinement, never a gate: lsof absent, timing out, or
-    erroring degrades to an empty map (= keep the newest-mtime choice). lsof
-    exits nonzero when some listed files are open by nobody — stdout is still
-    authoritative for the ones that are.
-    """
-    if not paths:
-        return {}
-    try:
-        r = subprocess.run(
-            ["lsof", "-Fpn", "--", *map(str, paths)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    held: dict[str, set[int]] = {}
-    pid: int | None = None
-    for line in r.stdout.splitlines():
-        if line[:1] == "p":
-            try:
-                pid = int(line[1:])
-            except ValueError:
-                pid = None
-        elif line[:1] == "n" and pid is not None:
-            held.setdefault(os.path.realpath(line[1:]), set()).add(pid)
-    return held
+    for path in fresh:
+        meta = adapter.read_meta(path)
+        if meta and meta.cwd == cwd:
+            return meta.session_id
+    return None
 
 
 _SHELL_INIT_POSIX = """\
