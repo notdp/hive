@@ -182,12 +182,13 @@ def test_claude_outside_tmux_runs_raw(runner, monkeypatch):
     assert calls == [["claude", "claude", "hello"]]
 
 
-def test_claude_exits_nonzero_when_channel_unavailable(runner, monkeypatch):
-    # nonzero exit lets the shell function fall back to `command claude`
+def test_claude_exits_127_when_channel_unavailable(runner, monkeypatch):
+    # the reserved wrapper-declined code lets the shell function fall back to
+    # `command claude`; any other status is claude's own exit
     calls = _capture_exec(monkeypatch)
     _managed_env(monkeypatch, flags=[])
     result = runner.invoke(cli, ["claude", "hello"])
-    assert result.exit_code != 0
+    assert result.exit_code == 127
     assert calls == []  # neither managed nor raw exec: the wrapper decides
 
 
@@ -198,7 +199,9 @@ def test_shell_init_zsh_emits_claude_function(runner):
     # both zsh and bash, so pre-existing user aliases cannot break the parse
     assert "function codex {" in result.output
     assert "function claude {" in result.output
-    assert "hive claude \"$@\" || command claude \"$@\"" in result.output
+    assert 'hive claude "$@"' in result.output
+    # raw fallback only on the reserved wrapper-declined code
+    assert 'if [ "$_hive_rc" -eq 127 ]; then' in result.output
     # passthrough guards present for both surfaces
     assert "agents" in result.output
     assert "--print" in result.output
@@ -249,7 +252,8 @@ def test_shell_init_fish_emits_claude_function(runner):
     assert result.exit_code == 0
     assert "function codex" in result.output
     assert "function claude" in result.output
-    assert "hive claude $argv; or command claude $argv" in result.output
+    assert "hive claude $argv" in result.output
+    assert "if test $_hive_rc -eq 127" in result.output
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
@@ -298,14 +302,14 @@ def test_shell_init_fish_claude_tail_calls_resume_hint(runner):
 
 
 def _hint_stub_bins(tmp_path):
-    """Stub hive/claude that log calls: managed launch fails (exit 1) so the
-    function falls back to raw claude, which exits 7."""
+    """Stub hive/claude that log calls: the managed launch declines with the
+    reserved 127, so the function falls back to raw claude, which exits 7."""
     log = tmp_path / "calls.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 7\n')
     (bin_dir / "hive").write_text(
-        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 1\nexit 0\n'
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 127\nexit 0\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -326,8 +330,8 @@ def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    assert lines[0] == "hive claude hello"  # managed attempt (stub exits 1)
-    assert lines[1] == "claude hello"  # raw fallback (stub exits 7)
+    assert lines[0] == "hive claude hello"  # managed attempt (stub declines: 127)
+    assert lines[1] == "claude hello"  # raw fallback on 127 (stub exits 7)
     assert lines[2] == "hive resume-hint claude"
     assert lines[3] == "claude --help"  # passthrough stays raw and hint-free
     assert len(lines) == 4
@@ -462,3 +466,59 @@ def test_resume_hint_control_bytes_in_cwd_silence_hint(runner, monkeypatch, tmp_
     result = runner.invoke(cli, ["resume-hint", "claude"])
     assert result.exit_code == 0
     assert result.output == ""
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_no_relaunch_on_claude_own_exit_code(runner, tmp_path, shell):
+    # regression: `hive claude || command claude` used to start a SECOND raw
+    # claude whenever the exec'd claude exited nonzero on its own; only the
+    # reserved 127 may trigger the fallback
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 7\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    r = subprocess.run(
+        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"  # exits 7: claude's own status
+    assert lines[1] == "hive resume-hint claude"  # no raw relaunch in between
+    assert len(lines) == 2
+    assert "rc=7" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 7\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; claude hello; echo "rc=$status"'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"
+    assert lines[1] == "hive resume-hint claude"
+    assert len(lines) == 2
+    assert "rc=7" in r.stdout

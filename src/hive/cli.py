@@ -627,13 +627,6 @@ def _status_migration_failure(command_name: str) -> None:
     )
 
 
-def _tmux_runtime_required(argv: list[str]) -> bool:
-    positional = [arg for arg in argv if arg and not arg.startswith("-")]
-    if not positional:
-        return False
-    return positional[0] not in _TMUX_OPTIONAL_ROOT_COMMANDS
-
-
 def _resolve_spawn_cli_name(cli_name: str | None) -> str:
     if cli_name in AGENT_CLI_NAMES:
         return cli_name
@@ -4959,9 +4952,11 @@ def _exec_claude_managed(args: list[str]) -> None:
     user's argv.
 
     Degrades to raw ``claude`` outside tmux and for non-interactive surfaces
-    (subcommands, -p/--print, --help/--version). Exits nonzero when the
+    (subcommands, -p/--print, --help/--version). Exits 127 — the shell's own
+    command-not-found code, which a real claude run can't produce — when the
     channel plugin cannot be converged, so the shell wrapper falls back to
-    ``command claude``.
+    ``command claude`` on exactly that code and never relaunches a claude
+    that exited nonzero on its own.
     """
     def _raw() -> None:
         os.execvp("claude", ["claude", *args])
@@ -4983,7 +4978,7 @@ def _exec_claude_managed(args: list[str]) -> None:
         claude_channel.clear_ready(pane)
     flags = claude_channel.prepare_pane(os.getcwd())
     if not flags:
-        raise SystemExit(1)  # shell wrapper falls back to `command claude`
+        raise SystemExit(127)  # wrapper declined: shell falls back to `command claude`
     os.execvp("claude", ["claude", *args, *flags])
 
 
@@ -5145,8 +5140,14 @@ function codex {
         command codex "$@"; return ;;
     esac
   done
-  hive codex "$@" || command codex "$@"
+  hive codex "$@"
   _hive_rc=$?
+  # 127 = wrapper declined (or hive itself missing); any other status is
+  # codex's own exit and must not trigger a second launch.
+  if [ "$_hive_rc" -eq 127 ]; then
+    command codex "$@"
+    _hive_rc=$?
+  fi
   # print a cd-ready resume hint for the session that just ended.
   hive resume-hint codex 2>/dev/null
   return $_hive_rc
@@ -5172,8 +5173,14 @@ function claude {
         command claude "$@"; return ;;
     esac
   done
-  hive claude "$@" || command claude "$@"
+  hive claude "$@"
   _hive_rc=$?
+  # 127 = wrapper declined (or hive itself missing); any other status is
+  # claude's own exit and must not trigger a second launch.
+  if [ "$_hive_rc" -eq 127 ]; then
+    command claude "$@"
+    _hive_rc=$?
+  fi
   # claude's own resume hint omits the directory; print a cd-ready one.
   hive resume-hint claude 2>/dev/null
   return $_hive_rc
@@ -5216,8 +5223,14 @@ function codex
                 return
         end
     end
-    hive codex $argv; or command codex $argv
+    hive codex $argv
     set -l _hive_rc $status
+    # 127 = wrapper declined (or hive itself missing); any other status is
+    # codex's own exit and must not trigger a second launch.
+    if test $_hive_rc -eq 127
+        command codex $argv
+        set _hive_rc $status
+    end
     # print a cd-ready resume hint for the session that just ended.
     hive resume-hint codex 2>/dev/null
     return $_hive_rc
@@ -5252,8 +5265,14 @@ function claude
                 return
         end
     end
-    hive claude $argv; or command claude $argv
+    hive claude $argv
     set -l _hive_rc $status
+    # 127 = wrapper declined (or hive itself missing); any other status is
+    # claude's own exit and must not trigger a second launch.
+    if test $_hive_rc -eq 127
+        command claude $argv
+        set _hive_rc $status
+    end
     # claude's own resume hint omits the directory; print a cd-ready one.
     hive resume-hint claude 2>/dev/null
     return $_hive_rc
