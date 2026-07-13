@@ -121,7 +121,7 @@ hive spawn claude                            # bring up a new agent pane
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "skills", "worktree", "ls"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "claude-resume-hint", "skills", "worktree", "ls"}
 
 
 class SectionedHelpGroup(click.Group):
@@ -687,6 +687,7 @@ def _stderr_is_interactive() -> bool:
 
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "claude",
+    "claude-resume-hint",
     "codex",
     "config",
     "current",
@@ -5013,6 +5014,50 @@ def claude_cmd(ctx: click.Context):
     _exec_claude_managed(args)
 
 
+@cli.command("claude-resume-hint", hidden=True)
+@click.option("--since", type=float, default=0.0)
+def claude_resume_hint_cmd(since: float):
+    """Print a cd-ready resume command for the claude session this cwd just ran.
+
+    Called by the shell-init claude function after a managed claude exits:
+    claude's own "Resume this session with" line omits the directory, so it
+    only works from the cwd it assumes. ``--since`` is the launch epoch —
+    sessions not touched during this run are never suggested. Sessions are
+    matched by the cwd recorded inside the transcript, never by the projects
+    dir slug (the slug flattens ``/``, ``.`` and ``_`` alike and cannot be
+    inverted). Prints nothing and exits 0 on any failure: a hint must never
+    break the shell wrapper it rides in.
+    """
+    try:
+        hint = _claude_resume_hint(os.getcwd(), since)
+    except Exception:
+        return
+    if hint:
+        click.echo(hint)
+
+
+def _claude_resume_hint(cwd: str, since: float) -> str | None:
+    from .adapters.base import safe_mtime
+    from .adapters.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    root = adapter._projects_root()
+    if not root.is_dir():
+        return None
+    # 1s slack: `date +%s` truncates while file mtimes do not.
+    fresh = [p for p in root.rglob("*.jsonl") if safe_mtime(p) >= since - 1]
+    for path in sorted(fresh, key=safe_mtime, reverse=True):
+        meta = adapter.read_meta(path)
+        # ponytail: concurrent claude panes in one cwd race on newest mtime;
+        # --since narrows to this run and hive panes get their own worktrees.
+        if meta and meta.cwd == cwd:
+            return (
+                "Resume from anywhere:\n"
+                f"  cd {shlex.quote(cwd)} && claude --resume {shlex.quote(meta.session_id)}"
+            )
+    return None
+
+
 _SHELL_INIT_POSIX = """\
 # hive agent integration — bind interactive codex/claude launches to hive
 # (per-pane daemon for codex, per-pane message channel for claude).
@@ -5063,7 +5108,12 @@ function claude {
         command claude "$@"; return ;;
     esac
   done
+  _hive_t=$(date +%%s)
   hive claude "$@" || command claude "$@"
+  _hive_rc=$?
+  # claude's own resume hint omits the directory; print a cd-ready one.
+  hive claude-resume-hint --since "$_hive_t" 2>/dev/null
+  return $_hive_rc
 }
 """
 
@@ -5135,7 +5185,12 @@ function claude
                 return
         end
     end
+    set -l _hive_t (date +%%s)
     hive claude $argv; or command claude $argv
+    set -l _hive_rc $status
+    # claude's own resume hint omits the directory; print a cd-ready one.
+    hive claude-resume-hint --since $_hive_t 2>/dev/null
+    return $_hive_rc
 end
 """
 

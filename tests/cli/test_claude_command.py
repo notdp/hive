@@ -1,5 +1,8 @@
 """CLI tests for `hive claude` managed launch and its shell-init function."""
+import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 
@@ -274,3 +277,158 @@ def test_shell_init_zsh_routes_aliased_subcommand_raw(runner, tmp_path):
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     assert log.read_text() == "claude --verbose daemon status\n"
+
+
+# --- claude-resume-hint -----------------------------------------------------
+
+
+def _fake_session(claude_home, slug, stem, session_id, cwd, mtime):
+    d = claude_home / "projects" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{stem}.jsonl"
+    p.write_text(json.dumps({
+        "sessionId": session_id,
+        "cwd": cwd,
+        "timestamp": "2026-07-13T00:00:00.000Z",
+        "type": "user",
+        "message": {"role": "user", "content": "hi"},
+    }) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_resume_hint_picks_newest_session_for_cwd_and_quotes(runner, monkeypatch, tmp_path):
+    # cwd match comes from the transcript's cwd field, never the dir slug;
+    # both cwd and session id are shell-quoted (the id also comes from file
+    # content, so it is as untrusted as the path)
+    work = tmp_path / "wo rk"
+    work.mkdir()
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(work)
+    cwd = os.getcwd()
+    evil_id = "id; rm -rf ~"
+    _fake_session(home, "slug-a", "old", "old-id", cwd, 1000.0)
+    _fake_session(home, "slug-a", "new", evil_id, cwd, 2000.0)
+    _fake_session(home, "slug-b", "distractor", "other-id", "/elsewhere", 3000.0)
+    result = runner.invoke(cli, ["claude-resume-hint", "--since", "900"])
+    assert result.exit_code == 0
+    assert result.output == (
+        "Resume from anywhere:\n"
+        f"  cd {shlex.quote(cwd)} && claude --resume {shlex.quote(evil_id)}\n"
+    )
+
+
+def test_resume_hint_since_excludes_stale_sessions(runner, monkeypatch, tmp_path):
+    # a run that produced no session (instant quit) must not resurrect the
+    # previous session's id as if it were this run's
+    home = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    _fake_session(home, "slug", "old", "old-id", os.getcwd(), 1000.0)
+    result = runner.invoke(cli, ["claude-resume-hint", "--since", "5000"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_without_projects_dir_is_silent(runner, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "empty"))
+    result = runner.invoke(cli, ["claude-resume-hint", "--since", "0"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_resume_hint_bypasses_tmux_and_codex_gates(runner, monkeypatch, tmp_path):
+    # the hint runs from a plain shell after claude exits: outside tmux, and
+    # possibly inside a codex tool env — neither root gate may block it
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "empty"))
+    result = runner.invoke(cli, ["claude-resume-hint", "--since", "0"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_shell_init_posix_claude_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "zsh"]).output
+    assert "_hive_t=$(date +%s)" in out
+    assert 'hive claude-resume-hint --since "$_hive_t" 2>/dev/null' in out
+    assert "return $_hive_rc" in out
+    # claude only: the codex function stays hint-free
+    assert out.count("claude-resume-hint") == 1
+
+
+def test_shell_init_fish_claude_tail_calls_resume_hint(runner):
+    out = runner.invoke(cli, ["shell-init", "fish"]).output
+    assert "set -l _hive_t (date +%s)" in out
+    assert "hive claude-resume-hint --since $_hive_t 2>/dev/null" in out
+    assert "return $_hive_rc" in out
+    assert out.count("claude-resume-hint") == 1
+
+
+def _hint_stub_bins(tmp_path):
+    """Stub hive/claude that log calls: managed launch fails (exit 1) so the
+    function falls back to raw claude, which exits 7."""
+    log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 7\n')
+    (bin_dir / "hive").write_text(
+        f'#!/bin/sh\necho "hive $@" >> {log}\n[ "$1" = "claude" ] && exit 1\nexit 0\n'
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    return log, bin_dir
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_path, shell):
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log, bin_dir = _hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        [shell, "-c",
+         'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"; claude --help; true'],
+        env={**os.environ, "HIVE_SHELL_INIT": script,
+             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"  # managed attempt (stub exits 1)
+    assert lines[1] == "claude hello"  # raw fallback (stub exits 7)
+    assert re.fullmatch(r"hive claude-resume-hint --since \d+", lines[2])
+    assert lines[3] == "claude --help"  # passthrough stays raw and hint-free
+    assert len(lines) == 4
+    assert "rc=7" in r.stdout  # the hint call must not eat claude's exit code
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_script_parses(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    r = subprocess.run(["fish", "-n", str(script_file)],
+                       capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(shutil.which("fish") is None, reason="fish not available")
+def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_path):
+    script_file = tmp_path / "init.fish"
+    script_file.write_text(runner.invoke(cli, ["shell-init", "fish"]).output)
+    log, bin_dir = _hint_stub_bins(tmp_path)
+    r = subprocess.run(
+        ["fish", "-c",
+         f'source {shlex.quote(str(script_file))}; '
+         'claude hello; echo "rc=$status"; claude --help; true'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+             "TMUX": "stub"},
+        capture_output=True, text=True, timeout=15)
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    assert lines[0] == "hive claude hello"
+    assert lines[1] == "claude hello"
+    assert re.fullmatch(r"hive claude-resume-hint --since \d+", lines[2])
+    assert lines[3] == "claude --help"
+    assert len(lines) == 4
+    assert "rc=7" in r.stdout
