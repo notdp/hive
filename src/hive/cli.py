@@ -5038,11 +5038,15 @@ def resume_hint_cmd(cli_name: str):
 
 
 def _resume_hint(cli_name: str, cwd: str) -> str | None:
+    identity = _pane_team_identity()
+    if identity is None:
+        return None
+    pane, team, agent = identity
     if cli_name == "codex":
-        session_id = _pane_codex_session_id()
+        session_id = _pane_codex_session_id(pane)
         resume_cmd = "codex resume"
     else:
-        session_id = _pane_member_claude_session_id()
+        session_id = _member_snapshot_session_id(team, agent)
         resume_cmd = "claude --resume"
     if not session_id:
         return None
@@ -5065,29 +5069,12 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
     )
 
 
-def _pane_codex_session_id() -> str | None:
-    """This pane's codex session id, from the runtime's existing authority.
+def _pane_team_identity() -> tuple[str, str, str] | None:
+    """(pane, team, agent) when this pane is a tagged team member, else None.
 
-    The per-pane app-server daemon is detached and outlives the TUI, so right
-    after exit it still answers with its thread's session id — the same
-    ``codex_app_server.session_id_for_pane`` the sidecar uses. No pane, no
-    daemon, or unresolved → None (caller falls back to the cwd scan).
-    """
-    pane = os.environ.get("TMUX_PANE", "").strip()
-    if not pane:
-        return None
-    from .adapters import codex_app_server
-
-    return codex_app_server.session_id_for_pane(pane)
-
-
-def _pane_member_claude_session_id() -> str | None:
-    """This pane's claude session, from the team resume snapshot.
-
-    The sidecar keeps recording every member's sessionId into the resume
-    store, and a member entry survives its pane's process exiting — that
-    store is hive's own answer to "which session did this pane run". Pane
-    not tagged as a team member, no snapshot, or no recorded session → None.
+    The team gate is shared by both CLIs: any tmux user gets a per-pane codex
+    daemon from the managed launch, so daemon reachability alone must not
+    qualify a pane for a hint — only hive team member panes are in scope.
     """
     pane = os.environ.get("TMUX_PANE", "").strip()
     if not pane:
@@ -5096,6 +5083,30 @@ def _pane_member_claude_session_id() -> str | None:
     agent = tmux.get_pane_option(pane, "hive-agent") or ""
     if not team or not agent:
         return None
+    return pane, team, agent
+
+
+def _pane_codex_session_id(pane: str) -> str | None:
+    """This pane's codex session id, from the runtime's existing authority.
+
+    The per-pane app-server daemon is detached and outlives the TUI, so right
+    after exit it still answers with its thread's session id — the same
+    ``codex_app_server.session_id_for_pane`` the sidecar uses. No daemon or
+    unresolved → None: no answer means no hint.
+    """
+    from .adapters import codex_app_server
+
+    return codex_app_server.session_id_for_pane(pane)
+
+
+def _member_snapshot_session_id(team: str, agent: str) -> str | None:
+    """The member's claude session, from the team resume snapshot.
+
+    The sidecar keeps recording every member's sessionId into the resume
+    store, and a member entry survives its pane's process exiting — that
+    store is hive's own answer to "which session did this pane run". No
+    snapshot, no member, or no recorded session → None.
+    """
     from . import resume as resume_store
 
     snap = resume_store.load_snapshot(team)

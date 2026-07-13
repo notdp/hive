@@ -336,7 +336,7 @@ def _fake_rollout(codex_home, day, stem, session_id, cwd, mtime):
     return p
 
 
-def _codex_hint_env(monkeypatch, tmp_path, *, pane=None):
+def _codex_hint_env(monkeypatch, tmp_path, *, pane=None, tagged=True):
     home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.chdir(tmp_path)
@@ -344,6 +344,10 @@ def _codex_hint_env(monkeypatch, tmp_path, *, pane=None):
         monkeypatch.delenv("TMUX_PANE", raising=False)
     else:
         monkeypatch.setenv("TMUX_PANE", pane)
+    tags = {"hive-team": "t1", "hive-agent": "validator"} if tagged else {}
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option", lambda _p, key: tags.get(key)
+    )
     return home
 
 
@@ -455,6 +459,23 @@ def test_codex_resume_hint_daemon_id_untrusted_gates(runner, monkeypatch, tmp_pa
     _codex_hint_env(monkeypatch, tmp_path, pane="%77")
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: evil_id
+    )
+    result = runner.invoke(cli, ["resume-hint", "codex"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_codex_resume_hint_untagged_pane_prints_nothing(runner, monkeypatch, tmp_path):
+    # the team gate is shared by both CLIs: any tmux user gets a per-pane
+    # daemon from the managed launch, so daemon reachability alone must not
+    # qualify a pane for a hint
+    _codex_hint_env(monkeypatch, tmp_path, pane="%77", tagged=False)
+
+    def _must_not_call(_p):
+        raise AssertionError("daemon lookup must not run for an untagged pane")
+
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.session_id_for_pane", _must_not_call
     )
     result = runner.invoke(cli, ["resume-hint", "codex"])
     assert result.exit_code == 0
