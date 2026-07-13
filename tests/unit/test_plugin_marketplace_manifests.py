@@ -109,24 +109,60 @@ def test_canonical_skill_is_the_only_shipped_copy():
 # --- bootstrap hook (invisible-update contract) ------------------------------
 
 HOOKS_FILE = REPO / "plugins" / "hive" / "hooks" / "hooks.json"
+CODEX_HOOKS_FILE = REPO / "plugins" / "hive" / "hooks" / "codex-hooks.json"
 
 
 def test_hooks_declarations_are_asymmetric_by_design():
-    # Claude auto-loads hooks/hooks.json; an explicit manifest entry makes it
-    # load twice ("Duplicate hooks file detected"). Codex needs the explicit
-    # reference. So: absent on the Claude side, declared on the Codex side.
+    # Claude auto-loads hooks/hooks.json (an explicit manifest entry makes it
+    # load twice: "Duplicate hooks file detected"). Codex would auto-load the
+    # same file and skip the whole hook over its `async` key ("async hooks are
+    # not supported yet"), so its manifest must override the default with the
+    # async-free variant.
     assert "hooks" not in _load(HIVE_CC)
     rel = _load(HIVE_CODEX)["hooks"]
-    assert rel.startswith("./")
-    assert (HIVE_CODEX.parent.parent / rel).resolve() == HOOKS_FILE.resolve()
+    assert rel == "./hooks/codex-hooks.json"
+    target = (HIVE_CODEX.parent.parent / rel).resolve()
+    assert target == CODEX_HOOKS_FILE.resolve()
+    assert target.is_file()
+    assert target.is_relative_to((REPO / "plugins" / "hive").resolve())
+
+
+def test_codex_hook_is_the_claude_hook_without_async():
+    # lockstep contract: strip Claude's `async` and Codex's stdout redirect;
+    # everything else must stay deep-equal so a command/timeout edit on one
+    # side cannot ship without the other
+    claude = _load(HOOKS_FILE)
+    codex = _load(CODEX_HOOKS_FILE)
+    for group in claude["hooks"]["SessionStart"]:
+        for hook in group["hooks"]:
+            hook.pop("async", None)
+    for group in codex["hooks"]["SessionStart"]:
+        for hook in group["hooks"]:
+            hook["command"] = hook["command"].removesuffix(" >/dev/null")
+    assert claude == codex
+
+
+def test_codex_hook_redirects_stdout_only():
+    # Codex feeds SessionStart stdout into developer context, so the success
+    # summaries must be dropped; stderr stays for the single-line remediation
+    hooks = [h for g in _load(CODEX_HOOKS_FILE)["hooks"]["SessionStart"] for h in g["hooks"]]
+    assert len(hooks) == 1
+    command = hooks[0]["command"]
+    assert command.endswith(" >/dev/null")
+    assert "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py" in command
+    assert "2>" not in command
+    assert "&" not in command
+    assert "async" not in CODEX_HOOKS_FILE.read_text()
+    assert _load(HOOKS_FILE)["hooks"]["SessionStart"][0]["hooks"][0]["async"] is True
 
 
 def test_bootstrap_hook_runs_script_via_plugin_root():
-    data = _load(HOOKS_FILE)
-    groups = data["hooks"]["SessionStart"]
-    commands = [h["command"] for g in groups for h in g["hooks"]]
-    assert any("${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py" in c for c in commands)
-    raw = HOOKS_FILE.read_text()
-    for needle in ["/Users/", "/private/", str(REPO)]:
-        assert needle not in raw, needle
+    for hooks_file in (HOOKS_FILE, CODEX_HOOKS_FILE):
+        data = _load(hooks_file)
+        groups = data["hooks"]["SessionStart"]
+        commands = [h["command"] for g in groups for h in g["hooks"]]
+        assert any("${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py" in c for c in commands)
+        raw = hooks_file.read_text()
+        for needle in ["/Users/", "/private/", str(REPO)]:
+            assert needle not in raw, needle
     assert (REPO / "plugins" / "hive" / "scripts" / "bootstrap.py").is_file()

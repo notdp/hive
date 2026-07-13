@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py\" >/dev/null",
+            "timeout": 600,
+            "statusMessage": "hive bootstrap check..."
+          }
+        ]
+      }
+    ]
+  }
+}
