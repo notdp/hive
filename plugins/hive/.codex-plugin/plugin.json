@@ -7,5 +7,5 @@
     "url": "https://github.com/notdp"
   },
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/codex-hooks.json"
 }
