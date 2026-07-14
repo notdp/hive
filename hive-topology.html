@@ -138,12 +138,12 @@
 <pre>
 你打 /hive  （任何 pane 都行）
    │
-   ▼  自动加载通信底座 (hive skills get core: send/reply/team)
+   ▼  自动加载通信底座 (hive skill 的 references/core.md: send/reply/team)
 [问] AskUserQuestion —— 唯一一次交互："起哪种拓扑?"
    ├─ cell   worker + validator，你自己编排          (2 panes)
    └─ crew   orch + skeptic + 按需 worker-cell        (orch = 当前 pane)
    │
-   ▼  hive skills get &lt;选的&gt;  → 拉该拓扑的角色说明
+   ▼  读 hive skill 的 references/&lt;选的&gt;.md  → 拉该拓扑的角色说明
    ▼  跑对应 init：hive cell init  /  hive crew init  → 自动布 tmux + spawn 角色
    ▼  开干
 </pre>
@@ -164,7 +164,7 @@
   <div class="stbox todo">
     <h4>⧗ 待建（设计已定，未写码）</h4>
     <ul>
-      <li><code>hive skills get &lt;core|cell|crew&gt;</code> —— 新命令，目前不存在。</li>
+      <li><code>references/&lt;core|cell|crew&gt;.md</code>（hive skill 内）—— role spec 分发面，已从 CLI 命令改为插件 references。</li>
       <li><code>hive cell init</code> —— 把 cell 落成 <b>worker+validator（固定角色）</b>。<b>注意</b>：当前 <code>hive init</code> 起的还是<b>旧的对称 peer</b>（<code>group=peer</code>、双方都写码互审），<u>尚未</u>改成本图里的 doer+validator。</li>
       <li>重写 <code>/hive</code> skill 成 AskUserQuestion(cell/crew) 选择器 + fetch + init。</li>
     </ul>
