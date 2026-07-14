@@ -931,8 +931,9 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Run `hive skills get core` first and follow "
-        "that protocol. Hive messages will arrive inline as "
+        "Context is pre-bound. Load the hive skill and read its "
+        "`references/core.md` first and follow that protocol. "
+        "Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; reply on an existing thread with "
         "`hive reply <name> \"...\"`; open a new thread with "
@@ -2217,85 +2218,11 @@ def layout_cmd(preset: str):
     click.echo(json.dumps({"layout": preset, "window": window_target}))
 
 
-# --- CLI-shipped skill specs ---------------------------------------------
-# Thin discovery stub (skills/hive/SKILL.md) points here; the volatile
-# protocol/topology guidance ships inside the package and is fetched on
-# demand, so it can never drift from the installed CLI version.
-
-_SPEC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-
-def _spec_repo_dir() -> Path | None:
-    """Repo specs dir when running from a checkout; else None (packaged)."""
-    candidate = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
-    return candidate if candidate.is_dir() else None
-
-
-def _read_spec(name: str) -> str | None:
-    repo = _spec_repo_dir()
-    if repo is not None:
-        path = repo / f"{name}.md"
-        return path.read_text(encoding="utf-8") if path.is_file() else None
-    from importlib import resources
-
-    resource = resources.files("hive.core_assets").joinpath("specs", f"{name}.md")
-    try:
-        return resource.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return None
-
-
-def _list_specs() -> list[str]:
-    repo = _spec_repo_dir()
-    if repo is not None:
-        return sorted(p.stem for p in repo.glob("*.md"))
-    from importlib import resources
-
-    names: list[str] = []
-    try:
-        for entry in resources.files("hive.core_assets").joinpath("specs").iterdir():
-            if entry.name.endswith(".md"):
-                names.append(entry.name[:-3])
-    except (FileNotFoundError, OSError, NotADirectoryError):
-        pass
-    return sorted(names)
-
-
-@cli.group("skills")
-def skills_cmd():
-    """CLI-shipped skill specs (version-locked, never drift). Start: `hive skills get core`."""
-
-
-@skills_cmd.command("get")
-@click.argument("name")
-def skills_get_cmd(name: str):
-    """Print spec NAME (e.g. `core`). Content always matches the installed CLI version."""
-    if not _SPEC_NAME_RE.match(name):
-        _fail(f"invalid spec name '{name}' (lowercase letters, digits, dashes only)")
-    text = _read_spec(name)
-    if text is None:
-        available = ", ".join(_list_specs()) or "(none)"
-        _fail(f"unknown spec '{name}'. available: {available}")
-    click.echo(text)
-
-
-@skills_cmd.command("list")
-def skills_list_cmd():
-    """List spec names available on this installed version."""
-    click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
-
-
-@skills_cmd.command("ls", hidden=True)
-def skills_ls_cmd():
-    """Hidden alias of `hive skills list`."""
-    skills_list_cmd.callback()
-
-
 def _inject_role_bootstrap(pane: str, role: str) -> bool:
     """Deliver the role bootstrap prompt to *pane* over its native transport.
 
-    Same text a spawned pane gets as its launch prompt (identity +
-    ``hive skills get <role>`` + idle discipline) — adoption only changes the
+    Same text a spawned pane gets as its launch prompt (identity + the hive
+    skill reference to read + idle discipline) — adoption only changes the
     delivery channel, never the wording. Returns True when the pane's
     transport accepted it; False when the pane runs no known agent CLI or the
     transport refused (delivery is native-only, no keystroke fallback).
@@ -2314,15 +2241,16 @@ def _inject_role_bootstrap(pane: str, role: str) -> bool:
 
 
 def _role_bootstrap_prompt(role: str) -> str:
-    """Spawn first-message for a no-human role pane: identity + the one command
-    that loads the role. The spec itself stays CLI-served — the spawned pane
-    runs ``hive skills get <role>`` exactly like a dispatched pane does
-    (`_inject_role_bootstrap`), so there is no inlined spec snapshot to keep in
-    sync and the prompt stays short enough to inline into the launch command.
+    """Spawn first-message for a no-human role pane: identity + the one skill
+    reference that loads the role. The spec ships inside the hive plugin —
+    the spawned pane reads ``references/<role>.md`` from the hive skill
+    exactly like a dispatched pane does (`_inject_role_bootstrap`), so there
+    is no inlined spec snapshot to keep in sync and the prompt stays short
+    enough to inline into the launch command.
     """
     return (
-        f"你是这个 team 的 {role}。先跑 `hive skills get {role}` 取你的角色协议 "
-        f"—— 照它做。没有待办时结束当前 turn,让 pane 开着接收第一条任务消息"
+        f"你是这个 team 的 {role}。用 hive skill 取你的角色协议:读该 skill 目录下的 "
+        f"`references/{role}.md` —— 照它做。没有待办时结束当前 turn,让 pane 开着接收第一条任务消息"
         f"(orch / peer 会发来);在那之前别自己找活、别翻库、别 `sleep` 轮询。"
     )
 
@@ -2681,8 +2609,8 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
 
     layout_mod.apply_adaptive(window)
 
-    # Hand the validator its role: a spawned validator already got `hive
-    # skills get duo-validator` as its startup prompt; an adopted idle
+    # Hand the validator its role: a spawned validator already got the
+    # duo-validator bootstrap prompt at launch; an adopted idle
     # neighbor gets it injected here. The worker pane is the agent running
     # this very command — its role load is returned as `next` for it to run
     # in-turn, never injected into its input box as a fake user message.
@@ -2704,7 +2632,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
             "mode": mode,
         },
         "dispatched": dispatched,
-        "next": "hive skills get duo-worker",
+        "next": "hive skill: read references/duo-worker.md",
     }
 
 
@@ -3820,7 +3748,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         "orch": {"pane": orch_pane, "name": orch_agent_name},
         "challenger": {"pane": challenger_agent.pane_id, "name": challenger_agent_name},
         "dispatched": dispatched,
-        "next": "hive skills get squad-orch",
+        "next": "hive skill: read references/squad-orch.md",
     }, indent=2))
 
 

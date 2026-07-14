@@ -94,22 +94,22 @@ def test_duo_init_one_pane_spawns_antifamily_validator(
     assert spawned[0]["name"] == "validator"
     assert spawned[0]["cli"] == "claude"
     assert spawned[0]["skill"] == "none"
-    # validator's role bootstrap is a thin pointer: the spawned pane loads its
-    # spec itself via `hive skills get duo-validator` — the same CLI-served
-    # channel a dispatched pane uses — so no spec snapshot is inlined into the
-    # launch command or cached on disk.
+    # validator's role bootstrap is a thin pointer: the spawned pane reads
+    # references/duo-validator.md from the hive skill — the same
+    # plugin-shipped channel a dispatched pane uses — so no spec snapshot is
+    # inlined into the launch command or cached on disk.
     bootstrap = spawned[0]["prompt"]
     assert bootstrap == cli_mod._role_bootstrap_prompt("duo-validator")
-    assert "hive skills get duo-validator" in bootstrap
+    assert "references/duo-validator.md" in bootstrap
     assert "别 `sleep` 轮询" in bootstrap
     assert "别退出" not in bootstrap
     assert payload["dispatched"] == ["validator"]
-    assert payload["next"] == "hive skills get duo-worker"
+    assert payload["next"] == "hive skill: read references/duo-worker.md"
     # The worker runs init itself: nothing may be injected into its pane.
     worker_pane = payload["worker"]["pane"]
-    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    assert not [c for c in sent if c[0] == worker_pane and "references/" in c[1]]
     # Spawned validator gets its role via the launch prompt, not injection.
-    assert not [c for c in sent if "skills get duo-validator" in c[1]]
+    assert not [c for c in sent if "references/duo-validator.md" in c[1]]
 
 
 def test_role_bootstrap_prompts_do_not_tell_idle_agents_to_not_exit(configure_hive_home):
@@ -162,13 +162,13 @@ def test_duo_init_two_panes_adopts_idle_antifamily_neighbor(
     assert spawned == []  # adopted the neighbor, did not spawn
     assert breaks == []  # 2-pane pairable → no break-out
     assert payload["dispatched"] == ["validator"]  # adopted validator got its role injected
-    assert payload["next"] == "hive skills get duo-worker"
+    assert payload["next"] == "hive skill: read references/duo-worker.md"
     worker_pane = payload["worker"]["pane"]
-    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    assert not [c for c in sent if c[0] == worker_pane and "references/" in c[1]]
     # Positive control: the adopted idle neighbor gets the exact same
     # bootstrap prompt a spawned validator would get at launch.
     validator_pane = payload["validator"]["pane"]
-    injected = [c[1] for c in sent if c[0] == validator_pane and "skills get" in c[1]]
+    injected = [c[1] for c in sent if c[0] == validator_pane and "references/" in c[1]]
     assert injected == [cli_mod._role_bootstrap_prompt("duo-validator")]
 
 
@@ -219,12 +219,12 @@ def test_duo_init_two_panes_same_family_breaks_out_then_spawns(
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
     assert payload["dispatched"] == ["validator"]
-    assert payload["next"] == "hive skills get duo-worker"
+    assert payload["next"] == "hive skill: read references/duo-worker.md"
     # The worker runs init itself: nothing may be injected into its pane.
     worker_pane = payload["worker"]["pane"]
-    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    assert not [c for c in sent if c[0] == worker_pane and "references/" in c[1]]
     # Spawned validator gets its role via the launch prompt, not injection.
-    assert not [c for c in sent if "skills get duo-validator" in c[1]]
+    assert not [c for c in sent if "references/duo-validator.md" in c[1]]
 
 
 def test_duo_init_three_panes_breaks_out_then_spawns(
@@ -261,12 +261,12 @@ def test_duo_init_three_panes_breaks_out_then_spawns(
     assert payload["validator"]["mode"] == "spawned"
     assert len(spawned) == 1
     assert payload["dispatched"] == ["validator"]
-    assert payload["next"] == "hive skills get duo-worker"
+    assert payload["next"] == "hive skill: read references/duo-worker.md"
     # The worker runs init itself: nothing may be injected into its pane.
     worker_pane = payload["worker"]["pane"]
-    assert not [c for c in sent if c[0] == worker_pane and "skills get" in c[1]]
+    assert not [c for c in sent if c[0] == worker_pane and "references/" in c[1]]
     # Spawned validator gets its role via the launch prompt, not injection.
-    assert not [c for c in sent if "skills get duo-validator" in c[1]]
+    assert not [c for c in sent if "references/duo-validator.md" in c[1]]
 
 
 def test_duo_init_breakout_names_team_from_final_window_not_origin(
