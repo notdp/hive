@@ -1,3 +1,8 @@
+---
+name: core
+description: Hive 无角色 pane 的通信协议。仅当你被拉进 hive team 而没有分配角色时加载。
+---
+
 # core — 无角色 pane 的通信协议
 
 你在一个 Hive team 里，但没有固定角色。先拿到通信底座，再按 team 里的任务做事。
@@ -34,7 +39,7 @@ hive reply dodo "ack, looking"
 
 - 标签里的 `body` 是短摘要。
 - `artifact=<path>` 是正文；需要细节时直接打开这个文件。
-- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时读 hive skill 的 `references/debug.md`。
+- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时调用 hive:debug skill。
 
 ### 发消息：send 还是 reply
 
@@ -42,7 +47,7 @@ hive reply dodo "ack, looking"
 
 - 新话题用 `hive send <agent> "<短摘要>"`，例如派任务、提新问题、发新汇报。`send` 不接 `--reply-to`。
 - 回应入站消息用 `hive reply <agent> "<回复>"`。不传 `--reply-to` 时，它会锚到最近一条来自该 agent 且你还没回过的入站消息。
-- 有 anchor msgId 但当前 pane 没有那条入站消息时，显式 `hive reply <agent> --reply-to <msgId> "<回复>"`。接管 thread 的细节需要时读 hive skill 的 `references/advanced-routing.md`。
+- 有 anchor msgId 但当前 pane 没有那条入站消息时，显式 `hive reply <agent> --reply-to <msgId> "<回复>"`。接管 thread 的细节需要时调用 hive:advanced-routing skill。
 
 不要因为“刚收到过对方消息”就用 `reply`。如果现在说的是新任务或新汇报，用 `send` 开新 thread。
 
@@ -113,5 +118,5 @@ source: ...
 
 日常收发只用上面的通信底座。
 
-- 排障命令、delivery、thread、capture、inject、interrupt、kill：hive skill 的 `references/debug.md`
-- active-turn fork、handoff 接管、复杂 thread routing：hive skill 的 `references/advanced-routing.md`
+- 排障命令、delivery、thread、capture、inject、interrupt、kill：hive:debug skill
+- active-turn fork、handoff 接管、复杂 thread routing：hive:advanced-routing skill

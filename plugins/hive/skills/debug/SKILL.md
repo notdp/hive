@@ -1,3 +1,8 @@
+---
+name: debug
+description: Hive 排障深潜：delivery、thread、capture、inject、interrupt、kill。仅在 hive 协作排障时按需加载。
+---
+
 # debug + 协议边界
 
 排障命令清单和 hive kernel 的协议硬约束。主通道见 core「消息机制」;日常收发消息不读这份。

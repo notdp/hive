@@ -1,3 +1,8 @@
+---
+name: advanced-routing
+description: Hive 高级路由：active-turn fork、handoff 接管、复杂 thread routing。仅在 hive 协作中按需加载。
+---
+
 # advanced routing — thread takeover
 
 hive 路由的低频场景。常规 `hive send` / `hive reply` 流程不需要读这份,core「消息机制」已经覆盖。

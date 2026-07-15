@@ -932,8 +932,8 @@ def test_resume_full_restore_spawns_fresh_validator_without_session(
     # snapshot cli/model
     assert validator["name"] == "validator"
     assert "session_id" not in validator and "session_mode" not in validator
-    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
-    assert validator["skill"] == "none"
+    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator", skill_loaded=True)
+    assert validator["skill"] == "hive:duo-validator"
     assert validator["cwd"] == good_cwd
     assert validator["cli"] == "codex" and validator["model"] == "m2"
 
@@ -980,7 +980,8 @@ def test_resume_live_revive_spawns_fresh_validator_in_live_worker_cwd(
     (validator,) = rec.spawns
     assert validator["name"] == "validator"
     assert "session_id" not in validator and "session_mode" not in validator
-    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator", skill_loaded=True)
+    assert validator["skill"] == "hive:duo-validator"
     # live worker pane's current cwd (mocked display_value), not the snapshot's
     assert validator["cwd"] == "/live/repo-cwd"
     sessions = {m["name"]: m["session"] for m in payload["members"]}

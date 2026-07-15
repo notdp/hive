@@ -238,7 +238,7 @@ def configure_hive_home(monkeypatch, tmp_path):
                 "worker": {"pane": "%self", "name": "worker", "cli": "claude"},
                 "validator": {"pane": "%peer", "name": "validator", "cli": "codex", "mode": "spawned"},
                 "dispatched": ["validator"],
-                "next": "hive skill: read references/duo-worker.md",
+                "next": "invoke skill hive:duo-worker",
             },
         )
         monkeypatch.delenv("TMUX_PANE", raising=False)

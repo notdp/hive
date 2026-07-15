@@ -1,3 +1,8 @@
+---
+name: duo-worker
+description: Hive duo 的 worker 角色协议。仅当 hive 出生提示或 init 输出指定你为 duo-worker 时加载；其他场景不要触发。
+---
+
 # duo-worker — 自包含协议
 
 你是 standalone duo 的 **worker**。validator 审你的 plan、主笔 VAL、最后审 code。你是 duo 对 human 的唯一出口。
@@ -21,7 +26,7 @@
 
 - 标签里的 `body` 是短摘要。
 - `artifact=<path>` 是正文；需要细节时直接打开这个文件。
-- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时读 hive skill 的 `references/debug.md`。
+- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时调用 hive:debug skill。
 
 ### 发消息：send 还是 reply
 
@@ -29,7 +34,7 @@
 
 - 新话题用 `hive send <agent> "<短摘要>"`，例如派任务、提新问题、发新汇报。`send` 不接 `--reply-to`。
 - 回应入站消息用 `hive reply <agent> "<回复>"`。不传 `--reply-to` 时，它会锚到最近一条来自该 agent 且你还没回过的入站消息。
-- 有 anchor msgId 但当前 pane 没有那条入站消息时，显式 `hive reply <agent> --reply-to <msgId> "<回复>"`。接管 thread 的细节需要时读 hive skill 的 `references/advanced-routing.md`。
+- 有 anchor msgId 但当前 pane 没有那条入站消息时，显式 `hive reply <agent> --reply-to <msgId> "<回复>"`。接管 thread 的细节需要时调用 hive:advanced-routing skill。
 
 不要因为“刚收到过对方消息”就用 `reply`。如果现在说的是新任务或新汇报，用 `send` 开新 thread。
 

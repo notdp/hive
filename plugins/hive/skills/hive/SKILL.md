@@ -5,7 +5,7 @@ description: Hive 是 tmux 里的多 agent 协作 runtime。当收到 HIVE 消�
 
 # Hive — agent 协作入口
 
-Hive 让多个 agent 在 tmux 里用 `<HIVE ...>` 消息协作。这个文件只是发现入口；真正协议在本 skill 目录的 `references/` 下，按当前角色读取。
+Hive 让多个 agent 在 tmux 里用 `<HIVE ...>` 消息协作。这个文件只是发现入口；真正协议是按角色命名的独立 skill，按名加载。
 
 ## 已在 team 里
 
@@ -17,18 +17,18 @@ hive team
 
 看 `self`、`members`、`group`、`peer` 和当前 pane 状态。
 
-如果出生 prompt 或 init 输出给了角色，就只读那一份（路径相对本 skill 目录）：
+如果出生 prompt 或 init 输出给了角色，就只加载那一个 skill：
 
-- `references/duo-worker.md`
-- `references/duo-validator.md`
-- `references/squad-orch.md`
-- `references/squad-challenger.md`
-- `references/squad-worker.md`
-- `references/squad-validator.md`
+- `hive:duo-worker`
+- `hive:duo-validator`
+- `hive:squad-orch`
+- `hive:squad-challenger`
+- `hive:squad-worker`
+- `hive:squad-validator`
 
-这些角色 spec 都是自包含协议。读完一份、照它做；不要再拼别的 role spec。
+这些角色 skill 都是自包含协议。加载一个、照它做；不要再拼别的角色 skill。
 
-如果你只是被拉进已有 team、没有角色，读 `references/core.md`。
+如果你只是被拉进已有 team、没有角色，加载 `hive:core`。
 
 没有待办时结束当前 turn，pane 保持打开等下一条 `<HIVE>` 注入。不要 `sleep` 轮询，不要自己翻库找活。
 
@@ -46,8 +46,8 @@ hive duo init
 hive squad init
 ```
 
-init 的 JSON 会给 `next`，例如 `hive skill: read references/duo-worker.md`。按 `next` 读本 skill 目录下对应文件，取当前 pane 的完整协议。
+init 的 JSON 会给 `next`，例如 `invoke skill hive:duo-worker`。照 `next` 加载对应角色 skill，取当前 pane 的完整协议。
 
 ## 速查
 
-`references/debug.md` 和 `references/advanced-routing.md` 是按需逃生口；日常流程按当前角色 spec。
+`hive:debug` 和 `hive:advanced-routing` 是按需逃生口；日常流程按当前角色 skill。

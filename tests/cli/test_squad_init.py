@@ -66,12 +66,12 @@ def test_squad_init_creates_orch_and_challenger_without_board(
     assert payload["challenger"]["name"] == "peaky.challenger"
     assert payload["challenger"]["pane"] == "%101"
     assert payload["dispatched"] == ["peaky.challenger"]
-    assert payload["next"] == "hive skill: read references/squad-orch.md"
+    assert payload["next"] == "invoke skill hive:squad-orch"
     # The orch runs init itself: nothing may be injected into its pane.
     orch_pane = payload["orch"]["pane"]
-    assert not [c for c in sent if c[0] == orch_pane and "references/" in c[1]]
+    assert not [c for c in sent if c[0] == orch_pane and "hive:" in c[1]]
     # Positive control: the spawned challenger gets its role via launch prompt.
-    assert spawned[0]["prompt"] == cli_mod._role_bootstrap_prompt("squad-challenger")
+    assert spawned[0]["prompt"] == cli_mod._role_bootstrap_prompt("squad-challenger", skill_loaded=True)
     assert "board" not in payload
     assert selected_windows == ["dev:0"]
 
@@ -151,9 +151,9 @@ def test_squad_init_breakout_names_main_team_from_final_window_keeps_readable_sq
     assert payload["challenger"]["name"] == "peaky.challenger"
     assert spawned[0]["team_name"] == "dev-w88"   # challenger spawned under the final-window team
     assert payload["dispatched"] == ["peaky.challenger"]
-    assert payload["next"] == "hive skill: read references/squad-orch.md"
+    assert payload["next"] == "invoke skill hive:squad-orch"
     orch_pane = payload["orch"]["pane"]
-    assert not [c for c in sent if c[0] == orch_pane and "references/" in c[1]]
+    assert not [c for c in sent if c[0] == orch_pane and "hive:" in c[1]]
     assert sidecar_calls == [("/tmp/hive-dev-w88", "dev-w88", "dev:8", "@88")]
 
 

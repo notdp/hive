@@ -931,8 +931,8 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Load the hive skill and read its "
-        "`references/core.md` first and follow that protocol. "
+        "Context is pre-bound. Invoke the `hive:core` skill first and "
+        "follow that protocol. "
         "Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; reply on an existing thread with "
@@ -2221,9 +2221,9 @@ def layout_cmd(preset: str):
 def _inject_role_bootstrap(pane: str, role: str) -> bool:
     """Deliver the role bootstrap prompt to *pane* over its native transport.
 
-    Same text a spawned pane gets as its launch prompt (identity + the hive
-    skill reference to read + idle discipline) — adoption only changes the
-    delivery channel, never the wording. Returns True when the pane's
+    A dispatched running pane is told to invoke its role skill by name —
+    the launch-path equivalent is skill activation at spawn plus the
+    skill_loaded variant of the same prompt. Returns True when the pane's
     transport accepted it; False when the pane runs no known agent CLI or the
     transport refused (delivery is native-only, no keystroke fallback).
     """
@@ -2240,17 +2240,24 @@ def _inject_role_bootstrap(pane: str, role: str) -> bool:
     return True
 
 
-def _role_bootstrap_prompt(role: str) -> str:
-    """Spawn first-message for a no-human role pane: identity + the one skill
-    reference that loads the role. The spec ships inside the hive plugin —
-    the spawned pane reads ``references/<role>.md`` from the hive skill
-    exactly like a dispatched pane does (`_inject_role_bootstrap`), so there
-    is no inlined spec snapshot to keep in sync and the prompt stays short
-    enough to inline into the launch command.
+def _role_bootstrap_prompt(role: str, skill_loaded: bool = False) -> str:
+    """First-message for a no-human role pane: identity + the role skill.
+
+    The protocol ships as the plugin skill ``hive:<role>``. A spawned pane
+    gets that skill activated as line one of its launch turn
+    (``Agent.spawn(skill=...)``), so its prompt only carries identity
+    (*skill_loaded=True*). A dispatched running pane
+    (`_inject_role_bootstrap`) instead gets told to invoke the skill by
+    name. Either way no spec snapshot is inlined or kept in sync.
     """
+    identity = f"你是这个 team 的 {role}。"
+    act = (
+        "按已加载的角色协议行动。"
+        if skill_loaded
+        else f"调用 hive:{role} skill 取你的角色协议 —— 照它做。"
+    )
     return (
-        f"你是这个 team 的 {role}。用 hive skill 取你的角色协议:读该 skill 目录下的 "
-        f"`references/{role}.md` —— 照它做。没有待办时结束当前 turn,让 pane 开着接收第一条任务消息"
+        f"{identity}{act}没有待办时结束当前 turn,让 pane 开着接收第一条任务消息"
         f"(orch / peer 会发来);在那之前别自己找活、别翻库、别 `sleep` 轮询。"
     )
 
@@ -2469,8 +2476,8 @@ def _spawn_duo_validator(
         split_size="50%",
         cli=cli,
         model=model,
-        skill="none",
-        prompt=_role_bootstrap_prompt("duo-validator"),
+        skill="hive:duo-validator",
+        prompt=_role_bootstrap_prompt("duo-validator", skill_loaded=True),
         workspace=ws,
     )
     t.agents["validator"] = validator_agent
@@ -2610,7 +2617,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
     layout_mod.apply_adaptive(window)
 
     # Hand the validator its role: a spawned validator already got the
-    # duo-validator bootstrap prompt at launch; an adopted idle
+    # hive:duo-validator skill at launch; an adopted idle
     # neighbor gets it injected here. The worker pane is the agent running
     # this very command — its role load is returned as `next` for it to run
     # in-turn, never injected into its input box as a fake user message.
@@ -2632,7 +2639,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
             "mode": mode,
         },
         "dispatched": dispatched,
-        "next": "hive skill: read references/duo-worker.md",
+        "next": "invoke skill hive:duo-worker",
     }
 
 
@@ -3201,7 +3208,10 @@ def _resume_members_into_live_team(
                     tmux.display_value(live_worker.pane_id, "#{pane_current_path}") if live_worker else ""
                 )
                 cwd = live_cwd or snap_worker_cwd
-                session_kwargs: dict[str, str] = {"prompt": _role_bootstrap_prompt("duo-validator")}
+                session_kwargs: dict[str, str] = {
+                    "prompt": _role_bootstrap_prompt("duo-validator", skill_loaded=True),
+                    "skill": "hive:duo-validator",
+                }
             else:
                 _resume_progress(
                     f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
@@ -3217,7 +3227,7 @@ def _resume_members_into_live_team(
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
-                skill="none",
+                skill=session_kwargs.pop("skill", "none"),
                 workspace=ws,
                 **session_kwargs,
             )
@@ -3304,7 +3314,10 @@ def _resume_full_team(
                 _resume_progress(
                     f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
                 )
-                session_kwargs: dict[str, str] = {"prompt": _role_bootstrap_prompt("duo-validator")}
+                session_kwargs: dict[str, str] = {
+                    "prompt": _role_bootstrap_prompt("duo-validator", skill_loaded=True),
+                    "skill": "hive:duo-validator",
+                }
             else:
                 _resume_progress(
                     f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
@@ -3320,7 +3333,7 @@ def _resume_full_team(
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
-                skill="none",
+                skill=session_kwargs.pop("skill", "none"),
                 workspace=ws,
                 **session_kwargs,
             )
@@ -3714,8 +3727,8 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         cwd=orch_cwd,
         split_horizontal=layout_mod.split_horizontal(squad_window, 2),
         split_size="50%",
-        skill="none",
-        prompt=_role_bootstrap_prompt("squad-challenger"),
+        skill="hive:squad-challenger",
+        prompt=_role_bootstrap_prompt("squad-challenger", skill_loaded=True),
         cli=peer_cli_name,
         model=peer_model_id,
     )
@@ -3748,7 +3761,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
         "orch": {"pane": orch_pane, "name": orch_agent_name},
         "challenger": {"pane": challenger_agent.pane_id, "name": challenger_agent_name},
         "dispatched": dispatched,
-        "next": "hive skill: read references/squad-orch.md",
+        "next": "invoke skill hive:squad-orch",
     }, indent=2))
 
 
@@ -4041,8 +4054,8 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str, 
         target_pane=shell_pane,
         cwd=cwd,
         split_window=False,
-        skill="none",
-        prompt=_role_bootstrap_prompt("squad-worker"),
+        skill="hive:squad-worker",
+        prompt=_role_bootstrap_prompt("squad-worker", skill_loaded=True),
         cli=worker_cli,
         model=worker_model,
     )
@@ -4059,8 +4072,8 @@ def squad_spawn_duo_cmd(feature_id: str, task_artifact: str, val_artifact: str, 
         cwd=cwd,
         split_horizontal=layout_mod.split_horizontal(peer_window, validator_pane_count_after),
         split_size="50%",
-        skill="none",
-        prompt=_role_bootstrap_prompt("squad-validator"),
+        skill="hive:squad-validator",
+        prompt=_role_bootstrap_prompt("squad-validator", skill_loaded=True),
         cli=validator_cli,
         model=validator_model,
     )
