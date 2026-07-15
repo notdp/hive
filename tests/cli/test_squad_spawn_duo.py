@@ -457,12 +457,14 @@ def test_squad_spawn_duo_passes_role_config_to_agent_spawn(
     assert worker_spawn["name"] == "peaky.worker-1000"
     assert worker_spawn["cli"] == "claude"
     assert worker_spawn["model"] == "opus"
+    assert worker_spawn["skill"] == "hive:squad-worker"
 
     # Validator spawn
     validator_spawn = spawned[1]
     assert validator_spawn["name"] == "peaky.validator-1000"
     assert validator_spawn["cli"] == "codex"
     assert validator_spawn["model"] == "o3"
+    assert validator_spawn["skill"] == "hive:squad-validator"
 
 
 def test_squad_spawn_duo_validator_fallback_when_no_role_cli(

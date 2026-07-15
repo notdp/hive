@@ -72,6 +72,7 @@ def test_squad_init_creates_orch_and_challenger_without_board(
     assert not [c for c in sent if c[0] == orch_pane and "hive:" in c[1]]
     # Positive control: the spawned challenger gets its role via launch prompt.
     assert spawned[0]["prompt"] == cli_mod._role_bootstrap_prompt("squad-challenger", skill_loaded=True)
+    assert spawned[0]["skill"] == "hive:squad-challenger"
     assert "board" not in payload
     assert selected_windows == ["dev:0"]
 
