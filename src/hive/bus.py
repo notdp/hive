@@ -434,6 +434,33 @@ def latest_unanswered_inbound_send_event(
     return _row_to_event(row) if row is not None else None
 
 
+def has_unanswered_outbound(workspace: str | Path, *, sender: str) -> bool:
+    """True when *sender* sent a message nobody has replied to yet.
+
+    "Am I waiting on a peer right now" — the gate for blocking at the end of a
+    turn: a member with an open question should wait for the answer, an idle
+    one should not stall the session.
+    """
+    with _connect(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM messages AS sent
+            WHERE sent.intent = 'send'
+              AND sent.from_agent = ?
+              AND sent.msg_id != ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM messages AS answer
+                  WHERE answer.intent = 'send'
+                    AND answer.in_reply_to = sent.msg_id
+                    AND answer.to_agent = sent.from_agent
+              )
+            LIMIT 1
+            """,
+            (sender,),
+        ).fetchone()
+    return row is not None
+
+
 def has_send_reply_to(
     workspace: str | Path,
     *,

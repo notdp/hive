@@ -802,24 +802,30 @@ def _gc_dead_teams() -> None:
     default=0,
     help="Block up to N seconds for new inbound messages (0 = return immediately)",
 )
-def collect_cmd(wait_seconds: int):
+@click.option(
+    "--if-awaiting",
+    is_flag=True,
+    help="With --wait: only block while one of my own messages is unanswered",
+)
+def collect_cmd(wait_seconds: int, if_awaiting: bool):
     """Drain this member's inbound messages from the bus (blocking inbox).
 
     For members whose session cannot receive channel push — a desktop-led
-    worker outside tmux. Returns inbound messages newer than the last collect
-    and advances a durable cursor. Long-poll with --wait from a background
-    shell: the command returning IS the push signal, so re-arm it after each
-    drain instead of polling.
+    worker outside tmux, whose messages arrive through the plugin's Stop hook
+    instead. Returns inbound messages newer than the last collect and advances
+    a durable cursor.
 
     \b
     Examples:
-      hive collect                # drain unread now
-      hive collect --wait 3600    # block until a message arrives (max 1h)
+      hive collect                            # drain unread now
+      hive collect --wait 120 --if-awaiting   # block only while a reply is owed
     """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     me = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
+    if wait_seconds and if_awaiting and not bus.has_unanswered_outbound(ws, sender=me):
+        wait_seconds = 0
     cursor_path = Path(ws) / "state" / f"collect-cursor-{me}"
     try:
         cursor = int(cursor_path.read_text().strip())

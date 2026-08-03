@@ -128,18 +128,26 @@ def test_hooks_declarations_are_asymmetric_by_design():
 
 
 def test_codex_hook_is_the_claude_hook_without_async():
-    # lockstep contract: strip Claude's `async` and Codex's stdout redirect;
-    # everything else must stay deep-equal so a command/timeout edit on one
-    # side cannot ship without the other
-    claude = _load(HOOKS_FILE)
-    codex = _load(CODEX_HOOKS_FILE)
-    for group in claude["hooks"]["SessionStart"]:
+    # lockstep contract for the shared bootstrap: strip Claude's `async` and
+    # Codex's stdout redirect; everything else must stay deep-equal so a
+    # command/timeout edit on one side cannot ship without the other
+    claude = _load(HOOKS_FILE)["hooks"]["SessionStart"]
+    codex = _load(CODEX_HOOKS_FILE)["hooks"]["SessionStart"]
+    for group in claude:
         for hook in group["hooks"]:
             hook.pop("async", None)
-    for group in codex["hooks"]["SessionStart"]:
+    for group in codex:
         for hook in group["hooks"]:
             hook["command"] = hook["command"].removesuffix(" >/dev/null")
     assert claude == codex
+
+
+def test_inbox_stop_hook_is_claude_only():
+    # The Stop hook exists for sessions channels cannot reach (the desktop
+    # app). Codex members always run in a tmux pane, where the app-server
+    # daemon delivers natively — a Stop hook there would be dead weight.
+    assert "Stop" in _load(HOOKS_FILE)["hooks"]
+    assert "Stop" not in _load(CODEX_HOOKS_FILE)["hooks"]
 
 
 def test_codex_hook_redirects_stdout_only():

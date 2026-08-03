@@ -6,6 +6,12 @@ from hive import context as hive_context
 from hive.cli import cli
 
 
+def _fake_clock():
+    """Monotonic clock that jumps past any deadline after two reads."""
+    ticks = iter([0.0, 1.0] + [10_000.0] * 50)
+    return lambda: next(ticks)
+
+
 def _bind_desktop_worker(configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(tmux_inside=False)
     ws = tmp_path / "ws"
@@ -56,3 +62,31 @@ def test_collect_immediate_empty_has_no_timeout_flag(
     payload = json.loads(runner.invoke(cli, ["collect"]).output)
 
     assert payload == {"agent": "worker", "team": "hive-ccd-w1", "messages": [], "count": 0}
+
+
+def test_collect_if_awaiting_skips_the_wait_when_nothing_is_owed(
+    runner, configure_hive_home, monkeypatch, tmp_path
+):
+    """The Stop hook ends an idle turn immediately: --if-awaiting only blocks
+    while one of my own messages is still unanswered."""
+    ws = _bind_desktop_worker(configure_hive_home, monkeypatch, tmp_path)
+    slept: list[float] = []
+    monkeypatch.setattr("hive.cli.time.sleep", lambda s: slept.append(s))
+
+    # Nothing sent yet → nothing owed → returns at once despite --wait.
+    payload = json.loads(runner.invoke(cli, ["collect", "--wait", "30", "--if-awaiting"]).output)
+    assert payload["count"] == 0
+    assert slept == []
+
+    # An unanswered outbound → the wait is armed (loop runs until the deadline).
+    bus.write_send_event(ws, from_agent="worker", to_agent="validator", body="please review")
+    monkeypatch.setattr("hive.cli.time.monotonic", _fake_clock())
+    payload = json.loads(runner.invoke(cli, ["collect", "--wait", "30", "--if-awaiting"]).output)
+    assert payload["timedOut"] is True
+    assert slept  # it actually blocked
+
+    # Once the peer answers, nothing is owed again.
+    reply = bus.write_send_event(
+        ws, from_agent="validator", to_agent="worker", body="looks good", reply_to="0Aea"
+    )
+    assert reply.msg_id
