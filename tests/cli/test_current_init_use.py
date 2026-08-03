@@ -620,12 +620,15 @@ def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_hom
     assert breaks == []                   # no break-out
 
 
-def test_init_fails_outside_tmux(runner, configure_hive_home, monkeypatch):
+def test_init_outside_tmux_without_channel_socket_fails(runner, configure_hive_home, monkeypatch):
+    # Outside tmux, init now targets the desktop-led duo path; with no live
+    # client channel socket it must fail with guidance instead of forming one.
     configure_hive_home(tmux_inside=False)
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 
     result = runner.invoke(cli, ["init"])
     assert result.exit_code != 0
+    assert "channel socket" in result.output
     assert "tmux" in result.output.lower()
 
 

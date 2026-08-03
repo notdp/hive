@@ -66,6 +66,7 @@ class Team:
         cwd: str = "",
         workspace: str = "",
         tag_lead: bool = True,
+        allow_outside_tmux: bool = False,
     ) -> Team:
         """Create a team bound to *window_target* (not necessarily the focused
         window).
@@ -76,9 +77,17 @@ class Team:
         window explicitly so callers can break out first, then bind the team
         where the pane actually landed — team identity must follow the final
         window (Bug A).
+
+        *allow_outside_tmux* lets a caller outside tmux (a desktop-led duo
+        binding a detached session's window) create the team; the gate then
+        demands positive evidence that *window_target* exists on the server
+        instead of the caller's own location.
         """
         if not tmux.is_inside_tmux():
-            raise ValueError(_TMUX_REQUIRED_MESSAGE)
+            if not allow_outside_tmux:
+                raise ValueError(_TMUX_REQUIRED_MESSAGE)
+            if not window_target or not tmux.get_window_id(window_target):
+                raise ValueError(f"tmux window '{window_target}' not found")
         from .resume import is_archive_handle
 
         if is_archive_handle(name):

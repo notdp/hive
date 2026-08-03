@@ -184,11 +184,23 @@ def _discover_tmux_binding() -> dict[str, str]:
 
 
 def _default_team() -> str | None:
-    return _discover_tmux_binding().get("team")
+    discovered = _discover_tmux_binding().get("team")
+    if discovered:
+        return discovered
+    if not tmux.is_inside_tmux():
+        # Desktop-led worker: outside tmux the identity lives in the saved
+        # default context (written by `hive duo init --channel`).
+        return hive_context.load_current_context().get("team") or None
+    return None
 
 
 def _default_agent() -> str | None:
-    return _discover_tmux_binding().get("agent")
+    discovered = _discover_tmux_binding().get("agent")
+    if discovered:
+        return discovered
+    if not tmux.is_inside_tmux():
+        return hive_context.load_current_context().get("agent") or None
+    return None
 
 
 def _require_team(team: str | None) -> str:
@@ -753,7 +765,12 @@ def cli(ctx: click.Context):
         return
     _require_codex_native(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
-        _fail(_TMUX_REQUIRED_MESSAGE)
+        # Desktop-led exception: `init`/`duo` form the binding themselves, and
+        # once a saved default context names a team this external session IS a
+        # member (the anchor-pane duo) — its commands resolve against the tmux
+        # server without the caller living inside tmux.
+        if ctx.invoked_subcommand not in ("init", "duo") and not hive_context.load_current_context().get("team"):
+            _fail(_TMUX_REQUIRED_MESSAGE)
 
 
 def _gc_dead_teams() -> None:
@@ -1398,10 +1415,16 @@ def _require_codex_daemon_backed(pane: str) -> None:
     )
 
 
-def _run_duo_init(validator_cli: str | None) -> None:
+def _run_duo_init(validator_cli: str | None, channel: str = "") -> None:
     """Shared callback body for the equivalent `hive init` / `hive duo init`."""
     if not tmux.is_inside_tmux():
-        _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
+        # Desktop-led duo: this (external) Claude session is the worker,
+        # reachable over its channel socket; hive owns a detached session
+        # for the anchor + validator panes.
+        sock = channel or _discover_client_channel_socket()
+        result = _create_ccd_duo(channel_socket=sock, validator_cli=validator_cli)
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     current_pane = tmux.get_current_pane_id() or ""
     if not current_pane:
         _fail("cannot determine current pane")
@@ -1420,14 +1443,20 @@ def _run_duo_init(validator_cli: str | None) -> None:
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
-def init_cmd(validator_cli: str | None):
+@click.option(
+    "--channel",
+    default="",
+    help="Outside tmux only: this Claude session's channel socket "
+    "(hive-client-<pid>.sock, printed in the hive-channel MCP instructions)",
+)
+def init_cmd(validator_cli: str | None, channel: str):
     """Initialize a duo in this window (equivalent to `hive duo init`).
 
     Worker = this pane, validator = anti-family spawn. Team name and
     workspace derive from the final window. Idempotent: re-running in a
     bound window reports the existing binding.
     """
-    _run_duo_init(validator_cli)
+    _run_duo_init(validator_cli, channel=channel)
 
 
 @cli.command("register")
@@ -2144,8 +2173,11 @@ def team_cmd():
     """
     _gc_dead_teams()
     discovered = _discover_tmux_binding()
-    if discovered.get("team"):
-        _, t = _resolve_scoped_team(str(discovered.get("team")), required=False)
+    team_name = discovered.get("team")
+    if not team_name and not tmux.is_inside_tmux():
+        team_name = hive_context.load_current_context().get("team") or None
+    if team_name:
+        _, t = _resolve_scoped_team(str(team_name), required=False)
         if t is not None:
             click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
             return
@@ -2523,6 +2555,7 @@ def _spawn_duo_validator(
     cli: str,
     model: str,
     pane_count_after: int,
+    allow_outside_tmux: bool = False,
 ) -> Agent:
     """Spawn a duo validator beside *worker_pane* and wire its identity.
 
@@ -2544,6 +2577,7 @@ def _spawn_duo_validator(
         skill="none",
         prompt=_role_bootstrap_prompt("duo-validator"),
         workspace=ws,
+        allow_outside_tmux=allow_outside_tmux,
     )
     t.agents["validator"] = validator_agent
     tmux.set_pane_option(validator_agent.pane_id, "hive-group", "duo")
@@ -2812,6 +2846,203 @@ def _create_standalone_duo(
     return result
 
 
+_CCD_SESSION_NAME = "hive-ccd"
+
+
+def _probe_unix_socket(path: str) -> bool:
+    """True when something is listening on *path* (connect succeeds)."""
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _discover_client_channel_socket() -> str:
+    """The single live ``hive-client-*.sock``, or fail with guidance.
+
+    Liveness is a real connect probe — a socket file surviving a kill -9'd
+    session would otherwise shadow the live one forever. Ambiguity (several
+    live desktop sessions) requires an explicit ``--channel``.
+    """
+    from .adapters import claude_channel
+
+    channel_dir = claude_channel.channel_socket_path("").parent
+    candidates = [
+        str(sock)
+        for sock in sorted(channel_dir.glob("hive-client-*.sock"))
+        if _probe_unix_socket(str(sock))
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        _fail(
+            "no live client channel socket found; pass --channel <socket> "
+            "(the path is in this session's hive-channel MCP instructions), "
+            "or run inside a tmux session"
+        )
+    _fail(
+        "multiple live client channel sockets found; pass --channel <socket>:\n  "
+        + "\n  ".join(candidates)
+    )
+    raise AssertionError("unreachable")
+
+
+def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
+    """Idempotency for the desktop-led path: the saved default context names a
+    live team whose anchor socket still links to *this* channel socket."""
+    ctx = hive_context.load_current_context()
+    team_name = ctx.get("team", "")
+    if not team_name:
+        return None
+    try:
+        t = Team.load(team_name)
+    except (FileNotFoundError, ValueError):
+        return None
+    worker = t.agents.get("worker")
+    if worker is None or tmux.get_pane_option(worker.pane_id, "hive-remote") != "channel":
+        return None
+    from .adapters import claude_channel
+
+    link = claude_channel.channel_socket_path(worker.pane_id)
+    try:
+        if os.readlink(link) != channel_socket:
+            return None
+    except OSError:
+        return None
+    validator = t.agents.get("validator")
+    return {
+        "team": t.name,
+        "window": t.tmux_window,
+        "group": "duo",
+        "worker": {"pane": worker.pane_id, "name": "worker", "cli": "claude", "remote": "channel"},
+        "validator": (
+            {"pane": validator.pane_id, "name": "validator", "cli": validator.cli}
+            if validator
+            else None
+        ),
+        "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
+    }
+
+
+def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[str, object]:
+    """Desktop-led duo: an external Claude session (outside tmux) is the worker.
+
+    The worker's tmux presence is an *anchor pane* — a plain shell in a
+    detached ``hive-ccd`` session carrying the member tags plus
+    ``@hive-remote=channel``, its channel socket/marker symlinked to the
+    external session's ``hive-client-<pid>.sock``. Everything downstream
+    (identity, routing, delivery, reaping, doctor) keeps working on pane
+    authority; the validator is a normal spawned pane beside the anchor.
+    """
+    from .adapters import claude_channel
+
+    _gc_dead_teams()
+    plugin_manager.cleanup_retired_plugins()
+
+    existing = _existing_ccd_duo(channel_socket)
+    if existing is not None:
+        return existing
+
+    cwd = os.getcwd()
+    if not tmux.has_session(_CCD_SESSION_NAME):
+        tmux.new_session(_CCD_SESSION_NAME)
+    window_name = _duo_window_name(cwd)
+    window, anchor_pane = tmux.new_window(_CCD_SESSION_NAME, name=window_name, cwd=cwd)
+    if not window or not anchor_pane:
+        _fail(f"could not create a window in tmux session '{_CCD_SESSION_NAME}'")
+    try:
+        window_id = tmux.get_window_id(window) or ""
+        final_index = window.rsplit(":", 1)[-1] if ":" in window else "0"
+        team_name = _default_team_name_for_window(_CCD_SESSION_NAME, window_id, final_index)
+        _claim_team_name(team_name, this_window=window, explicit=False)
+
+        ws_path = _default_auto_workspace_path(_CCD_SESSION_NAME, window_id, final_index)
+        from .sidecar import stop_sidecar
+
+        stop_sidecar(str(ws_path))
+        bus.reset_workspace(ws_path)
+
+        t = Team.create_for_window(
+            team_name,
+            window_target=window,
+            lead_pane_id=anchor_pane,
+            lead_name="worker",
+            description=f"desktop-led duo ({cwd})",
+            workspace=str(ws_path),
+            tag_lead=False,
+            allow_outside_tmux=True,
+        )
+
+        tmux.rename_window(window, _unique_duo_window_name(window_name, window))
+        tmux.configure_hive_window(window)
+        tmux.set_pane_title(anchor_pane, "[worker]")
+        tmux.set_pane_option(anchor_pane, "hive-role", "agent")
+        tmux.set_pane_option(anchor_pane, "hive-agent", "worker")
+        tmux.set_pane_option(anchor_pane, "hive-team", team_name)
+        tmux.set_pane_option(anchor_pane, "hive-group", "duo")
+        tmux.set_pane_option(anchor_pane, "hive-cli", "claude")
+        tmux.set_pane_option(anchor_pane, "hive-remote", "channel")
+        hive_context.save_context_for_pane(
+            anchor_pane, team=team_name, workspace=str(ws_path), agent="worker"
+        )
+        _remember_context(team=team_name, workspace=str(ws_path), agent="worker")
+
+        err = claude_channel.link_client_socket(anchor_pane, channel_socket)
+        if err:
+            raise RuntimeError(f"cannot link channel socket: {err}")
+
+        v_cli, v_model = _resolve_validator_cli_model("anthropic", validator_cli)
+        validator_agent = _spawn_duo_validator(
+            t,
+            window=window,
+            worker_pane=anchor_pane,
+            worker_cwd=cwd,
+            ws=str(ws_path),
+            cli=v_cli,
+            model=v_model,
+            pane_count_after=2,
+            allow_outside_tmux=True,
+        )
+    except Exception as e:  # noqa: BLE001 — undo the half-built window
+        tmux.kill_window(window)
+        _fail(str(e))
+        raise AssertionError("unreachable")
+
+    try:
+        reloaded = Team.load(team_name, prefer_pane=anchor_pane)
+        reloaded.set_peer("worker", "validator")
+    except (FileNotFoundError, KeyError, ValueError):
+        pass
+
+    from . import layout as layout_mod
+
+    layout_mod.apply_adaptive(window)
+    _ensure_team_sidecar(t, ws_path)
+
+    return {
+        "team": team_name,
+        "window": window,
+        "group": "duo",
+        "worker": {"pane": anchor_pane, "name": "worker", "cli": "claude", "remote": "channel"},
+        "validator": {
+            "pane": validator_agent.pane_id,
+            "name": "validator",
+            "cli": v_cli,
+            "mode": "spawned",
+        },
+        "dispatched": ["validator"],
+        "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
+        "next": "hive skills get duo-worker",
+    }
+
+
 @duo_cmd.command("init")
 @click.option(
     "--validator-cli",
@@ -2819,7 +3050,13 @@ def _create_standalone_duo(
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
-def duo_init_cmd(validator_cli: str | None):
+@click.option(
+    "--channel",
+    default="",
+    help="Outside tmux only: this Claude session's channel socket "
+    "(hive-client-<pid>.sock, printed in the hive-channel MCP instructions)",
+)
+def duo_init_cmd(validator_cli: str | None, channel: str):
     """Set up a duo from the current pane: worker (=this pane) + anti-family validator.
 
     Equivalent to `hive init`. The current pane must be running
@@ -2833,8 +3070,13 @@ def duo_init_cmd(validator_cli: str | None):
 
     The validator runs the anti-family CLI (claude↔codex) so review stays
     independent.
+
+    Outside tmux (Claude Code desktop) this forms a desktop-led duo instead:
+    this session becomes the worker over its channel socket, the validator
+    spawns in a background detached tmux session (`tmux attach -t hive-ccd`
+    to watch).
     """
-    _run_duo_init(validator_cli)
+    _run_duo_init(validator_cli, channel=channel)
 
 
 # Replaces the bare index token in a window-status format with a conditional

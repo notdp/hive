@@ -338,3 +338,53 @@ def test_resume_hint_colors_command_on_terminals_only(monkeypatch, tmp_path):
     assert plain.exit_code == 0
     assert "\x1b[" not in plain.output
     assert "claude --resume sid-1" in plain.output
+
+
+# --- desktop-led anchor pane: @hive-remote=channel bypasses the process gate --
+
+
+def test_send_to_remote_channel_anchor_uses_channel_transport(monkeypatch):
+    """An anchor pane hosts no CLI by design — its member lives in an external
+    Claude session. Delivery routes to the channel transport, whose own
+    fail-closed marker/receipt machinery is the listening evidence."""
+    monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr(
+        "hive.agent.tmux.get_pane_option",
+        lambda _p, key: "channel" if key == "hive-remote" else None,
+    )
+    sent: dict[str, str] = {}
+    monkeypatch.setattr(
+        "hive.adapters.claude_channel.send_to_pane",
+        lambda pane, text: sent.update(pane=pane, text=text) or "mcpWriteAccepted",
+    )
+    agent = Agent(name="w", team_name="team-x", pane_id="%9", cli="claude")
+
+    assert agent.send("hi") == "mcpWriteAccepted"
+    assert sent == {"pane": "%9", "text": "hi"}
+
+
+def test_send_to_remote_channel_anchor_fails_closed_on_transport_failure(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr(
+        "hive.agent.tmux.get_pane_option",
+        lambda _p, key: "channel" if key == "hive-remote" else None,
+    )
+    monkeypatch.setattr("hive.adapters.claude_channel.send_to_pane", lambda _p, _t: None)
+    agent = Agent(name="w", team_name="team-x", pane_id="%9", cli="claude")
+
+    from hive.agent import DeliveryError
+
+    with pytest.raises(DeliveryError, match="external Claude session"):
+        agent.send("hi")
+
+
+def test_send_to_plain_retained_shell_still_refuses(monkeypatch):
+    """No remote tag → the original fail-closed contract is untouched."""
+    monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr("hive.agent.tmux.get_pane_option", lambda _p, _k: None)
+    agent = Agent(name="v", team_name="team-x", pane_id="%9", cli="claude")
+
+    from hive.agent import DeliveryError
+
+    with pytest.raises(DeliveryError, match="cli_exited"):
+        agent.send("hi")

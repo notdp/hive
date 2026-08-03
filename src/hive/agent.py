@@ -206,6 +206,7 @@ class Agent:
         cli: str = "claude",
         workspace: str = "",
         session_mode: str = "fork",
+        allow_outside_tmux: bool = False,
     ) -> Agent:
         """Spawn an agent CLI (claude/codex) in a tmux pane.
 
@@ -225,7 +226,13 @@ class Agent:
             raise ValueError(f"unsupported session_mode '{session_mode}', must be fork or resume")
         cwd = cwd or os.getcwd()
         if not tmux.is_inside_tmux():
-            raise ValueError(_TMUX_REQUIRED_MESSAGE)
+            # A desktop-led duo spawns into a detached session; the opt-in
+            # trades the caller-location gate for positive evidence that the
+            # target pane exists on the server.
+            if not allow_outside_tmux:
+                raise ValueError(_TMUX_REQUIRED_MESSAGE)
+            if not target_pane or not tmux.get_pane_window_target(target_pane):
+                raise ValueError(f"target pane '{target_pane}' not found on the tmux server")
 
         from .agent_cli import get_profile
         profile = get_profile(cli)
@@ -258,7 +265,13 @@ class Agent:
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
-        bin_path = CLI_BINS[cli]
+        # Resolve the binary once, here, to an absolute path: the pane shell
+        # and the daemon Popen otherwise each resolve the bare name against
+        # their *own* PATH (spawner env vs pane env), and a version-skewed
+        # leftover install silently splits them (2026-07-14 codex incident).
+        import shutil
+
+        bin_path = shutil.which(CLI_BINS[cli]) or CLI_BINS[cli]
         # No `exec`: the CLI runs as the pane shell's foreground child, so
         # the pane (and a usable shell) survives the CLI exiting.
         cmd_parts = [_shell_escape(bin_path)]
@@ -273,7 +286,7 @@ class Agent:
             # handoff shortcut stays embedded (below).
             if not session_id or session_mode == "resume":
                 from .adapters import codex_app_server
-                if not codex_app_server.spawn_daemon(pane_id):
+                if not codex_app_server.spawn_daemon(pane_id, codex_bin=bin_path):
                     # Codex runtime state is daemon-native only (embedded codex
                     # is unsupported), so a pane without a daemon would join the
                     # team stateless. Undo the pane side effects instead of
@@ -422,6 +435,13 @@ class Agent:
         # retained shell can carry a stale title, the declared cli tag, and
         # (for codex) a surviving per-pane daemon with an open thread — none
         # of that may route a message into a pane nobody is watching.
+        #
+        # Exception: an anchor pane (`@hive-remote=channel`) hosts no CLI by
+        # design — its member lives in an external Claude session (desktop)
+        # reached through the pane's symlinked channel socket. For that member
+        # "somebody is listening" evidence is the channel's own fail-closed
+        # marker + receipt, so delivery skips the process probe and lets the
+        # transport gate it.
         probe = None
         try:
             from .agent_cli import detect_cli_process_for_pane
@@ -430,6 +450,17 @@ class Agent:
         except Exception:
             probe = None
         if probe is None:
+            if tmux.get_pane_option(self.pane_id, "hive-remote") == "channel":
+                from .adapters import claude_channel
+
+                accepted = claude_channel.send_to_pane(self.pane_id, text)
+                if accepted is None:
+                    raise DeliveryError(
+                        f"remote channel pane {self.pane_id} transport failed "
+                        "(client socket gone, marker missing, or no receipt); "
+                        "is the external Claude session still running?"
+                    )
+                return accepted
             raise DeliveryError(
                 f"no live CLI process on pane {self.pane_id} (cli_exited): "
                 "refusing native transport to a retained shell"

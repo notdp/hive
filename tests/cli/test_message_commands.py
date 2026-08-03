@@ -405,8 +405,10 @@ def test_reply_rejects_legacy_msg_option_with_positional_hint(runner, configure_
     assert called == []
 
 
-def test_send_requires_tmux(runner, monkeypatch):
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+def test_send_requires_tmux(runner, configure_hive_home, monkeypatch):
+    # Hermetic HIVE_HOME: the root gate now consults the saved default context
+    # outside tmux (desktop-led duo), so the real ~/.hive must stay unread.
+    configure_hive_home(tmux_inside=False)
 
     result = runner.invoke(cli, ["send", "gpt", "hello from current context"])
 
@@ -954,8 +956,10 @@ def test_notify_uses_current_pane_by_default(runner, monkeypatch):
     }
 
 
-def test_notify_fails_outside_tmux(runner, monkeypatch):
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+def test_notify_fails_outside_tmux(runner, configure_hive_home, monkeypatch):
+    # Hermetic HIVE_HOME: the root gate now consults the saved default context
+    # outside tmux (desktop-led duo), so the real ~/.hive must stay unread.
+    configure_hive_home(tmux_inside=False)
     monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "")
 
     result = runner.invoke(cli, ["notify", "需要确认"])
