@@ -34,6 +34,7 @@ _COMMAND_HELP_SECTIONS = {
     "team": "Daily",
     "send": "Daily",
     "reply": "Daily",
+    "collect": "Daily",
     "notify": "Daily",
     "compact": "Daily",
     "skills": "Daily",
