@@ -8,7 +8,11 @@ send-keys delivery into a running Claude session.
 
 Inbound seam: a per-pane unix socket under ``$HIVE_HOME/channel`` whose name is
 derived from ``$TMUX_PANE`` (so the plugin's single server entry serves every
-pane). ``claude_channel.send_to_pane`` connects and writes one JSON frame
+pane). Outside tmux (Claude Code desktop) the socket is pid-keyed
+(``hive-client-<pid>.sock``) and its path is appended to the MCP instructions;
+``hive duo init --channel`` symlinks an anchor pane's socket to it so
+pane-addressed delivery reaches the session. ``claude_channel.send_to_pane``
+connects and writes one JSON frame
 ``{"msg_id": ..., "content": ...}``; this server emits it to Claude and then
 answers with a single-byte **local MCP-write receipt** (``b"1"``) on the same
 connection. The receipt only proves the notification was written+flushed to
@@ -41,6 +45,14 @@ INSTRUCTIONS = (
     'msg_id="...">, wrapping a <HIVE ...> envelope. Read the inner <HIVE> block '
     "and follow the hive protocol exactly as if it were injected directly. "
     "This channel is one-way: reply with the hive CLI, not a channel tool."
+)
+# Appended for sessions outside tmux (Claude Code desktop): the agent reads its
+# own socket path from these instructions and hands it to `hive duo init
+# --channel` — the agent itself is the bridge between this MCP server and the
+# hive CLI, so no separate discovery mechanism exists.
+CLIENT_INSTRUCTIONS_SUFFIX = (
+    " This session runs outside tmux; its channel socket is {path}. To form a "
+    "duo from here, run: hive duo init --channel {path}"
 )
 
 _stdout_lock = threading.Lock()
@@ -77,14 +89,24 @@ def socket_path_for_pane(pane: str) -> str:
     return os.path.join(_hive_home(), "channel", f"hive-pane-{slug}.sock")
 
 
+def socket_path_for_client(pid: int) -> str:
+    """Socket for a Claude session outside tmux (e.g. Claude Code desktop).
+
+    Keyed by this server's pid — unique per session, dies with it. An anchor
+    pane's ``hive-pane-*.sock`` is symlinked here by ``hive duo init
+    --channel`` so pane-addressed delivery reaches the external session.
+    """
+    return os.path.join(_hive_home(), "channel", f"hive-client-{pid}.sock")
+
+
 def marker_path_for_socket(sock_path: str) -> str:
     """Same name shape as ``claude_channel.ready_marker_path``."""
     return sock_path[: -len(".sock")] + ".ready"
 
 
-def _resolve_socket_path() -> str | None:
+def _resolve_socket_path() -> str:
     pane = os.environ.get("TMUX_PANE", "")
-    return socket_path_for_pane(pane) if pane else None
+    return socket_path_for_pane(pane) if pane else socket_path_for_client(os.getpid())
 
 
 def _safe_unlink(path: str) -> None:
@@ -192,11 +214,15 @@ def _maybe_publish_marker(path: str) -> None:
 
 def _handle_request(method: str, params: dict) -> dict:
     if method == "initialize":
+        instructions = INSTRUCTIONS
+        if not os.environ.get("TMUX_PANE", ""):
+            path = _resolve_socket_path()
+            instructions += CLIENT_INSTRUCTIONS_SUFFIX.format(path=path)
         return {
             "protocolVersion": params.get("protocolVersion") or "2025-06-18",
             "capabilities": {"experimental": {"claude/channel": {}}},
             "serverInfo": {"name": SERVER_NAME, "version": "0.1.0"},
-            "instructions": INSTRUCTIONS,
+            "instructions": instructions,
         }
     if method == "ping":
         return {}
@@ -209,29 +235,26 @@ class _MethodNotFound(Exception):
 
 def main() -> None:
     path = _resolve_socket_path()
-    if path:
-        # Signal handlers must be installed from the main thread; unlink the
-        # socket + ready marker on SIGTERM/SIGINT (Claude killing the MCP
-        # child) since atexit does not run on signal termination. A stale
-        # socket is also cleared before bind on the next spawn, and spawn
-        # clears a stale marker before launch, so this is best-effort.
-        def _remove_artifacts() -> None:
-            _safe_unlink(path)
-            _safe_unlink(marker_path_for_socket(path))
+    # Signal handlers must be installed from the main thread; unlink the
+    # socket + ready marker on SIGTERM/SIGINT (Claude killing the MCP
+    # child) since atexit does not run on signal termination. A stale
+    # socket is also cleared before bind on the next spawn, and spawn
+    # clears a stale marker before launch, so this is best-effort.
+    def _remove_artifacts() -> None:
+        _safe_unlink(path)
+        _safe_unlink(marker_path_for_socket(path))
 
-        def _cleanup(*_args: object) -> None:
-            _remove_artifacts()
-            os._exit(0)
+    def _cleanup(*_args: object) -> None:
+        _remove_artifacts()
+        os._exit(0)
 
-        try:
-            signal.signal(signal.SIGTERM, _cleanup)
-            signal.signal(signal.SIGINT, _cleanup)
-        except (ValueError, OSError):
-            pass
-        atexit.register(_remove_artifacts)
-        threading.Thread(target=_socket_loop, args=(path,), daemon=True).start()
-    else:
-        _log("no TMUX_PANE; channel socket disabled (MCP handshake only)")
+    try:
+        signal.signal(signal.SIGTERM, _cleanup)
+        signal.signal(signal.SIGINT, _cleanup)
+    except (ValueError, OSError):
+        pass
+    atexit.register(_remove_artifacts)
+    threading.Thread(target=_socket_loop, args=(path,), daemon=True).start()
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -248,7 +271,7 @@ def main() -> None:
             # Readiness strictly follows the initialize RESPONSE reaching the
             # MCP transport — never the request handling alone. Only now may a
             # sender observe the pane as channel-ready.
-            if msg.get("method") == "initialize" and path and not _initialized.is_set():
+            if msg.get("method") == "initialize" and not _initialized.is_set():
                 _initialized.set()
                 _maybe_publish_marker(path)
         except _MethodNotFound as e:

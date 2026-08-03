@@ -536,7 +536,10 @@ def test_server_bind_failure_writes_no_marker(_hive_home):
         proc.wait(timeout=5)
 
 
-def test_server_without_tmux_pane_skips_socket(_hive_home):
+def test_server_without_tmux_pane_binds_client_socket(_hive_home):
+    """Outside tmux (desktop session) the server binds a pid-keyed client
+    socket and self-reports its path in the MCP instructions — the agent is
+    the bridge that hands it to `hive duo init --channel`."""
     env = {**os.environ, "HIVE_HOME": str(_hive_home),
            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
     env.pop("TMUX_PANE", None)
@@ -545,13 +548,20 @@ def test_server_without_tmux_pane_skips_socket(_hive_home):
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1, env=env,
     )
+    sock = _hive_home / "channel" / f"hive-client-{proc.pid}.sock"
+    marker = _hive_home / "channel" / f"hive-client-{proc.pid}.ready"
     try:
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                      "params": {}}) + "\n")
         proc.stdin.flush()
         resp = json.loads(proc.stdout.readline())
-        assert resp["id"] == 1  # handshake still works
-        assert not (_hive_home / "channel").exists()  # no socket dir created
+        assert resp["id"] == 1
+        instructions = resp["result"]["instructions"]
+        assert str(sock) in instructions
+        assert "--channel" in instructions
+        assert _wait_path(sock)
+        assert _wait_path(marker)
+        assert marker.read_text().strip() == "2"
     finally:
         proc.terminate()
         proc.wait(timeout=5)
@@ -677,3 +687,100 @@ def test_marker_publish_failure_is_retryable(_srv_module, _hive_home, monkeypatc
 
     srv._maybe_publish_marker(sock_path)  # retry succeeds
     assert marker.read_text() == srv.MARKER_RECEIPT_CAPABLE
+
+
+# --- desktop-led anchor pane linkage ----------------------------------------
+
+
+def _client_server_proc(hive_home: Path) -> subprocess.Popen:
+    """A channel server with no TMUX_PANE: binds hive-client-<pid>.sock."""
+    env = {**os.environ, "HIVE_HOME": str(hive_home),
+           "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
+    env.pop("TMUX_PANE", None)
+    return subprocess.Popen(
+        [sys.executable, "-m", "hive.adapters.claude_channel_server"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=env,
+    )
+
+
+def _initialize(proc: subprocess.Popen) -> dict:
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                 "params": {}}) + "\n")
+    proc.stdin.flush()
+    return json.loads(proc.stdout.readline())
+
+
+def test_link_client_socket_refuses_missing_socket(_hive_home):
+    err = cc.link_client_socket("%42", _hive_home / "channel" / "hive-client-1.sock")
+    assert err is not None and "does not exist" in err
+
+
+def test_link_client_socket_refuses_unknown_marker(_hive_home):
+    channel = _hive_home / "channel"
+    channel.mkdir(parents=True)
+    sock = channel / "hive-client-1.sock"
+    sock.touch()
+    (channel / "hive-client-1.ready").write_text("9")
+    err = cc.link_client_socket("%42", sock)
+    assert err is not None and "unknown version" in err
+
+
+def test_link_client_socket_links_sock_and_marker(_hive_home):
+    channel = _hive_home / "channel"
+    channel.mkdir(parents=True)
+    sock = channel / "hive-client-1.sock"
+    sock.touch()
+    (channel / "hive-client-1.ready").write_text("2")
+
+    assert cc.link_client_socket("%42", sock) is None
+
+    assert os.readlink(cc.channel_socket_path("%42")) == str(sock)
+    assert cc.marker_version("%42") == "2"
+    # Relinking (e.g. a fresh desktop session) replaces, never fails.
+    assert cc.link_client_socket("%42", sock) is None
+
+
+def test_send_to_pane_delivers_through_client_symlink(_hive_home):
+    """The desktop-led duo's inbound path end to end at the transport level:
+    a client-mode server + anchor-pane symlink + pane-addressed send lands as
+    a channel notification with a local MCP-write receipt."""
+    proc = _client_server_proc(_hive_home)
+    try:
+        assert _initialize(proc)["id"] == 1
+        sock = _hive_home / "channel" / f"hive-client-{proc.pid}.sock"
+        marker = _hive_home / "channel" / f"hive-client-{proc.pid}.ready"
+        assert _wait_path(sock) and _wait_path(marker)
+        assert cc.link_client_socket("%42", sock) is None
+
+        accepted = cc.send_to_pane("%42", "<HIVE msgId=m1>hello</HIVE>")
+
+        assert accepted == cc.ACCEPTED_MCP_WRITE
+        note = json.loads(proc.stdout.readline())
+        assert note["method"] == "notifications/claude/channel"
+        assert note["params"]["content"] == "<HIVE msgId=m1>hello</HIVE>"
+        assert note["params"]["meta"] == {"msg_id": "m1"}
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_send_to_pane_fails_closed_when_client_exits(_hive_home):
+    """Server exit unlinks its real socket+marker; the anchor's symlinks
+    dangle and pane-addressed sends fail closed like any dead pane server."""
+    proc = _client_server_proc(_hive_home)
+    try:
+        assert _initialize(proc)["id"] == 1
+        sock = _hive_home / "channel" / f"hive-client-{proc.pid}.sock"
+        marker = _hive_home / "channel" / f"hive-client-{proc.pid}.ready"
+        assert _wait_path(sock) and _wait_path(marker)
+        assert cc.link_client_socket("%42", sock) is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+    deadline = time.time() + 5
+    while time.time() < deadline and marker.exists():
+        time.sleep(0.05)
+    assert not marker.exists()
+    assert cc.send_to_pane("%42", "anyone home?") is None
