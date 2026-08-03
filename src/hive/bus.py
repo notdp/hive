@@ -355,6 +355,32 @@ def count_events(workspace: str | Path) -> int:
     return int(row["count"]) if row is not None else 0
 
 
+def read_inbound_after(
+    workspace: str | Path,
+    *,
+    recipient: str,
+    after_seq: int,
+) -> list[tuple[int, dict[str, object]]]:
+    """Inbound send events for *recipient* newer than *after_seq*, oldest first.
+
+    The read side of `hive collect`: a member whose session cannot receive
+    channel push (a desktop-led worker) drains its inbox from the bus, keyed
+    by the monotonic seq as a durable cursor.
+    """
+    with _connect(workspace) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE intent = 'send'
+              AND to_agent = ?
+              AND seq > ?
+            ORDER BY seq ASC
+            """,
+            (recipient, after_seq),
+        ).fetchall()
+    return [(int(row["seq"]), _row_to_event(row)) for row in rows]
+
+
 def latest_inbound_send_event(
     workspace: str | Path,
     *,

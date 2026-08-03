@@ -793,6 +793,57 @@ def _gc_dead_teams() -> None:
         hive_context.clear_current_context()
 
 
+@cli.command("collect")
+@click.option(
+    "--wait",
+    "wait_seconds",
+    type=click.IntRange(0, 3600),
+    default=0,
+    help="Block up to N seconds for new inbound messages (0 = return immediately)",
+)
+def collect_cmd(wait_seconds: int):
+    """Drain this member's inbound messages from the bus (blocking inbox).
+
+    For members whose session cannot receive channel push — a desktop-led
+    worker outside tmux. Returns inbound messages newer than the last collect
+    and advances a durable cursor. Long-poll with --wait from a background
+    shell: the command returning IS the push signal, so re-arm it after each
+    drain instead of polling.
+
+    \b
+    Examples:
+      hive collect                # drain unread now
+      hive collect --wait 3600    # block until a message arrives (max 1h)
+    """
+    team_name, t = _resolve_scoped_team(None, required=True)
+    assert t is not None
+    me = _resolve_sender(None)
+    ws = _resolve_workspace(t, required=True)
+    cursor_path = Path(ws) / "state" / f"collect-cursor-{me}"
+    try:
+        cursor = int(cursor_path.read_text().strip())
+    except (OSError, ValueError):
+        cursor = 0
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        rows = bus.read_inbound_after(ws, recipient=me, after_seq=cursor)
+        if rows or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    payload: dict[str, object] = {
+        "agent": me,
+        "team": team_name,
+        "messages": [event for _seq, event in rows],
+        "count": len(rows),
+    }
+    if rows:
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        cursor_path.write_text(str(rows[-1][0]))
+    elif wait_seconds:
+        payload["timedOut"] = True
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 _FORK_MIN_COLS = 80
 _FORK_MIN_ROWS = 20
 
@@ -2935,6 +2986,7 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
             else None
         ),
         "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
+        "inbox": "hive collect --wait 3600",
     }
     if relinked:
         result["relinked"] = True
@@ -3054,6 +3106,9 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         },
         "dispatched": ["validator"],
         "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
+        # Channel push does not reach desktop sessions (research preview gap);
+        # a long-poll collect from a background shell is the push signal.
+        "inbox": "hive collect --wait 3600",
         "next": "hive skills get duo-worker",
     }
 
