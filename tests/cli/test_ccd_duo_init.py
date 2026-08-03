@@ -186,3 +186,36 @@ def test_duo_init_outside_tmux_discovers_single_live_socket(
         import shutil
 
         shutil.rmtree(short_home, ignore_errors=True)
+
+
+def test_existing_ccd_duo_relinks_stale_socket(configure_hive_home, monkeypatch, tmp_path):
+    """A desktop session restart changes its pid-keyed socket; re-running init
+    heals the anchor's symlink and keeps the team instead of forming a new one."""
+    hive_home = configure_hive_home(tmux_inside=False)
+    hive_context.save_current_context(team="hive-ccd-w1", workspace="/tmp/ws", agent="worker")
+    worker = SimpleNamespace(pane_id="%50", cli="claude")
+    team = SimpleNamespace(
+        name="hive-ccd-w1", tmux_window="hive-ccd:1", agents={"worker": worker}
+    )
+    monkeypatch.setattr("hive.cli.Team", SimpleNamespace(load=lambda name, **kw: team))
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda _p, k: "channel" if k == "hive-remote" else None,
+    )
+    channel = hive_home / "channel"
+    channel.mkdir(parents=True, exist_ok=True)
+    stale = channel / "hive-client-1.sock"
+    stale.touch()
+    fresh = channel / "hive-client-2.sock"
+    fresh.touch()
+    (channel / "hive-client-2.ready").write_text("2")
+    link = claude_channel.channel_socket_path("%50")
+    os.symlink(stale, link)
+
+    from hive.cli import _existing_ccd_duo
+
+    res = _existing_ccd_duo(str(fresh))
+
+    assert res is not None and res.get("relinked") is True
+    assert os.readlink(link) == str(fresh)
+    assert claude_channel.marker_version("%50") == "2"

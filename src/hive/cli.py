@@ -2896,7 +2896,10 @@ def _discover_client_channel_socket() -> str:
 
 def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
     """Idempotency for the desktop-led path: the saved default context names a
-    live team whose anchor socket still links to *this* channel socket."""
+    live team whose anchor is a remote-channel member. A stale or divergent
+    symlink (the desktop session restarted and its pid-keyed socket changed)
+    is healed by re-linking the anchor to *this* socket — the team and its
+    validator survive the desktop session's restarts."""
     ctx = hive_context.load_current_context()
     team_name = ctx.get("team", "")
     if not team_name:
@@ -2910,14 +2913,18 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
         return None
     from .adapters import claude_channel
 
+    relinked = False
     link = claude_channel.channel_socket_path(worker.pane_id)
     try:
-        if os.readlink(link) != channel_socket:
-            return None
+        current_target = os.readlink(link)
     except OSError:
-        return None
+        current_target = ""
+    if current_target != channel_socket:
+        if claude_channel.link_client_socket(worker.pane_id, channel_socket) is not None:
+            return None  # this socket is unusable; fall through to a fresh form (which fails loudly)
+        relinked = True
     validator = t.agents.get("validator")
-    return {
+    result: dict[str, object] = {
         "team": t.name,
         "window": t.tmux_window,
         "group": "duo",
@@ -2929,6 +2936,9 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
         ),
         "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
     }
+    if relinked:
+        result["relinked"] = True
+    return result
 
 
 def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[str, object]:
