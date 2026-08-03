@@ -3024,6 +3024,11 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
     from . import layout as layout_mod
 
     layout_mod.apply_adaptive(window)
+    # The anchor pane is plumbing, not a view: fill the window with the
+    # validator (prefix-z restores the split) and land attaches on the duo
+    # window instead of the session's empty window 0.
+    tmux.zoom_pane(validator_agent.pane_id)
+    tmux.select_window(window)
     _ensure_team_sidecar(t, ws_path)
 
     return {

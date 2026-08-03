@@ -64,6 +64,8 @@ def _patch(monkeypatch) -> dict[str, object]:
         lambda pane, key, value: calls["pane_options"].append((pane, key, value)),
     )
     monkeypatch.setattr("hive.cli.tmux.kill_window", lambda target: calls["killed"].append(target))
+    monkeypatch.setattr("hive.cli.tmux.zoom_pane", lambda pane: calls.__setitem__("zoomed", pane))
+    monkeypatch.setattr("hive.cli.tmux.select_window", lambda w: calls.__setitem__("selected", w))
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda _w: None)
     monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _ws: None)
     monkeypatch.setattr("hive.cli.bus.reset_workspace", lambda _ws: None)
@@ -117,6 +119,11 @@ def test_duo_init_outside_tmux_forms_desktop_led_duo(
     assert calls["validator_kw"]["worker_pane"] == "%50"
     assert calls["validator_kw"]["allow_outside_tmux"] is True
     assert calls["validator_kw"]["cli"] == "codex"
+
+    # Viewport: the validator fills the window (anchor is plumbing, not a
+    # view) and an attach lands on the duo window, not the empty window 0.
+    assert calls["zoomed"] == "%51"
+    assert calls["selected"] == "hive-ccd:1"
 
 
 def test_duo_init_outside_tmux_dead_channel_socket_undoes_window(

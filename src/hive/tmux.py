@@ -574,6 +574,14 @@ def resize_pane(pane_id: str, width: str | None = None, height: str | None = Non
     _run(args, check=False)
 
 
+def zoom_pane(pane_id: str) -> None:
+    """Zoom *pane_id* to fill its window (idempotent: only toggles when not
+    already zoomed). Unzoom is the human's `prefix z`."""
+    r = _run(["display", "-t", pane_id, "-p", "#{window_zoomed_flag}"], check=False)
+    if r.stdout.strip() != "1":
+        _run(["resize-pane", "-Z", "-t", pane_id], check=False)
+
+
 def list_panes(target: str) -> list[str]:
     """List all pane ids in a window/session."""
     r = _run(["list-panes", "-t", target, "-F", "#{pane_id}"], check=False)
