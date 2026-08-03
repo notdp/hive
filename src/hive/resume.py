@@ -25,7 +25,7 @@ SCHEMA_VERSION = 1
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PREV_SUFFIX = ".prev"
 
-_MEMBER_FIELDS = ("name", "cli", "model", "sessionId", "cwd")
+_MEMBER_FIELDS = ("name", "cli", "model", "sessionId", "cwd", "remote")
 
 
 def repo_label(cwd: str) -> str:
@@ -232,7 +232,7 @@ def merge_members(
             continue
         entry = by_name.setdefault(name, {field: "" for field in _MEMBER_FIELDS})
         entry["name"] = name
-        for field in ("cli", "model", "sessionId", "cwd"):
+        for field in ("cli", "model", "sessionId", "cwd", "remote"):
             value = str(obs.get(field, "") or "")
             if value:
                 entry[field] = value

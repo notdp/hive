@@ -1903,6 +1903,10 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
             "model": model or agent.model,
             "sessionId": session_id,
             "cwd": agent.cwd,
+            # An anchored member's process lives outside tmux, so its pane
+            # carries no session to resume; recording the marker keeps resume
+            # from spawning a look-alike CLI in its place.
+            "remote": tmux.get_pane_option(agent.pane_id, "hive-remote") or "",
         })
 
     existing = resume_store.load_snapshot(t.name)

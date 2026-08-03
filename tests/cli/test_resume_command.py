@@ -1056,3 +1056,37 @@ def test_resume_live_fresh_validator_rolls_back_pane_on_layout_failure(
     assert rec.killed_windows == []    # live window survives
     # snapshot is kept for retry
     assert resume_store.load_snapshot("0-w2") is not None
+
+
+def test_resume_skips_an_anchored_member(monkeypatch, configure_hive_home, tmp_path):
+    """A member whose agent lives outside tmux has no session to restore;
+    spawning a look-alike CLI would put a fake agent on its routing key."""
+    configure_hive_home()
+    from types import SimpleNamespace
+
+    from hive import cli as cli_mod
+
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        cli_mod.Agent, "spawn",
+        lambda **kw: spawned.append(kw["name"]) or SimpleNamespace(pane_id="%99"),
+    )
+    progress: list[str] = []
+    monkeypatch.setattr(cli_mod, "_resume_progress", lambda m: progress.append(m))
+    monkeypatch.setattr(cli_mod.tmux, "select_window", lambda _w: None)
+    monkeypatch.setattr(cli_mod.tmux, "set_pane_option", lambda *_a: None)
+    monkeypatch.setattr("hive.layout.apply_adaptive", lambda _w: None)
+    peer_team = SimpleNamespace(peer_map={}, agents={}, set_peer=lambda a, b: None, save=lambda: None)
+    monkeypatch.setattr(cli_mod.Team, "load", classmethod(lambda cls, name, **kw: peer_team))
+
+    missing = [{"name": "worker", "cli": "claude", "cwd": "/tmp", "sessionId": "", "remote": "channel"}]
+    result = cli_mod._resume_members_into_live_team(
+        {"team": "hive-ccd-w1", "members": missing},
+        {"window": "hive-ccd:1", "workspace": str(tmp_path / "ws")},
+        {"validator": SimpleNamespace(pane_id="%51")},
+        missing,
+    )
+
+    assert spawned == []  # never respawned as a CLI
+    assert result["members"] == []
+    assert any("outside tmux" in m for m in progress)

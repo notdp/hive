@@ -2906,6 +2906,13 @@ def _create_standalone_duo(
 
 _CCD_SESSION_NAME = "hive-ccd"
 
+# Channel push never reaches a session the host launched without `--channels`
+# (the desktop app owns its argv). The plugin's Stop hook delivers instead, so
+# the member is told what to expect rather than handed a polling command.
+_REMOTE_INBOX_NOTE = (
+    "delivered automatically at the end of each turn by the hive plugin's Stop hook"
+)
+
 
 def _probe_unix_socket(path: str) -> bool:
     """True when something is listening on *path* (connect succeeds)."""
@@ -2993,7 +3000,7 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
             else None
         ),
         "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
-        "inbox": "hive collect --wait 3600",
+        "inbox": _REMOTE_INBOX_NOTE,
     }
     if relinked:
         result["relinked"] = True
@@ -3118,9 +3125,7 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         },
         "dispatched": ["validator"],
         "watch": f"tmux attach -t {_CCD_SESSION_NAME}",
-        # Channel push does not reach desktop sessions (research preview gap);
-        # a long-poll collect from a background shell is the push signal.
-        "inbox": "hive collect --wait 3600",
+        "inbox": _REMOTE_INBOX_NOTE,
         "next": "hive skills get duo-worker",
     }
 
@@ -3587,6 +3592,17 @@ def _resume_members_into_live_team(
         for m in _resume_member_order(missing):
             count += 1
             name = str(m["name"])
+            if m.get("remote"):
+                # The member is an external session (a desktop-led worker)
+                # reached through its anchor pane's channel link. There is no
+                # CLI here to restore, and spawning one would put a look-alike
+                # agent on the team's routing key. That session reconnects
+                # itself with `hive duo init --channel <its socket>`.
+                _resume_progress(
+                    f"skipping {name} — it runs outside tmux; reconnect it with "
+                    "`hive duo init --channel <socket>` from that session"
+                )
+                continue
             fresh = name in fresh_members
             if fresh:
                 _resume_progress(

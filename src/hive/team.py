@@ -317,11 +317,18 @@ class Team:
                     row["peer"] = peer_name
             members.append(row)
         for name in sorted(self.agents):
+            pane_id = self.agents[name].pane_id
             row = {
                 "name": name,
                 "role": "agent",
-                "pane": self.agents[name].pane_id,
+                "pane": pane_id,
             }
+            # An anchored member hosts no CLI on its pane by design, so its
+            # `cliAlive: false` is normal rather than a dead agent — say so in
+            # the payload instead of leaving readers to guess.
+            remote = tmux.get_pane_option(pane_id, "hive-remote") or ""
+            if remote:
+                row["remote"] = remote
             group = self.member_groups.get(name, "")
             if group:
                 row["group"] = group

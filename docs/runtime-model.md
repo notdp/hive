@@ -133,11 +133,35 @@ exiting; the retained shell is not an agent runtime. The three states:
 |---|---|---|---|---|---|
 | pane dead | false | false | offline | pane_dead | false |
 | retained shell (CLI exited) | true | false | offline | cli_exited | false |
+| anchored member (`remote`) | true | false | offline | cli_exited | false |
 | live CLI | true | true | per runtime | per runtime | per runtime |
 
 Consumers — delivery refuses a retained shell before any native transport
 (the send event stays durable on the bus); idle notify, session-snapshot
 capture, and duo pairing all skip retained shells.
+
+### `remote`
+
+Source — the member pane's `@hive-remote` tag, written at registration.
+
+Meaning — the member's agent process does not live on this pane. `channel`
+is the only value today: the pane is an **anchor** whose channel socket and
+ready marker are symlinks to an external Claude session's own
+`hive-client-<pid>.sock`. The pane exists to hold the member's identity, so
+every pane-keyed authority (routing, tags, `kill-pane` as the kick control,
+doctor) keeps working unchanged.
+
+The honest asymmetry: `alive` no longer implies the member is reachable, and
+`cliAlive` is permanently `false` because no CLI was ever meant to run here.
+Reachability comes from the transport instead — a dangling symlink (the
+external session exited and unlinked its socket) makes delivery fail closed
+exactly like a dead pane server.
+
+Consumers — delivery routes an anchored member to the channel transport
+rather than refusing it as a retained shell; the resume snapshot records the
+marker and resume skips those members instead of spawning a look-alike CLI on
+the team's routing key (an external session reconnects itself by re-running
+`hive duo init --channel <socket>`, which relinks the anchor).
 
 ### `inputState`
 

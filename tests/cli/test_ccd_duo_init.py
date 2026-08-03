@@ -222,3 +222,24 @@ def test_existing_ccd_duo_relinks_stale_socket(configure_hive_home, monkeypatch,
     assert res is not None and res.get("relinked") is True
     assert os.readlink(link) == str(fresh)
     assert claude_channel.marker_version("%50") == "2"
+
+
+def test_team_status_marks_the_anchored_member(configure_hive_home, monkeypatch):
+    """`cliAlive: false` on an anchor pane is by design, so the payload says
+    so — a reader must not have to guess whether the member is dead."""
+    configure_hive_home()
+    from hive.agent import Agent
+    from hive.team import Team
+
+    monkeypatch.setattr(
+        "hive.team.tmux.get_pane_option",
+        lambda pane, key: "channel" if (pane == "%50" and key == "hive-remote") else None,
+    )
+    team = Team(name="hive-ccd-w1", tmux_session="hive-ccd", tmux_window="hive-ccd:1")
+    team.agents["worker"] = Agent(name="worker", team_name=team.name, pane_id="%50", cli="claude")
+    team.agents["validator"] = Agent(name="validator", team_name=team.name, pane_id="%51", cli="codex")
+
+    members = {m["name"]: m for m in team.status()["members"]}
+
+    assert members["worker"]["remote"] == "channel"
+    assert "remote" not in members["validator"]
