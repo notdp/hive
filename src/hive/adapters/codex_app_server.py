@@ -480,6 +480,14 @@ def spawn_daemon(
     short-lived CLI; the sidecar reaps it via the pidfile when the pane dies.
     Returns False if the daemon fails to bind or dies before becoming ready.
     """
+    if not os.path.isabs(codex_bin):
+        # Resolve the bare name here, once: Popen would otherwise resolve it
+        # against this process's PATH while the pane's TUI resolves against
+        # the pane shell's — a leftover second install silently splits the
+        # two (2026-07-14 version-skew incident).
+        import shutil
+
+        codex_bin = shutil.which(codex_bin) or codex_bin
     sock = pane_socket_path(pane)
     sock.parent.mkdir(parents=True, exist_ok=True)
     if sock.exists():
