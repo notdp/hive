@@ -3052,10 +3052,6 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         tmux.set_pane_option(anchor_pane, "hive-group", "duo")
         tmux.set_pane_option(anchor_pane, "hive-cli", "claude")
         tmux.set_pane_option(anchor_pane, "hive-remote", "channel")
-        hive_context.save_context_for_pane(
-            anchor_pane, team=team_name, workspace=str(ws_path), agent="worker"
-        )
-        _remember_context(team=team_name, workspace=str(ws_path), agent="worker")
 
         err = claude_channel.link_client_socket(anchor_pane, channel_socket)
         if err:
@@ -3077,6 +3073,15 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         tmux.kill_window(window)
         _fail(str(e))
         raise AssertionError("unreachable")
+
+    # Identity is written only once the duo actually exists: a failed link or
+    # spawn above must not leave the saved default context pointing at a
+    # window that was just torn down (it poisons `hive collect` and the next
+    # init's idempotency check).
+    hive_context.save_context_for_pane(
+        anchor_pane, team=team_name, workspace=str(ws_path), agent="worker"
+    )
+    _remember_context(team=team_name, workspace=str(ws_path), agent="worker")
 
     try:
         reloaded = Team.load(team_name, prefer_pane=anchor_pane)

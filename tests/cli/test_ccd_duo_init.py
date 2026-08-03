@@ -138,6 +138,9 @@ def test_duo_init_outside_tmux_dead_channel_socket_undoes_window(
     assert result.exit_code != 0
     assert "does not exist" in result.output
     assert calls["killed"] == ["hive-ccd:1"]  # no half-built window left
+    # And no dangling identity: a failed form must not poison the saved
+    # context (it would break `hive collect` and the next init's idempotency).
+    assert hive_context.load_current_context().get("team", "") == ""
 
 
 def test_send_outside_tmux_resolves_saved_context(runner, configure_hive_home, monkeypatch):
