@@ -327,6 +327,19 @@ def marker_path_for_socket_path(sock_path: str | Path) -> str:
     return s[: -len(".sock")] + ".ready" if s.endswith(".sock") else s + ".ready"
 
 
+def remote_member_alive(pane: str) -> bool:
+    """Whether an anchored member's external session is still running.
+
+    Its channel server unlinks the real socket and marker on exit, so the
+    anchor's symlinks dangle and ``exists()`` (which follows them) goes False.
+    Nothing is ever pushed over this socket — a session the app launched
+    without ``--channels`` cannot receive channel notifications — so this is
+    liveness evidence only, and delivery to a live member is the bus plus the
+    member's own inbox hook.
+    """
+    return channel_socket_path(pane).exists() and ready_marker_path(pane).exists()
+
+
 # --- delivery ---------------------------------------------------------------
 
 def _extract_msg_id(text: str) -> str:

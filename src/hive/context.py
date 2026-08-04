@@ -44,7 +44,9 @@ def load_current_context() -> dict[str, str]:
     return {str(k): str(v) for k, v in dict(data).items() if v}
 
 
-def save_current_context(*, team: str = "", workspace: str = "", agent: str = "") -> Path:
+def save_current_context(
+    *, team: str = "", workspace: str = "", agent: str = "", session: str = ""
+) -> Path:
     path = _context_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -52,6 +54,11 @@ def save_current_context(*, team: str = "", workspace: str = "", agent: str = ""
         "workspace": workspace,
         "agent": agent,
     }
+    if session:
+        # Which host session owns this identity. Only the desktop path sets it,
+        # to keep sibling sessions running the same inbox hook from draining a
+        # member's inbox that isn't theirs.
+        payload["session"] = session
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return path
 

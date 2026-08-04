@@ -153,15 +153,29 @@ doctor) keeps working unchanged.
 
 The honest asymmetry: `alive` no longer implies the member is reachable, and
 `cliAlive` is permanently `false` because no CLI was ever meant to run here.
-Reachability comes from the transport instead — a dangling symlink (the
-external session exited and unlinked its socket) makes delivery fail closed
-exactly like a dead pane server.
 
-Consumers — delivery routes an anchored member to the channel transport
-rather than refusing it as a retained shell; the resume snapshot records the
-marker and resume skips those members instead of spawning a look-alike CLI on
-the team's routing key (an external session reconnects itself by re-running
-`hive duo init --channel <socket>`, which relinks the anchor).
+**An anchored member has no push transport.** A host that launches its
+sessions without `--channels` — the desktop app owns its argv — cannot
+receive channel notifications at all, so nothing is pushed to this pane and
+the channel socket is never written to. Delivery is the durable bus write
+plus the member's own inbox hook, which drains it after each tool call and
+again at the end of the turn. `Agent.send` names that boundary
+`busInboxAccepted`; it deliberately claims less than the channel and daemon
+classifications, because no push was attempted and none may be claimed.
+
+The socket still earns its keep as **liveness evidence**: the external
+session's channel server unlinks the real socket and marker when it exits, so
+the anchor's symlinks dangle and delivery fails closed exactly like a dead
+pane server — the message stays on the bus for its return.
+
+Consumers — delivery gates an anchored member on that liveness rather than
+refusing it as a retained shell; the resume snapshot records the marker and
+resume skips those members instead of spawning a look-alike CLI on the team's
+routing key (an external session reconnects itself by re-running `hive duo
+init --channel <socket>`, which relinks the anchor). Because every session on
+the host runs the same inbox hook, the saved context carries a `session`
+claim: the first session to drain owns the identity and siblings are refused,
+and re-forming the duo clears the claim.
 
 ### `inputState`
 

@@ -20,6 +20,12 @@ CLI_BINS: dict[str, str] = {
     "codex": "codex",
 }
 
+# Accepted-transport classification for a member with no push transport: the
+# message is durable on the bus and the member's own inbox hook drains it. It
+# claims strictly less than the channel/daemon classifications — no push was
+# attempted, so none can be claimed.
+ACCEPTED_BUS_INBOX = "busInboxAccepted"
+
 
 def _shell_escape(s: str) -> str:
     """Escape a string for safe shell use."""
@@ -437,11 +443,10 @@ class Agent:
         # of that may route a message into a pane nobody is watching.
         #
         # Exception: an anchor pane (`@hive-remote=channel`) hosts no CLI by
-        # design — its member lives in an external Claude session (desktop)
-        # reached through the pane's symlinked channel socket. For that member
-        # "somebody is listening" evidence is the channel's own fail-closed
-        # marker + receipt, so delivery skips the process probe and lets the
-        # transport gate it.
+        # design — its member lives in an external session that pulls its mail
+        # off the bus (the plugin's inbox hook). Nothing is pushed to it, so
+        # this is not a transport at all; the pane's channel link is only
+        # liveness evidence that the external session still exists.
         probe = None
         try:
             from .agent_cli import detect_cli_process_for_pane
@@ -453,14 +458,16 @@ class Agent:
             if tmux.get_pane_option(self.pane_id, "hive-remote") == "channel":
                 from .adapters import claude_channel
 
-                accepted = claude_channel.send_to_pane(self.pane_id, text)
-                if accepted is None:
+                if not claude_channel.remote_member_alive(self.pane_id):
                     raise DeliveryError(
-                        f"remote channel pane {self.pane_id} transport failed "
-                        "(client socket gone, marker missing, or no receipt); "
-                        "is the external Claude session still running?"
+                        f"remote member on pane {self.pane_id} is gone "
+                        "(its session unlinked the channel socket); the message "
+                        "stays on the bus for when it comes back"
                     )
-                return accepted
+                # The bus write already happened upstream and the member's
+                # inbox hook drains it. Naming that honestly keeps the delivery
+                # state machine from recording a push that never happens.
+                return ACCEPTED_BUS_INBOX
             raise DeliveryError(
                 f"no live CLI process on pane {self.pane_id} (cli_exited): "
                 "refusing native transport to a retained shell"

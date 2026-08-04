@@ -90,3 +90,25 @@ def test_collect_if_awaiting_skips_the_wait_when_nothing_is_owed(
         ws, from_agent="validator", to_agent="worker", body="looks good", reply_to="0Aea"
     )
     assert reply.msg_id
+
+
+def test_collect_session_claim_keeps_siblings_out(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Every desktop session runs the same inbox hook, so the first to claim the
+    member identity owns it; a sibling draining would deliver the member's mail
+    into the wrong conversation."""
+    ws = _bind_desktop_worker(configure_hive_home, monkeypatch, tmp_path)
+    bus.write_send_event(ws, from_agent="validator", to_agent="worker", body="verdict")
+
+    # A sibling session with no claim on file takes it and drains.
+    payload = json.loads(runner.invoke(cli, ["collect", "--session", "sess-A"]).output)
+    assert payload["count"] == 1
+    assert hive_context.load_current_context()["session"] == "sess-A"
+
+    # A different session is refused outright — no drain, no cursor movement.
+    bus.write_send_event(ws, from_agent="validator", to_agent="worker", body="second")
+    other = json.loads(runner.invoke(cli, ["collect", "--session", "sess-B"]).output)
+    assert other == {"messages": [], "count": 0, "notMine": True}
+
+    # The owner still gets it.
+    mine = json.loads(runner.invoke(cli, ["collect", "--session", "sess-A"]).output)
+    assert [m["body"] for m in mine["messages"]] == ["second"]

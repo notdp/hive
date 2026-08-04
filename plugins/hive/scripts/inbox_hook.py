@@ -5,15 +5,25 @@ Claude Code delivers channel notifications only to sessions launched with
 ``--channels``. Sessions hosted by the Claude Code desktop app are not: the
 app owns its argv, so a desktop-led duo worker never sees the push (measured
 A/B: same binary, same stream-json transport, flag present -> delivered, flag
-absent -> silently dropped). Plugin hooks *do* run there, so this Stop hook is
-the delivery path for those sessions: it drains the member's bus inbox and
-returns the messages as blocked-stop feedback, which Claude Code injects as
-context and continues on — the same effect the channel would have had.
+absent -> silently dropped). A hook is the only injection point that lives
+*inside* the session process, so it is the delivery path for those members.
+
+Two events, two jobs:
+
+- ``PostToolUse`` — mid-turn delivery. A member doing real work calls tools
+  constantly, so each tool result is a delivery point; a reply that lands
+  during a long turn arrives within one tool call instead of at turn end.
+  Never blocks, never waits.
+- ``Stop`` — the idle/settle path. Drains what is left, and while one of the
+  member's own messages is still unanswered it holds the turn open waiting
+  for the answer (the duo's "wait for the verdict" semantics).
 
 Silent no-op everywhere else: inside tmux the native channel/app-server
 transports already deliver, and a session bound to no hive team has no inbox.
-Only a real message ever blocks a stop, and each drain advances a durable
-cursor, so the block cannot repeat on the same message.
+Each drain advances a durable cursor, so no message is delivered twice and a
+blocked stop cannot repeat on the same message. ``--session`` scopes the
+drain to the member's own session, so other desktop sessions running the same
+hook never steal its inbox.
 """
 from __future__ import annotations
 
@@ -59,6 +69,13 @@ def _envelope(message: dict) -> str:
     return f"{head}>\n{message.get('body', '')}\n</HIVE>"
 
 
+def _preamble(count: int) -> str:
+    return (
+        f"{count} hive message{'s' if count > 1 else ''} arrived. Follow the hive "
+        f"protocol for each (reply with `hive reply <agent>`):\n\n"
+    )
+
+
 def main() -> None:
     if os.environ.get("TMUX_PANE"):
         return  # native channel / app-server transports own delivery in tmux
@@ -66,13 +83,32 @@ def main() -> None:
         event = json.load(sys.stdin)
     except (ValueError, OSError):
         event = {}
-    already_blocking = bool(event.get("stop_hook_active"))
+    session = str(event.get("session_id") or "")
+    claim = ["--session", session] if session else []
 
-    payload = _collect([])
+    if event.get("hook_event_name") == "PostToolUse":
+        # Mid-turn delivery: every tool call is a delivery point, so a message
+        # that lands while the member is working arrives with the next tool
+        # result instead of waiting for the turn to end. Never waits — a turn
+        # in progress must not be stalled by an empty inbox.
+        messages = (_collect(claim).get("messages")) or []
+        if not messages:
+            return
+        body = "\n\n".join(_envelope(m) for m in messages)
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": _preamble(len(messages)) + body,
+            },
+        }))
+        return
+
+    already_blocking = bool(event.get("stop_hook_active"))
+    payload = _collect(claim)
     if not payload.get("messages") and not already_blocking:
         # Nothing unread. Wait for the answer only while one is actually owed,
         # so an idle session ends its turn immediately.
-        payload = _collect(["--wait", str(WAIT_SECONDS), "--if-awaiting"])
+        payload = _collect([*claim, "--wait", str(WAIT_SECONDS), "--if-awaiting"])
     messages = payload.get("messages") or []
     if not messages:
         return
@@ -81,10 +117,7 @@ def main() -> None:
     count = len(messages)
     print(json.dumps({
         "decision": "block",
-        "reason": (
-            f"{count} hive message{'s' if count > 1 else ''} arrived. Follow the hive "
-            f"protocol for each (reply with `hive reply <agent>`):\n\n{body}"
-        ),
+        "reason": _preamble(count) + body,
         "systemMessage": f"hive: {count} message{'s' if count > 1 else ''} delivered",
     }))
 

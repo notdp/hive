@@ -87,3 +87,45 @@ def test_hook_is_a_no_op_inside_tmux(monkeypatch, capsys):
 
     assert calls == []  # native transports own delivery there
     assert out == ""
+
+
+def test_post_tool_use_injects_mid_turn_without_blocking(monkeypatch, capsys):
+    """The mid-turn path: a message that lands while the member works arrives
+    with the next tool result, as additionalContext — never a block, and never
+    a wait (a turn in progress must not stall on an empty inbox)."""
+    message = {"from": "validator", "to": "worker", "msgId": "18kd", "body": "VAL failed: retry"}
+    calls, out = _run(
+        monkeypatch, capsys,
+        event={"hook_event_name": "PostToolUse", "session_id": "sess-1"},
+        collect_results=[{"messages": [message], "count": 1}],
+    )
+
+    assert calls == [["--session", "sess-1"]]  # scoped drain, no wait args
+    payload = json.loads(out)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert "VAL failed: retry" in payload["hookSpecificOutput"]["additionalContext"]
+    assert "decision" not in payload  # must not block a turn in progress
+
+
+def test_post_tool_use_is_silent_when_inbox_is_empty(monkeypatch, capsys):
+    calls, out = _run(
+        monkeypatch, capsys,
+        event={"hook_event_name": "PostToolUse", "session_id": "sess-1"},
+        collect_results=[{"messages": []}],
+    )
+
+    assert calls == [["--session", "sess-1"]]  # one drain, no blocking wait
+    assert out == ""
+
+
+def test_stop_scopes_its_drain_to_the_session(monkeypatch, capsys):
+    calls, _out = _run(
+        monkeypatch, capsys,
+        event={"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "sess-1"},
+        collect_results=[{"messages": []}, {"messages": []}],
+    )
+
+    assert calls == [
+        ["--session", "sess-1"],
+        ["--session", "sess-1", "--wait", "120", "--if-awaiting"],
+    ]

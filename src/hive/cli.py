@@ -794,6 +794,29 @@ def _gc_dead_teams() -> None:
         hive_context.clear_current_context()
 
 
+def _claim_context_session(session_id: str) -> bool:
+    """Whether *session_id* owns the saved member identity, claiming it if free.
+
+    A desktop member's identity lives in the shared default context, but every
+    host session runs the same inbox hook. First claim wins: the session that
+    formed the duo is the one working right after, so it claims before an
+    idle sibling can. `hive duo init` clears the claim, so re-forming from
+    another session moves the identity rather than deadlocking it.
+    """
+    ctx = hive_context.load_current_context()
+    owner = ctx.get("session", "")
+    if owner and owner != session_id:
+        return False
+    if not owner:
+        hive_context.save_current_context(
+            team=ctx.get("team", ""),
+            workspace=ctx.get("workspace", ""),
+            agent=ctx.get("agent", ""),
+            session=session_id,
+        )
+    return True
+
+
 @cli.command("collect")
 @click.option(
     "--wait",
@@ -807,7 +830,13 @@ def _gc_dead_teams() -> None:
     is_flag=True,
     help="With --wait: only block while one of my own messages is unanswered",
 )
-def collect_cmd(wait_seconds: int, if_awaiting: bool):
+@click.option(
+    "--session",
+    "session_id",
+    default="",
+    help="Host session id; drains only when this session owns the member identity",
+)
+def collect_cmd(wait_seconds: int, if_awaiting: bool, session_id: str):
     """Drain this member's inbound messages from the bus (blocking inbox).
 
     For members whose session cannot receive channel push — a desktop-led
@@ -820,6 +849,11 @@ def collect_cmd(wait_seconds: int, if_awaiting: bool):
       hive collect                            # drain unread now
       hive collect --wait 120 --if-awaiting   # block only while a reply is owed
     """
+    if session_id and not _claim_context_session(session_id):
+        # Another host session owns this member identity. Draining here would
+        # deliver its mail into the wrong conversation, so stay silent.
+        click.echo(json.dumps({"messages": [], "count": 0, "notMine": True}, indent=2))
+        return
     team_name, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     me = _resolve_sender(None)
