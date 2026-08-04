@@ -434,31 +434,74 @@ def latest_unanswered_inbound_send_event(
     return _row_to_event(row) if row is not None else None
 
 
-def has_unanswered_outbound(workspace: str | Path, *, sender: str) -> bool:
-    """True when *sender* sent a message nobody has replied to yet.
+def is_awaiting_reply(
+    workspace: str | Path,
+    *,
+    sender: str,
+    within_seconds: float,
+    now: float | None = None,
+) -> bool:
+    """True when *sender* just sent an outbound still owed a reply — i.e. it is
+    *sender*'s turn to wait for a peer, not to act.
 
-    "Am I waiting on a peer right now" — the gate for blocking at the end of a
-    turn: a member with an open question should wait for the answer, an idle
-    one should not stall the session.
+    Two gates, both required:
+
+    1. *Structure*: the newest message *sender* is party to must be *sender*'s
+       own send, unanswered. Judged from the single latest message, never from
+       "any unanswered send anywhere" — a finished exchange always leaves one
+       trailing unanswered send (whoever spoke last is never replied to), so an
+       any-unanswered test latches True forever.
+    2. *Recency*: that send must be newer than *within_seconds*. Structure alone
+       cannot tell a fresh handoff ("review this", ending the turn to wait) from
+       a stale sign-off ("thanks, shipping") the member left behind turns ago —
+       both are a trailing unanswered outbound. A handoff worth waiting on is
+       seconds old; once it ages past the wait window a reply is not imminent,
+       so later unrelated turns do not re-arm on it.
+
+    *now* is injectable for tests; it defaults to wall-clock time.
     """
     with _connect(workspace) as conn:
         row = conn.execute(
             """
-            SELECT 1 FROM messages AS sent
-            WHERE sent.intent = 'send'
-              AND sent.from_agent = ?
-              AND sent.msg_id != ''
-              AND NOT EXISTS (
-                  SELECT 1 FROM messages AS answer
-                  WHERE answer.intent = 'send'
-                    AND answer.in_reply_to = sent.msg_id
-                    AND answer.to_agent = sent.from_agent
-              )
+            SELECT from_agent, msg_id, created_at FROM messages
+            WHERE intent = 'send' AND (from_agent = ? OR to_agent = ?)
+            ORDER BY seq DESC
             LIMIT 1
             """,
-            (sender,),
+            (sender, sender),
         ).fetchone()
-    return row is not None
+        if row is None or row["from_agent"] != sender or not row["msg_id"]:
+            return False  # no history, or the latest move was inbound / anonymous
+        answered = conn.execute(
+            """
+            SELECT 1 FROM messages
+            WHERE intent = 'send' AND in_reply_to = ? AND to_agent = ?
+            LIMIT 1
+            """,
+            (row["msg_id"], sender),
+        ).fetchone()
+    if answered is not None:
+        return False
+    age = _age_seconds(str(row["created_at"] or ""), now=now)
+    return age is not None and age <= within_seconds
+
+
+def _age_seconds(created_at: str, *, now: float | None) -> float | None:
+    """Seconds between an ISO-8601 ``created_at`` and *now* (wall clock if None).
+    None when the timestamp is missing or unparseable — an unknown age is not a
+    fresh one, so callers gate it out."""
+    if not created_at:
+        return None
+    import datetime as _dt
+
+    try:
+        ts = _dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.timezone.utc)
+    current = now if now is not None else _dt.datetime.now(_dt.timezone.utc).timestamp()
+    return current - ts.timestamp()
 
 
 def has_send_reply_to(

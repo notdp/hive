@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -794,6 +795,31 @@ def _gc_dead_teams() -> None:
         hive_context.clear_current_context()
 
 
+@contextmanager
+def _cursor_claim_lock(cursor_path: Path):
+    """Exclusive lock guarding a collect cursor's read-claim-advance step.
+
+    The lock file is a sibling ``.lock`` so it never collides with the cursor
+    value itself; a lock failure degrades to no-lock rather than dropping mail.
+    """
+    import fcntl
+
+    lock_path = cursor_path.with_suffix(".lock")
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        yield  # best-effort: never let a lock problem swallow delivery
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _claim_context_session(session_id: str) -> bool:
     """Whether *session_id* owns the saved member identity, claiming it if free.
 
@@ -858,16 +884,32 @@ def collect_cmd(wait_seconds: int, if_awaiting: bool, session_id: str):
     assert t is not None
     me = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
-    if wait_seconds and if_awaiting and not bus.has_unanswered_outbound(ws, sender=me):
+    if (
+        wait_seconds
+        and if_awaiting
+        and not bus.is_awaiting_reply(ws, sender=me, within_seconds=wait_seconds)
+    ):
+        # Only hold the turn open when a reply is genuinely owed and recent
+        # (the handoff-then-wait case); a stale trailing send never re-arms.
         wait_seconds = 0
     cursor_path = Path(ws) / "state" / f"collect-cursor-{me}"
-    try:
-        cursor = int(cursor_path.read_text().strip())
-    except (OSError, ValueError):
-        cursor = 0
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + wait_seconds
+    rows: list[tuple[int, dict[str, object]]] = []
     while True:
-        rows = bus.read_inbound_after(ws, recipient=me, after_seq=cursor)
+        # Read cursor → claim rows → advance cursor is one atomic step under an
+        # exclusive lock: two hooks firing on parallel tool calls otherwise read
+        # the same cursor and each return the same messages (duplicate delivery).
+        # The lock wraps only the claim, never the wait — a collect blocking for
+        # a reply must not freeze a sibling drain.
+        with _cursor_claim_lock(cursor_path):
+            try:
+                cursor = int(cursor_path.read_text().strip())
+            except (OSError, ValueError):
+                cursor = 0
+            rows = bus.read_inbound_after(ws, recipient=me, after_seq=cursor)
+            if rows:
+                cursor_path.write_text(str(rows[-1][0]))
         if rows or time.monotonic() >= deadline:
             break
         time.sleep(0.5)
@@ -877,10 +919,7 @@ def collect_cmd(wait_seconds: int, if_awaiting: bool, session_id: str):
         "messages": [event for _seq, event in rows],
         "count": len(rows),
     }
-    if rows:
-        cursor_path.parent.mkdir(parents=True, exist_ok=True)
-        cursor_path.write_text(str(rows[-1][0]))
-    elif wait_seconds:
+    if not rows and wait_seconds:
         payload["timedOut"] = True
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
