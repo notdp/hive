@@ -3037,7 +3037,12 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
     live team whose anchor is a remote-channel member. A stale or divergent
     symlink (the desktop session restarted and its pid-keyed socket changed)
     is healed by re-linking the anchor to *this* socket — the team and its
-    validator survive the desktop session's restarts."""
+    validator survive the desktop session's restarts.
+
+    Re-forming also moves the inbox: the saved host-session claim is cleared
+    so the calling session's first inbox hook can claim it. Leaving a dead
+    session's claim in place bounces every `hive collect --session` as
+    notMine and strands inbound mail."""
     ctx = hive_context.load_current_context()
     team_name = ctx.get("team", "")
     if not team_name:
@@ -3061,6 +3066,12 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
         if claude_channel.link_client_socket(worker.pane_id, channel_socket) is not None:
             return None  # this socket is unusable; fall through to a fresh form (which fails loudly)
         relinked = True
+    # Same promise as the fresh-form path's _remember_context: init hands the
+    # identity to whichever session runs it, so drop any prior host-session
+    # claim (saving without `session` clears it).
+    _remember_context(
+        team=t.name, workspace=ctx.get("workspace", ""), agent=ctx.get("agent", "")
+    )
     validator = t.agents.get("validator")
     result: dict[str, object] = {
         "team": t.name,

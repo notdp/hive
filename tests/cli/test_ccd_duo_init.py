@@ -224,6 +224,50 @@ def test_existing_ccd_duo_relinks_stale_socket(configure_hive_home, monkeypatch,
     assert claude_channel.marker_version("%50") == "2"
 
 
+def test_existing_ccd_duo_clears_stale_session_claim(
+    configure_hive_home, monkeypatch, tmp_path
+):
+    """Re-running init from a new desktop session moves the inbox with the
+    socket: a dead session's saved claim would otherwise bounce every
+    `hive collect --session` as notMine and strand inbound mail."""
+    hive_home = configure_hive_home(tmux_inside=False)
+    hive_context.save_current_context(
+        team="hive-ccd-w1",
+        workspace="/tmp/ws",
+        agent="worker",
+        session="49174206-dead-dead-dead-000000000000",
+    )
+    worker = SimpleNamespace(pane_id="%50", cli="claude")
+    team = SimpleNamespace(
+        name="hive-ccd-w1", tmux_window="hive-ccd:1", agents={"worker": worker}
+    )
+    monkeypatch.setattr("hive.cli.Team", SimpleNamespace(load=lambda name, **kw: team))
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda _p, k: "channel" if k == "hive-remote" else None,
+    )
+    channel = hive_home / "channel"
+    channel.mkdir(parents=True, exist_ok=True)
+    stale = channel / "hive-client-1.sock"
+    stale.touch()
+    fresh = channel / "hive-client-2.sock"
+    fresh.touch()
+    (channel / "hive-client-2.ready").write_text("2")
+    link = claude_channel.channel_socket_path("%50")
+    os.symlink(stale, link)
+
+    from hive.cli import _claim_context_session, _existing_ccd_duo
+
+    res = _existing_ccd_duo(str(fresh))
+
+    assert res is not None
+    ctx = hive_context.load_current_context()
+    assert ctx.get("session", "") == ""
+    assert ctx.get("team") == "hive-ccd-w1" and ctx.get("agent") == "worker"
+    # The new host session can now claim the inbox.
+    assert _claim_context_session("11150968-live-live-live-000000000000") is True
+
+
 def test_team_status_marks_the_anchored_member(configure_hive_home, monkeypatch):
     """`cliAlive: false` on an anchor pane is by design, so the payload says
     so — a reader must not have to guess whether the member is dead."""
