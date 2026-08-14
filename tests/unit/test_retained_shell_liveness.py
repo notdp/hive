@@ -390,6 +390,38 @@ def test_send_to_anchored_member_fails_closed_when_its_session_is_gone(monkeypat
         agent.send("hi")
 
 
+def test_runtime_reports_a_reachable_anchor_as_remote_not_dead(monkeypatch):
+    """doctor on an anchor pane must not read as a dead member: no CLI here is
+    by design, and the real liveness signal is a connect on the endpoint."""
+    from hive.sidecar import _agent_runtime_payload
+
+    monkeypatch.setattr("hive.sidecar.detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
+    monkeypatch.setattr("hive.sidecar._busy_output_payload", lambda _p: {"busy": True})
+    monkeypatch.setattr("hive.tmux.get_pane_option", _anchor_options("/tmp/x.sock"))
+
+    monkeypatch.setattr("hive.adapters.claude_uds.is_live", lambda _s: True)
+    live = _agent_runtime_payload("%9")
+    assert live["cliAlive"] is False  # honest: no CLI was ever meant to run here
+    assert (live["inputState"], live["inputReason"]) == ("unknown", "remote_reachable")
+
+    monkeypatch.setattr("hive.adapters.claude_uds.is_live", lambda _s: False)
+    gone = _agent_runtime_payload("%9")
+    assert (gone["inputState"], gone["inputReason"]) == ("offline", "remote_gone")
+
+
+def test_runtime_still_calls_a_plain_retained_shell_exited(monkeypatch):
+    from hive.sidecar import _agent_runtime_payload
+
+    monkeypatch.setattr("hive.sidecar.detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
+    monkeypatch.setattr("hive.sidecar._busy_output_payload", lambda _p: {"busy": True})
+    monkeypatch.setattr("hive.tmux.get_pane_option", lambda _p, _k: None)
+
+    runtime = _agent_runtime_payload("%9")
+    assert (runtime["inputState"], runtime["inputReason"]) == ("offline", "cli_exited")
+
+
 def test_send_to_plain_retained_shell_still_refuses(monkeypatch):
     """No remote tag → the original fail-closed contract is untouched."""
     monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)

@@ -1062,6 +1062,24 @@ def _agent_runtime_payload(
     runtime["_cli"] = profile.name if profile else "unknown"
     if not profile:
         runtime["busy"] = False  # shell output is not agent activity
+        if tmux.get_pane_option(pane_id, "hive-remote") == "uds":
+            # An anchor pane hosts no CLI by design — the member is an external
+            # session reached over its inbox socket. The retained-shell verdict
+            # is literally true here and completely misleading: it reads as a
+            # dead member. Liveness for this path is a connect on the endpoint,
+            # and hive has no transcript for that session, so its input gate is
+            # genuinely unknown — never "ready", which would let the spawn
+            # readiness poll pass on a member nobody proved is up.
+            from .adapters import claude_uds
+
+            endpoint = tmux.get_pane_option(pane_id, claude_uds.ENDPOINT_OPTION) or ""
+            if claude_uds.is_live(endpoint):
+                runtime["inputState"] = "unknown"
+                runtime["inputReason"] = "remote_reachable"
+            else:
+                runtime["inputState"] = "offline"
+                runtime["inputReason"] = "remote_gone"
+            return runtime
         runtime["inputState"] = "offline"
         runtime["inputReason"] = "cli_exited"
         return runtime

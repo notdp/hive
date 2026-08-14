@@ -133,7 +133,8 @@ exiting; the retained shell is not an agent runtime. The three states:
 |---|---|---|---|---|---|
 | pane dead | false | false | offline | pane_dead | false |
 | retained shell (CLI exited) | true | false | offline | cli_exited | false |
-| anchored member (`remote`) | true | false | offline | cli_exited | false |
+| anchored member, reachable | true | false | unknown | remote_reachable | false |
+| anchored member, session gone | true | false | offline | remote_gone | false |
 | live CLI | true | true | per runtime | per runtime | per runtime |
 
 Consumers — delivery refuses a retained shell before any native transport
@@ -152,6 +153,11 @@ tags, `kill-pane` as the kick control, doctor) keeps working unchanged.
 
 The honest asymmetry: `alive` no longer implies the member is reachable, and
 `cliAlive` is permanently `false` because no CLI was ever meant to run here.
+That is why the pane does not report the retained-shell verdict: `cli_exited`
+is literally true and completely misleading — it reads as a dead member on the
+one member whose pane you cannot look at. `inputReason` names the remote
+instead, and `inputState` stays `unknown` while the session is reachable,
+because hive has no transcript for it and can never say `ready`.
 
 **The transport is the host's own cross-session inbox.** Claude Code binds
 one unix socket per session and exports its path to every child process as
@@ -195,6 +201,9 @@ Current values:
 - `waiting_user`
 - `unknown`
 - `offline`
+
+An anchored member never reports `ready`: hive reads its own panes'
+transcripts, and an external session's is not hive's to read.
 
 Meaning:
 
