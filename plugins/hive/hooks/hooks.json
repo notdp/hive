@@ -13,29 +13,6 @@
           }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/inbox_hook.py\"",
-            "timeout": 20
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/inbox_hook.py\"",
-            "timeout": 180,
-            "statusMessage": "hive inbox..."
-          }
-        ]
-      }
     ]
   }
 }

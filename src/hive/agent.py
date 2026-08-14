@@ -20,12 +20,6 @@ CLI_BINS: dict[str, str] = {
     "codex": "codex",
 }
 
-# Accepted-transport classification for a member with no push transport: the
-# message is durable on the bus and the member's own inbox hook drains it. It
-# claims strictly less than the channel/daemon classifications — no push was
-# attempted, so none can be claimed.
-ACCEPTED_BUS_INBOX = "busInboxAccepted"
-
 
 def _shell_escape(s: str) -> str:
     """Escape a string for safe shell use."""
@@ -433,7 +427,7 @@ class Agent:
         raises :class:`DeliveryError` (callers surface it as an explicit
         submit failure). The returned classification names which transport
         boundary was crossed (``turnStartAccepted`` / ``mcpWriteAccepted`` /
-        ``legacySocketAccepted``); none of them proves the agent processed
+        ``legacySocketAccepted`` / ``udsWriteAccepted``); none of them proves the agent processed
         the message — that final confirmation only ever comes from the
         target's transcript.
         """
@@ -442,11 +436,10 @@ class Agent:
         # (for codex) a surviving per-pane daemon with an open thread — none
         # of that may route a message into a pane nobody is watching.
         #
-        # Exception: an anchor pane (`@hive-remote=channel`) hosts no CLI by
-        # design — its member lives in an external session that pulls its mail
-        # off the bus (the plugin's inbox hook). Nothing is pushed to it, so
-        # this is not a transport at all; the pane's channel link is only
-        # liveness evidence that the external session still exists.
+        # Exception: an anchor pane (`@hive-remote=uds`) hosts no CLI by
+        # design — its member is an external Claude session, reached over the
+        # inbox socket recorded on the pane. The pane keeps the identity; the
+        # transport lives one symlink-free hop away.
         probe = None
         try:
             from .agent_cli import detect_cli_process_for_pane
@@ -455,19 +448,20 @@ class Agent:
         except Exception:
             probe = None
         if probe is None:
-            if tmux.get_pane_option(self.pane_id, "hive-remote") == "channel":
-                from .adapters import claude_channel
+            if tmux.get_pane_option(self.pane_id, "hive-remote") == "uds":
+                from .adapters import claude_uds
 
-                if not claude_channel.remote_member_alive(self.pane_id):
+                endpoint = tmux.get_pane_option(
+                    self.pane_id, claude_uds.ENDPOINT_OPTION) or ""
+                accepted = claude_uds.send(endpoint, text)
+                if accepted is None:
                     raise DeliveryError(
-                        f"remote member on pane {self.pane_id} is gone "
-                        "(its session unlinked the channel socket); the message "
-                        "stays on the bus for when it comes back"
+                        f"remote member on pane {self.pane_id} is unreachable "
+                        f"(nothing listening on {endpoint or '<no endpoint>'}); "
+                        "the message stays on the bus for when its session "
+                        "comes back"
                     )
-                # The bus write already happened upstream and the member's
-                # inbox hook drains it. Naming that honestly keeps the delivery
-                # state machine from recording a push that never happens.
-                return ACCEPTED_BUS_INBOX
+                return accepted
             raise DeliveryError(
                 f"no live CLI process on pane {self.pane_id} (cli_exited): "
                 "refusing native transport to a retained shell"

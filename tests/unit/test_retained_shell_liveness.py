@@ -340,38 +340,48 @@ def test_resume_hint_colors_command_on_terminals_only(monkeypatch, tmp_path):
     assert "claude --resume sid-1" in plain.output
 
 
-# --- desktop-led anchor pane: @hive-remote=channel bypasses the process gate --
+# --- desktop-led anchor pane: @hive-remote=uds bypasses the process gate ------
 
 
-def test_send_to_anchored_member_is_bus_only_not_a_push(monkeypatch):
-    """An anchored member has no push transport: its own inbox hook drains the
-    bus. Delivery must say exactly that — claiming an MCP write here would
-    record a push that never happens (the desktop app strips --channels, so
-    the channel server's receipt proves nothing about the session hearing it)."""
+def _anchor_options(endpoint):
+    from hive.adapters import claude_uds
+
+    def get(_pane, key):
+        if key == "hive-remote":
+            return "uds"
+        if key == claude_uds.ENDPOINT_OPTION:
+            return endpoint
+        return None
+
+    return get
+
+
+def test_send_to_anchored_member_pushes_over_its_inbox_socket(monkeypatch):
+    """An anchored member's process lives in an external Claude session; the
+    push goes to that session's inbox socket, never to the pane's channel."""
     monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
-    monkeypatch.setattr(
-        "hive.agent.tmux.get_pane_option",
-        lambda _p, key: "channel" if key == "hive-remote" else None,
-    )
-    monkeypatch.setattr("hive.adapters.claude_channel.remote_member_alive", lambda _p: True)
+    monkeypatch.setattr("hive.agent.tmux.get_pane_option", _anchor_options("/tmp/x.sock"))
     _forbid(monkeypatch, "hive.adapters.claude_channel.send_to_pane",
             "an anchored member is never pushed to over the channel socket")
+    sent = {}
+    monkeypatch.setattr(
+        "hive.adapters.claude_uds.send",
+        lambda sock, text: sent.update(sock=sock, text=text) or "udsWriteAccepted",
+    )
     agent = Agent(name="w", team_name="team-x", pane_id="%9", cli="claude")
 
-    from hive.agent import ACCEPTED_BUS_INBOX
+    from hive.adapters.claude_uds import ACCEPTED_UDS_WRITE
 
-    assert agent.send("hi") == ACCEPTED_BUS_INBOX
+    assert agent.send("hi") == ACCEPTED_UDS_WRITE
+    assert sent == {"sock": "/tmp/x.sock", "text": "hi"}
 
 
 def test_send_to_anchored_member_fails_closed_when_its_session_is_gone(monkeypatch):
-    """The external session unlinks its socket on exit, dangling the anchor's
-    symlinks — that is the liveness evidence, and it must fail closed."""
+    """The session unlinks its socket on exit and a socket left by a killed one
+    refuses connections — either way the send must fail closed."""
     monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
-    monkeypatch.setattr(
-        "hive.agent.tmux.get_pane_option",
-        lambda _p, key: "channel" if key == "hive-remote" else None,
-    )
-    monkeypatch.setattr("hive.adapters.claude_channel.remote_member_alive", lambda _p: False)
+    monkeypatch.setattr("hive.agent.tmux.get_pane_option", _anchor_options("/tmp/x.sock"))
+    monkeypatch.setattr("hive.adapters.claude_uds.send", lambda _s, _t: None)
     agent = Agent(name="w", team_name="team-x", pane_id="%9", cli="claude")
 
     from hive.agent import DeliveryError

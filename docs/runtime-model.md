@@ -144,38 +144,42 @@ capture, and duo pairing all skip retained shells.
 
 Source — the member pane's `@hive-remote` tag, written at registration.
 
-Meaning — the member's agent process does not live on this pane. `channel`
-is the only value today: the pane is an **anchor** whose channel socket and
-ready marker are symlinks to an external Claude session's own
-`hive-client-<pid>.sock`. The pane exists to hold the member's identity, so
-every pane-keyed authority (routing, tags, `kill-pane` as the kick control,
-doctor) keeps working unchanged.
+Meaning — the member's agent process does not live on this pane. `uds` is the
+only value today: the pane is an **anchor** carrying the member's identity
+plus `@hive-remote-endpoint`, the inbox socket of an external Claude session.
+Because the pane holds the identity, every pane-keyed authority (routing,
+tags, `kill-pane` as the kick control, doctor) keeps working unchanged.
 
 The honest asymmetry: `alive` no longer implies the member is reachable, and
 `cliAlive` is permanently `false` because no CLI was ever meant to run here.
 
-**An anchored member has no push transport.** A host that launches its
-sessions without `--channels` — the desktop app owns its argv — cannot
-receive channel notifications at all, so nothing is pushed to this pane and
-the channel socket is never written to. Delivery is the durable bus write
-plus the member's own inbox hook, which drains it after each tool call and
-again at the end of the turn. `Agent.send` names that boundary
-`busInboxAccepted`; it deliberately claims less than the channel and daemon
-classifications, because no push was attempted and none may be claimed.
+**The transport is the host's own cross-session inbox.** Claude Code binds
+one unix socket per session and exports its path to every child process as
+`CLAUDE_CODE_MESSAGING_SOCKET`; a write there is injected into the running
+turn as an attributed peer message. That is why the anchor works for a
+session hive did not launch — the desktop app owns its argv, so neither
+`--channels` nor a pane running the CLI is available, but the environment
+still hands `hive duo init` the address. `Agent.send` names the boundary
+`udsWriteAccepted`: the frame was written and a listener accepted it, which
+is not a claim that the session's inbound gate released it to the model.
 
-The socket still earns its keep as **liveness evidence**: the external
-session's channel server unlinks the real socket and marker when it exits, so
-the anchor's symlinks dangle and delivery fails closed exactly like a dead
-pane server — the message stays on the bus for its return.
+That gate is the receiving user's, not hive's: while a session runs in a
+bypass permission mode and the sender does not attest a matching mode, peer
+messages are *held* for a click. Hive does not forge the attestation — `duo
+init` preflights the user's `crossSessionInbound` setting and refuses to form
+a duo whose every message would stall, the same way the channel path
+preflights the managed channels allowlist.
 
-Consumers — delivery gates an anchored member on that liveness rather than
+**Liveness is the connect**, never an `exists()`: a session unlinks its
+socket on exit, and a socket file left by a killed one refuses connections.
+Either way the send fails closed and the message stays durable on the bus for
+its return.
+
+Consumers — delivery routes an anchored member to that socket instead of
 refusing it as a retained shell; the resume snapshot records the marker and
 resume skips those members instead of spawning a look-alike CLI on the team's
 routing key (an external session reconnects itself by re-running `hive duo
-init --channel <socket>`, which relinks the anchor). Because every session on
-the host runs the same inbox hook, the saved context carries a `session`
-claim: the first session to drain owns the identity and siblings are refused,
-and re-forming the duo clears the claim.
+init`, which repoints the anchor at its new pid-keyed socket).
 
 ### `inputState`
 

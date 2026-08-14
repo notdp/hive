@@ -142,14 +142,6 @@ def test_codex_hook_is_the_claude_hook_without_async():
     assert claude == codex
 
 
-def test_inbox_stop_hook_is_claude_only():
-    # The Stop hook exists for sessions channels cannot reach (the desktop
-    # app). Codex members always run in a tmux pane, where the app-server
-    # daemon delivers natively — a Stop hook there would be dead weight.
-    assert "Stop" in _load(HOOKS_FILE)["hooks"]
-    assert "Stop" not in _load(CODEX_HOOKS_FILE)["hooks"]
-
-
 def test_codex_hook_redirects_stdout_only():
     # Codex feeds SessionStart stdout into developer context, so the success
     # summaries must be dropped; stderr stays for the single-line remediation

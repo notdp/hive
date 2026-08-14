@@ -282,64 +282,6 @@ def prepare_pane(cwd: str) -> list[str]:
     return ["--channels", PLUGIN_SPEC]
 
 
-# --- anchor pane linkage ----------------------------------------------------
-
-def link_client_socket(pane: str, client_sock: str | Path) -> str | None:
-    """Point *pane*'s channel socket + marker at an external client's.
-
-    Used by ``hive duo init --channel``: the anchor pane of a desktop-led duo
-    has no CLI of its own, so its pane-addressed socket/marker become symlinks
-    to the external Claude session's ``hive-client-<pid>.sock``. Delivery
-    (:func:`send_to_pane`) is untouched: ``connect()`` follows symlinks, and
-    when the client's server exits and unlinks its real files the symlinks
-    dangle — ``exists()`` goes False and sends fail closed, exactly like a
-    dead pane server.
-
-    Returns None on success, or a human-readable refusal. Fail-closed: the
-    client socket must exist and its marker must advertise a known version
-    before any link is created.
-    """
-    client_sock = Path(client_sock)
-    client_marker = Path(marker_path_for_socket_path(client_sock))
-    if not client_sock.exists():
-        return f"channel socket {client_sock} does not exist (is the Claude session still running?)"
-    try:
-        version = client_marker.read_text().strip()
-    except OSError:
-        return f"channel marker {client_marker} is unreadable; refusing to link an unready channel"
-    if version not in (MARKER_LEGACY, MARKER_RECEIPT_CAPABLE):
-        return f"channel marker {client_marker} has unknown version {version!r}; refusing to link"
-    sock_link = channel_socket_path(pane)
-    marker_link = ready_marker_path(pane)
-    sock_link.parent.mkdir(parents=True, exist_ok=True)
-    for link, target in ((sock_link, client_sock), (marker_link, client_marker)):
-        try:
-            link.unlink()
-        except OSError:
-            pass
-        os.symlink(target, link)
-    return None
-
-
-def marker_path_for_socket_path(sock_path: str | Path) -> str:
-    """Marker path for a raw socket path (same shape the server writes)."""
-    s = str(sock_path)
-    return s[: -len(".sock")] + ".ready" if s.endswith(".sock") else s + ".ready"
-
-
-def remote_member_alive(pane: str) -> bool:
-    """Whether an anchored member's external session is still running.
-
-    Its channel server unlinks the real socket and marker on exit, so the
-    anchor's symlinks dangle and ``exists()`` (which follows them) goes False.
-    Nothing is ever pushed over this socket — a session the app launched
-    without ``--channels`` cannot receive channel notifications — so this is
-    liveness evidence only, and delivery to a live member is the bus plus the
-    member's own inbox hook.
-    """
-    return channel_socket_path(pane).exists() and ready_marker_path(pane).exists()
-
-
 # --- delivery ---------------------------------------------------------------
 
 def _extract_msg_id(text: str) -> str:

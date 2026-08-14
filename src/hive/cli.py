@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +34,6 @@ _COMMAND_HELP_SECTIONS = {
     "team": "Daily",
     "send": "Daily",
     "reply": "Daily",
-    "collect": "Daily",
     "notify": "Daily",
     "compact": "Daily",
     "skills": "Daily",
@@ -191,7 +189,7 @@ def _default_team() -> str | None:
         return discovered
     if not tmux.is_inside_tmux():
         # Desktop-led worker: outside tmux the identity lives in the saved
-        # default context (written by `hive duo init --channel`).
+        # default context (written by `hive duo init` outside tmux).
         return hive_context.load_current_context().get("team") or None
     return None
 
@@ -793,135 +791,6 @@ def _gc_dead_teams() -> None:
     ctx = hive_context.load_current_context()
     if ctx.get("team") and ctx["team"] not in live_names:
         hive_context.clear_current_context()
-
-
-@contextmanager
-def _cursor_claim_lock(cursor_path: Path):
-    """Exclusive lock guarding a collect cursor's read-claim-advance step.
-
-    The lock file is a sibling ``.lock`` so it never collides with the cursor
-    value itself; a lock failure degrades to no-lock rather than dropping mail.
-    """
-    import fcntl
-
-    lock_path = cursor_path.with_suffix(".lock")
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield  # best-effort: never let a lock problem swallow delivery
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
-def _claim_context_session(session_id: str) -> bool:
-    """Whether *session_id* owns the saved member identity, claiming it if free.
-
-    A desktop member's identity lives in the shared default context, but every
-    host session runs the same inbox hook. First claim wins: the session that
-    formed the duo is the one working right after, so it claims before an
-    idle sibling can. `hive duo init` clears the claim, so re-forming from
-    another session moves the identity rather than deadlocking it.
-    """
-    ctx = hive_context.load_current_context()
-    owner = ctx.get("session", "")
-    if owner and owner != session_id:
-        return False
-    if not owner:
-        hive_context.save_current_context(
-            team=ctx.get("team", ""),
-            workspace=ctx.get("workspace", ""),
-            agent=ctx.get("agent", ""),
-            session=session_id,
-        )
-    return True
-
-
-@cli.command("collect")
-@click.option(
-    "--wait",
-    "wait_seconds",
-    type=click.IntRange(0, 3600),
-    default=0,
-    help="Block up to N seconds for new inbound messages (0 = return immediately)",
-)
-@click.option(
-    "--if-awaiting",
-    is_flag=True,
-    help="With --wait: only block while one of my own messages is unanswered",
-)
-@click.option(
-    "--session",
-    "session_id",
-    default="",
-    help="Host session id; drains only when this session owns the member identity",
-)
-def collect_cmd(wait_seconds: int, if_awaiting: bool, session_id: str):
-    """Drain this member's inbound messages from the bus (blocking inbox).
-
-    For members whose session cannot receive channel push — a desktop-led
-    worker outside tmux, whose messages arrive through the plugin's Stop hook
-    instead. Returns inbound messages newer than the last collect and advances
-    a durable cursor.
-
-    \b
-    Examples:
-      hive collect                            # drain unread now
-      hive collect --wait 120 --if-awaiting   # block only while a reply is owed
-    """
-    if session_id and not _claim_context_session(session_id):
-        # Another host session owns this member identity. Draining here would
-        # deliver its mail into the wrong conversation, so stay silent.
-        click.echo(json.dumps({"messages": [], "count": 0, "notMine": True}, indent=2))
-        return
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    me = _resolve_sender(None)
-    ws = _resolve_workspace(t, required=True)
-    if (
-        wait_seconds
-        and if_awaiting
-        and not bus.is_awaiting_reply(ws, sender=me, within_seconds=wait_seconds)
-    ):
-        # Only hold the turn open when a reply is genuinely owed and recent
-        # (the handoff-then-wait case); a stale trailing send never re-arms.
-        wait_seconds = 0
-    cursor_path = Path(ws) / "state" / f"collect-cursor-{me}"
-    cursor_path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + wait_seconds
-    rows: list[tuple[int, dict[str, object]]] = []
-    while True:
-        # Read cursor → claim rows → advance cursor is one atomic step under an
-        # exclusive lock: two hooks firing on parallel tool calls otherwise read
-        # the same cursor and each return the same messages (duplicate delivery).
-        # The lock wraps only the claim, never the wait — a collect blocking for
-        # a reply must not freeze a sibling drain.
-        with _cursor_claim_lock(cursor_path):
-            try:
-                cursor = int(cursor_path.read_text().strip())
-            except (OSError, ValueError):
-                cursor = 0
-            rows = bus.read_inbound_after(ws, recipient=me, after_seq=cursor)
-            if rows:
-                cursor_path.write_text(str(rows[-1][0]))
-        if rows or time.monotonic() >= deadline:
-            break
-        time.sleep(0.5)
-    payload: dict[str, object] = {
-        "agent": me,
-        "team": team_name,
-        "messages": [event for _seq, event in rows],
-        "count": len(rows),
-    }
-    if not rows and wait_seconds:
-        payload["timedOut"] = True
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 _FORK_MIN_COLS = 80
@@ -1546,14 +1415,14 @@ def _require_codex_daemon_backed(pane: str) -> None:
     )
 
 
-def _run_duo_init(validator_cli: str | None, channel: str = "") -> None:
+def _run_duo_init(validator_cli: str | None) -> None:
     """Shared callback body for the equivalent `hive init` / `hive duo init`."""
     if not tmux.is_inside_tmux():
         # Desktop-led duo: this (external) Claude session is the worker,
-        # reachable over its channel socket; hive owns a detached session
+        # reachable over its own inbox socket; hive owns a detached session
         # for the anchor + validator panes.
-        sock = channel or _discover_client_channel_socket()
-        result = _create_ccd_duo(channel_socket=sock, validator_cli=validator_cli)
+        result = _create_ccd_duo(
+            host_socket=_host_session_socket(), validator_cli=validator_cli)
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
     current_pane = tmux.get_current_pane_id() or ""
@@ -1574,20 +1443,14 @@ def _run_duo_init(validator_cli: str | None, channel: str = "") -> None:
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
-@click.option(
-    "--channel",
-    default="",
-    help="Outside tmux only: this Claude session's channel socket "
-    "(hive-client-<pid>.sock, printed in the hive-channel MCP instructions)",
-)
-def init_cmd(validator_cli: str | None, channel: str):
+def init_cmd(validator_cli: str | None):
     """Initialize a duo in this window (equivalent to `hive duo init`).
 
     Worker = this pane, validator = anti-family spawn. Team name and
     workspace derive from the final window. Idempotent: re-running in a
     bound window reports the existing binding.
     """
-    _run_duo_init(validator_cli, channel=channel)
+    _run_duo_init(validator_cli)
 
 
 @cli.command("register")
@@ -2979,70 +2842,47 @@ def _create_standalone_duo(
 
 _CCD_SESSION_NAME = "hive-ccd"
 
-# Channel push never reaches a session the host launched without `--channels`
-# (the desktop app owns its argv). The plugin's Stop hook delivers instead, so
-# the member is told what to expect rather than handed a polling command.
-_REMOTE_INBOX_NOTE = (
-    "delivered automatically at the end of each turn by the hive plugin's Stop hook"
-)
+# Messages land in the session's turn the moment they are sent, like the
+# in-tmux channel — the member needs no polling command and no turn-end drain.
+_REMOTE_INBOX_NOTE = "pushed into this session mid-turn over its inbox socket"
 
 
-def _probe_unix_socket(path: str) -> bool:
-    """True when something is listening on *path* (connect succeeds)."""
-    import socket as _socket
+def _host_session_socket() -> str:
+    """This session's inbox socket, or fail with guidance.
 
-    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect(path)
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def _discover_client_channel_socket() -> str:
-    """The single live ``hive-client-*.sock``, or fail with guidance.
-
-    Liveness is a real connect probe — a socket file surviving a kill -9'd
-    session would otherwise shadow the live one forever. Ambiguity (several
-    live desktop sessions) requires an explicit ``--channel``.
+    ``hive duo init`` runs as a child of the Claude session it is forming the
+    duo for, so the host hands it the path in the environment — no probe, no
+    registry, and nothing of ours to go stale when the session restarts.
     """
-    from .adapters import claude_channel
+    from .adapters import claude_uds
 
-    channel_dir = claude_channel.channel_socket_path("").parent
-    candidates = [
-        str(sock)
-        for sock in sorted(channel_dir.glob("hive-client-*.sock"))
-        if _probe_unix_socket(str(sock))
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
+    sock = claude_uds.session_socket()
+    if not sock:
         _fail(
-            "no live client channel socket found; pass --channel <socket> "
-            "(the path is in this session's hive-channel MCP instructions), "
-            "or run inside a tmux session"
+            f"${claude_uds.ENV_SOCKET} is not set: this shell is not running "
+            "inside a Claude Code session, so there is nobody here to be the "
+            "worker. Run `hive duo init` from a Claude session, or from inside "
+            "tmux for a normal duo."
         )
-    _fail(
-        "multiple live client channel sockets found; pass --channel <socket>:\n  "
-        + "\n  ".join(candidates)
-    )
-    raise AssertionError("unreachable")
+    if not claude_uds.is_live(sock):
+        _fail(
+            f"nothing is listening on {sock}; the session that exported "
+            f"${claude_uds.ENV_SOCKET} is gone. Start a fresh session and "
+            "rerun."
+        )
+    if not claude_uds.inbound_accepted():
+        _fail(
+            "this session would hold every hive message for a click instead of "
+            f"delivering it: {claude_uds.setting_hint()}"
+        )
+    return sock
 
 
-def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
+def _existing_ccd_duo(host_socket: str) -> dict[str, object] | None:
     """Idempotency for the desktop-led path: the saved default context names a
-    live team whose anchor is a remote-channel member. A stale or divergent
-    symlink (the desktop session restarted and its pid-keyed socket changed)
-    is healed by re-linking the anchor to *this* socket — the team and its
-    validator survive the desktop session's restarts.
-
-    Re-forming also moves the inbox: the saved host-session claim is cleared
-    so the calling session's first inbox hook can claim it. Leaving a dead
-    session's claim in place bounces every `hive collect --session` as
-    notMine and strands inbound mail."""
+    live team whose anchor is a remote member. The host socket is pid-keyed, so
+    a restarted session brings a new one — re-pointing the anchor at *this*
+    socket keeps the team and its validator across restarts."""
     ctx = hive_context.load_current_context()
     team_name = ctx.get("team", "")
     if not team_name:
@@ -3052,23 +2892,13 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
     except (FileNotFoundError, ValueError):
         return None
     worker = t.agents.get("worker")
-    if worker is None or tmux.get_pane_option(worker.pane_id, "hive-remote") != "channel":
+    if worker is None or tmux.get_pane_option(worker.pane_id, "hive-remote") != "uds":
         return None
-    from .adapters import claude_channel
+    from .adapters import claude_uds
 
-    relinked = False
-    link = claude_channel.channel_socket_path(worker.pane_id)
-    try:
-        current_target = os.readlink(link)
-    except OSError:
-        current_target = ""
-    if current_target != channel_socket:
-        if claude_channel.link_client_socket(worker.pane_id, channel_socket) is not None:
-            return None  # this socket is unusable; fall through to a fresh form (which fails loudly)
-        relinked = True
-    # Same promise as the fresh-form path's _remember_context: init hands the
-    # identity to whichever session runs it, so drop any prior host-session
-    # claim (saving without `session` clears it).
+    relinked = tmux.get_pane_option(worker.pane_id, claude_uds.ENDPOINT_OPTION) != host_socket
+    if relinked:
+        tmux.set_pane_option(worker.pane_id, claude_uds.ENDPOINT_OPTION, host_socket)
     _remember_context(
         team=t.name, workspace=ctx.get("workspace", ""), agent=ctx.get("agent", "")
     )
@@ -3077,7 +2907,7 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
         "team": t.name,
         "window": t.tmux_window,
         "group": "duo",
-        "worker": {"pane": worker.pane_id, "name": "worker", "cli": "claude", "remote": "channel"},
+        "worker": {"pane": worker.pane_id, "name": "worker", "cli": "claude", "remote": "uds"},
         "validator": (
             {"pane": validator.pane_id, "name": "validator", "cli": validator.cli}
             if validator
@@ -3091,22 +2921,21 @@ def _existing_ccd_duo(channel_socket: str) -> dict[str, object] | None:
     return result
 
 
-def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[str, object]:
+def _create_ccd_duo(*, host_socket: str, validator_cli: str | None) -> dict[str, object]:
     """Desktop-led duo: an external Claude session (outside tmux) is the worker.
 
     The worker's tmux presence is an *anchor pane* — a plain shell in a
     detached ``hive-ccd`` session carrying the member tags plus
-    ``@hive-remote=channel``, its channel socket/marker symlinked to the
-    external session's ``hive-client-<pid>.sock``. Everything downstream
+    ``@hive-remote=uds`` and the session's inbox socket. Everything downstream
     (identity, routing, delivery, reaping, doctor) keeps working on pane
     authority; the validator is a normal spawned pane beside the anchor.
     """
-    from .adapters import claude_channel
+    from .adapters import claude_uds
 
     _gc_dead_teams()
     plugin_manager.cleanup_retired_plugins()
 
-    existing = _existing_ccd_duo(channel_socket)
+    existing = _existing_ccd_duo(host_socket)
     if existing is not None:
         return existing
 
@@ -3148,11 +2977,8 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         tmux.set_pane_option(anchor_pane, "hive-team", team_name)
         tmux.set_pane_option(anchor_pane, "hive-group", "duo")
         tmux.set_pane_option(anchor_pane, "hive-cli", "claude")
-        tmux.set_pane_option(anchor_pane, "hive-remote", "channel")
-
-        err = claude_channel.link_client_socket(anchor_pane, channel_socket)
-        if err:
-            raise RuntimeError(f"cannot link channel socket: {err}")
+        tmux.set_pane_option(anchor_pane, "hive-remote", "uds")
+        tmux.set_pane_option(anchor_pane, claude_uds.ENDPOINT_OPTION, host_socket)
 
         v_cli, v_model = _resolve_validator_cli_model("anthropic", validator_cli)
         validator_agent = _spawn_duo_validator(
@@ -3173,8 +2999,8 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
 
     # Identity is written only once the duo actually exists: a failed link or
     # spawn above must not leave the saved default context pointing at a
-    # window that was just torn down (it poisons `hive collect` and the next
-    # init's idempotency check).
+    # window that was just torn down (it poisons the next init's idempotency
+    # check and every command that resolves the saved context).
     hive_context.save_context_for_pane(
         anchor_pane, team=team_name, workspace=str(ws_path), agent="worker"
     )
@@ -3200,7 +3026,7 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
         "team": team_name,
         "window": window,
         "group": "duo",
-        "worker": {"pane": anchor_pane, "name": "worker", "cli": "claude", "remote": "channel"},
+        "worker": {"pane": anchor_pane, "name": "worker", "cli": "claude", "remote": "uds"},
         "validator": {
             "pane": validator_agent.pane_id,
             "name": "validator",
@@ -3221,13 +3047,7 @@ def _create_ccd_duo(*, channel_socket: str, validator_cli: str | None) -> dict[s
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
-@click.option(
-    "--channel",
-    default="",
-    help="Outside tmux only: this Claude session's channel socket "
-    "(hive-client-<pid>.sock, printed in the hive-channel MCP instructions)",
-)
-def duo_init_cmd(validator_cli: str | None, channel: str):
+def duo_init_cmd(validator_cli: str | None):
     """Set up a duo from the current pane: worker (=this pane) + anti-family validator.
 
     Equivalent to `hive init`. The current pane must be running
@@ -3243,11 +3063,11 @@ def duo_init_cmd(validator_cli: str | None, channel: str):
     independent.
 
     Outside tmux (Claude Code desktop) this forms a desktop-led duo instead:
-    this session becomes the worker over its channel socket, the validator
+    this session becomes the worker over its own inbox socket, the validator
     spawns in a background detached tmux session (`tmux attach -t hive-ccd`
     to watch).
     """
-    _run_duo_init(validator_cli, channel=channel)
+    _run_duo_init(validator_cli)
 
 
 # Replaces the bare index token in a window-status format with a conditional
@@ -3678,13 +3498,13 @@ def _resume_members_into_live_team(
             name = str(m["name"])
             if m.get("remote"):
                 # The member is an external session (a desktop-led worker)
-                # reached through its anchor pane's channel link. There is no
+                # reached through its anchor pane's inbox socket. There is no
                 # CLI here to restore, and spawning one would put a look-alike
                 # agent on the team's routing key. That session reconnects
-                # itself with `hive duo init --channel <its socket>`.
+                # itself by re-running `hive duo init`.
                 _resume_progress(
-                    f"skipping {name} — it runs outside tmux; reconnect it with "
-                    "`hive duo init --channel <socket>` from that session"
+                    f"skipping {name} — it runs outside tmux; reconnect it by "
+                    "running `hive duo init` from that session"
                 )
                 continue
             fresh = name in fresh_members
