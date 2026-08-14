@@ -4,7 +4,9 @@ Claude Code binds one unix socket per session — its cross-session messaging
 inbox — and exports the path to every child process as
 ``CLAUDE_CODE_MESSAGING_SOCKET``. Any local process may connect and write a
 single newline-terminated JSON message; the session queues it as an attributed
-peer message and takes it up at its next turn boundary. That is the transport for a
+peer message and takes it up at its next processing boundary — measured on a
+live desktop session, that is between tool calls of a turn already in flight,
+not after the turn ends. That is the transport for a
 member hive did not launch: the Claude Code desktop app owns its argv, so
 neither ``--channels`` (channel push registers only for sessions launched with
 the flag) nor a pane running the CLI is available there.
@@ -131,9 +133,10 @@ def send(sock_path: str | Path, text: str) -> str | None:
     payload = json.dumps(
         {
             "type": "user",
-            # Queued, not preempting: the message waits for the turn in flight
-            # instead of cutting into it. A peer does not get to derail a
-            # member mid-task; it gets the floor as soon as that task is done.
+            # Queued, not preempting. This costs nothing in practice: measured
+            # on a live desktop session the message still lands between tool
+            # calls of a turn in flight — a tool loop has many boundaries — it
+            # just never cuts into a generation already streaming.
             "priority": "next",
             "from": f"hive:{sender.group(1)}" if sender else "hive",
             "message": {"role": "user", "content": text},
