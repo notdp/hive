@@ -403,6 +403,8 @@ def test_runtime_reports_a_reachable_anchor_as_remote_not_dead(monkeypatch):
     monkeypatch.setattr("hive.adapters.claude_uds.is_live", lambda _s: True)
     live = _agent_runtime_payload("%9")
     assert live["cliAlive"] is False  # honest: no CLI was ever meant to run here
+    assert live["remote"] == "uds"  # ...and the payload says why, next to it
+    assert live["_remoteEndpoint"] == "/tmp/x.sock"
     assert (live["inputState"], live["inputReason"]) == ("unknown", "remote_reachable")
 
     monkeypatch.setattr("hive.adapters.claude_uds.is_live", lambda _s: False)

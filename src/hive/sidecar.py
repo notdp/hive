@@ -947,6 +947,10 @@ def _doctor_payload(
     diag["alive"] = bool(runtime.get("alive", alive))
     if "cliAlive" in runtime:
         diag["cliAlive"] = bool(runtime["cliAlive"])
+    if runtime.get("remote"):
+        # `cliAlive: false` is by design on an anchor pane, so doctor says which
+        # topology it is looking at rather than leaving a reader to infer it.
+        diag["remote"] = runtime["remote"]
     if runtime.get("model"):
         diag["model"] = runtime["model"]
     if runtime.get("sessionId"):
@@ -1073,6 +1077,11 @@ def _agent_runtime_payload(
             from .adapters import claude_uds
 
             endpoint = tmux.get_pane_option(pane_id, claude_uds.ENDPOINT_OPTION) or ""
+            # Name the topology next to the verdict: without it a reader sees
+            # `cliAlive: false` beside `remote_reachable` and has to infer why
+            # those are not contradictory.
+            runtime["remote"] = "uds"
+            runtime["_remoteEndpoint"] = endpoint
             if claude_uds.is_live(endpoint):
                 runtime["inputState"] = "unknown"
                 runtime["inputReason"] = "remote_reachable"
