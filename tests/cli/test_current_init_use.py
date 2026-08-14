@@ -82,14 +82,17 @@ def test_current_ignores_window_only_team_binding_without_pane_registration(runn
     assert payload["hint"].startswith("No team bound")
 
 
-def test_team_no_tmux_no_team(runner, configure_hive_home, monkeypatch):
+def test_team_no_tmux_no_team_returns_bootstrap_payload(runner, configure_hive_home, monkeypatch):
+    # `team` is the look-around command: outside tmux with no binding it
+    # answers with the bootstrap payload (team=null + hint) instead of the
+    # tmux lecture, so a desktop session can size up whether to init.
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 
     result = runner.invoke(cli, ["team"])
 
-    assert result.exit_code != 0
-    assert "requires tmux" in result.output
+    assert result.exit_code == 0
+    assert json.loads(result.output)["team"] is None
 
 
 def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hive_home, monkeypatch, tmp_path):

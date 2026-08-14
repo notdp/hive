@@ -219,7 +219,8 @@ def test_send_outside_tmux_with_someone_elses_duo_is_rejected(runner, configure_
     result = runner.invoke(cli, ["send", "validator", "hello"])
 
     assert result.exit_code != 0
-    assert "tmux" in result.output.lower()
+    assert "not a member" in result.output
+    assert "hive duo init" in result.output
 
 
 def _stub_team(monkeypatch) -> dict[str, object]:
@@ -317,3 +318,19 @@ def test_team_status_marks_the_anchored_member(configure_hive_home, monkeypatch)
 
     assert members["worker"]["remote"] == "uds"
     assert "remote" not in members["validator"]
+
+
+def test_team_outside_tmux_without_binding_returns_bootstrap_payload(
+    runner, configure_hive_home, monkeypatch
+):
+    """A desktop session sizing up whether to init must be able to look:
+    `hive team` passes the root gate unbound and answers with the bootstrap
+    payload instead of a tmux lecture (the post-hijack-fix regression)."""
+    configure_hive_home(tmux_inside=False)
+    monkeypatch.setenv(claude_uds.ENV_SOCKET, "/tmp/nobody.sock")
+    monkeypatch.setattr("hive.tmux.list_remote_members", lambda: [_anchor_row()])
+
+    result = runner.invoke(cli, ["team"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["team"] is None

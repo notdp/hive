@@ -785,11 +785,25 @@ def cli(ctx: click.Context):
         return
     _require_codex_native(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
-        # Desktop-led exception: `init`/`duo` form the binding themselves, and
-        # once an anchor pane records this session's inbox socket the session
-        # IS a member (the anchor-pane duo) — its commands resolve against the
-        # tmux server without the caller living inside tmux.
-        if ctx.invoked_subcommand not in ("init", "duo") and not _uds_member_binding():
+        # Desktop-led exception: `init`/`duo` form the binding themselves,
+        # `team` answers "where am I" for a session deciding whether to init
+        # (its own unbound branch returns the bootstrap payload), and once an
+        # anchor pane records this session's inbox socket the session IS a
+        # member — its commands resolve against the tmux server without the
+        # caller living inside tmux.
+        if ctx.invoked_subcommand not in ("init", "duo", "team") and not _uds_member_binding():
+            from .adapters import claude_uds
+
+            if claude_uds.session_socket():
+                # A desktop session that is nobody's worker: telling it to
+                # start tmux is wrong twice over. Name the actual state and
+                # the actual next step.
+                _fail(
+                    "this desktop session is not a member of any hive team "
+                    "(no anchor pane records its inbox socket). Run `hive duo "
+                    "init` to form a duo led from here, or `hive team` to "
+                    "look around."
+                )
             _fail(_TMUX_REQUIRED_MESSAGE)
 
 
