@@ -50,9 +50,13 @@ REQUEST_SLACK = 5.0
 
 
 def _native_submit_timeout() -> float:
-    from .adapters import claude_channel, codex_app_server
+    from .adapters import claude_channel, claude_uds, codex_app_server
 
-    return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    return max(
+        claude_channel.SUBMIT_TIMEOUT,
+        claude_uds.SUBMIT_TIMEOUT,
+        codex_app_server.SUBMIT_TIMEOUT,
+    )
 
 
 def _send_request_timeout() -> float:
