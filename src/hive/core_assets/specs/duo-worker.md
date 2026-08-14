@@ -4,6 +4,14 @@
 
 第一步：`hive team`。确认自己是 `worker`，找到 `validator`。
 
+`hive team` 里自己带 `remote: uds` 时，你跑在 Claude Code 桌面里，validator 在后台 tmux session。开局第一条回复就把观察入口贴给 human，单独一个 bash 代码块（桌面端会渲染成可点的 Run）：
+
+```bash
+tmux attach -t hive-ccd
+```
+
+human 不想切过去时，用 `hive team` 里 validator 的 `pane` 抓一屏贴回去：`tmux capture-pane -p -S -100 -t <pane>`。
+
 角色边界：
 
 - worker 写代码、提交 handoff、向 human 交付。
