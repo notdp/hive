@@ -67,8 +67,20 @@ def test_send_writes_one_mid_turn_user_frame(inbox):
     assert frame == {
         "type": "user",
         "priority": "now",
+        # `from` is the sender label the receiving session shows its human;
+        # without it the message card reads "Message from unknown".
+        "from": "hive:validator",
         "message": {"role": "user", "content": "<HIVE from=validator msgId=m1>verdict</HIVE>"},
     }
+
+
+def test_send_labels_a_non_envelope_payload_as_plain_hive(inbox):
+    path, received, thread = inbox
+
+    assert uds.send(path, "no envelope here") == uds.ACCEPTED_UDS_WRITE
+
+    thread.join(timeout=5)
+    assert json.loads(received[0])["from"] == "hive"
 
 
 def test_send_fails_closed_on_a_socket_nobody_listens_to(tmp_path):

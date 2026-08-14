@@ -31,11 +31,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from pathlib import Path
 
 ENV_SOCKET = "CLAUDE_CODE_MESSAGING_SOCKET"
 SETTING = "crossSessionInbound"
+
+_HIVE_FROM_RE = re.compile(r"<HIVE\b[^>]*\bfrom=([^\s>]+)")
 
 # tmux pane option holding an anchored member's inbox socket path. Pane-keyed
 # like every other member authority, so routing/reaping/doctor keep working.
@@ -118,13 +121,18 @@ def send(sock_path: str | Path, text: str) -> str | None:
     """
     if not sock_path:
         return None
-    # ponytail: fire-and-forget. The session answers held/denied/delivered
-    # receipts to a `from` address, which would cost hive a listening socket
-    # per send; add one if a duo ever needs to distinguish held from delivered.
+    # `from` is what the receiving session shows the human as the sender, so it
+    # names the hive member rather than defaulting to "unknown". It is not a
+    # reply address: the session answers held/denied/delivered receipts to a
+    # `uds:<path>` in its own socket namespace, and hive has no socket there.
+    # ponytail: fire-and-forget; add a listener if a duo ever needs to tell
+    # held from delivered.
+    sender = _HIVE_FROM_RE.search(text)
     payload = json.dumps(
         {
             "type": "user",
             "priority": "now",  # mid-turn, matching in-tmux channel delivery
+            "from": f"hive:{sender.group(1)}" if sender else "hive",
             "message": {"role": "user", "content": text},
         }
     )
