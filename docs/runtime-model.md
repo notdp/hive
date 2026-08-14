@@ -161,8 +161,8 @@ because hive has no transcript for it and can never say `ready`.
 
 **The transport is the host's own cross-session inbox.** Claude Code binds
 one unix socket per session and exports its path to every child process as
-`CLAUDE_CODE_MESSAGING_SOCKET`; a write there is injected into the running
-turn as an attributed peer message. That is why the anchor works for a
+`CLAUDE_CODE_MESSAGING_SOCKET`; a write there is queued for the session as an
+attributed peer message. That is why the anchor works for a
 session hive did not launch — the desktop app owns its argv, so neither
 `--channels` nor a pane running the CLI is available, but the environment
 still hands `hive duo init` the address. `Agent.send` names the boundary

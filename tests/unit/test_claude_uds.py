@@ -2,10 +2,10 @@
 
 The wire contract is fixed by Claude Code, not by hive: one newline-terminated
 JSON object per message, ``type: "user"`` with a string ``content``, and
-``priority: "now"`` for mid-turn delivery (the default parks it until the turn
-ends, which is the turn-end drain this transport exists to replace). A frame
-that drifts from that shape is dropped by the receiver without a word, so the
-shape is asserted here rather than left to a live session to reveal.
+``priority: "next"`` so the message waits for the turn in flight rather than
+preempting it. A frame that drifts from that shape is dropped by the receiver
+without a word, so the shape is asserted here rather than left to a live
+session to reveal.
 """
 import json
 import shutil
@@ -54,7 +54,7 @@ def inbox():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def test_send_writes_one_mid_turn_user_frame(inbox):
+def test_send_writes_one_queued_user_frame(inbox):
     path, received, thread = inbox
 
     assert uds.send(path, "<HIVE from=validator msgId=m1>verdict</HIVE>") == uds.ACCEPTED_UDS_WRITE
@@ -66,7 +66,7 @@ def test_send_writes_one_mid_turn_user_frame(inbox):
     frame = json.loads(raw)
     assert frame == {
         "type": "user",
-        "priority": "now",
+        "priority": "next",
         # `from` is the sender label the receiving session shows its human;
         # without it the message card reads "Message from unknown".
         "from": "hive:validator",
