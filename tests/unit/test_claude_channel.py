@@ -536,6 +536,27 @@ def test_server_bind_failure_writes_no_marker(_hive_home):
         proc.wait(timeout=5)
 
 
+def test_server_without_tmux_pane_skips_socket(_hive_home):
+    env = {**os.environ, "HIVE_HOME": str(_hive_home),
+           "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
+    env.pop("TMUX_PANE", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "hive.adapters.claude_channel_server"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=env,
+    )
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                     "params": {}}) + "\n")
+        proc.stdin.flush()
+        resp = json.loads(proc.stdout.readline())
+        assert resp["id"] == 1  # handshake still works
+        assert not (_hive_home / "channel").exists()  # no socket dir created
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 def test_server_publishes_no_marker_before_initialize(_hive_home):
     proc = _server_proc(_hive_home, "%80")
     sock_path = _hive_home / "channel" / "hive-pane-80.sock"
