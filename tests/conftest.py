@@ -22,7 +22,14 @@ def _isolate_codex_tool_env(monkeypatch):
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(monkeypatch) -> CliRunner:
+    # CLI tests assume an in-tmux caller unless a test says otherwise
+    # (configure_hive_home(tmux_inside=False) or a local patch overrides
+    # this later). Without the pin, the verdict of every bare-runner test
+    # depends on where pytest itself runs: from a desktop Claude session
+    # the root gate consults that session's identity, and a leaked global
+    # context once turned the whole gate green by accident.
+    monkeypatch.setattr("hive.tmux.is_inside_tmux", lambda: True)
     return CliRunner()
 
 
@@ -129,6 +136,10 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+        # The test process may itself be a child of a desktop Claude session;
+        # its inbox socket must never resolve an identity against real tmux.
+        monkeypatch.delenv("CLAUDE_CODE_MESSAGING_SOCKET", raising=False)
+        monkeypatch.setattr("hive.tmux.list_remote_members", lambda: [])
         monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": None)
         monkeypatch.setattr("hive.cli.HIVE_HOME", hive_home)

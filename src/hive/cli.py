@@ -183,14 +183,34 @@ def _discover_tmux_binding() -> dict[str, str]:
     return payload
 
 
+def _uds_member_binding() -> dict[str, str]:
+    """This outside-tmux process's member identity, by pane authority.
+
+    A desktop session's inbox socket is unique to it, and the anchor pane of
+    its duo records that socket — whichever anchor names my socket is me.
+    Never the saved default context: that is one global slot, and a second
+    desktop session in another project inherited the first one's whole
+    identity through it (caught live, 2026-08-14).
+    """
+    from .adapters import claude_uds
+
+    sock = claude_uds.session_socket()
+    if not sock:
+        return {}
+    for row in tmux.list_remote_members():
+        if row["endpoint"] == sock:
+            return row
+    return {}
+
+
 def _default_team() -> str | None:
     discovered = _discover_tmux_binding().get("team")
     if discovered:
         return discovered
     if not tmux.is_inside_tmux():
-        # Desktop-led worker: outside tmux the identity lives in the saved
-        # default context (written by `hive duo init` outside tmux).
-        return hive_context.load_current_context().get("team") or None
+        # Desktop-led worker: outside tmux, identity is the anchor pane that
+        # records this session's own inbox socket.
+        return _uds_member_binding().get("team") or None
     return None
 
 
@@ -199,7 +219,7 @@ def _default_agent() -> str | None:
     if discovered:
         return discovered
     if not tmux.is_inside_tmux():
-        return hive_context.load_current_context().get("agent") or None
+        return _uds_member_binding().get("agent") or None
     return None
 
 
@@ -766,10 +786,10 @@ def cli(ctx: click.Context):
     _require_codex_native(ctx.invoked_subcommand)
     if ctx.invoked_subcommand not in _TMUX_OPTIONAL_ROOT_COMMANDS and ctx.invoked_subcommand is not None and not tmux.is_inside_tmux():
         # Desktop-led exception: `init`/`duo` form the binding themselves, and
-        # once a saved default context names a team this external session IS a
-        # member (the anchor-pane duo) — its commands resolve against the tmux
-        # server without the caller living inside tmux.
-        if ctx.invoked_subcommand not in ("init", "duo") and not hive_context.load_current_context().get("team"):
+        # once an anchor pane records this session's inbox socket the session
+        # IS a member (the anchor-pane duo) — its commands resolve against the
+        # tmux server without the caller living inside tmux.
+        if ctx.invoked_subcommand not in ("init", "duo") and not _uds_member_binding():
             _fail(_TMUX_REQUIRED_MESSAGE)
 
 
@@ -2169,7 +2189,7 @@ def team_cmd():
     discovered = _discover_tmux_binding()
     team_name = discovered.get("team")
     if not team_name and not tmux.is_inside_tmux():
-        team_name = hive_context.load_current_context().get("team") or None
+        team_name = _uds_member_binding().get("team") or None
     if team_name:
         _, t = _resolve_scoped_team(str(team_name), required=False)
         if t is not None:
@@ -2879,35 +2899,54 @@ def _host_session_socket() -> str:
 
 
 def _existing_ccd_duo(host_socket: str) -> dict[str, object] | None:
-    """Idempotency for the desktop-led path: the saved default context names a
-    live team whose anchor is a remote member. The host socket is pid-keyed, so
-    a restarted session brings a new one — re-pointing the anchor at *this*
-    socket keeps the team and its validator across restarts."""
-    ctx = hive_context.load_current_context()
-    team_name = ctx.get("team", "")
-    if not team_name:
-        return None
-    try:
-        t = Team.load(team_name)
-    except (FileNotFoundError, ValueError):
-        return None
-    worker = t.agents.get("worker")
-    if worker is None or tmux.get_pane_option(worker.pane_id, "hive-remote") != "uds":
-        return None
+    """Idempotency for the desktop-led path, resolved from anchor panes.
+
+    Adopt the team whose anchor already records *host_socket* (the same
+    session re-running init). Failing that, repoint the anchor whose shell
+    still sits in this project's cwd — the session restarted and its
+    pid-keyed socket changed. No match means another project's duo or none
+    at all: form a fresh team. Never the saved default context — it is one
+    global slot, and adopting through it let a second desktop session in
+    another project hijack the first one's duo (caught live, 2026-08-14).
+    """
     from .adapters import claude_uds
 
-    relinked = tmux.get_pane_option(worker.pane_id, claude_uds.ENDPOINT_OPTION) != host_socket
-    if relinked:
-        tmux.set_pane_option(worker.pane_id, claude_uds.ENDPOINT_OPTION, host_socket)
+    anchors = [r for r in tmux.list_remote_members() if r["remote"] == "uds"]
+    match = next((r for r in anchors if r["endpoint"] == host_socket), None)
+    relinked = False
+    if match is None:
+        match = next((r for r in anchors if r["cwd"] == os.getcwd()), None)
+        if match is None:
+            return None
+        tmux.set_pane_option(match["pane"], claude_uds.ENDPOINT_OPTION, host_socket)
+        relinked = True
+    try:
+        t = Team.load(match["team"])
+    except (FileNotFoundError, ValueError):
+        return None
+    worker = t.agents.get(match["agent"])
+    if worker is None:
+        return None
     _remember_context(
-        team=t.name, workspace=ctx.get("workspace", ""), agent=ctx.get("agent", "")
+        team=t.name,
+        workspace=_resolve_workspace(t, required=False) or "",
+        agent=match["agent"],
     )
     validator = t.agents.get("validator")
+    if validator is not None:
+        # The anchor is plumbing, not a view: keep the validator filling the
+        # window on re-adoption too, not only on the fresh form.
+        tmux.zoom_pane(validator.pane_id)
     result: dict[str, object] = {
         "team": t.name,
         "window": t.tmux_window,
         "group": "duo",
-        "worker": {"pane": worker.pane_id, "name": "worker", "cli": "claude", "remote": "uds"},
+        "worker": {
+            "pane": worker.pane_id,
+            "name": match["agent"],
+            "cli": "claude",
+            "remote": "uds",
+        },
         "validator": (
             {"pane": validator.pane_id, "name": "validator", "cli": validator.cli}
             if validator

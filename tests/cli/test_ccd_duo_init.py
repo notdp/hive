@@ -178,11 +178,19 @@ def test_duo_init_outside_tmux_refuses_a_session_that_would_hold_messages(
     assert calls["killed"] == []
 
 
-def test_send_outside_tmux_resolves_saved_context(runner, configure_hive_home, monkeypatch):
-    """The root gate + team resolution fall back to the saved default context,
+def _anchor_row(**kw) -> dict[str, str]:
+    row = {"pane": "%50", "team": "hive-ccd-w1", "agent": "worker",
+           "remote": "uds", "endpoint": "/tmp/me.sock", "cwd": "/tmp/proj"}
+    row.update(kw)
+    return row
+
+
+def test_send_outside_tmux_resolves_by_anchor_binding(runner, configure_hive_home, monkeypatch):
+    """Outside tmux, identity is the anchor pane recording MY inbox socket —
     so a desktop-led worker can `hive send` without being inside tmux."""
     configure_hive_home(tmux_inside=False)
-    hive_context.save_current_context(team="hive-ccd-w1", workspace="/tmp/ws", agent="worker")
+    monkeypatch.setenv(claude_uds.ENV_SOCKET, "/tmp/me.sock")
+    monkeypatch.setattr("hive.tmux.list_remote_members", lambda: [_anchor_row()])
     seen: dict[str, object] = {}
 
     def _fake_resolve(team, required=True):
@@ -193,24 +201,51 @@ def test_send_outside_tmux_resolves_saved_context(runner, configure_hive_home, m
 
     result = runner.invoke(cli, ["send", "validator", "hello"])
 
-    # The command got past the root tmux gate and asked for the context team.
+    # The command got past the root tmux gate and asked for the bound team.
     assert result.exit_code == 3
     assert seen["team"] is None or seen["team"] == "hive-ccd-w1"
 
 
-def test_existing_ccd_duo_repoints_a_restarted_session(configure_hive_home, monkeypatch):
-    """A desktop session restart changes its pid-keyed socket; re-running init
-    repoints the anchor and keeps the team instead of forming a new one."""
+def test_send_outside_tmux_with_someone_elses_duo_is_rejected(runner, configure_hive_home, monkeypatch):
+    """The live hijack (2026-08-14): a second desktop session in another
+    project must NOT inherit the first session's duo. Its socket matches no
+    anchor, so the root gate rejects instead of resolving a foreign team."""
     configure_hive_home(tmux_inside=False)
+    monkeypatch.setenv(claude_uds.ENV_SOCKET, "/tmp/other-session.sock")
+    monkeypatch.setattr("hive.tmux.list_remote_members", lambda: [_anchor_row()])
+    # The old resolution path: a stale global context naming the first duo.
     hive_context.save_current_context(team="hive-ccd-w1", workspace="/tmp/ws", agent="worker")
+
+    result = runner.invoke(cli, ["send", "validator", "hello"])
+
+    assert result.exit_code != 0
+    assert "tmux" in result.output.lower()
+
+
+def _stub_team(monkeypatch) -> dict[str, object]:
+    calls: dict[str, object] = {"zoomed": None}
     worker = SimpleNamespace(pane_id="%50", cli="claude")
+    validator = SimpleNamespace(pane_id="%51", cli="codex")
     team = SimpleNamespace(
-        name="hive-ccd-w1", tmux_window="hive-ccd:1", agents={"worker": worker}
+        name="hive-ccd-w1", tmux_window="hive-ccd:1",
+        agents={"worker": worker, "validator": validator},
     )
     monkeypatch.setattr("hive.cli.Team", SimpleNamespace(load=lambda name, **kw: team))
+    monkeypatch.setattr("hive.cli._resolve_workspace", lambda t, required=True: "/tmp/ws")
+    monkeypatch.setattr("hive.cli.tmux.zoom_pane", lambda p: calls.__setitem__("zoomed", p))
+    return calls
+
+
+def test_existing_ccd_duo_repoints_a_restarted_session(configure_hive_home, monkeypatch):
+    """A desktop session restart changes its pid-keyed socket; re-running init
+    in the same project repoints that project's anchor and keeps the team."""
+    import os
+
+    configure_hive_home(tmux_inside=False)
+    calls = _stub_team(monkeypatch)
     monkeypatch.setattr(
-        "hive.cli.tmux.get_pane_option",
-        lambda _p, k: {"hive-remote": "uds", claude_uds.ENDPOINT_OPTION: "/tmp/old.sock"}.get(k),
+        "hive.tmux.list_remote_members",
+        lambda: [_anchor_row(endpoint="/tmp/old.sock", cwd=os.getcwd())],
     )
     written: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
@@ -223,6 +258,44 @@ def test_existing_ccd_duo_repoints_a_restarted_session(configure_hive_home, monk
 
     assert res is not None and res.get("relinked") is True
     assert written == [("%50", claude_uds.ENDPOINT_OPTION, "/tmp/new.sock")]
+    assert calls["zoomed"] == "%51"  # anchor stays hidden behind the validator
+
+
+def test_existing_ccd_duo_adopts_by_endpoint_without_repointing(configure_hive_home, monkeypatch):
+    configure_hive_home(tmux_inside=False)
+    _stub_team(monkeypatch)
+    monkeypatch.setattr(
+        "hive.tmux.list_remote_members",
+        lambda: [_anchor_row(endpoint="/tmp/me.sock", cwd="/anywhere")],
+    )
+    monkeypatch.setattr(
+        "hive.cli.tmux.set_pane_option",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("no repoint on an endpoint match")),
+    )
+
+    from hive.cli import _existing_ccd_duo
+
+    res = _existing_ccd_duo("/tmp/me.sock")
+
+    assert res is not None and "relinked" not in res
+
+
+def test_existing_ccd_duo_ignores_another_projects_duo(configure_hive_home, monkeypatch):
+    """Different socket AND different cwd: that duo belongs to another desktop
+    session. Init must fall through to a fresh form, never adopt or repoint."""
+    configure_hive_home(tmux_inside=False)
+    monkeypatch.setattr(
+        "hive.tmux.list_remote_members",
+        lambda: [_anchor_row(endpoint="/tmp/theirs.sock", cwd="/their/project")],
+    )
+    monkeypatch.setattr(
+        "hive.cli.tmux.set_pane_option",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("must not touch a foreign anchor")),
+    )
+
+    from hive.cli import _existing_ccd_duo
+
+    assert _existing_ccd_duo("/tmp/mine.sock") is None
 
 
 def test_team_status_marks_the_anchored_member(configure_hive_home, monkeypatch):

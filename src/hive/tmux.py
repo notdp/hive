@@ -1000,6 +1000,32 @@ def list_panes_all() -> list[PaneInfo]:
     return _parse_panes_full(r.stdout)
 
 
+def list_remote_members() -> list[dict[str, str]]:
+    """Every anchor pane (remote member) with its endpoint and shell cwd.
+
+    One server call. Outside-tmux identity resolution scans this: a caller
+    with no pane of its own is whichever anchor records its inbox socket,
+    and `duo init` re-adopts by endpoint or by project cwd.
+    """
+    r = _run([
+        "list-panes", "-a", "-F",
+        "#{pane_id}\t#{@hive-team}\t#{@hive-agent}\t#{@hive-remote}"
+        "\t#{@hive-remote-endpoint}\t#{pane_current_path}",
+    ], check=False)
+    rows = []
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = (line.split("\t") + [""] * 6)[:6]
+        pane, team, agent, remote, endpoint, cwd = parts
+        if remote and team and agent:
+            rows.append({
+                "pane": pane, "team": team, "agent": agent,
+                "remote": remote, "endpoint": endpoint, "cwd": cwd,
+            })
+    return rows
+
+
 def _stderr_means_no_server(stderr: str | None) -> bool:
     """True only when tmux stderr proves there is no server to talk to.
 
