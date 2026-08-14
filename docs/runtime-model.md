@@ -186,7 +186,16 @@ Consumers — delivery routes an anchored member to that socket instead of
 refusing it as a retained shell; the resume snapshot records the marker and
 resume skips those members instead of spawning a look-alike CLI on the team's
 routing key (an external session reconnects itself by re-running `hive duo
-init`, which repoints the anchor at its new pid-keyed socket).
+init`, which repoints its own project's anchor at the new pid-keyed socket).
+
+The endpoint is also the member's **identity key**. An outside-tmux `hive`
+process resolves who it is by scanning anchor panes for its own
+`CLAUDE_CODE_MESSAGING_SOCKET` — whichever anchor records my socket is me.
+Never a saved global context: that is one slot per machine, and a second
+desktop session in another project once inherited the first one's whole
+identity through it. `duo init` re-adopts by the same key (endpoint match),
+falling back to the anchor whose shell cwd is this project (session restart);
+anything else forms a fresh team, so desktop duos stay one per project.
 
 ### `inputState`
 
