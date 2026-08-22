@@ -5080,7 +5080,19 @@ def ccd_send_cmd(session: str, message: str):
         # A Claude session outside any team signs as itself; only a plain
         # shell falls back to the bare marker.
         sender = f"ccd:{me.name}" if me else "hive"
-    outcome = claude_sessions.send(target.socket_path, message, sender=sender)
+    # The frame's `from` reaches only the human's message card; the receiving
+    # model sees just the text. Wrap the body in the ordinary <HIVE> envelope
+    # so the sender travels in band and the existing reply rules apply
+    # (from=ccd:* -> `hive ccd send`, from=hive:<team>.<agent> -> guest
+    # `hive send <agent> --team <team>`). No msgId: this is not a bus thread.
+    from .runtime_state import format_hive_envelope
+
+    envelope = format_hive_envelope(
+        from_agent=sender,
+        to_agent=f"ccd:{target.name}",
+        body=message,
+    )
+    outcome = claude_sessions.send(target.socket_path, envelope, sender=sender)
     if outcome is None:
         _fail(
             f"session '{target.name}' (pid {target.pid}) is not listening on "

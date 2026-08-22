@@ -43,7 +43,13 @@ def test_ccd_send_delivers_to_the_named_session_as_the_calling_member(runner, co
     )
     result = runner.invoke(cli, ["ccd", "send", "desk", "build is green, merge when ready"])
     assert result.exit_code == 0, result.output
-    assert sent == [("/tmp/cc-socks/4242.sock", "build is green, merge when ready", "hive:duo-1.validator")]
+    # the frame's `from` never reaches the receiving model, so the body rides
+    # inside the ordinary <HIVE> envelope and self-identifies in band
+    assert sent == [(
+        "/tmp/cc-socks/4242.sock",
+        "<HIVE from=hive:duo-1.validator to=ccd:desk>\nbuild is green, merge when ready\n</HIVE>",
+        "hive:duo-1.validator",
+    )]
     assert json.loads(result.output) == {
         "session": "desk", "title": "", "pid": 4242, "cwd": "/w/desk",
         "from": "hive:duo-1.validator", "accepted": "udsWriteAccepted",
@@ -68,6 +74,24 @@ def test_ccd_send_signs_as_the_calling_session_when_not_a_member(runner, configu
     result = runner.invoke(cli, ["ccd", "send", "desk", "hi"])
     assert result.exit_code == 0, result.output
     assert sent == ["ccd:my-own-session"]
+
+
+def test_ccd_send_wraps_the_body_in_a_hive_envelope(runner, configure_hive_home, monkeypatch):
+    # no msgId (not a bus thread): just <HIVE from=… to=ccd:<target>>body</HIVE>
+    configure_hive_home(tmux_inside=False)
+    _identity(monkeypatch, team=None, agent=None)
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.self_session",
+        lambda: _session(name="my-own-session", pid=9),
+    )
+    texts: list[str] = []
+    monkeypatch.setattr("hive.adapters.claude_sessions.resolve", lambda name: [_session()])
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: texts.append(text) or "udsWriteAccepted",
+    )
+    runner.invoke(cli, ["ccd", "send", "desk", "hello there"])
+    assert texts == ["<HIVE from=ccd:my-own-session to=ccd:desk>\nhello there\n</HIVE>"]
 
 
 def test_ccd_send_outside_any_team_sends_as_plain_hive(runner, configure_hive_home, monkeypatch):
