@@ -387,9 +387,9 @@ def test_send_request_budget_covers_native_submission():
     """The CLI socket budget is strictly longer than the worst-case native
     transport submission: a valid slow acceptance must never surface as
     `sidecar unavailable`."""
-    from hive.adapters import claude_channel, codex_app_server
+    from hive.adapters import claude_sessions, codex_app_server
 
-    native = max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    native = max(claude_sessions.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
     assert sidecar._send_request_timeout() > native
 
 
@@ -413,7 +413,7 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
 
     # shrink every budget component so the test runs in <1s while keeping the
     # invariant shape: delay < derived budget
-    monkeypatch.setattr("hive.adapters.claude_channel.SUBMIT_TIMEOUT", 0.6)
+    monkeypatch.setattr("hive.adapters.claude_sessions.SUBMIT_TIMEOUT", 0.6)
     monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
     monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
 
@@ -426,7 +426,7 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
         with conn:
             while conn.recv(65536):
                 pass  # drain request until client half-closes
-            time.sleep(0.8)  # valid latency: within native budget, above old 5s-analogue
+            time.sleep(0.8)  # valid latency: above the native leg alone, below the derived budget (0.6 + 0.5)
             conn.sendall(b'{"ok": true, "msgId": "x1", "delivery": "queued"}\n')
 
     threading.Thread(target=_slow_reply, daemon=True).start()

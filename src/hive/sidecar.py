@@ -1,6 +1,6 @@
 """Team-scoped sidecar: message transport, runtime signals, notify watcher.
 
-Delivery has exactly one state: the native transport (claude channel /
+Delivery has exactly one state: the native transport (claude inbox /
 codex daemon) either accepted the message or refused it. There is no
 tracked in-between and no confirmation oracle — acceptance means the
 target's own runtime owns it from there.
@@ -42,17 +42,18 @@ _SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 # The CLI's socket budget must be strictly longer than the work it asks the
-# sidecar to perform: worst-case native transport submission (claude channel
-# receipt / codex daemon RPC) plus slack for scheduling and payload plumbing.
+# sidecar to perform: worst-case native transport submission (claude inbox
+# connect+write / codex daemon RPC) plus slack for scheduling and payload
+# plumbing.
 # A send blocks on nothing else — it returns queued the moment the transport
 # accepts; confirmation is asynchronous (background tracker / query-time).
 REQUEST_SLACK = 5.0
 
 
 def _native_submit_timeout() -> float:
-    from .adapters import claude_channel, codex_app_server
+    from .adapters import claude_sessions, codex_app_server
 
-    return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    return max(claude_sessions.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
 
 
 def _send_request_timeout() -> float:

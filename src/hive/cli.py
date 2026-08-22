@@ -985,7 +985,7 @@ def _register_agent_member(
                 hive_context.clear_context_for_pane(pane_id)
             _fail(
                 f"pane {pane_id} is not reachable over its native transport ({e}); "
-                "nothing was registered. Fix the channel/daemon and retry, "
+                "nothing was registered. Fix the inbox/daemon and retry, "
                 "or use --no-notify to register without a reachability check."
             )
     return agent
@@ -1145,8 +1145,9 @@ def _fork_registered_agent(
         pane_id, split, workspace=getattr(t, "workspace", ""),
     )
 
-    # Both clones launch through hive's managed launcher: `hive claude -r …`
-    # registers the channel, and `hive codex fork <sid>` binds the clone's own
+    # Both clones launch through hive's managed launcher: the forked claude
+    # binds its own cross-session inbox at startup, and `hive codex fork
+    # <sid>` binds the clone's own
     # per-pane daemon (verified on codex 0.147.0: the forked thread is created
     # on and held by that daemon), so a forked member joins daemon-backed like a
     # spawned one instead of the embedded codex this used to refuse.
@@ -4420,7 +4421,7 @@ def send(
     lines.
 
     \b
-    Delivery is binary: the native transport (claude channel / codex daemon)
+    Delivery is binary: the native transport (claude inbox / codex daemon)
     either accepted the message — its runtime owns it from there — or the
     command fails with the transport error. Nothing to poll afterwards.
 
@@ -4986,99 +4987,6 @@ def codex_cmd(ctx: click.Context):
     _exec_codex_managed(list(ctx.args))
 
 
-# claude subcommands that are not an interactive TUI launch: hive leaves these
-# completely untouched (raw claude). Includes subcommands hidden from
-# `claude --help` (attach, daemon, logs, remote-control, stop — verified on
-# 2.1.198); a missing entry here routes the invocation into `hive claude`,
-# where claude's parser turns it into a prompt and spawns a ghost session.
-_CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
-    "agents", "attach", "auth", "auto-mode", "daemon", "doctor", "gateway",
-    "install", "logs", "mcp", "plugin", "plugins", "project", "remote-control",
-    "setup-token", "stop", "ultrareview", "update", "upgrade",
-)
-
-# Non-interactive surfaces: a -p/--print run has no interactive session for
-# hive to message, and --help/--version never start a session.
-_CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "-h", "--help", "-V", "--version"})
-
-# Global claude options that consume the following token as their value, so
-# the subcommand scan does not mistake that value for the subcommand.
-# `--opt=value` is self-contained and handled by the flag branch.
-_CLAUDE_VALUE_OPTS = frozenset({
-    "-r", "--resume",
-    "--model", "--agent", "--session-id", "--settings", "--permission-mode",
-    "--effort", "-n", "--name", "--add-dir", "--plugin-dir", "--mcp-config",
-    "--setting-sources", "--output-format", "--input-format", "--max-turns",
-    "--allowed-tools", "--disallowed-tools", "--append-system-prompt",
-    "--append-system-prompt-file", "--system-prompt", "--system-prompt-file",
-})
-
-
-def _claude_subcommand(args: list[str]) -> str | None:
-    """First non-option token in `args` — claude's subcommand, if any.
-
-    claude accepts global options before a subcommand, and a user alias like
-    ``alias claude='claude --verbose'`` prepends one unconditionally, so
-    checking only ``args[0]`` misses e.g. ``claude --verbose daemon status``.
-    Worse, a leading flag also defeats claude's own subcommand dispatch: the
-    managed exec would turn "daemon status" into a prompt and spawn a ghost
-    interactive session. Skip option tokens (and the value of value-taking
-    options); ``--`` ends the scan since everything after it is a prompt.
-    """
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            return None
-        if a.startswith("-"):
-            i += 2 if (a in _CLAUDE_VALUE_OPTS and "=" not in a) else 1
-            continue
-        return a
-    return None
-
-
-def _exec_claude_managed(args: list[str]) -> None:
-    """Replace this process with claude, hive channel registered.
-
-    A user-launched interactive claude gets the same per-pane MCP channel as a
-    hive-spawned one, so the pane can receive ``<HIVE>`` messages (claude
-    delivery is channel-only). The channel flag is appended *after* the user's
-    args so it can never be read as the value of a user flag; it is one
-    ``--channels=<spec>`` token, so a user positional prompt is safe either way.
-
-    Degrades to raw ``claude`` outside tmux, for non-interactive surfaces
-    (subcommands, -p/--print, --help/--version), and when the channel plugin
-    cannot be converged. Always ends in an exec: no exit code of this
-    process is a fallback signal, because after the exec the status belongs
-    to claude and any value 0-255 is legitimate — the ``hclaude`` launcher only
-    special-cases a missing ``hive`` binary (exit 127 before anything runs).
-    """
-    def _raw() -> None:
-        os.execvp("claude", ["claude", *args])
-
-    if not tmux.is_inside_tmux():
-        _raw()
-    if _claude_subcommand(args) in _CLAUDE_PASSTHROUGH_SUBCOMMANDS:
-        _raw()
-    if any(a in _CLAUDE_PASSTHROUGH_FLAGS for a in args):
-        _raw()
-    if any(a == "--channels" or a.startswith("--channels=") for a in args):
-        _raw()  # caller already registered its channels (a hive-spawned pane does)
-    from .adapters import claude_channel
-
-    # A marker left by a previous claude in this pane must not count as the
-    # new launch's readiness — the server it belongs to is gone. Clear before
-    # exec (and before the raw fallback on a failed prepare) so readiness can
-    # only come from the server this launch actually starts.
-    pane = os.environ.get("TMUX_PANE") or (tmux.get_current_pane_id() or "")
-    if pane:
-        claude_channel.clear_ready(pane)
-    flags = claude_channel.prepare_pane(os.getcwd())
-    if not flags:
-        _raw()  # channel unavailable: a raw claude beats no claude
-    os.execvp("claude", ["claude", *args, *flags])
-
-
 @cli.command(
     "claude",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
@@ -5086,24 +4994,25 @@ def _exec_claude_managed(args: list[str]) -> None:
 )
 @click.pass_context
 def claude_cmd(ctx: click.Context):
-    """Launch claude with the hive channel registered (hive-managed).
+    """Launch claude (hive-managed pairing for the `hclaude` launcher).
 
-    Usually invoked through the `hclaude` launcher from `hive shell-init` rather
-    than by hand; all arguments are forwarded to claude. Replaces the current process
-    with claude and never returns on success.
-
-    Internal seam: the exact argv `channel-server` runs the per-pane channel
-    MCP server in-process instead of launching claude. Published plugin
-    manifests point at this entry (`hive claude channel-server`) so they stay
-    free of machine-specific interpreter paths.
+    All arguments are forwarded to claude verbatim; the process is replaced
+    and never returns. Nothing needs registering any more: claude binds its
+    own cross-session inbox at startup (2.1.224+), and that inbox is hive's
+    delivery path into the pane.
     """
     args = list(ctx.args)
     if args == ["channel-server"]:
-        from .adapters.claude_channel_server import main as _channel_server_main
-
-        _channel_server_main()
-        return
-    _exec_claude_managed(args)
+        # Tombstone for the retired hive-channel plugin's MCP entry: exec'ing
+        # this into claude would feed it a garbage subcommand every session.
+        click.echo(
+            "Error: the hive-channel plugin is retired (claude delivery now "
+            "uses the session's own cross-session inbox). Remove it with: "
+            "claude plugin uninstall hive-channel@hive",
+            err=True,
+        )
+        sys.exit(1)
+    os.execvp("claude", ["claude", *args])
 
 
 @cli.group("ccd")
@@ -5289,7 +5198,7 @@ def _member_snapshot_session_id(team: str, agent: str) -> str | None:
 
 _SHELL_INIT_POSIX = """\
 # hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
-# the current tmux pane (per-pane daemon for codex, per-pane message channel
+# the current tmux pane (per-pane daemon for codex, cross-session inbox
 # for claude) and print a cd-ready resume hint when it exits. Outside tmux,
 # and for management subcommands / non-interactive flags, they run the plain
 # binary. Plain `codex` / `claude` are never touched.
@@ -5322,7 +5231,7 @@ function hclaude {
 
 _SHELL_INIT_FISH = """\
 # hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
-# the current tmux pane (per-pane daemon for codex, per-pane message channel
+# the current tmux pane (per-pane daemon for codex, cross-session inbox
 # for claude) and print a cd-ready resume hint when it exits. Outside tmux,
 # and for management subcommands / non-interactive flags, they run the plain
 # binary. Plain `codex` / `claude` are never touched.

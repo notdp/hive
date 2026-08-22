@@ -218,6 +218,21 @@ def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
     return None
 
 
+def claude_pid_for_pane(pane_id: str) -> int | None:
+    """Pid of the live claude process on *pane_id*'s tty (process evidence
+    only, same matchers as :func:`detect_cli_process_for_pane`). The pid keys
+    the session's cross-session registry entry, which carries its inbox."""
+    try:
+        tty = tmux.get_pane_tty(pane_id) or ""
+        for process in tmux.list_tty_processes(tty):
+            profile = detect_profile_from_process(process.command, process.argv)
+            if profile and profile.name == "claude":
+                return int(process.pid)
+    except Exception:
+        return None
+    return None
+
+
 def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
     profile = detect_cli_process_for_pane(pane_id)
     if profile:

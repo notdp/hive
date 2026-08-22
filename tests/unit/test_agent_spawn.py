@@ -5,6 +5,7 @@ import json
 import pytest
 
 from hive import agent as agent_mod
+from hive.adapters import claude_sessions
 from hive.agent import (
     DeliveryError,
     Agent,
@@ -13,9 +14,32 @@ from hive.agent import (
 
 # The real startup driver, captured before any monkeypatching, for tests that
 # exercise its screen-capture loop instead of the fixture's success stub.
-_REAL_CHANNEL_STARTUP = agent_mod._drive_claude_channel_startup
+_REAL_STARTUP_DRIVER = agent_mod._drive_claude_startup
 
-_CHANNEL_FLAGS = ["--channels=plugin:hive-channel@hive"]
+
+def _fake_session(pid: int = 4321, name: str = "swift-otter") -> claude_sessions.ClaudeSession:
+    """A registry entry as claude_sessions.session_for_pid would return it."""
+    return claude_sessions.ClaudeSession(
+        name=name,
+        pid=pid,
+        cwd="/tmp",
+        kind="cli",
+        socket_path=f"/tmp/hive-test-inbox-{pid}.sock",
+        session_id="sess-registry",
+    )
+
+
+def _pin_inbox(monkeypatch, *, pid, session):
+    """Pin the claude delivery lookup chain: pane -> claude pid -> registry
+    entry. Both halves inspect the live machine, so every test that reaches
+    them must pin them. Returns the pids handed to session_for_pid."""
+    seen_pids: list[int | None] = []
+    monkeypatch.setattr("hive.agent_cli.claude_pid_for_pane", lambda _pane: pid)
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.session_for_pid",
+        lambda p: seen_pids.append(p) or session,
+    )
+    return seen_pids
 
 
 def _pin_cli_probe(monkeypatch, name):
@@ -53,16 +77,10 @@ def _setup_tmux_mocks(monkeypatch):
     # Default: no per-pane codex daemon, so tests never attempt a real socket
     # bind. Tests that exercise the --remote path override this explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
-    # Default: claude channel registration succeeds without touching disk and
-    # the startup driver reports the channel ready, so spawn tests never write
-    # the channel config or drive the capture loop. Failure paths have
-    # dedicated tests below and in tests/unit/test_claude_channel.py + tests/cli.
-    monkeypatch.setattr(
-        "hive.adapters.claude_channel.prepare_pane", lambda _cwd: list(_CHANNEL_FLAGS)
-    )
-    monkeypatch.setattr(
-        "hive.agent._drive_claude_channel_startup", lambda _pane, _ready: True
-    )
+    # Default: the startup driver reports the pane's claude session bound its
+    # cross-session inbox, so spawn tests never run the capture loop or look
+    # for a registry entry on disk. Failure paths have dedicated tests below.
+    monkeypatch.setattr("hive.agent._drive_claude_startup", lambda _pane, _ready: True)
 
     return calls, tags
 
@@ -167,61 +185,94 @@ def test_spawn_codex_hive_loads_skill_and_sends_prompt(monkeypatch):
     assert calls.count("<Enter>") == 1
 
 
-def test_spawn_claude_launches_with_channel_flags(monkeypatch):
+def test_spawn_claude_ready_as_soon_as_pid_and_registry_resolve(monkeypatch):
+    # exercise the real startup driver: readiness is the pane's claude pid
+    # resolving to a registry entry, so an empty screen (no welcome banner —
+    # what a resumed session shows) is enough
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    # exercise the real startup driver: readiness comes from the marker the
-    # channel server writes, not from any screen text
-    monkeypatch.setattr("hive.agent._drive_claude_channel_startup", _REAL_CHANNEL_STARTUP)
-    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
-    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: True)
+    monkeypatch.setattr("hive.agent._drive_claude_startup", _REAL_STARTUP_DRIVER)
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "")
+    monkeypatch.setattr("hive.agent._PROMPT_SETTLE", 0.0)
+    seen = _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
 
-    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
-                is_first=True, cli="claude")
+    agent = Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                        is_first=True, cli="claude")
 
-    startup_cmd = calls[0]
-    assert "--channels" in startup_cmd
-    assert "plugin:hive-channel@hive" in startup_cmd
-
-
-def test_spawn_claude_clears_stale_marker_before_launch(monkeypatch):
-    # a marker left by a previous claude on this pane id must not count as
-    # the new server's readiness: spawn clears it, the driver times out, and
-    # the spawn fails instead of silently accepting an undeliverable pane
-    _setup_tmux_mocks(monkeypatch)
-    monkeypatch.setattr("hive.agent._drive_claude_channel_startup", _REAL_CHANNEL_STARTUP)
-    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
-    monkeypatch.setattr("hive.agent.tmux.kill_pane", lambda _pane: None)
-    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 1)
-    monkeypatch.setattr("hive.agent._CHANNEL_NOTICE_GRACE", 0.01)
-
-    stale = {"%0"}  # simulated marker store: pre-seeded stale entry
-    monkeypatch.setattr("hive.adapters.claude_channel.is_ready",
-                        lambda pane: pane in stale)
-    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", stale.discard)
-
-    with pytest.raises(RuntimeError, match="channel"):
-        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
-                    is_first=True, cli="claude")
-
-    assert stale == set()  # the stale marker was cleared, never trusted
+    assert agent.pane_id == "%0"
+    assert seen == [4321]  # one probe round, no banner ever consulted
+    assert calls[0].split(" && ")[-1].split()[:2] == ["hive", "claude"]
 
 
-def test_channel_startup_driver_true_when_marker_appears(monkeypatch):
+def test_startup_driver_true_when_inbox_registers(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "")
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
-    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: True)
+    monkeypatch.setattr("hive.agent._PROMPT_SETTLE", 0.0)
+    _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
 
-    assert agent_mod._drive_claude_channel_startup("%9", "Claude Code") is True
+    assert agent_mod._drive_claude_startup("%9", "Claude Code") is True
 
 
-def test_channel_startup_driver_false_on_timeout_without_marker(monkeypatch):
+def test_startup_driver_false_when_ready_without_inbox(monkeypatch):
+    # the TUI is up but no session registration ever appears: after the grace
+    # window the driver gives up instead of waiting out the whole timeout
     monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "Claude Code\n")
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
-    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 0.5)
-    monkeypatch.setattr("hive.agent._CHANNEL_NOTICE_GRACE", 0.01)
-    monkeypatch.setattr("hive.adapters.claude_channel.is_ready", lambda _pane: False)
+    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 30)
+    monkeypatch.setattr("hive.agent._INBOX_NOTICE_GRACE", 0.01)
+    _pin_inbox(monkeypatch, pid=4321, session=None)
 
-    assert agent_mod._drive_claude_channel_startup("%9", "Claude Code") is False
+    assert agent_mod._drive_claude_startup("%9", "Claude Code") is False
+
+
+def test_startup_driver_false_when_no_claude_pid_before_deadline(monkeypatch):
+    # no claude process on the pane tty at all: nothing to register an inbox
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "")
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    monkeypatch.setattr("hive.agent.AGENT_STARTUP_TIMEOUT", 0)
+    probed: list[int | None] = _pin_inbox(monkeypatch, pid=None, session=_fake_session())
+
+    assert agent_mod._drive_claude_startup("%9", "Claude Code") is False
+    assert probed == []  # a missing pid short-circuits the registry read
+
+
+def test_startup_driver_answers_startup_prompts_until_inbox_appears(monkeypatch):
+    # folder trust / MCP consent each get one Enter (the safe first option);
+    # a prompt on screen always outranks the inbox probe
+    screens = ["Do you trust this folder?\n", "New MCP server found\n"]
+    monkeypatch.setattr(
+        "hive.agent.tmux.capture_pane",
+        lambda *_a, **_kw: screens.pop(0) if screens else "Claude Code\n",
+    )
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    keys: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: keys.append((pane, key)))
+    probes: list[int] = []
+    monkeypatch.setattr("hive.agent_cli.claude_pid_for_pane", lambda _pane: 4321)
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.session_for_pid",
+        lambda p: probes.append(p) or _fake_session(),
+    )
+
+    assert agent_mod._drive_claude_startup("%9", "Claude Code") is True
+    assert keys == [("%9", "Enter"), ("%9", "Enter")]
+    assert probes == [4321]  # never probed while a dialog was on screen
+
+
+def test_startup_driver_answers_prompts_even_after_inbox_registers(monkeypatch):
+    # the inbox registers at process start, BEFORE the trust dialog can render:
+    # registration alone must not end the drive with a modal still blocking
+    screens = ["", "Do you trust this folder?\n"]
+    monkeypatch.setattr(
+        "hive.agent.tmux.capture_pane",
+        lambda *_a, **_kw: screens.pop(0) if screens else "Claude Code\n",
+    )
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
+    keys: list[tuple[str, str]] = []
+    monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: keys.append((pane, key)))
+    _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
+
+    assert agent_mod._drive_claude_startup("%9", "Claude Code") is True
+    assert keys == [("%9", "Enter")]  # the late dialog still got answered
 
 
 @pytest.mark.parametrize("cli_name", ["claude", "codex"])
@@ -247,64 +298,40 @@ def test_spawn_pane_command_runs_hive_launcher_then_resume_hint(monkeypatch, cli
                 is_first=True, cli=cli_name, skill="none")
 
     launch = calls[0].split(" && ")[-1]
-    assert launch.startswith(f"hive {cli_name} ")
-    assert launch.endswith(f"; hive resume-hint {cli_name} 2>/dev/null || true")
-    if cli_name == "claude":
-        assert "--channels=plugin:hive-channel@hive" in launch
+    tail = f"; hive resume-hint {cli_name} 2>/dev/null || true"
+    assert launch.endswith(tail)
+    # token check, not a prefix: a bare claude launch now carries no flags
+    assert launch[: -len(tail)].split()[:2] == ["hive", cli_name]
 
 
-def test_spawn_claude_resume_registers_channel(monkeypatch):
+def test_spawn_claude_resume_proves_the_inbox_too(monkeypatch):
+    # a resumed session is a new claude process: it must register its own
+    # inbox before spawn hands the member over, exactly like a fresh spawn
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    flagged: list[str] = []
-    monkeypatch.setattr(
-        "hive.adapters.claude_channel.prepare_pane",
-        lambda cwd: flagged.append(cwd) or list(_CHANNEL_FLAGS),
-    )
+    monkeypatch.setattr("hive.agent._drive_claude_startup", _REAL_STARTUP_DRIVER)
+    # a resumed session never renders the welcome banner
+    monkeypatch.setattr("hive.agent.tmux.capture_pane", lambda *_a, **_kw: "")
+    monkeypatch.setattr("hive.agent._PROMPT_SETTLE", 0.0)
+    seen = _pin_inbox(monkeypatch, pid=777, session=_fake_session(pid=777))
 
     Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                 is_first=True, cli="claude", session_id="sess-123")
 
-    # resume/fork re-launches the claude process with the same launch flags:
-    # the channel registers exactly like a fresh spawn (channel-only delivery)
-    assert flagged == ["/tmp"]
-    assert "--channels" in calls[0] and "plugin:hive-channel@hive" in calls[0]
+    assert seen == [777]  # the resumed process's own registry entry
     assert "sess-123" in calls[0]
 
 
-def test_spawn_claude_channel_refused_fails_before_pane_creation(monkeypatch):
-    calls, _ = _setup_tmux_mocks(monkeypatch)
-    splits: list[str] = []
-    monkeypatch.setattr(
-        "hive.agent.tmux.split_window",
-        lambda target, **_kw: splits.append(target) or target,
-    )
-    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", lambda _cwd: [])
-
-    with pytest.raises(RuntimeError, match="channel"):
-        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
-                    is_first=True, cli="claude")
-
-    assert splits == []  # fail-fast: no pane created for an undeliverable agent
-    assert calls == []  # nothing was typed anywhere
-
-
-def test_spawn_claude_startup_without_channel_notice_fails(monkeypatch):
+def test_spawn_claude_without_inbox_kills_pane_and_fails(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
-    monkeypatch.setattr(
-        "hive.agent._drive_claude_channel_startup", lambda _pane, _ready: False
-    )
+    monkeypatch.setattr("hive.agent._drive_claude_startup", lambda _pane, _ready: False)
     killed: list[str] = []
     monkeypatch.setattr("hive.agent.tmux.kill_pane", killed.append)
-    cleared: list[str] = []
-    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", cleared.append)
 
-    with pytest.raises(RuntimeError, match="channel"):
+    with pytest.raises(RuntimeError, match="inbox-only"):
         Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                     is_first=True, cli="claude")
 
     assert killed == ["%0"]  # the half-started pane is not left behind
-    # cleared twice: the pre-launch stale-marker guard and the failure cleanup
-    assert cleared == ["%0", "%0"]
 
 
 def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
@@ -594,16 +621,101 @@ def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
     assert calls == []
 
 
-def test_send_claude_accepted_passes_classification_through(monkeypatch):
+def test_send_claude_writes_to_the_session_inbox_as_hive_sender(monkeypatch):
     _pin_cli_probe(monkeypatch, "claude")
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    for classification in ("mcpWriteAccepted", "legacySocketAccepted"):
-        monkeypatch.setattr(
-            "hive.adapters.claude_channel.send_to_pane",
-            lambda pane, text, _c=classification: _c,
-        )
-        agent = Agent(name="w", team_name="t", pane_id="%3", cli="claude")
-        assert agent.send("hi") == classification
+    session = _fake_session()
+    _pin_inbox(monkeypatch, pid=session.pid, session=session)
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: writes.append((sock, text, sender))
+        or claude_sessions.ACCEPTED_UDS_WRITE,
+    )
+
+    accepted = Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert accepted == "udsWriteAccepted"
+    assert writes == [(session.socket_path, "hi", "hive:w")]
+    assert calls == []  # native transport only — the composer is never touched
+
+
+def test_send_claude_resolves_the_inbox_from_the_pane_claude_pid(monkeypatch):
+    # the delivery address is derived pane -> live claude pid -> registry
+    # entry; a pid from another pane must never be what gets messaged
+    _pin_cli_probe(monkeypatch, "claude")
+    _setup_tmux_mocks(monkeypatch)
+    panes: list[str] = []
+    monkeypatch.setattr(
+        "hive.agent_cli.claude_pid_for_pane",
+        lambda pane: panes.append(pane) or 9182,
+    )
+    seen_pids: list[int] = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.session_for_pid",
+        lambda pid: seen_pids.append(pid) or _fake_session(pid=pid),
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: claude_sessions.ACCEPTED_UDS_WRITE,
+    )
+
+    Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert panes == ["%3"]
+    assert seen_pids == [9182]  # the pane's own claude pid keys the registry
+
+
+def test_send_claude_without_registered_inbox_raises(monkeypatch):
+    _pin_cli_probe(monkeypatch, "claude")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _pin_inbox(monkeypatch, pid=4321, session=None)
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda *a, **kw: writes.append((a, kw)) or claude_sessions.ACCEPTED_UDS_WRITE,
+    )
+
+    with pytest.raises(DeliveryError, match="inbox-only"):
+        Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert writes == []  # no socket to write to; nothing was attempted
+    assert calls == []
+
+
+def test_send_claude_not_listening_raises_without_keystrokes(monkeypatch):
+    _pin_cli_probe(monkeypatch, "claude")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send", lambda *a, **kw: None
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    with pytest.raises(DeliveryError, match="not listening"):
+        Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
+    assert submitted == []
+    assert calls == []
+
+
+def test_send_claude_write_timeout_raises_and_is_not_an_accept(monkeypatch):
+    # the listener took the connection but never read the frame: a stalled
+    # session, reported as a failure rather than returned as a classification
+    _pin_cli_probe(monkeypatch, "claude")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda *a, **kw: claude_sessions.WRITE_TIMED_OUT,
+    )
+
+    with pytest.raises(DeliveryError, match="did not drain the message in time"):
+        Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
+
     assert calls == []
 
 
@@ -625,15 +737,17 @@ def test_send_unknown_profile_raises_without_keystrokes(monkeypatch):
 
 def test_send_claude_never_uses_codex_daemon(monkeypatch):
     _pin_cli_probe(monkeypatch, "claude")
+    _pin_inbox(monkeypatch, pid=4321, session=_fake_session())
     daemon_calls: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.send_to_pane",
         lambda *a: daemon_calls.append(a) or True,
     )
-    channel_calls: list[tuple] = []
+    inbox_calls: list[tuple] = []
     monkeypatch.setattr(
-        "hive.adapters.claude_channel.send_to_pane",
-        lambda *a: channel_calls.append(a) or True,
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: inbox_calls.append((sock, text, sender))
+        or claude_sessions.ACCEPTED_UDS_WRITE,
     )
     submitted: list[tuple] = []
     monkeypatch.setattr(
@@ -643,8 +757,8 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
     Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
 
     assert daemon_calls == []  # codex daemon path not taken for claude
-    assert len(channel_calls) == 1  # claude delivers over its MCP channel
-    assert submitted == []  # channel-only: no keystroke fallback
+    assert len(inbox_calls) == 1  # claude delivers over its session inbox
+    assert submitted == []  # inbox-only: no keystroke fallback
 
 
 def test_spawn_claude_skips_session_detection(monkeypatch):
@@ -772,12 +886,12 @@ def _watch_banner_and_sleep(monkeypatch):
     return banner_waits, sleeps
 
 
-def test_spawn_claude_channel_readiness_skips_banner_and_settle(monkeypatch):
+def test_spawn_claude_inbox_readiness_skips_banner_and_settle(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
     banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
 
-    # fresh and resume: the channel marker is the oracle, the banner (which a
-    # resumed session never renders) is not consulted at all
+    # fresh and resume: the inbox registration is the oracle, the banner
+    # (which a resumed session never renders) is not consulted at all
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp", cli="claude")
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="claude", session_id="sess-1", session_mode="resume")

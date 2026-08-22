@@ -219,3 +219,25 @@ def test_process_matcher_accepts_executable_and_node_wrapper():
     ).name == "codex"
     # argv[0] identity works even when ps comm is generic
     assert detect_profile_from_process("something", "/usr/local/bin/claude --continue").name == "claude"
+
+
+def test_claude_pid_for_pane_returns_the_claude_process_pid(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="123", command="-zsh", argv="-zsh"),
+        tmux.TTYProcessInfo(pid="456", command="claude", argv="claude --model x"),
+    ])
+    assert agent_cli.claude_pid_for_pane("%1") == 456
+
+
+def test_claude_pid_for_pane_ignores_non_claude_processes(monkeypatch):
+    # argv mentions of "claude" (rg, git grep) must not bind a pid: the same
+    # process-identity rule the retained-shell probe uses
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="123", command="-zsh", argv="-zsh"),
+        tmux.TTYProcessInfo(pid="9", command="rg", argv="rg claude src"),
+    ])
+    assert agent_cli.claude_pid_for_pane("%1") is None
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "")
+    assert agent_cli.claude_pid_for_pane("%1") is None

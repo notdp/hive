@@ -20,7 +20,6 @@ The repo itself is a plugin marketplace for both CLIs. Installing the plugins is
 # Claude Code
 claude plugin marketplace add notdp/hive
 claude plugin install hive@hive
-claude plugin install hive-channel@hive
 
 # Codex
 codex plugin marketplace add https://github.com/notdp/hive.git

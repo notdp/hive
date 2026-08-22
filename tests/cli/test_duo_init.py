@@ -49,7 +49,7 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "hive.agent.Agent.send",
-        lambda self, text: sent.append((self.pane_id, text)) or "mcpWriteAccepted",
+        lambda self, text: sent.append((self.pane_id, text)) or "udsWriteAccepted",
     )
     monkeypatch.setattr("hive.sidecar.stop_sidecar", lambda _ws: None)
     monkeypatch.setattr("hive.layout.split_horizontal", lambda _t, _c: True)
@@ -395,7 +395,7 @@ def test_inject_role_bootstrap_sends_full_prompt_once(monkeypatch):
     monkeypatch.setattr(cli_mod.tmux, "send_keys", lambda pane, text, **_k: keys.append((pane, text)))
     monkeypatch.setattr(cli_mod.tmux, "send_key", lambda pane, key: keys.append((pane, key)))
     monkeypatch.setattr(
-        "hive.agent.Agent.send", lambda self, text: sent.append((self.pane_id, text)) or "mcpWriteAccepted"
+        "hive.agent.Agent.send", lambda self, text: sent.append((self.pane_id, text)) or "udsWriteAccepted"
     )
     assert cli_mod._inject_role_bootstrap("%9", "duo-validator") is True
     assert sent == [("%9", cli_mod._role_bootstrap_prompt("duo-validator"))]

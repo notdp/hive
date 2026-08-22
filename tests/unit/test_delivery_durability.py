@@ -39,7 +39,7 @@ def test_accepted_send_returns_identity_only(tmp_path, monkeypatch):
             return True
 
         def send(self, text: str) -> str:
-            return "mcpWriteAccepted"
+            return "udsWriteAccepted"
 
     _wire(monkeypatch, workspace, _Agent())
     payload = sidecar._send_payload(
@@ -94,7 +94,7 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
 
         def send(self, text: str) -> str:
             delivered.append(text)
-            return "mcpWriteAccepted"
+            return "udsWriteAccepted"
 
     _wire(monkeypatch, workspace, _BusyAgent())
     results = []

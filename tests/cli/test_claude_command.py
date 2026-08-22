@@ -1,4 +1,4 @@
-"""CLI tests for `hive claude` managed launch and its shell-init function."""
+"""CLI tests for the `hive claude` exec passthrough and its shell-init function."""
 import json
 import os
 import shlex
@@ -10,8 +10,6 @@ import pytest
 from hive.cli import cli
 
 pytestmark = pytest.mark.cli
-
-_FLAGS = ["--channels=plugin:hive-channel@hive"]
 
 
 class _ExecCalled(Exception):
@@ -29,185 +27,32 @@ def _capture_exec(monkeypatch) -> list[list[str]]:
     return calls
 
 
-def _managed_env(monkeypatch, *, in_tmux=True, flags=None, pane="%99"):
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: in_tmux)
-    if pane:
-        monkeypatch.setenv("TMUX_PANE", pane)
-    else:
-        monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: pane or None)
-    monkeypatch.setattr(
-        "hive.adapters.claude_channel.prepare_pane",
-        lambda _cwd: list(_FLAGS) if flags is None else list(flags),
-    )
-    cleared: list[str] = []
-    monkeypatch.setattr("hive.adapters.claude_channel.clear_ready", cleared.append)
-    return cleared
-
-
-def test_claude_bare_in_tmux_appends_channel_flags(runner, monkeypatch):
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude"])
-    assert calls == [["claude", "claude", *_FLAGS]]
-
-
-def test_claude_user_args_precede_channel_flags(runner, monkeypatch):
-    # both channel flags are variadic in claude's parser: appending them after
-    # the user's argv keeps a user positional prompt out of their reach
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude", "hello"])
-    assert calls == [["claude", "claude", "hello", *_FLAGS]]
-
-
-def test_claude_managed_launch_clears_stale_marker_first(runner, monkeypatch):
-    # a marker left by a previous claude in this pane must not survive into
-    # the new launch: readiness may only come from the new server
-    calls = _capture_exec(monkeypatch)
-    cleared = _managed_env(monkeypatch, pane="%99")
-    runner.invoke(cli, ["claude", "hello"])
-    assert cleared == ["%99"]
-    assert calls  # cleared before the managed exec happened
-
-
-def test_claude_passthrough_does_not_touch_marker(runner, monkeypatch):
-    _capture_exec(monkeypatch)
-    cleared = _managed_env(monkeypatch, pane="%99")
-    runner.invoke(cli, ["claude", "agents", "--json"])
-    assert cleared == []  # raw passthrough leaves pane state alone
-
-
-def test_claude_failed_prepare_still_clears_stale_marker(runner, monkeypatch):
-    # even when the wrapper falls back to `command claude` (exit 1), the pane
-    # must not keep a stale marker claiming a channel that will not exist
-    _capture_exec(monkeypatch)
-    cleared = _managed_env(monkeypatch, flags=[], pane="%99")
-    result = runner.invoke(cli, ["claude", "hello"])
-    assert result.exit_code != 0
-    assert cleared == ["%99"]
-
-
-def test_claude_passthrough_subcommand_runs_raw(runner, monkeypatch):
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude", "agents", "--json"])
-    assert calls == [["claude", "claude", "agents", "--json"]]
-
-
-def test_claude_leading_flag_before_subcommand_runs_raw(runner, monkeypatch):
-    # ghost-session regression: `alias claude='claude --verbose'` prepends a
-    # flag, and a leading flag also defeats claude's own subcommand dispatch —
-    # a managed exec would turn "daemon status" into a prompt
-    calls = _capture_exec(monkeypatch)
-    cleared = _managed_env(monkeypatch, pane="%99")
-    runner.invoke(cli, ["claude", "--verbose", "daemon", "status"])
-    assert calls == [["claude", "claude", "--verbose", "daemon", "status"]]
-    assert cleared == []  # the pane's live channel marker survives
-
-
-def test_claude_hidden_subcommand_runs_raw(runner, monkeypatch):
-    # daemon/attach/logs/stop/remote-control are absent from `claude --help`
-    # but real; a missing allowlist entry turns them into ghost sessions
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude", "daemon", "status"])
-    assert calls == [["claude", "claude", "daemon", "status"]]
-
-
-def test_claude_flag_value_is_not_a_subcommand(runner, monkeypatch):
-    # `--agent doctor`: "doctor" is the flag's value, not a subcommand
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude", "--agent", "doctor"])
-    assert calls == [["claude", "claude", "--agent", "doctor", *_FLAGS]]
-
-
-def test_claude_channel_server_dispatch_runs_server_main(runner, monkeypatch):
-    # published plugin manifests invoke `hive claude channel-server`; the
-    # exact argv must run the MCP server in-process, never exec claude
-    calls = _capture_exec(monkeypatch)
-    served: list[bool] = []
-    monkeypatch.setattr(
-        "hive.adapters.claude_channel_server.main", lambda: served.append(True)
-    )
-    result = runner.invoke(cli, ["claude", "channel-server"])
-    assert result.exit_code == 0
-    assert served == [True]
-    assert calls == []
-
-
-def test_claude_channel_server_with_extra_args_is_not_dispatch(runner, monkeypatch):
-    # anything beyond the exact internal argv stays on the passthrough path
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-
-    def _fail() -> None:
-        raise AssertionError("server main must not run for non-exact argv")
-
-    monkeypatch.setattr("hive.adapters.claude_channel_server.main", _fail)
-    runner.invoke(cli, ["claude", "channel-server", "--verbose"])
-    assert calls == [["claude", "claude", "channel-server", "--verbose", *_FLAGS]]
-
-
-def test_claude_double_dash_positional_is_a_prompt(monkeypatch):
-    # `claude -- daemon` explicitly makes "daemon" a prompt, not a subcommand.
-    # Exercised on _exec_claude_managed directly: click strips the first `--`
-    # from `hive claude -- daemon` before ctx.args, so via the CLI this branch
-    # only sees what the shell wrapper forwards without a click layer.
-    from hive.cli import _exec_claude_managed
-
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    with pytest.raises(_ExecCalled):
-        _exec_claude_managed(["--", "daemon"])
-    assert calls == [["claude", "claude", "--", "daemon", *_FLAGS]]
-
-
-@pytest.mark.parametrize("flag", ["-p", "--print", "-h", "--help", "-V", "--version"])
-def test_claude_noninteractive_flags_run_raw(runner, monkeypatch, flag):
-    # a -p/--print run has no interactive session for hive to message;
-    # --help/--version never start a session
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch)
-    runner.invoke(cli, ["claude", flag, "say hi"])
-    assert calls == [["claude", "claude", flag, "say hi"]]
-
-
-def test_claude_outside_tmux_runs_raw(runner, monkeypatch):
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch, in_tmux=False)
-    runner.invoke(cli, ["claude", "hello"])
-    assert calls == [["claude", "claude", "hello"]]
-
-
-def test_claude_channel_unavailable_runs_raw(runner, monkeypatch):
-    # the launcher always ends in an exec: channel prepare failing means a
-    # raw claude, never an exit code the shell must interpret
-    calls = _capture_exec(monkeypatch)
-    _managed_env(monkeypatch, flags=[])
-    runner.invoke(cli, ["claude", "hello"])
-    assert calls == [["claude", "claude", "hello"]]
-
-
-@pytest.mark.parametrize("chan", [
-    ["--channels", "plugin:hive-channel@hive"],
-    ["--channels=plugin:hive-channel@hive"],
+@pytest.mark.parametrize("argv", [
+    [],                                    # bare launch
+    ["hello"],                             # positional prompt
+    ["mcp", "list"],                       # management subcommand
+    ["daemon", "status"],                  # subcommand hidden from `claude --help`
+    ["--verbose", "daemon", "status"],     # global flag before a subcommand
+    ["-p", "say hi"],                      # non-interactive print run
+    ["--model", "x", "-r", "sid", "hi"],   # value-taking global options
+    ["--agent", "doctor"],                 # flag value that looks like a subcommand
 ])
-def test_claude_with_explicit_channels_runs_raw_unchanged(runner, monkeypatch, chan):
-    # the caller already registered its channels (a hive-spawned pane passes
-    # its own flags): re-preparing the pane would clobber that live channel
+def test_claude_execs_claude_with_argv_verbatim(runner, monkeypatch, argv):
+    # every argv shape reaches claude untouched: hive appends nothing and
+    # inspects nothing. Delivery no longer depends on anything hive puts on
+    # the command line — claude binds its own cross-session inbox at startup.
     calls = _capture_exec(monkeypatch)
-    cleared = _managed_env(monkeypatch, pane="%99")
+    runner.invoke(cli, ["claude", *argv])
+    assert calls == [["claude", "claude", *argv]]
 
-    def _fail(_cwd):
-        raise AssertionError("prepare_pane must not run when --channels is given")
 
-    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", _fail)
-    runner.invoke(cli, ["claude", "--model", "x", *chan, "--", "prompt"])
-    # click eats the first `--`; everything past it reaches claude untouched
-    assert calls == [["claude", "claude", "--model", "x", *chan, "prompt"]]
-    assert cleared == []  # the caller's readiness marker survives
+def test_claude_help_is_forwarded_not_handled_by_click(runner, monkeypatch):
+    # add_help_option=False: `hclaude --help` must show claude's help, not
+    # hive's, so the flag has to survive click and reach the exec
+    calls = _capture_exec(monkeypatch)
+    result = runner.invoke(cli, ["claude", "--help"])
+    assert calls == [["claude", "claude", "--help"]]
+    assert "Usage: cli claude" not in result.output
 
 
 def test_shell_init_zsh_emits_hclaude_launcher(runner):

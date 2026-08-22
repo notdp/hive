@@ -1,16 +1,14 @@
 """Structure tests for the published hive-plugins marketplace and manifests.
 
 These lock the executable contract of the plugin distribution foundation:
-portable channel command, no machine-specific paths, dual-manifest version
-consistency, and the plugin-owned canonical skill.
+no machine-specific paths, dual-manifest version consistency, and the
+plugin-owned canonical skill.
 """
 import json
 import re
 from pathlib import Path
 
 import pytest
-
-from hive.adapters import claude_channel
 
 pytestmark = pytest.mark.unit
 
@@ -20,8 +18,7 @@ CC_MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
 CODEX_MARKETPLACE = REPO / ".agents" / "plugins" / "marketplace.json"
 HIVE_CC = REPO / "plugins" / "hive" / ".claude-plugin" / "plugin.json"
 HIVE_CODEX = REPO / "plugins" / "hive" / ".codex-plugin" / "plugin.json"
-CHANNEL_CC = REPO / "plugins" / "hive-channel" / ".claude-plugin" / "plugin.json"
-ALL_MANIFESTS = [CC_MARKETPLACE, CODEX_MARKETPLACE, HIVE_CC, HIVE_CODEX, CHANNEL_CC]
+ALL_MANIFESTS = [CC_MARKETPLACE, CODEX_MARKETPLACE, HIVE_CC, HIVE_CODEX]
 
 CANONICAL_SKILL = REPO / "plugins" / "hive" / "skills" / "hive" / "SKILL.md"
 
@@ -37,21 +34,24 @@ def test_all_manifests_parse():
         assert isinstance(_load(path), dict), path
 
 
-def test_marketplace_name_matches_runtime_identity():
-    # single-user cutover (human directive): the published marketplace takes
-    # over the same name the runtime already uses, so PLUGIN_SPEC and
-    # enabledPlugins keys stay hive-channel@hive verbatim
+def test_both_marketplaces_declare_the_same_name():
+    # the marketplace name is half of every plugin ref (hive@hive), so the two
+    # published files must agree; the runtime half of this check is gone with
+    # claude_channel.MARKETPLACE_NAME -- no src constant names it any more
     for path in (CC_MARKETPLACE, CODEX_MARKETPLACE):
-        assert _load(path)["name"] == claude_channel.MARKETPLACE_NAME == "hive", path
+        assert _load(path)["name"] == "hive", path
 
 
-def test_cc_marketplace_lists_both_plugins_with_real_sources():
+def test_cc_marketplace_lists_only_hive_with_a_real_source():
     entries = {p["name"]: p for p in _load(CC_MARKETPLACE)["plugins"]}
-    assert set(entries) == {"hive", "hive-channel"}
+    assert set(entries) == {"hive"}
     for entry in entries.values():
         source = entry["source"]
         assert source.startswith("./"), entry
         assert (REPO / source).is_dir(), entry
+    # claude delivery moved to Claude Code's own cross-session inbox: the
+    # channel plugin is deleted, not merely unlisted
+    assert not (REPO / "plugins" / "hive-channel").exists()
 
 
 def test_codex_marketplace_lists_only_hive():
@@ -67,17 +67,11 @@ def test_codex_marketplace_lists_only_hive():
     assert entry["policy"]["authentication"] == "ON_INSTALL"
     assert entry["policy"]["authentication"] in {"ON_INSTALL", "ON_USE"}
     assert "category" in entry
-    raw = CODEX_MARKETPLACE.read_text()
-    assert "hive-channel" not in raw
-    assert "channels" not in raw
-
-
-def test_channel_manifest_is_portable():
-    data = _load(CHANNEL_CC)
-    server = data["mcpServers"]["hive-channel"]
-    assert server["command"] == "hive"
-    assert server["args"] == ["claude", "channel-server"]
-    assert data["channels"] == [{"server": "hive-channel"}]
+    # a Claude-only key must not leak into the codex marketplace (codex
+    # ingestion is strict); the hive-channel guard itself is retired:
+    assert "channels" not in CODEX_MARKETPLACE.read_text()
+    # the CC-only channel plugin they kept out of codex ingestion no longer
+    # exists on either side
 
 
 def test_no_machine_paths_in_any_manifest():
@@ -95,7 +89,7 @@ def test_plugin_versions_track_the_cli_version():
 
     cli_version = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
     assert SEMVER.match(cli_version), cli_version
-    for manifest in (HIVE_CC, HIVE_CODEX, CHANNEL_CC):
+    for manifest in (HIVE_CC, HIVE_CODEX):
         assert _load(manifest)["version"] == cli_version, manifest
 
 

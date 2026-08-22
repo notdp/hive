@@ -124,7 +124,7 @@ def test_send_to_retained_shell_fails_closed_with_durable_bus_event(tmp_path, mo
     monkeypatch.setattr("hive.agent_cli.detect_cli_process_for_pane", lambda _p: None)
     _forbid(monkeypatch, "hive.adapters.codex_app_server.send_to_pane",
             "native codex transport must not be called for a retained shell")
-    _forbid(monkeypatch, "hive.adapters.claude_channel.send_to_pane",
+    _forbid(monkeypatch, "hive.adapters.claude_sessions.send",
             "native claude transport must not be called for a retained shell")
     _forbid(monkeypatch, "hive.agent._submit_interactive_text",
             "keystroke fallback is forbidden")
@@ -145,15 +145,45 @@ def test_send_to_retained_shell_fails_closed_with_durable_bus_event(tmp_path, mo
     assert payload["msgId"]
 
 
+def _wire_codex_transport(monkeypatch, sent, accepted):
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda pane, text: sent.append((pane, text)) or accepted,
+    )
+
+
+def _wire_claude_transport(monkeypatch, sent, accepted):
+    # claude is addressed pane -> live pid -> registry entry -> that session's
+    # inbox socket, so the recorded pane is the one whose socket got written
+    from hive.adapters.claude_sessions import ClaudeSession
+
+    sock = "/run/claude-%9.sock"
+    monkeypatch.setattr(
+        "hive.agent_cli.claude_pid_for_pane", lambda pane: 4242 if pane == "%9" else None
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.session_for_pid",
+        lambda pid: ClaudeSession(
+            name="sess", pid=pid, cwd="", kind="cli", socket_path=sock, session_id="sid-1"
+        ) if pid == 4242 else None,
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda path, text, *, sender: (
+            sent.append(("%9" if path == sock else path, text)) or accepted
+        ),
+    )
+
+
 @pytest.mark.parametrize(
-    "cli_name,transport,accepted",
+    "cli_name,wire,accepted",
     [
-        ("codex", "hive.adapters.codex_app_server.send_to_pane", "turnStartAccepted"),
-        ("claude", "hive.adapters.claude_channel.send_to_pane", "mcpWriteAccepted"),
+        ("codex", _wire_codex_transport, "turnStartAccepted"),
+        ("claude", _wire_claude_transport, "udsWriteAccepted"),
     ],
 )
 def test_send_with_live_cli_still_uses_native_transport(
-    tmp_path, monkeypatch, cli_name, transport, accepted
+    tmp_path, monkeypatch, cli_name, wire, accepted
 ):
     from hive.agent_cli import get_profile
 
@@ -163,7 +193,7 @@ def test_send_with_live_cli_still_uses_native_transport(
         "hive.agent_cli.detect_cli_process_for_pane", lambda _p: get_profile(cli_name)
     )
     sent: list[tuple] = []
-    monkeypatch.setattr(transport, lambda pane, text: sent.append((pane, text)) or accepted)
+    wire(monkeypatch, sent, accepted)
     agent = Agent(name="v", team_name="team-x", pane_id="%9", cli=cli_name)
     _wire_send(monkeypatch, workspace, agent)
 
@@ -289,7 +319,7 @@ def test_retained_shell_running_rg_codex_is_not_a_cli(monkeypatch, tmp_path):
     bus.init_workspace(workspace)
     _forbid(monkeypatch, "hive.adapters.codex_app_server.send_to_pane",
             "native codex transport must not be called")
-    _forbid(monkeypatch, "hive.adapters.claude_channel.send_to_pane",
+    _forbid(monkeypatch, "hive.adapters.claude_sessions.send",
             "native claude transport must not be called")
     _forbid(monkeypatch, "hive.agent._submit_interactive_text",
             "keystroke fallback is forbidden")
