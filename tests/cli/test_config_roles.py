@@ -106,7 +106,7 @@ def test_interactive_select_role_cli_and_model(monkeypatch):
     """Pick validator → codex → gpt-5.5 (first codex suggestion)."""
     store = _run_interactive(monkeypatch, [
         1,    # role: validator (challenger=0, validator=1, worker=2, done=3)
-        1,    # CLI: codex (claude=0, codex=1, keep=2, clear=3)
+        1,    # CLI: codex (claude=0, codex=1, grok=2, keep=3, clear=4)
         0,    # model: first codex suggestion (gpt-5.5)
         3,    # role: done
     ])
@@ -138,7 +138,7 @@ def test_interactive_keep_preserves_existing(monkeypatch):
     n_codex = len(MODEL_SUGGESTIONS["codex"])
     store = _run_interactive(monkeypatch, [
         1,              # role: validator
-        2,              # CLI: (keep)
+        3,              # CLI: (keep)
         n_codex + 1,    # model: (keep) — custom=n, keep=n+1, clear=n+2
         3,              # role: done
     ], settings_store=dict(initial))
@@ -154,7 +154,7 @@ def test_interactive_clear_deletes_key(monkeypatch):
     }
     store = _run_interactive(monkeypatch, [
         1,    # role: validator
-        3,    # CLI: (clear)
+        4,    # CLI: (clear)
         # no suggestions (no effective CLI) → (custom)=0, (keep)=1, (clear)=2
         2,    # model: (clear)
         3,    # role: done
@@ -171,7 +171,7 @@ def test_interactive_clear_cli_leaves_model_intact(monkeypatch):
     }
     store = _run_interactive(monkeypatch, [
         2,    # role: worker
-        3,    # CLI: (clear)
+        4,    # CLI: (clear)
         1,    # model: (keep) — no suggestions → custom=0, keep=1, clear=2
         3,    # role: done
     ], settings_store=dict(initial))
@@ -189,7 +189,7 @@ def test_interactive_clear_model_leaves_cli_intact(monkeypatch):
     n_claude = len(MODEL_SUGGESTIONS["claude"])
     store = _run_interactive(monkeypatch, [
         2,              # role: worker
-        2,              # CLI: (keep)
+        3,              # CLI: (keep)
         n_claude + 2,   # model: (clear) — custom=n, keep=n+1, clear=n+2
         3,              # role: done
     ], settings_store=dict(initial))
@@ -237,7 +237,7 @@ def test_interactive_escape_at_model_aborts_no_mutation(monkeypatch):
     _mock_settings(monkeypatch, store)
     _mock_menus(monkeypatch, [
         1,      # role: validator
-        3,      # CLI: (clear) — would clear if completed
+        4,      # CLI: (clear) — would clear if completed
         None,   # Escape at model menu
     ])
     with pytest.raises(click.Abort):
@@ -268,7 +268,7 @@ def test_interactive_cli_cursor_starts_at_current(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 4 + 1, 3])  # role=validator, CLI=keep, model=keep, done
+    menu_indices = iter([1, 3, 4 + 1, 3])  # role=validator, CLI=keep, model=keep, done
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -289,7 +289,7 @@ def test_interactive_model_cursor_starts_at_current(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 0, 3])  # role=validator, CLI=keep, model=first, done
+    menu_indices = iter([1, 3, 0, 3])  # role=validator, CLI=keep, model=first, done
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -310,7 +310,7 @@ def test_interactive_model_cursor_custom_value_focuses_keep(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 0, 3])  # role=validator, CLI=keep, model=first, done
+    menu_indices = iter([1, 3, 0, 3])  # role=validator, CLI=keep, model=first, done
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -328,7 +328,7 @@ def test_interactive_no_cli_shows_no_suggestions(monkeypatch):
     """When no CLI and user keeps, model prompt offers only custom/keep/clear."""
     store = _run_interactive(monkeypatch, [
         0,    # role: challenger
-        2,    # CLI: (keep) — no current CLI
+        3,    # CLI: (keep) — no current CLI
         0,    # model: (custom) — no suggestions → custom=0, keep=1, clear=2
         3,    # role: done
     ], custom_inputs=["my-model"])

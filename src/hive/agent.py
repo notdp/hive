@@ -18,6 +18,7 @@ _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session 
 CLI_BINS: dict[str, str] = {
     "claude": "claude",
     "codex": "codex",
+    "grok": "grok",
 }
 
 
@@ -146,6 +147,26 @@ def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
     return claude_channel.is_ready(pane_id)
 
 
+def _wait_grok_leader_ready(
+    pane_id: str,
+    *,
+    timeout: float = AGENT_STARTUP_TIMEOUT,
+    interval: float = 0.5,
+) -> bool:
+    from .adapters import grok_acp
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if grok_acp.pane_socket_path(pane_id).exists():
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
 def _wait_codex_thread_ready(
     pane_id: str,
     *,
@@ -207,7 +228,7 @@ class Agent:
         workspace: str = "",
         session_mode: str = "fork",
     ) -> Agent:
-        """Spawn an agent CLI (claude/codex) in a tmux pane.
+        """Spawn an agent CLI (claude/codex/grok) in a tmux pane.
 
         If split_window is True (default), splits *target_pane* and runs the
         CLI in the new pane. If False, runs the CLI in *target_pane* itself
@@ -215,9 +236,10 @@ class Agent:
 
         With a *session_id*, *session_mode* picks the semantics: ``fork``
         (default, existing behavior) branches a copy of the session; ``resume``
-        continues it — claude drops ``--fork-session``, codex runs the
-        daemon-native ``resume`` subcommand (a resumed team member is
-        first-class, so the embedded shortcut fork uses is not allowed).
+        continues it — claude drops ``--fork-session``, grok uses ``-r``
+        without ``--fork-session``, codex runs the daemon-native ``resume``
+        subcommand (a resumed team member is first-class, so the embedded
+        shortcut fork uses is not allowed).
         """
         if cli not in CLI_BINS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
@@ -263,6 +285,25 @@ class Agent:
         # the pane (and a usable shell) survives the CLI exiting.
         cmd_parts = [_shell_escape(bin_path)]
         codex_daemon_native = False
+        grok_leader_native = False
+        if cli == "grok":
+            from .adapters import grok_acp
+            if not grok_acp.spawn_daemon(pane_id):
+                if split_window:
+                    tmux.kill_pane(pane_id)
+                else:
+                    tmux.clear_pane_tags(pane_id)
+                    tmux.set_pane_title(pane_id, "")
+                raise RuntimeError(
+                    f"grok leader failed to start for pane {pane_id}; "
+                    "refusing to spawn a grok team member without a pane-local leader"
+                )
+            grok_leader_native = True
+            sock = grok_acp.pane_socket_path(pane_id)
+            cmd_parts.extend(["--leader-socket", _shell_escape(str(sock))])
+            if workspace:
+                from .sidecar import request_connect_grok
+                request_connect_grok(workspace, pane_id)
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
             # A new or resumed codex session runs against a per-pane app-server
@@ -310,12 +351,16 @@ class Agent:
         if model and not session_id:
             if cli == "claude":
                 cmd_parts.extend(["--model", _shell_escape(model)])
-            elif cli == "codex":
+            elif cli in {"codex", "grok"}:
                 cmd_parts.extend(["-m", _shell_escape(model)])
 
         # Resume/fork uses the original session's model; no --model flag needed.
         if session_id:
             if cli == "claude":
+                cmd_parts.extend(["-r", _shell_escape(session_id)])
+                if session_mode == "fork":
+                    cmd_parts.append("--fork-session")
+            elif cli == "grok":
                 cmd_parts.extend(["-r", _shell_escape(session_id)])
                 if session_mode == "fork":
                     cmd_parts.append("--fork-session")
@@ -336,10 +381,11 @@ class Agent:
         if prompt:
             initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
         if initial_prompt:
-            if cli == "claude":
+            if cli in {"claude", "grok"}:
                 # Claude's channel flags are variadic: without a `--`
                 # separator the parser consumes the positional prompt as a
-                # flag value and aborts launch.
+                # flag value and aborts launch. Grok's --leader-socket path
+                # is safer with the same terminator.
                 cmd_parts.append("--")
             cmd_parts.append(_shell_escape(initial_prompt))
 
@@ -394,6 +440,8 @@ class Agent:
         # fork (no daemon) has nothing better than the banner.
         if channel_flags:
             pass
+        elif grok_leader_native:
+            _wait_grok_leader_ready(pane_id)
         elif codex_daemon_native:
             _wait_codex_thread_ready(pane_id)
         elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
@@ -443,6 +491,16 @@ class Agent:
                 raise DeliveryError(
                     f"codex pane {self.pane_id} did not accept the turn "
                     "(no daemon/thread, RPC error, or connection failure)"
+                )
+            return accepted
+        if profile_name == "grok":
+            from .adapters import grok_acp
+
+            accepted = grok_acp.send_to_pane(self.pane_id, text, cwd=self.cwd)
+            if accepted is None:
+                raise DeliveryError(
+                    f"grok pane {self.pane_id} did not accept the prompt "
+                    "(no leader, ACP handshake failed, or session/prompt error)"
                 )
             return accepted
         if profile_name == "claude":

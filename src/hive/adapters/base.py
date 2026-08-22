@@ -154,7 +154,7 @@ def iter_jsonl_records_reverse(path: Path, *, chunk_size: int = 64 * 1024) -> It
 # Detect whether the target agent is waiting for a user answer
 # (AskUserQuestion) before allowing message injection.
 
-_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "request_user_input"})
+_ASK_TOOL_NAMES = frozenset({"AskUserQuestion", "request_user_input", "ask_user_question"})
 
 _MAX_TAIL_BYTES = 128 * 1024  # 128KB upper bound for tail reads
 
@@ -199,7 +199,22 @@ def _is_assistant_ask(payload: dict[str, Any]) -> bool:
                 return True
         return False
 
+    update = _grok_update(payload)
+    if update is not None and update.get("sessionUpdate") == "tool_call":
+        tool = ((update.get("_meta") or {}).get("x.ai/tool") or {})
+        name = str(tool.get("name") or update.get("title") or "")
+        return name in _ASK_TOOL_NAMES
+
     return False
+
+
+def _grok_update(payload: dict[str, Any]) -> dict[str, Any] | None:
+    params = payload.get("params")
+    if isinstance(params, dict) and isinstance(params.get("update"), dict):
+        return params["update"]
+    if isinstance(payload.get("update"), dict):
+        return payload["update"]
+    return None
 
 
 def _is_function_call_output(payload: dict[str, Any]) -> bool:
@@ -298,7 +313,8 @@ def _is_user_turn(payload: dict[str, Any]) -> bool:
     if record_type == "response_item":
         inner = payload.get("payload")
         return isinstance(inner, dict) and inner.get("type") == "message" and inner.get("role") == "user"
-    return False
+    update = _grok_update(payload)
+    return bool(update and update.get("sessionUpdate") == "user_message_chunk")
 
 
 def _poll_interval(elapsed: float) -> float:

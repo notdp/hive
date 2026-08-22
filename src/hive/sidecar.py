@@ -50,9 +50,9 @@ REQUEST_SLACK = 5.0
 
 
 def _native_submit_timeout() -> float:
-    from .adapters import claude_channel, codex_app_server
+    from .adapters import claude_channel, codex_app_server, grok_acp
 
-    return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    return max(claude_channel.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT, grok_acp.SUBMIT_TIMEOUT)
 
 
 def _send_request_timeout() -> float:
@@ -457,6 +457,20 @@ def _pane_in_active_turn(pane_id: str) -> bool:
     return _pane_active_turn_phase(pane_id) in ACTIVE_TURN_PHASES
 
 
+def _grok_leader_busy(pane_id: str) -> bool | None:
+    if not pane_id:
+        return None
+    try:
+        from .adapters import grok_acp
+
+        rt = grok_acp.runtime_for_pane(pane_id)
+    except Exception:
+        return None
+    if rt is None:
+        return None
+    return bool(rt.busy)
+
+
 def _codex_app_server_busy(pane_id: str) -> bool | None:
     if not pane_id:
         return None
@@ -491,6 +505,9 @@ def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     app_busy = _codex_app_server_busy(pane_id)
     if app_busy is not None:
         return app_busy
+    grok_busy = _grok_leader_busy(pane_id)
+    if grok_busy is not None:
+        return grok_busy
 
     monitor_busy = (
         monitor is not None
@@ -537,6 +554,9 @@ def _is_output_busy(
     app_busy = _codex_app_server_busy(pane_id)
     if app_busy is not None:
         return app_busy
+    grok_busy = _grok_leader_busy(pane_id)
+    if grok_busy is not None:
+        return grok_busy
 
     if monitor is not None and monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS):
         progressed = _transcript_progressed_recently(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS)
@@ -686,6 +706,10 @@ def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
     is down, and the lazy connect on the next runtime tick covers that case.
     """
     return _request_sidecar(workspace, {"action": "connect-codex", "pane": pane}, timeout=3.0)
+
+
+def request_connect_grok(workspace: str, pane: str) -> dict[str, Any] | None:
+    return _request_sidecar(workspace, {"action": "connect-grok", "pane": pane}, timeout=3.0)
 
 
 def _sidecar_identity_matches(
@@ -983,6 +1007,29 @@ def _doctor_payload(
     return diag
 
 
+def _grok_leader_runtime(pane_id: str) -> dict[str, Any] | None:
+    from .adapters import grok_acp
+
+    rt = grok_acp.runtime_for_pane(pane_id)
+    if rt is None:
+        return None
+    input_state = rt.input_state or "ready"
+    return {
+        "busy": rt.busy,
+        "turnPhase": rt.turn_phase,
+        "inputState": input_state,
+        "inputReason": "" if input_state != "waiting_user" else "ask_user_question",
+        "sessionId": rt.session_id,
+        "_runtimeSource": "grok_leader",
+    }
+
+
+def _grok_session_id_best_effort(pane_id: str) -> str | None:
+    from .adapters import grok_acp
+
+    return grok_acp.session_id_for_pane(pane_id)
+
+
 def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
     """Native codex runtime from the per-pane daemon, or None if no daemon.
 
@@ -1091,6 +1138,13 @@ def _agent_runtime_payload(
             runtime["sessionId"] = _codex_session_id_best_effort(
                 pane_id, runtime_snapshot=runtime_snapshot
             )
+            return runtime
+    if profile.name == "grok":
+        grok_runtime = _grok_leader_runtime(pane_id)
+        if grok_runtime is not None:
+            runtime.update(grok_runtime)
+            sid = grok_runtime.get("sessionId") or _grok_session_id_best_effort(pane_id)
+            runtime["sessionId"] = sid or "unresolved"
             return runtime
 
     if (
@@ -1782,6 +1836,15 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
+    if action == "connect-grok":
+        try:
+            from .adapters import grok_acp
+            pane = str(request.get("pane") or "")
+            connected = bool(pane) and grok_acp.connect_pane(pane)
+            response = {"ok": True, "connected": connected}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
     if action == "shutdown":
         return {"ok": True}, False
     return {"ok": False, "error": "unknown action"}, True
@@ -1869,6 +1932,20 @@ def _cleanup_dead_codex_daemons(workspace: str) -> None:
                 pid = None
             notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
             codex_app_server.kill_pane_daemon(pane)
+
+
+def _cleanup_dead_grok_leaders(workspace: str) -> None:
+    from . import notify_debug, tmux
+    from .adapters import grok_acp
+
+    for pane in grok_acp.list_daemon_panes():
+        if not tmux.is_pane_alive(pane):
+            try:
+                pid: int | None = int(grok_acp.pane_pidfile_path(pane).read_text().strip())
+            except (OSError, ValueError):
+                pid = None
+            notify_debug.emit(workspace, "grok.leader.reap", pane=pane, pid=pid)
+            grok_acp.kill_pane_daemon(pane)
 
 
 def _write_resume_snapshot(workspace: str, team: str) -> None:
@@ -1990,6 +2067,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             if now - last_daemon_cleanup >= 30.0:
                 last_daemon_cleanup = now
                 _cleanup_dead_codex_daemons(workspace)
+                _cleanup_dead_grok_leaders(workspace)
                 try:
                     _write_resume_snapshot(workspace, team)
                 except Exception:

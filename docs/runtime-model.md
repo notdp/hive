@@ -225,6 +225,21 @@ Codex has no transcript/JCL probe. A daemon-backed pane reports natively (see
 "Codex Native Runtime" below); an embedded (daemon-less) codex is unsupported
 and reads as `unknown_evidence`.
 
+### Grok
+
+Grok panes spawned by hive get a per-pane `grok agent leader` under
+`$HIVE_HOME/grok/`. When the leader speaks ACP, busy/turn/input come from
+`session/update` (`_runtimeSource: grok_leader`). Otherwise the sidecar
+falls through to the transcript probe on `updates.jsonl`:
+
+- `tool_open` — `tool_call`
+- `user_prompt_pending` — `user_message_chunk`
+- `assistant_text_idle` — agent text/thought without a later closer
+- `turn_closed` — `_x.ai/session/update` `turn_completed`
+
+Identity for tool children is `$HIVE_HOME/identity.json` (session/thread/leader
+pid → pane). Hive does not rewrite `TMUX_PANE` on the grok leader.
+
 ## Codex Native Runtime (app-server source)
 
 A born-connected codex pane — hive-spawned, or launched through `hive codex` /

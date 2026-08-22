@@ -20,8 +20,9 @@ CC_MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
 CODEX_MARKETPLACE = REPO / ".agents" / "plugins" / "marketplace.json"
 HIVE_CC = REPO / "plugins" / "hive" / ".claude-plugin" / "plugin.json"
 HIVE_CODEX = REPO / "plugins" / "hive" / ".codex-plugin" / "plugin.json"
+HIVE_GROK = REPO / "plugins" / "hive" / ".grok-plugin" / "plugin.json"
 CHANNEL_CC = REPO / "plugins" / "hive-channel" / ".claude-plugin" / "plugin.json"
-ALL_MANIFESTS = [CC_MARKETPLACE, CODEX_MARKETPLACE, HIVE_CC, HIVE_CODEX, CHANNEL_CC]
+ALL_MANIFESTS = [CC_MARKETPLACE, CODEX_MARKETPLACE, HIVE_CC, HIVE_CODEX, HIVE_GROK, CHANNEL_CC]
 
 CANONICAL_SKILL = REPO / "plugins" / "hive" / "skills" / "hive" / "SKILL.md"
 
@@ -95,7 +96,7 @@ def test_plugin_versions_track_the_cli_version():
 
     cli_version = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
     assert SEMVER.match(cli_version), cli_version
-    for manifest in (HIVE_CC, HIVE_CODEX, CHANNEL_CC):
+    for manifest in (HIVE_CC, HIVE_CODEX, HIVE_GROK, CHANNEL_CC):
         assert _load(manifest)["version"] == cli_version, manifest
 
 

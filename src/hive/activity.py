@@ -294,6 +294,31 @@ def _probe_claude_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
     return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
 
 
+def _grok_update(record: dict[str, Any]) -> dict[str, Any] | None:
+    params = record.get("params")
+    if isinstance(params, dict) and isinstance(params.get("update"), dict):
+        return params["update"]
+    return None
+
+
+def _probe_grok_turn_phase(records: list[dict[str, Any]]) -> dict[str, Any]:
+    tail = [_raw_record_summary(record) for record in records]
+    for record in reversed(records):
+        update = _grok_update(record)
+        if not update:
+            continue
+        kind = update.get("sessionUpdate")
+        if kind == "turn_completed":
+            return _phase_payload(reason="turn_closed", evidence_tail=tail)
+        if kind == "tool_call":
+            return _phase_payload(reason="tool_open", evidence_tail=tail)
+        if kind == "user_message_chunk":
+            return _phase_payload(reason="user_prompt_pending", evidence_tail=tail)
+        if kind in {"agent_message_chunk", "agent_thought_chunk"}:
+            return _phase_payload(reason="assistant_text_idle", evidence_tail=tail)
+    return _phase_payload(reason="unknown_evidence", evidence_tail=tail)
+
+
 def probe_transcript_turn_phase(
     cli_name: str,
     transcript: str | Path,
@@ -313,6 +338,8 @@ def probe_transcript_turn_phase(
     # team entry), so it falls through to unknown_evidence below.
     if cli_name == "claude":
         return _probe_claude_turn_phase(records)
+    if cli_name == "grok":
+        return _probe_grok_turn_phase(records)
     return _phase_payload(
         reason="unknown_evidence",
         evidence_tail=[_raw_record_summary(record) for record in records],

@@ -587,7 +587,16 @@ def is_inside_tmux() -> bool:
 
 
 def get_current_pane_id() -> str | None:
-    """Get the pane id of the calling process (per-pane env var)."""
+    """Pane id of the caller.
+
+    Prefer the identity store (session/thread/leader pid). Fall back to
+    tmux's own TMUX_PANE — never treat a forged copy as more authoritative.
+    """
+    from . import identity
+
+    bound = identity.pane_from_caller()
+    if bound:
+        return bound
     return os.environ.get("TMUX_PANE")
 
 

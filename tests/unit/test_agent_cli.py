@@ -16,6 +16,7 @@ def test_normalize_command_strips_path_and_aliases():
 def test_member_role_classifies_agents_and_shells():
     assert agent_cli.member_role("claude") == "agent"
     assert agent_cli.member_role("codex") == "agent"
+    assert agent_cli.member_role("grok") == "agent"
     assert agent_cli.member_role("zsh") == "terminal"
     assert agent_cli.member_role("python3") == "terminal"
 
@@ -23,6 +24,8 @@ def test_member_role_classifies_agents_and_shells():
 def test_profiles_use_expected_skill_commands():
     assert agent_cli.get_profile("claude").skill_cmd == "/{name}"
     assert agent_cli.get_profile("codex").skill_cmd == "${name}"
+    assert agent_cli.get_profile("grok").skill_cmd == "/{name}"
+    assert agent_cli.get_profile("grok").fork_cmd == "grok -r {session_id} --fork-session"
 
 
 def test_detect_profile_for_pane_uses_title_and_tty_processes(monkeypatch):

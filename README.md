@@ -37,13 +37,13 @@ Requires:
 
 - `tmux` (3.2+ is needed for the `hive cvim` / `hive vim` popup helpers)
 - Python 3.11+
-- At least one agent CLI: `claude` or `codex`
+- At least one agent CLI: `claude`, `codex`, or `grok`
 
 ## Start in your agent session
 
 ```bash
 # Inside tmux, start your agent of choice
-$ claude       # or: codex
+$ claude       # or: codex / grok
 
 # In the agent session, type:
 /hive

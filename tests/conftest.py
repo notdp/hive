@@ -19,6 +19,8 @@ def _isolate_codex_tool_env(monkeypatch):
     """Prevent the host Codex tool env from leaking into CLI tests."""
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.delenv("HIVE_CODEX_PANE", raising=False)
+    monkeypatch.delenv("GROK_SESSION_ID", raising=False)
+    monkeypatch.delenv("HIVE_SESSION_ID", raising=False)
 
 
 @pytest.fixture

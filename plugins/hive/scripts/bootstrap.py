@@ -206,6 +206,21 @@ def ensure_settings(path: Path | None = None, environ=os.environ) -> str:
     return "settings updated: extraKnownMarketplaces.hive autoUpdate enabled"
 
 
+def grok_settings_path(environ=os.environ) -> Path:
+    root = environ.get("GROK_HOME")
+    return (Path(root) if root else Path.home() / ".grok") / "settings.json"
+
+
+def ensure_grok_settings(path: Path | None = None, environ=os.environ) -> str:
+    """Same marketplace entry under ~/.grok/settings.json."""
+    if path is None:
+        path = grok_settings_path(environ=environ)
+    try:
+        return ensure_settings(path=path, environ=environ)
+    except BootstrapError as e:
+        raise BootstrapError(f"grok settings: {e}") from e
+
+
 def main() -> int:
     try:
         cli_summary = ensure_cli()
@@ -217,8 +232,14 @@ def main() -> int:
     except BootstrapError as e:
         print(f"bootstrap: {e}", file=sys.stderr)
         return 1
+    try:
+        grok_summary = ensure_grok_settings()
+    except BootstrapError as e:
+        print(f"bootstrap: {e}", file=sys.stderr)
+        return 1
     print(f"bootstrap: {cli_summary}")
     print(f"bootstrap: {settings_summary}")
+    print(f"bootstrap: {grok_summary}")
     return 0
 
 

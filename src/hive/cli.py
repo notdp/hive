@@ -24,7 +24,7 @@ from . import notify_ui
 from . import plugin_manager
 from . import tmux
 from .agent import AGENT_STARTUP_TIMEOUT, Agent, _submit_interactive_text
-from .agent_cli import AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
+from .agent_cli import AGENT_CLI_CHOICES, AGENT_CLI_NAMES, anti_peer_cli, detect_profile_for_pane, family_for_pane, member_role_for_pane, normalize_command, peer_cli_for_family, resolve_session_id_for_pane
 from .team import HIVE_HOME, LEAD_AGENT_NAME, Team
 
 
@@ -71,6 +71,7 @@ _COMMAND_HELP_SECTIONS = {
     # Launchers — hive-managed claude/codex entry points + shell integration.
     "claude": "Launchers",
     "codex": "Launchers",
+    "grok": "Launchers",
     "shell-init": "Launchers",
 }
 _COMMAND_HELP_SECTION_ORDER = [
@@ -121,7 +122,7 @@ hive spawn claude                            # bring up a new agent pane
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "resume-hint", "skills", "worktree", "ls"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "grok", "resume-hint", "skills", "worktree", "ls"}
 
 
 class SectionedHelpGroup(click.Group):
@@ -1398,6 +1399,26 @@ def _require_codex_daemon_backed(pane: str) -> None:
     )
 
 
+def _require_grok_leader_backed(pane: str) -> None:
+    if not pane:
+        return
+    profile = detect_profile_for_pane(pane)
+    if not profile or profile.name != "grok":
+        return
+    from .adapters import grok_acp
+
+    if grok_acp.pane_socket_path(pane).exists():
+        return
+    _fail(
+        "this grok has no pane-local leader; hive will not forge TMUX_PANE "
+        "to fake identity.\n"
+        "make future grok launches hive-managed:\n"
+        "  grep -q 'hive shell-init' ~/.zshrc || "
+        "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
+        "then: exit grok and run `hive grok` (or just `grok` after shell-init)."
+    )
+
+
 def _run_duo_init(validator_cli: str | None) -> None:
     """Shared callback body for the equivalent `hive init` / `hive duo init`."""
     if not tmux.is_inside_tmux():
@@ -1406,8 +1427,9 @@ def _run_duo_init(validator_cli: str | None) -> None:
     if not current_pane:
         _fail("cannot determine current pane")
     if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex (this becomes the worker)")
+        _fail("current pane must be running claude / codex / grok (this becomes the worker)")
     _require_codex_daemon_backed(current_pane)
+    _require_grok_leader_backed(current_pane)
 
     result = _create_standalone_duo(current_pane=current_pane, validator_cli=validator_cli)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
@@ -1416,7 +1438,7 @@ def _run_duo_init(validator_cli: str | None) -> None:
 @cli.command("init")
 @click.option(
     "--validator-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(AGENT_CLI_CHOICES),
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
@@ -1579,7 +1601,7 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
-@click.option("--cli", "cli_name", type=click.Choice(["claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
+@click.option("--cli", "cli_name", type=click.Choice(AGENT_CLI_CHOICES), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
           cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
     """Spawn an agent pane.
@@ -2815,7 +2837,7 @@ def _create_standalone_duo(
 @duo_cmd.command("init")
 @click.option(
     "--validator-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(AGENT_CLI_CHOICES),
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
@@ -3632,7 +3654,7 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @squad_cmd.command("init")
 @click.option(
     "--peer-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(AGENT_CLI_CHOICES),
     default=None,
     help="CLI for challenger (default: anti-family of current pane's CLI)",
 )
@@ -3649,7 +3671,7 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @click.option(
     "--worker",
     "worker_cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(AGENT_CLI_CHOICES),
     default=None,
     help="CLI for this squad's duo workers (default: orch's family; validator takes the anti-family review seat). e.g. --worker codex for backend-heavy squads.",
 )
@@ -5038,8 +5060,67 @@ def claude_cmd(ctx: click.Context):
     _exec_claude_managed(args)
 
 
+_GROK_PASSTHROUGH_SUBCOMMANDS = (
+    "agent", "completions", "dashboard", "doctor", "du", "disk-usage",
+    "export", "help", "inspect", "leader", "login", "logout", "mcp",
+    "memory", "models", "plugin", "sessions", "setup", "trace", "update",
+    "version", "v", "worktree", "wrap",
+)
+
+
+def _grok_subcommand(args: list[str]) -> str | None:
+    for a in args:
+        if a == "--":
+            return None
+        if a.startswith("-"):
+            continue
+        return a
+    return None
+
+
+def _exec_grok_managed(args: list[str]) -> None:
+    """Replace this process with grok bound to a per-pane leader socket.
+
+    Does not forge TMUX_PANE. The leader pid is recorded in the identity
+    store so tool children can resolve their pane without env rewriting.
+    """
+    from .adapters import grok_acp
+
+    def _raw() -> None:
+        os.execvp("grok", ["grok", *args])
+
+    pane = tmux.get_current_pane_id() or ""
+    if not pane or not tmux.is_inside_tmux():
+        _raw()
+    if _grok_subcommand(args) in _GROK_PASSTHROUGH_SUBCOMMANDS:
+        _raw()
+    if any(a in {"--help", "-h", "--version", "-v", "-p", "--single"} for a in args):
+        _raw()
+    if any(a == "--leader-socket" or a.startswith("--leader-socket=") for a in args):
+        _raw()
+    if not grok_acp.spawn_daemon(pane):
+        _raw()
+    sock = grok_acp.pane_socket_path(pane)
+    argv = ["grok", "--leader-socket", str(sock), *args]
+    os.execvp("grok", argv)
+
+
+@cli.command(
+    "grok",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
+)
+@click.pass_context
+def grok_cmd(ctx: click.Context):
+    """Launch grok bound to a per-pane leader (hive-managed).
+
+    Usually invoked through `hive shell-init`. All arguments are forwarded
+    to grok. Replaces the current process and never returns on success.
+    """
+    _exec_grok_managed(list(ctx.args))
+
+
 @cli.command("resume-hint", hidden=True)
-@click.argument("cli_name", type=click.Choice(["claude", "codex"]))
+@click.argument("cli_name", type=click.Choice(AGENT_CLI_CHOICES))
 def resume_hint_cmd(cli_name: str):
     """Print a cd-ready resume command for the session this pane just ran.
 
@@ -5069,6 +5150,11 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
     if cli_name == "codex":
         session_id = _pane_codex_session_id(pane)
         resume_cmd = "codex resume"
+    elif cli_name == "grok":
+        from .adapters import grok_acp
+
+        session_id = grok_acp.session_id_for_pane(pane) or _member_snapshot_session_id(team, agent)
+        resume_cmd = "grok --resume"
     else:
         session_id = _member_snapshot_session_id(team, agent)
         resume_cmd = "claude --resume"
@@ -5208,6 +5294,32 @@ function claude {
   hive resume-hint claude 2>/dev/null || true
   return $_hive_rc
 }
+
+function grok {
+  if [ -z "$TMUX" ]; then command grok "$@"; return; fi
+  _hive_sub=
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      --) break ;;
+      -*) continue ;;
+      *) _hive_sub="$_hive_a"; break ;;
+    esac
+  done
+  case "$_hive_sub" in
+    %(grok_passthrough)s)
+      command grok "$@"; return ;;
+  esac
+  for _hive_a in "$@"; do
+    case "$_hive_a" in
+      --help|-h|--version|-v|-p|--single)
+        command grok "$@"; return ;;
+    esac
+  done
+  if ! command -v hive >/dev/null 2>&1; then command grok "$@"; return; fi
+  if hive grok "$@"; then _hive_rc=0; else _hive_rc=$?; fi
+  hive resume-hint grok 2>/dev/null || true
+  return $_hive_rc
+}
 """
 
 _SHELL_INIT_FISH = """\
@@ -5300,6 +5412,45 @@ function claude
     hive resume-hint claude 2>/dev/null
     return $_hive_rc
 end
+
+function grok
+    if test -z "$TMUX"
+        command grok $argv
+        return
+    end
+    set -l _hive_sub ""
+    for a in $argv
+        switch "$a"
+            case --
+                break
+            case '-*'
+                continue
+            case '*'
+                set _hive_sub "$a"
+                break
+        end
+    end
+    switch "$_hive_sub"
+        case %(grok_passthrough)s
+            command grok $argv
+            return
+    end
+    for a in $argv
+        switch "$a"
+            case --help -h --version -v -p --single
+                command grok $argv
+                return
+        end
+    end
+    if not type -q hive
+        command grok $argv
+        return
+    end
+    hive grok $argv
+    set -l _hive_rc $status
+    hive resume-hint grok 2>/dev/null
+    return $_hive_rc
+end
 """
 
 
@@ -5328,6 +5479,7 @@ def shell_init_cmd(shell: str):
             "passthrough": " ".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
             "claude_passthrough": " ".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
             "claude_flag_passthrough": " ".join(claude_flags),
+            "grok_passthrough": " ".join(_GROK_PASSTHROUGH_SUBCOMMANDS),
         }, nl=False)
     else:
         # zsh and bash share this syntax; case patterns use `|`. The ksh-style
@@ -5339,6 +5491,7 @@ def shell_init_cmd(shell: str):
             "passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
             "claude_passthrough": "|".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
             "claude_flag_passthrough": "|".join(claude_flags),
+            "grok_passthrough": "|".join(_GROK_PASSTHROUGH_SUBCOMMANDS),
         }, nl=False)
 
 

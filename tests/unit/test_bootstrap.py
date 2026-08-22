@@ -308,5 +308,6 @@ def test_main_runs_both_phases_in_order(monkeypatch, capsys):
     order = []
     monkeypatch.setattr(bootstrap, "ensure_cli", lambda **kw: order.append("cli") or "cli ok")
     monkeypatch.setattr(bootstrap, "ensure_settings", lambda **kw: order.append("settings") or "s ok")
+    monkeypatch.setattr(bootstrap, "ensure_grok_settings", lambda **kw: order.append("grok") or "g ok")
     assert bootstrap.main() == 0
-    assert order == ["cli", "settings"]
+    assert order == ["cli", "settings", "grok"]
