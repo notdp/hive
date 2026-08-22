@@ -19,6 +19,10 @@ def _isolate_codex_tool_env(monkeypatch):
     """Prevent the host Codex tool env from leaking into CLI tests."""
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.delenv("HIVE_CODEX_PANE", raising=False)
+    # And the host Claude config tree: the session registry / transcripts must
+    # come from a fixture, never the developer's real ~/.claude or a dev lane.
+    monkeypatch.delenv("CLAUDE_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
 @pytest.fixture

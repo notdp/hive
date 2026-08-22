@@ -31,7 +31,11 @@ from .base import (
 
 
 def _claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
+    # One resolver for every reader of the claude config tree (delivery reads
+    # the session registry through the same function).
+    from .claude_sessions import _config_dir
+
+    return _config_dir()
 
 
 class ClaudeAdapter:

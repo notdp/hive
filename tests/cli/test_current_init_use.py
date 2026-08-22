@@ -759,7 +759,7 @@ def test_register_rolls_back_everything_when_native_join_refused(
     assert not ctx.exists()                    # saved context rolled back
 
     # a later retry starts clean and succeeds
-    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: "mcpWriteAccepted")
+    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: "udsWriteAccepted")
     agent = cli_mod._register_agent_member(
         t,
         pane_id="%42",

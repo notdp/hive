@@ -11,7 +11,7 @@ another terminal — and the only such path a codex member has: it carries no
 
 The registry layout and the inbox line shape are what Claude Code does today
 (observed on 2.1.237), not a published contract. Every read here is defensive,
-and :func:`send` claims only that a live listener accepted the frame: whether
+and :func:`send` claims only that the socket accepted the bytes: whether
 the session's ``crossSessionInbound`` setting then delivers or holds it is the
 receiving session's decision, invisible from here.
 """
@@ -30,6 +30,8 @@ ACCEPTED_UDS_WRITE = "udsWriteAccepted"
 WRITE_TIMED_OUT = "udsWriteTimedOut"
 _CONNECT_TIMEOUT = 2.0
 _WRITE_TIMEOUT = 10.0
+# The sidecar submit budget must cover a full send() worst case.
+SUBMIT_TIMEOUT = _CONNECT_TIMEOUT + _WRITE_TIMEOUT
 
 
 # Transcript bytes scanned for the desktop title: the `custom-title` record is
@@ -165,6 +167,37 @@ def list_sessions() -> list[ClaudeSession]:
         ))
     rows.sort(key=lambda s: (s.name, s.pid))
     return rows
+
+
+def session_for_pid(pid: int | None) -> ClaudeSession | None:
+    """Registry entry for the session whose process is *pid*.
+
+    The registry file is named by the pid, so member delivery reads exactly
+    one file — no directory scan, no title lookup (a member is addressed by
+    its pane, never by a human-facing title).
+    """
+    if not pid:
+        return None
+    try:
+        data = json.loads((_registry_dir() / f"{pid}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    name = str(data.get("name") or "")
+    sock = str(data.get("messagingSocketPath") or "")
+    # The socket file must exist too: /tmp/cc-socks keeps orphans from killed
+    # sessions, and spawn readiness leans on this entry being deliverable.
+    if not name or not sock or not _pid_alive(pid) or not os.path.exists(sock):
+        return None
+    return ClaudeSession(
+        name=name,
+        pid=pid,
+        cwd=str(data.get("cwd") or ""),
+        kind=str(data.get("kind") or ""),
+        socket_path=sock,
+        session_id=str(data.get("sessionId") or ""),
+    )
 
 
 def own_socket() -> str:

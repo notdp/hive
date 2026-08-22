@@ -36,7 +36,7 @@ def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> s
 
 
 class DeliveryError(RuntimeError):
-    """A native transport (codex daemon / claude channel) did not accept the
+    """A native transport (codex daemon / claude inbox) did not accept the
     message. Normal hive delivery never falls back to keystrokes; callers
     surface this as an explicit submit failure (injectStatus=failed)."""
 
@@ -100,23 +100,29 @@ def _resolve_profile_name(pane_id: str, cli: str) -> str:
     return cli
 
 
-_CHANNEL_NOTICE_GRACE = 4.0
+_INBOX_NOTICE_GRACE = 6.0
+# The inbox registers at process start — BEFORE the folder-trust / MCP-consent
+# dialogs — so registration alone must not end the drive: a modal could still
+# be blocking the TUI. After the inbox is proven, the loop keeps answering
+# prompts until the banner shows, or the screen stays prompt-free this long.
+_PROMPT_SETTLE = 1.5
 
 
-def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
+def _drive_claude_startup(pane_id: str, ready_text: str) -> bool:
     """Answer Claude's one-shot startup prompts (folder trust, MCP-server
     consent for the project's own servers -- each defaults to the safe first
-    option) until the channel server reports ready.
+    option) until the session has bound its cross-session inbox AND the TUI is
+    past its startup dialogs.
 
     Spawn-time startup-consent driving only -- never message delivery. The
-    success signal is the pane's ready marker, written by the channel server
-    itself once its socket is listening (the plugin-provided channel loads
-    with no consent dialog, so a running server means the channel is live).
-    Returns ``False`` when Claude reached ready (or the deadline)
-    without the marker appearing -- the pane cannot receive hive messages and
-    spawn must fail. The caller cleared any stale marker before launch.
+    delivery signal is the session's registry entry appearing for the pane's
+    claude process: claude binds the inbox itself, so a registered session
+    means hive can deliver. Returns ``False`` when Claude reached ready (or
+    the deadline) without an inbox -- the pane cannot receive hive messages
+    and spawn must fail.
     """
-    from .adapters import claude_channel
+    from .adapters import claude_sessions
+    from .agent_cli import claude_pid_for_pane
 
     prompts = (
         "trust this folder",
@@ -124,23 +130,37 @@ def _drive_claude_channel_startup(pane_id: str, ready_text: str) -> bool:
         "Use this MCP server",
     )
     deadline = time.time() + AGENT_STARTUP_TIMEOUT
+    inbox_ok = False
     ready_at: float | None = None
+    settled_at: float | None = None
     while time.time() < deadline:
-        if claude_channel.is_ready(pane_id):
-            return True
         screen = tmux.capture_pane(pane_id, lines=80)
         if any(p in screen for p in prompts):
             tmux.send_key(pane_id, "Enter")
             ready_at = None
+            settled_at = None
             time.sleep(0.6)
             continue
-        if ready_text in screen:
+        if not inbox_ok:
+            pid = claude_pid_for_pane(pane_id)
+            if pid and claude_sessions.session_for_pid(pid) is not None:
+                inbox_ok = True
+        if inbox_ok:
+            if ready_text in screen:
+                return True  # banner up, no dialog on screen
+            # A resumed session never renders the banner: a prompt-free screen
+            # holding steady is the best remaining "past the dialogs" signal.
+            if settled_at is None:
+                settled_at = time.time()
+            elif time.time() - settled_at > _PROMPT_SETTLE:
+                return True
+        elif ready_text in screen:
             if ready_at is None:
                 ready_at = time.time()
-            elif time.time() - ready_at > _CHANNEL_NOTICE_GRACE:
-                return False  # TUI is up but the channel server never bound
+            elif time.time() - ready_at > _INBOX_NOTICE_GRACE:
+                return False  # TUI is up but the session never bound an inbox
         time.sleep(0.4)
-    return claude_channel.is_ready(pane_id)
+    return inbox_ok
 
 
 def _wait_codex_thread_ready(
@@ -230,23 +250,6 @@ class Agent:
 
         resolved_model = model
 
-        # Every claude session (fresh, resume, fork — each is a new process
-        # picking up the launch flags) registers a per-pane MCP "channel" so
-        # hive can push <HIVE> messages over a socket. Delivery is
-        # channel-only: when the channel config cannot be written, the pane
-        # could never receive messages, so spawn fails before a pane is even
-        # created instead of leaving an undeliverable agent behind.
-        channel_flags: list[str] = []
-        if cli == "claude":
-            from .adapters import claude_channel
-            channel_flags = claude_channel.prepare_pane(cwd)
-            if not channel_flags:
-                raise RuntimeError(
-                    f"claude channel could not be registered in {cwd} "
-                    "(see [hive-channel] stderr for the reason); claude "
-                    "delivery is channel-only, refusing to spawn an "
-                    "undeliverable pane"
-                )
 
         if split_window:
             pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
@@ -306,8 +309,6 @@ class Agent:
                 if workspace:
                     from .sidecar import request_connect_codex
                     request_connect_codex(workspace, pane_id)
-        if channel_flags:
-            cmd_parts.extend(channel_flags)
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
@@ -359,11 +360,6 @@ class Agent:
         # After the CLI exits the pane keeps its shell, so print the cd-ready
         # resume hint there — the same tail `hclaude` / `hcodex` run.
         cmd = f"{cmd} && {' '.join(cmd_parts)}; hive resume-hint {cli} 2>/dev/null || true"
-        if channel_flags:
-            # A stale marker from a previous claude in this pane id must not
-            # be mistaken for the new server's readiness.
-            from .adapters import claude_channel
-            claude_channel.clear_ready(pane_id)
         tmux.send_keys(pane_id, cmd)
 
         agent = cls(
@@ -377,28 +373,29 @@ class Agent:
             cli=cli,
         )
 
-        if channel_flags:
-            if not _drive_claude_channel_startup(pane_id, ready_text):
-                from .adapters import claude_channel
-                claude_channel.clear_ready(pane_id)
+        if cli == "claude":
+            if not _drive_claude_startup(pane_id, ready_text):
                 if split_window:
                     tmux.kill_pane(pane_id)
                 raise RuntimeError(
-                    f"claude started in pane {pane_id} but never registered "
-                    "the hive channel; claude delivery is channel-only, "
-                    "refusing to keep an undeliverable pane (channels "
-                    "verified on Claude Code 2.1.198 with Anthropic auth; "
-                    "older versions or Bedrock/Vertex may not support them)"
+                    f"claude started in pane {pane_id} but never bound a "
+                    "cross-session inbox; claude delivery is inbox-only, "
+                    "refusing to keep an undeliverable pane (needs Claude "
+                    "Code >= 2.1.224, and messaging stays off when "
+                    "DISABLE_TELEMETRY / DO_NOT_TRACK / DISABLE_GROWTHBOOK / "
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables "
+                    "feature-flag evaluation; a held member also needs "
+                    "crossSessionInbound left at its default or 'accept')"
                 )
 
-        # Readiness comes from runtime signals, not screen text: the channel
-        # marker (claude, proven above) and the app-server thread (codex
+        # Readiness comes from runtime signals, not screen text: the inbox
+        # registration (claude, proven above) and the app-server thread (codex
         # daemon) can only appear once the agent is actually up. A resumed
         # claude session never renders the welcome banner, so a banner wait
         # here ate its full timeout on every resume. Only the embedded codex
         # fork (no daemon) has nothing better than the banner.
-        if channel_flags:
-            pass
+        if cli == "claude":
+            pass  # inbox registration proven above
         elif codex_daemon_native:
             _wait_codex_thread_ready(pane_id)
         elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
@@ -413,13 +410,13 @@ class Agent:
         """Send a prompt to the agent; return the accepted-transport class.
 
         Delivery is native-transport-only: codex goes through the per-pane
-        daemon's ``turn/start`` RPC, claude through its per-pane MCP channel
+        daemon's ``turn/start`` RPC, claude through its session's own inbox
         socket. Neither touches the composer, and there is no keystroke
         fallback on any failure — a transport that did not accept the message
         raises :class:`DeliveryError` (callers surface it as an explicit
         submit failure). The returned classification names which transport
-        boundary was crossed (``turnStartAccepted`` / ``mcpWriteAccepted`` /
-        ``legacySocketAccepted``); none of them proves the agent processed
+        boundary was crossed (``turnStartAccepted`` / ``udsWriteAccepted``);
+        none of them proves the agent processed
         the message — that final confirmation only ever comes from the
         target's transcript.
         """
@@ -451,14 +448,28 @@ class Agent:
                 )
             return accepted
         if profile_name == "claude":
-            from .adapters import claude_channel
+            from .adapters import claude_sessions
+            from .agent_cli import claude_pid_for_pane
 
-            accepted = claude_channel.send_to_pane(self.pane_id, text)
+            session = claude_sessions.session_for_pid(claude_pid_for_pane(self.pane_id))
+            if session is None:
+                raise DeliveryError(
+                    f"claude pane {self.pane_id} has no cross-session inbox "
+                    "(claude < 2.1.224, messaging disabled by env, or the "
+                    "session is still starting); claude delivery is inbox-only"
+                )
+            accepted = claude_sessions.send(
+                session.socket_path, text, sender=f"hive:{self.name}"
+            )
+            if accepted == claude_sessions.WRITE_TIMED_OUT:
+                raise DeliveryError(
+                    f"claude pane {self.pane_id} (session {session.name}) accepted "
+                    "the connection but did not drain the message in time"
+                )
             if accepted is None:
                 raise DeliveryError(
-                    f"claude pane {self.pane_id} channel transport failed "
-                    "(marker/socket missing, write error, or no MCP-write "
-                    "receipt); claude delivery is channel-only"
+                    f"claude pane {self.pane_id} (session {session.name}) is not "
+                    "listening on its inbox; the message stays on the bus"
                 )
             return accepted
         raise DeliveryError(
