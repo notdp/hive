@@ -33,6 +33,19 @@
 
 不要因为“刚收到过对方消息”就用 `reply`。如果现在说的是新任务或新汇报，用 `send` 开新 thread。
 
+### 和 team 外的 Claude session 互通
+
+human 说“给 xxx 这个 session 发一条”时（桌面 Claude Code、另一个终端），用：
+
+```bash
+hive ccd ls                               # 列出本机能收消息的 Claude session：name、桌面标题 title、pid
+hive ccd send "<title 或 name>" "<消息>"
+```
+
+human 通常说的是桌面标题（`title`），直接用它；重名时用 `name` 或 `pid`。消息里有反引号、`$(...)` 或多行内容时，先写文件再 `hive ccd send "<title>" "$(cat /tmp/note.md)"`——双引号里的反引号和 `$(...)` 会被 shell 执行，`$(cat ...)` 的输出不会再被展开。返回 `accepted` 只代表对方进程收下了这一帧；按对方设置，它可能在下一个 tool call 之间读到，也可能停在待接受状态。消息显示为来自 `hive:<team>.<agent>`。
+
+反过来，桌面 session 也会给你发：你收到 `from=ccd:<label>` 的 `<HIVE>` 时，**回它用 `hive ccd send "<label>" "<回复>"`（label 就是 `ccd:` 后面的部分），不要 `hive reply`**——它不是成员，没有 thread 可锚。
+
 ### root 消息 + shell 安全
 
 root send 的 body 只放短摘要。多行、Markdown、代码、长证据全部放 artifact。

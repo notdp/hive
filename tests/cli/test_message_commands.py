@@ -405,8 +405,11 @@ def test_reply_rejects_legacy_msg_option_with_positional_hint(runner, configure_
     assert called == []
 
 
-def test_send_requires_tmux(runner, monkeypatch):
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+def test_send_requires_tmux(runner, configure_hive_home, monkeypatch):
+    # Hermetic: the root gate now admits a Claude-session guest (identified by
+    # its inbox-socket env); a plain shell outside tmux must still be told to
+    # start tmux, so the host session must not leak into this test.
+    configure_hive_home(tmux_inside=False)
 
     result = runner.invoke(cli, ["send", "gpt", "hello from current context"])
 

@@ -135,6 +135,10 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+        # The test process may itself run inside a desktop Claude session; its
+        # inbox socket must never make the guest-send gate treat a test as
+        # that session.
+        monkeypatch.delenv("CLAUDE_CODE_MESSAGING_SOCKET", raising=False)
         monkeypatch.setattr("hive.team.HIVE_HOME", hive_home)
         monkeypatch.setattr("hive.agent.detect_current_session_id", lambda _cwd, model="", pane_id="": None)
         monkeypatch.setattr("hive.cli.HIVE_HOME", hive_home)
