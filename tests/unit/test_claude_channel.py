@@ -289,7 +289,7 @@ def test_prepare_pane_absent_binding_adds_published_marketplace(
     fake = _FakeClaudePlugin(marketplaces=[])
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert flags == ["--channels=plugin:hive-channel@hive"]
     assert fake.calls == [
         ["marketplace", "list", "--json"],
         ["marketplace", "add", "notdp/hive"],
@@ -328,7 +328,7 @@ def test_prepare_pane_published_binding_installed_is_subprocess_free(
     fake = _FakeClaudePlugin(marketplaces=_PUBLISHED)
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert flags == ["--channels=plugin:hive-channel@hive"]
     assert fake.calls == [["marketplace", "list", "--json"]]
     assert not (cc._channel_dir() / "marketplace").exists()
 
@@ -340,7 +340,7 @@ def test_prepare_pane_converged_repeat_stays_on_fast_path(
     _patch_plugin_cmd(monkeypatch, fake)
     first = cc.prepare_pane(str(tmp_path))
     second = cc.prepare_pane(str(tmp_path))
-    assert first == second == ["--channels", "plugin:hive-channel@hive"]
+    assert first == second == ["--channels=plugin:hive-channel@hive"]
     assert fake.calls == [["marketplace", "list", "--json"]] * 2
     assert not (cc._channel_dir() / "marketplace").exists()
 
@@ -351,7 +351,7 @@ def test_prepare_pane_published_binding_missing_plugin_self_heals_once(
     fake = _FakeClaudePlugin(marketplaces=_PUBLISHED)
     _patch_plugin_cmd(monkeypatch, fake)
     flags = cc.prepare_pane(str(tmp_path))
-    assert flags == ["--channels", "plugin:hive-channel@hive"]
+    assert flags == ["--channels=plugin:hive-channel@hive"]
     assert ["install", "hive-channel@hive"] in fake.calls
     assert all(c[0] != "update" for c in fake.calls)
     assert all(c[:2] != ["marketplace", "add"] for c in fake.calls)

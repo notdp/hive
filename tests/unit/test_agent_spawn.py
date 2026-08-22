@@ -15,7 +15,7 @@ from hive.agent import (
 # exercise its screen-capture loop instead of the fixture's success stub.
 _REAL_CHANNEL_STARTUP = agent_mod._drive_claude_channel_startup
 
-_CHANNEL_FLAGS = ["--channels", "plugin:hive-channel@hive"]
+_CHANNEL_FLAGS = ["--channels=plugin:hive-channel@hive"]
 
 
 def _pin_cli_probe(monkeypatch, name):
@@ -224,17 +224,33 @@ def test_channel_startup_driver_false_on_timeout_without_marker(monkeypatch):
     assert agent_mod._drive_claude_channel_startup("%9", "Claude Code") is False
 
 
-def test_spawn_claude_separates_dashed_prompt_with_double_dash(monkeypatch):
+@pytest.mark.parametrize("cli_name", ["claude", "codex"])
+def test_spawn_rejects_prompt_starting_with_dash(monkeypatch, cli_name):
+    # the launch goes through `hive <cli>`, whose parser strips any `--`
+    # separator, so a dashed prompt would be read as a flag: refuse it
     calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
 
-    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
-                is_first=True, cli="claude", skill="none", prompt="--edge prompt")
+    with pytest.raises(ValueError, match="must not start with '-'"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    is_first=True, cli=cli_name, skill="none", prompt="--edge prompt")
 
-    startup_cmd = calls[0]
-    # the channel flags are variadic: without `--` claude would consume the
-    # positional prompt as a flag value and abort launch
-    assert " -- " in startup_cmd
-    assert startup_cmd.index(" -- ") < startup_cmd.index("--edge prompt")
+
+@pytest.mark.parametrize("cli_name", ["claude", "codex"])
+def test_spawn_pane_command_runs_hive_launcher_then_resume_hint(monkeypatch, cli_name):
+    # the pane runs hive's managed launcher as the binary (never the rc's
+    # hclaude/hcodex function) and prints the cd-ready hint once the CLI exits
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/work/dir",
+                is_first=True, cli=cli_name, skill="none")
+
+    launch = calls[0].split(" && ")[-1]
+    assert launch.startswith(f"hive {cli_name} ")
+    assert launch.endswith(f"; hive resume-hint {cli_name} 2>/dev/null || true")
+    if cli_name == "claude":
+        assert "--channels=plugin:hive-channel@hive" in launch
 
 
 def test_spawn_claude_resume_registers_channel(monkeypatch):
@@ -368,9 +384,8 @@ def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "codex" in startup_cmd
-    assert "fork" in startup_cmd
-    assert "sess-abc" in startup_cmd
+    assert startup_cmd.split(" && ")[-1].startswith(
+        "hive codex -c check_for_update_on_startup=false fork 'sess-abc'")
     # codex fork does not take --model; model flag should not appear
     assert "-m" not in startup_cmd
 
@@ -675,17 +690,18 @@ def test_spawn_claude_fork_and_resume_session_flags(monkeypatch):
     assert "--fork-session" not in resume_cmd
 
 
-def test_spawn_codex_fork_contract_unchanged(monkeypatch):
+def test_spawn_codex_fork_delegates_to_hive_codex(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    # fork never touches the daemon; the default spawn_daemon mock returning
-    # False must not matter.
+    # spawn itself never touches the daemon for a fork (the pane's `hive codex`
+    # binds it); the default spawn_daemon mock returning False must not matter.
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="codex", session_id="roll-1")
 
-    cmd = calls[0]
-    assert "fork 'roll-1'" in cmd or "fork roll-1" in cmd
-    assert "--remote" not in cmd
-    assert "resume" not in cmd
+    launch = calls[0].split(" && ")[-1].split("; hive resume-hint")[0]
+    assert launch.startswith("hive codex ")
+    assert "fork 'roll-1'" in launch
+    assert "--remote" not in launch  # the daemon binding is `hive codex`'s job
+    assert "resume" not in launch
 
 
 def test_spawn_codex_resume_is_daemon_native(monkeypatch):

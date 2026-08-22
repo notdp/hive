@@ -1,7 +1,6 @@
 """CLI tests for `hive claude` managed launch and its shell-init function."""
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -12,7 +11,7 @@ from hive.cli import cli
 
 pytestmark = pytest.mark.cli
 
-_FLAGS = ["--channels", "plugin:hive-channel@hive"]
+_FLAGS = ["--channels=plugin:hive-channel@hive"]
 
 
 class _ExecCalled(Exception):
@@ -165,7 +164,7 @@ def test_claude_double_dash_positional_is_a_prompt(monkeypatch):
     assert calls == [["claude", "claude", "--", "daemon", *_FLAGS]]
 
 
-@pytest.mark.parametrize("flag", ["-p", "--print", "--help", "--version"])
+@pytest.mark.parametrize("flag", ["-p", "--print", "-h", "--help", "-V", "--version"])
 def test_claude_noninteractive_flags_run_raw(runner, monkeypatch, flag):
     # a -p/--print run has no interactive session for hive to message;
     # --help/--version never start a session
@@ -191,95 +190,55 @@ def test_claude_channel_unavailable_runs_raw(runner, monkeypatch):
     assert calls == [["claude", "claude", "hello"]]
 
 
-def test_shell_init_zsh_emits_claude_function(runner):
+@pytest.mark.parametrize("chan", [
+    ["--channels", "plugin:hive-channel@hive"],
+    ["--channels=plugin:hive-channel@hive"],
+])
+def test_claude_with_explicit_channels_runs_raw_unchanged(runner, monkeypatch, chan):
+    # the caller already registered its channels (a hive-spawned pane passes
+    # its own flags): re-preparing the pane would clobber that live channel
+    calls = _capture_exec(monkeypatch)
+    cleared = _managed_env(monkeypatch, pane="%99")
+
+    def _fail(_cwd):
+        raise AssertionError("prepare_pane must not run when --channels is given")
+
+    monkeypatch.setattr("hive.adapters.claude_channel.prepare_pane", _fail)
+    runner.invoke(cli, ["claude", "--model", "x", *chan, "--", "prompt"])
+    # click eats the first `--`; everything past it reaches claude untouched
+    assert calls == [["claude", "claude", "--model", "x", *chan, "prompt"]]
+    assert cleared == []  # the caller's readiness marker survives
+
+
+def test_shell_init_zsh_emits_hclaude_launcher(runner):
     result = runner.invoke(cli, ["shell-init", "zsh"])
     assert result.exit_code == 0
     # ksh-style `function name {` bypasses alias expansion of the name in
-    # both zsh and bash, so pre-existing user aliases cannot break the parse
-    assert "function codex {" in result.output
-    assert "function claude {" in result.output
-    # errexit-safe status capture; raw fallback lives inside the launcher
+    # both zsh and bash, so a stray user alias cannot break the parse
+    assert "function hcodex {" in result.output
+    assert "function hclaude {" in result.output
+    # errexit-safe status capture; the raw fallback lives in `hive claude`
     assert 'if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi' in result.output
     assert "command -v hive" in result.output
-    # passthrough guards present for both surfaces
-    assert "agents" in result.output
-    assert "--print" in result.output
+    # the plain command keeps its own meaning: shell-init never redefines it
+    assert "function claude {" not in result.output
+    assert "function codex {" not in result.output
 
 
-def test_shell_init_bash_emits_function_form(runner):
+def test_shell_init_bash_emits_launcher_function_form(runner):
     result = runner.invoke(cli, ["shell-init", "bash"])
     assert result.exit_code == 0
-    assert "function codex {" in result.output
-    assert "function claude {" in result.output
+    assert "function hcodex {" in result.output
+    assert "function hclaude {" in result.output
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_shell_init_bash_survives_existing_aliases(runner):
-    # bash alias-expands function-definition names too when expand_aliases is
-    # on (interactive/bashrc); the function form must survive it
-    script = runner.invoke(cli, ["shell-init", "bash"]).output
-    r = subprocess.run(
-        ["bash", "-c",
-         "shopt -s expand_aliases; "
-         "alias claude='claude --verbose'; alias codex='codex -q'; "
-         'eval "$HIVE_SHELL_INIT" && declare -F claude codex >/dev/null '
-         '&& echo OK'],
-        env={**os.environ, "HIVE_SHELL_INIT": script},
-        capture_output=True, text=True, timeout=15)
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "OK"
-
-
-@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
-def test_shell_init_zsh_survives_existing_claude_alias(runner):
-    # regression: sourcing the integration with a pre-existing alias used to
-    # abort with "defining function based on alias `claude'" + parse error
-    script = runner.invoke(cli, ["shell-init", "zsh"]).output
-    # the script rides in an env var so its own quotes survive untouched
-    r = subprocess.run(
-        ["zsh", "-c",
-         "alias claude='claude --verbose'; alias codex='codex -q'; "
-         'eval "$HIVE_SHELL_INIT" && print -r -- "$+functions[claude] $+functions[codex]"'],
-        env={**os.environ, "HIVE_SHELL_INIT": script},
-        capture_output=True, text=True, timeout=15)
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "1 1"  # both functions defined despite aliases
-
-
-def test_shell_init_fish_emits_claude_function(runner):
+def test_shell_init_fish_emits_hclaude_launcher(runner):
     result = runner.invoke(cli, ["shell-init", "fish"])
     assert result.exit_code == 0
-    assert "function codex" in result.output
-    assert "function claude" in result.output
+    assert "function hcodex" in result.output
+    assert "function hclaude" in result.output
     assert "hive claude $argv" in result.output
     assert "if not type -q hive" in result.output
-
-
-@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
-def test_shell_init_zsh_routes_aliased_subcommand_raw(runner, tmp_path):
-    # end-to-end ghost-session regression: with a user alias injecting a
-    # leading flag, `claude daemon status` must reach the real binary — not
-    # `hive claude`, whose managed exec would spawn an interactive session
-    # with "daemon status" as the prompt
-    script = runner.invoke(cli, ["shell-init", "zsh"]).output
-    log = tmp_path / "calls.log"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\n')
-    (bin_dir / "hive").write_text(f'#!/bin/sh\necho "hive $@" >> {log}\n')
-    for stub in bin_dir.iterdir():
-        stub.chmod(0o755)
-    # the trailing eval forces a fresh parse so the alias actually expands:
-    # zsh parses the whole -c string before the alias command runs
-    r = subprocess.run(
-        ["zsh", "-c",
-         "alias claude='claude --verbose'; "
-         'eval "$HIVE_SHELL_INIT"; eval \'claude daemon status\''],
-        env={**os.environ, "HIVE_SHELL_INIT": script,
-             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
-        capture_output=True, text=True, timeout=15)
-    assert r.returncode == 0, r.stderr
-    assert log.read_text() == "claude --verbose daemon status\n"
 
 
 # --- resume-hint (claude) -----------------------------------------------------
@@ -289,7 +248,7 @@ def test_shell_init_posix_claude_tail_calls_resume_hint(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
     assert 'hive resume-hint claude 2>/dev/null' in out
     assert "return $_hive_rc" in out
-    # claude only: the codex function stays hint-free
+    # the claude hint is emitted once, in the hclaude launcher only
     assert out.count("hive resume-hint claude 2>/dev/null") == 1
 
 
@@ -324,7 +283,7 @@ def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp
     log, bin_dir = _hint_stub_bins(tmp_path)
     r = subprocess.run(
         [shell, "-c",
-         'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"; claude --help; true'],
+         'eval "$HIVE_SHELL_INIT"; hclaude hello; echo "rc=$?"; true'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
              "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
@@ -332,8 +291,7 @@ def test_shell_init_posix_hint_runs_after_claude_and_keeps_exit_code(runner, tmp
     lines = log.read_text().splitlines()
     assert lines[0] == "hive claude hello"  # the launcher IS the claude run (exits 7)
     assert lines[1] == "hive resume-hint claude"  # no second launch in between
-    assert lines[2] == "claude --help"  # passthrough stays raw and hint-free
-    assert len(lines) == 3
+    assert len(lines) == 2
     assert "rc=7" in r.stdout  # the hint call must not eat claude's exit code
 
 
@@ -354,7 +312,7 @@ def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_
     r = subprocess.run(
         ["fish", "-c",
          f'source {shlex.quote(str(script_file))}; '
-         'claude hello; echo "rc=$status"; claude --help; true'],
+         'hclaude hello; echo "rc=$status"; true'],
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
              "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
@@ -362,8 +320,7 @@ def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_
     lines = log.read_text().splitlines()
     assert lines[0] == "hive claude hello"
     assert lines[1] == "hive resume-hint claude"
-    assert lines[2] == "claude --help"
-    assert len(lines) == 3
+    assert len(lines) == 2
     assert "rc=7" in r.stdout
 
 def _fake_snapshot(hive_home, team, members):
@@ -405,7 +362,7 @@ def test_resume_hint_reads_team_snapshot_and_quotes(runner, monkeypatch, tmp_pat
     assert result.exit_code == 0
     assert result.output == (
         "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && claude --resume {shlex.quote(evil_id)}\n"
+        f"  cd {shlex.quote(cwd)} && hive claude --resume {shlex.quote(evil_id)}\n"
     )
 
 
@@ -485,7 +442,7 @@ def test_shell_init_posix_no_relaunch_on_claude_own_exit_code(runner, tmp_path, 
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
     r = subprocess.run(
-        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"'],
+        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; hclaude hello; echo "rc=$?"'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
              "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
@@ -514,7 +471,7 @@ def test_shell_init_fish_no_relaunch_on_claude_own_exit_code(runner, tmp_path, o
         stub.chmod(0o755)
     r = subprocess.run(
         ["fish", "-c",
-         f'source {shlex.quote(str(script_file))}; claude hello; echo "rc=$status"'],
+         f'source {shlex.quote(str(script_file))}; hclaude hello; echo "rc=$status"'],
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
@@ -546,7 +503,7 @@ def test_shell_init_posix_survives_errexit_and_keeps_status(runner, tmp_path, sh
     # errexit inside the whole function body and prove nothing
     r = subprocess.run(
         [shell, "-c",
-         'set -e; eval "$HIVE_SHELL_INIT"; claude hello; echo unreachable'],
+         'set -e; eval "$HIVE_SHELL_INIT"; hclaude hello; echo unreachable'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
              "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
@@ -563,23 +520,26 @@ def test_shell_init_posix_survives_errexit_and_keeps_status(runner, tmp_path, sh
 
 
 @pytest.mark.parametrize("shell", ["zsh", "bash"])
-def test_shell_init_posix_missing_hive_runs_raw(runner, tmp_path, shell):
-    # no hive binary on PATH → straight to `command claude`, no hint attempt
+def test_shell_init_missing_hive_returns_127_and_reports(runner, tmp_path, shell):
+    # hclaude only exists to launch a hive-connected claude: without hive it
+    # says so and returns 127 instead of quietly starting an unmanaged claude
     if shutil.which(shell) is None:
         pytest.skip(f"{shell} not available")
     script = runner.invoke(cli, ["shell-init", shell]).output
     log = tmp_path / "calls.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 7\n')
+    (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $@" >> {log}\nexit 0\n')
     (bin_dir / "claude").chmod(0o755)
     r = subprocess.run(
         # absolute shell path: the child PATH below intentionally lacks the
         # dirs where real hive (and the shells) live
-        [shutil.which(shell), "-c", 'eval "$HIVE_SHELL_INIT"; claude hello; echo "rc=$?"'],
+        [shutil.which(shell), "-c",
+         'eval "$HIVE_SHELL_INIT"; hclaude hello; echo "rc=$?"'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
              "PATH": f"{bin_dir}:/usr/bin:/bin", "TMUX": "stub"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
-    assert log.read_text() == "claude hello\n"
-    assert "rc=7" in r.stdout
+    assert "rc=127" in r.stdout
+    assert "hclaude: hive is not on PATH" in r.stderr
+    assert not log.exists()  # no claude launched behind hive's back

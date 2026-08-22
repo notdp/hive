@@ -31,8 +31,9 @@ npx skills add https://github.com/notdp/hive -g --all
 ## エージェントセッションで起動する
 
 ```bash
-# tmux 内で好きなエージェントを起動
-$ claude       # もしくは: codex
+# 初回のみ: シェルの rc に eval "$(hive shell-init zsh)" を追加
+# tmux 内で hive のランチャーからエージェントを起動
+$ hclaude      # もしくは: hcodex
 
 # エージェントセッションで以下を入力:
 /hive

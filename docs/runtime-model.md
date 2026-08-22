@@ -227,8 +227,8 @@ and reads as `unknown_evidence`.
 
 ## Codex Native Runtime (app-server source)
 
-A born-connected codex pane — hive-spawned, or launched through `hive codex` /
-the `hive shell-init` shell function — runs a per-pane `codex app-server`
+A born-connected codex pane — hive-spawned, or launched through `hcodex` (the
+`hive shell-init` launcher) — runs a per-pane `codex app-server`
 daemon. Hive connects as a second client over that pane's unix socket and reads
 `busy` / `inputState` / `turnPhase` **natively** from the daemon's
 notification stream, instead of reverse-engineering them from the transcript.
@@ -237,8 +237,9 @@ The emitted payload is tagged `_runtimeSource: codex_app_server`.
 This path is taken only when a live per-pane daemon answers. An embedded
 (manually launched, non-daemon) codex has no socket and is deliberately
 unsupported **as a Hive team member**: `hive init` / `hive duo` reject it at
-team entry, and a team-bound `hive fork` / `hive handoff --fork` refuses to
-clone a codex pane (`codex fork` would launch embedded). A standalone embedded
+team entry. A team-bound `hive fork` / `hive handoff --fork` of a codex pane
+launches the clone through `hive codex fork <sid>`, which binds the clone's own
+per-pane daemon, so it joins daemon-backed. A standalone embedded
 codex still runs, but hive reads no state from it — session id stays
 `unresolved`, `turnPhase` stays unknown, and there is no transcript fallback.
 

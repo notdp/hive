@@ -15,10 +15,7 @@ from .agent_cli import resolve_session_id_for_pane
 AGENT_STARTUP_TIMEOUT = 30
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
-CLI_BINS: dict[str, str] = {
-    "claude": "claude",
-    "codex": "codex",
-}
+SUPPORTED_CLIS: tuple[str, ...] = ("claude", "codex")
 
 
 def _shell_escape(s: str) -> str:
@@ -219,8 +216,8 @@ class Agent:
         daemon-native ``resume`` subcommand (a resumed team member is
         first-class, so the embedded shortcut fork uses is not allowed).
         """
-        if cli not in CLI_BINS:
-            raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(CLI_BINS)}")
+        if cli not in SUPPORTED_CLIS:
+            raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(SUPPORTED_CLIS)}")
         if session_mode not in ("fork", "resume"):
             raise ValueError(f"unsupported session_mode '{session_mode}', must be fork or resume")
         cwd = cwd or os.getcwd()
@@ -258,10 +255,13 @@ class Agent:
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
-        bin_path = CLI_BINS[cli]
-        # No `exec`: the CLI runs as the pane shell's foreground child, so
-        # the pane (and a usable shell) survives the CLI exiting.
-        cmd_parts = [_shell_escape(bin_path)]
+        # The pane runs hive's managed launcher (`hive claude` / `hive codex`),
+        # the same path a human's `hclaude` / `hcodex` takes — but invoked as
+        # the binary, not the shell function, so a spawn never depends on the
+        # pane shell's rc having sourced `hive shell-init`. No `exec`: the CLI
+        # runs as the pane shell's foreground child, so the pane (and a usable
+        # shell) survives the CLI exiting.
+        cmd_parts = ["hive", cli]
         codex_daemon_native = False
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
@@ -269,8 +269,11 @@ class Agent:
             # daemon: hive starts the daemon (injecting this pane's TMUX_PANE so
             # shell tools keep the right identity, sharing the real CODEX_HOME)
             # and the TUI joins it via --remote. cwd is passed explicitly
-            # because Remote workspace mode drops config.cwd. Only the fork
-            # handoff shortcut stays embedded (below).
+            # because Remote workspace mode drops config.cwd. The fork shortcut
+            # (below) also goes through `hive codex`, which binds a daemon and
+            # injects --remote itself (verified on codex 0.147.0: the forked
+            # thread is created on and held by that daemon); no production
+            # path forks a codex member yet — the team-fork gate refuses it.
             if not session_id or session_mode == "resume":
                 from .adapters import codex_app_server
                 if not codex_app_server.spawn_daemon(pane_id):
@@ -324,7 +327,7 @@ class Agent:
                     # Daemon flags (--remote/--cd) are already on cmd_parts.
                     cmd_parts.extend(["resume", _shell_escape(session_id)])
                 else:
-                    cmd_parts = [_shell_escape(bin_path), "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
+                    cmd_parts = ["hive", "codex", "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
 
         # Both CLIs accept a positional [prompt] arg (also on resume/fork).
         # Pass skill activation + optional user prompt here so the CLI
@@ -336,11 +339,11 @@ class Agent:
         if prompt:
             initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
         if initial_prompt:
-            if cli == "claude":
-                # Claude's channel flags are variadic: without a `--`
-                # separator the parser consumes the positional prompt as a
-                # flag value and aborts launch.
-                cmd_parts.append("--")
+            # The launch goes through `hive <cli>`, whose parser strips any
+            # `--` separator, so a prompt cannot be protected from being read
+            # as a flag; refuse the one shape that would be.
+            if initial_prompt.startswith("-"):
+                raise ValueError("initial prompt must not start with '-'")
             cmd_parts.append(_shell_escape(initial_prompt))
 
         env_parts: list[str] = []
@@ -353,7 +356,9 @@ class Agent:
             cmd = f"{cmd} && export {' '.join(env_parts)}"
         if pre_cmd_parts:
             cmd = f"{cmd} && {' && '.join(pre_cmd_parts)}"
-        cmd = f"{cmd} && {' '.join(cmd_parts)}"
+        # After the CLI exits the pane keeps its shell, so print the cd-ready
+        # resume hint there — the same tail `hclaude` / `hcodex` run.
+        cmd = f"{cmd} && {' '.join(cmd_parts)}; hive resume-hint {cli} 2>/dev/null || true"
         if channel_flags:
             # A stale marker from a previous claude in this pane id must not
             # be mistaken for the new server's readiness.

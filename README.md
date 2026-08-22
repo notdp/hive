@@ -42,8 +42,9 @@ Requires:
 ## Start in your agent session
 
 ```bash
-# Inside tmux, start your agent of choice
-$ claude       # or: codex
+# one-time setup: eval "$(hive shell-init zsh)" in your shell rc
+# Inside tmux, start your agent through hive's launcher
+$ hclaude      # or: hcodex
 
 # In the agent session, type:
 /hive

@@ -130,13 +130,13 @@ PROFILES: dict[str, CLIProfile] = {
     "claude": CLIProfile(
         name="claude",
         ready_text="Claude Code",
-        fork_cmd="claude -r {session_id} --fork-session",
+        fork_cmd="hive claude -r {session_id} --fork-session",
         skill_cmd="/{name}",
     ),
     "codex": CLIProfile(
         name="codex",
         ready_text="OpenAI Codex",
-        fork_cmd="codex fork {session_id}",
+        fork_cmd="hive codex fork {session_id}",
         skill_cmd="${name}",
     ),
 }

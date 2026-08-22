@@ -82,6 +82,32 @@ def test_codex_passthrough_subcommand_runs_raw(runner, monkeypatch):
     assert calls == [["codex", "codex", "exec", "echo", "hi"]]
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help", "-V", "--version"])
+def test_codex_noninteractive_flags_run_raw(runner, monkeypatch, flag):
+    # --help/--version never start a session: no daemon, codex's own output
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.spawn_daemon",
+        lambda _pane: pytest.fail(f"spawn_daemon must not run for {flag}"),
+    )
+    runner.invoke(cli, ["codex", flag])
+    assert calls == [["codex", "codex", flag]]
+
+
+def test_codex_fork_is_bound_to_daemon(runner, monkeypatch):
+    # `fork` is an interactive launch like `resume`: the managed path binds the
+    # daemon and injects --remote/--cd ahead of the subcommand
+    calls = _capture_exec(monkeypatch)
+    _managed_env(monkeypatch)
+    runner.invoke(cli, ["codex", "-c", "k=v", "fork", "sid-1"])
+    assert calls == [[
+        "codex", "codex", "-c", "check_for_update_on_startup=false",
+        "--remote", "unix:///tmp/ctrl/hive-pane-9.sock", "--cd", os.getcwd(),
+        "-c", "k=v", "fork", "sid-1",
+    ]]
+
+
 def test_codex_passthrough_subcommand_after_global_options(runner, monkeypatch):
     # codex allows global options before the subcommand; -c consumes its value,
     # so `exec` must still be detected as a management subcommand -> raw.
@@ -149,23 +175,22 @@ def test_codex_falls_back_to_raw_when_daemon_fails(runner, monkeypatch):
     assert calls == [["codex", "codex"]]
 
 
-def test_shell_init_zsh_emits_guarded_function(runner):
+def test_shell_init_zsh_emits_hcodex_launcher(runner):
     out = runner.invoke(cli, ["shell-init", "zsh"]).output
     # function form: immune to alias expansion of the name (user aliases)
-    assert "function codex {" in out
-    assert 'if [ -z "$TMUX" ]; then command codex "$@"; return; fi' in out
+    assert "function hcodex {" in out
     assert 'if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi' in out
     assert "command -v hive" in out
-    # management subcommands stay raw
-    assert "app-server" in out and "exec" in out and "--version" in out
+    # plain `codex` keeps its own binary: no wrapper is defined for the bare name
+    assert re.search(r"^function codex\b", out, re.M) is None
 
 
-def test_shell_init_fish_emits_function(runner):
+def test_shell_init_fish_emits_hcodex_launcher(runner):
     out = runner.invoke(cli, ["shell-init", "fish"]).output
-    assert "function codex" in out
-    assert "command codex $argv" in out
+    assert "function hcodex" in out
     assert "hive codex $argv" in out
     assert "if not type -q hive" in out
+    assert re.search(r"^function codex\b", out, re.M) is None
 
 
 # --- init gate: embedded codex must relaunch daemon-backed ---
@@ -367,7 +392,8 @@ def test_shell_init_fish_codex_tail_calls_resume_hint(runner):
 
 def _codex_hint_stub_bins(tmp_path):
     """Stub hive/codex that log calls: the managed launch (stub hive) exits
-    with codex's own status 7 and must not trigger any second launch."""
+    with codex's own status 7 and must not trigger any second launch. The
+    plain `codex` stub is the negative control — the launcher never runs it."""
     log = tmp_path / "calls.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -388,16 +414,15 @@ def test_shell_init_posix_codex_hint_runs_after_codex_and_keeps_exit_code(runner
     log, bin_dir = _codex_hint_stub_bins(tmp_path)
     r = subprocess.run(
         [shell, "-c",
-         'eval "$HIVE_SHELL_INIT"; codex hello; echo "rc=$?"; codex --help; true'],
+         'eval "$HIVE_SHELL_INIT"; hcodex hello; echo "rc=$?"; true'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
-             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+             "PATH": f"{bin_dir}:{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    assert lines[0] == "hive codex hello"  # the launcher IS the codex run (exits 7)
-    assert lines[1] == "hive resume-hint codex"  # no second launch in between
-    assert lines[2] == "codex --help"  # passthrough stays raw and hint-free
-    assert len(lines) == 3
+    # the launcher IS the codex run (exits 7); the hint follows with no
+    # second launch in between
+    assert lines == ["hive codex hello", "hive resume-hint codex"]
     assert "rc=7" in r.stdout  # the hint call must not eat codex's exit code
 
 
@@ -409,16 +434,12 @@ def test_shell_init_fish_codex_hint_runs_after_codex_and_keeps_exit_code(runner,
     r = subprocess.run(
         ["fish", "-c",
          f'source {shlex.quote(str(script_file))}; '
-         'codex hello; echo "rc=$status"; codex --help; true'],
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-             "TMUX": "stub"},
+         'hcodex hello; echo "rc=$status"; true'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    assert lines[0] == "hive codex hello"
-    assert lines[1] == "hive resume-hint codex"
-    assert lines[2] == "codex --help"
-    assert len(lines) == 3
+    assert lines == ["hive codex hello", "hive resume-hint codex"]
     assert "rc=7" in r.stdout
 
 
@@ -500,9 +521,9 @@ def test_shell_init_posix_no_relaunch_on_codex_own_exit_code(runner, tmp_path, s
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
     r = subprocess.run(
-        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; codex hello; echo "rc=$?"'],
+        [shell, "-c", 'eval "$HIVE_SHELL_INIT"; hcodex hello; echo "rc=$?"'],
         env={**os.environ, "HIVE_SHELL_INIT": script,
-             "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+             "PATH": f"{bin_dir}:{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
@@ -529,8 +550,8 @@ def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path, ow
         stub.chmod(0o755)
     r = subprocess.run(
         ["fish", "-c",
-         f'source {shlex.quote(str(script_file))}; codex hello; echo "rc=$status"'],
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX": "stub"},
+         f'source {shlex.quote(str(script_file))}; hcodex hello; echo "rc=$status"'],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
@@ -538,3 +559,22 @@ def test_shell_init_fish_no_relaunch_on_codex_own_exit_code(runner, tmp_path, ow
     assert lines[1] == "hive resume-hint codex"  # no raw relaunch in between
     assert len(lines) == 2
     assert f"rc={own_rc}" in r.stdout
+
+
+@pytest.mark.parametrize("shell", ["zsh", "bash"])
+def test_shell_init_posix_hcodex_without_hive_on_path_returns_127(runner, tmp_path, shell):
+    # the launcher is hive's entry point, not a codex wrapper: with hive gone
+    # it must say so and fail, never silently start a plain codex
+    bash = shutil.which(shell)
+    if bash is None:
+        pytest.skip(f"{shell} not available")
+    script = runner.invoke(cli, ["shell-init", shell]).output
+    log, bin_dir = _codex_hint_stub_bins(tmp_path)
+    (bin_dir / "hive").unlink()
+    r = subprocess.run(
+        [bash, "-c", 'eval "$HIVE_SHELL_INIT"; hcodex hello; echo "rc=$?"'],
+        env={"HIVE_SHELL_INIT": script, "PATH": str(bin_dir)},
+        capture_output=True, text=True, timeout=15)
+    assert "rc=127" in r.stdout
+    assert "hcodex: hive is not on PATH" in r.stderr
+    assert not log.exists()  # no fallback launch of the plain codex binary
