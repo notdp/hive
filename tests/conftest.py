@@ -22,7 +22,13 @@ def _isolate_codex_tool_env(monkeypatch):
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(monkeypatch) -> CliRunner:
+    # CLI tests assume an in-tmux caller unless a test says otherwise
+    # (configure_hive_home(tmux_inside=False) or a local patch overrides this
+    # later). Without the pin, the verdict of every bare-runner test depends
+    # on where pytest itself runs: from a shell outside tmux the root gate
+    # fails every non-optional command.
+    monkeypatch.setattr("hive.tmux.is_inside_tmux", lambda: True)
     return CliRunner()
 
 
