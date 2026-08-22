@@ -50,9 +50,31 @@ def test_ccd_send_delivers_to_the_named_session_as_the_calling_member(runner, co
     }
 
 
-def test_ccd_send_outside_any_team_sends_as_plain_hive(runner, configure_hive_home, monkeypatch):
+def test_ccd_send_signs_as_the_calling_session_when_not_a_member(runner, configure_hive_home, monkeypatch):
+    # a Claude session outside any team signs as itself, so the receiver can
+    # answer with `hive ccd send "<name>"` instead of guessing who wrote
     configure_hive_home(tmux_inside=False)
     _identity(monkeypatch, team=None, agent=None)
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.self_session",
+        lambda: _session(name="my-own-session", pid=9),
+    )
+    sent: list[tuple] = []
+    monkeypatch.setattr("hive.adapters.claude_sessions.resolve", lambda name: [_session()])
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: sent.append(sender) or "udsWriteAccepted",
+    )
+    result = runner.invoke(cli, ["ccd", "send", "desk", "hi"])
+    assert result.exit_code == 0, result.output
+    assert sent == ["ccd:my-own-session"]
+
+
+def test_ccd_send_outside_any_team_sends_as_plain_hive(runner, configure_hive_home, monkeypatch):
+    # a plain shell (no team, not a Claude session) keeps the bare marker
+    configure_hive_home(tmux_inside=False)
+    _identity(monkeypatch, team=None, agent=None)
+    monkeypatch.setattr("hive.adapters.claude_sessions.self_session", lambda: None)
     sent: list[tuple] = []
     monkeypatch.setattr("hive.adapters.claude_sessions.resolve", lambda name: [_session()])
     monkeypatch.setattr(
@@ -165,7 +187,9 @@ def test_guest_send_reaches_a_member_attributed_to_the_session(runner, configure
     monkeypatch.setattr("hive.cli._request_send_payload", lambda **kw: _capture(**kw))
     result = runner.invoke(cli, ["send", "validator", "check PR 73"])
     assert result.exit_code == 0, result.output
-    assert sent["sender_agent"] == "ccd:PR70 审查"
+    # the session NAME, not the title: titles may contain spaces, which break
+    # <HIVE from=...> attribute tokenization on the receiving side
+    assert sent["sender_agent"] == "ccd:nice-dd"
     assert sent["target_agent"] == "validator"
     assert sent["team"] is team_obj
     assert json.loads(result.output)["msgId"] == "m1"
