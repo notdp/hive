@@ -93,9 +93,9 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
     "Extensions": "Manage first-party Hive plugins (Claude Code, Codex).",
     "Launchers": (
-        "hive-managed launchers, usually invoked through the `hive shell-init` shell "
-        "integration rather than by hand. All arguments are forwarded verbatim, so "
-        "`hive claude --help` shows claude's own help, not this wrapper's."
+        "hive-managed launchers behind the `hcodex` / `hclaude` shell functions from "
+        "`hive shell-init`, rarely run by hand. All arguments are forwarded verbatim, "
+        "so `hive claude --help` shows claude's own help, not this wrapper's."
     ),
 }
 _ROOT_HELP_EXAMPLES = '''# Team lifecycle
@@ -709,7 +709,7 @@ def _is_codex_tool_env() -> bool:
 def _codex_relaunch_message() -> str:
     return (
         "this codex isn't daemon-backed — hive runtime is degraded.\n"
-        "make every future codex native (run once, any shell):\n"
+        "for future launches use hcodex (one-time setup, any shell):\n"
         "  grep -q 'hive shell-init' ~/.zshrc || "
         "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
         "then exit this codex (Ctrl-C twice) and run: hive codex resume"
@@ -1139,18 +1139,11 @@ def _fork_registered_agent(
         pane_id, split, workspace=getattr(t, "workspace", ""),
     )
 
-    # `codex fork <sid>` launches an embedded codex (no per-pane daemon), and
-    # embedded codex is unsupported as a team member — the forked pane would
-    # join the team with no session id and no runtime state. Refuse before any
-    # pane is split or registered. Non-team forks (_fork_orphan_clone) stay
-    # allowed: a bare clone belongs to no team and makes no runtime promises.
-    if profile.name == "codex":
-        _fail(
-            "codex team fork requires daemon-backed fork support; "
-            "embedded codex is unsupported as a team member "
-            "(fork it without a team, or start a fresh daemon-backed codex instead)"
-        )
-
+    # Both clones launch through hive's managed launcher: `hive claude -r …`
+    # registers the channel, and `hive codex fork <sid>` binds the clone's own
+    # per-pane daemon (verified on codex 0.147.0: the forked thread is created
+    # on and held by that daemon), so a forked member joins daemon-backed like a
+    # spawned one instead of the embedded codex this used to refuse.
     # Boundary text is static across workspaces and forks, so cache it under
     # $HIVE_HOME and expand via shell command substitution when there is no
     # prompt. With --prompt we inline boundary + marker + prompt together so
@@ -1388,7 +1381,7 @@ def _require_codex_daemon_backed(pane: str) -> None:
     _fail(
         "this codex is running embedded; hive needs it daemon-backed for native "
         "runtime, so it can't join yet.\n"
-        "make every future codex native (run once, any shell):\n"
+        "for future launches use hcodex (one-time setup, any shell):\n"
         "  grep -q 'hive shell-init' ~/.zshrc || "
         "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
         "for this session now (your session is preserved):\n"
@@ -3452,7 +3445,7 @@ def resume_cmd(handle: str):
     if not tmux.is_inside_tmux():
         _fail("hive resume requires a tmux session")
     from . import resume as resume_store
-    from .agent import CLI_BINS
+    from .agent import SUPPORTED_CLIS
 
     snap = resume_store.load_snapshot(handle)
     if snap is None:
@@ -3476,7 +3469,7 @@ def resume_cmd(handle: str):
     # A validator without a saved session cannot be resumed, but the worker's
     # context is the whole point of resume: bring the validator back fresh.
     fresh_members = frozenset(n for n, m in zip(names, members) if not m.get("sessionId"))
-    bad_cli = [n for n, m in zip(names, members) if m.get("cli") not in CLI_BINS]
+    bad_cli = [n for n, m in zip(names, members) if m.get("cli") not in SUPPORTED_CLIS]
     if bad_cli:
         _fail(f"unsupported cli for member(s): {', '.join(bad_cli)}")
     gone_cwd = [
@@ -4831,6 +4824,9 @@ _CODEX_PASSTHROUGH_SUBCOMMANDS = (
     "sandbox", "debug", "apply", "a", "cloud", "exec-server", "features", "help",
 )
 
+# Non-interactive surfaces: --help/--version never start a session.
+_CODEX_PASSTHROUGH_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+
 # Global codex options that consume the following token as their value, so the
 # subcommand scan does not mistake that value for the subcommand. `--opt=value`
 # and `-Cvalue` are self-contained and handled separately.
@@ -4871,8 +4867,9 @@ def _exec_codex_managed(args: list[str]) -> None:
     over the same socket, no restart and no transcript reverse-engineering.
 
     Degrades to raw ``codex`` (embedded, status quo) whenever the managed path
-    cannot apply: outside tmux, an explicit ``--remote`` already given, or the
-    daemon failing to bind. The caller never ends up worse than plain codex.
+    cannot apply: outside tmux, a management subcommand or --help/--version,
+    an explicit ``--remote`` already given, or the daemon failing to bind. The
+    caller never ends up worse than plain codex.
     """
     from .adapters import codex_app_server
 
@@ -4884,6 +4881,8 @@ def _exec_codex_managed(args: list[str]) -> None:
         _raw()  # hive needs a tmux pane to bind a daemon to
     if _codex_subcommand(args) in _CODEX_PASSTHROUGH_SUBCOMMANDS:
         _raw()  # a management subcommand, not an interactive TUI launch
+    if any(a in _CODEX_PASSTHROUGH_FLAGS for a in args):
+        _raw()  # --help/--version never start a session
     if any(a == "--remote" or a.startswith("--remote=") for a in args):
         _raw()  # caller already chose an endpoint
     if not codex_app_server.spawn_daemon(pane):
@@ -4908,13 +4907,14 @@ def _codex_args_set_cwd(args: list[str]) -> bool:
 @cli.command(
     "codex",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
+    add_help_option=False,
 )
 @click.pass_context
 def codex_cmd(ctx: click.Context):
     """Launch codex bound to a per-pane app-server daemon (hive-managed).
 
-    Usually invoked through the `hive shell-init` shell function rather than by
-    hand; all arguments are forwarded to codex. Replaces the current process
+    Usually invoked through the `hcodex` launcher from `hive shell-init` rather
+    than by hand; all arguments are forwarded to codex. Replaces the current process
     with codex and never returns on success.
     """
     _exec_codex_managed(list(ctx.args))
@@ -4933,12 +4933,13 @@ _CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
 
 # Non-interactive surfaces: a -p/--print run has no interactive session for
 # hive to message, and --help/--version never start a session.
-_CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "--help", "--version"})
+_CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-p", "--print", "-h", "--help", "-V", "--version"})
 
 # Global claude options that consume the following token as their value, so
 # the subcommand scan does not mistake that value for the subcommand.
 # `--opt=value` is self-contained and handled by the flag branch.
 _CLAUDE_VALUE_OPTS = frozenset({
+    "-r", "--resume",
     "--model", "--agent", "--session-id", "--settings", "--permission-mode",
     "--effort", "-n", "--name", "--add-dir", "--plugin-dir", "--mcp-config",
     "--setting-sources", "--output-format", "--input-format", "--max-turns",
@@ -4975,17 +4976,16 @@ def _exec_claude_managed(args: list[str]) -> None:
 
     A user-launched interactive claude gets the same per-pane MCP channel as a
     hive-spawned one, so the pane can receive ``<HIVE>`` messages (claude
-    delivery is channel-only). The channel flags are appended *after* the
-    user's args: both flags are variadic in claude's parser, so this ordering
-    keeps a user positional prompt out of their reach without rewriting the
-    user's argv.
+    delivery is channel-only). The channel flag is appended *after* the user's
+    args so it can never be read as the value of a user flag; it is one
+    ``--channels=<spec>`` token, so a user positional prompt is safe either way.
 
     Degrades to raw ``claude`` outside tmux, for non-interactive surfaces
     (subcommands, -p/--print, --help/--version), and when the channel plugin
     cannot be converged. Always ends in an exec: no exit code of this
     process is a fallback signal, because after the exec the status belongs
-    to claude and any value 0-255 is legitimate — the shell function only
-    special-cases a missing ``hive`` binary.
+    to claude and any value 0-255 is legitimate — the ``hclaude`` launcher only
+    special-cases a missing ``hive`` binary (exit 127 before anything runs).
     """
     def _raw() -> None:
         os.execvp("claude", ["claude", *args])
@@ -4996,6 +4996,8 @@ def _exec_claude_managed(args: list[str]) -> None:
         _raw()
     if any(a in _CLAUDE_PASSTHROUGH_FLAGS for a in args):
         _raw()
+    if any(a == "--channels" or a.startswith("--channels=") for a in args):
+        _raw()  # caller already registered its channels (a hive-spawned pane does)
     from .adapters import claude_channel
 
     # A marker left by a previous claude in this pane must not count as the
@@ -5020,8 +5022,8 @@ def _exec_claude_managed(args: list[str]) -> None:
 def claude_cmd(ctx: click.Context):
     """Launch claude with the hive channel registered (hive-managed).
 
-    Usually invoked through the `hive shell-init` shell function rather than by
-    hand; all arguments are forwarded to claude. Replaces the current process
+    Usually invoked through the `hclaude` launcher from `hive shell-init` rather
+    than by hand; all arguments are forwarded to claude. Replaces the current process
     with claude and never returns on success.
 
     Internal seam: the exact argv `channel-server` runs the per-pane channel
@@ -5043,7 +5045,7 @@ def claude_cmd(ctx: click.Context):
 def resume_hint_cmd(cli_name: str):
     """Print a cd-ready resume command for the session this pane just ran.
 
-    Called by the shell-init claude/codex functions after a managed launch
+    Called by the shell-init `hclaude`/`hcodex` launchers after a managed launch
     exits: claude's own "Resume this session with" line omits the directory
     and codex prints none at all. Resolution rides hive's existing session
     truth only — codex asks the pane's detached app-server daemon (it
@@ -5068,10 +5070,10 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
     pane, team, agent = identity
     if cli_name == "codex":
         session_id = _pane_codex_session_id(pane)
-        resume_cmd = "codex resume"
+        resume_cmd = "hive codex resume"
     else:
         session_id = _member_snapshot_session_id(team, agent)
-        resume_cmd = "claude --resume"
+        resume_cmd = "hive claude --resume"
     if not session_id:
         return None
     # Both fields are untrusted content headed for automatic terminal output:
@@ -5143,33 +5145,15 @@ def _member_snapshot_session_id(team: str, agent: str) -> str | None:
 
 
 _SHELL_INIT_POSIX = """\
-# hive agent integration — bind interactive codex/claude launches to hive
-# (per-pane daemon for codex, per-pane message channel for claude).
-# Bypass anytime with `command codex` / `command claude`.
-# Subcommand detection scans for the first non-flag argument: a user alias
-# (e.g. `alias claude='claude --verbose'`) injects flags before it, and a
-# `--` ends the scan because everything after it is a prompt.
-function codex {
-  if [ -z "$TMUX" ]; then command codex "$@"; return; fi
-  _hive_sub=
-  for _hive_a in "$@"; do
-    case "$_hive_a" in
-      --) break ;;
-      -*) continue ;;
-      *) _hive_sub="$_hive_a"; break ;;
-    esac
-  done
-  case "$_hive_sub" in
-    %(passthrough)s)
-      command codex "$@"; return ;;
-  esac
-  for _hive_a in "$@"; do
-    case "$_hive_a" in
-      --help|-h|--version|-V)
-        command codex "$@"; return ;;
-    esac
-  done
-  if ! command -v hive >/dev/null 2>&1; then command codex "$@"; return; fi
+# hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
+# the current tmux pane (per-pane daemon for codex, per-pane message channel
+# for claude) and print a cd-ready resume hint when it exits. Outside tmux,
+# and for management subcommands / non-interactive flags, they run the plain
+# binary. Plain `codex` / `claude` are never touched.
+function hcodex {
+  if ! command -v hive >/dev/null 2>&1; then
+    echo "hcodex: hive is not on PATH" >&2; return 127
+  fi
   # The launcher always ends in an exec (managed or raw), so the status here
   # is codex's own — never a fallback signal. The if-condition keeps errexit
   # shells from bailing before the status is saved.
@@ -5179,27 +5163,10 @@ function codex {
   return $_hive_rc
 }
 
-function claude {
-  if [ -z "$TMUX" ]; then command claude "$@"; return; fi
-  _hive_sub=
-  for _hive_a in "$@"; do
-    case "$_hive_a" in
-      --) break ;;
-      -*) continue ;;
-      *) _hive_sub="$_hive_a"; break ;;
-    esac
-  done
-  case "$_hive_sub" in
-    %(claude_passthrough)s)
-      command claude "$@"; return ;;
-  esac
-  for _hive_a in "$@"; do
-    case "$_hive_a" in
-      %(claude_flag_passthrough)s)
-        command claude "$@"; return ;;
-    esac
-  done
-  if ! command -v hive >/dev/null 2>&1; then command claude "$@"; return; fi
+function hclaude {
+  if ! command -v hive >/dev/null 2>&1; then
+    echo "hclaude: hive is not on PATH" >&2; return 127
+  fi
   # The launcher always ends in an exec (managed or raw), so the status here
   # is claude's own — never a fallback signal. The if-condition keeps errexit
   # shells from bailing before the status is saved.
@@ -5211,44 +5178,15 @@ function claude {
 """
 
 _SHELL_INIT_FISH = """\
-# hive agent integration — bind interactive codex/claude launches to hive
-# (per-pane daemon for codex, per-pane message channel for claude).
-# Bypass anytime with `command codex` / `command claude`.
-# Subcommand detection scans for the first non-flag argument: a user alias
-# (e.g. `alias claude='claude --verbose'`) injects flags before it, and a
-# `--` ends the scan because everything after it is a prompt.
-function codex
-    if test -z "$TMUX"
-        command codex $argv
-        return
-    end
-    set -l _hive_sub ""
-    for a in $argv
-        switch "$a"
-            case --
-                break
-            case '-*'
-                continue
-            case '*'
-                set _hive_sub "$a"
-                break
-        end
-    end
-    switch "$_hive_sub"
-        case %(passthrough)s
-            command codex $argv
-            return
-    end
-    for a in $argv
-        switch "$a"
-            case --help -h --version -V
-                command codex $argv
-                return
-        end
-    end
+# hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
+# the current tmux pane (per-pane daemon for codex, per-pane message channel
+# for claude) and print a cd-ready resume hint when it exits. Outside tmux,
+# and for management subcommands / non-interactive flags, they run the plain
+# binary. Plain `codex` / `claude` are never touched.
+function hcodex
     if not type -q hive
-        command codex $argv
-        return
+        echo "hcodex: hive is not on PATH" >&2
+        return 127
     end
     # the launcher always ends in an exec (managed or raw): the status is
     # codex's own, never a fallback signal
@@ -5259,38 +5197,10 @@ function codex
     return $_hive_rc
 end
 
-function claude
-    if test -z "$TMUX"
-        command claude $argv
-        return
-    end
-    set -l _hive_sub ""
-    for a in $argv
-        switch "$a"
-            case --
-                break
-            case '-*'
-                continue
-            case '*'
-                set _hive_sub "$a"
-                break
-        end
-    end
-    switch "$_hive_sub"
-        case %(claude_passthrough)s
-            command claude $argv
-            return
-    end
-    for a in $argv
-        switch "$a"
-            case %(claude_flag_passthrough)s
-                command claude $argv
-                return
-        end
-    end
+function hclaude
     if not type -q hive
-        command claude $argv
-        return
+        echo "hclaude: hive is not on PATH" >&2
+        return 127
     end
     # the launcher always ends in an exec (managed or raw): the status is
     # claude's own, never a fallback signal
@@ -5306,10 +5216,11 @@ end
 @cli.command("shell-init")
 @click.argument("shell", required=False, default="")
 def shell_init_cmd(shell: str):
-    """Print the codex + claude shell integration for your shell.
+    """Print the `hcodex` / `hclaude` launchers for your shell.
 
-    Add to your shell rc to make interactive `codex` / `claude` launches
-    hive-managed:
+    Add to your shell rc; then `hcodex` / `hclaude` start a hive-connected
+    codex / claude in the current tmux pane, while plain `codex` / `claude`
+    stay untouched:
 
     \b
       # ~/.zshrc or ~/.bashrc
@@ -5317,29 +5228,17 @@ def shell_init_cmd(shell: str):
       # ~/.config/fish/config.fish
       hive shell-init fish | source
 
-    The functions only act inside tmux on interactive launches; management
-    subcommands, non-interactive flags, and `command codex` / `command claude`
-    pass straight through to the real binaries.
+    Outside tmux, and for management subcommands and non-interactive flags,
+    the launchers run the plain binary.
     """
     shell = (shell or os.path.basename(os.environ.get("SHELL", "") or "zsh")).strip()
-    claude_flags = sorted(_CLAUDE_PASSTHROUGH_FLAGS)
     if shell == "fish":
-        click.echo(_SHELL_INIT_FISH % {
-            "passthrough": " ".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
-            "claude_passthrough": " ".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
-            "claude_flag_passthrough": " ".join(claude_flags),
-        }, nl=False)
+        click.echo(_SHELL_INIT_FISH, nl=False)
     else:
-        # zsh and bash share this syntax; case patterns use `|`. The ksh-style
-        # `function name {` form bypasses alias expansion of the name in BOTH
-        # shells, so a pre-existing `alias claude=...` cannot break the parse
-        # (an unadorned `claude() {` does break under zsh, and under bash with
-        # expand_aliases). The alias itself keeps working at call time.
-        click.echo(_SHELL_INIT_POSIX % {
-            "passthrough": "|".join(_CODEX_PASSTHROUGH_SUBCOMMANDS),
-            "claude_passthrough": "|".join(_CLAUDE_PASSTHROUGH_SUBCOMMANDS),
-            "claude_flag_passthrough": "|".join(claude_flags),
-        }, nl=False)
+        # zsh and bash share this syntax. The ksh-style `function name {` form
+        # bypasses alias expansion of the name in BOTH shells, so a stray
+        # alias cannot break the parse.
+        click.echo(_SHELL_INIT_POSIX, nl=False)
 
 
 @cli.group()

@@ -14,15 +14,14 @@ raises as :class:`hive.agent.DeliveryError` (the sidecar projects it to
 Channel registration: the published github marketplace (``notdp/hive``)
 ships the ``hive-channel`` plugin declaring this MCP server plus a
 ``channels`` entry; panes launch with plain
-``--channels plugin:hive-channel@hive``. No project file is ever touched and
+``--channels=plugin:hive-channel@hive``. No project file is ever touched and
 no consent dialog appears -- but ONLY when the machine's managed settings
 allowlist the plugin (``allowedChannelPlugins``). Claude enforces that
 allowlist by silently skipping channel notifications: the server runs and the
 socket comes up while the session stays deaf, so :func:`prepare_pane`
 preflights the policy file and fails loudly with setup instructions instead.
-``--channels`` is variadic, so the caller must terminate the flag list (spawn
-puts ``--`` before the positional prompt) or append the flags after all
-positionals.
+The flag is emitted in its single-token ``--channels=<spec>`` form: the
+space-separated form is variadic and swallows a following positional prompt.
 """
 from __future__ import annotations
 
@@ -241,9 +240,9 @@ def prepare_pane(cwd: str) -> list[str]:
     ``[]`` when the channel cannot be converged; the caller must treat that
     as channel-unavailable and fail loudly.
 
-    ``--channels`` is variadic in Claude's CLI parser: a positional prompt
-    directly after it is consumed as a flag value; a positional must be
-    separated with ``--``.
+    The flag comes back as one ``--channels=<spec>`` token: the space-separated
+    form is variadic in Claude's parser and would consume a positional prompt
+    placed after it.
     """
     del cwd  # location-independent
     if not _channel_allowlisted():
@@ -274,12 +273,12 @@ def prepare_pane(cwd: str) -> list[str]:
                 f"marketplace add {PUBLISHED_REPO}`")
 
     if _PLUGIN_REF in (_installed_plugin_refs() or ()):
-        return ["--channels", PLUGIN_SPEC]
+        return [f"--channels={PLUGIN_SPEC}"]
     step = ("install", _PLUGIN_REF)
     out = _claude_plugin(*step)
     if out is None or out.returncode != 0:
         return _step_failed(step, out)
-    return ["--channels", PLUGIN_SPEC]
+    return [f"--channels={PLUGIN_SPEC}"]
 
 
 # --- delivery ---------------------------------------------------------------

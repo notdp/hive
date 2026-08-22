@@ -31,8 +31,9 @@ npx skills add https://github.com/notdp/hive -g --all
 ## 在 agent 会话中开始
 
 ```bash
-# 在 tmux 里启动你要用的 agent
-$ claude       # 或：codex
+# 一次性设置：在 shell rc 里加 eval "$(hive shell-init zsh)"
+# 在 tmux 里通过 hive 的启动器启动你要用的 agent
+$ hclaude      # 或：hcodex
 
 # 在 agent 会话里输入：
 /hive
