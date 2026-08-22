@@ -4451,7 +4451,10 @@ def send(
             _fail(_TMUX_REQUIRED_MESSAGE)
     if guest is not None:
         team_name, t = _resolve_guest_send_target(to_agent, team_option)
-        sender = f"ccd:{guest.title or guest.name}"
+        # The session NAME, never the title: a title may contain spaces, which
+        # would break `<HIVE from=...>` attribute tokenization downstream. The
+        # name addresses the session in `hive ccd send` just the same.
+        sender = f"ccd:{guest.name}"
     else:
         if team_option:
             _fail("--team is for a Claude session outside tmux; team members address peers by name")
@@ -5070,7 +5073,13 @@ def ccd_send_cmd(session: str, message: str):
         _fail(f"{len(matches)} live sessions answer to '{session}': {where}; use the name or pid")
     target = matches[0]
     team, agent = _default_team(), _default_agent()
-    sender = f"hive:{team}.{agent}" if team and agent else "hive"
+    if team and agent:
+        sender = f"hive:{team}.{agent}"
+    else:
+        me = claude_sessions.self_session()
+        # A Claude session outside any team signs as itself; only a plain
+        # shell falls back to the bare marker.
+        sender = f"ccd:{me.name}" if me else "hive"
     outcome = claude_sessions.send(target.socket_path, message, sender=sender)
     if outcome is None:
         _fail(
