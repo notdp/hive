@@ -22,7 +22,7 @@ def _duo_mocks(cli_mod, monkeypatch, repo, *, pane_count, family_map=None, panes
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda p: fam.get(p, "openai"))
     monkeypatch.setattr(cli_mod, "peer_cli_for_family", lambda _f: "claude")
     monkeypatch.setattr(cli_mod, "anti_peer_cli", lambda _c: "claude")
-    monkeypatch.setattr(cli_mod, "_require_codex_daemon_backed", lambda _p: None)
+    monkeypatch.setattr(cli_mod, "_require_daemon_backed", lambda _p: None)
     monkeypatch.setattr(cli_mod, "_resolve_spawn_cli_name", lambda _a: "codex")
     monkeypatch.setattr(cli_mod, "_pane_is_idle_for_pairing", lambda _p: True)
     monkeypatch.setattr(cli_mod.tmux, "get_pane_count", lambda _p: pane_count)
@@ -630,7 +630,7 @@ def _revive_mocks(cli_mod, monkeypatch, tmp_path, *, panes, binding, team="defau
     monkeypatch.setattr(
         cli_mod, "detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude", skill_cmd="/{name}")
     )
-    monkeypatch.setattr(cli_mod, "_require_codex_daemon_backed", lambda _p: None)
+    monkeypatch.setattr(cli_mod, "_require_daemon_backed", lambda _p: None)
     monkeypatch.setattr(cli_mod, "_discover_tmux_binding", lambda: binding)
     monkeypatch.setattr(cli_mod.tmux, "list_panes_full_or_none", lambda _w: panes)
     monkeypatch.setattr(cli_mod, "family_for_pane", lambda _p: "anthropic")

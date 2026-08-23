@@ -16,6 +16,7 @@ def test_normalize_command_strips_path_and_aliases():
 def test_member_role_classifies_agents_and_shells():
     assert agent_cli.member_role("claude") == "agent"
     assert agent_cli.member_role("codex") == "agent"
+    assert agent_cli.member_role("grok") == "agent"
     assert agent_cli.member_role("zsh") == "terminal"
     assert agent_cli.member_role("python3") == "terminal"
 
@@ -23,6 +24,16 @@ def test_member_role_classifies_agents_and_shells():
 def test_profiles_use_expected_skill_commands():
     assert agent_cli.get_profile("claude").skill_cmd == "/{name}"
     assert agent_cli.get_profile("codex").skill_cmd == "${name}"
+    assert agent_cli.get_profile("grok").skill_cmd == "/skills {name} "
+
+
+def test_grok_profile_forks_through_the_hive_launcher():
+    profile = agent_cli.get_profile("/usr/local/bin/grok")
+    assert profile.name == "grok"
+    assert profile.ready_text == "Shift+Tab:mode"
+    assert profile.fork_cmd.format(session_id="sess-1") == (
+        "hive grok --resume sess-1 --fork-session"
+    )
 
 
 def test_detect_profile_for_pane_uses_title_and_tty_processes(monkeypatch):
@@ -50,6 +61,25 @@ def test_detect_profile_for_pane_falls_back_to_tty_processes(monkeypatch):
 
     assert profile is not None
     assert profile.name == "codex"
+
+
+def test_detect_profile_for_pane_finds_grok_on_the_tty(monkeypatch):
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_current_command", lambda _pane: "1.0.5")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_title", lambda _pane: "")
+    monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "/dev/ttys012")
+    monkeypatch.setattr("hive.agent_cli.tmux.list_tty_processes", lambda _tty: [
+        tmux.TTYProcessInfo(pid="100", command="-zsh", argv="-zsh"),
+        tmux.TTYProcessInfo(
+            pid="200",
+            command="grok",
+            argv="grok --leader --leader-socket /home/.grok/hive/p19.sock",
+        ),
+    ])
+
+    profile = agent_cli.detect_profile_for_pane("%19")
+
+    assert profile is not None
+    assert profile.name == "grok"
 
 
 def test_detect_profile_for_pane_reads_codex_argv_without_claude_path_false_positive(monkeypatch):
@@ -219,6 +249,10 @@ def test_process_matcher_accepts_executable_and_node_wrapper():
     ).name == "codex"
     # argv[0] identity works even when ps comm is generic
     assert detect_profile_from_process("something", "/usr/local/bin/claude --continue").name == "claude"
+    assert detect_profile_from_process("grok", "grok --leader-socket /s").name == "grok"
+    assert detect_profile_from_process("1.0.5", "/opt/homebrew/bin/grok --resume s").name == "grok"
+    # a grok mention in argument text is still not a CLI
+    assert detect_profile_from_process("rg", "rg grok src") is None
 
 
 def test_claude_pid_for_pane_returns_the_claude_process_pid(monkeypatch):
@@ -241,3 +275,35 @@ def test_claude_pid_for_pane_ignores_non_claude_processes(monkeypatch):
     assert agent_cli.claude_pid_for_pane("%1") is None
     monkeypatch.setattr("hive.agent_cli.tmux.get_pane_tty", lambda _pane: "")
     assert agent_cli.claude_pid_for_pane("%1") is None
+
+
+# --- peer diversity: grok is its own family, paired against claude ---
+
+
+def test_grok_pairs_against_claude_without_disturbing_claude_codex():
+    assert agent_cli.anti_peer_cli("grok") == "claude"
+    assert agent_cli.anti_peer_cli("claude") == "codex"
+    assert agent_cli.anti_peer_cli("codex") == "claude"
+    assert agent_cli.peer_cli_for_family("xai") == "claude"
+    assert agent_cli.peer_cli_for_family("anthropic") == "codex"
+    assert agent_cli.peer_cli_for_family("openai") == "claude"
+
+
+def test_classify_model_family_reads_grok_models_as_xai():
+    assert agent_cli.classify_model_family("grok-4.6") == "xai"
+    assert agent_cli.classify_model_family("grok-build") == "xai"
+    assert agent_cli.classify_model_family("claude-opus-4-8") == "anthropic"
+    assert agent_cli.classify_model_family("gpt-5.5") == "openai"
+
+
+def test_family_for_pane_uses_grok_identity_when_the_model_is_unknown(monkeypatch):
+    monkeypatch.setattr(
+        "hive.agent_cli.detect_profile_for_pane", lambda _pane: agent_cli.PROFILES["grok"]
+    )
+    models = iter(["", "grok-4.6"])
+    monkeypatch.setattr(
+        "hive.agent_cli.resolve_model_for_pane", lambda *_a, **_kw: next(models)
+    )
+
+    assert agent_cli.family_for_pane("%19") == "xai"  # CLI identity fallback
+    assert agent_cli.family_for_pane("%19") == "xai"  # and via the resolved model

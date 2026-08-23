@@ -9,8 +9,8 @@ from hive import adapters, tmux
 
 
 def test_registry_has_known_adapters():
-    assert set(adapters.available()) == {"claude", "codex"}
-    for name in ("claude", "codex"):
+    assert set(adapters.available()) == {"claude", "codex", "grok"}
+    for name in ("claude", "codex", "grok"):
         adapter = adapters.get(name)
         assert adapter is not None
         assert isinstance(adapter, adapters.SessionAdapter)

@@ -701,6 +701,82 @@ def test_compact_codex_busy_keystrokes_disabled_notice(runner, configure_hive_ho
     }
 
 
+def test_compact_grok_idle_fires_leader_rpc(runner, configure_hive_home, monkeypatch):
+    # grok is daemon-backed too: an idle pane compacts over the leader RPC
+    # (x.ai/compact_conversation), never through the composer.
+    configure_hive_home()
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def send(self, _text: str) -> None:
+            raise AssertionError("grok compact must not use session/prompt send()")
+
+    monkeypatch.setattr("hive.cli.Agent", _RecordingAgent)
+    pane_options = {
+        ("%42", "hive-team"): "team-x",
+        ("%42", "hive-agent"): "bobo",
+        ("%42", "hive-cli"): "grok",
+    }
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("idle grok must not be keystroked")),
+    )
+    compacted: list[str] = []
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.compact_pane",
+        lambda pane: compacted.append(pane) or "compacted",
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert compacted == ["%42"]
+    payload = json.loads(result.output)
+    assert payload == {
+        "member": "bobo",
+        "action": "compact",
+        "pane": "%42",
+        "status": "compacted",
+        "success": True,
+    }
+
+
+@pytest.mark.parametrize("status", ["busy", "unavailable"])
+def test_compact_grok_not_compacted_keystrokes_the_tui(
+    runner, configure_hive_home, monkeypatch, status
+):
+    # A busy (or leader-less) grok gets `/compact` keystroked into its own TUI so
+    # grok surfaces the refusal itself, exactly like the codex path.
+    configure_hive_home()
+    pane_options = {
+        ("%42", "hive-team"): "team-x",
+        ("%42", "hive-agent"): "bobo",
+        ("%42", "hive-cli"): "grok",
+    }
+    monkeypatch.setattr(
+        "hive.cli.tmux.get_pane_option",
+        lambda pane, key: pane_options.get((pane, key)),
+    )
+    monkeypatch.setattr("hive.adapters.grok_leader.compact_pane", lambda _pane: status)
+    keyed: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.cli._submit_interactive_text",
+        lambda pane, text, cli_name: keyed.append((pane, text, cli_name)),
+    )
+
+    result = runner.invoke(cli, ["compact", "--pane", "%42"])
+    assert result.exit_code == 0, result.output
+    assert keyed == [("%42", "/compact", "grok")]
+    payload = json.loads(result.output)
+    assert payload["status"] == status
+    assert payload["success"] is False
+
+
 def _forbid_team_resolution(monkeypatch):
     """Make any Team load/resolve a hard failure (non-team compact must avoid it)."""
     def _no_team(*_a, **_kw):

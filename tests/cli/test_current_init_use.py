@@ -390,7 +390,7 @@ def test_init_accepts_preopened_codex_worker_pane(
         lambda pane_id: SimpleNamespace(name="codex") if pane_id == "%10" else None,
     )
     # A pre-opened codex must be daemon-backed for the init gate to pass; a
-    # live socket short-circuits _require_codex_daemon_backed.
+    # live socket short-circuits _require_daemon_backed.
     sock = tmp_path / "hive-pane-10.sock"
     sock.touch()
     monkeypatch.setattr("hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock)

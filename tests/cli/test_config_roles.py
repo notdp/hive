@@ -5,8 +5,19 @@ import json
 import click
 import pytest
 
+from hive.agent_cli import AGENT_CLI_NAMES, MODEL_SUGGESTIONS
 from hive.cli import cli, _interactive_role_config, _collect_role_choices, _apply_role_action
 from hive.settings import APPLIED_ROLES, CONFIGURABLE_ROLES
+
+# The CLI menu is sorted(AGENT_CLI_NAMES) + ["(keep)", "(clear)"], so every
+# index below is derived: adding a CLI shifts (keep)/(clear), never the test.
+_CLI_MENU = sorted(AGENT_CLI_NAMES)
+_CLI_KEEP = len(_CLI_MENU)
+_CLI_CLEAR = _CLI_KEEP + 1
+
+
+def _cli_idx(name: str) -> int:
+    return _CLI_MENU.index(name)
 
 
 # --- JSON mode (--json flag and non-TTY fallback) ---
@@ -105,10 +116,10 @@ def _run_interactive(monkeypatch, menu_indices, *, settings_store=None,
 def test_interactive_select_role_cli_and_model(monkeypatch):
     """Pick validator → codex → gpt-5.5 (first codex suggestion)."""
     store = _run_interactive(monkeypatch, [
-        1,    # role: validator (challenger=0, validator=1, worker=2, done=3)
-        1,    # CLI: codex (claude=0, codex=1, keep=2, clear=3)
-        0,    # model: first codex suggestion (gpt-5.5)
-        3,    # role: done
+        1,                  # role: validator (challenger=0, validator=1, worker=2, done=3)
+        _cli_idx("codex"),  # CLI: codex
+        0,                  # model: first codex suggestion (gpt-5.5)
+        3,                  # role: done
     ])
     assert store["roles.validator.cli"] == "codex"
     assert store["roles.validator.model"] == "gpt-5.5"
@@ -116,13 +127,12 @@ def test_interactive_select_role_cli_and_model(monkeypatch):
 
 def test_interactive_custom_model(monkeypatch):
     """Pick worker → claude → custom model value."""
-    from hive.agent_cli import MODEL_SUGGESTIONS
     n_claude = len(MODEL_SUGGESTIONS["claude"])
     store = _run_interactive(monkeypatch, [
-        2,          # role: worker
-        0,          # CLI: claude
-        n_claude,   # model: (custom) — right after suggestions
-        3,          # role: done
+        2,                   # role: worker
+        _cli_idx("claude"),  # CLI: claude
+        n_claude,            # model: (custom) — right after suggestions
+        3,                   # role: done
     ], custom_inputs=["my-custom-model"])
     assert store["roles.worker.cli"] == "claude"
     assert store["roles.worker.model"] == "my-custom-model"
@@ -134,11 +144,10 @@ def test_interactive_keep_preserves_existing(monkeypatch):
         "roles.validator.cli": "codex",
         "roles.validator.model": "gpt-5.5",
     }
-    from hive.agent_cli import MODEL_SUGGESTIONS
     n_codex = len(MODEL_SUGGESTIONS["codex"])
     store = _run_interactive(monkeypatch, [
         1,              # role: validator
-        2,              # CLI: (keep)
+        _CLI_KEEP,      # CLI: (keep)
         n_codex + 1,    # model: (keep) — custom=n, keep=n+1, clear=n+2
         3,              # role: done
     ], settings_store=dict(initial))
@@ -153,11 +162,11 @@ def test_interactive_clear_deletes_key(monkeypatch):
         "roles.validator.model": "gpt-5.5",
     }
     store = _run_interactive(monkeypatch, [
-        1,    # role: validator
-        3,    # CLI: (clear)
+        1,           # role: validator
+        _CLI_CLEAR,  # CLI: (clear)
         # no suggestions (no effective CLI) → (custom)=0, (keep)=1, (clear)=2
-        2,    # model: (clear)
-        3,    # role: done
+        2,           # model: (clear)
+        3,           # role: done
     ], settings_store=dict(initial))
     assert "roles.validator.cli" not in store
     assert "roles.validator.model" not in store
@@ -170,10 +179,10 @@ def test_interactive_clear_cli_leaves_model_intact(monkeypatch):
         "roles.worker.model": "opus",
     }
     store = _run_interactive(monkeypatch, [
-        2,    # role: worker
-        3,    # CLI: (clear)
-        1,    # model: (keep) — no suggestions → custom=0, keep=1, clear=2
-        3,    # role: done
+        2,           # role: worker
+        _CLI_CLEAR,  # CLI: (clear)
+        1,           # model: (keep) — no suggestions → custom=0, keep=1, clear=2
+        3,           # role: done
     ], settings_store=dict(initial))
     assert "roles.worker.cli" not in store
     assert store["roles.worker.model"] == "opus"
@@ -185,11 +194,10 @@ def test_interactive_clear_model_leaves_cli_intact(monkeypatch):
         "roles.worker.cli": "claude",
         "roles.worker.model": "opus",
     }
-    from hive.agent_cli import MODEL_SUGGESTIONS
     n_claude = len(MODEL_SUGGESTIONS["claude"])
     store = _run_interactive(monkeypatch, [
         2,              # role: worker
-        2,              # CLI: (keep)
+        _CLI_KEEP,      # CLI: (keep)
         n_claude + 2,   # model: (clear) — custom=n, keep=n+1, clear=n+2
         3,              # role: done
     ], settings_store=dict(initial))
@@ -236,9 +244,9 @@ def test_interactive_escape_at_model_aborts_no_mutation(monkeypatch):
     store = dict(initial)
     _mock_settings(monkeypatch, store)
     _mock_menus(monkeypatch, [
-        1,      # role: validator
-        3,      # CLI: (clear) — would clear if completed
-        None,   # Escape at model menu
+        1,           # role: validator
+        _CLI_CLEAR,  # CLI: (clear) — would clear if completed
+        None,        # Escape at model menu
     ])
     with pytest.raises(click.Abort):
         _interactive_role_config()
@@ -248,13 +256,13 @@ def test_interactive_escape_at_model_aborts_no_mutation(monkeypatch):
 def test_interactive_multiple_roles(monkeypatch):
     """Configure two roles in one session."""
     store = _run_interactive(monkeypatch, [
-        2,    # role: worker
-        0,    # CLI: claude
-        0,    # model: first claude suggestion (claude-fable-5)
-        1,    # role: validator
-        1,    # CLI: codex
-        0,    # model: first codex suggestion (gpt-5.5)
-        3,    # role: done
+        2,                   # role: worker
+        _cli_idx("claude"),  # CLI: claude
+        0,                   # model: first claude suggestion (claude-fable-5)
+        1,                   # role: validator
+        _cli_idx("codex"),   # CLI: codex
+        0,                   # model: first codex suggestion (gpt-5.5)
+        3,                   # role: done
     ])
     assert store["roles.worker.cli"] == "claude"
     assert store["roles.worker.model"] == "claude-fable-5"
@@ -268,7 +276,8 @@ def test_interactive_cli_cursor_starts_at_current(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 4 + 1, 3])  # role=validator, CLI=keep, model=keep, done
+    # role=validator, CLI=keep, model=keep, done
+    menu_indices = iter([1, _CLI_KEEP, len(MODEL_SUGGESTIONS["codex"]) + 1, 3])
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -289,7 +298,8 @@ def test_interactive_model_cursor_starts_at_current(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 0, 3])  # role=validator, CLI=keep, model=first, done
+    # role=validator, CLI=keep, model=first, done
+    menu_indices = iter([1, _CLI_KEEP, 0, 3])
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -299,7 +309,6 @@ def test_interactive_model_cursor_starts_at_current(monkeypatch):
     _interactive_role_config()
 
     model_call = [c for c in calls if "Model" in c["title"]][0]
-    from hive.agent_cli import MODEL_SUGGESTIONS
     expected_cursor = MODEL_SUGGESTIONS["codex"].index("gpt-5.4")
     assert model_call["cursor_index"] == expected_cursor
 
@@ -310,7 +319,8 @@ def test_interactive_model_cursor_custom_value_focuses_keep(monkeypatch):
     _mock_settings(monkeypatch, store)
 
     calls: list[dict] = []
-    menu_indices = iter([1, 2, 0, 3])  # role=validator, CLI=keep, model=first, done
+    # role=validator, CLI=keep, model=first, done
+    menu_indices = iter([1, _CLI_KEEP, 0, 3])
 
     def tracking_menu(entries, title, **kw):
         calls.append({"entries": entries, "title": title, **kw})
@@ -327,10 +337,10 @@ def test_interactive_model_cursor_custom_value_focuses_keep(monkeypatch):
 def test_interactive_no_cli_shows_no_suggestions(monkeypatch):
     """When no CLI and user keeps, model prompt offers only custom/keep/clear."""
     store = _run_interactive(monkeypatch, [
-        0,    # role: challenger
-        2,    # CLI: (keep) — no current CLI
-        0,    # model: (custom) — no suggestions → custom=0, keep=1, clear=2
-        3,    # role: done
+        0,           # role: challenger
+        _CLI_KEEP,   # CLI: (keep) — no current CLI
+        0,           # model: (custom) — no suggestions → custom=0, keep=1, clear=2
+        3,           # role: done
     ], custom_inputs=["my-model"])
     assert store["roles.challenger.model"] == "my-model"
     assert "roles.challenger.cli" not in store

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,9 +70,10 @@ _COMMAND_HELP_SECTIONS = {
     # Extensions.
     "plugin": "Extensions",
     "config": "Extensions",
-    # Launchers — hive-managed claude/codex entry points + shell integration.
+    # Launchers — hive-managed claude/codex/grok entry points + shell integration.
     "claude": "Launchers",
     "codex": "Launchers",
+    "grok": "Launchers",
     "shell-init": "Launchers",
 }
 _COMMAND_HELP_SECTION_ORDER = [
@@ -94,8 +96,8 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Debug": "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
     "Extensions": "Manage first-party Hive plugins (Claude Code, Codex).",
     "Launchers": (
-        "hive-managed launchers behind the `hcodex` / `hclaude` shell functions from "
-        "`hive shell-init`, rarely run by hand. All arguments are forwarded verbatim, "
+        "hive-managed launchers behind the `hcodex` / `hclaude` / `hgrok` shell functions "
+        "from `hive shell-init`, rarely run by hand. All arguments are forwarded verbatim, "
         "so `hive claude --help` shows claude's own help, not this wrapper's."
     ),
 }
@@ -122,7 +124,7 @@ hive spawn claude                            # bring up a new agent pane
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "resume-hint", "skills", "worktree", "ls", "ccd"}
+_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "grok", "resume-hint", "skills", "worktree", "ls", "ccd"}
 
 
 class SectionedHelpGroup(click.Group):
@@ -718,6 +720,7 @@ _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "config",
     "current",
     "doctor",
+    "grok",
     "inject",
     "plugin",
     "resume-hint",
@@ -1493,7 +1496,7 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     return False
 
 
-def _require_codex_daemon_backed(pane: str) -> None:
+def _require_daemon_backed(pane: str) -> None:
     """Refuse to let an embedded (non-daemon) codex join; point to the fix.
 
     A manually-launched bare codex runs its app-server embedded, so hive can
@@ -1515,7 +1518,12 @@ def _require_codex_daemon_backed(pane: str) -> None:
     if not pane:
         return
     profile = detect_profile_for_pane(pane)
-    if not profile or profile.name != "codex":
+    if not profile:
+        return
+    if profile.name == "grok":
+        _require_grok_leader_backed(pane)
+        return
+    if profile.name != "codex":
         return
     from .adapters import codex_app_server
 
@@ -1539,6 +1547,28 @@ def _require_codex_daemon_backed(pane: str) -> None:
     )
 
 
+def _require_grok_leader_backed(pane: str) -> None:
+    """Refuse a plain grok pane: hive delivers only through the pane leader."""
+    from .adapters import grok_leader
+
+    sock = grok_leader.pane_socket_path(pane)
+    if sock.exists() and grok_leader.probe_socket(str(sock)):
+        return
+    sid = grok_leader.session_id_for_pane(pane) or ""
+    resume = f"hive grok --resume {sid}" if sid else "hive grok"
+    _fail(
+        "this grok has no hive leader; hive delivers to grok only through the "
+        "pane leader, so it can't join yet.\n"
+        "for future launches use hgrok (one-time setup, any shell):\n"
+        "  grep -q 'hive shell-init' ~/.zshrc || "
+        "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
+        "for this session now (your session is preserved):\n"
+        "  1) exit grok: /exit\n"
+        f"  2) run: {resume}\n"
+        "then re-run /skills hive."
+    )
+
+
 def _run_duo_init(validator_cli: str | None) -> None:
     """Shared callback body for the equivalent `hive init` / `hive duo init`."""
     if not tmux.is_inside_tmux():
@@ -1547,8 +1577,8 @@ def _run_duo_init(validator_cli: str | None) -> None:
     if not current_pane:
         _fail("cannot determine current pane")
     if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex (this becomes the worker)")
-    _require_codex_daemon_backed(current_pane)
+        _fail("current pane must be running claude / codex / grok (this becomes the worker)")
+    _require_daemon_backed(current_pane)
 
     result = _create_standalone_duo(current_pane=current_pane, validator_cli=validator_cli)
     click.echo(json.dumps(result, indent=2, ensure_ascii=False))
@@ -1557,7 +1587,7 @@ def _run_duo_init(validator_cli: str | None) -> None:
 @cli.command("init")
 @click.option(
     "--validator-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "grok"]),
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
@@ -1720,14 +1750,14 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--workflow", default="", help="Workflow skill to load after the base skill")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
-@click.option("--cli", "cli_name", type=click.Choice(["claude", "codex"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
+@click.option("--cli", "cli_name", type=click.Choice(["claude", "codex", "grok"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 def spawn(agent_name: str, model: str, prompt: str,
           cwd: str, skill: str, workflow: str, env: tuple[str, ...], cli_name: str | None):
     """Spawn an agent pane.
 
     Creates a new tmux pane in the current window and starts the chosen
     agent CLI. By default spawns the same CLI as the current pane; use
-    `--cli claude|codex` to pick a specific one. `--skill` loads
+    `--cli claude|codex|grok` to pick a specific one. `--skill` loads
     a base skill on startup (`hive` by default), `--workflow` stacks a
     workflow skill on top, and `--prompt` sends an initial message.
 
@@ -2202,19 +2232,21 @@ def _compact_target(target: _PaneTarget) -> str:
     state — so a pane shared by two same-named agents (Bug A) still compacts the
     pane in hand.
     """
-    if target.cli == "codex":
-        # codex: an idle agent compacts via the dedicated RPC
-        # (thread/compact/start) — never a turn/start prompt, which only feeds
-        # the model literal "/compact". When the agent is busy (compact_pane
-        # returns non-"compacted") we do NOT queue or silently defer: a Compact
-        # turn would abort the running turn, so instead we keystroke `/compact`
-        # into codex's own TUI, which then shows its native "disabled while a
-        # task is in progress." That is an explicit refusal the agent can see,
-        # not a silent background compaction it never learns about.
-        from .adapters import codex_app_server
-        status = codex_app_server.compact_pane(target.pane_id)
+    if target.cli in ("codex", "grok"):
+        # Daemon-backed CLIs: an idle agent compacts via the dedicated RPC
+        # (codex thread/compact/start, grok x.ai/compact_conversation) — never a
+        # prompt, which only feeds the model the literal "/compact". When the
+        # agent is busy (compact_pane returns non-"compacted") we do NOT queue or
+        # silently defer: a Compact turn would abort the running turn, so instead
+        # we keystroke `/compact` into the CLI's own TUI, which then shows its
+        # native "disabled while a task is in progress." That is an explicit
+        # refusal the agent can see, not a silent background compaction it never
+        # learns about.
+        from .adapters import codex_app_server, grok_leader
+        transport = codex_app_server if target.cli == "codex" else grok_leader
+        status = transport.compact_pane(target.pane_id)
         if status != "compacted":
-            _submit_interactive_text(target.pane_id, "/compact", "codex")
+            _submit_interactive_text(target.pane_id, "/compact", target.cli)
         return status
     # claude (and embedded codex without a daemon): `/compact` is a TUI
     # slash command, so it must go through the composer. A channel message
@@ -2961,7 +2993,7 @@ def _create_standalone_duo(
 @duo_cmd.command("init")
 @click.option(
     "--validator-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "grok"]),
     default=None,
     help="CLI for validator (default: anti-family of current pane's CLI)",
 )
@@ -2969,7 +3001,7 @@ def duo_init_cmd(validator_cli: str | None):
     """Set up a duo from the current pane: worker (=this pane) + anti-family validator.
 
     Equivalent to `hive init`. The current pane must be running
-    an agent CLI (claude / codex); it becomes the worker. Realized by
+    an agent CLI (claude / codex / grok); it becomes the worker. Realized by
     the current window's pane count:
 
       1 pane   → split-spawn the validator beside the worker
@@ -3783,7 +3815,7 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @squad_cmd.command("init")
 @click.option(
     "--peer-cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "grok"]),
     default=None,
     help="CLI for challenger (default: anti-family of current pane's CLI)",
 )
@@ -3800,7 +3832,7 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
 @click.option(
     "--worker",
     "worker_cli",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "grok"]),
     default=None,
     help="CLI for this squad's duo workers (default: orch's family; validator takes the anti-family review seat). e.g. --worker codex for backend-heavy squads.",
 )
@@ -3808,7 +3840,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     """Break current pane into a dedicated squad window (orch + challenger).
 
     Standalone — no need to run `hive init` first. Must run from a pane that's
-    already running an agent CLI (claude / codex); that CLI becomes
+    already running an agent CLI (claude / codex / grok); that CLI becomes
     orch's session. If the pane isn't yet bound to a team, one is auto-created
     (mirrors `hive init`).
 
@@ -3834,7 +3866,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
 
     profile = detect_profile_for_pane(current_pane)
     if profile is None:
-        _fail("current pane must be running claude / codex (this will become orch)")
+        _fail("current pane must be running claude / codex / grok (this will become orch)")
 
     # Idempotent: a pane already running as a squad orch returns its existing
     # binding untouched — before any squad-name claim, rename/break, retag, or a
@@ -5155,6 +5187,109 @@ def claude_cmd(ctx: click.Context):
     os.execvp("claude", ["claude", *args])
 
 
+# --- grok managed launch ---
+
+# grok subcommands that are not an interactive TUI launch: hive leaves these
+# completely untouched (raw grok). Everything else — no arguments, flags only,
+# or a bare [PROMPT] — is an interactive launch bound to the pane's leader
+# daemon so hive can read its native runtime. A subcommand is always the first
+# token; a prompt is the only other thing that can sit there.
+_GROK_PASSTHROUGH_SUBCOMMANDS = (
+    "agent", "completions", "dashboard", "doctor", "du", "export", "help",
+    "inspect", "leader", "login", "logout", "mcp", "memory", "models", "plugin",
+    "sessions", "setup", "trace", "update", "version", "worktree", "wrap",
+)
+
+# Non-interactive surfaces: --help/--version never start a session.
+_GROK_PASSTHROUGH_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+
+
+def _grok_opt_value(args: list[str], names: tuple[str, ...]) -> str | None:
+    """Value of the first `--opt value` / `--opt=value` occurrence in `args`."""
+    for i, a in enumerate(args):
+        if a in names:
+            return args[i + 1] if i + 1 < len(args) else None
+        for name in names:
+            if a.startswith(f"{name}="):
+                return a[len(name) + 1:]
+    return None
+
+
+def _grok_launch_session(args: list[str]) -> tuple[str | None, bool]:
+    """(session id this launch will run, whether hive must pass --session-id).
+
+    grok mints nothing hive can observe, so hive names the session itself and
+    records it beside the pane's socket. Two shapes already carry their own
+    name: an explicit --session-id, and a plain --resume (grok rejects
+    --session-id there unless --fork-session makes it the *new* fork's name).
+    A --resume whose id hive cannot read leaves the pane unrecorded rather
+    than making grok reject the launch.
+    """
+    explicit = _grok_opt_value(args, ("--session-id", "-s"))
+    if explicit:
+        return explicit, False
+    if any(a == "--resume" or a.startswith("--resume=") for a in args):
+        if "--fork-session" not in args:
+            return _grok_opt_value(args, ("--resume",)), False
+    return str(uuid.uuid4()), True
+
+
+def _exec_grok_managed(args: list[str]) -> None:
+    """Replace this process with grok, attached to a per-pane leader daemon.
+
+    Born-connected path for a user-launched grok: start (or reuse) the pane's
+    leader, then exec ``grok --leader --leader-socket <sock> --session-id <sid>
+    <args>`` so hive can drive that session over a second leader client from
+    the first turn — no restart and no transcript reverse-engineering.
+
+    Degrades to raw ``grok`` whenever the managed path cannot apply: outside
+    tmux, a management subcommand or --help/--version, or the leader failing
+    to bind. The caller never ends up worse than plain grok.
+    """
+    from .adapters import grok_leader
+
+    def _raw() -> None:
+        os.execvp("grok", ["grok", *args])
+
+    pane = os.environ.get("TMUX_PANE") or (tmux.get_current_pane_id() or "")
+    if not pane or not tmux.is_inside_tmux():
+        _raw()  # hive needs a tmux pane to bind a daemon to
+    if args and args[0] in _GROK_PASSTHROUGH_SUBCOMMANDS:
+        _raw()  # a management subcommand, not an interactive TUI launch
+    if any(a in _GROK_PASSTHROUGH_FLAGS for a in args):
+        _raw()  # --help/--version never start a session
+    if not grok_leader.spawn_daemon(pane):
+        # A raw grok drives whatever session it likes; leaving an earlier
+        # record in place would have hive resolve that stale id as this pane's.
+        grok_leader.pane_session_path(pane).unlink(missing_ok=True)
+        click.echo("hive: grok leader did not start; launching plain grok", err=True)
+        _raw()
+    session_id, pass_flag = _grok_launch_session(args)
+    argv = ["grok", "--leader", "--leader-socket", str(grok_leader.pane_socket_path(pane))]
+    if pass_flag:
+        argv += ["--session-id", session_id]
+    if session_id:
+        grok_leader.write_pane_session(pane, session_id, os.getcwd())
+    argv += args
+    os.execvp("grok", argv)
+
+
+@cli.command(
+    "grok",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
+    add_help_option=False,
+)
+@click.pass_context
+def grok_cmd(ctx: click.Context):
+    """Launch grok attached to a per-pane leader daemon (hive-managed).
+
+    Usually invoked through the `hgrok` launcher from `hive shell-init` rather
+    than by hand; all arguments are forwarded to grok. Replaces the current
+    process with grok and never returns on success.
+    """
+    _exec_grok_managed(list(ctx.args))
+
+
 @cli.group("ccd")
 def ccd_cmd():
     """Discover Claude Code sessions outside the team — the desktop app,
@@ -5189,19 +5324,20 @@ def ccd_ls_cmd():
 
 
 @cli.command("resume-hint", hidden=True)
-@click.argument("cli_name", type=click.Choice(["claude", "codex"]))
+@click.argument("cli_name", type=click.Choice(["claude", "codex", "grok"]))
 def resume_hint_cmd(cli_name: str):
     """Print a cd-ready resume command for the session this pane just ran.
 
-    Called by the shell-init `hclaude`/`hcodex` launchers after a managed launch
-    exits: claude's own "Resume this session with" line omits the directory
-    and codex prints none at all. Resolution rides hive's existing session
-    truth only — codex asks the pane's detached app-server daemon (it
-    outlives the TUI), claude reads this pane's team-member entry in the
-    resume snapshot (the sidecar keeps recording it and the entry survives
-    the process). A pane outside a hive team gets no hint; tracking
-    arbitrary user panes is not this feature's job. Prints nothing and
-    exits 0 on any failure: a hint must never break the wrapper.
+    Called by the shell-init `hclaude`/`hcodex`/`hgrok` launchers after a managed
+    launch exits: claude's own "Resume this session with" line omits the
+    directory and codex/grok print none at all. Resolution rides hive's existing
+    session truth only — codex asks the pane's detached app-server daemon (it
+    outlives the TUI), grok reads the session file its launch wrote, claude
+    reads this pane's team-member entry in the resume snapshot (the sidecar
+    keeps recording it and the entry survives the process). A pane outside a
+    hive team gets no hint; tracking arbitrary user panes is not this feature's
+    job. Prints nothing and exits 0 on any failure: a hint must never break the
+    wrapper.
     """
     try:
         hint = _resume_hint(cli_name, os.getcwd())
@@ -5219,6 +5355,9 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
     if cli_name == "codex":
         session_id = _pane_codex_session_id(pane)
         resume_cmd = "hive codex resume"
+    elif cli_name == "grok":
+        session_id = _pane_grok_session_id(pane)
+        resume_cmd = "hive grok --resume"
     else:
         session_id = _member_snapshot_session_id(team, agent)
         resume_cmd = "hive claude --resume"
@@ -5273,6 +5412,19 @@ def _pane_codex_session_id(pane: str) -> str | None:
     return codex_app_server.session_id_for_pane(pane)
 
 
+def _pane_grok_session_id(pane: str) -> str | None:
+    """This pane's grok session id, from the file the launch wrote.
+
+    grok's session is named by hive at launch time and recorded beside the
+    pane's leader socket, so the id survives the TUI exiting. No record → no
+    hint.
+    """
+    from .adapters import grok_leader
+
+    record = grok_leader.read_pane_session(pane)
+    return record[0] if record else None
+
+
 def _member_snapshot_session_id(team: str, agent: str) -> str | None:
     """The member's claude session, from the team resume snapshot.
 
@@ -5293,11 +5445,11 @@ def _member_snapshot_session_id(team: str, agent: str) -> str | None:
 
 
 _SHELL_INIT_POSIX = """\
-# hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
-# the current tmux pane (per-pane daemon for codex, cross-session inbox
-# for claude) and print a cd-ready resume hint when it exits. Outside tmux,
-# and for management subcommands / non-interactive flags, they run the plain
-# binary. Plain `codex` / `claude` are never touched.
+# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
+# claude / grok in the current tmux pane (per-pane daemon for codex and grok,
+# cross-session inbox for claude) and print a cd-ready resume hint when it
+# exits. Outside tmux, and for management subcommands / non-interactive flags,
+# they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hcodex: hive is not on PATH" >&2; return 127
@@ -5323,14 +5475,27 @@ function hclaude {
   hive resume-hint claude 2>/dev/null || true
   return $_hive_rc
 }
+
+function hgrok {
+  if ! command -v hive >/dev/null 2>&1; then
+    echo "hgrok: hive is not on PATH" >&2; return 127
+  fi
+  # The launcher always ends in an exec (managed or raw), so the status here
+  # is grok's own — never a fallback signal. The if-condition keeps errexit
+  # shells from bailing before the status is saved.
+  if hive grok "$@"; then _hive_rc=0; else _hive_rc=$?; fi
+  # print a cd-ready resume hint for the session that just ended.
+  hive resume-hint grok 2>/dev/null || true
+  return $_hive_rc
+}
 """
 
 _SHELL_INIT_FISH = """\
-# hive launchers — `hcodex` / `hclaude` start a hive-connected codex / claude in
-# the current tmux pane (per-pane daemon for codex, cross-session inbox
-# for claude) and print a cd-ready resume hint when it exits. Outside tmux,
-# and for management subcommands / non-interactive flags, they run the plain
-# binary. Plain `codex` / `claude` are never touched.
+# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
+# claude / grok in the current tmux pane (per-pane daemon for codex and grok,
+# cross-session inbox for claude) and print a cd-ready resume hint when it
+# exits. Outside tmux, and for management subcommands / non-interactive flags,
+# they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive
         echo "hcodex: hive is not on PATH" >&2
@@ -5358,17 +5523,31 @@ function hclaude
     hive resume-hint claude 2>/dev/null
     return $_hive_rc
 end
+
+function hgrok
+    if not type -q hive
+        echo "hgrok: hive is not on PATH" >&2
+        return 127
+    end
+    # the launcher always ends in an exec (managed or raw): the status is
+    # grok's own, never a fallback signal
+    hive grok $argv
+    set -l _hive_rc $status
+    # print a cd-ready resume hint for the session that just ended.
+    hive resume-hint grok 2>/dev/null
+    return $_hive_rc
+end
 """
 
 
 @cli.command("shell-init")
 @click.argument("shell", required=False, default="")
 def shell_init_cmd(shell: str):
-    """Print the `hcodex` / `hclaude` launchers for your shell.
+    """Print the `hcodex` / `hclaude` / `hgrok` launchers for your shell.
 
-    Add to your shell rc; then `hcodex` / `hclaude` start a hive-connected
-    codex / claude in the current tmux pane, while plain `codex` / `claude`
-    stay untouched:
+    Add to your shell rc; then `hcodex` / `hclaude` / `hgrok` start a
+    hive-connected codex / claude / grok in the current tmux pane, while the
+    plain `codex` / `claude` / `grok` stay untouched:
 
     \b
       # ~/.zshrc or ~/.bashrc

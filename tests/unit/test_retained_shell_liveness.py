@@ -152,6 +152,13 @@ def _wire_codex_transport(monkeypatch, sent, accepted):
     )
 
 
+def _wire_grok_transport(monkeypatch, sent, accepted):
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.send_to_pane",
+        lambda pane, text: sent.append((pane, text)) or accepted,
+    )
+
+
 def _wire_claude_transport(monkeypatch, sent, accepted):
     # claude is addressed pane -> live pid -> registry entry -> that session's
     # inbox socket, so the recorded pane is the one whose socket got written
@@ -179,6 +186,7 @@ def _wire_claude_transport(monkeypatch, sent, accepted):
     "cli_name,wire,accepted",
     [
         ("codex", _wire_codex_transport, "turnStartAccepted"),
+        ("grok", _wire_grok_transport, "sessionPromptQueued"),
         ("claude", _wire_claude_transport, "udsWriteAccepted"),
     ],
 )

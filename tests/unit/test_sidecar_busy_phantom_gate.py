@@ -37,7 +37,7 @@ class _Monitor:
 def _reset_path_cache(monkeypatch):
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
     monkeypatch.setattr(sidecar, "_pane_active_turn_phase", lambda _pane_id: None)
-    monkeypatch.setattr(sidecar, "_codex_app_server_busy", lambda _pane_id: None)
+    monkeypatch.setattr(sidecar, "_native_daemon_busy", lambda _pane_id: None)
     yield
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
 
@@ -146,11 +146,11 @@ def test_progressed_returns_false_when_fresh_resolve_yields_no_path(monkeypatch,
     assert sidecar._transcript_progressed_recently("%1", 3.0) is False
 
 
-# --- Codex app-server authoritative override --------------------------------
+# --- Native daemon (codex app-server / grok leader) authoritative override ---
 
 
 def _stub_app_server_busy(monkeypatch, value: bool | None) -> None:
-    monkeypatch.setattr(sidecar, "_codex_app_server_busy", lambda _pane_id: value)
+    monkeypatch.setattr(sidecar, "_native_daemon_busy", lambda _pane_id: value)
 
 
 def test_truly_busy_true_when_app_server_busy(monkeypatch):
