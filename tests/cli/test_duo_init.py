@@ -310,10 +310,10 @@ def test_duo_init_breakout_names_team_from_final_window_not_origin(
     payload = json.loads(result.output)
     assert breaks == ["%100"]
     assert payload["window"] == "dev:7"
-    assert payload["team"] == "dev-w77"            # final window @77, not origin/index
+    assert payload["team"] == "honey"              # pool name; window probe lives in the workspace
     assert payload["worker"]["pane"] == "%200"
-    assert spawned[0]["team_name"] == "dev-w77"    # validator spawned under the final-window team
-    assert sidecar_calls == [("/tmp/hive-dev-w77", "dev-w77", "dev:7", "@77")]
+    assert spawned[0]["team_name"] == "honey"      # validator spawned under the final-window team
+    assert sidecar_calls == [("/tmp/hive-dev-w77", "honey", "dev:7", "@77")]
 
 
 def test_duo_window_name_branch_then_project(monkeypatch):

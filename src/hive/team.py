@@ -86,6 +86,16 @@ class Team:
                 f"team name '{name}' is invalid: the '.prev' suffix is reserved "
                 "for resume snapshot archives"
             )
+        if name == "ccd":
+            raise ValueError(
+                f"team name '{name}' is invalid: 'ccd' is the reserved send "
+                "address for Claude sessions outside any team"
+            )
+        if "." in name:
+            raise ValueError(
+                f"team name '{name}' is invalid: dots separate send-address "
+                "segments (`<team>.<member>`), so a team name must be dot-free"
+            )
 
         existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
         if existing_team:

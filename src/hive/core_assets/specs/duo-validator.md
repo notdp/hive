@@ -39,12 +39,12 @@ human 说“给 xxx 这个 session 发一条”时（桌面 Claude Code、另一
 
 ```bash
 hive ccd ls                               # 列出本机能收消息的 Claude session：name、桌面标题 title、pid
-hive ccd send "<title 或 name>" "<消息>"
+hive send "ccd.<title 或 name>" "<消息>"
 ```
 
-human 通常说的是桌面标题（`title`），直接用它；重名时用 `name` 或 `pid`。消息里有反引号、`$(...)` 或多行内容时，先写文件再 `hive ccd send "<title>" "$(cat /tmp/note.md)"`——双引号里的反引号和 `$(...)` 会被 shell 执行，`$(cat ...)` 的输出不会再被展开。返回 `accepted` 只代表对方进程收下了这一帧；按对方设置，它可能在下一个 tool call 之间读到，也可能停在待接受状态。对方收到的是普通 `<HIVE from=…>` 信封（无 msgId），按 from 回：`ccd:*` 用 `hive ccd send`，`hive:<team>.<agent>` 用 `hive send <agent> --team <team>`。
+human 通常说的是桌面标题（`title`），直接用它；重名时用 `name` 或 `pid`。消息里有反引号、`$(...)` 或多行内容时，先写文件再 `hive send "ccd.<title>" "$(cat /tmp/note.md)"`——双引号里的反引号和 `$(...)` 会被 shell 执行，`$(cat ...)` 的输出不会再被展开。返回 `accepted` 只代表对方进程收下了这一帧；按对方设置，它可能在下一个 tool call 之间读到，也可能停在待接受状态。对方收到的是普通 `<HIVE from=<team>.<agent>>` 信封（无 msgId），照抄 from 就能回：`hive send <team>.<agent> "<回复>"`。
 
-反过来，桌面 session 也会给你发：你收到 `from=ccd:<label>` 的 `<HIVE>` 时，**回它用 `hive ccd send "<label>" "<回复>"`（label 就是 `ccd:` 后面的部分），不要 `hive reply`**——它不是成员，没有 thread 可锚。
+反过来，桌面 session 也会给你发：你收到 `from=ccd.<name>` 的 `<HIVE>` 时，**照抄 from 回：`hive send ccd.<name> "<回复>"`，不要 `hive reply`**——它不是成员，没有 thread 可锚。
 
 ### root 消息 + shell 安全
 

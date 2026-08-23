@@ -293,6 +293,32 @@ def save_snapshot(
     return "written"
 
 
+def archive_stale_snapshot(handle: str) -> bool:
+    """Rotate *handle*'s snapshot into its ``.prev`` slot without a replacement.
+
+    Called when a new team instance claims a recycled name (pool names are
+    reused after a team dies): the dead predecessor's members must never
+    answer for the new team — e.g. resume-hint reading a foreign sessionId —
+    so the old snapshot moves to the archive slot before the new team runs.
+    Returns True when something was archived.
+    """
+    snap = load_snapshot(handle)
+    if snap is None:
+        return False
+    path = snapshot_path(handle)
+    if path is None:
+        return False
+    prev_stem = f"{path.stem}{_PREV_SUFFIX}"
+    prev = dict(snap)
+    prev["handle"] = prev_stem
+    _write_atomic(path.with_name(f"{prev_stem}.json"), prev)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return True
+
+
 def delete_snapshot(handle: str) -> bool:
     path = snapshot_path(handle)
     if path is None:

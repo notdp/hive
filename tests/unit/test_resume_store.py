@@ -341,3 +341,18 @@ def test_short_id_is_a_locked_sha256_vector():
     assert resume.short_id({"handle": "0-w2", "createdAt": "100.0"}) == "0582"  # stable
     assert resume.short_id({"handle": "0-w2", "createdAt": "200.0"}) == "775b"  # new instance
     assert resume.short_id({"handle": "foo", "createdAt": "100.0"}) == "0541"  # other handle
+
+
+def test_archive_stale_snapshot_rotates_without_replacement(store):
+    """A recycled pool name archives the dead predecessor's snapshot up front,
+    so resume-hint can never hand the new team a foreign sessionId."""
+    assert resume.save_snapshot(_snap(handle="honey", created_at="100.0"), now="t1") == "written"
+
+    assert resume.archive_stale_snapshot("honey") is True
+    assert resume.load_snapshot("honey") is None
+    prev = resume.load_snapshot("honey.prev")
+    assert prev is not None and prev["createdAt"] == "100.0"
+
+    # nothing left to archive: reports False and keeps the archive slot
+    assert resume.archive_stale_snapshot("honey") is False
+    assert resume.load_snapshot("honey.prev") is not None

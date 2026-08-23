@@ -621,7 +621,7 @@ def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
     assert calls == []
 
 
-def test_send_claude_writes_to_the_session_inbox_as_hive_sender(monkeypatch):
+def test_send_claude_writes_to_the_session_inbox_as_the_member_address(monkeypatch):
     _pin_cli_probe(monkeypatch, "claude")
     calls, _ = _setup_tmux_mocks(monkeypatch)
     session = _fake_session()
@@ -636,7 +636,7 @@ def test_send_claude_writes_to_the_session_inbox_as_hive_sender(monkeypatch):
     accepted = Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
 
     assert accepted == "udsWriteAccepted"
-    assert writes == [(session.socket_path, "hi", "hive:w")]
+    assert writes == [(session.socket_path, "hi", "t.w")]
     assert calls == []  # native transport only — the composer is never touched
 
 

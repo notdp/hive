@@ -459,7 +459,7 @@ class Agent:
                     "session is still starting); claude delivery is inbox-only"
                 )
             accepted = claude_sessions.send(
-                session.socket_path, text, sender=f"hive:{self.name}"
+                session.socket_path, text, sender=f"{self.team_name}.{self.name}"
             )
             if accepted == claude_sessions.WRITE_TIMED_OUT:
                 raise DeliveryError(
