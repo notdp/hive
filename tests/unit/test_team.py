@@ -1,3 +1,5 @@
+import pytest
+
 from hive import tmux as _tmux
 from hive.agent import Agent
 from hive.team import Team, _find_team_window, _gc_stale_team_windows, duplicate_team_bindings
@@ -35,6 +37,16 @@ def test_team_create_rejects_outside_tmux(configure_hive_home):
         assert "requires tmux" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+@pytest.mark.parametrize("name", ["ccd", "ccd.desk", "a.b"])
+def test_team_create_rejects_reserved_or_dotted_names(configure_hive_home, name):
+    # `hive send` parses `<team>.<member>` / `ccd.<session>`: a team named
+    # ccd, or one carrying a dot, would be unaddressable
+    configure_hive_home(tmux_inside=True)
+
+    with pytest.raises(ValueError, match="invalid"):
+        Team.create(name)
 
 
 def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):

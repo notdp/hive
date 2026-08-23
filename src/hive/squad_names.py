@@ -41,13 +41,14 @@ def validate_name(name: str) -> tuple[bool, str]:
     """Return ``(ok, reason)`` for a caller-supplied squad name.
 
     Rules: 1-16 chars, lowercase ASCII letters/digits/dashes only,
-    must start with a letter. The bare tokens ``squad`` (topology word)
-    and ``crew`` (pre-rename legacy scheme) are reserved, never instance
-    names.
+    must start with a letter. The bare tokens ``squad`` (topology word),
+    ``crew`` (pre-rename legacy scheme) and ``ccd`` (the send address of
+    Claude sessions outside any team — a squad named ccd would make
+    ``ccd.orch`` ambiguous) are reserved, never instance names.
     """
     if not name:
         return False, "squad name cannot be empty"
-    if name in ("squad", "crew"):
+    if name in ("squad", "crew", "ccd"):
         return False, f"'{name}' is reserved; pick a distinct instance name"
     if not _NAME_RE.match(name):
         return False, (

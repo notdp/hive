@@ -38,6 +38,8 @@ def test_validate_accepts_pool_names(name):
     [
         ("", "empty"),
         ("squad", "reserved"),
+        ("crew", "reserved"),
+        ("ccd", "reserved"),          # send address of outside Claude sessions
         ("Peaky", "lowercase"),           # uppercase rejected
         ("peaky!", "lowercase"),          # punctuation rejected
         ("9crew", "lowercase"),           # leading digit rejected

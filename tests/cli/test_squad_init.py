@@ -145,16 +145,16 @@ def test_squad_init_breakout_names_main_team_from_final_window_keeps_readable_sq
     payload = json.loads(result.output)
     assert breaks == ["%100"]                     # crowded origin → broke out
     assert payload["window"] == "dev:8"
-    assert payload["team"] == "dev-w88"           # internal main team id-derived from final window
+    assert payload["team"] == "honey"             # pool name; the final-window probe is the workspace
     assert payload["squadName"] == "peaky"         # squad-facing namespace stays readable
     assert payload["orch"]["name"] == "peaky.orch"
     assert payload["challenger"]["name"] == "peaky.challenger"
-    assert spawned[0]["team_name"] == "dev-w88"   # challenger spawned under the final-window team
+    assert spawned[0]["team_name"] == "honey"     # challenger spawned under the final-window team
     assert payload["dispatched"] == ["peaky.challenger"]
     assert payload["next"] == "hive skills get squad-orch"
     orch_pane = payload["orch"]["pane"]
     assert not [c for c in sent if c[0] == orch_pane and "skills get" in c[1]]
-    assert sidecar_calls == [("/tmp/hive-dev-w88", "dev-w88", "dev:8", "@88")]
+    assert sidecar_calls == [("/tmp/hive-dev-w88", "honey", "dev:8", "@88")]
 
 
 def _bind_pane_as_squad_orch(cli_mod, pane="%100", *, team="dev-w0", squad="peaky"):

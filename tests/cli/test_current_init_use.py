@@ -320,11 +320,11 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     assert result.exit_code == 0
     payload = json.loads(result.output)
     # Stale "ghost" tag cleared; a fresh duo is formed for this window.
-    assert payload["team"] == "dev-w0"
+    assert payload["team"] == "honey"
     assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
-    assert tmux.get_window_option("dev:0", "hive-team") == "dev-w0"
+    assert tmux.get_window_option("dev:0", "hive-team") == "honey"
 
 
 def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -351,7 +351,7 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
     assert result.exit_code == 0
     payload = json.loads(result.output)
     # init now delegates to the duo topology and echoes its result dict.
-    assert payload["team"] == "dev-w2"
+    assert payload["team"] == "honey"
     assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
     assert payload["validator"]["name"] == "validator"
@@ -360,9 +360,9 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
 
     # The team is created and the current pane is remembered as the worker.
     from hive.team import Team
-    assert Team.load("dev-w2").workspace == str(workspace)
+    assert Team.load("honey").workspace == str(workspace)
     current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
-    assert current["team"] == "dev-w2"
+    assert current["team"] == "honey"
     assert current["agent"] == "worker"
 
 
@@ -402,7 +402,7 @@ def test_init_accepts_preopened_codex_worker_pane(
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-w5"
+    assert payload["team"] == "honey"
     assert payload["group"] == "duo"
     assert payload["worker"]["name"] == "worker"
 
@@ -462,7 +462,7 @@ def test_init_starts_sidecar_for_new_team(runner, configure_hive_home, monkeypat
     result = runner.invoke(cli, ["init"])
 
     assert result.exit_code == 0
-    assert calls == [(str(workspace), "dev-w2", "dev:2", "@2")]
+    assert calls == [(str(workspace), "honey", "dev:2", "@2")]
 
 
 def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -524,7 +524,48 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
     assert not team_dir.exists()
 
 
-def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_team(
+def test_init_reusing_a_pool_name_archives_the_dead_predecessors_snapshot(
+    runner, configure_hive_home, monkeypatch, tmp_path,
+):
+    # a fresh team that picks a recycled pool name must not inherit the dead
+    # team's resume snapshot: resume-hint would hand out a foreign sessionId
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_index", lambda: "2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: "dev:2")
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%5")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+
+    from hive.tmux import PaneInfo
+
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%5", "[orch]", command="claude")],
+    )
+    monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
+    monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws")
+
+    from hive import resume
+
+    dead = resume.build_snapshot(
+        handle="honey", team="honey", group="duo", window_name="hive",
+        workspace="/tmp/hive-dev-w9", repo_cwd="/repo", branch="main",
+        created_at="100.0",
+        members=[{"name": "worker", "cli": "claude", "model": "m", "sessionId": "DEAD-SID", "cwd": "/repo"}],
+    )
+    assert resume.save_snapshot(dead, now="t0") == "written"
+
+    result = runner.invoke(cli, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["team"] == "honey"
+    assert resume.load_snapshot("honey") is None  # the new team starts clean
+    prev = resume.load_snapshot("honey.prev")
+    assert prev is not None and prev["members"][0]["sessionId"] == "DEAD-SID"
+
+
+def test_init_skips_pool_names_claimed_by_live_teams_and_squads(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     configure_hive_home(current_pane="%8", session_name="dev")
@@ -537,11 +578,15 @@ def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_t
 
     from hive.tmux import PaneInfo
 
-    # Set up existing team "dev-0" in tmux state at window dev:0
-    from hive import tmux
-    tmux.set_window_option("dev:0", "@hive-team", "dev-0")
-    tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws-0"))
-
+    # a live team elsewhere claims the first pool name, a squad namespace
+    # prefix claims the second — the new team takes the third
+    monkeypatch.setattr(
+        "hive.cli.tmux.list_panes_all",
+        lambda: [
+            PaneInfo("%2", "", role="agent", agent="worker", team="honey"),
+            PaneInfo("%3", "", role="agent", agent="comb.orch", group="comb"),
+        ],
+    )
     monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="claude")])
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws-1")
 
@@ -549,7 +594,7 @@ def test_init_uses_window_scoped_default_team_name_when_same_session_has_other_t
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-w1"
+    assert payload["team"] == "wasp"
 
 
 def test_init_breakout_names_team_from_final_window(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -587,9 +632,11 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["team"] == "dev-w42"   # final window @42, not origin (dev-w0) or index (dev-w3)
+    assert payload["team"] == "honey"
     assert payload["window"] == "dev:3"
-    assert sidecar_calls == [("/tmp/hive-dev-w42", "dev-w42", "dev:3", "@42")]
+    # the workspace + sidecar binding carry the final-window probe (@42),
+    # not origin (@0) or index (3) — the team name is a pool pick
+    assert sidecar_calls == [("/tmp/hive-dev-w42", "honey", "dev:3", "@42")]
 
 
 def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_home, monkeypatch, tmp_path):

@@ -167,7 +167,7 @@ def test_send_writes_one_peer_message_line_and_reports_acceptance(short_tmp):
     t = threading.Thread(target=_accept, daemon=True)
     t.start()
     try:
-        assert m.send(path, "hello there", sender="hive:t.w") == m.ACCEPTED_UDS_WRITE
+        assert m.send(path, "hello there", sender="t.w") == m.ACCEPTED_UDS_WRITE
         t.join(timeout=5)
     finally:
         srv.close()
@@ -177,7 +177,7 @@ def test_send_writes_one_peer_message_line_and_reports_acceptance(short_tmp):
     assert frame == {
         "type": "user",
         "priority": "next",
-        "from": "hive:t.w",
+        "from": "t.w",
         "message": {"role": "user", "content": "hello there"},
     }
 

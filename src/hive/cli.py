@@ -428,14 +428,46 @@ def _default_auto_workspace_path(session_name: str, window_id: str, fallback_ind
 
 
 def _default_team_name_for_window(session_name: str, window_id: str, window_index: str = "0") -> str:
-    """Default team name derived from a window's stable id.
+    """Window-id-derived team name — the overflow scheme behind the pool.
 
-    Team name is a routing key, not a display title, so it must stay unique and
-    stable. tmux window ids are never reused within a session, which avoids the
-    cross-window collisions that window-index-derived names hit after break-out
-    or window reorder (Bug A).
+    tmux window ids are never reused within a session, which avoids the
+    cross-window collisions that window-index-derived names hit after
+    break-out or window reorder (Bug A).
     """
     return f"{session_name}-{_window_id_slug(window_id, window_index)}"
+
+
+TEAM_NAME_POOL: tuple[str, ...] = (
+    "honey",
+    "comb",
+    "wasp",
+    "bumble",
+    "hornet",
+    "nectar",
+    "pollen",
+    "amber",
+    "clover",
+    "sage",
+)
+
+
+def _pick_team_name(session_name: str, window_id: str, window_index: str = "0") -> str:
+    """Short memorable name for a new team; window-id scheme as overflow.
+
+    The name is a routing key (`hive send <team>.<member>`), so it must be
+    short and typeable. Claimed = any live pane's team tag, plus the squad
+    namespace (a squad prefix in a qualified agent name routes just like a
+    team). `_claim_team_name` stays the final anti-clobber; identity itself
+    binds to the window via tags, never to the name's shape.
+    """
+    from . import squad_names
+
+    used = {p.team for p in tmux.list_panes_all() if p.team}
+    used |= squad_names.claimed_names()
+    for candidate in TEAM_NAME_POOL:
+        if candidate not in used:
+            return candidate
+    return _default_team_name_for_window(session_name, window_id, window_index)
 
 
 def _team_default_auto_workspace_path(team: Team) -> Path | None:
@@ -1288,27 +1320,113 @@ def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
     return team_name, t
 
 
-def _resolve_guest_send_target(to_agent: str, team_option: str) -> tuple[str, Team]:
+def _resolve_guest_send_target(to_agent: str, team: str) -> tuple[str, Team]:
     """Target resolution for a Claude-session guest (outside tmux).
 
     A guest has no scoped context and must never inherit one from a saved
-    slot: resolve by scanning live pane tags, or by an explicit --team.
+    slot: resolve by scanning live pane tags, or by the explicit
+    `<team>.<member>` address.
     """
-    if team_option:
-        t = _load_team(team_option)
+    if team:
+        t = _load_team(team)
         if _existing_team_agent(t, to_agent) is None:
-            _fail(f"agent '{to_agent}' not found in team '{team_option}'")
+            _fail(f"agent '{to_agent}' not found in team '{team}'")
         return t.name, t
     candidates = [p for p in tmux.list_panes_all() if p.agent == to_agent and p.team]
     teams = sorted({p.team for p in candidates})
     if not teams:
         _fail(f"agent '{to_agent}' not found in any live team (see `hive ls`)")
     if len(teams) > 1:
-        _fail(
-            f"agent '{to_agent}' exists in {len(teams)} teams "
-            f"({', '.join(teams)}); pass --team"
-        )
+        addresses = ", ".join(f"{name}.{to_agent}" for name in teams)
+        _fail(f"agent '{to_agent}' exists in {len(teams)} teams; address one of: {addresses}")
     return teams[0], _load_team(teams[0])
+
+
+def _live_member_pids() -> dict[int, tuple[str, str]]:
+    """pid -> (team, agent) for every live claude team-member process."""
+    from .agent_cli import claude_pid_for_pane
+
+    out: dict[int, tuple[str, str]] = {}
+    for p in tmux.list_panes_all():
+        if p.team and p.agent:
+            pid = claude_pid_for_pane(p.pane_id)
+            if pid:
+                out[pid] = (p.team, p.agent)
+    return out
+
+
+def _send_to_ccd_session(label: str, message: str, artifact: str) -> None:
+    """`hive send ccd.<session>`: a member pushes into an outside Claude
+    session's cross-session inbox.
+
+    LABEL is the session's Claude Code name, its desktop title, or its pid,
+    as listed by `hive ccd ls`. The receiving session reads the message
+    between tool calls, or starts a turn with it when idle.
+
+    Fire-and-forget: `accepted` means a live session took the frame. Whether
+    its `crossSessionInbound` setting delivers it or holds it for a click is
+    that session's decision and is not reported back here.
+    """
+    from .adapters import claude_sessions
+
+    team, agent = _default_team(), _default_agent()
+    if not (team and agent):
+        _fail(
+            "`ccd.<session>` is a team member's outbound address; another "
+            "Claude session is messaged with the native SendMessage tool"
+        )
+    if artifact:
+        _fail("a session push carries no --artifact; put the path in the body")
+    if not message:
+        _fail("message body required")
+    matches = claude_sessions.resolve(label)
+    if not matches:
+        _fail(f"no live Claude session named, titled or numbered '{label}' (see `hive ccd ls`)")
+    if len(matches) > 1:
+        where = ", ".join(f"{s.name} (pid {s.pid}, {s.cwd or '?'})" for s in matches)
+        _fail(f"{len(matches)} live sessions answer to '{label}': {where}; use the name or pid")
+    target = matches[0]
+    member = _live_member_pids().get(target.pid)
+    if member is not None:
+        m_team, m_agent = member
+        if m_team == team:
+            _fail(
+                f"'{label}' is your teammate {m_agent}; members talk over "
+                f"the bus: `hive send {m_agent}` / `hive reply`"
+            )
+        _fail(f"'{label}' is {m_team}.{m_agent}, a member of another team, not an outside session")
+    sender = f"{team}.{agent}"
+    # The frame's `from` reaches only the human's message card; the receiving
+    # model sees just the text. Wrap the body in the ordinary <HIVE> envelope
+    # so the sender travels in band and the receiver answers by copying it
+    # verbatim: `hive send <team>.<agent>`. No msgId: this is not a bus thread.
+    from .runtime_state import format_hive_envelope
+
+    envelope = format_hive_envelope(
+        from_agent=sender,
+        to_agent=f"ccd.{target.name}",
+        body=message,
+    )
+    outcome = claude_sessions.send(target.socket_path, envelope, sender=sender)
+    if outcome is None:
+        _fail(
+            f"session '{target.name}' (pid {target.pid}) is not listening on "
+            f"{target.socket_path}; it may have just exited"
+        )
+    if outcome == claude_sessions.WRITE_TIMED_OUT:
+        _fail(
+            f"session '{target.name}' (pid {target.pid}) accepted the connection but did "
+            f"not read the message (~{max(1, len(message) // 1024)} KB) in time; it looks "
+            "stalled and may hold a truncated frame — retry once it is responsive"
+        )
+    click.echo(json.dumps({
+        "session": target.name,
+        "title": target.title,
+        "pid": target.pid,
+        "cwd": target.cwd,
+        "from": sender,
+        "accepted": outcome,
+    }, indent=2, ensure_ascii=False))
 
 
 def _existing_team_agent(t: Team, agent_name: str) -> Agent | None:
@@ -2803,9 +2921,14 @@ def _create_standalone_duo(
     final_window_id = tmux.get_window_id(final_window) or ""
     final_index = final_window.rsplit(":", 1)[-1] if ":" in final_window else "0"
 
-    team_name = _default_team_name_for_window(session_name, final_window_id, final_index)
+    team_name = _pick_team_name(session_name, final_window_id, final_index)
     _prepare_window_for_new_team(final_window, current_pane=placement.worker_pane)
     _claim_team_name(team_name, this_window=final_window, explicit=False)
+    from . import resume as resume_store
+
+    # A recycled pool name must not inherit the dead predecessor's
+    # snapshot (resume-hint would hand out a foreign sessionId).
+    resume_store.archive_stale_snapshot(team_name)
 
     ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
     # A fresh duo on a reused window must not inherit the previous team's
@@ -3625,8 +3748,13 @@ def _create_squad_main_team(*, window_target: str, lead_pane: str) -> Team:
     final_index = window_target.rsplit(":", 1)[-1] if ":" in window_target else "0"
 
     _prepare_window_for_new_team(window_target, current_pane=lead_pane)
-    team_name = _default_team_name_for_window(session_name, final_window_id, final_index)
+    team_name = _pick_team_name(session_name, final_window_id, final_index)
     _claim_team_name(team_name, this_window=window_target, explicit=False)
+    from . import resume as resume_store
+
+    # A recycled pool name must not inherit the dead predecessor's
+    # snapshot (resume-hint would hand out a foreign sessionId).
+    resume_store.archive_stale_snapshot(team_name)
     ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
 
     from .sidecar import stop_sidecar
@@ -4390,19 +4518,12 @@ def status_show(legacy_args: tuple[str, ...]):
 @click.argument("to_agent", required=False, default="")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option(
-    "--team",
-    "team_option",
-    default="",
-    help="Target team, for a Claude session sending from outside any team",
-)
 @click.option("--to", "to_option", hidden=True, default=None)
 @click.option("--msg", "msg_option", hidden=True, default=None)
 def send(
     to_agent: str,
     body: str,
     artifact: str,
-    team_option: str,
     to_option: str | None,
     msg_option: str | None,
 ):
@@ -4411,9 +4532,13 @@ def send(
     `hive send` always opens a root thread; it does not accept
     `--reply-to`. To reply on an existing thread, use `hive reply`.
 
-    A Claude Code session outside tmux (the desktop app) may send too: the
-    message arrives as `from=ccd:<its title>`, and the member answers it with
-    `hive ccd send "<title>" "..."`. With several live teams, pass --team.
+    The recipient is an address, and every `from=` value on a received
+    envelope is one — answer by copying it verbatim. A teammate is a bare
+    name. A member of some team is `<team>.<member>` (how a Claude session
+    outside tmux, e.g. the desktop app, reaches in; bare names work there
+    too while unique across live teams — its message arrives as
+    `from=ccd.<its name>`). A Claude session outside any team is
+    `ccd.<name or title or pid>` (how a member reaches out).
 
     Root sends must keep `body` to a short summary and put details in
     `--artifact`; the body is rejected if longer than 500 chars, has
@@ -4428,17 +4553,26 @@ def send(
     \b
     Examples:
       hive send dodo "review this diff" --artifact /tmp/diff.md
+      hive send "ccd.PR review" "build is green"    # session by desktop title
       hive send dodo "see report" --artifact - <<'EOF'
       # Findings
       - item
       EOF
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
-    if to_agent.startswith("ccd:"):
-        _fail(
-            f"'{to_agent}' is a Claude session, not a team member; message it with "
-            f"`hive ccd send \"{to_agent[4:]}\" \"...\"`"
-        )
+    if to_agent.startswith("ccd."):
+        _send_to_ccd_session(to_agent[4:], body, artifact)
+        return
+    explicit_team = ""
+    if "." in to_agent:
+        # A dot splits the address only when the prefix names a live team
+        # (`honey.worker`); a squad member's own name is dotted
+        # (`peaky.orch`) and must stay whole for qualified resolution.
+        from .team import _find_team_window
+
+        prefix, rest = to_agent.split(".", 1)
+        if prefix and _find_team_window(prefix)[0]:
+            explicit_team, to_agent = prefix, rest
     guest = None
     if not tmux.is_inside_tmux():
         # The root gate admitted this call because the process runs inside a
@@ -4450,14 +4584,17 @@ def send(
         if guest is None:
             _fail(_TMUX_REQUIRED_MESSAGE)
     if guest is not None:
-        team_name, t = _resolve_guest_send_target(to_agent, team_option)
+        team_name, t = _resolve_guest_send_target(to_agent, explicit_team)
         # The session NAME, never the title: a title may contain spaces, which
         # would break `<HIVE from=...>` attribute tokenization downstream. The
-        # name addresses the session in `hive ccd send` just the same.
-        sender = f"ccd:{guest.name}"
+        # name addresses the session in `hive send ccd.<name>` just the same.
+        sender = f"ccd.{guest.name}"
     else:
-        if team_option:
-            _fail("--team is for a Claude session outside tmux; team members address peers by name")
+        if explicit_team:
+            _fail(
+                "team members address teammates by bare name; "
+                "`<team>.<member>` is for a Claude session outside tmux"
+            )
         team_name, t = _resolve_send_target_team(to_agent)
         sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
@@ -4515,10 +4652,10 @@ def reply(
       hive reply dodo "see v2" --artifact /tmp/v2.md
     """
     _reject_legacy_recipient_options(to_option, msg_option, command="reply", to_agent=to_agent)
-    if to_agent.startswith("ccd:"):
+    if to_agent.startswith("ccd."):
         _fail(
             f"'{to_agent}' is a Claude session, not a team member; answer it with "
-            f"`hive ccd send \"{to_agent[4:]}\" \"...\"` (it has no thread to anchor)"
+            f"`hive send \"{to_agent}\" \"...\"` (it has no thread to anchor)"
         )
     team_name, t = _resolve_send_target_team(to_agent)
     sender = _resolve_sender(None)
@@ -5020,86 +5157,36 @@ def claude_cmd(ctx: click.Context):
 
 @cli.group("ccd")
 def ccd_cmd():
-    """Reach Claude Code sessions outside the team — the desktop app, another
-    terminal — over their own cross-session inbox.
+    """Discover Claude Code sessions outside the team — the desktop app,
+    another terminal — by their cross-session inbox registry.
 
-    The path `SendMessage` uses between Claude sessions; a codex member has
-    no such tool, so this gives every member one. `hive ccd ls` lists the
-    reachable sessions; `hive ccd send` pushes a message to one by its name,
-    desktop title, or pid. Replies do not come back this way: the receiver is
-    not a team member and has no msgId to answer.
+    `hive ccd ls` lists the reachable sessions; messaging one is plain
+    `hive send ccd.<name>` (name, desktop title, or pid).
     """
 
 
 @ccd_cmd.command("ls")
 def ccd_ls_cmd():
-    """List the Claude Code sessions `hive ccd send` can reach.
+    """List the Claude Code sessions `hive send ccd.<name>` can reach.
 
     The same registry `/list-agents` reads: every live session that binds a
     cross-session inbox (Claude Code 2.1.224+). A session on an older CLI, or
     started in bare mode, has no inbox and is not listed. `title` is the
-    desktop app's session title when one is set.
+    desktop app's session title when one is set. A session that is really a
+    live team member carries a `member` field with its `<team>.<agent>`
+    address: message it over the bus, not here.
     """
     from .adapters import claude_sessions
 
-    rows = [
-        {"name": s.name, "title": s.title, "pid": s.pid, "kind": s.kind, "cwd": s.cwd}
-        for s in claude_sessions.list_sessions()
-    ]
+    members = _live_member_pids()
+    rows = []
+    for s in claude_sessions.list_sessions():
+        row = {"name": s.name, "title": s.title, "pid": s.pid, "kind": s.kind, "cwd": s.cwd}
+        if s.pid in members:
+            row["member"] = ".".join(members[s.pid])
+        rows.append(row)
     click.echo(json.dumps({"sessions": rows}, indent=2, ensure_ascii=False))
 
-
-@ccd_cmd.command("send")
-@click.argument("session")
-@click.argument("message")
-def ccd_send_cmd(session: str, message: str):
-    """Push a message into a Claude Code session on this machine.
-
-    SESSION is the session's Claude Code name, its desktop title, or its pid,
-    as listed by `hive ccd ls`. The receiving session reads the message
-    between tool calls, or starts a turn with it when idle.
-
-    Fire-and-forget: `accepted` means a live session took the frame. Whether
-    its `crossSessionInbound` setting delivers it or holds it for a click is
-    that session's decision and is not reported back here.
-    """
-    from .adapters import claude_sessions
-
-    matches = claude_sessions.resolve(session)
-    if not matches:
-        _fail(f"no live Claude session named, titled or numbered '{session}' (see `hive ccd ls`)")
-    if len(matches) > 1:
-        where = ", ".join(f"{s.name} (pid {s.pid}, {s.cwd or '?'})" for s in matches)
-        _fail(f"{len(matches)} live sessions answer to '{session}': {where}; use the name or pid")
-    target = matches[0]
-    team, agent = _default_team(), _default_agent()
-    if team and agent:
-        sender = f"hive:{team}.{agent}"
-    else:
-        me = claude_sessions.self_session()
-        # A Claude session outside any team signs as itself; only a plain
-        # shell falls back to the bare marker.
-        sender = f"ccd:{me.name}" if me else "hive"
-    outcome = claude_sessions.send(target.socket_path, message, sender=sender)
-    if outcome is None:
-        _fail(
-            f"session '{target.name}' (pid {target.pid}) is not listening on "
-            f"{target.socket_path}; it may have just exited"
-        )
-    if outcome == claude_sessions.WRITE_TIMED_OUT:
-        _fail(
-            f"session '{target.name}' (pid {target.pid}) accepted the connection but did "
-            f"not read the message (~{max(1, len(message) // 1024)} KB) in time; it looks "
-            "stalled and may hold a truncated frame — retry once it is responsive"
-        )
-    click.echo(json.dumps({
-        "session": target.name,
-        "title": target.title,
-        "pid": target.pid,
-        "cwd": target.cwd,
-        "from": sender,
-        "accepted": outcome,
-    }, indent=2, ensure_ascii=False))
 
 @cli.command("resume-hint", hidden=True)
 @click.argument("cli_name", type=click.Choice(["claude", "codex"]))
