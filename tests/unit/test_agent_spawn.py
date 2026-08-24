@@ -74,9 +74,11 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _profile: False)
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
-    # Default: no per-pane codex daemon, so tests never attempt a real socket
-    # bind. Tests that exercise the --remote path override this explicitly.
+    # Default: no per-pane codex daemon / grok leader, so tests never attempt a
+    # real socket bind or spawn a CLI process. Tests that exercise the daemon
+    # paths override these explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
+    monkeypatch.setattr("hive.adapters.grok_leader.spawn_daemon", lambda *_a, **_kw: False)
     # Default: the startup driver reports the pane's claude session bound its
     # cross-session inbox, so spawn tests never run the capture loop or look
     # for a registry entry on disk. Failure paths have dedicated tests below.
@@ -275,24 +277,27 @@ def test_startup_driver_answers_prompts_even_after_inbox_registers(monkeypatch):
     assert keys == [("%9", "Enter")]  # the late dialog still got answered
 
 
-@pytest.mark.parametrize("cli_name", ["claude", "codex"])
+@pytest.mark.parametrize("cli_name", ["claude", "codex", "grok"])
 def test_spawn_rejects_prompt_starting_with_dash(monkeypatch, cli_name):
     # the launch goes through `hive <cli>`, whose parser strips any `--`
     # separator, so a dashed prompt would be read as a flag: refuse it
     calls, _ = _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
 
     with pytest.raises(ValueError, match="must not start with '-'"):
         Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
                     is_first=True, cli=cli_name, skill="none", prompt="--edge prompt")
 
 
-@pytest.mark.parametrize("cli_name", ["claude", "codex"])
+@pytest.mark.parametrize("cli_name", ["claude", "codex", "grok"])
 def test_spawn_pane_command_runs_hive_launcher_then_resume_hint(monkeypatch, cli_name):
     # the pane runs hive's managed launcher as the binary (never the rc's
-    # hclaude/hcodex function) and prints the cd-ready hint once the CLI exits
+    # hclaude/hcodex/hgrok function) and prints the cd-ready hint once the CLI
+    # exits
     calls, _ = _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
 
     Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/work/dir",
                 is_first=True, cli=cli_name, skill="none")
@@ -449,6 +454,19 @@ def _mock_daemon_up(monkeypatch):
     )
 
 
+def _mock_grok_leader_up(monkeypatch):
+    """Leader daemon up; record the session hive minted for the pane."""
+    sessions: list[tuple[str, str, str]] = []
+    monkeypatch.setattr("hive.adapters.grok_leader.spawn_daemon", lambda *_a, **_kw: True)
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.write_pane_session",
+        lambda pane, session_id, cwd: sessions.append((pane, session_id, cwd)),
+    )
+    # Readiness polls the minted session dir on disk; answer immediately.
+    monkeypatch.setattr("hive.agent._wait_grok_session_ready", lambda _pane, _sid: True)
+    return sessions
+
+
 def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
     # With a workspace, spawn asks the sidecar to bring the 2nd client online
     # before codex starts, so it never has to late-join/resume.
@@ -546,6 +564,143 @@ def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
     assert started == []  # daemon not started on resume
 
 
+def test_spawn_grok_launches_with_minted_session_id_and_model_flag(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    sessions = _mock_grok_leader_up(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0",
+        model="grok-4.6", cwd="/work/dir", is_first=True, skill="none", cli="grok",
+    )
+
+    launch = calls[0].split(" && ")[-1].split("; hive resume-hint")[0]
+    pane, session_id, cwd = sessions[0]
+    assert (pane, cwd) == ("%0", "/work/dir")
+    assert launch.split() == ["hive", "grok", "--session-id", session_id, "-m", "'grok-4.6'"]
+
+
+def test_spawn_grok_resume_keeps_the_session_id_and_drops_fork_flag(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    sessions = _mock_grok_leader_up(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none",
+        cli="grok", session_id="sess-abc", session_mode="resume",
+    )
+
+    launch = calls[0].split(" && ")[-1].split("; hive resume-hint")[0]
+    assert launch.split() == ["hive", "grok", "--resume", "'sess-abc'"]
+    # the pane drives the resumed session itself — no new id is minted
+    assert sessions == [("%0", "sess-abc", "/tmp")]
+
+
+def test_spawn_grok_fork_mints_a_new_session_id_for_the_branch(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    sessions = _mock_grok_leader_up(monkeypatch)
+
+    Agent.spawn(
+        name="w1", team_name="t", target_pane="%0", cwd="/tmp", skill="none",
+        cli="grok", session_id="sess-abc",
+    )
+
+    launch = calls[0].split(" && ")[-1].split("; hive resume-hint")[0]
+    forked_id = sessions[0][1]
+    assert forked_id != "sess-abc"
+    assert launch.split() == [
+        "hive", "grok", "--session-id", forked_id, "--resume", "'sess-abc'", "--fork-session",
+    ]
+
+
+def test_spawn_grok_refuses_when_leader_daemon_fails(monkeypatch):
+    """Grok runtime lives on the per-pane leader: without one the pane would run
+    a grok nobody can reach, so spawn gives the pane back and raises."""
+    # _setup_tmux_mocks makes grok spawn_daemon return False.
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    killed: list[str] = []
+    written: list[tuple] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", killed.append)
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.write_pane_session",
+        lambda *a: written.append(a),
+    )
+
+    with pytest.raises(RuntimeError, match="leader-only"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    skill="none", cli="grok")
+
+    assert killed == ["%0"]
+    assert calls == []  # no launch command was ever sent
+    assert written == []  # and no session record left behind
+
+
+def test_spawn_grok_leader_fail_in_place_clears_tags_instead_of_killing(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    killed: list[str] = []
+    cleared: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", killed.append)
+    monkeypatch.setattr("hive.agent.tmux.clear_pane_tags", cleared.append)
+
+    with pytest.raises(RuntimeError, match="leader-only"):
+        Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/tmp",
+                    skill="none", cli="grok", split_window=False)
+
+    assert killed == []
+    assert cleared == ["%0"]
+    assert calls == []
+
+
+def test_spawn_grok_connects_the_2nd_client_once_the_session_is_ready(monkeypatch):
+    # the client can only load a session the TUI has opened, so the connect
+    # follows readiness instead of racing the launch
+    _setup_tmux_mocks(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
+    order: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._wait_grok_session_ready",
+        lambda pane, _sid: order.append(("ready", pane)) or True,
+    )
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_grok",
+        lambda workspace, pane: order.append(("connect", workspace, pane)) or {"ok": True},
+    )
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/work/dir",
+                skill="none", cli="grok", workspace="/tmp/ws")
+
+    assert order == [("ready", "%0"), ("connect", "/tmp/ws", "%0")]
+
+
+def test_spawn_grok_skips_the_connect_when_readiness_times_out(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
+    monkeypatch.setattr("hive.agent._wait_grok_session_ready", lambda _pane, _sid: False)
+    connects: list = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_grok",
+        lambda workspace, pane: connects.append((workspace, pane)),
+    )
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/work/dir",
+                skill="none", cli="grok", workspace="/tmp/ws")
+
+    assert connects == []  # nothing to load yet; the lazy connect retries
+
+
+def test_spawn_grok_skips_preconnect_without_workspace(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
+    connects: list = []
+    monkeypatch.setattr(
+        "hive.sidecar.request_connect_grok",
+        lambda workspace, pane: connects.append((workspace, pane)),
+    )
+
+    Agent.spawn(name="w1", team_name="t", target_pane="%0", cwd="/work/dir",
+                skill="none", cli="grok")  # lazy connect on the next tick covers it
+
+    assert connects == []
+
+
 def test_send_codex_uses_turn_start_when_daemon_accepts(monkeypatch):
     # pin the process probe: the real one inspects the live tmux pane "%3",
     # which detects whatever CLI happens to run there on this machine
@@ -616,6 +771,43 @@ def test_send_codex_transport_failure_raises_without_keystrokes(monkeypatch):
 
     with pytest.raises(DeliveryError):
         Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert submitted == []
+    assert calls == []
+
+
+def test_send_grok_queues_the_prompt_on_the_leader(monkeypatch):
+    _pin_cli_probe(monkeypatch, "grok")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.send_to_pane",
+        lambda pane, text: sent.append((pane, text)) or "sessionPromptQueued",
+    )
+
+    accepted = Agent(name="w", team_name="t", pane_id="%3", cli="grok").send("hi")
+
+    assert accepted == "sessionPromptQueued"
+    assert sent == [("%3", "hi")]
+    assert calls == []  # native transport only — the composer is never touched
+
+
+def test_send_grok_transport_failure_raises_without_keystrokes(monkeypatch):
+    """Every grok transport failure (no leader, no session record, RPC error,
+    ack timeout — the adapter folds them all to None) raises DeliveryError and
+    never falls back to keystroke injection."""
+    _pin_cli_probe(monkeypatch, "grok")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.send_to_pane", lambda pane, text: None
+    )
+    submitted: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.agent._submit_interactive_text", lambda *a: submitted.append(a)
+    )
+
+    with pytest.raises(DeliveryError):
+        Agent(name="w", team_name="t", pane_id="%3", cli="grok").send("hi")
 
     assert submitted == []
     assert calls == []
@@ -944,6 +1136,50 @@ def test_wait_codex_thread_ready_timeout_is_deterministic_and_nonfatal(monkeypat
     a = Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
                     cli="codex", skill="hive")
     assert a.pane_id == "%0"
+
+
+def test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner(monkeypatch):
+    _setup_tmux_mocks(monkeypatch)
+    monkeypatch.setattr("hive.adapters.grok_leader.spawn_daemon", lambda *_a, **_kw: True)
+    sessions: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.write_pane_session",
+        lambda pane, session_id, cwd: sessions.append((pane, session_id, cwd)),
+    )
+    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
+    waited: list[str] = []
+    monkeypatch.setattr(
+        "hive.agent._wait_grok_session_ready", lambda pane, sid: waited.append(sid) or True
+    )
+
+    Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
+                cli="grok", skill="none")
+
+    assert banner_waits == []
+    assert waited == [sessions[0][1]]  # the id hive minted, not the pane's cwd
+
+
+def test_wait_grok_session_ready_sees_the_session_dir_and_is_nonfatal(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_HOME", str(tmp_path))
+    _pin_cli_probe(monkeypatch, "grok")
+    assert agent_mod._wait_grok_session_ready("%0", "sess-x", timeout=0, interval=0) is False
+
+    # grok creates $GROK_HOME/sessions/<quoted cwd>/<sid>/ at startup
+    (tmp_path / "sessions" / "%2Ftmp" / "sess-x").mkdir(parents=True)
+    assert agent_mod._wait_grok_session_ready("%0", "sess-x", timeout=0, interval=0) is True
+
+    # on resume the dir predates the launch, so the pane's own grok must be up
+    _pin_cli_probe(monkeypatch, "")
+    assert agent_mod._wait_grok_session_ready("%0", "sess-x", timeout=0, interval=0) is False
+
+    # a readiness timeout is not fatal: spawn still completes
+    _setup_tmux_mocks(monkeypatch)
+    _mock_grok_leader_up(monkeypatch)
+    monkeypatch.setattr("hive.agent._wait_grok_session_ready", lambda _pane, _sid: False)
+
+    agent = Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
+                        cli="grok", skill="hive")
+    assert agent.pane_id == "%0"
 
 
 def test_spawn_codex_embedded_fork_keeps_banner_wait(monkeypatch):

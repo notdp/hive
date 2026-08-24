@@ -117,6 +117,25 @@ def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
     assert connected == ["%5"]
 
 
+def test_handle_request_connect_grok_brings_2nd_client_online(monkeypatch):
+    import hive.adapters.grok_leader as grok_leader
+    connected: list[str] = []
+    monkeypatch.setattr(grok_leader, "connect_pane", lambda pane: connected.append(pane) or True)
+
+    response, keep_running = sidecar._handle_request(
+        workspace="/tmp/ws",
+        team="team-a",
+        tmux_window="dev:3",
+        tmux_window_id="@99",
+        sidecar_started_at="2026-04-17T00:00:00Z",
+        request={"action": "connect-grok", "pane": "%5"},
+    )
+
+    assert keep_running is True
+    assert response == {"ok": True, "connected": True}
+    assert connected == ["%5"]
+
+
 def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
     captured: dict[str, object] = {}
     workspace = "/tmp/ws"
@@ -387,9 +406,13 @@ def test_send_request_budget_covers_native_submission():
     """The CLI socket budget is strictly longer than the worst-case native
     transport submission: a valid slow acceptance must never surface as
     `sidecar unavailable`."""
-    from hive.adapters import claude_sessions, codex_app_server
+    from hive.adapters import claude_sessions, codex_app_server, grok_leader
 
-    native = max(claude_sessions.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    native = max(
+        claude_sessions.SUBMIT_TIMEOUT,
+        codex_app_server.SUBMIT_TIMEOUT,
+        grok_leader.SUBMIT_TIMEOUT,
+    )
     assert sidecar._send_request_timeout() > native
 
 
@@ -415,6 +438,7 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
     # invariant shape: delay < derived budget
     monkeypatch.setattr("hive.adapters.claude_sessions.SUBMIT_TIMEOUT", 0.6)
     monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
+    monkeypatch.setattr("hive.adapters.grok_leader.SUBMIT_TIMEOUT", 0.2)
     monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
 
     srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)

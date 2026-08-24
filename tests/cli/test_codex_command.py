@@ -206,7 +206,7 @@ def test_init_gate_ignores_non_codex(monkeypatch):
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane", lambda _p: _profile("claude")
     )
-    cli_mod._require_codex_daemon_backed("%1")  # no raise, no daemon lookup
+    cli_mod._require_daemon_backed("%1")  # no raise, no daemon lookup
 
 
 def test_init_gate_allows_daemon_backed_codex(monkeypatch, tmp_path):
@@ -219,7 +219,7 @@ def test_init_gate_allows_daemon_backed_codex(monkeypatch, tmp_path):
         "hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock
     )
     monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
-    cli_mod._require_codex_daemon_backed("%1")  # daemon answers -> allowed
+    cli_mod._require_daemon_backed("%1")  # daemon answers -> allowed
 
 
 def test_init_gate_uses_native_marker_pane(monkeypatch, tmp_path):
@@ -243,7 +243,7 @@ def test_init_gate_uses_native_marker_pane(monkeypatch, tmp_path):
         fake_socket_path,
     )
     monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
-    cli_mod._require_codex_daemon_backed("%bad")
+    cli_mod._require_daemon_backed("%bad")
     assert seen["pane"] == "%9"
 
 
@@ -256,7 +256,7 @@ def test_init_gate_blocks_codex_tool_without_native_marker(monkeypatch, capsys):
         ),
     )
     with pytest.raises(SystemExit):
-        cli_mod._require_codex_daemon_backed("%wrong")
+        cli_mod._require_daemon_backed("%wrong")
     err = capsys.readouterr().err
     assert "hive codex resume" in err
     assert "abc-123" not in err
@@ -276,7 +276,7 @@ def test_init_gate_blocks_embedded_codex_with_resume_hint(monkeypatch, tmp_path,
         lambda _self, _p: "abc-123",
     )
     with pytest.raises(SystemExit):
-        cli_mod._require_codex_daemon_backed("%1")
+        cli_mod._require_daemon_backed("%1")
     err = capsys.readouterr().err
     assert "Ctrl-C" in err
     assert "hive codex resume abc-123" in err
@@ -296,7 +296,7 @@ def test_init_gate_hint_without_sid_falls_back_to_picker(monkeypatch, tmp_path, 
         lambda _self, _p: None,
     )
     with pytest.raises(SystemExit):
-        cli_mod._require_codex_daemon_backed("%1")
+        cli_mod._require_daemon_backed("%1")
     err = capsys.readouterr().err
     assert "run: hive codex resume\n" in err  # picker form, no trailing sid
 

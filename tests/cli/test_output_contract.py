@@ -157,8 +157,9 @@ def test_ignore_unknown_commands_pin_help_to_double_dash_only():
             )
 
 
-def test_claude_keeps_no_help_option():
-    assert cli.commands["claude"].add_help_option is False
+def test_launchers_keep_no_help_option():
+    for name in ("claude", "codex", "grok"):
+        assert cli.commands[name].add_help_option is False, name
 
 
 def test_dash_h_still_lands_in_raw_args_for_launchers():
@@ -166,6 +167,8 @@ def test_dash_h_still_lands_in_raw_args_for_launchers():
     probe via make_context; callbacks are never invoked)."""
     codex_ctx = cli.commands["codex"].make_context("codex", ["-h"])
     assert codex_ctx.args == ["-h"]
+    grok_ctx = cli.commands["grok"].make_context("grok", ["-h"])
+    assert grok_ctx.args == ["-h"]
     cvim_ctx = cli.commands["cvim"].make_context("cvim", ["-h"])
     assert cvim_ctx.params.get("args") == ("-h",)
     claude_ctx = cli.commands["claude"].make_context("claude", ["--help"])

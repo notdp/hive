@@ -1,4 +1,4 @@
-"""Agent CLI profiles: claude, codex."""
+"""Agent CLI profiles: claude, codex, grok."""
 
 from __future__ import annotations
 
@@ -13,13 +13,14 @@ from . import adapters
 from . import settings as user_settings
 from . import tmux
 
-AGENT_CLI_NAMES = frozenset({"claude", "codex"})
+AGENT_CLI_NAMES = frozenset({"claude", "codex", "grok"})
 
 # Non-authoritative suggestions for the interactive picker. Custom values
 # always accepted; these just save the user from typing common aliases.
 # Sources:
 #   claude: https://code.claude.com/docs/en/model-config
 #   codex:  https://developers.openai.com/codex/models
+#   grok:   https://docs.x.ai/docs/models
 MODEL_SUGGESTIONS: dict[str, list[str]] = {
     "claude": [
         "claude-fable-5",
@@ -29,6 +30,7 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
         "claude-sonnet-4-6[1m]", "claude-sonnet-4-6",
     ],
     "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
+    "grok": ["grok-4.6", "grok-build"],
 }
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
@@ -42,21 +44,21 @@ CLI_ALIASES = {
 }
 
 # Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
-# OpenAI) produce more diverse viewpoints than same-family pairs. Used by:
+# OpenAI vs xAI) produce more diverse viewpoints than same-family pairs. Used by:
 # - `hive squad init` to pick challenger's CLI
 # - `hive init` peer discovery / spawn fallback
-_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude"}
+_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude", "grok": "claude"}
 
 
 def anti_peer_cli(current_cli: str) -> str:
-    """Return the anti-family peer CLI for *current_cli* (claude↔codex)."""
+    """Return the anti-family peer CLI for *current_cli* (claude↔codex, grok→claude)."""
     return _ANTI_PEER_CLI.get(current_cli, "claude")
 
 
 def classify_model_family(model: str) -> str:
     """Classify a model identifier into a coarse family for peer diversity.
 
-    Returns 'anthropic', 'openai', or 'unknown'.
+    Returns 'anthropic', 'openai', 'xai', or 'unknown'.
     """
     if not model:
         return "unknown"
@@ -66,6 +68,8 @@ def classify_model_family(model: str) -> str:
         return "anthropic"
     if "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
+    if "grok" in m:
+        return "xai"
     return "unknown"
 
 
@@ -73,7 +77,7 @@ def family_for_pane(pane_id: str) -> str:
     """Best-effort classify the agent pane's model family.
 
     Reads model via resolve_model_for_pane; falls back to CLI identity when
-    the model is unavailable (claude→anthropic, codex→openai).
+    the model is unavailable (claude→anthropic, codex→openai, grok→xai).
     """
     profile = detect_profile_for_pane(pane_id)
     if not profile:
@@ -86,6 +90,8 @@ def family_for_pane(pane_id: str) -> str:
         return "anthropic"
     if profile.name == "codex":
         return "openai"
+    if profile.name == "grok":
+        return "xai"
     return "unknown"
 
 
@@ -93,7 +99,7 @@ def peer_cli_for_family(my_family: str) -> str:
     """CLI to spawn as an anti-family peer when my family is *my_family*."""
     if my_family == "anthropic":
         return "codex"
-    if my_family == "openai":
+    if my_family in ("openai", "xai"):
         return "claude"
     return "claude"
 
@@ -138,6 +144,12 @@ PROFILES: dict[str, CLIProfile] = {
         ready_text="OpenAI Codex",
         fork_cmd="hive codex fork {session_id}",
         skill_cmd="${name}",
+    ),
+    "grok": CLIProfile(
+        name="grok",
+        ready_text="Shift+Tab:mode",
+        fork_cmd="hive grok --resume {session_id} --fork-session",
+        skill_cmd="/skills {name} ",
     ),
 }
 

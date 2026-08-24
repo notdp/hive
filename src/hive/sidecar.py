@@ -1,8 +1,8 @@
 """Team-scoped sidecar: message transport, runtime signals, notify watcher.
 
 Delivery has exactly one state: the native transport (claude inbox /
-codex daemon) either accepted the message or refused it. There is no
-tracked in-between and no confirmation oracle — acceptance means the
+codex daemon / grok leader) either accepted the message or refused it.
+There is no tracked in-between and no confirmation oracle — acceptance means the
 target's own runtime owns it from there.
 """
 
@@ -43,17 +43,21 @@ SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 # The CLI's socket budget must be strictly longer than the work it asks the
 # sidecar to perform: worst-case native transport submission (claude inbox
-# connect+write / codex daemon RPC) plus slack for scheduling and payload
-# plumbing.
+# connect+write / codex daemon RPC / grok leader prompt+ack) plus slack for
+# scheduling and payload plumbing.
 # A send blocks on nothing else — it returns queued the moment the transport
 # accepts; confirmation is asynchronous (background tracker / query-time).
 REQUEST_SLACK = 5.0
 
 
 def _native_submit_timeout() -> float:
-    from .adapters import claude_sessions, codex_app_server
+    from .adapters import claude_sessions, codex_app_server, grok_leader
 
-    return max(claude_sessions.SUBMIT_TIMEOUT, codex_app_server.SUBMIT_TIMEOUT)
+    return max(
+        claude_sessions.SUBMIT_TIMEOUT,
+        codex_app_server.SUBMIT_TIMEOUT,
+        grok_leader.SUBMIT_TIMEOUT,
+    )
 
 
 def _send_request_timeout() -> float:
@@ -458,13 +462,20 @@ def _pane_in_active_turn(pane_id: str) -> bool:
     return _pane_active_turn_phase(pane_id) in ACTIVE_TURN_PHASES
 
 
-def _codex_app_server_busy(pane_id: str) -> bool | None:
+def _native_daemon_busy(pane_id: str) -> bool | None:
+    """Busy flag from the pane's own daemon (codex app-server, grok leader).
+
+    None when neither transport holds a live session for the pane, which is
+    the signal to fall back to the heuristic sources.
+    """
     if not pane_id:
         return None
     try:
-        from .adapters import codex_app_server
+        from .adapters import codex_app_server, grok_leader
 
         rt = codex_app_server.runtime_for_pane(pane_id)
+        if rt is None:
+            rt = grok_leader.runtime_for_pane(pane_id)
     except Exception:
         return None
     if rt is None:
@@ -475,10 +486,10 @@ def _codex_app_server_busy(pane_id: str) -> bool | None:
 def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     """Public ``busy`` signal: true when the agent is in mid-turn.
 
-    For daemon-backed Codex panes the app-server ``busy`` flag is
+    For daemon-backed Codex/Grok panes the daemon's ``busy`` flag is
     authoritative and short-circuits the heuristic sources below.
 
-    Heuristic sources (non-Codex or no daemon):
+    Heuristic sources (no daemon):
         A. tmux control-mode reports recent visible output (with phantom-redraw
            gate via transcript jsonl mtime).
         B. transcript turnPhase is in :data:`activity.ACTIVE_TURN_PHASES`.
@@ -489,7 +500,7 @@ def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     if not pane_id:
         return False
 
-    app_busy = _codex_app_server_busy(pane_id)
+    app_busy = _native_daemon_busy(pane_id)
     if app_busy is not None:
         return app_busy
 
@@ -517,10 +528,10 @@ def _is_output_busy(
 ) -> bool:
     """idle-notify variant of :func:`_pane_is_truly_busy`.
 
-    For daemon-backed Codex panes the app-server ``busy`` flag is
+    For daemon-backed Codex/Grok panes the daemon's ``busy`` flag is
     authoritative and short-circuits all heuristic sources.
 
-    Heuristic sources (non-Codex or no daemon): same OR signal as
+    Heuristic sources (no daemon): same OR signal as
     ``_pane_is_truly_busy`` but the monitor source is additionally
     clamped by an ``inactive_age`` sub-gate: when the window has been
     inactive for ``inactive_age`` seconds, ignore monitor output that
@@ -535,7 +546,7 @@ def _is_output_busy(
     if not pane_id:
         return False
 
-    app_busy = _codex_app_server_busy(pane_id)
+    app_busy = _native_daemon_busy(pane_id)
     if app_busy is not None:
         return app_busy
 
@@ -687,6 +698,18 @@ def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
     is down, and the lazy connect on the next runtime tick covers that case.
     """
     return _request_sidecar(workspace, {"action": "connect-codex", "pane": pane}, timeout=3.0)
+
+
+def request_connect_grok(workspace: str, pane: str) -> dict[str, Any] | None:
+    """Ask the sidecar to bring a per-pane grok 2nd client online now.
+
+    Called at spawn time so the stdio client has loaded the pane's session
+    before its first turn: ``session/load`` replays past updates, and a replay
+    is not evidence — only a live-attached client sees the first real turn.
+    Best-effort: returns None when the sidecar is down, and the lazy connect on
+    the next runtime tick covers that case.
+    """
+    return _request_sidecar(workspace, {"action": "connect-grok", "pane": pane}, timeout=3.0)
 
 
 def _sidecar_identity_matches(
@@ -1008,6 +1031,30 @@ def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
     return fields
 
 
+def _grok_leader_runtime(pane_id: str) -> dict[str, Any] | None:
+    """Native grok runtime from the pane's leader, or None if no daemon.
+
+    hive-spawned grok panes run their own leader daemon; hive's second client
+    folds its ACP notifications into busy/turn state. Returns None for a grok
+    hive never spawned — it has no socket and no session record, so there is
+    nothing to read (grok has no transcript probe to fall back to).
+    """
+    from .adapters import grok_leader
+
+    rt = grok_leader.runtime_for_pane(pane_id)
+    if rt is None:
+        return None
+    input_state = rt.input_state or "ready"
+    fields: dict[str, Any] = {
+        "busy": rt.busy,
+        "turnPhase": rt.turn_phase,
+        "inputState": input_state,
+        "inputReason": "" if input_state != "waiting_user" else "leader_permission_request",
+        "_runtimeSource": "grok-leader",
+    }
+    return fields
+
+
 def _codex_session_id_best_effort(
     pane_id: str, *, runtime_snapshot: RuntimeSnapshot | None
 ) -> str:
@@ -1092,6 +1139,18 @@ def _agent_runtime_payload(
             runtime["sessionId"] = _codex_session_id_best_effort(
                 pane_id, runtime_snapshot=runtime_snapshot
             )
+            return runtime
+
+    # hive-spawned grok is the same shape over its per-pane leader daemon, and
+    # its session id needs no probing: hive minted it at spawn time and wrote
+    # it beside the socket.
+    if profile.name == "grok":
+        leader_runtime = _grok_leader_runtime(pane_id)
+        if leader_runtime is not None:
+            from .adapters import grok_leader
+
+            runtime.update(leader_runtime)
+            runtime["sessionId"] = grok_leader.session_id_for_pane(pane_id) or "unresolved"
             return runtime
 
     if (
@@ -1783,6 +1842,15 @@ def _handle_request(
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
+    if action == "connect-grok":
+        try:
+            from .adapters import grok_leader
+            pane = str(request.get("pane") or "")
+            connected = bool(pane) and grok_leader.connect_pane(pane)
+            response = {"ok": True, "connected": connected}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        return response, True
     if action == "shutdown":
         return {"ok": True}, False
     return {"ok": False, "error": "unknown action"}, True
@@ -1844,8 +1912,8 @@ def _serve_requests(
             return False
 
 
-def _cleanup_dead_codex_daemons(workspace: str) -> None:
-    """Reap per-pane codex app-server daemons whose pane has died.
+def _cleanup_dead_daemons(workspace: str) -> None:
+    """Reap per-pane agent daemons (codex app-server, grok leader) whose pane died.
 
     The daemon is started at spawn time (agent.py) with ``start_new_session`` so
     it outlives the short-lived CLI process; the long-lived sidecar owns
@@ -1853,23 +1921,29 @@ def _cleanup_dead_codex_daemons(workspace: str) -> None:
     daemon and remove its socket + pidfile. Independent of team bindings, so it
     also reaps orphans from crashed spawns.
 
-    Killing a daemon takes its ``--remote`` TUI (and pane) down with it, so
-    every reap is logged; ``is_pane_alive`` only reports dead panes from a
-    successful tmux listing, never from a transient tmux failure.
+    Killing a daemon takes its attached TUI (and pane) down with it, so every
+    reap is logged; ``is_pane_alive`` only reports dead panes from a successful
+    tmux listing, never from a transient tmux failure.
     """
     from . import notify_debug, tmux
-    from .adapters import codex_app_server
+    from .adapters import codex_app_server, grok_leader
 
-    for pane in codex_app_server.list_daemon_panes():
-        if not tmux.is_pane_alive(pane):
+    for transport in (codex_app_server, grok_leader):
+        for pane in transport.list_daemon_panes():
+            if tmux.is_pane_alive(pane):
+                continue
             try:
                 pid: int | None = int(
-                    codex_app_server.pane_pidfile_path(pane).read_text().strip()
+                    transport.pane_pidfile_path(pane).read_text().strip()
                 )
             except (OSError, ValueError):
                 pid = None
             notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
-            codex_app_server.kill_pane_daemon(pane)
+            # Drop the pool's client BEFORE killing the daemon: a grok stdio
+            # client that outlives its leader auto-spawns a replacement on the
+            # same socket, resurrecting an orphan mid-reap.
+            transport.pool().drop(pane)
+            transport.kill_pane_daemon(pane)
 
 
 def _write_resume_snapshot(workspace: str, team: str) -> None:
@@ -1990,7 +2064,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
             if now - last_daemon_cleanup >= 30.0:
                 last_daemon_cleanup = now
-                _cleanup_dead_codex_daemons(workspace)
+                _cleanup_dead_daemons(workspace)
                 try:
                     _write_resume_snapshot(workspace, team)
                 except Exception:

@@ -97,9 +97,10 @@ Source — `busy=true` when **either** of two branches holds:
 
 Combined into ``sidecar._pane_is_truly_busy``.
 
-Codex override: a daemon-backed (born-connected) codex pane reports `busy`
-from its per-pane app-server instead — both branches above are still computed
-but then replaced for that pane. See "Codex Native Runtime (app-server source)".
+Native-daemon override: a daemon-backed (born-connected) codex or grok pane
+reports `busy` from its own per-pane daemon instead — both branches above are
+still computed but then replaced for that pane. See "Codex Native Runtime
+(app-server source)" and "Grok Native Runtime (leader source)".
 
 Fail-open: if the transcript path can't be resolved (non-agent pane, no
 session yet, stat error), the output branch returns true on monitor
@@ -121,7 +122,7 @@ Notes:
 Source — live process evidence on the pane's TTY only: the pane's current
 command and its TTY process table, parsed by the shared CLI matchers
 (`agent_cli.detect_cli_process_for_pane`). Never the pane title, the
-`@hive-cli` tag, a surviving codex app-server daemon/thread, or
+`@hive-cli` tag, a surviving codex app-server or grok leader daemon, or
 transcript/session metadata — all of those outlive the CLI process. Probe
 failures fail closed to `false`.
 
@@ -146,6 +147,8 @@ Source:
 - transcript gate inspection via `check_input_gate()`
 - codex app-server `status.activeFlags` for a daemon-backed codex pane
   (overrides the transcript gate for that pane — see "Codex Native Runtime")
+- grok leader `session/request_permission` for a daemon-backed grok pane
+  (see "Grok Native Runtime")
 
 Current values:
 
@@ -169,6 +172,8 @@ Source:
 - transcript probe for claude (last observed transcript state)
 - codex app-server thread status for a daemon-backed codex pane — codex has no
   transcript probe (see "Codex Native Runtime")
+- grok leader notifications for a daemon-backed grok pane — grok has no
+  transcript probe either (see "Grok Native Runtime")
 
 Current values:
 
@@ -225,6 +230,12 @@ Codex has no transcript/JCL probe. A daemon-backed pane reports natively (see
 "Codex Native Runtime" below); an embedded (daemon-less) codex is unsupported
 and reads as `unknown_evidence`.
 
+### Grok
+
+Grok has no transcript/JCL probe either. A daemon-backed pane reports natively
+(see "Grok Native Runtime" below); a grok hive never spawned has no leader
+socket and no session record, and reads as `unknown_evidence`.
+
 ## Codex Native Runtime (app-server source)
 
 A born-connected codex pane — hive-spawned, or launched through `hcodex` (the
@@ -268,6 +279,56 @@ Field mapping (notification → runtime field):
 `sessionId` for a daemon-backed pane resolves from app-server thread metadata
 (`thread.sessionId` via `thread/resume`), with an lsof-on-daemon-pid fallback.
 It stays `unresolved` until the thread has produced activity.
+
+## Grok Native Runtime (leader source)
+
+A born-connected grok pane — hive-spawned, or launched through `hgrok` (the
+`hive shell-init` launcher) — runs a per-pane `grok agent leader` daemon. The
+TUI attaches to it, and hive attaches as a second client through `grok agent
+--leader stdio`, an ACP JSON-RPC subprocess. `busy` / `inputState` / `turnPhase`
+are folded from that client's notification stream; the emitted payload is tagged
+`_runtimeSource: grok-leader`.
+
+The leader keeps every session of the cwd, so which one is *this pane's* is not
+discoverable from it: hive mints the session id at spawn time, passes it as
+`--session-id`, and records it beside the socket. The client loads exactly that
+session and ignores notifications for any other.
+
+`session/load` replays the session's past updates before it answers, so
+everything received before the load response is discarded — a replayed turn must
+never mark the pane busy. This is why spawn asks the sidecar to connect
+(`connect-grok`) once the pane's session exists and its grok is up, rather than
+lazily on the next tick.
+
+Field mapping (notification → runtime field):
+
+- `busy` — `_x.ai/sessions/changed` `activity` is the authority:
+  - `true` — `activity: working`, or any `session/update` chunk/tool event
+  - `false` — `activity: idle`, or `_x.ai/session_notification` `turn_completed`
+- `turnPhase`
+  - `tool_open` — `session/update` `tool_call`
+  - `tool_result_pending_reply` — `tool_call_update` with `status: completed`
+  - `user_prompt_pending` — an agent/thought/user message chunk with no tool
+    phase open
+  - `input_backlog` — `_x.ai/queue/changed` with non-empty entries
+  - `turn_closed` — `turn_completed`, or `activity: idle`
+  - `unknown_evidence` — before the first post-load notification
+- `inputState`
+  - `waiting_user` — the leader asked `session/request_permission`; hive answers
+    its copy `cancelled` (the decision belongs to the human at the TUI, which
+    gets its own copy) and emits `inputReason=leader_permission_request`
+  - `ready` — `turn_completed`, `activity: idle`, or any `tool_call_update` (the
+    permission it was blocked on has been decided)
+
+Queue semantics: a prompt sent mid-turn is queued FIFO by the leader and runs
+when the current turn ends — there is no steering and no bounce, the same as
+typing into the TUI. Delivery is therefore accepted at the *echo* (a queue entry
+or `user_message_chunk` carrying the text), not at the `session/prompt`
+response, which only lands when the whole turn ends.
+
+`sessionId` for a daemon-backed pane is the spawn-minted id read straight from
+the pane's `.session` file — no probing, and no `unresolved` window while the
+session warms up.
 
 ## Root Send Protocol
 

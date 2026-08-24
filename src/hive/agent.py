@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from .agent_cli import resolve_session_id_for_pane
 AGENT_STARTUP_TIMEOUT = 30
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
-SUPPORTED_CLIS: tuple[str, ...] = ("claude", "codex")
+SUPPORTED_CLIS: tuple[str, ...] = ("claude", "codex", "grok")
 
 
 def _shell_escape(s: str) -> str:
@@ -36,7 +37,7 @@ def detect_current_session_id(cwd: str, model: str = "", pane_id: str = "") -> s
 
 
 class DeliveryError(RuntimeError):
-    """A native transport (codex daemon / claude inbox) did not accept the
+    """A native transport (codex daemon / grok leader / claude inbox) did not accept the
     message. Normal hive delivery never falls back to keystrokes; callers
     surface this as an explicit submit failure (injectStatus=failed)."""
 
@@ -190,6 +191,40 @@ def _wait_codex_thread_ready(
         time.sleep(interval)
 
 
+def _wait_grok_session_ready(
+    pane_id: str,
+    session_id: str,
+    *,
+    timeout: float = AGENT_STARTUP_TIMEOUT,
+    interval: float = 0.5,
+) -> bool:
+    """Wait for the grok TUI to materialize the session hive minted for it.
+
+    ``--session-id`` is honoured at startup: grok creates
+    ``$GROK_HOME/sessions/<quoted cwd>/<sid>/`` before the first prompt, so that
+    directory appearing is the readiness signal — no screen scraping. The cwd
+    segment is grok's own encoding of the pane cwd, so the pane's session is
+    matched by id under any of them. On resume the directory already exists, so
+    the pane's live grok process is required too. Best-effort like the codex
+    thread wait: a timeout is not fatal.
+    """
+    from .adapters import grok_leader
+    from .agent_cli import detect_cli_process_for_pane
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if any(grok_leader.grok_home().glob(f"sessions/*/{session_id}")):
+                profile = detect_cli_process_for_pane(pane_id)
+                if profile is not None and profile.name == "grok":
+                    return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
 @dataclass
 class Agent:
     name: str
@@ -224,7 +259,7 @@ class Agent:
         workspace: str = "",
         session_mode: str = "fork",
     ) -> Agent:
-        """Spawn an agent CLI (claude/codex) in a tmux pane.
+        """Spawn an agent CLI (claude/codex/grok) in a tmux pane.
 
         If split_window is True (default), splits *target_pane* and runs the
         CLI in the new pane. If False, runs the CLI in *target_pane* itself
@@ -234,7 +269,8 @@ class Agent:
         (default, existing behavior) branches a copy of the session; ``resume``
         continues it — claude drops ``--fork-session``, codex runs the
         daemon-native ``resume`` subcommand (a resumed team member is
-        first-class, so the embedded shortcut fork uses is not allowed).
+        first-class, so the embedded shortcut fork uses is not allowed), grok
+        drops ``--fork-session`` and keeps the resumed session's own id.
         """
         if cli not in SUPPORTED_CLIS:
             raise ValueError(f"unsupported cli '{cli}', must be one of: {', '.join(SUPPORTED_CLIS)}")
@@ -258,14 +294,24 @@ class Agent:
         tmux.set_pane_title(pane_id, f"[{name}]")
         tmux.tag_pane(pane_id, "agent", name, team_name, cli=cli)
 
-        # The pane runs hive's managed launcher (`hive claude` / `hive codex`),
-        # the same path a human's `hclaude` / `hcodex` takes — but invoked as
-        # the binary, not the shell function, so a spawn never depends on the
-        # pane shell's rc having sourced `hive shell-init`. No `exec`: the CLI
-        # runs as the pane shell's foreground child, so the pane (and a usable
-        # shell) survives the CLI exiting.
+        def _undo_pane_side_effects() -> None:
+            """Give the pane back after a daemon failure: a split pane is ours
+            to kill, an in-place one only loses the tags/title just written."""
+            if split_window:
+                tmux.kill_pane(pane_id)
+            else:
+                tmux.clear_pane_tags(pane_id)
+                tmux.set_pane_title(pane_id, "")
+
+        # The pane runs hive's managed launcher (`hive claude` / `hive codex` /
+        # `hive grok`), the same path a human's `hclaude` / `hcodex` / `hgrok`
+        # takes — but invoked as the binary, not the shell function, so a spawn
+        # never depends on the pane shell's rc having sourced `hive shell-init`.
+        # No `exec`: the CLI runs as the pane shell's foreground child, so the
+        # pane (and a usable shell) survives the CLI exiting.
         cmd_parts = ["hive", cli]
         codex_daemon_native = False
+        grok_session_id = ""
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
             # A new or resumed codex session runs against a per-pane app-server
@@ -284,11 +330,7 @@ class Agent:
                     # is unsupported), so a pane without a daemon would join the
                     # team stateless. Undo the pane side effects instead of
                     # leaving a tagged inert member behind.
-                    if split_window:
-                        tmux.kill_pane(pane_id)
-                    else:
-                        tmux.clear_pane_tags(pane_id)
-                        tmux.set_pane_title(pane_id, "")
+                    _undo_pane_side_effects()
                     raise RuntimeError(
                         f"codex app-server daemon failed to start for pane {pane_id}; "
                         "codex runtime is daemon-only, refusing to spawn an "
@@ -309,12 +351,33 @@ class Agent:
                 if workspace:
                     from .sidecar import request_connect_codex
                     request_connect_codex(workspace, pane_id)
+        elif cli == "grok":
+            from .adapters import grok_leader
+            if not grok_leader.spawn_daemon(pane_id):
+                # Grok runtime state lives on the per-pane leader; without one
+                # the TUI would run detached from hive. Same deal as codex: give
+                # the pane back rather than tag an unreachable member.
+                _undo_pane_side_effects()
+                raise RuntimeError(
+                    f"grok leader daemon failed to start for pane {pane_id}; "
+                    "grok runtime is leader-only, refusing to spawn an "
+                    "unattached grok team member"
+                )
+            # The leader cannot say which of the cwd's sessions is this pane's,
+            # so hive mints the id, hands it to the TUI and records it beside
+            # the socket. A resume keeps the resumed session's own id.
+            if session_id and session_mode == "resume":
+                grok_session_id = session_id
+            else:
+                grok_session_id = str(uuid.uuid4())
+                cmd_parts.extend(["--session-id", grok_session_id])
+            grok_leader.write_pane_session(pane_id, grok_session_id, cwd)
         pre_cmd_parts: list[str] = []
 
         if model and not session_id:
             if cli == "claude":
                 cmd_parts.extend(["--model", _shell_escape(model)])
-            elif cli == "codex":
+            elif cli in ("codex", "grok"):
                 cmd_parts.extend(["-m", _shell_escape(model)])
 
         # Resume/fork uses the original session's model; no --model flag needed.
@@ -329,8 +392,13 @@ class Agent:
                     cmd_parts.extend(["resume", _shell_escape(session_id)])
                 else:
                     cmd_parts = ["hive", "codex", "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
+            elif cli == "grok":
+                cmd_parts.extend(["--resume", _shell_escape(session_id)])
+                if session_mode == "fork":
+                    # `--session-id` (already on cmd_parts) names the fork.
+                    cmd_parts.append("--fork-session")
 
-        # Both CLIs accept a positional [prompt] arg (also on resume/fork).
+        # Every CLI accepts a positional [prompt] arg (also on resume/fork).
         # Pass skill activation + optional user prompt here so the CLI
         # auto-submits at startup, bypassing TUI keystroke injection entirely
         # (avoids the codex picker race and any analogous races for claude).
@@ -389,15 +457,22 @@ class Agent:
                 )
 
         # Readiness comes from runtime signals, not screen text: the inbox
-        # registration (claude, proven above) and the app-server thread (codex
-        # daemon) can only appear once the agent is actually up. A resumed
-        # claude session never renders the welcome banner, so a banner wait
-        # here ate its full timeout on every resume. Only the embedded codex
-        # fork (no daemon) has nothing better than the banner.
+        # registration (claude, proven above), the app-server thread (codex
+        # daemon) and the minted session directory (grok) can only appear once
+        # the agent is actually up. A resumed claude session never renders the
+        # welcome banner, so a banner wait here ate its full timeout on every
+        # resume. Only the embedded codex fork (no daemon) has nothing better
+        # than the banner.
         if cli == "claude":
             pass  # inbox registration proven above
         elif codex_daemon_native:
             _wait_codex_thread_ready(pane_id)
+        elif cli == "grok":
+            # The 2nd client can only load a session the TUI has opened, so the
+            # connect follows readiness instead of racing it.
+            if _wait_grok_session_ready(pane_id, grok_session_id) and workspace:
+                from .sidecar import request_connect_grok
+                request_connect_grok(workspace, pane_id)
         elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
             time.sleep(1)
 
@@ -410,13 +485,14 @@ class Agent:
         """Send a prompt to the agent; return the accepted-transport class.
 
         Delivery is native-transport-only: codex goes through the per-pane
-        daemon's ``turn/start`` RPC, claude through its session's own inbox
-        socket. Neither touches the composer, and there is no keystroke
-        fallback on any failure — a transport that did not accept the message
-        raises :class:`DeliveryError` (callers surface it as an explicit
-        submit failure). The returned classification names which transport
-        boundary was crossed (``turnStartAccepted`` / ``udsWriteAccepted``);
-        none of them proves the agent processed
+        daemon's ``turn/start`` RPC, grok through its per-pane leader's
+        ``session/prompt``, claude through its session's own inbox socket. None
+        of them touches the composer, and there is no keystroke fallback on any
+        failure — a transport that did not accept the message raises
+        :class:`DeliveryError` (callers surface it as an explicit submit
+        failure). The returned classification names which transport boundary
+        was crossed (``turnStartAccepted`` / ``sessionPromptQueued`` /
+        ``udsWriteAccepted``); none of them proves the agent processed
         the message — that final confirmation only ever comes from the
         target's transcript.
         """
@@ -445,6 +521,16 @@ class Agent:
                 raise DeliveryError(
                     f"codex pane {self.pane_id} did not accept the turn "
                     "(no daemon/thread, RPC error, or connection failure)"
+                )
+            return accepted
+        if profile_name == "grok":
+            from .adapters import grok_leader
+
+            accepted = grok_leader.send_to_pane(self.pane_id, text)
+            if accepted is None:
+                raise DeliveryError(
+                    f"grok pane {self.pane_id} did not accept the prompt "
+                    "(no leader/session, RPC error, or connection failure)"
                 )
             return accepted
         if profile_name == "claude":
