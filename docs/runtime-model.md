@@ -223,10 +223,110 @@ never reattaches viewers (the watch loop self-heals, and a user who left it
 deliberately must not be typed at) and never touches an asleep member with a
 live pane.
 
-Keyboard paths (`hive inject`, claude `/compact`, cvim sendback) still work:
-keystrokes pass through the attach viewer into the engine pty. Each checks
-for a live claude process on the pane tty first and refuses during the
-viewer gap rather than typing into the pane shell.
+The pane is a viewer, and the human can drive it: the attach panel switches
+bg sessions in-process, so a member pane can be showing another member's
+session, a stranger's, or the panel list while keeping its own tags, job
+record and delivery address. What is on screen is probed in this order
+(`adapters/claude_view.py`):
+
+1. is a viewer running on the pane tty at all (argv `claude attach`/`claude
+   agents`)? No viewer means nothing is displayed — the pane title is a
+   latched leftover of what the dead viewer showed last, never evidence;
+2. the attach journal (`<claude-config>/daemon/attach-journal/*.json`) — one
+   entry per attach gesture, written when a session goes on screen and
+   removed when the viewer returns to the list or detaches. It answers
+   *whether* a session is displayed, never which, and its entries outlive
+   crashed viewers, so an entry only counts when its `pid` is alive and
+   started when `procStart` says. No live entry for the viewer's pid is the
+   panel list, whatever the other two signals say — which is what closes the
+   window where a panel-entered viewer still carries its launch argv;
+3. the viewer's argv — behind that gate, `claude attach <jobId>` names the
+   job outright (`certain`), until the process re-execs to `claude agents`
+   on first entering the panel;
+4. `#{pane_title}` — the panel writes the viewed session's bare name on every
+   switch, the only carrier of *which* once the argv is gone (`likely`). Hive
+   member jobs are named `<team>.<member>`, so a title maps back to a jobId
+   without paying for the `claude agents --json` ledger; the name is matched
+   on token boundaries, so a decorated title still resolves while a longer
+   name that merely contains a member's (`probe.red-notes`, `probe.red2`)
+   never does.
+
+The verdict is `certain` / `likely` / `unknown` plus a kind (`member_view`,
+`foreign`, `list_view`, `no_viewer`). It is **display truth only**: the
+runtime fields `_viewKind` / `_viewCertainty` / `_viewedJob` /
+`_viewedMember` (`hive doctor -v` shows them as `claudeView`) and the pane's
+`@hive-view` tmux option, which the border renders as `name -> what you are
+really looking at` (the sidecar refreshes it whenever the journal or a pane
+title changes). Nothing about typing depends on it.
+
+### The member keyboard is the job, not the pane
+
+Every keyboard path for a claude member (`hive inject`, `/compact`, cvim
+sendback, `hive interrupt`'s Escape) pipes into `claude attach <jobId>`
+instead of typing at the pane. Hive opens its own attach client with stdin on
+a pipe, writes the keystrokes and closes it; the pane's viewer stays attached
+and unflickered throughout, and the attach also wakes a parked engine, so the
+1h park self-heals on the keyboard path the same way it does on delivery.
+The pane's viewer is a screen: what the human has it showing can no longer
+misroute, block, or get kicked by a delivery. There is no fallback — a member
+pane never gets `send-keys`.
+
+The sequence (`adapters/claude_bg.type_into_job` / `interrupt_job`) and what
+each step is evidence of:
+
+1. **client readiness** — the attach client writes its own attach-journal
+   entry (~0.3s) when the session goes on screen. Control bytes wait for it:
+   a `C-u` written into a client that has not taken the keyboard yet is
+   inserted into the composer as a literal character instead of clearing it
+   (observed once on 2.1.240, and silent when it happens).
+2. **clear, in a chunk of its own** — `C-u`, then the text as a separate
+   write. Anything already in the composer would otherwise be submitted in
+   front of the delivery.
+3. **typing readiness** — `claude logs <jobId>` is the engine's own pty
+   output, readable headlessly, and the composer's unsubmitted content is at
+   the end of it. It is polled until the typed text echoes back; that echo,
+   not a sleep, is the proof the client is forwarding stdin. A slice without
+   an echo re-types, and because every attempt re-clears first, a retype
+   cannot double the text. Two details make the echo *evidence* rather than a
+   coincidence: it is counted against a snapshot taken before anything was
+   typed, so the same text delivered twice (or a payload quoting what is
+   already on screen) does not read as an echo that predates the typing; and
+   the copy on screen may be the head of the text, its tail (the composer
+   scrolls to the cursor on a long paste) or a `[Pasted text #N]` placeholder
+   holding none of it, so all three count.
+4. **submit** — `\r`, then the transcript. A slash command lands as a
+   `<command-name>` record (the engine ran the command); anything else lands
+   as a user turn whose content must equal what was typed **exactly** — an
+   equal turn is also the proof that no draft rode along. A turn that ends
+   with the text but carries something in front of it is reported as a
+   failure, not delivered silently. A slash command with no record at all
+   (`/cost` and other UI-only commands write none) degrades to "written".
+5. **Escape** leaves no echo, so it skips step 3, and it is written exactly
+   once — a second Escape lands on claude's own "edit previous message"
+   chord. It is confirmed by the transcript's `[Request interrupted by user]`
+   marker or by the engine leaving `busy`. An engine that was not busy has
+   nothing to interrupt and nothing that could confirm one either, so that
+   returns immediately: a success, not a failure and not a wait (cvim sends
+   an Escape before every sendback, and members are idle most of the time).
+
+Every subprocess in that path (`attach`, `logs`) is hard-bounded and its env
+is washed of `CLAUDE*`/`ANTHROPIC*` like the spawn's, and the subcommand is
+argv[1] — a leading flag silently downgrades `attach` into a prompt.
+
+The draft trade-off: `C-u` drops whatever the human was typing into the
+member's composer. Claude keeps it on its own kill ring (the TUI offers
+`Ctrl+Y to paste deleted txt` right after), so it is recoverable in the pane
+— hive does not save or restore it. The tmux buffer dance that guards codex
+and grok drafts does not apply here: it types at the pane, and the pane is
+not where a member's keyboard is.
+
+Non-member claude panes — a plain interactive TUI with no job record — are a
+different target, not a fallback: they keep the tmux keystroke path with its
+live-process guard. That guard checks the *shape* of the claude on the pane
+tty, not just its presence: an attach viewer is refused too, because its
+composer belongs to whichever session it is displaying. So a member whose job
+record went missing fails loudly instead of quietly typing into a stranger's
+turn.
 
 An unmanaged claude — a bare interactive TUI with no job record — is
 deliberately unsupported **as a Hive team member**: `hive init` / `hive duo`

@@ -2259,9 +2259,8 @@ def inject_cmd(agent_name: str, text: str):
     agent = t.get(agent_name)
     # Documented low-level bypass: raw composer keystrokes for every CLI, so
     # delivery paths (channel/RPC) can be debugged from outside themselves.
-    # On a claude member pane the keystrokes pass through the attach viewer
-    # into the engine pty; with no viewer attached the submit refuses rather
-    # than typing into the pane shell.
+    # A claude member's keystrokes are piped into its bg job rather than its
+    # pane, and the submit fails loudly when the engine did not take them.
     try:
         _submit_interactive_text(agent.pane_id, text, agent.cli)
     except RuntimeError as exc:
@@ -2300,8 +2299,8 @@ def _compact_target(target: _PaneTarget) -> str:
         return status
     # claude (and embedded codex without a daemon): `/compact` is a TUI
     # slash command, so it must go through the composer. For a claude member
-    # the keystrokes pass through the attach viewer into the engine pty; in
-    # the viewer gap the submit refuses (never typed into the pane shell).
+    # that composer is reached by piping into `claude attach <jobId>`, and
+    # the command is confirmed by its `<command-name>` transcript record.
     try:
         _submit_interactive_text(target.pane_id, "/compact", target.cli)
     except RuntimeError as exc:
@@ -4886,7 +4885,10 @@ def interrupt(agent_name: str):
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     agent = t.get(agent_name)
-    agent.interrupt()
+    try:
+        agent.interrupt()
+    except RuntimeError as e:
+        _fail(str(e))
     click.echo(json.dumps({
         "member": agent_name,
         "action": "interrupt",
@@ -4941,6 +4943,11 @@ def _exec_cvim(mode: str, args: tuple[str, ...]) -> None:
     pane = tmux.get_current_pane_id()
     if pane:
         os.environ["TMUX_PANE"] = pane
+    # The script (and the post-popup sendback it generates) calls back into
+    # hive for pane profile and claude-viewer questions. A bare `python3` is
+    # whatever the pane's PATH resolves — usually not the interpreter hive is
+    # installed in — so hand it this one.
+    os.environ["HIVE_PYTHON"] = sys.executable
     os.execvp("bash", ["bash", str(_CVIM_BINARY), mode, *args])
 
 
@@ -5355,9 +5362,10 @@ def _claude_attach_loop(job_id: str) -> None:
     its bg job's engine. Never returns.
 
     A job-control shell (``set -m``) runs the loop so ``claude attach`` owns
-    the tty foreground — the pane's current command reads ``claude`` while a
-    viewer is attached, which is what the keyboard-path guards (cvim,
-    inject, /compact) key on.
+    the tty foreground: the viewer gets the keyboard the human is typing on,
+    and the pane's current command reads ``claude`` for anything that reads
+    the pane as a display. Hive's own deliveries do not come through here —
+    a member's keystrokes are addressed to its job, not to this pane.
 
     ``claude attach`` exits 0 both when the user detaches and when an engine
     respawn/upgrade kicks the viewer, so the loop reattaches after a 1s

@@ -422,6 +422,433 @@ def ensure_engine(
     return wait_engine_entry(job_id, timeout=timeout)
 
 
+# --------------------------------------------------------------------------
+# keyboard: piping keystrokes into the engine over `claude attach <jobId>`
+# --------------------------------------------------------------------------
+# `claude attach` reads stdin even when it is a pipe, so a jobId addresses the
+# engine's keyboard the same way it addresses everything else — no tmux, no
+# pane, no viewer. A pane viewer stays attached and unflickered while this
+# second client types (real-machine verified, 2.1.240), and the attach itself
+# wakes a parked engine, so the keyboard path self-heals the ~1h park for free.
+_CLEAR_LINE = "\x15"  # C-u: drop whatever is in the composer (claude keeps it
+                      # on its own kill ring — Ctrl+Y pastes it back)
+_SUBMIT = "\r"
+_ESCAPE = "\x1b"  # interrupts the running turn
+
+_ENGINE_READY_TIMEOUT = 20.0  # our own attach is the wake; the entry follows it
+_CLIENT_READY_TIMEOUT = 15.0  # observed ~0.3s to the journal entry
+_TYPE_READY_TIMEOUT = 25.0  # total budget for "the client is forwarding stdin"
+_TYPE_RETRY_AFTER = 5.0  # re-type (C-u first, so it is idempotent) after this
+_SUBMIT_CONFIRM_TIMEOUT = 20.0  # the user turn is written the moment it lands
+# A slash command's `<command-name>` record is written when the command
+# *finishes* (a /compact can take a minute), so waiting for it would block the
+# caller on work it does not need to see. This window only has to be long
+# enough for the failure shape — the command submitted as plain text, which
+# writes its turn immediately.
+_SLASH_CONFIRM_TIMEOUT = 5.0
+_INTERRUPT_CONFIRM_TIMEOUT = 12.0
+_LOGS_TIMEOUT = 15.0
+_KEY_POLL_INTERVAL = 0.4
+_CONTROL_KEY_GAP = 0.25  # a control byte must not ride in the text's chunk
+_ATTACH_EXIT_TIMEOUT = 10.0
+
+_LOGS_TAIL_CHARS = 4000  # the composer is at the very end of the pty stream
+_ECHO_PREFIX_CHARS = 40  # head/tail slice: unique enough, short enough to survive a wrap
+_PASTE_PLACEHOLDER = "[Pastedtext#"  # squashed `[Pasted text #N]`
+_INTERRUPT_MARKER = "[Request interrupted by user]"
+
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[_PX^][^\x1b]*\x1b\\"  # APC/DCS/SOS/PM (claude emits `cc-daemon-hint`)
+    r"|\x1b[()][0-9A-B]|\x1b[=>]"
+)
+# `claude logs` replays the raw pty stream: the layout lives in cursor moves,
+# not in spaces, so whitespace and box drawing are noise for a substring test.
+_CHROME_RE = re.compile(r"[\s─-▟]+")
+
+
+@dataclass(frozen=True)
+class KeyResult:
+    """Outcome of a keystroke pipe. ``confirmed`` names the evidence:
+    ``transcript`` (the engine recorded the turn/command/interrupt),
+    ``status`` (the engine left ``busy``) or ``written`` (the bytes went into
+    the pipe and nothing contradicted it)."""
+
+    ok: bool
+    confirmed: str = ""
+    why: str = ""
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _squash(text: str) -> str:
+    return _CHROME_RE.sub("", text)
+
+
+def job_screen(job_id: str, *, claude_bin: str = "claude") -> str:
+    """Tail of ``claude logs <jobId>`` with escape sequences stripped.
+
+    The engine's own pty output — the composer's unsubmitted content included
+    — read headlessly, with no pane or viewer involved. Empty when the CLI
+    call failed.
+    """
+    if not job_id:
+        return ""
+    try:
+        result = subprocess.run(
+            [claude_bin, "logs", job_id],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_LOGS_TIMEOUT,
+            env=bg_env(),
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return _strip_ansi(result.stdout or "")[-_LOGS_TAIL_CHARS:]
+
+
+def _echo_needles(text: str) -> tuple[str, ...]:
+    """What "the composer is showing *text*" can look like on the pty screen.
+
+    Three shapes, any of which counts: the head of the text, its tail (a long
+    paste scrolls the composer viewport to the cursor, so the head is off
+    screen), and the ``[Pasted text #N]`` placeholder the TUI folds a long
+    paste into, which carries none of the text at all.
+    """
+    squashed = _squash(text)
+    if not squashed:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            (
+                squashed[:_ECHO_PREFIX_CHARS],
+                squashed[-_ECHO_PREFIX_CHARS:],
+                _PASTE_PLACEHOLDER,
+            )
+        )
+    )
+
+
+def _echo_counts(job_id: str, needles: tuple[str, ...], *, claude_bin: str) -> dict[str, int]:
+    """How often each needle is on the job's screen right now.
+
+    Counted, not tested for presence: the screen is the tail of the whole pty
+    replay, so a repeat delivery of the same text, a payload quoting what is
+    already displayed, or a leftover placeholder from an earlier paste all sit
+    there *before* anything is typed. Only a count that goes up was caused by
+    this call.
+    """
+    screen = _squash(job_screen(job_id, claude_bin=claude_bin))
+    return {needle: screen.count(needle) for needle in needles}
+
+
+def _transcript_cursor(engine: EngineSession | None) -> tuple[Path | None, int]:
+    """The job's transcript file and its current size — the offset new
+    records are read from once the submit lands."""
+    if engine is None or not engine.session_id:
+        return None, 0
+    from .claude import ClaudeAdapter
+
+    path = ClaudeAdapter().find_session_file(engine.session_id, cwd=engine.cwd or None)
+    if path is None:
+        return None, 0
+    try:
+        return path, path.stat().st_size
+    except OSError:
+        return path, 0
+
+
+def _transcript_since(path: Path | None, offset: int) -> str:
+    """Whatever the transcript gained after *offset*."""
+    if path is None:
+        return ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            handle.seek(offset)
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _user_text(record: dict[str, Any]) -> str | None:
+    if record.get("type") != "user":
+        return None
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return None
+
+
+def _is_slash_command(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("/") and "\n" not in stripped
+
+
+def _submit_verdict(path: Path | None, offset: int, text: str) -> str:
+    """What the transcript says about the submit: ``landed``, ``corrupted``
+    or ``none`` (nothing yet — keep waiting).
+
+    A slash command lands as a ``<command-name>`` entry: the engine ran the
+    command instead of sending its literal text to the model. Anything else
+    lands as a user turn whose content equals what was typed *exactly*.
+    ``corrupted`` is the case exact matching exists for: a turn that ends
+    with the typed text but carries something in front of it is a leftover
+    composer draft that got submitted along with the delivery — the one
+    thing a substring match would wave through.
+    """
+    chunk = _transcript_since(path, offset)
+    if not chunk:
+        return "none"
+    turns: list[str] = []
+    for line in chunk.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue  # a half-written tail line; the next poll sees it whole
+        if isinstance(record, dict):
+            turn = _user_text(record)
+            if turn is not None:
+                turns.append(turn)
+    if _is_slash_command(text):
+        if f"<command-name>{text.strip().split()[0]}</command-name>" in chunk:
+            return "landed"
+    elif any(turn == text for turn in turns):
+        return "landed"
+    if any(
+        turn != text and turn.endswith(text) and "<command-name>" not in turn
+        for turn in turns
+    ):
+        return "corrupted"
+    return "none"
+
+
+def _attach_pipe(job_id: str, *, claude_bin: str) -> subprocess.Popen | None:
+    try:
+        return subprocess.Popen(
+            [claude_bin, "attach", job_id],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=bg_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _feed(proc: subprocess.Popen, payload: str) -> bool:
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        return True
+    except (BrokenPipeError, OSError, ValueError):
+        return False
+
+
+def _wait_engine_behind(job_id: str, proc: subprocess.Popen) -> EngineSession | None:
+    """The engine the pipe is typing into — the attach itself wakes a parked
+    one, so this is also the wake wait. A client that exits first says the
+    job is gone; there is nothing left to wait for."""
+    deadline = time.monotonic() + _ENGINE_READY_TIMEOUT
+    while True:
+        engine = engine_session_for_job(job_id)
+        if engine is not None:
+            return engine
+        if proc.poll() is not None or time.monotonic() >= deadline:
+            return None
+        time.sleep(_ENTRY_POLL_INTERVAL)
+
+
+def _wait_client_ready(proc: subprocess.Popen) -> bool:
+    """Wait until the attach client has the session on screen.
+
+    Its own attach-journal entry says so (~0.3s), and that matters for the
+    control bytes: a ``\\x15`` written into a client that is not in raw key
+    mode yet is inserted into the composer as a literal character instead of
+    clearing it — observed once on 2.1.240, and silent when it happens.
+    """
+    from .claude_view import attach_entry_for_pid
+
+    deadline = time.monotonic() + _CLIENT_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        if attach_entry_for_pid(proc.pid) is not None:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _clear_composer(proc: subprocess.Popen) -> bool:
+    """C-u, in a chunk of its own — see :func:`_wait_client_ready`."""
+    if not _feed(proc, _CLEAR_LINE):
+        return False
+    time.sleep(_CONTROL_KEY_GAP)
+    return True
+
+
+def _close_pipe(proc: subprocess.Popen) -> None:
+    """Let the attach client exit, and make sure it does.
+
+    A wedged client would otherwise outlive the caller holding the pipe open;
+    nothing downstream may block on it.
+    """
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+    try:
+        proc.wait(timeout=_ATTACH_EXIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=_ATTACH_EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyResult:
+    """Type *text* into the engine's composer and press Enter.
+
+    The composer is cleared first (C-u), so an unsent draft can never be
+    concatenated onto the delivered text — and so a re-type after a lost
+    keystroke is idempotent rather than doubled. Readiness is not a sleep:
+    the text is typed, then ``claude logs`` is polled until the composer
+    echoes it back, which is the proof that the attach client is forwarding
+    stdin; a slice without an echo re-types.
+
+    ponytail: two pipes typing into the same job at once (a cvim sendback and
+    a hand-run ``hive inject``) interleave — one of them wins the composer and
+    the other fails loudly on the transcript compare, never silently. Serialize
+    with an flock under ``hive-control/<jobId>.lock`` if that ever bites.
+    """
+    if not job_id or not text:
+        return KeyResult(False, why="no job id" if not job_id else "nothing to type")
+    proc = _attach_pipe(job_id, claude_bin=claude_bin)
+    if proc is None:
+        return KeyResult(False, why=f"could not run `{claude_bin} attach {job_id}`")
+    try:
+        engine = _wait_engine_behind(job_id, proc)
+        if engine is None:
+            return KeyResult(False, why=f"job {job_id} has no engine (removed?)")
+        transcript, offset = _transcript_cursor(engine)
+        if not _wait_client_ready(proc):
+            return KeyResult(False, why=f"`attach {job_id}` never came up")
+
+        needles = _echo_needles(text)
+        baseline = _echo_counts(job_id, needles, claude_bin=claude_bin)
+        deadline = time.monotonic() + _TYPE_READY_TIMEOUT
+        next_retype = 0.0
+        echoed = False
+        while time.monotonic() < deadline:
+            if time.monotonic() >= next_retype:
+                if not _clear_composer(proc) or not _feed(proc, text):
+                    return KeyResult(False, why="the attach client closed its stdin")
+                next_retype = time.monotonic() + _TYPE_RETRY_AFTER
+            counts = _echo_counts(job_id, needles, claude_bin=claude_bin)
+            if not needles or any(count > baseline[needle] for needle, count in counts.items()):
+                echoed = True
+                break
+            time.sleep(_KEY_POLL_INTERVAL)
+        if not echoed:
+            return KeyResult(
+                False,
+                why=f"job {job_id} never echoed the typed text back into its composer",
+            )
+        if not _feed(proc, _SUBMIT):
+            return KeyResult(False, why="the attach client closed its stdin before Enter")
+        if transcript is None:
+            return KeyResult(True, "written", "no transcript to confirm against")
+        slash = _is_slash_command(text)
+        confirm_deadline = time.monotonic() + (
+            _SLASH_CONFIRM_TIMEOUT if slash else _SUBMIT_CONFIRM_TIMEOUT
+        )
+        while time.monotonic() < confirm_deadline:
+            verdict = _submit_verdict(transcript, offset, text)
+            if verdict == "landed":
+                return KeyResult(True, "transcript")
+            if verdict == "corrupted":
+                return KeyResult(
+                    False,
+                    why=f"job {job_id} submitted the text with a leftover draft in front of it",
+                )
+            time.sleep(_KEY_POLL_INTERVAL)
+        if slash:
+            # ponytail: a slash command's record comes late (or never — /cost
+            # and other UI-only commands write none), so silence here is not
+            # evidence of failure; the composer echo already proved the client
+            # was forwarding, and a command swallowed as text would have shown
+            # up as a turn by now. If a lost `/compact` ever needs catching,
+            # the missing signal is "the composer emptied after Enter".
+            return KeyResult(True, "written", "a slash command with no transcript record yet")
+        return KeyResult(
+            False,
+            why=f"job {job_id} took the text but no matching turn reached its transcript",
+        )
+    finally:
+        _close_pipe(proc)
+
+
+def interrupt_job(job_id: str, *, claude_bin: str = "claude") -> KeyResult:
+    """Send Escape to the engine — interrupt whatever turn is running.
+
+    Escape leaves no composer echo, so the readiness gate the typing path
+    uses does not apply, and Escape is never repeated: a second one lands on
+    the engine's "edit previous message" chord. It is written once, then
+    confirmed against the transcript's interrupt marker or the engine leaving
+    ``busy``. An engine that was never busy has nothing to interrupt and
+    nothing that could confirm one: that returns right away, a success with
+    ``written`` — not a failure, and not a wait.
+    """
+    if not job_id:
+        return KeyResult(False, why="no job id")
+    proc = _attach_pipe(job_id, claude_bin=claude_bin)
+    if proc is None:
+        return KeyResult(False, why=f"could not run `{claude_bin} attach {job_id}`")
+    try:
+        engine = _wait_engine_behind(job_id, proc)
+        if engine is None:
+            return KeyResult(False, why=f"job {job_id} has no engine (removed?)")
+        transcript, offset = _transcript_cursor(engine)
+        was_busy = engine.status == "busy"
+        if not _wait_client_ready(proc):
+            return KeyResult(False, why=f"`attach {job_id}` never came up")
+        if not _feed(proc, _ESCAPE):
+            return KeyResult(False, why="the attach client closed its stdin")
+        if not was_busy:
+            # Nothing was running, so nothing can confirm: waiting out the
+            # window could only relabel a success. cvim sends this before
+            # every sendback, and the member is idle most of the time.
+            time.sleep(_CONTROL_KEY_GAP)  # let the client forward it before EOF
+            return KeyResult(True, "written", "the engine was not busy")
+        deadline = time.monotonic() + _INTERRUPT_CONFIRM_TIMEOUT
+        while time.monotonic() < deadline:
+            if _INTERRUPT_MARKER in _transcript_since(transcript, offset):
+                return KeyResult(True, "transcript")
+            current = engine_session_for_job(job_id)
+            if current is not None and current.status != "busy":
+                return KeyResult(True, "status")
+            time.sleep(_KEY_POLL_INTERVAL)
+        return KeyResult(False, why=f"job {job_id} is still busy after Escape")
+    finally:
+        _close_pipe(proc)
+
+
 def stop_job(job_id: str, *, claude_bin: str = "claude") -> None:
     """Best-effort ``claude stop`` — parks the job (still in ``--all``, still
     wakeable); never raises."""
