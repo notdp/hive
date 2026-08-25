@@ -164,25 +164,26 @@ def _drive_claude_startup(pane_id: str, ready_text: str) -> bool:
     return inbox_ok
 
 
-def _wait_codex_thread_ready(
+def _wait_codex_attached(
     pane_id: str,
     *,
     timeout: float = AGENT_STARTUP_TIMEOUT,
     interval: float = 0.5,
 ) -> bool:
-    """Wait for the pane's app-server daemon to expose a live thread runtime.
+    """Wait for the codex TUI process to appear on the pane's TTY.
 
-    The TUI joining the daemon (fresh or resume) creates/attaches its thread;
-    that runtime appearing is the readiness signal — no screen scraping. Polls
-    through the persistent client pool (no per-round reconnect). Best-effort
-    like the banner wait it replaces: a timeout is not fatal.
+    The pane's thread identity is minted (and recorded) before the launch
+    command runs, so readiness is just the TUI being up — process evidence,
+    no screen scraping. Best-effort like the banner wait it replaces: a
+    timeout is not fatal.
     """
-    from .adapters import codex_app_server
+    from .agent_cli import detect_cli_process_for_pane
 
     deadline = time.monotonic() + timeout
     while True:
         try:
-            if codex_app_server.runtime_for_pane(pane_id) is not None:
+            profile = detect_cli_process_for_pane(pane_id)
+            if profile is not None and profile.name == "codex":
                 return True
         except Exception:
             pass
@@ -310,47 +311,56 @@ class Agent:
         # No `exec`: the CLI runs as the pane shell's foreground child, so the
         # pane (and a usable shell) survives the CLI exiting.
         cmd_parts = ["hive", cli]
-        codex_daemon_native = False
         grok_session_id = ""
         if cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
-            # A new or resumed codex session runs against a per-pane app-server
-            # daemon: hive starts the daemon (injecting this pane's TMUX_PANE so
-            # shell tools keep the right identity, sharing the real CODEX_HOME)
-            # and the TUI joins it via --remote. cwd is passed explicitly
-            # because Remote workspace mode drops config.cwd. The fork shortcut
-            # (below) also goes through `hive codex`, which binds a daemon and
-            # injects --remote itself (verified on codex 0.147.0: the forked
-            # thread is created on and held by that daemon); no production
-            # path forks a codex member yet — the team-fork gate refuses it.
-            if not session_id or session_mode == "resume":
-                from .adapters import codex_app_server
-                if not codex_app_server.spawn_daemon(pane_id):
+            from .adapters import codex_app_server
+            if session_id and session_mode == "fork":
+                # The managed launcher forks server-side (`hive codex fork
+                # <sid>` → thread/fork → resume of the fork) and records the
+                # pane's thread itself; nothing to mint here.
+                cmd_parts.extend(["fork", _shell_escape(session_id)])
+            else:
+                # Every codex member runs on the shared app-server daemon and
+                # owns exactly one thread. A new member's thread is minted by
+                # hive up front (thread/start + name/set flush), a resumed
+                # member's thread is its recorded sessionId (== threadId), and
+                # the TUI attaches with `resume <threadId>` through the
+                # managed launcher (which injects --remote/--cd).
+                if not codex_app_server.spawn_daemon():
                     # Codex runtime state is daemon-native only (embedded codex
                     # is unsupported), so a pane without a daemon would join the
                     # team stateless. Undo the pane side effects instead of
                     # leaving a tagged inert member behind.
                     _undo_pane_side_effects()
                     raise RuntimeError(
-                        f"codex app-server daemon failed to start for pane {pane_id}; "
+                        "codex shared app-server daemon failed to start; "
                         "codex runtime is daemon-only, refusing to spawn an "
                         "embedded codex team member"
                     )
-                codex_daemon_native = True
-                sock = codex_app_server.pane_socket_path(pane_id)
-                cmd_parts.extend([
-                    "--remote", _shell_escape(f"unix://{sock}"),
-                    "--cd", _shell_escape(cwd),
-                ])
-                # Bring hive's 2nd client online now — before codex (started
-                # by send_keys at the end of this method) creates its thread
-                # — so the sidecar receives the thread/started + status
-                # broadcast live instead of late-joining and resuming.
+                codex_app_server.ensure_dir_trusted(cwd)
+                if session_id:  # session_mode == "resume"
+                    codex_thread_id = session_id
+                else:
+                    codex_thread_id = codex_app_server.start_member_thread(
+                        cwd, name=f"{team_name}.{name}", model=model,
+                    )
+                    if not codex_thread_id:
+                        _undo_pane_side_effects()
+                        raise RuntimeError(
+                            f"codex app-server refused to mint a thread for "
+                            f"'{name}' (cwd {cwd}); refusing to spawn a codex "
+                            "member without a thread identity"
+                        )
+                codex_app_server.write_pane_thread(pane_id, codex_thread_id, cwd)
+                cmd_parts.extend(["resume", _shell_escape(codex_thread_id)])
+                # Bring the sidecar's client online now so it holds the
+                # broadcast stream before the member's first turn.
                 # Best-effort: a down/slow sidecar just falls back to the
                 # lazy connect on the next runtime tick.
                 if workspace:
                     from .sidecar import request_connect_codex
-                    request_connect_codex(workspace, pane_id)
+                    request_connect_codex(workspace)
         elif cli == "grok":
             from .adapters import grok_leader
             if not grok_leader.spawn_daemon(pane_id):
@@ -374,24 +384,20 @@ class Agent:
             grok_leader.write_pane_session(pane_id, grok_session_id, cwd)
         pre_cmd_parts: list[str] = []
 
+        # codex pins the model at thread/start; only claude/grok take a flag.
         if model and not session_id:
             if cli == "claude":
                 cmd_parts.extend(["--model", _shell_escape(model)])
-            elif cli in ("codex", "grok"):
+            elif cli == "grok":
                 cmd_parts.extend(["-m", _shell_escape(model)])
 
         # Resume/fork uses the original session's model; no --model flag needed.
+        # codex resume/fork is already on cmd_parts (built in its branch above).
         if session_id:
             if cli == "claude":
                 cmd_parts.extend(["-r", _shell_escape(session_id)])
                 if session_mode == "fork":
                     cmd_parts.append("--fork-session")
-            elif cli == "codex":
-                if session_mode == "resume":
-                    # Daemon flags (--remote/--cd) are already on cmd_parts.
-                    cmd_parts.extend(["resume", _shell_escape(session_id)])
-                else:
-                    cmd_parts = ["hive", "codex", "-c", "check_for_update_on_startup=false", "fork", _shell_escape(session_id)]
             elif cli == "grok":
                 cmd_parts.extend(["--resume", _shell_escape(session_id)])
                 if session_mode == "fork":
@@ -457,16 +463,15 @@ class Agent:
                 )
 
         # Readiness comes from runtime signals, not screen text: the inbox
-        # registration (claude, proven above), the app-server thread (codex
-        # daemon) and the minted session directory (grok) can only appear once
-        # the agent is actually up. A resumed claude session never renders the
-        # welcome banner, so a banner wait here ate its full timeout on every
-        # resume. Only the embedded codex fork (no daemon) has nothing better
-        # than the banner.
+        # registration (claude, proven above), the codex TUI process on the
+        # pane TTY, and the minted session directory (grok) can only appear
+        # once the agent is actually up. A resumed claude session never renders
+        # the welcome banner, so a banner wait here ate its full timeout on
+        # every resume.
         if cli == "claude":
             pass  # inbox registration proven above
-        elif codex_daemon_native:
-            _wait_codex_thread_ready(pane_id)
+        elif cli == "codex":
+            _wait_codex_attached(pane_id)
         elif cli == "grok":
             # The 2nd client can only load a session the TUI has opened, so the
             # connect follows readiness instead of racing it.
@@ -484,8 +489,9 @@ class Agent:
     def send(self, text: str) -> str:
         """Send a prompt to the agent; return the accepted-transport class.
 
-        Delivery is native-transport-only: codex goes through the per-pane
-        daemon's ``turn/start`` RPC, grok through its per-pane leader's
+        Delivery is native-transport-only: codex goes through the shared
+        daemon's ``turn/start`` RPC on the member's recorded thread, grok
+        through its per-pane leader's
         ``session/prompt``, claude through its session's own inbox socket. None
         of them touches the composer, and there is no keystroke fallback on any
         failure — a transport that did not accept the message raises
@@ -498,7 +504,7 @@ class Agent:
         """
         # Native transports require a live CLI process on the pane TTY. A
         # retained shell can carry a stale title, the declared cli tag, and
-        # (for codex) a surviving per-pane daemon with an open thread — none
+        # (for codex) a surviving thread record on the shared daemon — none
         # of that may route a message into a pane nobody is watching.
         probe = None
         try:
@@ -520,7 +526,8 @@ class Agent:
             if accepted is None:
                 raise DeliveryError(
                     f"codex pane {self.pane_id} did not accept the turn "
-                    "(no daemon/thread, RPC error, or connection failure)"
+                    "(no recorded thread, daemon down, RPC error, or "
+                    "connection failure)"
                 )
             return accepted
         if profile_name == "grok":

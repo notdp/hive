@@ -587,7 +587,22 @@ def is_inside_tmux() -> bool:
 
 
 def get_current_pane_id() -> str | None:
-    """Get the pane id of the calling process (per-pane env var)."""
+    """Get the pane id of the calling process.
+
+    Inside a codex tool subprocess the env's TMUX_PANE is unreliable — the
+    shared app-server daemon's env is frozen at spawn time (and hive strips
+    TMUX_PANE from it) — but codex injects the thread's own ``CODEX_THREAD_ID``
+    per tool, and hive records which pane each thread is bound to. That
+    mapping wins over the env var; everywhere else the per-pane TMUX_PANE
+    env var is the answer.
+    """
+    thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
+    if thread_id:
+        from .adapters.codex_app_server import pane_for_thread
+
+        pane = pane_for_thread(thread_id)
+        if pane:
+            return pane
     return os.environ.get("TMUX_PANE")
 
 

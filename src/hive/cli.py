@@ -734,17 +734,29 @@ _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
 }
 
 
-def _codex_native_pane_from_env() -> str:
-    return os.environ.get("HIVE_CODEX_PANE", "").strip()
-
-
 def _is_codex_tool_env() -> bool:
     return bool(os.environ.get("CODEX_THREAD_ID", "").strip())
 
 
+def _codex_pane_from_thread_env() -> str:
+    """Pane recorded for this codex tool's own thread, or ''.
+
+    Codex injects the thread's ``CODEX_THREAD_ID`` into every tool
+    subprocess; hive records which pane each thread is bound to. A resolvable
+    mapping is what makes a codex hive-native — env TMUX_PANE is the shared
+    daemon's frozen value and never identity.
+    """
+    thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
+    if not thread_id:
+        return ""
+    from .adapters import codex_app_server
+
+    return codex_app_server.pane_for_thread(thread_id) or ""
+
+
 def _codex_relaunch_message() -> str:
     return (
-        "this codex isn't daemon-backed — hive runtime is degraded.\n"
+        "this codex isn't hive-managed — hive runtime is degraded.\n"
         "for future launches use hcodex (one-time setup, any shell):\n"
         "  grep -q 'hive shell-init' ~/.zshrc || "
         "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
@@ -755,7 +767,7 @@ def _codex_relaunch_message() -> str:
 def _require_codex_native(invoked: str | None) -> None:
     if invoked in _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS:
         return
-    if _codex_native_pane_from_env() or not _is_codex_tool_env():
+    if not _is_codex_tool_env() or _codex_pane_from_thread_env():
         return
     _fail(_codex_relaunch_message())
 
@@ -1182,10 +1194,10 @@ def _fork_registered_agent(
 
     # Both clones launch through hive's managed launcher: the forked claude
     # binds its own cross-session inbox at startup, and `hive codex fork
-    # <sid>` binds the clone's own
-    # per-pane daemon (verified on codex 0.147.0: the forked thread is created
-    # on and held by that daemon), so a forked member joins daemon-backed like a
-    # spawned one instead of the embedded codex this used to refuse.
+    # <sid>` forks the thread server-side on the shared daemon, records the
+    # fork as the new pane's thread, and resumes it — so a forked member joins
+    # daemon-backed like a spawned one instead of the embedded codex this used
+    # to refuse.
     # Boundary text is static across workspaces and forks, so cache it under
     # $HIVE_HOME and expand via shell command substitution when there is no
     # prompt. With --prompt we inline boundary + marker + prompt together so
@@ -1497,23 +1509,22 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
 
 
 def _require_daemon_backed(pane: str) -> None:
-    """Refuse to let an embedded (non-daemon) codex join; point to the fix.
+    """Refuse to let an unmanaged codex join; point to the fix.
 
-    A manually-launched bare codex runs its app-server embedded, so hive can
-    only reverse-engineer state from the transcript — never read native runtime.
-    Rather than register a degraded member, stop here and tell the user how to
-    relaunch it daemon-backed; ``hive codex resume`` preserves the session.
+    A hive-manageable codex has a recorded thread on the shared app-server
+    daemon (the managed launcher / spawn wrote it), which is what native
+    runtime and delivery ride on. A bare `codex` — embedded, or remote but
+    never recorded — gives hive no thread identity to bind, so rather than
+    register a degraded member, stop here and tell the user how to relaunch
+    it managed; ``hive codex resume`` preserves the session.
     """
-    native_pane = _codex_native_pane_from_env()
-    if native_pane:
-        pane = native_pane
+    if _is_codex_tool_env():
+        # Running from inside the codex TUI's own tool: the thread record is
+        # the identity, and the shared daemon must answer.
         from .adapters import codex_app_server
 
-        sock = codex_app_server.pane_socket_path(pane)
-        if sock.exists() and codex_app_server.probe_socket(str(sock)):
+        if _codex_pane_from_thread_env() and codex_app_server.daemon_alive():
             return
-        _fail(_codex_relaunch_message())
-    if _is_codex_tool_env():
         _fail(_codex_relaunch_message())
     if not pane:
         return
@@ -1527,22 +1538,18 @@ def _require_daemon_backed(pane: str) -> None:
         return
     from .adapters import codex_app_server
 
-    sock = codex_app_server.pane_socket_path(pane)
-    if sock.exists() and codex_app_server.probe_socket(str(sock)):
-        return  # already daemon-backed (born-connected / hive-spawned) — fine
-    from .adapters.codex import CodexAdapter
-
-    sid = CodexAdapter().resolve_current_session_id(pane) or ""
-    resume = f"hive codex resume {sid}" if sid else "hive codex resume"
+    if codex_app_server.thread_id_for_pane(pane) and codex_app_server.daemon_alive():
+        return  # recorded thread on a live shared daemon — hive-managed, fine
     _fail(
-        "this codex is running embedded; hive needs it daemon-backed for native "
-        "runtime, so it can't join yet.\n"
+        "this codex is not hive-managed; hive needs its thread on the shared "
+        "app-server daemon for native runtime, so it can't join yet.\n"
         "for future launches use hcodex (one-time setup, any shell):\n"
         "  grep -q 'hive shell-init' ~/.zshrc || "
         "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
         "for this session now (your session is preserved):\n"
         "  1) exit codex: press Ctrl-C (twice)\n"
-        f"  2) run: {resume}\n"
+        "  2) run: hive codex resume <session-id>   (or `hive codex resume` "
+        "for the picker)\n"
         "then re-run /hive."
     )
 
@@ -4882,6 +4889,12 @@ _CVIM_BINARY = Path(__file__).parent / "core_assets" / "cvim" / "bin" / "cvim-co
 
 
 def _exec_cvim(mode: str, args: tuple[str, ...]) -> None:
+    # The script reads TMUX_PANE for its reply pane; inside a codex tool env
+    # that variable is the shared daemon's (stripped) one, so hand it the
+    # thread-resolved pane identity instead.
+    pane = tmux.get_current_pane_id()
+    if pane:
+        os.environ["TMUX_PANE"] = pane
     os.execvp("bash", ["bash", str(_CVIM_BINARY), mode, *args])
 
 
@@ -4910,7 +4923,8 @@ def vim_cmd(args: tuple[str, ...]) -> None:
 
 
 def _exec_fork_split(split: str, args: tuple[str, ...]) -> None:
-    reply_pane = os.environ.get("TMUX_PANE", "")
+    # Thread-aware pane resolution: in a codex tool env TMUX_PANE is gone.
+    reply_pane = tmux.get_current_pane_id() or ""
     subprocess.Popen(
         ["hive", "fork", "-s", split, *args],
         stdin=subprocess.DEVNULL,
@@ -5055,8 +5069,9 @@ def plugin_disable(name: str, plain: bool) -> None:
 
 # codex subcommands that are not an interactive TUI launch: hive leaves these
 # completely untouched (raw codex). Everything else (no subcommand, a bare
-# [PROMPT], or `resume`/`fork`) is an interactive launch we bind to a per-pane
-# daemon so hive can read its native runtime. Kept in sync with `codex --help`.
+# [PROMPT], or `resume`/`fork`) is an interactive launch bound to the shared
+# app-server daemon so hive can read its native runtime. Kept in sync with
+# `codex --help`.
 _CODEX_PASSTHROUGH_SUBCOMMANDS = (
     "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server",
     "app-server", "remote-control", "app", "completion", "update", "doctor",
@@ -5076,8 +5091,8 @@ _CODEX_VALUE_OPTS = frozenset({
 })
 
 
-def _codex_subcommand(args: list[str]) -> str | None:
-    """First non-option token in `args` — codex's subcommand, if any.
+def _codex_subcommand_index(args: list[str]) -> int | None:
+    """Index of the first non-option token in `args` — the subcommand, if any.
 
     codex accepts global options before the subcommand (`codex [OPTIONS]
     <COMMAND>`), so checking only `args[0]` misses e.g. `codex -c k=v exec …`.
@@ -5089,6 +5104,25 @@ def _codex_subcommand(args: list[str]) -> str | None:
     while i < len(args):
         a = args[i]
         if a == "--":
+            return i + 1 if i + 1 < len(args) else None
+        if a.startswith("-"):
+            i += 2 if (a in _CODEX_VALUE_OPTS and "=" not in a) else 1
+            continue
+        return i
+    return None
+
+
+def _codex_subcommand(args: list[str]) -> str | None:
+    idx = _codex_subcommand_index(args)
+    return args[idx] if idx is not None else None
+
+
+def _codex_positional_after(args: list[str], sub_index: int) -> str | None:
+    """First positional token after the subcommand (e.g. resume's SESSION_ID)."""
+    i = sub_index + 1
+    while i < len(args):
+        a = args[i]
+        if a == "--":
             return args[i + 1] if i + 1 < len(args) else None
         if a.startswith("-"):
             i += 2 if (a in _CODEX_VALUE_OPTS and "=" not in a) else 1
@@ -5097,13 +5131,41 @@ def _codex_subcommand(args: list[str]) -> str | None:
     return None
 
 
-def _exec_codex_managed(args: list[str]) -> None:
-    """Replace this process with codex, bound to a per-pane app-server daemon.
+def _codex_opt_value(args: list[str], names: tuple[str, ...]) -> str | None:
+    """Value of the first `--opt value` / `--opt=value` occurrence in `args`."""
+    for i, a in enumerate(args):
+        if a in names:
+            return args[i + 1] if i + 1 < len(args) else None
+        for name in names:
+            if a.startswith(f"{name}=" if name.startswith("--") else name) and a != name:
+                prefix = f"{name}=" if name.startswith("--") else name
+                return a[len(prefix):]
+    return None
 
-    Born-connected path for a user-launched codex: start (or reuse) the pane's
-    daemon, then exec ``codex --remote unix://<sock> --cd <cwd> <args>`` so the
-    TUI talks to the daemon from the first thread — hive reads native runtime
-    over the same socket, no restart and no transcript reverse-engineering.
+
+def _codex_pane_thread_name(pane: str) -> str:
+    """Placeholder thread name for launcher-minted threads (must be non-empty)."""
+    return f"hive-{pane.replace('%', '') or 'pane'}"
+
+
+def _exec_codex_managed(args: list[str]) -> None:
+    """Replace this process with codex on the shared app-server daemon.
+
+    Born-connected path for a user-launched codex: ensure the shared daemon,
+    trust the working directory, bind this pane to a thread, then exec
+    ``codex resume <threadId> --remote unix://<sock> --cd <cwd>`` so the TUI
+    drives exactly the thread hive recorded for the pane — identity is the
+    threadId, never the process environment.
+
+    Thread binding by launch shape:
+    - bare interactive launch: hive mints the thread (thread/start +
+      name/set rollout flush) and execs a resume of it;
+    - ``resume <id>``: that id becomes the pane's recorded thread;
+    - ``fork <id>``: hive forks server-side (thread/fork), records the fork,
+      and execs a resume of it;
+    - ``resume`` picker / ``--last`` (thread unknowable up front): the pane's
+      stale record is cleared and the launch runs remote-attached but
+      unrecorded — degraded, no native runtime for that pane.
 
     Degrades to raw ``codex`` (embedded, status quo) whenever the managed path
     cannot apply: outside tmux, a management subcommand or --help/--version,
@@ -5117,23 +5179,70 @@ def _exec_codex_managed(args: list[str]) -> None:
 
     pane = os.environ.get("TMUX_PANE") or (tmux.get_current_pane_id() or "")
     if not pane or not tmux.is_inside_tmux():
-        _raw()  # hive needs a tmux pane to bind a daemon to
-    if _codex_subcommand(args) in _CODEX_PASSTHROUGH_SUBCOMMANDS:
+        _raw()  # hive needs a tmux pane to bind a thread to
+    sub_index = _codex_subcommand_index(args)
+    sub = args[sub_index] if sub_index is not None else None
+    if sub in _CODEX_PASSTHROUGH_SUBCOMMANDS:
         _raw()  # a management subcommand, not an interactive TUI launch
     if any(a in _CODEX_PASSTHROUGH_FLAGS for a in args):
         _raw()  # --help/--version never start a session
     if any(a == "--remote" or a.startswith("--remote=") for a in args):
         _raw()  # caller already chose an endpoint
-    if not codex_app_server.spawn_daemon(pane):
+    if not codex_app_server.spawn_daemon():
         _raw()  # daemon would not bind — fall back to embedded codex
-    sock = codex_app_server.pane_socket_path(pane)
+    cwd = _codex_opt_value(args, ("--cd", "-C")) or os.getcwd()
+    codex_app_server.ensure_dir_trusted(cwd)
+    sock = codex_app_server.shared_socket_path()
     # -c check_for_update_on_startup=false mirrors the hive-spawned path so a
     # managed launch never drops the user into codex's npm self-update prompt.
     argv = ["codex", "-c", "check_for_update_on_startup=false", "--remote", f"unix://{sock}"]
     if not _codex_args_set_cwd(args):
-        argv += ["--cd", os.getcwd()]
-    argv += args
-    os.execvp("codex", argv)
+        argv += ["--cd", cwd]
+
+    if sub == "resume":
+        sid = _codex_positional_after(args, sub_index)
+        if sid:
+            codex_app_server.write_pane_thread(pane, sid, cwd)
+        else:
+            # Picker / --last: the chosen thread is unknowable up front. A
+            # stale record must not keep routing hive at the previous thread.
+            codex_app_server.clear_pane_thread(pane)
+        os.execvp("codex", argv + args)
+    if sub == "fork":
+        source = _codex_positional_after(args, sub_index)
+        forked = (
+            codex_app_server.fork_member_thread(
+                source, name=_codex_pane_thread_name(pane)
+            )
+            if source
+            else None
+        )
+        if forked:
+            codex_app_server.write_pane_thread(pane, forked, cwd)
+            rewritten = list(args)
+            rewritten[sub_index] = "resume"
+            rewritten[rewritten.index(source, sub_index + 1)] = forked
+            os.execvp("codex", argv + rewritten)
+        # No source id, or the fork RPC failed: let codex fork on its own —
+        # remote-attached but unrecorded, so clear any stale pane record.
+        codex_app_server.clear_pane_thread(pane)
+        os.execvp("codex", argv + args)
+    # Interactive launch — no subcommand, flags only, or a bare [PROMPT]:
+    # mint the pane's thread so it is born with an identity hive can read,
+    # deliver to, and resume. A trailing prompt rides `resume`'s own [PROMPT]
+    # positional unchanged.
+    minted = codex_app_server.start_member_thread(
+        cwd,
+        name=_codex_pane_thread_name(pane),
+        model=_codex_opt_value(args, ("--model", "-m")) or "",
+    )
+    if minted:
+        codex_app_server.write_pane_thread(pane, minted, cwd)
+        os.execvp("codex", argv + ["resume", minted] + args)
+    # Mint failed (daemon just died?): remote attach unrecorded — degraded,
+    # and a stale record must not point hive at a thread this TUI won't run.
+    codex_app_server.clear_pane_thread(pane)
+    os.execvp("codex", argv + args)
 
 
 def _codex_args_set_cwd(args: list[str]) -> bool:
@@ -5150,7 +5259,7 @@ def _codex_args_set_cwd(args: list[str]) -> bool:
 )
 @click.pass_context
 def codex_cmd(ctx: click.Context):
-    """Launch codex bound to a per-pane app-server daemon (hive-managed).
+    """Launch codex on the shared app-server daemon (hive-managed).
 
     Usually invoked through the `hcodex` launcher from `hive shell-init` rather
     than by hand; all arguments are forwarded to codex. Replaces the current process
@@ -5331,13 +5440,13 @@ def resume_hint_cmd(cli_name: str):
     Called by the shell-init `hclaude`/`hcodex`/`hgrok` launchers after a managed
     launch exits: claude's own "Resume this session with" line omits the
     directory and codex/grok print none at all. Resolution rides hive's existing
-    session truth only — codex asks the pane's detached app-server daemon (it
-    outlives the TUI), grok reads the session file its launch wrote, claude
-    reads this pane's team-member entry in the resume snapshot (the sidecar
-    keeps recording it and the entry survives the process). A pane outside a
-    hive team gets no hint; tracking arbitrary user panes is not this feature's
-    job. Prints nothing and exits 0 on any failure: a hint must never break the
-    wrapper.
+    session truth only — codex reads the thread record its launch wrote (the
+    record outlives the TUI), grok reads the session file its launch wrote,
+    claude reads this pane's team-member entry in the resume snapshot (the
+    sidecar keeps recording it and the entry survives the process). A pane
+    outside a hive team gets no hint; tracking arbitrary user panes is not this
+    feature's job. Prints nothing and exits 0 on any failure: a hint must never
+    break the wrapper.
     """
     try:
         hint = _resume_hint(cli_name, os.getcwd())
@@ -5385,9 +5494,9 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
 def _pane_team_identity() -> tuple[str, str, str] | None:
     """(pane, team, agent) when this pane is a tagged team member, else None.
 
-    The team gate is shared by both CLIs: any tmux user gets a per-pane codex
-    daemon from the managed launch, so daemon reachability alone must not
-    qualify a pane for a hint — only hive team member panes are in scope.
+    The team gate is shared by every CLI: any tmux user gets a thread record /
+    session file from the managed launch, so a resolvable session alone must
+    not qualify a pane for a hint — only hive team member panes are in scope.
     """
     pane = os.environ.get("TMUX_PANE", "").strip()
     if not pane:
@@ -5402,10 +5511,9 @@ def _pane_team_identity() -> tuple[str, str, str] | None:
 def _pane_codex_session_id(pane: str) -> str | None:
     """This pane's codex session id, from the runtime's existing authority.
 
-    The per-pane app-server daemon is detached and outlives the TUI, so right
-    after exit it still answers with its thread's session id — the same
-    ``codex_app_server.session_id_for_pane`` the sidecar uses. No daemon or
-    unresolved → None: no answer means no hint.
+    The pane's thread record (threadId == sessionId) is written at launch time
+    and outlives the TUI — the same ``codex_app_server.session_id_for_pane``
+    the sidecar uses. No record → None: no answer means no hint.
     """
     from .adapters import codex_app_server
 
@@ -5446,9 +5554,9 @@ def _member_snapshot_session_id(team: str, agent: str) -> str | None:
 
 _SHELL_INIT_POSIX = """\
 # hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
-# claude / grok in the current tmux pane (per-pane daemon for codex and grok,
-# cross-session inbox for claude) and print a cd-ready resume hint when it
-# exits. Outside tmux, and for management subcommands / non-interactive flags,
+# claude / grok in the current tmux pane (shared app-server daemon for codex,
+# per-pane leader for grok, cross-session inbox for claude) and print a
+# cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
@@ -5492,9 +5600,9 @@ function hgrok {
 
 _SHELL_INIT_FISH = """\
 # hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
-# claude / grok in the current tmux pane (per-pane daemon for codex and grok,
-# cross-session inbox for claude) and print a cd-ready resume hint when it
-# exits. Outside tmux, and for management subcommands / non-interactive flags,
+# claude / grok in the current tmux pane (shared app-server daemon for codex,
+# per-pane leader for grok, cross-session inbox for claude) and print a
+# cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive

@@ -41,22 +41,33 @@ def test_codex_app_server_runtime_waiting_user(monkeypatch):
     assert out["inputReason"] == "app_server_active_flag"
 
 
-def test_session_id_best_effort_via_daemon_lsof(monkeypatch):
-    monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: "sess-xyz"
-    )
-    monkeypatch.setattr(
-        sidecar._RUNTIME_SNAPSHOTS, "update_session_id", lambda *a, **k: None
-    )
-    sid = sidecar._codex_session_id_best_effort("%5", runtime_snapshot=None)
-    assert sid == "sess-xyz"
+def test_doctor_verbose_reports_codex_daemon(monkeypatch, tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
 
-
-def test_session_id_best_effort_unresolved(monkeypatch):
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: None
+        "hive.team.Team.load",
+        classmethod(lambda _cls, _name, **_kw: SimpleNamespace(
+            name="t",
+            get=lambda _a: SimpleNamespace(pane_id="%5", is_alive=lambda: True),
+            agents={"a": object()},
+        )),
     )
-    assert (
-        sidecar._codex_session_id_best_effort("%5", runtime_snapshot=None)
-        == "unresolved"
+    monkeypatch.setattr(
+        sidecar, "_member_runtime_payload",
+        lambda pane_id, role: {"alive": True, "_cli": "codex"},
     )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.shared_socket_path",
+        lambda: Path("/x/hive-shared.sock"),
+    )
+    monkeypatch.setattr("hive.adapters.codex_app_server.daemon_alive", lambda: True)
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.thread_id_for_pane", lambda _p: "tid-5"
+    )
+    diag = sidecar._doctor_payload(str(tmp_path), "t", "a", verbose=True)
+    assert diag["codexDaemon"] == {
+        "socket": "/x/hive-shared.sock",
+        "alive": True,
+        "threadId": "tid-5",
+    }

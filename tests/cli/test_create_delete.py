@@ -33,7 +33,7 @@ def test_create_initializes_workspace_and_state(runner, configure_hive_home, tmp
     team = Team.load("team-a")
     assert team.workspace == str(workspace)
 
-    current = json.loads((hive_home / "contexts" / "default.json").read_text())
+    current = json.loads((hive_home / "contexts" / "pane-0.json").read_text())
     assert current == {"team": "team-a", "workspace": str(workspace), "agent": "orch"}
 
 
@@ -71,7 +71,7 @@ def test_delete_preserves_workspace_by_default(runner, configure_hive_home, tmp_
     result = runner.invoke(cli, ["delete", "team-b"])
     assert result.exit_code == 0
     assert workspace.exists()  # workspace preserved by default
-    assert not (hive_home / "contexts" / "default.json").exists()
+    assert not (hive_home / "contexts" / "pane-0.json").exists()
 
 
 def test_delete_removes_workspace_with_flag(runner, configure_hive_home, tmp_path):

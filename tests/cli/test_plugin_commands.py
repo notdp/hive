@@ -161,7 +161,9 @@ def test_fork_split_spawns_background_hive_fork(
     runner, configure_hive_home, capture_fork_subprocess, monkeypatch, hive_command, expected_split
 ):
     configure_hive_home(tmux_inside=True)
-    monkeypatch.setenv("TMUX_PANE", "%42")
+    # the reply pane is the resolved current pane (thread-aware in codex tool
+    # envs), not a raw env read
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%42")
 
     popen_calls, run_calls = capture_fork_subprocess
     result = runner.invoke(cli, [hive_command, "--", "--extra", "arg1"])
@@ -180,6 +182,7 @@ def test_fork_split_without_tmux_pane_skips_escape(
 ):
     configure_hive_home(tmux_inside=True)
     monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: None)
 
     popen_calls, run_calls = capture_fork_subprocess
     result = runner.invoke(cli, ["vfork"])

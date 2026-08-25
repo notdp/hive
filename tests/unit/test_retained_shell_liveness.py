@@ -86,8 +86,7 @@ def test_payload_live_codex_process_reaches_daemon_runtime(monkeypatch):
         lambda _p: {"busy": True, "inputState": "ready", "inputReason": ""},
     )
     monkeypatch.setattr(
-        sidecar, "_codex_session_id_best_effort",
-        lambda _p, runtime_snapshot=None: "sid-1",
+        "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: "sid-1",
     )
     rt = sidecar._agent_runtime_payload("%9")
     assert rt["cliAlive"] is True
