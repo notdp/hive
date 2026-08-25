@@ -5196,9 +5196,23 @@ def _codex_opt_value(args: list[str], names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _pane_member_label(pane: str) -> str | None:
+    """``<team>.<member>`` when the pane carries hive member tags, else None."""
+    team = tmux.get_window_option(pane, "hive-team")
+    agent = tmux.get_window_option(pane, "hive-agent")
+    if team and agent:
+        return f"{team}.{agent}"
+    return None
+
+
 def _codex_pane_thread_name(pane: str) -> str:
-    """Placeholder thread name for launcher-minted threads (must be non-empty)."""
-    return f"hive-{pane.replace('%', '') or 'pane'}"
+    """Thread name for launcher-minted threads (must be non-empty).
+
+    Member panes get their member identity so the name means something
+    anywhere codex surfaces it; non-member panes get a pane-derived
+    placeholder.
+    """
+    return _pane_member_label(pane) or f"hive-{pane.replace('%', '') or 'pane'}"
 
 
 def _exec_codex_managed(args: list[str]) -> None:
@@ -5353,8 +5367,15 @@ def _claude_resume_arg(args: list[str]) -> tuple[bool, str | None]:
 
 
 def _claude_pane_job_name(pane: str) -> str:
-    """Job name for launcher-minted jobs (also the ledger row's label)."""
-    return f"hive-{pane.replace('%', '') or 'pane'}"
+    """Job name for launcher-minted jobs (also the ledger row's label).
+
+    Member panes get ``<team>.<member>`` so the native agent panel and
+    ``claude agents`` rows say which member a job is — and so the view
+    probe's title branch, which matches member names, can recognize the
+    member when the human selects it there. Non-member panes get a
+    pane-derived placeholder.
+    """
+    return _pane_member_label(pane) or f"hive-{pane.replace('%', '') or 'pane'}"
 
 
 def _claude_attach_loop(job_id: str) -> None:
