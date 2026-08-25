@@ -2019,6 +2019,43 @@ def _claude_supervisor_tick(workspace: str) -> None:
             claude_bg.stop_job(record[0])
 
 
+def _claude_name_tick(*, members: dict[str, dict[str, Any]], team: str, state: dict[str, Any]) -> None:
+    """Keep each claude member's job labelled `<team>.<member>`.
+
+    A member spawned by hive is minted under that name already; one adopted
+    from a pane that was running claude first (duo, squad, resume) was minted
+    before the pane carried any tag, so its job keeps a `hive-<pane>`
+    placeholder. The engine's registry entry — read anyway on every tick —
+    carries the current label, so the comparison is free and the rename fires
+    at most once per job.
+
+    The rename types into the engine, which can take seconds and can queue
+    behind a running turn, so it goes to a thread: identity repair must not
+    stall delivery.
+    """
+    import threading
+
+    from .adapters import claude_bg
+
+    done: set[str] = state.setdefault("named", set())
+    for member, binding in sorted(members.items()):
+        if binding.get("cli") != "claude":
+            continue
+        job_id = claude_bg.job_id_for_pane(str(binding.get("pane") or "")) or ""
+        want = f"{team}.{member}"
+        if not job_id or job_id in done:
+            continue
+        engine = claude_bg.engine_session_for_job(job_id)
+        if engine is None:
+            continue  # asleep or gone: retry on a later tick
+        done.add(job_id)
+        if engine.name == want:
+            continue
+        threading.Thread(
+            target=claude_bg.ensure_job_named, args=(job_id, want), daemon=True
+        ).start()
+
+
 def _claude_view_tick(
     *,
     workspace: str,
@@ -2257,6 +2294,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             tick_members = _team_member_bindings(team)
 
             try:
+                _claude_name_tick(members=tick_members, team=team, state=claude_view_state)
                 _claude_view_tick(
                     workspace=workspace,
                     team=team,

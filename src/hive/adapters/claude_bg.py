@@ -169,6 +169,7 @@ class EngineSession:
     status: str
     waiting_for: str
     status_updated_at: float  # epoch seconds, 0.0 when absent
+    name: str = ""  # the job's label, as the panel and ledger show it
 
 
 def _entry_to_engine(data: dict[str, Any]) -> EngineSession | None:
@@ -192,6 +193,7 @@ def _entry_to_engine(data: dict[str, Any]) -> EngineSession | None:
         status=str(data.get("status") or ""),
         waiting_for=str(data.get("waitingFor") or ""),
         status_updated_at=updated,
+        name=str(data.get("name") or ""),
     )
 
 
@@ -863,6 +865,31 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
         )
     finally:
         _close_pipe(proc)
+
+
+def ensure_job_named(job_id: str, name: str, *, claude_bin: str = "claude") -> bool:
+    """Make the job's own label read *name*; True when it already did or now does.
+
+    A job minted before hive knew whose pane it was on carries a placeholder
+    (`hive-<pane>`): every path that adopts an existing pane into a team —
+    duo, squad, resume — tags the pane after its CLI is already running, and
+    the mint cannot see a tag that does not exist yet. `/rename` is the only
+    way back, the same command the agents panel runs, and it updates the
+    panel row, the ledger and the registry at once. A busy engine queues it
+    and runs it when the turn ends.
+
+    The name is not cosmetic: the view probe recognizes a session on screen
+    by matching the panel title against member names, so a placeholder-named
+    member reads as a stranger in its own pane.
+    """
+    if not job_id or not name:
+        return False
+    engine = engine_session_for_job(job_id)
+    if engine is None:
+        return False
+    if engine.name == name:
+        return True
+    return type_into_job(job_id, f"/rename {name}", claude_bin=claude_bin).ok
 
 
 def interrupt_job(job_id: str, *, claude_bin: str = "claude") -> KeyResult:

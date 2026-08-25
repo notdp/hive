@@ -132,3 +132,93 @@ def test_an_empty_pane_listing_is_a_tmux_failure(tick):
 
     assert tick["options"] == []
     assert tick["state"] == {}
+
+
+# --- job names ------------------------------------------------------------
+
+
+def _engine(job_id, name):
+    from hive.adapters.claude_bg import EngineSession
+
+    return EngineSession(
+        pid=1, job_id=job_id, session_id="s", socket_path="/tmp/s", cwd="/repo",
+        status="idle", waiting_for="", status_updated_at=0.0, name=name,
+    )
+
+
+def _name_wire(monkeypatch, *, jobs, engines):
+    """jobs: pane -> job id. engines: job id -> engine (or None)."""
+    from hive.adapters import claude_bg
+
+    started = []
+    monkeypatch.setattr(claude_bg, "job_id_for_pane", lambda pane: jobs.get(pane))
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: engines.get(job))
+    monkeypatch.setattr(
+        sidecar.threading if hasattr(sidecar, "threading") else __import__("threading"),
+        "Thread",
+        lambda target, args, daemon: type(
+            "T", (), {"start": lambda self: started.append((target, args))}
+        )(),
+    )
+    return started
+
+
+def test_a_placeholder_named_member_job_is_renamed_once(monkeypatch):
+    """A pane adopted into a team (duo/squad/resume) was minted before it
+    carried tags, so its job keeps `hive-<pane>`."""
+    from hive.adapters import claude_bg
+
+    started = _name_wire(
+        monkeypatch,
+        jobs={"%183": "485865b2"},
+        engines={"485865b2": _engine("485865b2", "hive-183")},
+    )
+    state = {}
+    members = {"worker": {"pane": "%183", "cli": "claude"}}
+
+    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    sidecar._claude_name_tick(members=members, team="honey", state=state)
+
+    assert len(started) == 1
+    target, args = started[0]
+    assert target is claude_bg.ensure_job_named
+    assert args == ("485865b2", "honey.worker")
+
+
+def test_an_already_named_job_is_left_alone(monkeypatch):
+    started = _name_wire(
+        monkeypatch,
+        jobs={"%183": "485865b2"},
+        engines={"485865b2": _engine("485865b2", "honey.worker")},
+    )
+
+    sidecar._claude_name_tick(
+        members={"worker": {"pane": "%183", "cli": "claude"}}, team="honey", state={}
+    )
+
+    assert started == []
+
+
+def test_an_asleep_engine_is_retried_on_a_later_tick(monkeypatch):
+    """No entry means parked or gone — not a job that needs no rename."""
+    started = _name_wire(monkeypatch, jobs={"%183": "485865b2"}, engines={})
+    state = {}
+    members = {"worker": {"pane": "%183", "cli": "claude"}}
+
+    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    assert state.get("named", set()) == set()
+
+    _name_wire(monkeypatch, jobs={"%183": "485865b2"},
+               engines={"485865b2": _engine("485865b2", "hive-183")})
+    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    assert state["named"] == {"485865b2"}
+
+
+def test_non_claude_members_are_not_renamed(monkeypatch):
+    started = _name_wire(monkeypatch, jobs={"%184": "job"}, engines={})
+
+    sidecar._claude_name_tick(
+        members={"validator": {"pane": "%184", "cli": "grok"}}, team="honey", state={}
+    )
+
+    assert started == []
