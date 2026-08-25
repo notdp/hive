@@ -44,23 +44,34 @@ class DeliveryError(RuntimeError):
 
 def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
     """Submit text to an interactive agent TUI, preserving any pending draft."""
+    profile_name = _resolve_profile_name(pane_id, cli)
+    if profile_name == "claude":
+        from .adapters import claude_bg, claude_view
+
+        job_id = claude_bg.job_id_for_pane(pane_id)
+        if job_id:
+            # A claude member's keyboard is the job, not the pane: hive pipes
+            # the keystrokes into `claude attach <jobId>` itself. Nothing here
+            # touches tmux — the pane's viewer is a screen, and what the human
+            # has it showing (another session, the panel list, nothing at all)
+            # cannot misroute or block a delivery.
+            result = claude_bg.type_into_job(job_id, text)
+            if not result.ok:
+                raise RuntimeError(f"claude job {job_id} did not take the text: {result.why}")
+            return
+        # No job record: an interactive claude TUI on the pane tty, typed at
+        # through tmux like any other CLI. Refuse rather than type into the
+        # pane shell when that TUI is not running — or into an attach viewer,
+        # whose composer belongs to whatever session it is showing.
+        if claude_view.interactive_claude_pid(pane_id) is None:
+            raise RuntimeError(
+                f"no interactive claude process on pane {pane_id} to receive keystrokes"
+            )
+
     if tmux.is_pane_in_mode(pane_id):
         tmux.cancel_pane_mode(pane_id)
         time.sleep(0.05)
 
-    profile_name = _resolve_profile_name(pane_id, cli)
-    if profile_name == "claude":
-        # A claude member pane shows its engine through an attach viewer;
-        # keystrokes pass through the viewer into the engine pty. In the
-        # viewer gap (reattach window) the keystrokes would land in the pane
-        # shell instead — refuse rather than type into bash.
-        from .agent_cli import claude_pid_for_pane
-
-        if claude_pid_for_pane(pane_id) is None:
-            raise RuntimeError(
-                f"no claude process on pane {pane_id} to receive keystrokes "
-                "(viewer detached or reattaching); retry once the viewer is back"
-            )
     buffer_name = _save_and_clear_draft(pane_id, profile_name)
 
     tmux.send_keys(pane_id, text, enter=False)
@@ -585,7 +596,21 @@ class Agent:
         )
 
     def interrupt(self) -> None:
-        """Press Escape to interrupt."""
+        """Press Escape to interrupt.
+
+        A claude member's Escape rides the same pipe as its text — addressed
+        to the job, so it interrupts *that* engine's turn whatever the pane's
+        viewer happens to be showing.
+        """
+        if self.cli == "claude":
+            from .adapters import claude_bg
+
+            job_id = claude_bg.job_id_for_pane(self.pane_id)
+            if job_id:
+                result = claude_bg.interrupt_job(job_id)
+                if not result.ok:
+                    raise RuntimeError(f"claude job {job_id} was not interrupted: {result.why}")
+                return
         tmux.send_key(self.pane_id, "Escape")
 
     def capture(self, lines: int = 50) -> str:

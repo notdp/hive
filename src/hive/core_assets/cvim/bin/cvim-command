@@ -145,8 +145,12 @@ debug_log() {
   cvim_debug_log "$debug_log_file" "$src_workspace" "$debug_run_id" "$$" "$message"
 }
 
+# `hive cvim` exports the interpreter hive itself runs in; a bare python3 on
+# the pane's PATH usually cannot import hive.
+hive_python="${HIVE_PYTHON:-python3}"
+
 detect_src_profile() {
-  python3 - "$src_pane" <<'PY'
+  "$hive_python" - "$src_pane" <<'PY'
 import importlib
 import sys
 
@@ -199,7 +203,7 @@ queue_post_run() {
   fi
 
   debug_log "queue_post_run.enqueue tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
-  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib"
+  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib" "$hive_python"
   tmux run-shell -b "$post_cmd"
 }
 
@@ -518,6 +522,7 @@ debug_log_file="${12}"
 debug_workspace="${13}"
 debug_run_id="${14}"
 debug_lib="${15}"
+hive_python="${16}"
 did_pre_interrupt="0"
 . "$debug_lib"
 
@@ -617,15 +622,45 @@ fi
 debug_log "post.start tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
 
 if [[ "$reply_profile" == "claude" ]]; then
-  # A claude member pane is an attach viewer over a bg engine; in the viewer
-  # gap (reattach window) keystrokes would land in the pane shell. Refuse
-  # rather than type into bash. The claude binary is version-named
-  # (~/.local/bin/claude -> versions/2.1.240), so the pane's current command
-  # reads either "claude" or a bare version string.
-  pane_cmd="$(tmux display-message -p -t "$reply_pane" '#{pane_current_command}' 2>/dev/null || true)"
-  if [[ "$pane_cmd" != claude* && ! "$pane_cmd" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
-    debug_log "post.abort reason=no_claude_viewer pane_cmd=$pane_cmd"
-    rm -rf "$tmpdir"
+  # A claude member's keyboard is its bg job, not its pane: hive pipes the
+  # sendback straight into `claude attach <jobId>`, so nothing below has to
+  # run and the pane's viewer is left alone. Exit codes: 0 delivered, 10 this
+  # pane is a plain interactive claude (keep going with tmux keys), anything
+  # else nothing safe to type into.
+  pipe_rc=0
+  "$hive_python" - "$reply_pane" "$send_file" "$content_changed" "$interrupt_before_paste" "$interrupt_after_paste" <<'PY' || pipe_rc=$?
+import importlib
+import sys
+
+pane, send_file, content_changed, interrupt_first, interrupt_after = sys.argv[1:6]
+claude_bg = importlib.import_module("hive.adapters.claude_bg")
+claude_view = importlib.import_module("hive.adapters.claude_view")
+
+job_id = claude_bg.job_id_for_pane(pane)
+if not job_id:
+    raise SystemExit(10 if claude_view.interactive_claude_pid(pane) is not None else 1)
+interrupt = interrupt_first != "0" or interrupt_after != "0"
+if content_changed != "1":
+    # Nothing was edited: the sendback is just the interrupt (if any).
+    raise SystemExit(0 if not interrupt or claude_bg.interrupt_job(job_id).ok else 1)
+if interrupt:
+    # Either flag means "interrupt this turn". The tmux path can only honour
+    # the `after` one post-paste; the pipe types and submits in one call, so
+    # both land here, before the text.
+    claude_bg.interrupt_job(job_id)
+with open(send_file, encoding="utf-8") as handle:
+    text = handle.read().rstrip("\n")  # same trailing-newline trim as the tmux path
+raise SystemExit(0 if claude_bg.type_into_job(job_id, text).ok else 1)
+PY
+  if (( pipe_rc != 10 )); then
+    debug_log "post.pipe rc=$pipe_rc"
+    if (( pipe_rc == 0 )); then
+      rm -rf "$tmpdir"
+    else
+      # The edit is the user's work and the pipe refused to deliver it: keep
+      # the payload on disk (the debug log names it) instead of deleting it.
+      debug_log "post.pipe_retained send_file=$send_file"
+    fi
     exit 0
   fi
 fi

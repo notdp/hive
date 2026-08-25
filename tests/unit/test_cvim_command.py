@@ -224,6 +224,38 @@ raise SystemExit(1)
     return script
 
 
+def _write_fake_ps(tmp_path: Path) -> Path:
+    """Shadow the real ps so the pane's process probe never sees the
+    developer's own machine.
+
+    Default answer: a plain interactive claude on the pane tty, i.e. the one
+    shape tmux keystrokes may go to. ``FAKE_PS_OUTPUT`` overrides it (empty =
+    nothing running, ``claude attach <job>`` = an attach viewer).
+    """
+    script = tmp_path / "ps"
+    script.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+
+out = os.environ.get("FAKE_PS_OUTPUT", "456 claude claude")
+if out:
+    sys.stdout.write(out.rstrip("\\n") + "\\n")
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _isolated_env(tmp_path: Path) -> dict[str, str]:
+    """Env bits that keep a cvim run off the developer's real claude tree."""
+    return {
+        "HIVE_PYTHON": sys.executable,
+        "PYTHONPATH": str(ROOT / "src"),
+        "CLAUDE_HOME": str(tmp_path / "claude-home"),
+    }
+
+
 def _write_fake_editor(tmp_path: Path) -> Path:
     script = tmp_path / "fake-editor"
     script.write_text(
@@ -263,6 +295,7 @@ def _run_command(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     _write_fake_tmux(tmp_path)
+    _write_fake_ps(tmp_path)
     command = _materialize_cvim_bundle(tmp_path)
     log_path = tmp_path / "tmux-log.json"
     state = {
@@ -279,6 +312,7 @@ def _run_command(
     env["CVIM_EDITOR"] = "sh"
     env["FAKE_TMUX_STATE"] = json.dumps(state)
     env["FAKE_TMUX_LOG"] = str(log_path)
+    env.update(_isolated_env(tmp_path))
     if extra_env:
         env.update(extra_env)
 
@@ -296,6 +330,7 @@ def _run_command_actions(
     workspace: Path | None = None,
 ) -> list[dict[str, object]]:
     _write_fake_tmux(tmp_path)
+    _write_fake_ps(tmp_path)
     command = _materialize_cvim_bundle(tmp_path)
     editor = _write_fake_editor(tmp_path)
     log_path = tmp_path / "tmux-log.json"
@@ -323,6 +358,7 @@ def _run_command_actions(
     env["FAKE_TMUX_LOG"] = str(log_path)
     env["FAKE_TMUX_ACTIONS"] = str(actions_path)
     env["FAKE_TMUX_EXEC_POPUP"] = "1"
+    env.update(_isolated_env(tmp_path))
     if extra_env:
         env.update(extra_env)
 
@@ -613,6 +649,174 @@ def test_claude_profile_clears_input_even_when_editor_content_is_unchanged(tmp_p
     )
 
 
+_CLAUDE_PANE = {
+    "id": "%1",
+    "left": 0,
+    "top": 0,
+    "width": 200,
+    "height": 100,
+    "command": "claude",
+    "title": "✳ Claude Code",
+}
+
+
+def _write_fake_claude(tmp_path: Path) -> Path:
+    """Stand-in for the claude binary, for the member sendback path.
+
+    `attach` records its argv, registers a bg engine entry for the job (so
+    the pipe gets past engine resolution) and exits at once — which is how
+    the primitive learns the client is gone. That is enough to prove the
+    member branch went down the pipe: what matters here is that it never
+    reaches for tmux.
+    """
+    script = tmp_path / "claude"
+    script.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["FAKE_CLAUDE_LOG"]).open("a").write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:2] == ["attach"]:
+    # hive washes CLAUDE_HOME out of the pipe env and re-exports the config
+    # tree the way claude itself takes it.
+    home = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    sock = home / "inbox.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    sock.touch()
+    registry = home / "sessions"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{os.getppid()}.json").write_text(json.dumps({
+        "kind": "bg",
+        "pid": os.getppid(),
+        "jobId": sys.argv[2],
+        "sessionId": "sid-fake",
+        "messagingSocketPath": str(sock),
+        "cwd": os.getcwd(),
+        "status": "idle",
+    }))
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _record_member_job(tmp_path: Path, pane: str, job_id: str) -> None:
+    control = tmp_path / "claude-home" / "hive-control"
+    control.mkdir(parents=True, exist_ok=True)
+    slug = pane.replace("%", "")
+    (control / f"hive-pane-{slug}.job").write_text(
+        json.dumps({"jobId": job_id, "sessionId": "sid-fake", "cwd": str(tmp_path)})
+    )
+
+
+def test_claude_member_sendback_goes_through_the_pipe_not_tmux(tmp_path):
+    # The pane records a bg job, so its keyboard is the job: the sendback is
+    # piped into `claude attach <jobId>` and no keystroke goes near the pane.
+    _write_fake_claude(tmp_path)
+    _record_member_job(tmp_path, "%1", "cafe1234")
+    claude_log = tmp_path / "fake-claude.log"
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[dict(_CLAUDE_PANE)],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_CLAUDE_LOG": str(claude_log),
+        },
+    )
+
+    assert "attach cafe1234" in claude_log.read_text()
+    assert not any(
+        event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
+        for event in actions
+    )
+
+
+def test_claude_member_unedited_save_interrupts_only_when_asked(tmp_path):
+    # Nothing was edited, so the sendback is just the interrupt — and the pipe
+    # honours the same two switches the tmux path does instead of always
+    # interrupting.
+    def run(where: Path, env: dict[str, str]) -> str:
+        where.mkdir(parents=True, exist_ok=True)
+        _write_fake_claude(where)
+        _record_member_job(where, "%1", "cafe1234")
+        claude_log = where / "fake-claude.log"
+        claude_log.touch()
+        actions = _run_command_actions(
+            where,
+            current_pane="%1",
+            panes=[dict(_CLAUDE_PANE)],
+            extra_env={"FAKE_CLAUDE_LOG": str(claude_log), **env},
+        )
+        # Whatever it decided, it decided over the pipe: no keys near the pane.
+        assert not any(event["cmd"] == "send-keys" for event in actions)
+        return claude_log.read_text()
+
+    assert "attach cafe1234" in run(tmp_path / "default", {})
+    assert "attach" not in run(
+        tmp_path / "no-interrupt",
+        {"CVIM_INTERRUPT_BEFORE_PASTE": "0", "CVIM_INTERRUPT_AFTER_PASTE": "0"},
+    )
+
+
+def test_claude_pane_without_a_job_record_still_types_through_tmux(tmp_path):
+    # A plain interactive claude on the pane tty (fake ps), no job record:
+    # nothing to pipe into, so the sendback is typed like any other CLI's.
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[dict(_CLAUDE_PANE)],
+        extra_env={"FAKE_EDITOR_APPEND_TEXT": "new line added"},
+    )
+
+    assert any(event["cmd"] == "paste-buffer" for event in actions)
+    assert any(
+        event["cmd"] == "send-keys" and event["args"][-1] == "Enter"
+        for event in actions
+    )
+
+
+def test_claude_post_refuses_when_the_pane_only_holds_an_attach_viewer(tmp_path):
+    # No job record, and the claude on the tty is an attach viewer: its
+    # composer belongs to whatever session it displays, so typing there would
+    # land the sendback in a stranger's turn.
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[dict(_CLAUDE_PANE)],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_PS_OUTPUT": "456 claude claude attach beef5678",
+        },
+    )
+
+    assert not any(
+        event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
+        for event in actions
+    )
+
+
+def test_claude_post_refuses_when_nothing_is_running_on_the_pane(tmp_path):
+    # No job record and no claude process on the pane tty: no keystroke may
+    # reach the pane shell.
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[dict(_CLAUDE_PANE)],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "FAKE_PS_OUTPUT": "",
+        },
+    )
+
+    assert not any(
+        event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
+        for event in actions
+    )
+
+
 def test_popup_schedules_post_after_popup_exits(tmp_path):
     actions = _run_command_actions(
         tmp_path,
@@ -840,6 +1044,7 @@ def _run_menu_command(
     command = bundle_root / "bin" / "cvim-command"
 
     _write_fake_tmux(tmp_path)
+    _write_fake_ps(tmp_path)
     editor_log = tmp_path / "editor.json"
     fake_vim = _write_capturing_fake_vim(tmp_path, editor_log)
 
@@ -865,6 +1070,7 @@ def _run_menu_command(
     env["FAKE_TMUX_LOG"] = str(log_path)
     env["FAKE_TMUX_ACTIONS"] = str(actions_path)
     env["FAKE_TMUX_EXEC_POPUP"] = "1"
+    env.update(_isolated_env(tmp_path))
     if extra_env:
         env.update(extra_env)
 
