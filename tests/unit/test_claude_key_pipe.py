@@ -588,3 +588,48 @@ def test_a_probe_failure_closes_the_draft_gate(monkeypatch):
         lambda pane: (_ for _ in ()).throw(RuntimeError("tmux gone")),
     )
     assert claude_bg._composer_has_draft("cafe1234") is False
+
+
+# --- job naming ------------------------------------------------------------
+
+
+def _named_engine(name):
+    return claude_bg.EngineSession(
+        pid=1, job_id="cafe1234", session_id="s", socket_path="/tmp/s", cwd="/repo",
+        status="idle", waiting_for="", status_updated_at=0.0, name=name,
+    )
+
+
+def test_a_wrongly_named_job_is_renamed_with_the_slash_command(monkeypatch):
+    typed = []
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("hive-183"))
+    monkeypatch.setattr(
+        claude_bg, "type_into_job",
+        lambda job, text, **kw: typed.append((job, text)) or claude_bg.KeyResult(True, "transcript"),
+    )
+
+    assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is True
+    assert typed == [("cafe1234", "/rename honey.worker")]
+
+
+def test_a_correctly_named_job_types_nothing(monkeypatch):
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("honey.worker"))
+    monkeypatch.setattr(
+        claude_bg, "type_into_job",
+        lambda job, text, **kw: (_ for _ in ()).throw(AssertionError("must not type")),
+    )
+
+    assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is True
+
+
+def test_naming_an_engineless_job_reports_failure(monkeypatch):
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: None)
+    assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is False
+
+
+def test_the_registry_name_is_read_into_the_engine_session():
+    engine = claude_bg._entry_to_engine({
+        "kind": "bg", "pid": 1, "jobId": "cafe1234",
+        "messagingSocketPath": __file__, "name": "honey.worker",
+    })
+    assert engine is not None and engine.name == "honey.worker"
