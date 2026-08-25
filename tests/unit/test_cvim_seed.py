@@ -375,54 +375,20 @@ def test_resolve_transcript_path_for_pane_returns_none_without_session(monkeypat
 
     class MissingAdapter:
         def resolve_current_session_id(self, pane_id: str) -> str | None:
-            raise AssertionError("Hive panes without a runtime snapshot should not probe live state")
+            assert pane_id == "%42"
+            return None
 
         def find_session_file(self, session_id: str, *, cwd: str | None = None) -> Path | None:
             raise AssertionError("find_session_file should not be called when session id is missing")
 
     monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr(shared, "_get_adapter", lambda name: MissingAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (True, None))
-    monkeypatch.setattr(
-        shared,
-        "_resolve_claude_pidfile_session_id",
-        lambda _pane_id, _cwd: (_ for _ in ()).throw(AssertionError("Hive panes should not use pidfile fallback")),
-    )
+    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
 
     assert shared.resolve_transcript_path_for_pane(
         pane_id="%42",
         cwd="/repo",
     ) is None
-
-
-def test_resolve_transcript_path_for_claude_uses_validated_pidfile_fallback(monkeypatch, tmp_path):
-    shared = _import_shared()
-    transcript = tmp_path / "claude.jsonl"
-    transcript.write_text("")
-
-    class FdMissAdapter:
-        def resolve_current_session_id(self, pane_id: str) -> str | None:
-            assert pane_id == "%42"
-            return None
-
-        def find_session_file(self, session_id: str, *, cwd: str | None = None) -> Path | None:
-            assert session_id == "sess-pidfile"
-            assert cwd == "/repo"
-            return transcript
-
-    monkeypatch.setattr(shared, "_detect_profile_for_pane", lambda pane_id: SimpleNamespace(name="claude"))
-    monkeypatch.setattr(shared, "_get_adapter", lambda name: FdMissAdapter() if name == "claude" else None)
-    monkeypatch.setattr(shared, "_resolve_hive_runtime_session_id", lambda _pane_id, _cli_name="": (False, None))
-    monkeypatch.setattr(
-        shared,
-        "_resolve_claude_pidfile_session_id",
-        lambda pane_id, cwd: "sess-pidfile" if (pane_id, cwd) == ("%42", "/repo") else None,
-    )
-
-    assert shared.resolve_transcript_path_for_pane(
-        pane_id="%42",
-        cwd="/repo",
-    ) == str(transcript)
 
 
 def test_resolve_transcript_path_for_pane_returns_none_when_session_file_missing(monkeypatch, tmp_path):

@@ -583,18 +583,29 @@ def list_panes(target: str) -> list[str]:
 # --- Context detection ---
 
 def is_inside_tmux() -> bool:
-    return bool(os.environ.get("TMUX"))
+    """True inside a tmux client — or inside a member engine's tool subprocess.
+
+    A claude bg engine runs on the supervisor's pty, not in any tmux client,
+    so its tools see no reliable $TMUX; but the member's pane identity is
+    resolvable from the engine's own env markers, and the tmux server on the
+    default socket answers targeted commands without $TMUX. Gating on $TMUX
+    alone would lock every member out of hive.
+    """
+    if os.environ.get("TMUX"):
+        return True
+    return _member_env_pane() is not None
 
 
-def get_current_pane_id() -> str | None:
-    """Get the pane id of the calling process.
+def _member_env_pane() -> str | None:
+    """Pane resolved from a member engine's per-tool env markers, or None.
 
-    Inside a codex tool subprocess the env's TMUX_PANE is unreliable — the
-    shared app-server daemon's env is frozen at spawn time (and hive strips
-    TMUX_PANE from it) — but codex injects the thread's own ``CODEX_THREAD_ID``
-    per tool, and hive records which pane each thread is bound to. That
-    mapping wins over the env var; everywhere else the per-pane TMUX_PANE
-    env var is the answer.
+    - codex injects the thread's ``CODEX_THREAD_ID`` into tool subprocesses;
+      hive records which pane each thread is bound to.
+    - a claude bg engine's tools carry ``CLAUDE_CODE_MESSAGING_SOCKET``
+      (``/tmp/cc-socks/<enginePid>.sock``); the engine's registry entry names
+      its jobId, and hive records which pane each job is bound to. An
+      interactive claude session's tools carry the socket too, but have no
+      bg registry entry (and no job record), so they fall through.
     """
     thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
     if thread_id:
@@ -603,6 +614,33 @@ def get_current_pane_id() -> str | None:
         pane = pane_for_thread(thread_id)
         if pane:
             return pane
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", "").strip()
+    if sock:
+        stem = os.path.basename(sock).rsplit(".", 1)[0]
+        if stem.isdigit():
+            from .adapters.claude_bg import engine_session_for_pid, pane_for_job
+
+            engine = engine_session_for_pid(int(stem))
+            if engine is not None:
+                pane = pane_for_job(engine.job_id)
+                if pane:
+                    return pane
+    return None
+
+
+def get_current_pane_id() -> str | None:
+    """Get the pane id of the calling process.
+
+    Inside a member engine's tool subprocess the env's TMUX_PANE is
+    unreliable — the codex shared daemon's env is frozen at spawn time (and
+    hive strips TMUX_PANE from it), and a claude bg engine has none at all —
+    so the per-CLI identity markers win over the env var (see
+    :func:`_member_env_pane`); everywhere else the per-pane TMUX_PANE env var
+    is the answer.
+    """
+    pane = _member_env_pane()
+    if pane:
+        return pane
     return os.environ.get("TMUX_PANE")
 
 

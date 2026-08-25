@@ -1358,15 +1358,22 @@ def _resolve_guest_send_target(to_agent: str, team: str) -> tuple[str, Team]:
 
 
 def _live_member_pids() -> dict[int, tuple[str, str]]:
-    """pid -> (team, agent) for every live claude team-member process."""
-    from .agent_cli import claude_pid_for_pane
+    """pid -> (team, agent) for every live claude team-member engine.
+
+    A claude member's process is its bg job's engine (found through the
+    pane's job record), never anything on the pane tty — the tty only holds
+    the attach viewer, whose pid must not shadow the member in the session
+    registry.
+    """
+    from .adapters import claude_bg
 
     out: dict[int, tuple[str, str]] = {}
     for p in tmux.list_panes_all():
         if p.team and p.agent:
-            pid = claude_pid_for_pane(p.pane_id)
-            if pid:
-                out[pid] = (p.team, p.agent)
+            job_id = claude_bg.job_id_for_pane(p.pane_id)
+            engine = claude_bg.engine_session_for_job(job_id) if job_id else None
+            if engine is not None:
+                out[engine.pid] = (p.team, p.agent)
     return out
 
 
@@ -1489,9 +1496,10 @@ def _pane_last_activity(pane_id: str) -> int:
 def _pane_is_idle_for_pairing(pane_id: str) -> bool:
     """Return True when *pane_id* is an agent pane safe to pair with.
 
-    Uses sidecar runtime inspection (turnPhase) with a graceful fallback:
-    freshly-opened CLIs without a session yet count as idle, turn_closed
-    counts as idle, everything else is treated as 'busy'.
+    Idle is proven, never presumed: a closed turn (codex/grok turnPhase) or
+    a native runtime source reporting not-busy. An unresolved session is
+    *not* idle — a working member whose session cannot be read must never be
+    conscripted as a validator.
     """
     try:
         from .sidecar import _agent_runtime_payload
@@ -1500,12 +1508,15 @@ def _pane_is_idle_for_pairing(pane_id: str) -> bool:
         return False
     if not runtime.get("alive", True):
         return False
-    phase = str(runtime.get("turnPhase") or "")
-    if phase == "turn_closed":
+    if runtime.get("busy"):
+        return False
+    if runtime.get("inputState") == "waiting_user":
+        return False
+    if str(runtime.get("turnPhase") or "") == "turn_closed":
         return True
-    if runtime.get("inputReason") == "no_session":
-        return True
-    return False
+    # A native source (codex daemon / grok leader / claude bg registry)
+    # answered busy=False with authority; heuristic-only panes stay out.
+    return bool(runtime.get("_runtimeSource"))
 
 
 def _require_daemon_backed(pane: str) -> None:
@@ -1534,6 +1545,9 @@ def _require_daemon_backed(pane: str) -> None:
     if profile.name == "grok":
         _require_grok_leader_backed(pane)
         return
+    if profile.name == "claude":
+        _require_claude_job_backed(pane)
+        return
     if profile.name != "codex":
         return
     from .adapters import codex_app_server
@@ -1550,6 +1564,29 @@ def _require_daemon_backed(pane: str) -> None:
         "  1) exit codex: press Ctrl-C (twice)\n"
         "  2) run: hive codex resume <session-id>   (or `hive codex resume` "
         "for the picker)\n"
+        "then re-run /hive."
+    )
+
+
+def _require_claude_job_backed(pane: str) -> None:
+    """Refuse a bare interactive claude pane: hive claude members run as bg
+    jobs (engine on claude's supervisor, pane is an attach viewer), which is
+    what delivery, runtime and resume all key on. A TUI claude would join
+    with no job identity and every delivery to it would fail."""
+    from .adapters import claude_bg
+
+    if claude_bg.job_id_for_pane(pane):
+        return
+    _fail(
+        "this claude is not hive-managed; hive claude members run as "
+        "background jobs (`claude --bg`) with the pane attached as a viewer, "
+        "so it can't join yet.\n"
+        "for future launches use hclaude (one-time setup, any shell):\n"
+        "  grep -q 'hive shell-init' ~/.zshrc || "
+        "echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n"
+        "for this session now (your session is preserved):\n"
+        "  1) note your session id (`claude --resume` lists it), exit claude\n"
+        "  2) run: hive claude -r <session-id>\n"
         "then re-run /hive."
     )
 
@@ -2222,7 +2259,13 @@ def inject_cmd(agent_name: str, text: str):
     agent = t.get(agent_name)
     # Documented low-level bypass: raw composer keystrokes for every CLI, so
     # delivery paths (channel/RPC) can be debugged from outside themselves.
-    _submit_interactive_text(agent.pane_id, text, agent.cli)
+    # On a claude member pane the keystrokes pass through the attach viewer
+    # into the engine pty; with no viewer attached the submit refuses rather
+    # than typing into the pane shell.
+    try:
+        _submit_interactive_text(agent.pane_id, text, agent.cli)
+    except RuntimeError as exc:
+        _fail(str(exc))
     result = {
         "member": agent_name,
         "action": "inject",
@@ -2256,10 +2299,13 @@ def _compact_target(target: _PaneTarget) -> str:
             _submit_interactive_text(target.pane_id, "/compact", target.cli)
         return status
     # claude (and embedded codex without a daemon): `/compact` is a TUI
-    # slash command, so it must go through the composer. A channel message
-    # would arrive as content, not as a command — this is startup/control
-    # keystroke driving, not message delivery.
-    _submit_interactive_text(target.pane_id, "/compact", target.cli)
+    # slash command, so it must go through the composer. For a claude member
+    # the keystrokes pass through the attach viewer into the engine pty; in
+    # the viewer gap the submit refuses (never typed into the pane shell).
+    try:
+        _submit_interactive_text(target.pane_id, "/compact", target.cli)
+    except RuntimeError as exc:
+        _fail(str(exc))
     return "compacted"
 
 
@@ -5268,21 +5314,106 @@ def codex_cmd(ctx: click.Context):
     _exec_codex_managed(list(ctx.args))
 
 
-@cli.command(
-    "claude",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
-    add_help_option=False,
+# claude subcommands that are not an interactive TUI launch: raw passthrough.
+# Hidden subcommands are only recognized at argv[1], so args[0] is the one
+# place a subcommand can sit.
+_CLAUDE_PASSTHROUGH_SUBCOMMANDS = (
+    "agents", "attach", "logs", "stop", "respawn", "rm", "mcp", "plugin",
+    "config", "doctor", "update", "install", "migrate-installer",
+    "setup-token", "api", "bg-spare", "bg-pty-host", "daemon", "help",
 )
-@click.pass_context
-def claude_cmd(ctx: click.Context):
-    """Launch claude (hive-managed pairing for the `hclaude` launcher).
 
-    All arguments are forwarded to claude verbatim; the process is replaced
-    and never returns. Nothing needs registering any more: claude binds its
-    own cross-session inbox at startup (2.1.224+), and that inbox is hive's
-    delivery path into the pane.
+# Non-interactive surfaces: --help/--version never start a session.
+_CLAUDE_PASSTHROUGH_FLAGS = frozenset({"-h", "--help", "-v", "--version"})
+
+# Launch shapes the bg mapping cannot represent: headless print mode
+# (rejected by --bg upstream), an explicit --bg the caller manages itself,
+# and -c/--continue (which session it continues is unknowable up front).
+_CLAUDE_RAW_MODE_FLAGS = frozenset({"-p", "--print", "--bg", "-c", "--continue"})
+
+
+def _claude_resume_arg(args: list[str]) -> tuple[bool, str | None]:
+    """(resume flag present, its value). ``-r``/``--resume`` take an optional
+    value; a bare flag opens claude's picker."""
+    for i, a in enumerate(args):
+        if a in ("-r", "--resume"):
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                return True, args[i + 1]
+            return True, None
+        if a.startswith("--resume="):
+            return True, a.split("=", 1)[1] or None
+    return False, None
+
+
+def _claude_pane_job_name(pane: str) -> str:
+    """Job name for launcher-minted jobs (also the ledger row's label)."""
+    return f"hive-{pane.replace('%', '') or 'pane'}"
+
+
+def _claude_attach_loop(job_id: str) -> None:
+    """Replace this process with a watch loop keeping the pane attached to
+    its bg job's engine. Never returns.
+
+    A job-control shell (``set -m``) runs the loop so ``claude attach`` owns
+    the tty foreground — the pane's current command reads ``claude`` while a
+    viewer is attached, which is what the keyboard-path guards (cvim,
+    inject, /compact) key on.
+
+    ``claude attach`` exits 0 both when the user detaches and when an engine
+    respawn/upgrade kicks the viewer, so the loop reattaches after a 1s
+    window the user can break out of with Ctrl-C (the interrupted ``sleep``
+    ends the loop). A viewer killed by a signal (rc > 128) is also
+    reattached; only a genuine error exit (1..128) that fails *fast* ends
+    the loop instead of spinning on a removed job.
     """
-    args = list(ctx.args)
+    from .adapters import claude_bg
+
+    script = (
+        "set -m\n"
+        "while :; do\n"
+        "  t0=$(date +%s)\n"
+        f"  claude attach {shlex.quote(job_id)}\n"
+        "  rc=$?\n"
+        "  if [ $rc -ge 1 ] && [ $rc -le 128 ] && "
+        "[ $(( $(date +%s) - t0 )) -lt 5 ]; then\n"
+        "    exit $rc\n"
+        "  fi\n"
+        f"  echo \"hive: viewer detached from job {shlex.quote(job_id)}; \"\\\n"
+        "\"reattaching in 1s (Ctrl-C to stay detached)\" >&2\n"
+        "  sleep 1 || exit 0\n"
+        "done\n"
+    )
+    os.execve("/bin/sh", ["sh", "-c", script], claude_bg.bg_env())
+
+
+def _exec_claude_managed(args: list[str]) -> None:
+    """Run claude as a hive-managed background job with this pane attached.
+
+    Born-managed path for a user-launched claude: mint (or rebind) a
+    ``claude --bg`` job, record pane<->jobId, then hold the pane in an
+    attach watch loop — the engine lives on claude's own supervisor, so the
+    pane is a viewer, and the member survives the viewer dying.
+
+    Job binding by launch shape:
+    - bare interactive launch (flags / prompt only): mint a bg job with the
+      forwarded flags and prompt;
+    - ``--resume <jobId>``: rebind the pane to that job and attach (waking a
+      parked engine — this is what spawn panes and resume hints run);
+    - ``-r <sessionId> [--fork-session]``: mint a bg job resuming (or
+      forking) that session;
+    - ``-r``/``--resume`` with no value (picker): raw claude — the chosen
+      session is unknowable up front.
+
+    Degrades to raw ``claude`` (interactive TUI, unmanaged) whenever the
+    managed path cannot apply: outside tmux, a management subcommand,
+    --help/--version, headless/--bg/--continue shapes, or the bg spawn
+    failing. The caller never ends up worse than plain claude.
+    """
+    from .adapters import claude_bg
+
+    def _raw() -> None:
+        os.execvp("claude", ["claude", *args])
+
     if args == ["channel-server"]:
         # Tombstone for the retired hive-channel plugin's MCP entry: exec'ing
         # this into claude would feed it a garbage subcommand every session.
@@ -5293,7 +5424,62 @@ def claude_cmd(ctx: click.Context):
             err=True,
         )
         sys.exit(1)
-    os.execvp("claude", ["claude", *args])
+    pane = os.environ.get("TMUX_PANE") or ""
+    if not pane or not os.environ.get("TMUX"):
+        _raw()  # hive needs a real tmux pane to bind a job to
+    if args and args[0] in _CLAUDE_PASSTHROUGH_SUBCOMMANDS:
+        _raw()  # a management subcommand, not an interactive TUI launch
+    if any(a in _CLAUDE_PASSTHROUGH_FLAGS for a in args):
+        _raw()
+    if any(a in _CLAUDE_RAW_MODE_FLAGS for a in args):
+        _raw()
+
+    resume_present, resume_val = _claude_resume_arg(args)
+    if resume_present and not resume_val:
+        _raw()  # picker: the chosen session is unknowable up front
+    cwd = os.getcwd()
+
+    if resume_val and claude_bg.looks_like_job_id(resume_val):
+        engine = claude_bg.engine_session_for_job(resume_val)
+        if engine is None and claude_bg.job_exists(resume_val):
+            engine = claude_bg.ensure_engine(resume_val)
+        if engine is not None or claude_bg.job_exists(resume_val):
+            claude_bg.write_pane_job(
+                pane, resume_val, engine.session_id if engine else "", cwd
+            )
+            _claude_attach_loop(resume_val)
+            return  # unreachable in production (the loop execs); mocked in tests
+        # Not a known job: fall through and treat the value as a session id.
+
+    user_named = any(a == "--name" or a.startswith("--name=") for a in args)
+    job_id = claude_bg.spawn_job(
+        cwd=cwd,
+        name="" if user_named else _claude_pane_job_name(pane),
+        extra_args=list(args),
+    )
+    if not job_id:
+        click.echo("hive: `claude --bg` failed; launching plain claude", err=True)
+        _raw()
+    engine = claude_bg.wait_engine_entry(job_id, timeout=10.0)
+    claude_bg.write_pane_job(pane, job_id, engine.session_id if engine else "", cwd)
+    _claude_attach_loop(job_id)
+
+
+@cli.command(
+    "claude",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]},
+    add_help_option=False,
+)
+@click.pass_context
+def claude_cmd(ctx: click.Context):
+    """Launch claude as a hive-managed background job (hclaude launcher).
+
+    Interactive launches run as `claude --bg` jobs with the pane attached as
+    a viewer; management subcommands and non-interactive shapes pass through
+    to plain claude. Does not return on the raw path; on the managed path it
+    exits with the viewer loop's status.
+    """
+    _exec_claude_managed(list(ctx.args))
 
 
 # --- grok managed launch ---
@@ -5442,11 +5628,11 @@ def resume_hint_cmd(cli_name: str):
     directory and codex/grok print none at all. Resolution rides hive's existing
     session truth only — codex reads the thread record its launch wrote (the
     record outlives the TUI), grok reads the session file its launch wrote,
-    claude reads this pane's team-member entry in the resume snapshot (the
-    sidecar keeps recording it and the entry survives the process). A pane
-    outside a hive team gets no hint; tracking arbitrary user panes is not this
-    feature's job. Prints nothing and exits 0 on any failure: a hint must never
-    break the wrapper.
+    claude reads the pane's bg job record (the jobId outlives viewer and
+    engine alike; `hive claude --resume <jobId>` reattaches and wakes it). A
+    pane outside a hive team gets no hint; tracking arbitrary user panes is not
+    this feature's job. Prints nothing and exits 0 on any failure: a hint must
+    never break the wrapper.
     """
     try:
         hint = _resume_hint(cli_name, os.getcwd())
@@ -5460,7 +5646,7 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
     identity = _pane_team_identity()
     if identity is None:
         return None
-    pane, team, agent = identity
+    pane, _team, _agent = identity
     if cli_name == "codex":
         session_id = _pane_codex_session_id(pane)
         resume_cmd = "hive codex resume"
@@ -5468,7 +5654,7 @@ def _resume_hint(cli_name: str, cwd: str) -> str | None:
         session_id = _pane_grok_session_id(pane)
         resume_cmd = "hive grok --resume"
     else:
-        session_id = _member_snapshot_session_id(team, agent)
+        session_id = _pane_claude_job_id(pane)
         resume_cmd = "hive claude --resume"
     if not session_id:
         return None
@@ -5533,29 +5719,22 @@ def _pane_grok_session_id(pane: str) -> str | None:
     return record[0] if record else None
 
 
-def _member_snapshot_session_id(team: str, agent: str) -> str | None:
-    """The member's claude session, from the team resume snapshot.
+def _pane_claude_job_id(pane: str) -> str | None:
+    """This pane's claude bg jobId, from the record its launch wrote.
 
-    The sidecar keeps recording every member's sessionId into the resume
-    store, and a member entry survives its pane's process exiting — that
-    store is hive's own answer to "which session did this pane run". No
-    snapshot, no member, or no recorded session → None.
+    The record outlives the viewer and the engine alike (attach wakes a
+    parked job with the same id), so the printed resume command works from
+    any shell at any time. No record → no hint.
     """
-    from . import resume as resume_store
+    from .adapters import claude_bg
 
-    snap = resume_store.load_snapshot(team)
-    if not snap:
-        return None
-    for member in snap.get("members", []):
-        if member.get("name") == agent:
-            return str(member.get("sessionId") or "") or None
-    return None
+    return claude_bg.job_id_for_pane(pane)
 
 
 _SHELL_INIT_POSIX = """\
 # hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
-# per-pane leader for grok, cross-session inbox for claude) and print a
+# per-pane leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
@@ -5601,7 +5780,7 @@ function hgrok {
 _SHELL_INIT_FISH = """\
 # hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
-# per-pane leader for grok, cross-session inbox for claude) and print a
+# per-pane leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex

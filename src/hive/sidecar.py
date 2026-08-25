@@ -51,10 +51,13 @@ REQUEST_SLACK = 5.0
 
 
 def _native_submit_timeout() -> float:
-    from .adapters import claude_sessions, codex_app_server, grok_leader
+    from .adapters import claude_bg, claude_sessions, codex_app_server, grok_leader
 
+    # claude's worst case is a delivery that has to wake a parked engine
+    # first (ledger check + tty-less attach + entry poll) before the inbox
+    # write itself.
     return max(
-        claude_sessions.SUBMIT_TIMEOUT,
+        claude_sessions.SUBMIT_TIMEOUT + claude_bg.WAKE_SUBMIT_BUDGET,
         codex_app_server.SUBMIT_TIMEOUT,
         grok_leader.SUBMIT_TIMEOUT,
     )
@@ -64,14 +67,9 @@ def _send_request_timeout() -> float:
     return _native_submit_timeout() + REQUEST_SLACK
 SIDECAR_API_VERSION = 5
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
-# Session snapshots stay event-invalidated for consumers. This low-rate
-# maintenance probe only bounds sidecar drift without paying per-tick ps/fd
-# cost on the steady fresh path.
-RUNTIME_SESSION_STEADY_PROBE_SECONDS = 60.0
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
-_RUNTIME_SESSION_LAST_STEADY_PROBE_AT: dict[str, float] = {}
 _AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 
@@ -228,114 +226,6 @@ def _set_output_busy_monitor(monitor: Any) -> None:
     _OUTPUT_BUSY_MONITOR = monitor
 
 
-def _process_matches_cli(cli_name: str, command: str, argv: str) -> bool:
-    from .agent_cli import detect_profile_from_pane_command, detect_profile_from_text
-
-    profile = detect_profile_from_pane_command(command) or detect_profile_from_text(argv)
-    return bool(profile and profile.name == cli_name)
-
-
-def _requires_tick_session_capture(cli_name: str) -> bool:
-    return cli_name == "claude"
-
-
-def _pane_has_recent_output(pane_id: str) -> bool:
-    monitor = _OUTPUT_BUSY_MONITOR
-    if monitor is None:
-        return False
-    try:
-        return bool(monitor.is_busy(pane_id, threshold_seconds=BUSY_OUTPUT_THRESHOLD_SECONDS))
-    except Exception:
-        return False
-
-
-def _runtime_session_steady_probe_due(
-    pane_id: str,
-    snapshot: RuntimeSnapshot | None,
-    *,
-    now: float,
-) -> bool:
-    if snapshot is None or not snapshot.sessionId.is_fresh(now=now):
-        return False
-    last_checked_at = max(
-        float(snapshot.sessionId.observed_at),
-        _RUNTIME_SESSION_LAST_STEADY_PROBE_AT.get(pane_id, 0.0),
-    )
-    return (now - last_checked_at) >= RUNTIME_SESSION_STEADY_PROBE_SECONDS
-
-
-def _probe_session_id_from_pidfile(pane_id: str, cli_name: str) -> str | None:
-    if cli_name != "claude":
-        return None
-    from . import tmux as tmux_mod
-    from .adapters.claude import resolve_session_id_from_pidfile
-
-    tty = tmux_mod.get_pane_tty(pane_id) or ""
-    if not tty:
-        return None
-    cwd_hint = tmux_mod.display_value(pane_id, "#{pane_current_path}")
-    for process in tmux_mod.list_tty_processes(tty):
-        if not _process_matches_cli(cli_name, process.command, process.argv):
-            continue
-        session_id = resolve_session_id_from_pidfile(process.pid, cwd=cwd_hint)
-        if session_id:
-            return session_id
-    return None
-
-
-def _runtime_snapshot_tick(
-    team_name: str,
-    *,
-    store: RuntimeSnapshotStore | None = None,
-    now: float | None = None,
-    workspace: str = "",
-    members: dict[str, dict[str, Any]] | None = None,
-) -> None:
-    snapshot_store = _RUNTIME_SNAPSHOTS if store is None else store
-    observed_at = time.monotonic() if now is None else now
-    bindings = members if members is not None else _team_member_bindings(team_name)
-    for member in bindings.values():
-        if member.get("role") not in _AGENT_NOTIFY_ROLES:
-            continue
-        pane_id = str(member.get("pane") or "")
-        cli_name = str(member.get("cli") or "")
-        if not pane_id or not cli_name:
-            continue
-        if not _requires_tick_session_capture(cli_name):
-            continue
-        if detect_cli_process_for_pane(pane_id) is None:
-            # Retained shell: its PTY output is not a session-rotation signal
-            # and must not stale the member's last-known session. Capture
-            # resumes as soon as a CLI process is back on the TTY.
-            continue
-        snapshot = snapshot_store.get(pane_id)
-        recent_output = _pane_has_recent_output(pane_id)
-        needs_probe = cli_name == "claude" and (
-            snapshot is None
-            or not snapshot.sessionId.is_fresh(now=observed_at)
-            or recent_output
-        )
-        if not needs_probe and not (
-            cli_name == "claude"
-            and _runtime_session_steady_probe_due(pane_id, snapshot, now=observed_at)
-        ):
-            continue
-        if not needs_probe:
-            _RUNTIME_SESSION_LAST_STEADY_PROBE_AT[pane_id] = observed_at
-        session_id = _probe_session_id_from_pidfile(pane_id, cli_name)
-        if session_id:
-            snapshot_store.update_session_id(
-                pane_id,
-                session_id,
-                source="pidfile",
-                observed_at=observed_at,
-            )
-        elif snapshot is not None and recent_output:
-            # PTY output is a conservative invalidation signal: a false positive
-            # may blank cvim briefly, but reusing an old session would be worse.
-            snapshot_store.mark_session_stale(pane_id, observed_at=observed_at)
-
-
 def _fresh_snapshot_session_id(pane_id: str, *, now: float | None = None) -> str:
     snapshot = _RUNTIME_SNAPSHOTS.get(pane_id)
     if (
@@ -431,43 +321,37 @@ def _transcript_progressed_recently(pane_id: str, threshold_seconds: float) -> b
     return _check_mtime_within(fresh, threshold_seconds)
 
 
-def _pane_active_turn_phase(pane_id: str) -> str | None:
-    """Probe transcript jsonl tail and return the current ``turnPhase`` token.
+def _claude_registry_busy(pane_id: str) -> bool | None:
+    """Busy flag from claude's own session registry, or None.
 
-    Returns None when the transcript path can't be resolved or the probe
-    fails — callers should treat that as "phase unknown" and not gate.
+    A bg member pane answers from its job's engine entry; an interactive
+    claude on the pane tty answers from its own registry entry (real TUI
+    sessions report ``status``; headless/desktop ones do not and stay None).
     """
-    from .activity import probe_transcript_turn_phase
+    from .adapters import claude_bg
+    from .agent_cli import claude_pid_for_pane
 
-    path = _resolve_transcript_path_cached(pane_id)
-    if not path:
-        return None
-    profile = detect_profile_for_pane(pane_id)
-    if not profile:
-        return None
-    try:
-        result = probe_transcript_turn_phase(profile.name, Path(path))
-    except Exception:
-        return None
-    if not isinstance(result, dict):
-        return None
-    phase = result.get("turnPhase")
-    return str(phase) if phase else None
+    job_id = claude_bg.job_id_for_pane(pane_id)
+    if job_id:
+        engine = claude_bg.engine_session_for_job(job_id)
+        if engine is None:
+            return None  # parked or gone — no live status either way
+        return engine.status == "busy"
+    from .adapters import claude_sessions
 
-
-def _pane_in_active_turn(pane_id: str) -> bool:
-    """Helper: pane's transcript turnPhase is in :data:`ACTIVE_TURN_PHASES`."""
-    from .activity import ACTIVE_TURN_PHASES
-
-    return _pane_active_turn_phase(pane_id) in ACTIVE_TURN_PHASES
+    reported = claude_sessions.session_status(claude_pid_for_pane(pane_id))
+    if reported is None:
+        return None
+    return reported[0] == "busy"
 
 
 def _native_daemon_busy(pane_id: str) -> bool | None:
-    """Busy flag from the pane's native daemon transport (codex shared
-    app-server via the pane's thread record, grok per-pane leader).
+    """Busy flag from the pane's native runtime source (codex shared
+    app-server via the pane's thread record, grok per-pane leader, claude's
+    own session registry).
 
-    None when neither transport holds a live session for the pane, which is
-    the signal to fall back to the heuristic sources.
+    None when no native source holds live state for the pane, which is the
+    signal to fall back to the heuristic monitor source.
     """
     if not pane_id:
         return None
@@ -477,26 +361,22 @@ def _native_daemon_busy(pane_id: str) -> bool | None:
         rt = codex_app_server.runtime_for_pane(pane_id)
         if rt is None:
             rt = grok_leader.runtime_for_pane(pane_id)
+        if rt is not None:
+            return bool(rt.busy)
+        return _claude_registry_busy(pane_id)
     except Exception:
         return None
-    if rt is None:
-        return None
-    return bool(rt.busy)
 
 
 def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
     """Public ``busy`` signal: true when the agent is in mid-turn.
 
-    For daemon-backed Codex/Grok panes the daemon's ``busy`` flag is
-    authoritative and short-circuits the heuristic sources below.
+    For panes with a native runtime source (codex daemon, grok leader,
+    claude session registry) that source's ``busy`` flag is authoritative
+    and short-circuits the heuristic below.
 
-    Heuristic sources (no daemon):
-        A. tmux control-mode reports recent visible output (with phantom-redraw
-           gate via transcript jsonl mtime).
-        B. transcript turnPhase is in :data:`activity.ACTIVE_TURN_PHASES`.
-
-    Source B catches the streaming-gap case where tmux visible-text payloads
-    happen to space out beyond ``BUSY_OUTPUT_THRESHOLD_SECONDS`` mid-tool.
+    Heuristic source (no native state): tmux control-mode reports recent
+    visible output, with the phantom-redraw gate via transcript jsonl mtime.
     """
     if not pane_id:
         return False
@@ -514,7 +394,7 @@ def _pane_is_truly_busy(pane_id: str, monitor: Any) -> bool:
         if progressed is not False:
             return True
 
-    return _pane_in_active_turn(pane_id)
+    return False
 
 
 def _busy_output_payload(pane_id: str) -> dict[str, Any]:
@@ -529,20 +409,16 @@ def _is_output_busy(
 ) -> bool:
     """idle-notify variant of :func:`_pane_is_truly_busy`.
 
-    For daemon-backed Codex/Grok panes the daemon's ``busy`` flag is
-    authoritative and short-circuits all heuristic sources.
+    For panes with a native runtime source (codex daemon, grok leader,
+    claude session registry) that source's ``busy`` flag is authoritative
+    and short-circuits the heuristic source.
 
-    Heuristic sources (no daemon): same OR signal as
-    ``_pane_is_truly_busy`` but the monitor source is additionally
-    clamped by an ``inactive_age`` sub-gate: when the window has been
-    inactive for ``inactive_age`` seconds, ignore monitor output that
-    predates that transition (the user already saw it while the window
-    was active — without the clamp, idle-notify rearms ~5s after every
-    window switch).
-
-    The active-turn (turnPhase) source intentionally **bypasses**
-    ``inactive_age``: an agent mid-tool is busy regardless of when the
-    user last looked at the window.
+    Heuristic source (no native state): the monitor signal from
+    ``_pane_is_truly_busy``, additionally clamped by an ``inactive_age``
+    sub-gate: when the window has been inactive for ``inactive_age``
+    seconds, ignore monitor output that predates that transition (the user
+    already saw it while the window was active — without the clamp,
+    idle-notify rearms ~5s after every window switch).
     """
     if not pane_id:
         return False
@@ -560,7 +436,7 @@ def _is_output_busy(
             if output_age is not None and output_age < inactive_age:
                 return True
 
-    return _pane_in_active_turn(pane_id)
+    return False
 
 
 def _most_recent_output_pane(panes: list[str], monitor: Any) -> str:
@@ -847,40 +723,28 @@ def _resolve_live_agent(team_name: str, agent_name: str):
     return team, agent
 
 
-def _resolve_ack_baseline(target) -> tuple[Path, int]:
-    from . import adapters
-    from .adapters.base import get_transcript_baseline
-
-    profile = detect_profile_for_pane(target.pane_id)
-    if not profile:
-        raise RuntimeError("cannot detect CLI profile for target pane")
-    adapter = adapters.get(profile.name)
-    if not adapter:
-        raise RuntimeError(f"no adapter for CLI '{profile.name}'")
-    session_id = _fresh_snapshot_session_id(target.pane_id)
-    if not session_id:
-        session_id = adapter.resolve_current_session_id(target.pane_id) or ""
-    if not session_id:
-        raise RuntimeError("cannot resolve session id for target pane")
-    from . import tmux
-    cwd_hint = tmux.display_value(target.pane_id, "#{pane_current_path}")
-    transcript = adapter.find_session_file(session_id, cwd=cwd_hint)
-    if not transcript:
-        raise RuntimeError(f"transcript file not found for session {session_id}")
-    return transcript, get_transcript_baseline(transcript)
+# waitingFor values that do not gate a send: a /status-style dialog open in
+# an attached viewer parks the status on "waiting", but the inbox still
+# queues normally and the message shows the moment the dialog closes.
+_SEND_GATE_WAIVED_REASONS = frozenset({"registry:dialog open"})
 
 
-def _check_send_gate(transcript_path: Path | None) -> str:
-    if transcript_path is None:
-        return "skipped"
-    from .adapters.base import check_input_gate
+def _check_send_gate(target) -> None:
+    """Raise when the target agent is waiting on its human.
 
-    result = check_input_gate(transcript_path)
-    if result.status == "waiting":
-        raise RuntimeError(
-            "target agent is waiting for a user answer; answer it in the target pane"
-        )
-    return result.status
+    Reads the member's runtime (native daemon / registry state for
+    codex, grok and claude; transcript gate for unmanaged panes) instead of
+    re-deriving it — one judgement for every CLI, and no silent skip when a
+    transcript cannot be resolved.
+    """
+    runtime = _member_runtime_payload(target.pane_id, role="agent")
+    if runtime.get("inputState") != "waiting_user":
+        return
+    if str(runtime.get("inputReason") or "") in _SEND_GATE_WAIVED_REASONS:
+        return
+    raise RuntimeError(
+        "target agent is waiting for a user answer; answer it in the target pane"
+    )
 
 
 def _send_payload(
@@ -897,14 +761,8 @@ def _send_payload(
     team, target = _resolve_live_agent(team_name, target_agent)
     normalized_body = body.strip()
 
-    transcript_path: Path | None = None
-    try:
-        transcript_path, _ = _resolve_ack_baseline(target)
-    except Exception:
-        transcript_path = None
-
-    # Side effect only: raises if target is waiting for a user answer. Return value unused.
-    _check_send_gate(transcript_path)
+    # Side effect only: raises if target is waiting for a user answer.
+    _check_send_gate(target)
 
     event = bus.write_send_event(
         workspace,
@@ -994,6 +852,17 @@ def _doctor_payload(
                 "alive": codex_app_server.daemon_alive(),
                 "threadId": codex_app_server.thread_id_for_pane(target.pane_id),
             }
+        if runtime.get("_cli") == "claude":
+            from .adapters import claude_bg
+
+            job_id = claude_bg.job_id_for_pane(target.pane_id)
+            if job_id:
+                diag["claudeJob"] = {
+                    "jobId": job_id,
+                    "engineAlive": claude_bg.engine_session_for_job(job_id) is not None,
+                }
+        if "_engineState" in runtime:
+            diag["engineState"] = runtime["_engineState"]
         if "inputReason" in runtime:
             diag["inputReason"] = runtime["inputReason"]
         if "_transcript" in runtime:
@@ -1064,6 +933,85 @@ def _grok_leader_runtime(pane_id: str) -> dict[str, Any] | None:
     return fields
 
 
+def _claude_bg_runtime(pane_id: str) -> dict[str, Any] | None:
+    """Native claude runtime from the pane's bg job, or None if unmanaged.
+
+    Liveness is three-tier: a live engine entry (alive — its ``status`` is
+    the truth); a ledger row without a live engine (asleep — the supervisor
+    parks idle jobs after ~1h, delivery wakes them, so asleep is not dead
+    and is never reaped); no ledger row (gone). The ledger costs a CLI call
+    (~270ms), so it is consulted only when the engine entry is missing,
+    behind a short cache.
+    """
+    from .adapters import claude_bg
+
+    record = claude_bg.read_pane_job(pane_id)
+    if record is None:
+        return None
+    job_id, record_session, _cwd = record
+    engine = claude_bg.engine_session_for_job(job_id)
+    if engine is not None:
+        fields = claude_bg.runtime_from_engine(engine)
+        fields["cliAlive"] = True
+        fields["sessionId"] = engine.session_id or record_session or "unresolved"
+        return fields
+    fields = {"_runtimeSource": "claude_bg", "busy": False}
+    rows = _claude_jobs_cached()
+    if rows is None:
+        fields.update(
+            cliAlive=True,
+            inputState="unknown",
+            inputReason="ledger_unavailable",
+            sessionId=record_session or "unresolved",
+        )
+        return fields
+    row = rows.get(job_id)
+    if row is None:
+        fields.update(
+            cliAlive=False,
+            inputState="offline",
+            inputReason="engine_gone",
+            sessionId=record_session or "unresolved",
+        )
+        return fields
+    # Asleep: parked engine. It still accepts input — delivery wakes it — so
+    # it reads as an idle, reachable member, never as a dead one.
+    fields.update(
+        cliAlive=True,
+        _engineState="asleep",
+        inputState="ready",
+        inputReason="",
+        sessionId=str(row.get("sessionId") or "") or record_session or "unresolved",
+    )
+    return fields
+
+
+_CLAUDE_JOBS_CACHE_TTL = 30.0
+_CLAUDE_JOBS_CACHE: tuple[float, dict[str, dict[str, Any]] | None] | None = None
+
+
+def _claude_jobs_cached() -> dict[str, dict[str, Any]] | None:
+    """Job ledger rows keyed by jobId, or None when the CLI call failed.
+
+    Cached briefly: the ledger is only read when an engine entry is missing
+    (rare state), and a ~270ms node start must not run per tick per pane.
+    """
+    global _CLAUDE_JOBS_CACHE
+    now = time.monotonic()
+    if _CLAUDE_JOBS_CACHE is not None and now < _CLAUDE_JOBS_CACHE[0]:
+        return _CLAUDE_JOBS_CACHE[1]
+    from .adapters import claude_bg
+
+    rows = claude_bg.list_jobs()
+    indexed = (
+        {str(row.get("id") or ""): row for row in rows if row.get("id")}
+        if rows is not None
+        else None
+    )
+    _CLAUDE_JOBS_CACHE = (now + _CLAUDE_JOBS_CACHE_TTL, indexed)
+    return indexed
+
+
 def _agent_runtime_payload(
     pane_id: str,
     *,
@@ -1071,7 +1019,6 @@ def _agent_runtime_payload(
 ) -> dict[str, Any]:
     from . import adapters, tmux
     from .adapters.base import check_input_gate
-    from .activity import probe_transcript_turn_phase
     from .agent_cli import resolve_model_for_pane
 
     runtime: dict[str, Any] = {
@@ -1085,12 +1032,23 @@ def _agent_runtime_payload(
         runtime["inputReason"] = "pane_dead"
         return runtime
 
-    # Liveness is process evidence only: a retained shell keeps the pane, a
-    # stale title, the @hive-cli tag and (for codex) the thread record on the
-    # shared daemon alive, and none of that makes it an agent runtime.
+    # Liveness is runtime evidence only: a retained shell keeps the pane, a
+    # stale title, the @hive-cli tag and a surviving thread/job record alive,
+    # and none of that alone makes it an agent runtime. For claude the
+    # evidence is the bg job's registry/ledger state — the engine never
+    # lives on the pane tty, so the process table only proves the viewer.
     profile = detect_cli_process_for_pane(pane_id)
     runtime["cliAlive"] = profile is not None
     runtime["_cli"] = profile.name if profile else "unknown"
+    if profile is None or profile.name == "claude":
+        bg_runtime = _claude_bg_runtime(pane_id)
+        if bg_runtime is not None:
+            runtime["_cli"] = "claude"
+            resolved_model = resolve_model_for_pane(pane_id, cli_name="claude", current_model="")
+            if resolved_model:
+                runtime["model"] = resolved_model
+            runtime.update(bg_runtime)
+            return runtime
     if not profile:
         runtime["busy"] = False  # shell output is not agent activity
         runtime["inputState"] = "offline"
@@ -1149,9 +1107,6 @@ def _agent_runtime_payload(
     else:
         session_id = adapter.resolve_current_session_id(pane_id)
         source = "adapter" if session_id else ""
-        if not session_id:
-            session_id = _probe_session_id_from_pidfile(pane_id, profile.name)
-            source = "pidfile"
         runtime["sessionId"] = session_id or "unresolved"
         if session_id:
             snapshot = _RUNTIME_SNAPSHOTS.update_session_id(
@@ -1180,12 +1135,6 @@ def _agent_runtime_payload(
         return runtime
 
     runtime["_transcriptSize"] = transcript.stat().st_size
-    safety = probe_transcript_turn_phase(profile.name, transcript)
-    runtime["turnPhase"] = str(safety.get("turnPhase") or "unknown_evidence")
-    if safety.get("phaseObservedAt"):
-        runtime["phaseObservedAt"] = safety["phaseObservedAt"]
-    if "evidence" in safety:
-        runtime["_safetyEvidence"] = safety["evidence"]
     gate = check_input_gate(transcript)
     runtime["_gate"] = gate.status
     runtime["_gateReason"] = gate.reason
@@ -1562,7 +1511,6 @@ def _idle_notify_tick(
         last_busy_ts = float(record.get("last_busy_ts", now))
         if now - last_busy_ts >= IDLE_NOTIFY_THRESHOLD_SECONDS and not bool(record.get("notified", False)):
             target_pane = _idle_notify_target_pane(panes, record, busy_monitor)
-            phase_snapshot = {p: _pane_active_turn_phase(p) for p in panes}
             notify_debug.emit(
                 workspace,
                 "fire.attempt",
@@ -1570,7 +1518,6 @@ def _idle_notify_tick(
                 window=window_target,
                 target_pane=target_pane,
                 idle_seconds=now - last_busy_ts,
-                pane_phases=phase_snapshot,
                 state_before={
                     "notified": record.get("notified"),
                     "seen_since_fire": record.get("seen_since_fire"),
@@ -2009,6 +1956,41 @@ def _codex_supervisor_tick(workspace: str, team: str) -> None:
         tmux.send_keys(agent.pane_id, f"hive codex resume {thread_id}")
 
 
+def _claude_supervisor_tick(workspace: str) -> None:
+    """Prune claude pane job records whose pane died; park the orphans.
+
+    Records are machine-level (like codex's thread records), so staleness
+    must never rebind a recycled pane id to a foreign job. A record whose
+    pane is gone also means nobody is watching that engine any more:
+    ``claude stop`` parks it — the job stays in the ledger and ``hive
+    resume`` can still wake it, so nothing is lost, but no orphan engine
+    keeps burning in the background.
+
+    No respawn/reattach half: the engine's life is claude's own supervisor's
+    business (wake happens on demand at delivery), and the pane viewer
+    self-heals through the managed launcher's attach loop — a user who
+    deliberately left the loop must not be typed at.
+    """
+    from . import notify_debug, tmux
+    from .adapters import claude_bg
+
+    try:
+        panes = tmux.list_panes_all()
+    except Exception:
+        return
+    if not panes:
+        return  # an empty listing is a tmux failure, not an empty server
+    live_panes = {p.pane_id for p in panes}
+    for pane in claude_bg.list_recorded_panes():
+        if pane in live_panes:
+            continue
+        record = claude_bg.read_pane_job(pane)
+        claude_bg.clear_pane_job(pane)
+        if record:
+            notify_debug.emit(workspace, "claude.job.park", pane=pane, job=record[0])
+            claude_bg.stop_job(record[0])
+
+
 def _write_resume_snapshot(workspace: str, team: str) -> None:
     """Persist the team's durable resume snapshot (`hive ls` / `hive resume`).
 
@@ -2134,6 +2116,10 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     # Supervision must never take the sidecar down.
                     pass
                 try:
+                    _claude_supervisor_tick(workspace)
+                except Exception:
+                    pass
+                try:
                     _write_resume_snapshot(workspace, team)
                 except Exception:
                     # Snapshot persistence must never take the sidecar down.
@@ -2181,8 +2167,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 )
 
             tick_members = _team_member_bindings(team)
-
-            _runtime_snapshot_tick(team, now=now, workspace=workspace, members=tick_members)
 
             if not _serve_requests(
                 server=server,

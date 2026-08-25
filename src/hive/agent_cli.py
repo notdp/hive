@@ -208,13 +208,17 @@ def detect_profile_from_process(command: str, argv: str) -> CLIProfile | None:
 
 
 def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
-    """CLI profile from live process evidence only — never the pane title.
+    """CLI profile from live agent evidence only — never the pane title.
 
     A retained shell keeps the pane (and often a stale title naming a CLI)
     after the agent process exits, so title text must not count as liveness
     evidence. Evidence is the pane's current command and its TTY process
-    table, parsed by the same matchers as :func:`detect_profile_for_pane`.
-    Any probe failure fails closed to None.
+    table, parsed by the same matchers as :func:`detect_profile_for_pane` —
+    plus, for claude, the pane's bg job record: a claude member's engine runs
+    on claude's own supervisor, and the pane only shows it through an attach
+    viewer, so a viewer gap (reattach window, closed viewer) with a live
+    engine still counts as a live claude. Any probe failure fails closed to
+    None.
     """
     try:
         profile = detect_profile_from_pane_command(tmux.get_pane_current_command(pane_id) or "")
@@ -225,6 +229,10 @@ def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
             profile = detect_profile_from_process(process.command, process.argv)
             if profile:
                 return profile
+        from .adapters.claude_bg import pane_engine_alive
+
+        if pane_engine_alive(pane_id):
+            return PROFILES["claude"]
     except Exception:
         return None
     return None
@@ -232,8 +240,13 @@ def detect_cli_process_for_pane(pane_id: str) -> CLIProfile | None:
 
 def claude_pid_for_pane(pane_id: str) -> int | None:
     """Pid of the live claude process on *pane_id*'s tty (process evidence
-    only, same matchers as :func:`detect_cli_process_for_pane`). The pid keys
-    the session's cross-session registry entry, which carries its inbox."""
+    only, same matchers as :func:`detect_cli_process_for_pane`).
+
+    On a bg-member pane this is the attach *viewer*'s pid — never member
+    identity or delivery routing (both key on the pane's job record). It
+    answers only tty-scoped questions: is there a viewer to keystroke into,
+    or an interactive (non-member) claude session on this pane.
+    """
     try:
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
@@ -253,7 +266,19 @@ def detect_profile_for_pane(pane_id: str) -> CLIProfile | None:
 
 
 def member_role_for_pane(pane_id: str) -> str:
-    return "agent" if detect_profile_for_pane(pane_id) else member_role(tmux.get_pane_current_command(pane_id) or "")
+    if detect_profile_for_pane(pane_id):
+        return "agent"
+    # A pane bound to a bg job is an agent pane even while its engine is
+    # parked (asleep is not dead): the lead's role — and with it runtime
+    # ticks and idle notify — must not ride the viewer's life.
+    try:
+        from .adapters.claude_bg import job_id_for_pane
+
+        if job_id_for_pane(pane_id):
+            return "agent"
+    except Exception:
+        pass
+    return member_role(tmux.get_pane_current_command(pane_id) or "")
 
 
 def resolve_session_id_for_pane(pane_id: str, profile: CLIProfile | None = None) -> str | None:

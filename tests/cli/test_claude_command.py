@@ -1,5 +1,4 @@
-"""CLI tests for the `hive claude` exec passthrough and its shell-init function."""
-import json
+"""CLI tests for the `hive claude` managed launcher and its shell-init function."""
 import os
 import shlex
 import shutil
@@ -32,15 +31,28 @@ def _capture_exec(monkeypatch) -> list[list[str]]:
     ["hello"],                             # positional prompt
     ["mcp", "list"],                       # management subcommand
     ["daemon", "status"],                  # subcommand hidden from `claude --help`
-    ["--verbose", "daemon", "status"],     # global flag before a subcommand
     ["-p", "say hi"],                      # non-interactive print run
     ["--model", "x", "-r", "sid", "hi"],   # value-taking global options
-    ["--agent", "doctor"],                 # flag value that looks like a subcommand
 ])
-def test_claude_execs_claude_with_argv_verbatim(runner, monkeypatch, argv):
-    # every argv shape reaches claude untouched: hive appends nothing and
-    # inspects nothing. Delivery no longer depends on anything hive puts on
-    # the command line — claude binds its own cross-session inbox at startup.
+def test_claude_outside_tmux_execs_claude_with_argv_verbatim(runner, monkeypatch, argv):
+    # outside tmux there is no pane to bind a job to: every argv shape
+    # reaches plain claude untouched.
+    monkeypatch.delenv("TMUX", raising=False)
+    calls = _capture_exec(monkeypatch)
+    runner.invoke(cli, ["claude", *argv])
+    assert calls == [["claude", "claude", *argv]]
+
+
+@pytest.mark.parametrize("argv", [
+    ["mcp", "list"],                       # management subcommand
+    ["daemon", "status"],                  # subcommand hidden from `claude --help`
+    ["-p", "say hi"],                      # headless print (rejected by --bg)
+    ["--bg", "task"],                      # caller manages the job itself
+    ["-c"],                                # continue: session unknowable up front
+    ["-r"],                                # resume picker: ditto
+])
+def test_claude_non_interactive_shapes_go_raw_even_in_tmux(runner, monkeypatch, argv):
+    _managed_env(monkeypatch)
     calls = _capture_exec(monkeypatch)
     runner.invoke(cli, ["claude", *argv])
     assert calls == [["claude", "claude", *argv]]
@@ -53,6 +65,113 @@ def test_claude_help_is_forwarded_not_handled_by_click(runner, monkeypatch):
     result = runner.invoke(cli, ["claude", "--help"])
     assert calls == [["claude", "claude", "--help"]]
     assert "Usage: cli claude" not in result.output
+
+
+# --- managed launch: bg job + attach loop ------------------------------------
+
+
+def _managed_env(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+
+
+def _fake_engine(job_id="cafe1234", session_id="sess-1"):
+    from hive.adapters.claude_bg import EngineSession
+
+    return EngineSession(
+        pid=4242, job_id=job_id, session_id=session_id,
+        socket_path="/tmp/cc-socks/4242.sock", cwd="/tmp",
+        status="idle", waiting_for="", status_updated_at=0.0,
+    )
+
+
+def _mock_bg(monkeypatch, *, job_id="cafe1234"):
+    state = {"spawns": [], "records": [], "loops": [], "wakes": []}
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.spawn_job",
+        lambda **kw: state["spawns"].append(kw) or job_id,
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.wait_engine_entry",
+        lambda _jid, timeout=0: _fake_engine(job_id=job_id),
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.engine_session_for_job", lambda _jid: None
+    )
+    monkeypatch.setattr("hive.adapters.claude_bg.job_exists", lambda _jid, **_kw: False)
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.ensure_engine",
+        lambda jid, **_kw: state["wakes"].append(jid) or _fake_engine(job_id=jid),
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.write_pane_job",
+        lambda pane, jid, sid, cwd: state["records"].append((pane, jid, sid, cwd)),
+    )
+    monkeypatch.setattr(
+        "hive.cli._claude_attach_loop", lambda jid: state["loops"].append(jid) or 0
+    )
+    return state
+
+
+def test_claude_interactive_launch_mints_bg_job_and_attaches(runner, monkeypatch):
+    _managed_env(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+    state = _mock_bg(monkeypatch)
+
+    result = runner.invoke(cli, ["claude", "--model", "opus", "hi"])
+
+    assert result.exit_code == 0
+    assert calls == []  # no raw exec: the pane holds the attach loop
+    spawn = state["spawns"][0]
+    assert spawn["name"] == "hive-7"
+    assert spawn["extra_args"] == ["--model", "opus", "hi"]
+    assert state["records"] == [("%7", "cafe1234", "sess-1", os.getcwd())]
+    assert state["loops"] == ["cafe1234"]
+
+
+def test_claude_resume_of_a_known_job_attaches_without_minting(runner, monkeypatch):
+    _managed_env(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+    state = _mock_bg(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.engine_session_for_job",
+        lambda jid: _fake_engine(job_id=jid) if jid == "cafe1234" else None,
+    )
+
+    result = runner.invoke(cli, ["claude", "--resume", "cafe1234"])
+
+    assert result.exit_code == 0
+    assert calls == []
+    assert state["spawns"] == []  # rebind, not a new job
+    assert state["records"] == [("%7", "cafe1234", "sess-1", os.getcwd())]
+    assert state["loops"] == ["cafe1234"]
+
+
+def test_claude_resume_of_a_session_uuid_mints_a_bg_resume(runner, monkeypatch):
+    _managed_env(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+    state = _mock_bg(monkeypatch)
+    sid = "74e0fe8d-3278-436a-98f1-7dd32c817571"
+
+    result = runner.invoke(cli, ["claude", "-r", sid, "--fork-session"])
+
+    assert result.exit_code == 0
+    assert calls == []
+    spawn = state["spawns"][0]
+    assert spawn["extra_args"] == ["-r", sid, "--fork-session"]
+    assert state["loops"] == ["cafe1234"]
+
+
+def test_claude_bg_spawn_failure_falls_back_to_raw(runner, monkeypatch):
+    _managed_env(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+    state = _mock_bg(monkeypatch)
+    monkeypatch.setattr("hive.adapters.claude_bg.spawn_job", lambda **_kw: None)
+
+    runner.invoke(cli, ["claude", "hello"])
+
+    assert calls == [["claude", "claude", "hello"]]
+    assert state["loops"] == []
 
 
 def test_shell_init_zsh_emits_hclaude_launcher(runner):
@@ -168,17 +287,6 @@ def test_shell_init_fish_hint_runs_after_claude_and_keeps_exit_code(runner, tmp_
     assert len(lines) == 2
     assert "rc=7" in r.stdout
 
-def _fake_snapshot(hive_home, team, members):
-    d = hive_home / "state" / "resume"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{team}.json").write_text(json.dumps({
-        "schema": 1, "handle": team, "team": team, "group": "duo",
-        "windowName": "", "workspace": "", "repoCwd": "", "repo": "",
-        "branch": "", "pr": "", "createdAt": "1", "savedAt": "now",
-        "members": members,
-    }))
-
-
 def _member_pane_env(monkeypatch, tmp_path, *, pane="%5", team="t1", agent="worker"):
     monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive-home"))
     monkeypatch.setenv("TMUX_PANE", pane)
@@ -189,25 +297,23 @@ def _member_pane_env(monkeypatch, tmp_path, *, pane="%5", team="t1", agent="work
     return tmp_path / "hive-home"
 
 
-def test_resume_hint_reads_team_snapshot_and_quotes(runner, monkeypatch, tmp_path):
-    # the sidecar already records each member's sessionId into the resume
-    # store and the entry survives the pane's process exiting — the hint
-    # reads that, never the filesystem; cwd and id are still quoted
+def test_resume_hint_reads_pane_job_record_and_quotes(runner, monkeypatch, tmp_path):
+    # the launch records the pane's bg jobId, and the record outlives viewer
+    # and engine alike — the hint reads that, never the process table; the
+    # cwd is still quoted
     work = tmp_path / "wo rk"
     work.mkdir()
     monkeypatch.chdir(work)
-    home = _member_pane_env(monkeypatch, tmp_path)
-    evil_id = "id; rm -rf ~"
-    _fake_snapshot(home, "t1", [
-        {"name": "validator", "cli": "codex", "sessionId": "other"},
-        {"name": "worker", "cli": "claude", "sessionId": evil_id},
-    ])
+    _member_pane_env(monkeypatch, tmp_path)
+    from hive.adapters import claude_bg
+
+    claude_bg.write_pane_job("%5", "cafe1234", "sid-1", str(work))
     cwd = os.getcwd()
     result = runner.invoke(cli, ["resume-hint", "claude"])
     assert result.exit_code == 0
     assert result.output == (
         "Resume from anywhere:\n"
-        f"  cd {shlex.quote(cwd)} && hive claude --resume {shlex.quote(evil_id)}\n"
+        f"  cd {shlex.quote(cwd)} && hive claude --resume cafe1234\n"
     )
 
 
@@ -229,16 +335,11 @@ def test_resume_hint_no_pane_env_prints_nothing(runner, monkeypatch, tmp_path):
     assert result.output == ""
 
 
-def test_resume_hint_missing_snapshot_or_member_prints_nothing(runner, monkeypatch, tmp_path):
-    home = _member_pane_env(monkeypatch, tmp_path)
-    r_no_snap = runner.invoke(cli, ["resume-hint", "claude"])
-    _fake_snapshot(home, "t1", [{"name": "someone-else", "sessionId": "x"}])
-    r_no_member = runner.invoke(cli, ["resume-hint", "claude"])
-    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": ""}])
-    r_no_session = runner.invoke(cli, ["resume-hint", "claude"])
-    for r in (r_no_snap, r_no_member, r_no_session):
-        assert r.exit_code == 0
-        assert r.output == ""
+def test_resume_hint_missing_job_record_prints_nothing(runner, monkeypatch, tmp_path):
+    _member_pane_env(monkeypatch, tmp_path)
+    result = runner.invoke(cli, ["resume-hint", "claude"])
+    assert result.exit_code == 0
+    assert result.output == ""
 
 
 @pytest.mark.parametrize("evil_id", [
@@ -246,12 +347,14 @@ def test_resume_hint_missing_snapshot_or_member_prints_nothing(runner, monkeypat
     "ok\nrm -rf ~",           # newline splits the printed command line
     "--dangerously-skip-permissions",  # option-shaped id
 ])
-def test_resume_hint_snapshot_id_untrusted_gates(runner, monkeypatch, tmp_path, evil_id):
-    # snapshot content is still untrusted for printing: quoting protects a
+def test_resume_hint_record_id_untrusted_gates(runner, monkeypatch, tmp_path, evil_id):
+    # record content is still untrusted for printing: quoting protects a
     # later shell parse, not the automatic print, and a leading-dash id
     # would parse as a flag (`claude --resume` takes an optional value)
-    home = _member_pane_env(monkeypatch, tmp_path)
-    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": evil_id}])
+    _member_pane_env(monkeypatch, tmp_path)
+    from hive.adapters import claude_bg
+
+    claude_bg.write_pane_job("%5", evil_id, "", "/tmp")
     result = runner.invoke(cli, ["resume-hint", "claude"])
     assert result.exit_code == 0
     assert result.output == ""
@@ -260,8 +363,10 @@ def test_resume_hint_snapshot_id_untrusted_gates(runner, monkeypatch, tmp_path, 
 def test_resume_hint_control_bytes_in_cwd_silence_hint(runner, monkeypatch, tmp_path):
     evil_dir = tmp_path / "d\x1b]0;pwned\x07ir"
     evil_dir.mkdir()
-    home = _member_pane_env(monkeypatch, tmp_path)
-    _fake_snapshot(home, "t1", [{"name": "worker", "sessionId": "good-id"}])
+    _member_pane_env(monkeypatch, tmp_path)
+    from hive.adapters import claude_bg
+
+    claude_bg.write_pane_job("%5", "cafe1234", "", str(evil_dir))
     monkeypatch.chdir(evil_dir)
     result = runner.invoke(cli, ["resume-hint", "claude"])
     assert result.exit_code == 0

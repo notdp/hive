@@ -169,12 +169,13 @@ def list_sessions() -> list[ClaudeSession]:
     return rows
 
 
-def session_for_pid(pid: int | None) -> ClaudeSession | None:
-    """Registry entry for the session whose process is *pid*.
+def session_status(pid: int | None) -> tuple[str, str] | None:
+    """(status, waitingFor) reported by the session running as *pid*.
 
-    The registry file is named by the pid, so member delivery reads exactly
-    one file — no directory scan, no title lookup (a member is addressed by
-    its pane, never by a human-facing title).
+    Real terminal TUI sessions report ``status`` (idle|busy|waiting — an
+    observed vocabulary, not a documented enum) in their registry entry;
+    headless/desktop-hosted sessions never do. None when the entry is
+    missing, the process is dead, or no status is reported.
     """
     if not pid:
         return None
@@ -182,22 +183,12 @@ def session_for_pid(pid: int | None) -> ClaudeSession | None:
         data = json.loads((_registry_dir() / f"{pid}.json").read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not _pid_alive(pid):
         return None
-    name = str(data.get("name") or "")
-    sock = str(data.get("messagingSocketPath") or "")
-    # The socket file must exist too: /tmp/cc-socks keeps orphans from killed
-    # sessions, and spawn readiness leans on this entry being deliverable.
-    if not name or not sock or not _pid_alive(pid) or not os.path.exists(sock):
+    status = data.get("status")
+    if status not in ("idle", "busy", "waiting"):
         return None
-    return ClaudeSession(
-        name=name,
-        pid=pid,
-        cwd=str(data.get("cwd") or ""),
-        kind=str(data.get("kind") or ""),
-        socket_path=sock,
-        session_id=str(data.get("sessionId") or ""),
-    )
+    return str(status), str(data.get("waitingFor") or "")
 
 
 def own_socket() -> str:

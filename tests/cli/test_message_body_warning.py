@@ -12,16 +12,6 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
     return str(path)
 
 
-def _patch_ack(monkeypatch):
-    """Disable ACK resolution and collapse the send-grace loop to a single
-    iteration; see the twin helper in test_message_commands.py."""
-    monkeypatch.setattr(
-        "hive.sidecar._resolve_ack_baseline",
-        lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
-        raising=False,
-    )
-
-
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
     if pending is None:
         pending = {}
@@ -37,7 +27,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
     monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
     monkeypatch.setattr(
         "hive.sidecar._agent_runtime_payload",
-        lambda _pane_id: {
+        lambda _pane_id, **_kw: {
             "alive": True,
             "turnPhase": "turn_closed",
         },
@@ -99,7 +89,6 @@ def _fake_team(workspace, *, sent_transcript):
 
 def test_send_rejects_structured_body_for_new_root(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     artifact = _write_artifact(tmp_path, "root-structured.md")
@@ -120,7 +109,6 @@ def test_send_rejects_structured_body_for_new_root(runner, configure_hive_home, 
 
 def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -144,7 +132,6 @@ def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_h
 
 def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -162,7 +149,6 @@ def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, m
 
 def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     artifact = _write_artifact(tmp_path, "root-short.md")

@@ -616,6 +616,20 @@ if [[ -f "$send_file" ]]; then
 fi
 debug_log "post.start tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
 
+if [[ "$reply_profile" == "claude" ]]; then
+  # A claude member pane is an attach viewer over a bg engine; in the viewer
+  # gap (reattach window) keystrokes would land in the pane shell. Refuse
+  # rather than type into bash. The claude binary is version-named
+  # (~/.local/bin/claude -> versions/2.1.240), so the pane's current command
+  # reads either "claude" or a bare version string.
+  pane_cmd="$(tmux display-message -p -t "$reply_pane" '#{pane_current_command}' 2>/dev/null || true)"
+  if [[ "$pane_cmd" != claude* && ! "$pane_cmd" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    debug_log "post.abort reason=no_claude_viewer pane_cmd=$pane_cmd"
+    rm -rf "$tmpdir"
+    exit 0
+  fi
+fi
+
 sleep "$paste_delay"
 debug_log "post.after_paste_delay seconds=$paste_delay"
 

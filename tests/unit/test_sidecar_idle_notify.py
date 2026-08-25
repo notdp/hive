@@ -53,7 +53,6 @@ def _setup(
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda name: plugin_enabled)
     monkeypatch.setattr(sidecar, "_transcript_progressed_recently", lambda _pane_id, _threshold: None)
-    monkeypatch.setattr(sidecar, "_pane_in_active_turn", lambda _pane_id: False)
     return calls
 
 
@@ -243,7 +242,6 @@ def test_idle_notify_transient_pane_query_failure_does_not_reset_state(monkeypat
     )
     monkeypatch.setattr("hive.plugin_manager.is_plugin_enabled", lambda _n: True)
     monkeypatch.setattr(sidecar, "_transcript_progressed_recently", lambda _pane_id, _threshold: None)
-    monkeypatch.setattr(sidecar, "_pane_in_active_turn", lambda _pane_id: False)
 
     state: dict[str, dict[str, object]] = {}
 

@@ -1,8 +1,9 @@
 """spawn-pane-survives: a retained shell is not an agent runtime.
 
 The pane (and its shell) survive the CLI exiting now, so liveness comes from
-process evidence only (`cliAlive`), delivery fails closed before any native
-transport, and the sidecar consumers ignore retained shells.
+runtime evidence only (`cliAlive` — process table for codex/grok, the bg
+job's registry/ledger state for claude), delivery fails closed before any
+native transport, and the sidecar consumers ignore retained shells.
 """
 from types import SimpleNamespace
 
@@ -10,7 +11,6 @@ import pytest
 
 from hive import bus, sidecar
 from hive.agent import Agent
-from hive.runtime_snapshot import RuntimeSnapshotStore
 
 pytestmark = pytest.mark.unit
 
@@ -113,8 +113,7 @@ def _wire_send(monkeypatch, workspace, agent):
         name="team-x", workspace=str(workspace), tmux_session="dev", tmux_window="dev:0"
     )
     monkeypatch.setattr(sidecar, "_resolve_live_agent", lambda _t, _a: (team, agent))
-    monkeypatch.setattr(sidecar, "_resolve_ack_baseline", lambda _t: (None, 0))
-    monkeypatch.setattr(sidecar, "_check_send_gate", lambda _p: None)
+    monkeypatch.setattr(sidecar, "_check_send_gate", lambda _t: None)
 
 
 def test_send_to_retained_shell_fails_closed_with_durable_bus_event(tmp_path, monkeypatch):
@@ -159,19 +158,21 @@ def _wire_grok_transport(monkeypatch, sent, accepted):
 
 
 def _wire_claude_transport(monkeypatch, sent, accepted):
-    # claude is addressed pane -> live pid -> registry entry -> that session's
+    # claude is addressed pane -> job record -> engine entry -> that engine's
     # inbox socket, so the recorded pane is the one whose socket got written
-    from hive.adapters.claude_sessions import ClaudeSession
+    from hive.adapters.claude_bg import EngineSession
 
     sock = "/run/claude-%9.sock"
     monkeypatch.setattr(
-        "hive.agent_cli.claude_pid_for_pane", lambda pane: 4242 if pane == "%9" else None
+        "hive.adapters.claude_bg.job_id_for_pane",
+        lambda pane: "cafe1234" if pane == "%9" else None,
     )
     monkeypatch.setattr(
-        "hive.adapters.claude_sessions.session_for_pid",
-        lambda pid: ClaudeSession(
-            name="sess", pid=pid, cwd="", kind="cli", socket_path=sock, session_id="sid-1"
-        ) if pid == 4242 else None,
+        "hive.adapters.claude_bg.engine_session_for_job",
+        lambda jid: EngineSession(
+            pid=4242, job_id=jid, session_id="sid-1", socket_path=sock,
+            cwd="", status="idle", waiting_for="", status_updated_at=0.0,
+        ) if jid == "cafe1234" else None,
     )
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
@@ -230,26 +231,6 @@ def test_idle_notify_excludes_retained_shell_pane(monkeypatch):
         lambda pane: object() if pane == "%1" else None,
     )
     assert sidecar._idle_notify_agent_panes("t") == ["%1"]
-
-
-def test_snapshot_tick_never_probes_or_stales_a_retained_shell(monkeypatch):
-    monkeypatch.setattr(sidecar, "detect_cli_process_for_pane", lambda _p: None)
-    monkeypatch.setattr(sidecar, "_pane_has_recent_output", lambda _p: True)
-    _forbid(monkeypatch, "hive.sidecar._probe_session_id_from_pidfile",
-            "retained shell must not be probed")
-    store = RuntimeSnapshotStore()
-    store.update_session_id("%1", "sid-1", source="pidfile", observed_at=9.0)
-
-    sidecar._runtime_snapshot_tick(
-        "t", store=store, now=10.0,
-        members={"v": {"role": "agent", "pane": "%1", "cli": "claude"}},
-    )
-
-    snap = store.get("%1")
-    assert snap is not None
-    assert snap.sessionId.value == "sid-1"
-    # plain shell output is not a session-rotation signal
-    assert snap.sessionId.is_fresh(now=10.0) is True
 
 
 def test_pairing_rejects_retained_shell_neighbor(monkeypatch):
@@ -352,26 +333,20 @@ def test_resume_hint_colors_command_on_terminals_only(monkeypatch, tmp_path):
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive-home"))
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path / "claude-home"))
     monkeypatch.setenv("TMUX_PANE", "%5")
     tags = {"hive-team": "t1", "hive-agent": "worker"}
     monkeypatch.setattr("hive.cli.tmux.get_pane_option", lambda _p, key: tags.get(key))
-    d = tmp_path / "hive-home" / "state" / "resume"
-    d.mkdir(parents=True)
-    import json as _json
+    from hive.adapters import claude_bg
 
-    (d / "t1.json").write_text(_json.dumps({
-        "schema": 1, "handle": "t1", "team": "t1", "group": "duo",
-        "windowName": "", "workspace": "", "repoCwd": "", "repo": "",
-        "branch": "", "pr": "", "createdAt": "1", "savedAt": "now",
-        "members": [{"name": "worker", "sessionId": "sid-1"}],
-    }))
+    claude_bg.write_pane_job("%5", "cafe1234", "sid-1", str(work))
 
     colored = CliRunner().invoke(hive_cli, ["resume-hint", "claude"], color=True)
     assert colored.exit_code == 0
     assert "\x1b[36m" in colored.output and "\x1b[0m" in colored.output
-    assert "claude --resume sid-1" in colored.output
+    assert "claude --resume cafe1234" in colored.output
 
     plain = CliRunner().invoke(hive_cli, ["resume-hint", "claude"])
     assert plain.exit_code == 0
     assert "\x1b[" not in plain.output
-    assert "claude --resume sid-1" in plain.output
+    assert "claude --resume cafe1234" in plain.output

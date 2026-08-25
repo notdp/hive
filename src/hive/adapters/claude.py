@@ -5,9 +5,11 @@ Every record carries ``sessionId``, ``cwd``, ``parentUuid``, ``timestamp`` and
 ``gitBranch``; the ``message.content`` field is an Anthropic-style list of blocks
 or (rarely) a plain string.
 
-Claude's ``$CLAUDE_HOME/sessions/<pid>.json`` PID map can become stale after
-``/clear``. Current-session resolution therefore uses PID-anchored open jsonl
-file handles and returns unresolved when no live handle is observed.
+Current-session resolution: a hive claude member is a bg job, so its pane's
+job record answers directly (the live engine entry's sessionId, which follows
+an in-session ``/clear``). An interactive claude on the pane tty — a guest
+session, a human's own pane — resolves through its ``sessions/<pid>.json``
+registry entry, which claude keeps current itself.
 """
 
 from __future__ import annotations
@@ -44,6 +46,16 @@ class ClaudeAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
+        # A bg member pane answers from its job record (engine entry first —
+        # it follows an in-session /clear — then the record's snapshot for a
+        # parked engine).
+        from .claude_bg import session_id_for_pane
+
+        session_id = session_id_for_pane(pane_id)
+        if session_id:
+            return session_id
+        # Interactive claude on the pane tty (guest pane, a human's own
+        # session): its registry entry is claude's own current-session truth.
         sessions_dir = _claude_home() / "sessions"
         tty = tmux.get_pane_tty(pane_id) or ""
         for process in tmux.list_tty_processes(tty):
@@ -162,12 +174,6 @@ class ClaudeAdapter:
 
 
 _META_SCAN_LIMIT = 20
-# Calibration from the cvim /clear regression data:
-# - normal Claude idle pidfile/transcript gaps cluster around [-2m, 0s]
-# - stale pidfiles after /clear were 19h+ apart from their transcripts
-# The 15-minute bound sits in that bimodal gap. This is a workaround for
-# Claude binary heartbeat drift, not current-session authority.
-PIDFILE_TRANSCRIPT_STALE_AFTER_SECONDS = 15 * 60
 
 
 def _claude_message_iter(handle) -> Iterator[Message]:
@@ -231,51 +237,6 @@ def _iter_claude_parts(content: Any) -> Iterator[MessagePart]:
             yield MessagePart(kind="unknown", raw=block)
 
 
-def resolve_session_id_from_pidfile(pid: str | int, *, cwd: str | None = None) -> str | None:
-    payload = _read_json_file(_claude_home() / "sessions" / f"{pid}.json")
-    if not payload:
-        return None
-    session_id = str_or_none(payload.get("sessionId"))
-    if not session_id:
-        return None
-    updated_at = _timestamp_seconds(payload.get("updatedAt"))
-    if updated_at is None:
-        return None
-    transcript = ClaudeAdapter().find_session_file(
-        session_id,
-        cwd=cwd or str_or_none(payload.get("cwd")),
-    )
-    if not transcript:
-        return None
-    try:
-        transcript_mtime = transcript.stat().st_mtime
-    except OSError:
-        return None
-    # Claude can advance sessions/<pid>.json heartbeats while an idle
-    # transcript is not changing, so small positive drift is normal. Large
-    # drift is treated only as a bounded seed rejection, not as current-state
-    # authority.
-    if updated_at - transcript_mtime > PIDFILE_TRANSCRIPT_STALE_AFTER_SECONDS:
-        return None
-    return session_id
-
-
-def _timestamp_seconds(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        timestamp = float(value)
-        return timestamp / 1000.0 if timestamp > 100_000_000_000 else timestamp
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        try:
-            return _timestamp_seconds(float(stripped))
-        except ValueError:
-            parsed = parse_iso_timestamp(stripped)
-            return parsed.timestamp() if parsed is not None else None
-    return None
-
-
 def _read_json_file(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text())
@@ -284,11 +245,28 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+_CLAUDE_TOKENS = frozenset({"claude", "claude.exe"})
+
+
 def _is_claude_process(command: str, argv: str) -> bool:
-    for token in (command, *(argv or "").split()):
-        if normalize_command_token(token) in {"claude", "claude.exe"}:
-            return True
-    return False
+    """Match the executable itself (ps comm / argv[0]), or the script-runtime
+    shape ``node <.../claude> …``.
+
+    Later argv tokens are the process's own arguments — ``rg claude src`` is
+    a search, not a claude — so they are never scanned.
+    """
+    if normalize_command_token(command) in _CLAUDE_TOKENS:
+        return True
+    parts = (argv or "").split()
+    if not parts:
+        return False
+    if normalize_command_token(parts[0]) in _CLAUDE_TOKENS:
+        return True
+    return (
+        len(parts) >= 2
+        and normalize_command_token(parts[0]) == "node"
+        and normalize_command_token(parts[1]) in _CLAUDE_TOKENS
+    )
 
 
 def _cwd_slug(cwd: str) -> str:
