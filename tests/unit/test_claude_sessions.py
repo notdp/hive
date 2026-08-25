@@ -218,38 +218,28 @@ def test_self_session_is_identified_by_its_own_socket(monkeypatch, tmp_path):
     assert m.self_session() is None
 
 
-def test_session_for_pid_reads_one_registry_file(monkeypatch, tmp_path, short_tmp):
+def test_session_status_reports_only_live_tui_vocabulary(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     me = os.getpid()
-    sock = short_tmp / "live.sock"
-    sock.touch()
-    _write_entry(tmp_path, f"{me}.json", name="member", pid=me, cwd="/w",
-                 messagingSocketPath=str(sock), sessionId="sid-m")
-    s = m.session_for_pid(me)
-    assert (s.name, s.socket_path, s.session_id) == ("member", str(sock), "sid-m")
-    assert m.session_for_pid(None) is None
-    assert m.session_for_pid(me + 1) is None  # no registry file for that pid
+    _write_entry(tmp_path, f"{me}.json", name="w", pid=me, kind="interactive",
+                 status="waiting", waitingFor="input needed")
+    assert m.session_status(me) == ("waiting", "input needed")
 
+    _write_entry(tmp_path, f"{me}.json", name="w", pid=me, kind="interactive",
+                 status="busy")
+    assert m.session_status(me) == ("busy", "")
 
-def test_session_for_pid_rejects_dead_socketless_or_broken_entries(monkeypatch, tmp_path, short_tmp):
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    me = os.getpid()
+    # headless/desktop-hosted sessions never report status
+    _write_entry(tmp_path, f"{me}.json", name="w", pid=me, kind="interactive")
+    assert m.session_status(me) is None
+    # unknown vocabulary is not trusted
+    _write_entry(tmp_path, f"{me}.json", name="w", pid=me, status="warming")
+    assert m.session_status(me) is None
+    # dead process / missing entry / no pid
     dead = _dead_pid()
-    sock = short_tmp / "s.sock"
-    sock.touch()
-    _write_entry(tmp_path, f"{dead}.json", name="gone", pid=dead, messagingSocketPath=str(sock))
-    assert m.session_for_pid(dead) is None
-    _write_entry(tmp_path, f"{me}.json", name="nosock", pid=me)
-    assert m.session_for_pid(me) is None
-    (tmp_path / "sessions" / f"{me}.json").write_text("{broken")
-    assert m.session_for_pid(me) is None
+    _write_entry(tmp_path, f"{dead}.json", name="w", pid=dead, status="idle")
+    assert m.session_status(dead) is None
+    assert m.session_status(me + 1) is None
+    assert m.session_status(None) is None
 
 
-def test_session_for_pid_requires_the_socket_file_to_exist(monkeypatch, tmp_path):
-    # /tmp/cc-socks keeps orphans from killed sessions, and a registry entry
-    # can name a socket that was never bound: neither is deliverable
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    me = os.getpid()
-    _write_entry(tmp_path, f"{me}.json", name="ghost", pid=me,
-                 messagingSocketPath=str(tmp_path / "never-bound.sock"))
-    assert m.session_for_pid(me) is None

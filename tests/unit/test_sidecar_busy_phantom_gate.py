@@ -36,7 +36,6 @@ class _Monitor:
 @pytest.fixture(autouse=True)
 def _reset_path_cache(monkeypatch):
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
-    monkeypatch.setattr(sidecar, "_pane_active_turn_phase", lambda _pane_id: None)
     monkeypatch.setattr(sidecar, "_native_daemon_busy", lambda _pane_id: None)
     yield
     sidecar._TRANSCRIPT_PATH_CACHE.clear()
@@ -55,10 +54,6 @@ def _stub_path_with_force(monkeypatch, *, cached: str | None, fresh: str | None)
         return fresh if force else cached
 
     monkeypatch.setattr(sidecar, "_resolve_transcript_path_cached", _fake)
-
-
-def _stub_phase(monkeypatch, phase: str | None) -> None:
-    monkeypatch.setattr(sidecar, "_pane_active_turn_phase", lambda _pane_id: phase)
 
 
 def _backdate(path: str, age_seconds: float) -> None:
@@ -231,60 +226,6 @@ def test_truly_busy_false_when_pane_id_empty(monkeypatch):
     assert sidecar._pane_is_truly_busy("", _Monitor(busy=True)) is False
 
 
-# --- turnPhase fallback when control-mode reports idle ---------------------
-
-
-def test_truly_busy_true_when_monitor_idle_but_tool_open(monkeypatch):
-    """Streaming-gap case: control-mode quiet but agent is mid-tool. Public
-    busy must reflect 'in active turn' so idle-notify doesn't fire."""
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "tool_open")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
-
-
-def test_truly_busy_true_when_monitor_idle_but_tool_result_pending(monkeypatch):
-    """Production case from team 0-2 burst: 5 fires all happened in
-    ``tool_result_pending_reply`` between tool_result and the next tool_use."""
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "tool_result_pending_reply")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
-
-
-def test_truly_busy_true_when_monitor_idle_but_user_prompt_pending(monkeypatch):
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "user_prompt_pending")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
-
-
-def test_truly_busy_false_when_monitor_idle_and_turn_closed(monkeypatch):
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "turn_closed")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is False
-
-
-def test_truly_busy_false_when_monitor_idle_and_assistant_text_idle(monkeypatch):
-    """assistant_text_idle = agent posted text without tool_use; turn is over."""
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "assistant_text_idle")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is False
-
-
-def test_truly_busy_true_when_monitor_idle_and_input_backlog(monkeypatch):
-    """input_backlog is treated as active turn for idle-notify and busy
-    purposes: a user prompt sitting in the queue means the agent is about
-    to start, so fire would be premature."""
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "input_backlog")
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
-
-
-def test_truly_busy_false_when_monitor_idle_and_phase_unknown(monkeypatch):
-    """Probe failure (transcript unresolvable / parse error) fails closed."""
-    _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, None)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is False
-
-
 # --- _is_output_busy keeps inactive_age semantics ---------------------------
 
 
@@ -298,16 +239,14 @@ def test_is_output_busy_respects_inactive_age_when_truly_busy(monkeypatch, tmp_p
     assert sidecar._is_output_busy("%1", monitor, inactive_age=1.0) is False
 
 
-def test_is_output_busy_active_turn_bypasses_inactive_age(monkeypatch):
-    """turnPhase active is independent of when the user last viewed the
-    window — agent mid-tool is busy regardless of inactive_age. Without
-    this bypass, idle-notify fires ~5s after every window switch even
-    while the agent is streaming."""
+def test_is_output_busy_native_busy_bypasses_inactive_age(monkeypatch):
+    """A native runtime source saying busy is independent of when the user
+    last viewed the window — agent mid-turn is busy regardless of
+    inactive_age. Without this bypass, idle-notify fires ~5s after every
+    window switch even while the agent is streaming."""
     _stub_path(monkeypatch, None)
-    _stub_phase(monkeypatch, "tool_result_pending_reply")
+    _stub_app_server_busy(monkeypatch, True)
     monitor = _Monitor(busy=False, last_output_age=20.0)
-    # Window inactive 5s, last visible output 20s ago, monitor.is_busy=False —
-    # without the bypass this would return False; turnPhase must override.
     assert sidecar._is_output_busy("%1", monitor, inactive_age=5.0) is True
 
 

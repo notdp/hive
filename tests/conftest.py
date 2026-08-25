@@ -15,13 +15,20 @@ def _isolate_notify_debug_global_log(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_codex_tool_env(monkeypatch):
-    """Prevent the host Codex tool env from leaking into CLI tests."""
+def _isolate_codex_tool_env(monkeypatch, tmp_path):
+    """Prevent the host CLI tool env from leaking into tests."""
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
-    # And the host Claude config tree: the session registry / transcripts must
-    # come from a fixture, never the developer's real ~/.claude or a dev lane.
+    # The test process may itself run inside a Claude session; its inbox
+    # socket must never resolve a member identity or a guest sender.
+    monkeypatch.delenv("CLAUDE_CODE_MESSAGING_SOCKET", raising=False)
+    # And the host Claude config tree: the session registry / job records /
+    # transcripts must come from a fixture, never the developer's real
+    # ~/.claude or a dev lane. Pin an empty isolation tree via the
+    # lower-precedence knob (not just delenv: claude_bg record reads would
+    # otherwise fall back to ~/.claude), so tests that set CLAUDE_HOME or
+    # CLAUDE_CONFIG_DIR themselves still win.
     monkeypatch.delenv("CLAUDE_HOME", raising=False)
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-env-isolation"))
 
 
 @pytest.fixture
@@ -260,6 +267,16 @@ def configure_hive_home(monkeypatch, tmp_path):
         # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
         # that want to observe sidecar startup patch this themselves.
         monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *args, **kwargs: None, raising=False)
+        # The fixture's default panes run claude, and post-cutover a claude
+        # member must be bg-job-backed to join: treat fixture panes as
+        # job-backed at the gate (tests exercising the unmanaged-claude
+        # refusal patch the gate back in), and pin every claude_bg surface
+        # that would otherwise run the real `claude` binary as a subprocess.
+        monkeypatch.setattr("hive.cli._require_claude_job_backed", lambda _pane: None)
+        monkeypatch.setattr("hive.adapters.claude_bg.list_jobs", lambda **_kw: [])
+        monkeypatch.setattr("hive.adapters.claude_bg.wake_job", lambda *_a, **_kw: False)
+        monkeypatch.setattr("hive.adapters.claude_bg.spawn_job", lambda **_kw: None)
+        monkeypatch.setattr("hive.adapters.claude_bg.stop_job", lambda *_a, **_kw: None)
         return hive_home
 
     return _configure

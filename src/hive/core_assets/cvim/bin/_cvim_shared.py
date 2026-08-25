@@ -47,7 +47,11 @@ def _resolve_hive_runtime_session_id(pane_id: str, cli_name: str = "") -> tuple[
             return False, None
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
-            return cli_name == "claude", None
+            # No sidecar snapshot for this pane: not sidecar-managed truth.
+            # The adapter is the authority (claude resolves through its bg
+            # job record / session registry, codex through its thread
+            # record), so fall through to it.
+            return False, None
         if snapshot.get("_sessionIdFresh") is False:
             return True, None
         session_id = snapshot.get("sessionId")
@@ -55,31 +59,7 @@ def _resolve_hive_runtime_session_id(pane_id: str, cli_name: str = "") -> tuple[
             return True, session_id
     except Exception:
         return False, None
-    return cli_name == "claude", None
-
-
-def _resolve_claude_pidfile_session_id(pane_id: str, cwd: str) -> str | None:
-    try:
-        from hive import tmux
-        from hive.adapters.claude import _is_claude_process, resolve_session_id_from_pidfile
-    except Exception:
-        return None
-
-    try:
-        tty = tmux.get_pane_tty(pane_id) or ""
-        processes = tmux.list_tty_processes(tty)
-    except Exception:
-        return None
-    for process in processes:
-        if not _is_claude_process(process.command, process.argv):
-            continue
-        try:
-            session_id = resolve_session_id_from_pidfile(process.pid, cwd=cwd)
-        except Exception:
-            session_id = None
-        if session_id:
-            return session_id
-    return None
+    return False, None
 
 
 def list_recent_assistant_messages(
@@ -383,8 +363,6 @@ def resolve_transcript_path_for_pane(
                         session_id = adapter.resolve_current_session_id(pane_id)
                     except Exception:
                         session_id = None
-                    if not session_id and profile.name == "claude":
-                        session_id = _resolve_claude_pidfile_session_id(pane_id, cwd)
                 if session_id:
                     try:
                         transcript_path = adapter.find_session_file(session_id, cwd=cwd)

@@ -17,7 +17,6 @@ Tests live under `tests/` and are split by level:
 ## Design Docs
 
 - Runtime design lives in `docs/runtime-model.md`.
-- Raw Claude transcript parsing rules live in `docs/transcript-signals.md`.
 - Keep runtime-field semantics there in sync with code:
   - `busy`
   - `inputState`

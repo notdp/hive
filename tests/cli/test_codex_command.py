@@ -273,11 +273,23 @@ def _isolate_codex_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
 
 
-def test_init_gate_ignores_non_codex(monkeypatch):
+def test_init_gate_requires_a_claude_job_record(monkeypatch):
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane", lambda _p: _profile("claude")
     )
-    cli_mod._require_daemon_backed("%1")  # no raise, no daemon lookup
+    monkeypatch.setattr("hive.adapters.claude_bg.job_id_for_pane", lambda _p: None)
+    with pytest.raises(SystemExit):
+        cli_mod._require_daemon_backed("%1")
+
+
+def test_init_gate_allows_a_job_backed_claude(monkeypatch):
+    monkeypatch.setattr(
+        "hive.cli.detect_profile_for_pane", lambda _p: _profile("claude")
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.job_id_for_pane", lambda _p: "cafe1234"
+    )
+    cli_mod._require_daemon_backed("%1")  # recorded job -> hive-managed, fine
 
 
 def test_init_gate_allows_recorded_thread_on_live_daemon(monkeypatch):

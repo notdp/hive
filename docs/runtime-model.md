@@ -22,114 +22,60 @@ This document does not define:
 - automatic fork/spawn decisions
 - automatic garbage collection
 
-For the raw Claude transcript structures that feed these runtime decisions,
-see `docs/transcript-signals.md`.
-
-## Runtime Layers
-
-Hive now exposes two different runtime layers on purpose:
-
-1. Output activity layer (`busy`)
-2. Turn phase layer (`turnPhase`)
-
-They answer different questions and should not be conflated.
-
-### Output Activity Layer
-
-Field:
-
-- `busy: true | false`
-
-Question answered:
-
-- Has this pane produced tmux-visible output in the last 3 seconds, and
-  is that output corroborated by recent transcript jsonl mtime advance?
-
-What it is good for:
-
-- lightweight live activity display
-- knowing whether a pane is currently emitting output
-
-What it is not:
-
-- not a semantic "agent is definitely busy"
-- not a safe-to-interrupt truth value
-
-### Turn Phase Layer
-
-Field:
-
-- `turnPhase: <token>`
-
-Question answered:
-
-- What phase of a turn does the receiver's transcript tail currently show?
-
-What it is good for:
-
-- deciding whether to fork the target or direct-send
-- explaining why Hive treated that target as it did
-
-What it is not:
-
-- not the same thing as pane output activity
-- not the same thing as a universal busy/idle truth model
-
 ## Runtime Field Reference
+
+Every CLI's runtime now comes from a **native source** — the runtime the CLI
+itself maintains — never from screen scraping or transcript tail heuristics:
+
+- claude: the session registry entry its bg-job engine writes
+  (`_runtimeSource: claude_bg`) — see "Claude Native Runtime"
+- codex: the shared app-server daemon's status stream
+  (`_runtimeSource: codex_app_server`) — see "Codex Native Runtime"
+- grok: the per-pane leader's notification stream
+  (`_runtimeSource: grok-leader`) — see "Grok Native Runtime"
+
+The tmux control-mode output monitor remains only as the fallback `busy`
+heuristic for panes with no native state (terminal panes, unmanaged CLIs) and
+as the idle-notify target-pane chooser.
 
 ### `busy`
 
-Source — `busy=true` when **either** of two branches holds:
+Source — the pane's native runtime source, when one holds state for it:
 
-1. **Output branch** — tmux control-mode output stream
-   (`tmux.ControlModeOutputMonitor`) reported visible output within the
-   last `3s`, AND the agent transcript jsonl mtime advanced within the
-   same window. The mtime check is a phantom-redraw gate that suppresses
-   TUI frame-redraw spikes (Ink / ratatui re-printing on-screen characters
-   during idle).
-2. **Active-turn branch** — transcript ``turnPhase`` ∈
-   :data:`activity.ACTIVE_TURN_PHASES` (``tool_open`` /
-   ``tool_result_pending_reply`` / ``user_prompt_pending`` /
-   ``input_backlog``). This branch catches the streaming-gap case where
-   tmux visible-text payloads space out beyond `3s` mid-tool, and it
-   bypasses the output branch's gates: an agent in mid-turn is busy
-   regardless of monitor activity or transcript mtime.
+1. codex: shared daemon `thread/status/changed`
+2. grok: leader `activity` notifications
+3. claude: the session registry `status` field (`busy` / `idle` / `waiting`),
+   read from the bg engine's entry (via the pane's job record) or, for an
+   interactive non-member claude on the pane tty, from that session's own
+   entry
+
+Fallback (no native state) — tmux control-mode output within the last `3s`,
+gated by transcript jsonl mtime advance within the same window (the
+phantom-redraw gate that suppresses Ink/ratatui frame-redraw spikes).
+If the transcript path can't be resolved, the fallback returns true on
+monitor activity alone — idle-notify must never silently disappear for panes
+the gate can't introspect.
 
 Combined into ``sidecar._pane_is_truly_busy``.
 
-Native-daemon override: a hive-managed codex pane (recorded thread on the
-shared app-server daemon) or a daemon-backed grok pane (per-pane leader)
-reports `busy` from its native daemon transport instead — both branches above
-are still computed but then replaced for that pane. See "Codex Native Runtime
-(app-server source)" and "Grok Native Runtime (leader source)".
-
-Fail-open: if the transcript path can't be resolved (non-agent pane, no
-session yet, stat error), the output branch returns true on monitor
-activity alone — idle-notify must never silently disappear for panes the
-gate can't introspect.
-
-Notes:
-
-- the active-turn branch is what makes idle-notify safe under streaming
-  agents (Claude/Codex tool loops): the public `busy` field tracks
-  "agent in mid-turn", not just "tmux output in the last 3s"
-- known limitation: a CLI that emits visible output for longer than the
-  threshold without writing the transcript jsonl AND whose `turnPhase`
-  the probe can't recognise can be gated as a false negative; the
-  threshold is intentionally conservative
-
 ### `cliAlive`
 
-Source — live process evidence on the pane's TTY only: the pane's current
-command and its TTY process table, parsed by the shared CLI matchers
-(`agent_cli.detect_cli_process_for_pane`). Never the pane title, the
-`@hive-cli` tag, a surviving codex app-server or grok leader daemon, or
-transcript/session metadata — all of those outlive the CLI process. Probe
-failures fail closed to `false`.
+Meaning — the member's agent runtime is actually alive. Spawned launches do
+not `exec` over the pane shell, so the pane (and `alive`) survives; a
+retained shell is not an agent runtime.
 
-Meaning — the member's CLI process is actually running. Spawned launches do
-not `exec` over the pane shell, so the pane (and `alive`) survives its CLI
-exiting; the retained shell is not an agent runtime. The three states:
+Source, per CLI:
+
+- codex / grok: live process evidence on the pane's TTY only — the pane's
+  current command and TTY process table, parsed by the shared CLI matchers
+  (`agent_cli.detect_cli_process_for_pane`). Never the pane title, the
+  `@hive-cli` tag, or a surviving daemon.
+- claude: the bg job's engine state, **never** the pane TTY — the pane only
+  shows an attach viewer, and a viewer gap (reattach window, closed viewer)
+  is not member death. See the three-tier liveness table under "Claude
+  Native Runtime".
+
+The generic three states:
 
 | state | `alive` | `cliAlive` | `inputState` | `inputReason` | `busy` |
 |---|---|---|---|---|---|
@@ -137,19 +83,19 @@ exiting; the retained shell is not an agent runtime. The three states:
 | retained shell (CLI exited) | true | false | offline | cli_exited | false |
 | live CLI | true | true | per runtime | per runtime | per runtime |
 
-Consumers — delivery refuses a retained shell before any native transport
-(the send event stays durable on the bus); idle notify, session-snapshot
-capture, and duo pairing all skip retained shells.
+Consumers — delivery refuses a dead runtime before any native transport (the
+send event stays durable on the bus); idle notify and duo pairing skip dead
+runtimes.
 
 ### `inputState`
 
 Source:
 
-- transcript gate inspection via `check_input_gate()`
-- codex app-server `status.activeFlags` for a daemon-backed codex pane
-  (overrides the transcript gate for that pane — see "Codex Native Runtime")
-- grok leader `session/request_permission` for a daemon-backed grok pane
-  (see "Grok Native Runtime")
+- claude: registry `status == waiting` plus its `waitingFor` label
+  (`inputReason: registry:<waitingFor>`)
+- codex: app-server `status.activeFlags` (see "Codex Native Runtime")
+- grok: leader `session/request_permission` (see "Grok Native Runtime")
+- unmanaged panes: transcript gate inspection via `check_input_gate()`
 
 Current values:
 
@@ -164,17 +110,20 @@ Meaning:
 
 Important consumer:
 
-- the send gate (`hive send` refuses while the target is `waiting_user`)
+- the send gate: `hive send` reads the member's runtime payload and refuses
+  while the target is `waiting_user` — with one waiver, claude's
+  `registry:dialog open` (a `/status`-style dialog in an attached viewer
+  parks the status on waiting, but the inbox still queues normally)
 
 ### `turnPhase`
 
 Source:
 
-- transcript probe for claude (last observed transcript state)
-- codex app-server thread status for a daemon-backed codex pane — codex has no
-  transcript probe (see "Codex Native Runtime")
-- grok leader notifications for a daemon-backed grok pane — grok has no
-  transcript probe either (see "Grok Native Runtime")
+- codex app-server thread status for a daemon-backed codex pane
+- grok leader notifications for a daemon-backed grok pane
+- claude emits **no** `turnPhase`: the registry `status` carries no turn
+  structure, and the transcript tail probe that used to synthesize one is
+  retired
 
 Current values:
 
@@ -183,60 +132,106 @@ Current values:
 - `input_backlog`
 - `tool_result_pending_reply`
 - `user_prompt_pending`
-- `assistant_text_idle`
 - `unknown_evidence`
 
 Meaning:
 
-- the phase the receiver's turn is in, as seen in the transcript tail
-- consumers pick the subsets they care about (see "Consumer Subsets" below)
+- the phase the receiver's turn is in, per its daemon's events
+- consumers treat an absent `turnPhase` as "no turn structure available" and
+  fall back to `busy` / `_runtimeSource` (duo pairing does exactly this)
 
-## Hard Busy vs Turn Phase
+## Claude Native Runtime (bg job source)
 
-These are related, but they are not the same concept.
+A hive claude member is a **`claude --bg` job**. The engine — a full Claude
+Code TUI on a pty owned by claude's own supervisor daemon (argv `claude
+bg-spare`) — runs outside tmux; the member's pane only shows it through a
+`claude attach <jobId>` viewer held in the managed launcher's watch loop.
+The pane process table therefore says nothing about the member's life: the
+viewer is furniture, the job is the member.
 
-### Hard Busy
+Identity is the **jobId** — durable across engine restarts, wakes and
+upgrades (the engine pid is not; the sessionId is durable too and stays the
+resume/transcript key). Which job belongs to which tmux pane is a per-pane
+`hive-pane-<n>.job` record under `<claude-config>/hive-control/`, written at
+spawn / managed-launch time (the same shape as codex's `.thread` records).
+`Agent.session_id` for a claude member IS its jobId, and resume snapshots
+carry it. Tool-side identity: the engine's tool subprocesses carry
+`CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/<enginePid>.sock`; hive parses
+the engine pid out of it, reads that engine's registry entry for the jobId,
+and reverse-looks-up the pane through the job records (the claude analogue of
+`CODEX_THREAD_ID`). This resolution also satisfies the in-tmux gate for the
+engine's tools, whose env has no usable `$TMUX`.
 
-`hard busy` is a reasoning concept, not a public field. It means:
+Signal surfaces:
 
-- a tool/task open event has happened
-- the corresponding close event has not happened yet
+- `<claude-config>/sessions/<enginePid>.json` — the live engine's registry
+  entry: `kind:"bg"`, `jobId`, `status` (`idle`/`busy`/`waiting`, an observed
+  vocabulary, not a documented enum), `waitingFor` (only while waiting),
+  `statusUpdatedAt`, `sessionId`, `messagingSocketPath`. The attach viewer
+  never registers. This entry is the busy/inputState/delivery authority; a
+  `statusUpdatedAt` older than 30 minutes demotes the status to `unknown`
+  (`inputReason: stale_status`) without touching liveness.
+- `claude agents --json --all` — the durable job ledger. Consulted only when
+  the engine entry is missing (~270ms per call, cached ~30s in the sidecar);
+  the ledger's `state` field lags reality and is never used for liveness.
+- `jobs/<jobId>/state.json` is deliberately **not** read (undocumented
+  fields).
 
-Example:
+Three-tier liveness:
 
-- Claude: `tool_use` without matching `tool_result`
+| tier | evidence | meaning | payload |
+|---|---|---|---|
+| alive | engine registry entry present (pid live, socket exists) | engine up; `status` is truth | `cliAlive: true`, status-mapped fields |
+| asleep | no entry, but the ledger lists the jobId (row without pid/status) | supervisor parked the job (~1h idle) or it was stopped; **not dead** — wake revives it with the same jobId/sessionId; never reaped | `cliAlive: true`, `busy: false`, `inputState: ready`, `_engineState: asleep` |
+| gone | no entry and no ledger row | job removed | `cliAlive: false`, `inputState: offline`, `inputReason: engine_gone` |
 
-In `turnPhase` terms, hard busy surfaces as `tool_open`. `input_backlog` is a
-strategy-level non-open state that also matters to consumers but is not hard
-busy.
+Status mapping (registry `status` → runtime fields):
 
-Hard busy is not currently surfaced as its own public runtime field.
+- `busy` → `busy: true`, `inputState: ready`
+- `idle` → `busy: false`, `inputState: ready`
+- `waiting` → `busy: false`, `inputState: waiting_user`,
+  `inputReason: registry:<waitingFor>`
 
-## Current CLI-Specific Evidence
+Delivery self-heals through the wake primitive: `Agent.send` resolves pane →
+job record → engine entry → inbox socket; when the entry is missing but the
+ledger still lists the job, a tty-less `claude attach <jobId>` (stdin at
+/dev/null) revives the engine — new pid, same jobId/sessionId — and delivery
+re-reads the fresh entry. Only a job missing from the ledger (or a failed
+wake) is a `DeliveryError`. Spawn readiness is the engine's registry entry
+appearing, proven **before** the pane command is even typed; spawn env is
+washed of `CLAUDE*`/`ANTHROPIC*` vars (an inherited
+`CLAUDE_CODE_CHILD_SESSION` makes the engine skip registration entirely), and
+path-valued spawn flags must be absolute (they persist verbatim as the job's
+`respawnFlags`).
 
-Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
+The managed launcher (`hive claude`, the `hclaude` path) makes user launches
+the same shape: an interactive launch mints a bg job (flags and prompt ride
+the spawn), `--resume <jobId>` rebinds the pane and wakes a parked job (what
+spawn panes, resume hints and `hive resume` all run), `-r <sessionId>
+[--fork-session]` mints a bg job resuming/forking that session, and
+management subcommands / headless / picker shapes pass through to plain
+claude. The pane then sits in an attach watch loop: `claude attach` exits 0
+both on user detach and when an engine respawn/upgrade kicks the viewer, so
+the loop reattaches after a 1s window the user can break with Ctrl-C; a
+non-zero attach (job removed) ends the loop.
 
-### Claude
+Lifecycle: `hive kill` (and team cleanup) parks the member's job with
+`claude stop` before killing the pane — the job stays in the ledger and
+`hive resume` can wake it. The sidecar's claude supervisor tick prunes job
+records whose pane died and parks those orphaned engines the same way; it
+never reattaches viewers (the watch loop self-heals, and a user who left it
+deliberately must not be typed at) and never touches an asleep member with a
+live pane.
 
-- `tool_open` — `tool_use` open
-- `input_backlog` — unresolved queue backlog is the newest decisive evidence
-- `turn_closed` — `turn_duration` or `stop_hook_summary` with `preventedContinuation=false`
-- `tool_result_pending_reply` — tool result arrived but assistant has not clearly continued
-- `user_prompt_pending` — real user prompt pending
-- `assistant_text_idle` — assistant text without stronger closing/opening evidence
+Keyboard paths (`hive inject`, claude `/compact`, cvim sendback) still work:
+keystrokes pass through the attach viewer into the engine pty. Each checks
+for a live claude process on the pane tty first and refuses during the
+viewer gap rather than typing into the pane shell.
 
-### Codex
-
-Codex has no transcript/JCL probe. A hive-managed pane (recorded thread on the
-shared daemon) reports natively (see "Codex Native Runtime" below); an
-unmanaged codex — embedded, or remote but never recorded — is unsupported and
-reads as `unknown_evidence`.
-
-### Grok
-
-Grok has no transcript/JCL probe either. A daemon-backed pane reports natively
-(see "Grok Native Runtime" below); a grok hive never spawned has no leader
-socket and no session record, and reads as `unknown_evidence`.
+An unmanaged claude — a bare interactive TUI with no job record — is
+deliberately unsupported **as a Hive team member**: `hive init` / `hive duo`
+reject it at team entry, and delivery to a recorded-less claude pane fails
+loudly. It still works as a `ccd.<name>` guest session over its own inbox.
 
 ## Codex Native Runtime (app-server source)
 

@@ -22,9 +22,10 @@ CURRENT_CONTEXT_FILE = HIVE_HOME / "current.json"
 def _context_file() -> Path:
     """Return the per-pane context file path.
 
-    Pane identity routes through the tmux facade so a codex tool subprocess
-    (whose env TMUX_PANE is the shared daemon's frozen value, stripped by
-    hive) still resolves its own pane via its thread record.
+    Pane identity routes through the tmux facade so a member engine's tool
+    subprocess — codex (whose env TMUX_PANE is the shared daemon's frozen
+    value, stripped by hive) or a claude bg engine (which has none at all) —
+    still resolves its own pane via its thread/job record.
     """
     from . import tmux
 

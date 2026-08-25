@@ -49,6 +49,18 @@ def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
         time.sleep(0.05)
 
     profile_name = _resolve_profile_name(pane_id, cli)
+    if profile_name == "claude":
+        # A claude member pane shows its engine through an attach viewer;
+        # keystrokes pass through the viewer into the engine pty. In the
+        # viewer gap (reattach window) the keystrokes would land in the pane
+        # shell instead — refuse rather than type into bash.
+        from .agent_cli import claude_pid_for_pane
+
+        if claude_pid_for_pane(pane_id) is None:
+            raise RuntimeError(
+                f"no claude process on pane {pane_id} to receive keystrokes "
+                "(viewer detached or reattaching); retry once the viewer is back"
+            )
     buffer_name = _save_and_clear_draft(pane_id, profile_name)
 
     tmux.send_keys(pane_id, text, enter=False)
@@ -99,69 +111,6 @@ def _resolve_profile_name(pane_id: str, cli: str) -> str:
     if profile is not None:
         return getattr(profile, "name", cli)
     return cli
-
-
-_INBOX_NOTICE_GRACE = 6.0
-# The inbox registers at process start — BEFORE the folder-trust / MCP-consent
-# dialogs — so registration alone must not end the drive: a modal could still
-# be blocking the TUI. After the inbox is proven, the loop keeps answering
-# prompts until the banner shows, or the screen stays prompt-free this long.
-_PROMPT_SETTLE = 1.5
-
-
-def _drive_claude_startup(pane_id: str, ready_text: str) -> bool:
-    """Answer Claude's one-shot startup prompts (folder trust, MCP-server
-    consent for the project's own servers -- each defaults to the safe first
-    option) until the session has bound its cross-session inbox AND the TUI is
-    past its startup dialogs.
-
-    Spawn-time startup-consent driving only -- never message delivery. The
-    delivery signal is the session's registry entry appearing for the pane's
-    claude process: claude binds the inbox itself, so a registered session
-    means hive can deliver. Returns ``False`` when Claude reached ready (or
-    the deadline) without an inbox -- the pane cannot receive hive messages
-    and spawn must fail.
-    """
-    from .adapters import claude_sessions
-    from .agent_cli import claude_pid_for_pane
-
-    prompts = (
-        "trust this folder",
-        "New MCP server found",
-        "Use this MCP server",
-    )
-    deadline = time.time() + AGENT_STARTUP_TIMEOUT
-    inbox_ok = False
-    ready_at: float | None = None
-    settled_at: float | None = None
-    while time.time() < deadline:
-        screen = tmux.capture_pane(pane_id, lines=80)
-        if any(p in screen for p in prompts):
-            tmux.send_key(pane_id, "Enter")
-            ready_at = None
-            settled_at = None
-            time.sleep(0.6)
-            continue
-        if not inbox_ok:
-            pid = claude_pid_for_pane(pane_id)
-            if pid and claude_sessions.session_for_pid(pid) is not None:
-                inbox_ok = True
-        if inbox_ok:
-            if ready_text in screen:
-                return True  # banner up, no dialog on screen
-            # A resumed session never renders the banner: a prompt-free screen
-            # holding steady is the best remaining "past the dialogs" signal.
-            if settled_at is None:
-                settled_at = time.time()
-            elif time.time() - settled_at > _PROMPT_SETTLE:
-                return True
-        elif ready_text in screen:
-            if ready_at is None:
-                ready_at = time.time()
-            elif time.time() - ready_at > _INBOX_NOTICE_GRACE:
-                return False  # TUI is up but the session never bound an inbox
-        time.sleep(0.4)
-    return inbox_ok
 
 
 def _wait_codex_attached(
@@ -304,6 +253,23 @@ class Agent:
                 tmux.clear_pane_tags(pane_id)
                 tmux.set_pane_title(pane_id, "")
 
+        # Every CLI accepts a positional [prompt] arg (also on resume/fork).
+        # Skill activation + optional user prompt are composed here, before
+        # the CLI branches: a claude member's prompt goes into the bg spawn
+        # itself, codex/grok pass it on the launch command line — either way
+        # the CLI auto-submits at startup, bypassing TUI keystroke injection
+        # entirely.
+        initial_prompt = ""
+        if skill and skill != "none":
+            initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
+        if prompt:
+            initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
+        # The launch goes through `hive <cli>`, whose parser strips any `--`
+        # separator, so a prompt cannot be protected from being read as a
+        # flag; refuse the one shape that would be.
+        if initial_prompt.startswith("-"):
+            raise ValueError("initial prompt must not start with '-'")
+
         # The pane runs hive's managed launcher (`hive claude` / `hive codex` /
         # `hive grok`), the same path a human's `hclaude` / `hcodex` / `hgrok`
         # takes — but invoked as the binary, not the shell function, so a spawn
@@ -312,7 +278,76 @@ class Agent:
         # pane (and a usable shell) survives the CLI exiting.
         cmd_parts = ["hive", cli]
         grok_session_id = ""
-        if cli == "codex":
+        if cli == "claude":
+            # A claude member is a `claude --bg` job: the engine runs on
+            # claude's own supervisor, the pane only watches it through the
+            # managed launcher's attach loop. The job is minted (or woken)
+            # up front — like codex's thread — so the member has a durable
+            # identity and a deliverable inbox before the pane even draws.
+            from .adapters import claude_bg, claude_sessions
+
+            if session_id and session_mode == "resume":
+                # The member IS the job: attach wakes a parked/stopped
+                # engine with the same jobId/sessionId, so resume is just
+                # rebinding the pane to it.
+                claude_job_id = session_id
+                engine = claude_bg.ensure_engine(
+                    claude_job_id, timeout=AGENT_STARTUP_TIMEOUT
+                )
+                if engine is None:
+                    _undo_pane_side_effects()
+                    raise RuntimeError(
+                        f"claude job '{claude_job_id}' did not come back up "
+                        "(removed from the job ledger, or the wake failed); "
+                        "cannot resume this member"
+                    )
+                if initial_prompt:
+                    # Resume carries no launch prompt; the engine's inbox is
+                    # already live, so hand it over there (best-effort).
+                    claude_sessions.send(
+                        engine.socket_path,
+                        initial_prompt,
+                        sender=f"{team_name}.{name}",
+                    )
+            else:
+                extra_args: list[str] = []
+                if model:
+                    extra_args.extend(["--model", model])
+                if session_id:  # session_mode == "fork": branch a copy
+                    extra_args.extend(["-r", session_id, "--fork-session"])
+                claude_job_id = claude_bg.spawn_job(
+                    cwd=cwd,
+                    name=f"{team_name}.{name}",
+                    prompt=initial_prompt,
+                    extra_args=extra_args,
+                    extra_env=extra_env,
+                )
+                if not claude_job_id:
+                    _undo_pane_side_effects()
+                    raise RuntimeError(
+                        f"`claude --bg` refused to mint a job for '{name}' "
+                        f"(cwd {cwd}); refusing to spawn a claude member "
+                        "without a job identity (needs a Claude Code with "
+                        "background sessions, 2.1.240+)"
+                    )
+                engine = claude_bg.wait_engine_entry(
+                    claude_job_id, timeout=AGENT_STARTUP_TIMEOUT
+                )
+                if engine is None:
+                    claude_bg.stop_job(claude_job_id)
+                    _undo_pane_side_effects()
+                    raise RuntimeError(
+                        f"claude job '{claude_job_id}' started but its engine "
+                        "never registered an inbox; claude delivery is "
+                        "inbox-only, refusing to keep an undeliverable member"
+                    )
+            claude_bg.write_pane_job(
+                pane_id, claude_job_id, engine.session_id if engine else "", cwd
+            )
+            # The managed launcher recognizes a jobId and runs the attach
+            # watch loop (auto-reattach across engine respawns/upgrades).
+            cmd_parts.extend(["--resume", _shell_escape(claude_job_id)])
+        elif cli == "codex":
             cmd_parts.extend(["-c", "check_for_update_on_startup=false"])
             from .adapters import codex_app_server
             if session_id and session_mode == "fork":
@@ -384,41 +419,22 @@ class Agent:
             grok_leader.write_pane_session(pane_id, grok_session_id, cwd)
         pre_cmd_parts: list[str] = []
 
-        # codex pins the model at thread/start; only claude/grok take a flag.
-        if model and not session_id:
-            if cli == "claude":
-                cmd_parts.extend(["--model", _shell_escape(model)])
-            elif cli == "grok":
+        # claude pins model/resume/prompt at bg-spawn time and codex at
+        # thread/start; only grok takes them on the launch command line.
+        if cli == "grok":
+            if model and not session_id:
                 cmd_parts.extend(["-m", _shell_escape(model)])
-
-        # Resume/fork uses the original session's model; no --model flag needed.
-        # codex resume/fork is already on cmd_parts (built in its branch above).
-        if session_id:
-            if cli == "claude":
-                cmd_parts.extend(["-r", _shell_escape(session_id)])
-                if session_mode == "fork":
-                    cmd_parts.append("--fork-session")
-            elif cli == "grok":
+            if session_id:
+                # Resume/fork uses the original session's model.
                 cmd_parts.extend(["--resume", _shell_escape(session_id)])
                 if session_mode == "fork":
                     # `--session-id` (already on cmd_parts) names the fork.
                     cmd_parts.append("--fork-session")
 
-        # Every CLI accepts a positional [prompt] arg (also on resume/fork).
-        # Pass skill activation + optional user prompt here so the CLI
-        # auto-submits at startup, bypassing TUI keystroke injection entirely
-        # (avoids the codex picker race and any analogous races for claude).
-        initial_prompt = ""
-        if skill and skill != "none":
-            initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
-        if prompt:
-            initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
-        if initial_prompt:
-            # The launch goes through `hive <cli>`, whose parser strips any
-            # `--` separator, so a prompt cannot be protected from being read
-            # as a flag; refuse the one shape that would be.
-            if initial_prompt.startswith("-"):
-                raise ValueError("initial prompt must not start with '-'")
+        # codex/grok take the composed prompt as the launch's positional arg
+        # (codex rides `resume`'s own [PROMPT] positional); claude's already
+        # went into the bg spawn.
+        if initial_prompt and cli != "claude":
             cmd_parts.append(_shell_escape(initial_prompt))
 
         env_parts: list[str] = []
@@ -447,29 +463,13 @@ class Agent:
             cli=cli,
         )
 
+        # Readiness comes from runtime signals, not screen text: the claude
+        # engine's registry entry (proven before the pane command was even
+        # typed), the codex TUI process on the pane TTY, and the minted
+        # session directory (grok) can only appear once the agent is actually
+        # up.
         if cli == "claude":
-            if not _drive_claude_startup(pane_id, ready_text):
-                if split_window:
-                    tmux.kill_pane(pane_id)
-                raise RuntimeError(
-                    f"claude started in pane {pane_id} but never bound a "
-                    "cross-session inbox; claude delivery is inbox-only, "
-                    "refusing to keep an undeliverable pane (needs Claude "
-                    "Code >= 2.1.224, and messaging stays off when "
-                    "DISABLE_TELEMETRY / DO_NOT_TRACK / DISABLE_GROWTHBOOK / "
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables "
-                    "feature-flag evaluation; a held member also needs "
-                    "crossSessionInbound left at its default or 'accept')"
-                )
-
-        # Readiness comes from runtime signals, not screen text: the inbox
-        # registration (claude, proven above), the codex TUI process on the
-        # pane TTY, and the minted session directory (grok) can only appear
-        # once the agent is actually up. A resumed claude session never renders
-        # the welcome banner, so a banner wait here ate its full timeout on
-        # every resume.
-        if cli == "claude":
-            pass  # inbox registration proven above
+            pass  # engine entry proven pre-launch; the pane only watches
         elif cli == "codex":
             _wait_codex_attached(pane_id)
         elif cli == "grok":
@@ -502,10 +502,11 @@ class Agent:
         the message — that final confirmation only ever comes from the
         target's transcript.
         """
-        # Native transports require a live CLI process on the pane TTY. A
-        # retained shell can carry a stale title, the declared cli tag, and
-        # (for codex) a surviving thread record on the shared daemon — none
-        # of that may route a message into a pane nobody is watching.
+        # A claude member's engine is not on the pane TTY at all: the pane's
+        # job record is its address, and a parked engine (supervisor idles
+        # jobs after ~1h) is woken in-line. The record is only trusted when
+        # the pane shows no *other* live CLI — a recycled pane id running
+        # codex must never route into a stale claude record.
         probe = None
         try:
             from .agent_cli import detect_cli_process_for_pane
@@ -513,12 +514,43 @@ class Agent:
             probe = detect_cli_process_for_pane(self.pane_id)
         except Exception:
             probe = None
+        profile_name = probe.name if probe is not None else ""
+        if profile_name in ("", "claude"):
+            from .adapters import claude_bg, claude_sessions
+
+            job_id = claude_bg.job_id_for_pane(self.pane_id)
+            if job_id:
+                engine = claude_bg.engine_session_for_job(job_id)
+                if engine is None and claude_bg.job_row(job_id) is not None:
+                    # Asleep, not dead: the job ledger still lists it, and a
+                    # tty-less attach revives the engine (same jobId and
+                    # sessionId, fresh pid) — then re-read its new entry.
+                    engine = claude_bg.ensure_engine(job_id)
+                if engine is None:
+                    raise DeliveryError(
+                        f"claude job '{job_id}' for pane {self.pane_id} is "
+                        "gone (removed from the job ledger, or the wake "
+                        "failed); the message stays on the bus"
+                    )
+                accepted = claude_sessions.send(
+                    engine.socket_path, text, sender=f"{self.team_name}.{self.name}"
+                )
+                if accepted == claude_sessions.WRITE_TIMED_OUT:
+                    raise DeliveryError(
+                        f"claude job '{job_id}' (pane {self.pane_id}) accepted "
+                        "the connection but did not drain the message in time"
+                    )
+                if accepted is None:
+                    raise DeliveryError(
+                        f"claude job '{job_id}' (pane {self.pane_id}) is not "
+                        "listening on its inbox; the message stays on the bus"
+                    )
+                return accepted
         if probe is None:
             raise DeliveryError(
                 f"no live CLI process on pane {self.pane_id} (cli_exited): "
                 "refusing native transport to a retained shell"
             )
-        profile_name = probe.name
         if profile_name == "codex":
             from .adapters import codex_app_server
 
@@ -541,30 +573,11 @@ class Agent:
                 )
             return accepted
         if profile_name == "claude":
-            from .adapters import claude_sessions
-            from .agent_cli import claude_pid_for_pane
-
-            session = claude_sessions.session_for_pid(claude_pid_for_pane(self.pane_id))
-            if session is None:
-                raise DeliveryError(
-                    f"claude pane {self.pane_id} has no cross-session inbox "
-                    "(claude < 2.1.224, messaging disabled by env, or the "
-                    "session is still starting); claude delivery is inbox-only"
-                )
-            accepted = claude_sessions.send(
-                session.socket_path, text, sender=f"{self.team_name}.{self.name}"
+            raise DeliveryError(
+                f"claude pane {self.pane_id} has no bg job record; a hive "
+                "claude member runs as a background job (relaunch it with "
+                "`hive claude`) — hive does not deliver to a bare claude TUI"
             )
-            if accepted == claude_sessions.WRITE_TIMED_OUT:
-                raise DeliveryError(
-                    f"claude pane {self.pane_id} (session {session.name}) accepted "
-                    "the connection but did not drain the message in time"
-                )
-            if accepted is None:
-                raise DeliveryError(
-                    f"claude pane {self.pane_id} (session {session.name}) is not "
-                    "listening on its inbox; the message stays on the bus"
-                )
-            return accepted
         raise DeliveryError(
             f"pane {self.pane_id} runs no supported agent CLI "
             f"(profile={profile_name or 'unknown'}); hive delivers over "
@@ -591,7 +604,20 @@ class Agent:
         tmux.send_keys(self.pane_id, "exit")
 
     def kill(self) -> None:
-        """Force kill the pane."""
+        """Force kill the pane — and, for a claude member, park its engine.
+
+        The engine lives on claude's supervisor, not in the pane, so killing
+        the pane alone would leave an orphan job running headless. ``claude
+        stop`` parks it: the job stays in the ledger and ``hive resume``
+        can still wake it.
+        """
+        if self.cli == "claude":
+            from .adapters import claude_bg
+
+            job_id = claude_bg.job_id_for_pane(self.pane_id)
+            if job_id:
+                claude_bg.stop_job(job_id)
+            claude_bg.clear_pane_job(self.pane_id)
         tmux.kill_pane(self.pane_id)
 
     # --- Serialization ---

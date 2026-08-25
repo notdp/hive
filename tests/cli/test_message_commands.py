@@ -16,18 +16,11 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
     return str(path)
 
 
-def _patch_ack(monkeypatch):
-    """Disable ACK resolution so tests don't need a real transcript."""
-    monkeypatch.setattr(
-        "hive.sidecar._resolve_ack_baseline",
-        lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
-        raising=False,
-    )
-
-
-def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
+def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None, runtime=None):
     if pending is None:
         pending = {}
+    if runtime is None:
+        runtime = {"alive": True, "turnPhase": "turn_closed"}
 
     monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
 
@@ -40,10 +33,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
     monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
     monkeypatch.setattr(
         "hive.sidecar._agent_runtime_payload",
-        lambda _pane_id: {
-            "alive": True,
-            "turnPhase": "turn_closed",
-        },
+        lambda _pane_id, **_kw: dict(runtime),
     )
 
     def _request_team_runtime(_workspace: str, *, team: str):
@@ -97,7 +87,6 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
 
 def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     artifact = _write_artifact(tmp_path, "review.md", "review request")
     bus.init_workspace(workspace)
@@ -162,7 +151,6 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
 
 def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     artifact = _write_artifact(tmp_path, "unknown.md", "full details")
@@ -195,13 +183,8 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
-    _patch_sidecar_requests(monkeypatch, team)
-    monkeypatch.setattr(
-        "hive.sidecar._agent_runtime_payload",
-        lambda _pane_id: {
-            "alive": True,
-            "turnPhase": "assistant_text_idle",
-        },
+    _patch_sidecar_requests(
+        monkeypatch, team, runtime={"alive": True, "turnPhase": "assistant_text_idle"}
     )
 
     result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", artifact])
@@ -239,7 +222,6 @@ def _reply_fake_team(workspace, *, sent_transcript):
 
 def test_reply_auto_fills_reply_to_from_latest_inbound(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -284,7 +266,6 @@ def test_reply_fails_when_no_inbound_from_agent(runner, configure_hive_home, mon
 
 def test_reply_fails_when_latest_inbound_already_replied(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -312,7 +293,6 @@ def test_reply_fails_when_latest_inbound_already_replied(runner, configure_hive_
 
 def test_reply_honors_explicit_reply_to_override(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -1069,7 +1049,6 @@ def test_parse_control_mode_output_strips_extended_prefix():
 def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_home, monkeypatch, tmp_path):
     """ACK gracefully degrades to skipped when transcript cannot be found."""
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     artifact = _write_artifact(tmp_path, "ack-skipped.md")
@@ -1136,7 +1115,6 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, 0), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     _patch_sidecar_requests(monkeypatch, team)
 
@@ -1157,18 +1135,14 @@ def test_send_help_explains_delivery_states(runner):
     assert "pending" not in help_text
 
 
-def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
-    """Common setup for gate tests. Returns (workspace, transcript, sent list)."""
+def _gate_test_setup(monkeypatch, tmp_path, runtime=None):
+    """Common setup for gate tests. Returns (workspace, sent list).
+
+    The send gate reads the member's runtime payload (native daemon /
+    registry state), so gate tests parametrize that payload directly.
+    """
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
-
-    transcript = tmp_path / "session.jsonl"
-    if transcript_records is not None:
-        transcript.write_text(
-            "\n".join(json.dumps(r) for r in transcript_records) + "\n"
-        )
-    else:
-        transcript.write_text("")
 
     sent: list[str] = []
 
@@ -1194,29 +1168,20 @@ def _gate_test_setup(monkeypatch, tmp_path, transcript_records=None):
 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _target: (transcript, transcript.stat().st_size), raising=False)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    # Gate tests only care about the gate projection; collapse the 3s grace loop.
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_sidecar_requests(monkeypatch, team, runtime=runtime)
 
-    return workspace, transcript, sent
+    return workspace, sent
 
 
 def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     artifact = _write_artifact(tmp_path, "gate-blocked.md")
-    _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
-        {"type": "user", "message": {"role": "user", "content": "do something"}},
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "proceed?"}},
-                ],
-            },
-        },
-    ])
+    _gate_test_setup(monkeypatch, tmp_path, runtime={
+        "alive": True,
+        "inputState": "waiting_user",
+        "inputReason": "registry:input needed",
+    })
 
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
@@ -1224,9 +1189,24 @@ def test_send_blocked_by_gate(runner, configure_hive_home, monkeypatch, tmp_path
     assert "waiting for a user answer" in result.output
 
 
-def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_gate_waives_dialog_open_waiting(runner, configure_hive_home, monkeypatch, tmp_path):
+    # a /status-style dialog in an attached viewer parks status on waiting,
+    # but the inbox still queues normally — that reason never blocks a send
     configure_hive_home()
-    _patch_ack(monkeypatch)
+    artifact = _write_artifact(tmp_path, "gate-dialog.md")
+    _gate_test_setup(monkeypatch, tmp_path, runtime={
+        "alive": True,
+        "inputState": "waiting_user",
+        "inputReason": "registry:dialog open",
+    })
+
+    result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
+
+    assert result.exit_code == 0
+
+
+def test_gate_unknown_runtime_state_does_not_block(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     artifact = _write_artifact(tmp_path, "gate-open.md")
@@ -1253,25 +1233,31 @@ def test_gate_fail_open_no_transcript(runner, configure_hive_home, monkeypatch, 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_sidecar_requests(monkeypatch, team, runtime={
+        "alive": True,
+        "inputState": "unknown",
+        "inputReason": "no_session",
+    })
 
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert "delivery" not in payload
-    # gate field was removed — send still succeeds fail-open without a transcript.
+    # only a proven waiting_user blocks — unknown does not veto the send.
     assert "gate" not in payload
     assert "injectStatus" not in payload
 
 
 def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
-    """When transcript resolves and gate is clear, the gate field is omitted (default is noise)."""
+    """When the member is ready, the gate field is omitted (default is noise)."""
     configure_hive_home()
     artifact = _write_artifact(tmp_path, "gate-clear.md")
-    workspace, transcript, sent = _gate_test_setup(monkeypatch, tmp_path, transcript_records=[
-        {"type": "user", "message": {"role": "user", "content": "hello"}},
-    ])
+    workspace, sent = _gate_test_setup(monkeypatch, tmp_path, runtime={
+        "alive": True,
+        "inputState": "ready",
+        "inputReason": "",
+    })
 
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 

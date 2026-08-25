@@ -386,11 +386,25 @@ def test_live_member_pids_maps_pid_to_team_dot_agent(runner, configure_hive_home
     configure_hive_home()
     from hive.tmux import PaneInfo
 
+    from hive.adapters.claude_bg import EngineSession
+
     monkeypatch.setattr(
         "hive.cli.tmux.list_panes_all",
         lambda: [PaneInfo("%5", "", role="agent", agent="validator", team="honey", cli="claude")],
     )
-    monkeypatch.setattr("hive.agent_cli.claude_pid_for_pane", lambda pane_id: 4242)
+    # a member's process is its bg job's engine, resolved via the pane record
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.job_id_for_pane",
+        lambda pane_id: "cafe1234" if pane_id == "%5" else None,
+    )
+    monkeypatch.setattr(
+        "hive.adapters.claude_bg.engine_session_for_job",
+        lambda jid: EngineSession(
+            pid=4242, job_id=jid, session_id="sid-1",
+            socket_path="/tmp/cc-socks/4242.sock", cwd="/w/ordo",
+            status="idle", waiting_for="", status_updated_at=0.0,
+        ) if jid == "cafe1234" else None,
+    )
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.list_sessions",
         lambda: [_session(name="ordo-c1", pid=4242, cwd="/w/ordo", sock="/tmp/cc-socks/4242.sock")],

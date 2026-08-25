@@ -4,14 +4,6 @@ from hive import bus
 from hive.cli import cli
 
 
-def _patch_ack(monkeypatch):
-    monkeypatch.setattr(
-        "hive.sidecar._resolve_ack_baseline",
-        lambda _target: (_ for _ in ()).throw(RuntimeError("no transcript")),
-        raising=False,
-    )
-
-
 def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
     if pending is None:
         pending = {}
@@ -87,7 +79,6 @@ class _FakeTeam:
 
 def test_handoff_direct_uses_send_path_for_delegate_and_announce(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     artifact = tmp_path / "task.md"
     artifact.write_text("review this")
@@ -216,7 +207,6 @@ def test_handoff_target_exists_error_wins_over_missing_anchor(runner, configure_
 
 def test_handoff_spawn_mode_creates_worker_then_sends_delegate_and_announce(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     inbound = bus.write_send_event(workspace, from_agent="lulu", to_agent="orch", body="need help")
@@ -254,7 +244,6 @@ def test_handoff_spawn_mode_creates_worker_then_sends_delegate_and_announce(runn
 
 def test_handoff_fork_mode_creates_worker_then_sends_delegate_and_announce(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     inbound = bus.write_send_event(workspace, from_agent="lulu", to_agent="orch", body="need help")
@@ -292,7 +281,6 @@ def test_handoff_fork_mode_creates_worker_then_sends_delegate_and_announce(runne
 
 def test_handoff_treats_announce_failure_as_best_effort(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
-    _patch_ack(monkeypatch)
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     inbound = bus.write_send_event(workspace, from_agent="lulu", to_agent="orch", body="need help")

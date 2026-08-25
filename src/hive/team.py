@@ -194,6 +194,13 @@ class Team:
                         # spawn/launch time.
                         from .adapters.codex_app_server import thread_id_for_pane
                         agent.session_id = thread_id_for_pane(pane.pane_id)
+                    elif resolved_cli == "claude":
+                        # A claude member's durable identity is its bg jobId,
+                        # recorded per pane at spawn/launch time — resume
+                        # wakes the job, so the jobId is what snapshots and
+                        # resume flows carry.
+                        from .adapters.claude_bg import job_id_for_pane
+                        agent.session_id = job_id_for_pane(pane.pane_id)
                     team.agents[pane.agent] = agent
 
         team.peer_map = team._canonical_peer_map(team.peer_map)

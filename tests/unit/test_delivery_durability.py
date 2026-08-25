@@ -24,8 +24,7 @@ def _wire(monkeypatch, workspace, agent):
 
     _Team.workspace = str(workspace)
     monkeypatch.setattr("hive.sidecar._resolve_live_agent", lambda _t, _a: (_Team(), agent))
-    monkeypatch.setattr("hive.sidecar._resolve_ack_baseline", lambda _t: (None, 0))
-    monkeypatch.setattr("hive.sidecar._check_send_gate", lambda _p: None)
+    monkeypatch.setattr("hive.sidecar._check_send_gate", lambda _t: None)
 
 
 def test_accepted_send_returns_identity_only(tmp_path, monkeypatch):

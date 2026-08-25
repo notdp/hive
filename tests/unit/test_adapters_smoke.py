@@ -104,50 +104,6 @@ def test_claude_adapter_returns_none_when_no_pidfile(monkeypatch, tmp_path):
     assert adapter.resolve_current_session_id("%1070") is None
 
 
-def test_claude_validated_pidfile_returns_session_when_transcript_is_current(monkeypatch, tmp_path):
-    from hive.adapters.claude import resolve_session_id_from_pidfile
-
-    claude_home = tmp_path / "claude-home"
-    sessions_dir = claude_home / "sessions"
-    projects_dir = claude_home / "projects" / "-repo"
-    sessions_dir.mkdir(parents=True)
-    projects_dir.mkdir(parents=True)
-    (sessions_dir / "43434.json").write_text(json.dumps({
-        "sessionId": "sess-idle",
-        "updatedAt": 1_700_000_120_000,
-        "cwd": "/repo",
-    }))
-    transcript = projects_dir / "sess-idle.jsonl"
-    transcript.write_text(json.dumps({"sessionId": "sess-idle", "cwd": "/repo"}) + "\n")
-    os.utime(transcript, (1_700_000_000.0, 1_700_000_000.0))
-
-    monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
-
-    assert resolve_session_id_from_pidfile("43434", cwd="/repo") == "sess-idle"
-
-
-def test_claude_validated_pidfile_rejects_stale_session(monkeypatch, tmp_path):
-    from hive.adapters.claude import resolve_session_id_from_pidfile
-
-    claude_home = tmp_path / "claude-home"
-    sessions_dir = claude_home / "sessions"
-    projects_dir = claude_home / "projects" / "-repo"
-    sessions_dir.mkdir(parents=True)
-    projects_dir.mkdir(parents=True)
-    (sessions_dir / "43434.json").write_text(json.dumps({
-        "sessionId": "sess-stale",
-        "updatedAt": 1_700_001_000_000,
-        "cwd": "/repo",
-    }))
-    transcript = projects_dir / "sess-stale.jsonl"
-    transcript.write_text(json.dumps({"sessionId": "sess-stale", "cwd": "/repo"}) + "\n")
-    os.utime(transcript, (1_700_000_000.0, 1_700_000_000.0))
-
-    monkeypatch.setenv("CLAUDE_HOME", str(claude_home))
-
-    assert resolve_session_id_from_pidfile("43434", cwd="/repo") is None
-
-
 def test_codex_adapter_returns_none_without_daemon(monkeypatch, configure_hive_home):
     """Embedded codex is unsupported: no daemon means no session, and the
     resolver must not go guessing via the pane's tty processes."""
