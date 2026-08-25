@@ -515,9 +515,12 @@ def set_pane_title(pane_id: str, title: str) -> None:
 # probe writes what is really on screen into `@hive-view` (empty while the
 # pane shows its own member), so the border reads "name -> what you are
 # actually looking at" without the format having to guess from the title.
+# Both halves carry the team: with several duos on screen, `worker` and
+# `validator` alone say nothing about which team a pane belongs to, and
+# the view suffix already names its member as `<team>.<member>`.
 _HIVE_PANE_BORDER_FORMAT = (
     " #{?@hive-notify-active,#[fg=colour220]#[bold][!] #[default],}"
-    "#{?@hive-agent,#{@hive-agent}"
+    "#{?@hive-agent,#{?@hive-team,#{@hive-team}.,}#{@hive-agent}"
     "#{?@hive-view,#[fg=colour220] -> #{@hive-view}#[default],}"
     ",#{pane_title}} "
 )
