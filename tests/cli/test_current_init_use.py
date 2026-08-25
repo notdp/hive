@@ -56,7 +56,7 @@ def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(ru
     configure_hive_home()
     ctx_dir = tmp_path / ".hive" / "contexts"
     ctx_dir.mkdir(parents=True, exist_ok=True)
-    (ctx_dir / "default.json").write_text(json.dumps({"team": "stale-team", "workspace": "/tmp/ws", "agent": "claude"}))
+    (ctx_dir / "pane-0.json").write_text(json.dumps({"team": "stale-team", "workspace": "/tmp/ws", "agent": "claude"}))
 
     result = runner.invoke(cli, ["team"])
 
@@ -361,7 +361,7 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
     # The team is created and the current pane is remembered as the worker.
     from hive.team import Team
     assert Team.load("honey").workspace == str(workspace)
-    current = json.loads((tmp_path / ".hive" / "contexts" / "default.json").read_text())
+    current = json.loads((tmp_path / ".hive" / "contexts" / "pane-5.json").read_text())
     assert current["team"] == "honey"
     assert current["agent"] == "worker"
 
@@ -389,12 +389,13 @@ def test_init_accepts_preopened_codex_worker_pane(
         "hive.cli.detect_profile_for_pane",
         lambda pane_id: SimpleNamespace(name="codex") if pane_id == "%10" else None,
     )
-    # A pre-opened codex must be daemon-backed for the init gate to pass; a
-    # live socket short-circuits _require_daemon_backed.
-    sock = tmp_path / "hive-pane-10.sock"
-    sock.touch()
-    monkeypatch.setattr("hive.adapters.codex_app_server.pane_socket_path", lambda _p: sock)
-    monkeypatch.setattr("hive.adapters.codex_app_server.probe_socket", lambda _s: True)
+    # A pre-opened codex must be hive-managed for the init gate to pass: a
+    # recorded thread on a live shared daemon short-circuits
+    # _require_daemon_backed.
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.thread_id_for_pane", lambda _p: "tid-10"
+    )
+    monkeypatch.setattr("hive.adapters.codex_app_server.daemon_alive", lambda: True)
 
     workspace = tmp_path / "ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: workspace)

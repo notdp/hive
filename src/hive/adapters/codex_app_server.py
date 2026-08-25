@@ -1,36 +1,38 @@
-"""Codex app-server client over a *per-pane* daemon.
+"""Codex app-server client over a single shared daemon.
 
-Each hive-spawned codex pane runs its own ``codex app-server --listen
-unix://<sock>`` daemon that shares the real CODEX_HOME. The daemon is started
-with ``TMUX_PANE=<pane>`` and ``HIVE_CODEX_PANE=<pane>`` in its environment, so
-shell tools it spawns inherit the correct pane identity marker — codex copies
-the daemon process env into tool subprocesses (``inherit:All``) with no
-per-thread TMUX_PANE injection. The codex TUI in that pane connects with
-``codex --remote unix://<sock> --cd <cwd>``; hive connects as a second client
-over the same socket for runtime signals and turn delivery.
+One ``codex app-server --listen unix://<sock>`` daemon per CODEX_HOME hosts
+every hive codex thread. Each codex TUI attaches with ``codex resume
+<threadId> --remote unix://<sock> --cd <cwd>`` and drives its own thread;
+hive connects as one more client over the same socket for runtime signals and
+turn delivery.
 
-Why per-pane and not one shared daemon: a single shared daemon freezes one
-TMUX_PANE for every thread, so untagged codex shells silently impersonate the
-first pane that spawned the daemon. One daemon per pane keeps identity honest
-and lets the whole tmux-tag workaround go away.
+Identity is the threadId (== transcript sessionId), never the process
+environment: the daemon's env is frozen at spawn time and shared by every
+thread, so ``TMUX_PANE`` is stripped from it and codex's own per-thread
+``CODEX_THREAD_ID`` injection into tool subprocesses is the tool-side identity.
+Which thread belongs to which tmux pane is recorded in a per-pane ``.thread``
+file beside the socket, written by whoever binds the pane to a thread (spawn,
+managed launch, fork). "Latest thread" heuristics are unusable on a shared
+daemon and do not exist here.
 
-Why ``--remote`` is safe here (codex 0.133.0 source-confirmed): ``--remote``
-puts the TUI in ``Remote`` workspace mode, whose ``thread/start`` keeps model /
-approval_policy / sandbox / cwd (cwd via ``--cd``) and only drops
-``model_provider`` — which the shared real-CODEX_HOME server config supplies by
-default. So workspace semantics stay intact.
+Spawn primitive (0.149.0 real-machine verified): ``thread/start`` (with cwd,
+optionally model) creates the thread but does not persist it; a follow-up
+``thread/name/set`` flushes the rollout to disk, after which both the TUI's
+``codex resume <threadId>`` and any client's ``thread/resume`` succeed.
+``thread/fork`` forks a rolled-out thread server-side and returns the new
+thread.
 
-Transport is WebSocket framing over the unix socket — verified against codex
-0.133.0, the daemon answers an HTTP Upgrade with ``101 Switching Protocols``.
-The client is stdlib-only (RFC6455 masked text frames), no new dependency. One
-background reader thread per connection keeps a thread-keyed state store current.
+Broadcast surface for a second client (verified): ``thread/status/changed``
+(active/idle with activeFlags) and ``thread/goal/*``. ``turn/*`` and ``item/*``
+notifications are delivered only to the client that started the turn, so all
+busy/inputState state folds from status events alone.
 
-busy late-join boundary (smoke-verified): a client online when a thread is
-created receives the full active->idle broadcast. A late-joining client must
-``thread/resume`` to recover the current state of an *active* thread; resuming
-an *idle, not-yet-rolled-out* thread fails with ``no rollout found`` and is
-harmless (retried). So hive attaches per pane and stays connected rather than
-connecting lazily on each read.
+Directory trust in remote mode is judged from the ``[projects]`` entries in the
+daemon's config.toml on disk (``-c`` overrides do not apply), so every new cwd
+is trusted via :func:`ensure_dir_trusted` before its thread starts.
+
+Transport is WebSocket framing over the unix socket — stdlib-only RFC6455
+masked text frames, one background reader thread per connection.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-import signal
+import re
 import socket
 import struct
 import subprocess
@@ -63,49 +65,175 @@ def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 
 
-def pane_socket_path(pane: str) -> Path:
-    """Per-pane daemon socket under the real CODEX_HOME.
+def shared_socket_path() -> Path:
+    """The shared daemon's socket under the real CODEX_HOME.
 
     Lives under ``app-server-control/`` (a real directory codex itself uses, so
     it is never a symlink — codex rejects a symlinked socket parent, e.g.
-    ``/tmp`` on macOS). One socket per tmux pane id keeps daemons isolated; pane
-    ids are unique within a tmux server.
+    ``/tmp`` on macOS). The path carries no per-pane or per-worktree component:
+    unix socket paths cap at ~104 bytes (SUN_LEN) and there is exactly one
+    daemon per CODEX_HOME.
     """
+    return codex_home() / "app-server-control" / "hive-shared.sock"
+
+
+def shared_pidfile_path() -> Path:
+    return shared_socket_path().with_suffix(".pid")
+
+
+def pane_thread_path(pane: str) -> Path:
+    """Per-pane record of the thread hive bound to this pane."""
     slug = pane.replace("%", "") or "default"
-    return codex_home() / "app-server-control" / f"hive-pane-{slug}.sock"
+    return codex_home() / "app-server-control" / f"hive-pane-{slug}.thread"
 
 
-def pane_pidfile_path(pane: str) -> Path:
-    """Sibling pidfile of the pane's daemon socket.
-
-    Written when the daemon becomes ready so the sidecar (which does not start
-    the daemon) can find and reap it when the pane dies.
-    """
-    return pane_socket_path(pane).with_suffix(".pid")
+def write_pane_thread(pane: str, thread_id: str, cwd: str) -> None:
+    path = pane_thread_path(pane)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"threadId": thread_id, "cwd": cwd}))
 
 
-def _daemon_env_for_pane(pane: str) -> dict[str, str]:
-    env = dict(os.environ)
-    env["TMUX_PANE"] = pane
-    env["HIVE_CODEX_PANE"] = pane
-    return env
-
-
-def _pane_from_socket_name(name: str) -> str | None:
-    """Inverse of :func:`pane_socket_path`: ``hive-pane-19.sock`` -> ``%19``."""
-    if not name.startswith("hive-pane-") or not name.endswith(".sock"):
+def read_pane_thread(pane: str) -> tuple[str, str] | None:
+    try:
+        data = json.loads(pane_thread_path(pane).read_text())
+    except (OSError, ValueError):
         return None
-    slug = name[len("hive-pane-"):-len(".sock")]
+    if not isinstance(data, dict):
+        return None
+    thread_id, cwd = data.get("threadId"), data.get("cwd")
+    if not thread_id:
+        return None
+    return str(thread_id), str(cwd or "")
+
+
+def clear_pane_thread(pane: str) -> None:
+    pane_thread_path(pane).unlink(missing_ok=True)
+
+
+def thread_id_for_pane(pane: str) -> str | None:
+    record = read_pane_thread(pane)
+    return record[0] if record else None
+
+
+def _pane_from_record_name(name: str) -> str | None:
+    """Inverse of :func:`pane_thread_path`: ``hive-pane-19.thread`` -> ``%19``."""
+    if not name.startswith("hive-pane-") or not name.endswith(".thread"):
+        return None
+    slug = name[len("hive-pane-"):-len(".thread")]
     if not slug or slug == "default":
         return None
     return "%" + slug
+
+
+def list_recorded_panes() -> list[str]:
+    """Pane ids that currently have a thread record on disk."""
+    root = codex_home() / "app-server-control"
+    if not root.is_dir():
+        return []
+    panes: list[str] = []
+    for entry in root.glob("hive-pane-*.thread"):
+        pane = _pane_from_record_name(entry.name)
+        if pane:
+            panes.append(pane)
+    return panes
+
+
+def pane_for_thread(thread_id: str) -> str | None:
+    """Pane recorded for *thread_id*, or None.
+
+    The reverse lookup behind tool-side identity: a ``hive`` invocation inside
+    a codex tool carries ``CODEX_THREAD_ID`` (injected per thread by codex),
+    and this maps it back to the tmux pane hive bound the thread to.
+    """
+    if not thread_id:
+        return None
+    for pane in list_recorded_panes():
+        record = read_pane_thread(pane)
+        if record and record[0] == thread_id:
+            return pane
+    return None
+
+
+# --------------------------------------------------------------------------
+# directory trust (config.toml)
+# --------------------------------------------------------------------------
+_TRUST_LEVEL_RE = re.compile(r"^\s*trust_level\s*=")
+
+
+def _trusted_section_headers(directory: str) -> tuple[str, ...]:
+    """Header spellings that name *directory*'s [projects] entry.
+
+    Codex writes the TOML basic-string form; the literal-string form is also
+    matched (when representable) so a hand-edited entry is not duplicated —
+    a duplicate table would make the whole config.toml unparsable.
+    """
+    escaped = directory.replace("\\", "\\\\").replace('"', '\\"')
+    headers = [f'[projects."{escaped}"]']
+    if "'" not in directory:
+        headers.append(f"[projects.'{directory}']")
+    return tuple(headers)
+
+
+def ensure_dir_trusted(directory: str) -> None:
+    """Converge ``[projects."<dir>"] trust_level = "trusted"`` in config.toml.
+
+    Remote-mode directory trust is judged from the daemon's config.toml on
+    disk (``-c`` overrides do not apply), so every new cwd must be trusted
+    before its thread starts. Idempotent line-level edit in the same spirit as
+    ``core_hooks._ensure_codex_hooks_enabled``: read, minimally patch, write
+    only on change; an unreadable config is left alone.
+    """
+    config_path = codex_home() / "config.toml"
+    content = ""
+    if config_path.exists():
+        try:
+            content = config_path.read_text()
+        except OSError:
+            return
+    original = content
+    headers = _trusted_section_headers(directory)
+    lines = content.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if any(stripped == h or stripped.startswith(h + " ") or stripped.startswith(h + "#") for h in headers):
+            start = i + 1
+            break
+    if start is None:
+        section = f'{headers[0]}\ntrust_level = "trusted"\n'
+        if not content:
+            content = section
+        elif content.endswith("\n"):
+            content += "\n" + section
+        else:
+            content += "\n\n" + section
+    else:
+        end = start
+        while end < len(lines) and not lines[end].strip().startswith("["):
+            end += 1
+        body = lines[start:end]
+        replaced = False
+        for j, line in enumerate(body):
+            if _TRUST_LEVEL_RE.match(line):
+                if line.strip() == 'trust_level = "trusted"':
+                    return
+                body[j] = 'trust_level = "trusted"\n'
+                replaced = True
+                break
+        if not replaced:
+            body.insert(0, 'trust_level = "trusted"\n')
+        lines[start:end] = body
+        content = "".join(lines)
+    if content != original:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(content)
 
 
 # --------------------------------------------------------------------------
 # transport: minimal RFC6455 client over a unix socket (text frames, masked)
 # --------------------------------------------------------------------------
 # Accepted-transport classification for durable delivery observations: the
-# per-pane daemon took the turn. Not proof the turn produced output.
+# shared daemon took the turn. Not proof the turn produced output.
 TURN_START_ACCEPTED = "turnStartAccepted"
 
 class _WSConn:
@@ -209,7 +337,6 @@ class ThreadRuntime:
     busy: bool = False
     turn_phase: str = "unknown_evidence"
     input_state: str = ""
-    active_turn_id: str | None = None
     observed_at: float = 0.0
 
 
@@ -231,7 +358,7 @@ def _apply_status(rt: ThreadRuntime, status: dict) -> None:
 
 
 # --------------------------------------------------------------------------
-# one connection to one per-pane daemon
+# one connection to the shared daemon
 # --------------------------------------------------------------------------
 class CodexDaemonClient:
     def __init__(self, socket_path: str):
@@ -241,7 +368,6 @@ class CodexDaemonClient:
         self._state_lock = threading.Lock()
         self._pending: dict[int, dict] = {}
         self._threads: dict[str, ThreadRuntime] = {}
-        self._session_ids: dict[str, str] = {}
         self._resume_cooldown: dict[str, float] = {}
         self._id = 0
         self._closed = False
@@ -295,73 +421,49 @@ class CodexDaemonClient:
 
     # ---- notification -> state ----
     def _on_notification(self, method: str, params: dict) -> None:
+        # thread/status/changed is the only busy-relevant notification a
+        # non-turn-owning client receives on the shared daemon (turn/* and
+        # item/* go to the turn's own client only).
+        if method != "thread/status/changed":
+            return
         tid = params.get("threadId")
         if not tid:
             return
         with self._state_lock:
             rt = self._threads.setdefault(tid, ThreadRuntime())
             rt.observed_at = time.time()
-            if method == "thread/status/changed":
-                _apply_status(rt, params.get("status") or {})
-            elif method == "turn/started":
-                turn = params.get("turn") or {}
-                rt.active_turn_id = turn.get("id")
-                rt.busy = True
-                rt.turn_phase = "tool_open"
-            elif method == "turn/completed":
-                rt.active_turn_id = None
-                rt.busy = False
-                rt.turn_phase = "turn_closed"
-                if not rt.input_state:
-                    rt.input_state = "ready"
+            _apply_status(rt, params.get("status") or {})
+
+    def _seed_status(self, thread_id: str, status: object) -> None:
+        if not isinstance(status, dict):
+            return
+        with self._state_lock:
+            rt = self._threads.setdefault(thread_id, ThreadRuntime())
+            rt.observed_at = time.time()
+            _apply_status(rt, status)
 
     def runtime_for(self, thread_id: str) -> ThreadRuntime | None:
         with self._state_lock:
             rt = self._threads.get(thread_id)
             return ThreadRuntime(**rt.__dict__) if rt is not None else None
 
-    def latest_runtime(self) -> ThreadRuntime | None:
-        """Most-recently-observed thread's runtime.
+    def runtime_or_backfill(self, thread_id: str) -> ThreadRuntime | None:
+        """Runtime for *thread_id*, resuming once to recover missing state.
 
-        A per-pane daemon normally hosts a single live thread (that pane's codex
-        session), so the pane's runtime is whichever thread last produced an
-        event. Returns None before any event is seen.
+        A client connected before the thread existed has no state for it until
+        the first status broadcast; ``thread/resume`` returns the thread's
+        current status and backfills it. Rate-limited per thread so a
+        never-resolving id does not storm resumes.
         """
+        rt = self.runtime_for(thread_id)
+        if rt is not None:
+            return rt
         with self._state_lock:
-            if not self._threads:
+            if time.monotonic() < self._resume_cooldown.get(thread_id, 0.0):
                 return None
-            tid = max(self._threads, key=lambda t: self._threads[t].observed_at)
-            return ThreadRuntime(**self._threads[tid].__dict__)
-
-    def latest_thread_id(self) -> str | None:
-        """Thread id of the most-recently-observed thread (for turn delivery)."""
-        with self._state_lock:
-            if not self._threads:
-                return None
-            return max(self._threads, key=lambda t: self._threads[t].observed_at)
-
-    def ensure_session_id(self) -> str | None:
-        """Transcript session id of the latest thread, from app-server metadata.
-
-        Reads ``Thread.sessionId`` via ``thread/resume`` (cached). Resuming an
-        idle, not-yet-rolled-out thread fails harmlessly, so the id only becomes
-        available once the thread has activity — fine, since hive only needs it
-        for resume/transcript links, which matter only after activity. Rate-
-        limited per thread so an unresolved id does not storm resumes.
-        """
-        tid = self.latest_thread_id()
-        if not tid:
-            return None
-        with self._state_lock:
-            sid = self._session_ids.get(tid)
-            if sid:
-                return sid
-            if time.monotonic() < self._resume_cooldown.get(tid, 0.0):
-                return None
-            self._resume_cooldown[tid] = time.monotonic() + _RESUME_COOLDOWN
-        self.resume(tid)  # fills _session_ids on success
-        with self._state_lock:
-            return self._session_ids.get(tid)
+            self._resume_cooldown[thread_id] = time.monotonic() + _RESUME_COOLDOWN
+        self.resume(thread_id)
+        return self.runtime_for(thread_id)
 
     # ---- protocol helpers ----
     def initialize(self) -> bool:
@@ -374,49 +476,67 @@ class CodexDaemonClient:
     def attach(self) -> None:
         """Recover state for already-active threads (busy late-join).
 
-        A client online at thread creation gets the full broadcast; this covers
-        the late-join case by resuming each loaded thread once — the resume
-        response carries sessionId and current status. Resuming an idle,
-        not-yet-rolled-out thread fails with `no rollout found` — harmless.
+        A client online when a status edge fires gets the broadcast; this
+        covers the late-join case by resuming each loaded thread once — the
+        resume response carries the thread's current status.
         """
         for tid in self.loaded_list():
             self.resume(tid)
-
-    def thread_list(self, cwd: str) -> list[dict]:
-        res = self.call("thread/list", {"cwd": cwd})
-        return (res.get("result") or {}).get("data") or [] if "result" in res else []
 
     def loaded_list(self) -> list[str]:
         res = self.call("thread/loaded/list", {})
         return (res.get("result") or {}).get("data") or [] if "result" in res else []
 
     def resume(self, thread_id: str) -> bool:
+        """Backfill a thread's current status from ``thread/resume``."""
         res = self.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
         result = res.get("result")
         if not isinstance(result, dict):
             return False
-        # thread/resume returns the full Thread. Two things we harvest from it:
         thread = result.get("thread")
-        if not isinstance(thread, dict):
-            return True
-        with self._state_lock:
-            # 1) sessionId — the transcript session id (rollout UUID); the
-            #    reliable source vs lsof, which the daemon does not always expose.
-            sid = thread.get("sessionId")
-            if sid:
-                self._session_ids[thread_id] = str(sid)
-            # 2) status — the thread's current ThreadStatus
-            #    ({"type": "idle"|"active"|..., "activeFlags": [...]}). Backfill it
-            #    into _threads so a *late-joined* client (one that missed the live
-            #    status broadcast) still reports native busy/turnPhase. Without
-            #    this, latest_runtime() returns None and the caller falls back to
-            #    transcript reverse-engineering (turnPhase=unknown_evidence).
-            status = thread.get("status")
-            if isinstance(status, dict):
-                rt = self._threads.setdefault(thread_id, ThreadRuntime())
-                rt.observed_at = time.time()
-                _apply_status(rt, status)
+        if isinstance(thread, dict):
+            self._seed_status(thread_id, thread.get("status"))
         return True
+
+    def start_thread(self, cwd: str, *, name: str, model: str = "") -> str | None:
+        """Mint a new thread for *cwd*; return its threadId (== sessionId).
+
+        ``thread/start`` alone leaves the thread unpersisted — ``thread/resume``
+        (and therefore the TUI's ``codex resume <tid>``) fails with ``no
+        rollout found``. The follow-up ``thread/name/set`` flushes the rollout
+        to disk (0.149.0 verified), so a minted thread is immediately
+        resumable. *name* must be non-empty (the daemon rejects empty names).
+        """
+        params: dict = {"cwd": cwd}
+        if model:
+            params["model"] = model
+        res = self.call("thread/start", params)
+        result = res.get("result")
+        if not isinstance(result, dict):
+            return None
+        thread = result.get("thread")
+        if not isinstance(thread, dict) or not thread.get("id"):
+            return None
+        tid = str(thread["id"])
+        self._seed_status(tid, thread.get("status"))
+        if "result" not in self.call("thread/name/set", {"threadId": tid, "name": name}):
+            return None  # unflushed thread is not attachable; treat as failure
+        return tid
+
+    def fork_thread(self, thread_id: str, *, name: str) -> str | None:
+        """Fork a rolled-out thread server-side; return the fork's threadId."""
+        res = self.call("thread/fork", {"threadId": thread_id})
+        result = res.get("result")
+        if not isinstance(result, dict):
+            return None
+        thread = result.get("thread")
+        if not isinstance(thread, dict) or not thread.get("id"):
+            return None
+        tid = str(thread["id"])
+        self._seed_status(tid, thread.get("status"))
+        if "result" not in self.call("thread/name/set", {"threadId": tid, "name": name}):
+            return None
+        return tid
 
     def turn_start(self, thread_id: str, text: str) -> dict:
         return self.call("turn/start", {
@@ -432,9 +552,6 @@ class CodexDaemonClient:
         prompt and never compacts.
         """
         return self.call("thread/compact/start", {"threadId": thread_id})
-
-    def interrupt(self, thread_id: str, turn_id: str) -> dict:
-        return self.call("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
     def is_alive(self) -> bool:
         return not self._closed and self._reader.is_alive()
@@ -465,22 +582,34 @@ def probe_socket(socket_path: str) -> bool:
         conn.close()
 
 
-def spawn_daemon(
-    pane: str,
-    *,
-    codex_bin: str = "codex",
-    timeout: float = _DAEMON_START_TIMEOUT,
-) -> bool:
-    """Ensure a per-pane app-server daemon is listening; return True if ready.
+def daemon_alive() -> bool:
+    sock = shared_socket_path()
+    return sock.exists() and probe_socket(str(sock))
 
-    Reuses a live daemon if one already answers on the pane's socket (idempotent
-    spawn). Otherwise starts one, injecting ``TMUX_PANE=<pane>`` so shell tools
-    report the right pane and sharing the real CODEX_HOME (auth/model/permission
-    defaults stay correct). ``start_new_session`` detaches it from the
-    short-lived CLI; the sidecar reaps it via the pidfile when the pane dies.
+
+def _daemon_env() -> dict[str, str]:
+    """Daemon env: the shared daemon serves every pane, so per-pane identity
+    markers must not freeze into it — tool subprocesses inherit this env and a
+    stale TMUX_PANE would impersonate whichever pane spawned the daemon.
+    Identity rides codex's own per-thread CODEX_THREAD_ID injection instead."""
+    env = dict(os.environ)
+    env.pop("TMUX_PANE", None)
+    env.pop("HIVE_CODEX_PANE", None)
+    return env
+
+
+def spawn_daemon(*, codex_bin: str = "codex", timeout: float = _DAEMON_START_TIMEOUT) -> bool:
+    """Ensure the shared app-server daemon is listening; return True if ready.
+
+    Reuses a live daemon if one already answers on the shared socket
+    (idempotent spawn); a stale socket from a dead daemon is removed first.
+    Shares the real CODEX_HOME (auth/model/permission defaults stay correct).
+    ``start_new_session`` detaches it from the short-lived caller. The daemon
+    is machine-level state: nothing in hive kills it when panes or teams go
+    away, and the sidecar re-spawns it if it dies while codex members live.
     Returns False if the daemon fails to bind or dies before becoming ready.
     """
-    sock = pane_socket_path(pane)
+    sock = shared_socket_path()
     sock.parent.mkdir(parents=True, exist_ok=True)
     if sock.exists():
         if probe_socket(str(sock)):
@@ -489,11 +618,10 @@ def spawn_daemon(
             sock.unlink()  # stale socket from a dead daemon
         except OSError:
             pass
-    env = _daemon_env_for_pane(pane)
     try:
         proc = subprocess.Popen(
             [codex_bin, "app-server", "--listen", f"unix://{sock}"],
-            env=env,
+            env=_daemon_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -507,7 +635,7 @@ def spawn_daemon(
             return False  # died before binding
         if probe_socket(str(sock)):
             try:
-                pane_pidfile_path(pane).write_text(str(proc.pid))
+                shared_pidfile_path().write_text(str(proc.pid))
             except OSError:
                 pass
             return True
@@ -519,236 +647,154 @@ def spawn_daemon(
     return False
 
 
-def list_daemon_panes() -> list[str]:
-    """Pane ids that currently have a per-pane daemon socket on disk."""
-    root = codex_home() / "app-server-control"
-    if not root.is_dir():
-        return []
-    panes: list[str] = []
-    for entry in root.glob("hive-pane-*.sock"):
-        pane = _pane_from_socket_name(entry.name)
-        if pane:
-            panes.append(pane)
-    return panes
+# --------------------------------------------------------------------------
+# shared client (one per process, lazily connected)
+# --------------------------------------------------------------------------
+_CLIENT: CodexDaemonClient | None = None
+_CLIENT_LOCK = threading.Lock()
+_CLIENT_COOLDOWN_UNTIL = 0.0
 
 
-def _terminate_process_group(pid: int) -> None:
-    """SIGTERM the pid's process group, escalating to SIGKILL if it lingers.
+def _shared_client() -> CodexDaemonClient | None:
+    global _CLIENT, _CLIENT_COOLDOWN_UNTIL
+    with _CLIENT_LOCK:
+        if _CLIENT is not None and _CLIENT.is_alive():
+            return _CLIENT
+        if _CLIENT is not None:
+            _CLIENT.close()
+            _CLIENT = None
+        if time.monotonic() < _CLIENT_COOLDOWN_UNTIL:
+            return None
 
-    spawn_daemon uses ``start_new_session``, so the daemon is a process-group
-    leader and its app-server child shares the group. ``killpg`` reaps both; a
-    plain ``kill(pid)`` on the node wrapper would orphan the Rust child.
-    """
-    try:
-        pgid = os.getpgid(pid)
-    except (OSError, ProcessLookupError):
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except (OSError, ProcessLookupError):
-            return
-        for _ in range(10):  # up to ~1s before escalating
-            try:
-                os.kill(pid, 0)
-            except (OSError, ProcessLookupError):
-                return  # exited
-            time.sleep(0.1)
-
-
-def kill_pane_daemon(pane: str) -> None:
-    """Stop a pane's daemon and remove its socket + pidfile (best-effort)."""
-    pidfile = pane_pidfile_path(pane)
-    try:
-        pid: int | None = int(pidfile.read_text().strip())
-    except (OSError, ValueError):
-        pid = None
-    if pid is not None:
-        _terminate_process_group(pid)
-    for path in (pane_socket_path(pane), pidfile):
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
-def _session_id_via_daemon_lsof(pane: str) -> str | None:
-    """Fallback: transcript session id via lsof on the daemon pid.
-
-    Unreliable — the daemon does not always hold the rollout JSONL open (codex
-    real-machine smoke saw empty FILES during an active turn) — so this is only
-    a fallback behind :func:`session_id_for_pane`'s app-server lookup.
-    """
-    try:
-        pid = int(pane_pidfile_path(pane).read_text().strip())
-    except (OSError, ValueError):
+    sock = shared_socket_path()
+    if not sock.exists():
+        _set_cooldown()
         return None
-    from .. import tmux
-    from .codex import session_id_from_open_file
-
-    for fpath in tmux.list_open_files(pid):
-        sid = session_id_from_open_file(fpath)
-        if sid:
-            return sid
-    return None
-
-
-# --------------------------------------------------------------------------
-# per-pane connection pool (sidecar-side)
-# --------------------------------------------------------------------------
-class CodexClientPool:
-    """One persistent app-server connection per pane.
-
-    The sidecar calls :meth:`runtime_for_pane` every tick; the per-connection
-    reader thread keeps each pane's thread state current between calls.
-    Connections are lazily established the first time a read finds a live daemon
-    socket and then reused; a dead connection is dropped and retried after a
-    short cooldown so a missing daemon does not storm reconnects.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._clients: dict[str, CodexDaemonClient] = {}
-        self._cooldown: dict[str, float] = {}
-
-    def runtime_for_pane(self, pane: str) -> ThreadRuntime | None:
-        client = self._client_for(pane)
-        return client.latest_runtime() if client is not None else None
-
-    def connect(self, pane: str) -> bool:
-        """Eagerly bring the 2nd client online for a pane.
-
-        Called at spawn time — after the daemon is up but before codex creates
-        its thread — so the client is already connected when ``thread/started``
-        and the status broadcasts fire. Runtime is then tracked live from the
-        broadcast stream; no late-join resume is needed.
-        """
-        return self._client_for(pane) is not None
-
-    def send_to_pane(self, pane: str, text: str) -> str | None:
-        """Deliver text as a new turn over the pane's daemon.
-
-        Returns ``TURN_START_ACCEPTED`` when ``turn/start`` answered with a
-        result — the daemon accepted the turn, which is codex's transport
-        boundary (not proof the turn ran to completion). Returns ``None`` on
-        transport failure: no daemon (embedded/manual codex), no thread yet,
-        an RPC error response, or a connection failure. There is no keystroke
-        fallback — normal hive delivery never touches the composer. A *busy*
-        thread is not bounced: ``turn/start`` carries steer semantics in core
-        (it steers the text into the running turn, or opens a fresh turn when
-        idle), so hive hands it straight to the RPC and lets codex pick the
-        landing — the same thing the codex TUI does for a typed message.
-        """
-        client = self._client_for(pane)
-        if client is None:
-            return None
-        tid = client.latest_thread_id()
-        if not tid:
-            return None
-        try:
-            response = client.turn_start(tid, text)
-        except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
-            return None
-        return TURN_START_ACCEPTED if "result" in response else None
-
-    def compact_pane(self, pane: str) -> str:
-        """Start context compaction over the pane's daemon.
-
-        Compaction is *not* steerable: codex runs it as a Compact turn via
-        ``spawn_task``, whose first act is to abort any running turn. Firing it
-        at a busy agent would kill the in-flight work. So unlike a normal
-        message, hive gates compaction on busy and only compacts an idle thread.
-
-        Returns ``"compacted"`` (RPC accepted), ``"busy"`` (agent mid-turn), or
-        ``"unavailable"`` (no daemon / no thread). On anything but ``"compacted"``
-        the caller keystrokes ``/compact`` into the TUI so codex itself surfaces
-        its native "disabled while a task is in progress" refusal.
-        """
-        client = self._client_for(pane)
-        if client is None:
-            return "unavailable"
-        tid = client.latest_thread_id()
-        if not tid:
-            return "unavailable"
-        rt = client.runtime_for(tid)
-        if rt is not None and rt.busy:
-            return "busy"
-        return "compacted" if "result" in client.compact_start(tid) else "unavailable"
-
-    def session_id_for_pane(self, pane: str) -> str | None:
-        client = self._client_for(pane)
-        return client.ensure_session_id() if client is not None else None
-
-    def _client_for(self, pane: str) -> CodexDaemonClient | None:
-        with self._lock:
-            client = self._clients.get(pane)
-            if client is not None and client.is_alive():
-                return client
-            if client is not None:
-                client.close()
-                self._clients.pop(pane, None)
-            if time.monotonic() < self._cooldown.get(pane, 0.0):
-                return None
-
-        sock = pane_socket_path(pane)
-        if not sock.exists():
-            self._set_cooldown(pane)
-            return None
-        new_client: CodexDaemonClient | None = None
-        try:
-            new_client = CodexDaemonClient(str(sock))
-            if not new_client.initialize():
-                raise ConnectionError("initialize failed")
-        except (OSError, ConnectionError):
-            if new_client is not None:
-                new_client.close()
-            self._set_cooldown(pane)
-            return None
-        new_client.attach()  # busy late-join recovery
-        with self._lock:
-            self._clients[pane] = new_client
-        return new_client
-
-    def _set_cooldown(self, pane: str) -> None:
-        with self._lock:
-            self._cooldown[pane] = time.monotonic() + _CONNECT_COOLDOWN
-
-    def drop(self, pane: str) -> None:
-        with self._lock:
-            client = self._clients.pop(pane, None)
+    client: CodexDaemonClient | None = None
+    try:
+        client = CodexDaemonClient(str(sock))
+        if not client.initialize():
+            raise ConnectionError("initialize failed")
+    except (OSError, ConnectionError):
         if client is not None:
             client.close()
+        _set_cooldown()
+        return None
+    client.attach()  # busy late-join recovery
+    with _CLIENT_LOCK:
+        _CLIENT = client
+    return client
 
 
-_POOL: CodexClientPool | None = None
-_POOL_LOCK = threading.Lock()
+def _set_cooldown() -> None:
+    global _CLIENT_COOLDOWN_UNTIL
+    with _CLIENT_LOCK:
+        _CLIENT_COOLDOWN_UNTIL = time.monotonic() + _CONNECT_COOLDOWN
 
 
-def pool() -> CodexClientPool:
-    global _POOL
-    with _POOL_LOCK:
-        if _POOL is None:
-            _POOL = CodexClientPool()
-        return _POOL
+def connect() -> bool:
+    """Eagerly bring hive's client online (spawn time / sidecar request)."""
+    return _shared_client() is not None
 
 
+def drop_client() -> None:
+    """Close the process's client so the next use reconnects (daemon respawn)."""
+    global _CLIENT, _CLIENT_COOLDOWN_UNTIL
+    with _CLIENT_LOCK:
+        client, _CLIENT = _CLIENT, None
+        _CLIENT_COOLDOWN_UNTIL = 0.0
+    if client is not None:
+        client.close()
+
+
+# --------------------------------------------------------------------------
+# pane-keyed API (thread resolved through the pane's record)
+# --------------------------------------------------------------------------
 def runtime_for_pane(pane: str) -> ThreadRuntime | None:
-    return pool().runtime_for_pane(pane)
-
-
-def connect_pane(pane: str) -> bool:
-    return pool().connect(pane)
+    tid = thread_id_for_pane(pane)
+    if not tid:
+        return None
+    client = _shared_client()
+    if client is None:
+        return None
+    return client.runtime_or_backfill(tid)
 
 
 def send_to_pane(pane: str, text: str) -> str | None:
-    return pool().send_to_pane(pane, text)
+    """Deliver text as a new turn on the pane's recorded thread.
+
+    Returns ``TURN_START_ACCEPTED`` when ``turn/start`` answered with a
+    result — the daemon accepted the turn, which is codex's transport
+    boundary (not proof the turn ran to completion). Returns ``None`` on
+    transport failure: no recorded thread (unmanaged codex), no daemon, an
+    RPC error response, or a connection failure. There is no keystroke
+    fallback — normal hive delivery never touches the composer. A *busy*
+    thread is not bounced: ``turn/start`` carries steer semantics in core
+    (it steers the text into the running turn, or opens a fresh turn when
+    idle), so hive hands it straight to the RPC and lets codex pick the
+    landing — the same thing the codex TUI does for a typed message.
+    """
+    tid = thread_id_for_pane(pane)
+    if not tid:
+        return None
+    client = _shared_client()
+    if client is None:
+        return None
+    try:
+        response = client.turn_start(tid, text)
+    except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
+        return None
+    return TURN_START_ACCEPTED if "result" in response else None
 
 
 def compact_pane(pane: str) -> str:
-    return pool().compact_pane(pane)
+    """Start context compaction on the pane's recorded thread.
+
+    Compaction is *not* steerable: codex runs it as a Compact turn via
+    ``spawn_task``, whose first act is to abort any running turn. Firing it
+    at a busy agent would kill the in-flight work. So unlike a normal
+    message, hive gates compaction on busy and only compacts an idle thread.
+
+    Returns ``"compacted"`` (RPC accepted), ``"busy"`` (agent mid-turn), or
+    ``"unavailable"`` (no record / no daemon). On anything but ``"compacted"``
+    the caller keystrokes ``/compact`` into the TUI so codex itself surfaces
+    its native "disabled while a task is in progress" refusal.
+    """
+    tid = thread_id_for_pane(pane)
+    if not tid:
+        return "unavailable"
+    client = _shared_client()
+    if client is None:
+        return "unavailable"
+    rt = client.runtime_or_backfill(tid)
+    if rt is not None and rt.busy:
+        return "busy"
+    return "compacted" if "result" in client.compact_start(tid) else "unavailable"
 
 
 def session_id_for_pane(pane: str) -> str | None:
-    """Transcript session id: app-server thread metadata first, lsof fallback."""
-    sid = pool().session_id_for_pane(pane)
-    return sid if sid else _session_id_via_daemon_lsof(pane)
+    """Transcript session id of the pane's recorded thread.
+
+    threadId == sessionId on the app-server surface, so this is a plain
+    record read — no daemon round-trip and no lsof.
+    """
+    return thread_id_for_pane(pane)
+
+
+# --------------------------------------------------------------------------
+# spawn-flow helpers
+# --------------------------------------------------------------------------
+def start_member_thread(cwd: str, *, name: str, model: str = "") -> str | None:
+    """Mint a resumable thread for a new member; None on any failure."""
+    client = _shared_client()
+    if client is None:
+        return None
+    return client.start_thread(cwd, name=name, model=model)
+
+
+def fork_member_thread(thread_id: str, *, name: str) -> str | None:
+    """Server-side fork of *thread_id*; returns the fork's id, None on failure."""
+    client = _shared_client()
+    if client is None:
+        return None
+    return client.fork_thread(thread_id, name=name)

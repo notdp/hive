@@ -463,7 +463,8 @@ def _pane_in_active_turn(pane_id: str) -> bool:
 
 
 def _native_daemon_busy(pane_id: str) -> bool | None:
-    """Busy flag from the pane's own daemon (codex app-server, grok leader).
+    """Busy flag from the pane's native daemon transport (codex shared
+    app-server via the pane's thread record, grok per-pane leader).
 
     None when neither transport holds a live session for the pane, which is
     the signal to fall back to the heuristic sources.
@@ -689,15 +690,14 @@ def request_ping(workspace: str) -> dict[str, Any] | None:
     return _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
 
 
-def request_connect_codex(workspace: str, pane: str) -> dict[str, Any] | None:
-    """Ask the sidecar to bring a per-pane codex 2nd client online now.
+def request_connect_codex(workspace: str) -> dict[str, Any] | None:
+    """Ask the sidecar to bring its shared-daemon codex client online now.
 
-    Called at spawn time so the client is connected *before* codex creates its
-    thread — it then receives the thread/started + status broadcast
-    live, with no late-join resume. Best-effort: returns None when the sidecar
-    is down, and the lazy connect on the next runtime tick covers that case.
+    Called at spawn time so the client holds the broadcast stream before the
+    member's first turn. Best-effort: returns None when the sidecar is down,
+    and the lazy connect on the next runtime tick covers that case.
     """
-    return _request_sidecar(workspace, {"action": "connect-codex", "pane": pane}, timeout=3.0)
+    return _request_sidecar(workspace, {"action": "connect-codex"}, timeout=3.0)
 
 
 def request_connect_grok(workspace: str, pane: str) -> dict[str, Any] | None:
@@ -986,6 +986,14 @@ def _doctor_payload(
         diag["teamMembers"] = len(list(team.agents.values()))
         if runtime.get("_cli"):
             diag["cli"] = runtime["_cli"]
+        if runtime.get("_cli") == "codex":
+            from .adapters import codex_app_server
+
+            diag["codexDaemon"] = {
+                "socket": str(codex_app_server.shared_socket_path()),
+                "alive": codex_app_server.daemon_alive(),
+                "threadId": codex_app_server.thread_id_for_pane(target.pane_id),
+            }
         if "inputReason" in runtime:
             diag["inputReason"] = runtime["inputReason"]
         if "_transcript" in runtime:
@@ -1008,12 +1016,13 @@ def _doctor_payload(
 
 
 def _codex_app_server_runtime(pane_id: str) -> dict[str, Any] | None:
-    """Native codex runtime from the per-pane daemon, or None if no daemon.
+    """Native codex runtime from the shared daemon, or None if unmanaged.
 
-    hive-spawned codex panes run their own app-server daemon; reading
-    busy/turn from it is both accurate and cheap versus tailing the
-    transcript. Returns None for embedded (manual) codex so the caller falls
-    back to the transcript path.
+    A hive-managed codex pane has a recorded thread on the shared app-server
+    daemon; reading busy/turn from its status stream is both accurate and
+    cheap versus tailing the transcript. Returns None for an unmanaged codex
+    (no thread record / no daemon) so the caller falls back to the transcript
+    path.
     """
     from .adapters import codex_app_server
 
@@ -1055,32 +1064,6 @@ def _grok_leader_runtime(pane_id: str) -> dict[str, Any] | None:
     return fields
 
 
-def _codex_session_id_best_effort(
-    pane_id: str, *, runtime_snapshot: RuntimeSnapshot | None
-) -> str:
-    """Codex transcript session id without reading the transcript.
-
-    Prefers a fresh snapshot, then the daemon's app-server thread metadata
-    (``thread.sessionId`` from ``thread/resume``), falling back to lsof on the
-    daemon pid. Returns 'unresolved' when nothing resolves.
-    """
-    from .adapters import codex_app_server
-
-    if (
-        runtime_snapshot is not None
-        and runtime_snapshot.sessionId.value
-        and runtime_snapshot.sessionId.is_fresh()
-    ):
-        return str(runtime_snapshot.sessionId.value)
-    sid = codex_app_server.session_id_for_pane(pane_id)
-    if sid:
-        _RUNTIME_SNAPSHOTS.update_session_id(
-            pane_id, sid, source="codex_app_server_session"
-        )
-        return sid
-    return "unresolved"
-
-
 def _agent_runtime_payload(
     pane_id: str,
     *,
@@ -1103,8 +1086,8 @@ def _agent_runtime_payload(
         return runtime
 
     # Liveness is process evidence only: a retained shell keeps the pane, a
-    # stale title, the @hive-cli tag and (for codex) the per-pane daemon
-    # alive, and none of that makes it an agent runtime.
+    # stale title, the @hive-cli tag and (for codex) the thread record on the
+    # shared daemon alive, and none of that makes it an agent runtime.
     profile = detect_cli_process_for_pane(pane_id)
     runtime["cliAlive"] = profile is not None
     runtime["_cli"] = profile.name if profile else "unknown"
@@ -1128,16 +1111,19 @@ def _agent_runtime_payload(
         runtime["inputReason"] = "no_session"
         return runtime
 
-    # hive-spawned codex runs a per-pane app-server daemon: read native runtime
-    # signals (busy / turn) over the socket instead of reverse-engineering
-    # them from the transcript. manual codex (embedded, no daemon socket)
-    # falls through to the transcript path below.
+    # A hive-managed codex has a recorded thread on the shared app-server
+    # daemon: read native runtime signals (busy / turn) over the socket
+    # instead of reverse-engineering them from the transcript, and its
+    # session id IS the recorded threadId — no probing. An unmanaged codex
+    # (no record) falls through to the transcript path below.
     if profile.name == "codex":
         app_runtime = _codex_app_server_runtime(pane_id)
         if app_runtime is not None:
+            from .adapters import codex_app_server
+
             runtime.update(app_runtime)
-            runtime["sessionId"] = _codex_session_id_best_effort(
-                pane_id, runtime_snapshot=runtime_snapshot
+            runtime["sessionId"] = (
+                codex_app_server.session_id_for_pane(pane_id) or "unresolved"
             )
             return runtime
 
@@ -1836,9 +1822,7 @@ def _handle_request(
     if action == "connect-codex":
         try:
             from .adapters import codex_app_server
-            pane = str(request.get("pane") or "")
-            connected = bool(pane) and codex_app_server.connect_pane(pane)
-            response = {"ok": True, "connected": connected}
+            response = {"ok": True, "connected": codex_app_server.connect()}
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         return response, True
@@ -1913,37 +1897,116 @@ def _serve_requests(
 
 
 def _cleanup_dead_daemons(workspace: str) -> None:
-    """Reap per-pane agent daemons (codex app-server, grok leader) whose pane died.
+    """Reap per-pane grok leader daemons whose pane died.
 
-    The daemon is started at spawn time (agent.py) with ``start_new_session`` so
-    it outlives the short-lived CLI process; the long-lived sidecar owns
-    cleanup. Scan the on-disk sockets and, for any whose pane is gone, kill the
-    daemon and remove its socket + pidfile. Independent of team bindings, so it
-    also reaps orphans from crashed spawns.
+    The leader is started at spawn time with ``start_new_session`` so it
+    outlives the short-lived CLI process; the long-lived sidecar owns cleanup.
+    Scan the on-disk sockets and, for any whose pane is gone, kill the daemon
+    and remove its socket + pidfile. Independent of team bindings, so it also
+    reaps orphans from crashed spawns. (Codex has no per-pane daemon any more
+    — its shared daemon is machine-level state the supervisor keeps alive,
+    never reaps.)
 
-    Killing a daemon takes its attached TUI (and pane) down with it, so every
+    Killing a leader takes its attached TUI (and pane) down with it, so every
     reap is logged; ``is_pane_alive`` only reports dead panes from a successful
     tmux listing, never from a transient tmux failure.
     """
     from . import notify_debug, tmux
-    from .adapters import codex_app_server, grok_leader
+    from .adapters import grok_leader
 
-    for transport in (codex_app_server, grok_leader):
-        for pane in transport.list_daemon_panes():
-            if tmux.is_pane_alive(pane):
-                continue
-            try:
-                pid: int | None = int(
-                    transport.pane_pidfile_path(pane).read_text().strip()
-                )
-            except (OSError, ValueError):
-                pid = None
-            notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
-            # Drop the pool's client BEFORE killing the daemon: a grok stdio
-            # client that outlives its leader auto-spawns a replacement on the
-            # same socket, resurrecting an orphan mid-reap.
-            transport.pool().drop(pane)
-            transport.kill_pane_daemon(pane)
+    for pane in grok_leader.list_daemon_panes():
+        if tmux.is_pane_alive(pane):
+            continue
+        try:
+            pid: int | None = int(
+                grok_leader.pane_pidfile_path(pane).read_text().strip()
+            )
+        except (OSError, ValueError):
+            pid = None
+        notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
+        # Drop the pool's client BEFORE killing the daemon: a grok stdio
+        # client that outlives its leader auto-spawns a replacement on the
+        # same socket, resurrecting an orphan mid-reap.
+        grok_leader.pool().drop(pane)
+        grok_leader.kill_pane_daemon(pane)
+
+
+# One send_keys attempt per pane per cooldown window, so a slow-starting codex
+# is not typed at twice while the process check cannot see it yet.
+_CODEX_REATTACH_COOLDOWN_SECONDS = 60.0
+_CODEX_REATTACH_AT: dict[str, float] = {}
+
+
+def _codex_supervisor_tick(workspace: str, team: str) -> None:
+    """Keep this team's codex members riding the shared daemon.
+
+    1. Prune pane thread records whose pane died (machine-level records, so
+       staleness never rebinds a recycled pane id to a foreign thread).
+    2. If any of this team's codex members is alive but the shared daemon is
+       not answering, respawn it and log the event. A workspace with no live
+       codex member leaves the daemon alone — it is machine-level shared
+       state, other teams (or the human) may be using it, and hive never
+       kills it.
+    3. A member pane whose CLI exited (retained shell) but whose thread is
+       recorded gets one `hive codex resume <threadId>` typed into its shell
+       — the daemon surviving means the thread is still live, so the member
+       is re-attached instead of left dead. Guarded by a live-process check,
+       a shell-prompt check, and a per-pane cooldown.
+    """
+    from . import notify_debug, tmux
+    from .adapters import codex_app_server
+    from .agent_cli import is_shell_command
+    from .team import Team
+
+    live_panes: set[str] = set()
+    try:
+        panes = tmux.list_panes_all()
+    except Exception:
+        panes = []
+    for p in panes:
+        live_panes.add(p.pane_id)
+    if panes:
+        for pane in codex_app_server.list_recorded_panes():
+            if pane not in live_panes:
+                codex_app_server.clear_pane_thread(pane)
+                _CODEX_REATTACH_AT.pop(pane, None)
+
+    try:
+        t = Team.load(team)
+    except Exception:
+        return
+    members = [
+        agent for agent in t.agents.values()
+        if agent.cli == "codex" and agent.pane_id in live_panes
+    ]
+    if not members:
+        return
+
+    if not codex_app_server.daemon_alive():
+        codex_app_server.drop_client()
+        respawned = codex_app_server.spawn_daemon()
+        notify_debug.emit(workspace, "codex.daemon.respawn", ok=respawned)
+        if not respawned:
+            return
+
+    now = time.monotonic()
+    for agent in members:
+        thread_id = codex_app_server.thread_id_for_pane(agent.pane_id)
+        if not thread_id:
+            continue
+        if detect_cli_process_for_pane(agent.pane_id) is not None:
+            continue  # CLI (codex or another agent) is on the TTY — leave it
+        if now - _CODEX_REATTACH_AT.get(agent.pane_id, 0.0) < _CODEX_REATTACH_COOLDOWN_SECONDS:
+            continue
+        command = tmux.display_value(agent.pane_id, "#{pane_current_command}") or ""
+        if not is_shell_command(command):
+            continue  # not at a shell prompt (vim, ssh, …): never type into it
+        _CODEX_REATTACH_AT[agent.pane_id] = now
+        notify_debug.emit(
+            workspace, "codex.member.reattach",
+            pane=agent.pane_id, agent=agent.name, thread=thread_id,
+        )
+        tmux.send_keys(agent.pane_id, f"hive codex resume {thread_id}")
 
 
 def _write_resume_snapshot(workspace: str, team: str) -> None:
@@ -2065,6 +2128,11 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
             if now - last_daemon_cleanup >= 30.0:
                 last_daemon_cleanup = now
                 _cleanup_dead_daemons(workspace)
+                try:
+                    _codex_supervisor_tick(workspace, team)
+                except Exception:
+                    # Supervision must never take the sidecar down.
+                    pass
                 try:
                     _write_resume_snapshot(workspace, team)
                 except Exception:

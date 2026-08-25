@@ -74,11 +74,14 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _profile: False)
     monkeypatch.setattr("hive.agent.resolve_session_id_for_pane", lambda _pane: None)
     monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
-    # Default: no per-pane codex daemon / grok leader, so tests never attempt a
+    # Default: no shared codex daemon / grok leader, so tests never attempt a
     # real socket bind or spawn a CLI process. Tests that exercise the daemon
     # paths override these explicitly.
     monkeypatch.setattr("hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: False)
     monkeypatch.setattr("hive.adapters.grok_leader.spawn_daemon", lambda *_a, **_kw: False)
+    # Default: codex readiness (a live TUI process on the pane) reports success
+    # so tests never poll the real process table for 30s.
+    monkeypatch.setattr("hive.agent._wait_codex_attached", lambda *_a, **_kw: True)
     # Default: the startup driver reports the pane's claude session bound its
     # cross-session inbox, so spawn tests never run the capture loop or look
     # for a registry entry on disk. Failure paths have dedicated tests below.
@@ -366,9 +369,9 @@ def test_spawn_claude_uses_model_flag(monkeypatch):
     assert "claude" in startup_cmd
 
 
-def test_spawn_codex_uses_model_flag(monkeypatch):
+def test_spawn_codex_pins_model_at_mint_not_flag(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    _mock_daemon_up(monkeypatch)
+    state = _mock_daemon_up(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -377,8 +380,9 @@ def test_spawn_codex_uses_model_flag(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "-m 'gpt-5.2'" in startup_cmd
-    assert "codex" in startup_cmd
+    # model is a thread/start property, not a resume flag
+    assert "-m 'gpt-5.2'" not in startup_cmd
+    assert state["minted"] == [("/tmp", "t.w1", "gpt-5.2")]
 
 
 def test_spawn_rejects_unknown_cli(monkeypatch):
@@ -422,11 +426,9 @@ def test_spawn_codex_resume_uses_fork_subcommand(monkeypatch):
     assert "-m" not in startup_cmd
 
 
-def test_spawn_codex_new_session_uses_remote_daemon(monkeypatch):
-    from pathlib import Path
-
+def test_spawn_codex_new_session_resumes_minted_thread(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    _mock_daemon_up(monkeypatch)  # daemon up + first-round runtime ready
+    state = _mock_daemon_up(monkeypatch)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%0",
@@ -434,24 +436,58 @@ def test_spawn_codex_new_session_uses_remote_daemon(monkeypatch):
     )
 
     startup_cmd = calls[0]
-    assert "--remote" in startup_cmd
-    assert "unix:///home/.codex/app-server-control/hive-pane-0.sock" in startup_cmd
-    assert "--cd '/work/dir'" in startup_cmd  # codex flag is -C/--cd, not --cwd
+    # hive minted the thread, recorded the pane binding, trusted the cwd, and
+    # the pane attaches with `resume <tid>` — the managed launcher injects
+    # --remote/--cd itself, so the spawn command carries neither.
+    assert "resume 'tid-minted'" in startup_cmd
+    assert "--remote" not in startup_cmd
+    assert "--cd" not in startup_cmd
+    assert state["minted"] == [("/work/dir", "t.w1", "")]
+    assert state["trusted"] == ["/work/dir"]
+    assert state["records"] == [("%0", "tid-minted", "/work/dir")]
+
+
+def test_spawn_codex_mint_failure_kills_pane_and_fails(monkeypatch):
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    _mock_daemon_up(monkeypatch)
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.start_member_thread",
+        lambda *_a, **_kw: None,
+    )
+    killed: list[str] = []
+    monkeypatch.setattr("hive.agent.tmux.kill_pane", killed.append)
+
+    with pytest.raises(RuntimeError, match="thread identity"):
+        Agent.spawn(
+            name="w1", team_name="t", target_pane="%0",
+            cwd="/work/dir", is_first=True, skill="none", cli="codex",
+        )
+
+    assert killed == ["%0"]
+    assert calls == []  # no startup command was ever sent
 
 
 def _mock_daemon_up(monkeypatch):
-    from pathlib import Path
+    """Shared daemon up; record trust writes, thread mints and pane records."""
+    state = {"minted": [], "trusted": [], "records": []}
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.spawn_daemon", lambda *_a, **_kw: True
     )
-    # Readiness polls the daemon runtime; tests answer on the first round.
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: object()
+        "hive.adapters.codex_app_server.ensure_dir_trusted",
+        lambda cwd: state["trusted"].append(cwd),
     )
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.pane_socket_path",
-        lambda pane: Path(f"/home/.codex/app-server-control/hive-pane-{pane.replace('%', '')}.sock"),
+        "hive.adapters.codex_app_server.start_member_thread",
+        lambda cwd, *, name, model="": (
+            state["minted"].append((cwd, name, model)) or "tid-minted"
+        ),
     )
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.write_pane_thread",
+        lambda pane, tid, cwd: state["records"].append((pane, tid, cwd)),
+    )
+    return state
 
 
 def _mock_grok_leader_up(monkeypatch):
@@ -468,14 +504,14 @@ def _mock_grok_leader_up(monkeypatch):
 
 
 def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
-    # With a workspace, spawn asks the sidecar to bring the 2nd client online
-    # before codex starts, so it never has to late-join/resume.
+    # With a workspace, spawn asks the sidecar to bring its client online
+    # before the member's first turn.
     calls, _ = _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
-    connects: list[tuple[str, str]] = []
+    connects: list[str] = []
     monkeypatch.setattr(
         "hive.sidecar.request_connect_codex",
-        lambda workspace, pane: connects.append((workspace, pane)) or {"ok": True},
+        lambda workspace: connects.append(workspace) or {"ok": True},
     )
 
     Agent.spawn(
@@ -484,7 +520,7 @@ def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
         workspace="/tmp/ws",
     )
 
-    assert connects == [("/tmp/ws", "%0")]
+    assert connects == ["/tmp/ws"]
 
 
 def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
@@ -493,7 +529,7 @@ def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
     connects: list = []
     monkeypatch.setattr(
         "hive.sidecar.request_connect_codex",
-        lambda workspace, pane: connects.append((workspace, pane)),
+        lambda workspace: connects.append(workspace),
     )
 
     Agent.spawn(
@@ -544,7 +580,9 @@ def test_spawn_codex_daemon_fail_in_place_clears_tags_instead_of_killing(monkeyp
     assert calls == []
 
 
-def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
+def test_spawn_codex_fork_does_not_start_daemon(monkeypatch):
+    # The pane's `hive codex fork <sid>` binds the daemon, forks server-side
+    # and records the pane's thread itself; spawn stays out of it.
     calls, _ = _setup_tmux_mocks(monkeypatch)
     started: list[object] = []
     monkeypatch.setattr(
@@ -560,8 +598,8 @@ def test_spawn_codex_resume_does_not_start_daemon(monkeypatch):
 
     startup_cmd = calls[0]
     assert "fork" in startup_cmd and "sess-abc" in startup_cmd
-    assert "--remote" not in startup_cmd  # resume stays embedded
-    assert started == []  # daemon not started on resume
+    assert "--remote" not in startup_cmd  # the launcher injects it
+    assert started == []  # daemon not started by spawn for a fork
 
 
 def test_spawn_grok_launches_with_minted_session_id_and_model_flag(monkeypatch):
@@ -1010,13 +1048,13 @@ def test_spawn_codex_fork_delegates_to_hive_codex(monkeypatch):
     assert "resume" not in launch
 
 
-def test_spawn_codex_resume_is_daemon_native(monkeypatch):
+def test_spawn_codex_resume_records_thread_and_resumes_it(monkeypatch):
     calls, _ = _setup_tmux_mocks(monkeypatch)
-    _mock_daemon_up(monkeypatch)
-    connects: list[tuple[str, str]] = []
+    state = _mock_daemon_up(monkeypatch)
+    connects: list[str] = []
     monkeypatch.setattr(
         "hive.sidecar.request_connect_codex",
-        lambda ws, pane: connects.append((ws, pane)),
+        lambda ws: connects.append(ws),
     )
 
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/repo",
@@ -1024,11 +1062,14 @@ def test_spawn_codex_resume_is_daemon_native(monkeypatch):
                 skill="none", workspace="/ws")
 
     cmd = calls[0]
-    assert "--remote 'unix:///home/.codex/app-server-control/hive-pane-0.sock'" in cmd
-    assert "--cd '/repo'" in cmd
+    # the resumed session's id IS its threadId: recorded, then resumed through
+    # the managed launcher (which injects --remote/--cd itself)
     assert "resume 'roll-1'" in cmd
     assert "fork" not in cmd
-    assert connects == [("/ws", "%0")]
+    assert "--remote" not in cmd
+    assert state["minted"] == []  # nothing minted on resume
+    assert state["records"] == [("%0", "roll-1", "/repo")]
+    assert connects == ["/ws"]
 
 
 def test_spawn_codex_resume_daemon_failure_never_falls_back_embedded(monkeypatch):
@@ -1092,46 +1133,45 @@ def test_spawn_claude_inbox_readiness_skips_banner_and_settle(monkeypatch):
     assert 1 not in sleeps  # no fixed 1s settle either
 
 
-def test_spawn_codex_daemon_native_waits_on_runtime_not_banner(monkeypatch):
+def test_spawn_codex_waits_on_process_not_banner(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
-    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
-
-    probes: list[str] = []
-    runtimes = iter([None, None, object()])
+    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
+    waited: list[str] = []
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane",
-        lambda pane: probes.append(pane) or next(runtimes),
+        "hive.agent._wait_codex_attached",
+        lambda pane, **_kw: waited.append(pane) or True,
     )
 
     Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="codex", skill="none", session_id="roll-1", session_mode="resume")
 
     assert banner_waits == []
-    assert probes == ["%0", "%0", "%0"]  # polled until the thread appeared
-    assert sleeps.count(0.5) == 2  # one interval sleep per empty round
+    assert waited == ["%0"]
 
-    # fresh session, runtime present on the first round: zero sleeps
-    sleeps.clear()
+
+def test_wait_codex_attached_polls_for_the_codex_process(monkeypatch):
+    from hive.agent_cli import get_profile
+
+    profiles = iter([None, get_profile("claude"), get_profile("codex")])
+    monkeypatch.setattr("hive.agent.time.sleep", lambda *_: None)
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: object()
+        "hive.agent_cli.detect_cli_process_for_pane", lambda _p: next(profiles)
     )
-    Agent.spawn(name="v2", team_name="t", target_pane="%0", cwd="/tmp",
-                cli="codex", skill="none")
-    assert banner_waits == []
-    assert sleeps == []
+    # None and a non-codex profile are both "not attached yet"
+    assert agent_mod._wait_codex_attached("%9", timeout=60, interval=0) is True
 
 
-def test_wait_codex_thread_ready_timeout_is_deterministic_and_nonfatal(monkeypatch):
+def test_wait_codex_attached_timeout_is_deterministic_and_nonfatal(monkeypatch):
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: None
+        "hive.agent_cli.detect_cli_process_for_pane", lambda _p: None
     )
-    assert agent_mod._wait_codex_thread_ready("%9", timeout=0, interval=0) is False
+    assert agent_mod._wait_codex_attached("%9", timeout=0, interval=0) is False
 
     # spawn survives a readiness timeout and still completes
     _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
-    monkeypatch.setattr("hive.agent._wait_codex_thread_ready", lambda _p: False)
+    monkeypatch.setattr("hive.agent._wait_codex_attached", lambda _p: False)
 
     a = Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
                     cli="codex", skill="hive")
@@ -1182,21 +1222,20 @@ def test_wait_grok_session_ready_sees_the_session_dir_and_is_nonfatal(monkeypatc
     assert agent.pane_id == "%0"
 
 
-def test_spawn_codex_embedded_fork_keeps_banner_wait(monkeypatch):
+def test_spawn_codex_fork_waits_on_process_not_banner(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
-    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
-    probes: list[str] = []
+    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
+    waited: list[str] = []
     monkeypatch.setattr(
-        "hive.adapters.codex_app_server.runtime_for_pane",
-        lambda pane: probes.append(pane) or object(),
+        "hive.agent._wait_codex_attached",
+        lambda pane, **_kw: waited.append(pane) or True,
     )
 
     Agent.spawn(name="f", team_name="t", target_pane="%0", cwd="/tmp",
-                cli="codex", session_id="roll-1")  # fork mode: no daemon
+                cli="codex", session_id="roll-1")  # fork mode
 
-    assert len(banner_waits) == 1  # legacy oracle stays for the embedded fork
-    assert 1 in sleeps  # old settle preserved
-    assert probes == []  # daemon runtime never consulted — flag-driven, not cli-driven
+    assert banner_waits == []  # every codex spawn shares the process oracle
+    assert waited == ["%0"]
 
 
 # --- V1: the launch never execs — the pane shell must survive the CLI ---
@@ -1249,7 +1288,7 @@ def test_spawn_codex_daemon_native_launch_keeps_shell(monkeypatch):
     )
     startup_cmd = calls[0]
     _assert_launch_keeps_shell(startup_cmd)
-    assert "--remote" in startup_cmd  # daemon-native flags unchanged
+    assert "resume 'tid-minted'" in startup_cmd  # minted-thread attach shape
 
 
 def test_spawn_codex_fork_shortcut_launch_keeps_shell(monkeypatch):

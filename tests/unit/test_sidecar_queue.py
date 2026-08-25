@@ -100,8 +100,8 @@ def test_handle_request_ping_returns_sidecar_identity():
 
 def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
     import hive.adapters.codex_app_server as cas
-    connected: list[str] = []
-    monkeypatch.setattr(cas, "connect_pane", lambda pane: connected.append(pane) or True)
+    connected: list[bool] = []
+    monkeypatch.setattr(cas, "connect", lambda: connected.append(True) or True)
 
     response, keep_running = sidecar._handle_request(
         workspace="/tmp/ws",
@@ -109,12 +109,12 @@ def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
         tmux_window="dev:3",
         tmux_window_id="@99",
         sidecar_started_at="2026-04-17T00:00:00Z",
-        request={"action": "connect-codex", "pane": "%5"},
+        request={"action": "connect-codex"},
     )
 
     assert keep_running is True
     assert response == {"ok": True, "connected": True}
-    assert connected == ["%5"]
+    assert connected == [True]
 
 
 def test_handle_request_connect_grok_brings_2nd_client_online(monkeypatch):

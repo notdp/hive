@@ -188,6 +188,12 @@ class Team:
                         cli=resolved_cli,
                         cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
                     )
+                    if resolved_cli == "codex":
+                        # A codex member's session id IS its threadId on the
+                        # shared app-server daemon, recorded per pane at
+                        # spawn/launch time.
+                        from .adapters.codex_app_server import thread_id_for_pane
+                        agent.session_id = thread_id_for_pane(pane.pane_id)
                     team.agents[pane.agent] = agent
 
         team.peer_map = team._canonical_peer_map(team.peer_map)

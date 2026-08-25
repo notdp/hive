@@ -97,9 +97,10 @@ Source — `busy=true` when **either** of two branches holds:
 
 Combined into ``sidecar._pane_is_truly_busy``.
 
-Native-daemon override: a daemon-backed (born-connected) codex or grok pane
-reports `busy` from its own per-pane daemon instead — both branches above are
-still computed but then replaced for that pane. See "Codex Native Runtime
+Native-daemon override: a hive-managed codex pane (recorded thread on the
+shared app-server daemon) or a daemon-backed grok pane (per-pane leader)
+reports `busy` from its native daemon transport instead — both branches above
+are still computed but then replaced for that pane. See "Codex Native Runtime
 (app-server source)" and "Grok Native Runtime (leader source)".
 
 Fail-open: if the transcript path can't be resolved (non-agent pane, no
@@ -226,9 +227,10 @@ Each row maps a transcript/JCL observation to the emitted `turnPhase` value.
 
 ### Codex
 
-Codex has no transcript/JCL probe. A daemon-backed pane reports natively (see
-"Codex Native Runtime" below); an embedded (daemon-less) codex is unsupported
-and reads as `unknown_evidence`.
+Codex has no transcript/JCL probe. A hive-managed pane (recorded thread on the
+shared daemon) reports natively (see "Codex Native Runtime" below); an
+unmanaged codex — embedded, or remote but never recorded — is unsupported and
+reads as `unknown_evidence`.
 
 ### Grok
 
@@ -238,36 +240,65 @@ socket and no session record, and reads as `unknown_evidence`.
 
 ## Codex Native Runtime (app-server source)
 
-A born-connected codex pane — hive-spawned, or launched through `hcodex` (the
-`hive shell-init` launcher) — runs a per-pane `codex app-server`
-daemon. Hive connects as a second client over that pane's unix socket and reads
-`busy` / `inputState` / `turnPhase` **natively** from the daemon's
-notification stream, instead of reverse-engineering them from the transcript.
-The emitted payload is tagged `_runtimeSource: codex_app_server`.
+One `codex app-server` daemon per CODEX_HOME (socket
+`$CODEX_HOME/app-server-control/hive-shared.sock`) hosts every hive codex
+thread. Each codex TUI attaches to its own thread with `codex resume
+<threadId> --remote unix://<sock> --cd <cwd>`; hive connects as one more
+client over the same socket and reads `busy` / `inputState` / `turnPhase`
+**natively** from the daemon's status stream, instead of reverse-engineering
+them from the transcript. The emitted payload is tagged `_runtimeSource:
+codex_app_server`.
 
-This path is taken only when a live per-pane daemon answers. An embedded
-(manually launched, non-daemon) codex has no socket and is deliberately
-unsupported **as a Hive team member**: `hive init` / `hive duo` reject it at
-team entry. A team-bound `hive fork` / `hive handoff --fork` of a codex pane
-launches the clone through `hive codex fork <sid>`, which binds the clone's own
-per-pane daemon, so it joins daemon-backed. A standalone embedded
-codex still runs, but hive reads no state from it — session id stays
-`unresolved`, `turnPhase` stays unknown, and there is no transcript fallback.
+Identity is the threadId (== transcript sessionId), never the process env: the
+daemon's env is frozen at spawn time and shared by every thread (hive strips
+`TMUX_PANE` from it), and codex injects the thread's own `CODEX_THREAD_ID`
+into tool subprocesses. Which thread belongs to which tmux pane is a per-pane
+`.thread` record beside the socket, written at spawn / managed-launch time;
+`hive` invocations inside a codex tool resolve their pane by reverse lookup of
+`CODEX_THREAD_ID` through those records.
 
-State is event-sourced from app-server notifications and stays valid until the
-next event — there is no time-based staleness gate. The relevant notifications
-are `thread/status/changed`, `turn/started`, and `turn/completed`.
+Spawn mints the thread up front: hive calls `thread/start` (with cwd, and the
+model when pinned) followed by `thread/name/set` — the name write flushes the
+rollout to disk, without which a fresh thread is not resumable — records the
+pane binding, and launches the TUI as a `resume` of that thread. `hive codex
+fork <sid>` forks server-side (`thread/fork`), records the fork, and resumes
+it the same way. Directory trust in remote mode is judged from the daemon's
+config.toml on disk, so every new cwd gets `[projects."<dir>"] trust_level =
+"trusted"` written before its thread starts.
+
+This path is taken only when the pane has a recorded thread and the shared
+daemon answers. An unmanaged codex — embedded, or a `resume` picker launch
+whose chosen thread hive cannot know — is deliberately unsupported **as a Hive
+team member**: `hive init` / `hive duo` reject it at team entry. It still
+runs, but hive reads no state from it — session id stays `unresolved`,
+`turnPhase` stays unknown, and there is no transcript fallback.
+
+The daemon is machine-level shared state: hive never kills it (a dead daemon
+takes every attached TUI down with it within ~5s), and the sidecar supervises
+it — a dead daemon is respawned while the team has live codex members, and a
+member pane whose CLI exited but whose thread is recorded gets one `hive codex
+resume <threadId>` typed into its retained shell (guarded by a live-process
+check, a shell-prompt check, and a cooldown). Records of dead panes are
+pruned on the same tick.
+
+State is event-sourced from the daemon's broadcasts and stays valid until the
+next event — there is no time-based staleness gate. On a shared daemon a
+non-turn-owning client receives only `thread/status/changed` (and
+`thread/goal/*`); `turn/*` and `item/*` go to the turn's own client, so status
+events are the sole busy source. A client that connected after a thread went
+active backfills its current status once via `thread/resume`.
 
 Field mapping (notification → runtime field):
 
 - `busy`
-  - `true` — `turn/started`, or `thread/status/changed` with `status.type=active`
-  - `false` — `turn/completed`, or `status.type=idle`
+  - `true` — `thread/status/changed` with `status.type=active`
+  - `false` — `status.type=idle`
 - `turnPhase`
-  - `tool_open` — any `active` turn. The native path does not subdivide active
-    phases (no `tool_result_pending_reply` / `user_prompt_pending` split); it
-    trades transcript-tail granularity for an authoritative busy edge.
-  - `turn_closed` — `idle` / `turn/completed`
+  - `tool_open` — any `active` status. The native path does not subdivide
+    active phases (no `tool_result_pending_reply` / `user_prompt_pending`
+    split); it trades transcript-tail granularity for an authoritative busy
+    edge.
+  - `turn_closed` — `idle`
   - `unknown_evidence` — before the first event; `notLoaded` / `systemError`
     leave the prior phase unchanged
 - `inputState`
@@ -276,9 +307,8 @@ Field mapping (notification → runtime field):
     `inputReason=app_server_active_flag`
   - `ready` — any other `active`, or `idle`
 
-`sessionId` for a daemon-backed pane resolves from app-server thread metadata
-(`thread.sessionId` via `thread/resume`), with an lsof-on-daemon-pid fallback.
-It stays `unresolved` until the thread has produced activity.
+`sessionId` for a hive-managed pane IS the recorded threadId — a plain record
+read, available from spawn time with no probing and no `unresolved` window.
 
 ## Grok Native Runtime (leader source)
 
