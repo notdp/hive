@@ -510,9 +510,16 @@ def set_pane_title(pane_id: str, title: str) -> None:
     ], check=False)
 
 
+# A claude member pane is an attach *viewer*: the human can switch it to
+# another bg session while the pane keeps its member tags. The sidecar's view
+# probe writes what is really on screen into `@hive-view` (empty while the
+# pane shows its own member), so the border reads "name -> what you are
+# actually looking at" without the format having to guess from the title.
 _HIVE_PANE_BORDER_FORMAT = (
     " #{?@hive-notify-active,#[fg=colour220]#[bold][!] #[default],}"
-    "#{?@hive-agent,#{@hive-agent},#{pane_title}} "
+    "#{?@hive-agent,#{@hive-agent}"
+    "#{?@hive-view,#[fg=colour220] -> #{@hive-view}#[default],}"
+    ",#{pane_title}} "
 )
 
 
@@ -1147,7 +1154,12 @@ def clear_pane_option(pane_id: str, key: str) -> None:
     _run(["set-option", "-p", "-t", pane_id, "-u", f"@{key}"], check=False)
 
 
-_PANE_TAG_KEYS = ("hive-role", "hive-agent", "hive-team", "hive-cli", "hive-group", "hive-owner")
+# `hive-view` is derived state (the claude view probe writes it), not
+# identity — but release must clear it with the rest, or a reused pane keeps
+# rendering a border suffix nobody owns any more.
+_PANE_TAG_KEYS = (
+    "hive-role", "hive-agent", "hive-team", "hive-cli", "hive-group", "hive-owner", "hive-view",
+)
 
 
 def tag_pane(pane_id: str, role: str, agent: str, team: str, *, cli: str = "", group: str = "") -> None:
@@ -1157,6 +1169,11 @@ def tag_pane(pane_id: str, role: str, agent: str, team: str, *, cli: str = "", g
     set_pane_option(pane_id, "hive-team", team)
     if cli:
         set_pane_option(pane_id, "hive-cli", cli)
+        if cli != "claude":
+            # Only the claude view tick maintains `hive-view`, and it skips
+            # non-claude panes — so a pane retagged onto another CLI in place
+            # would keep its last ' -> <session>' suffix forever.
+            clear_pane_option(pane_id, "hive-view")
     if group:
         set_pane_option(pane_id, "hive-group", group)
 

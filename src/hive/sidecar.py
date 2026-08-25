@@ -861,6 +861,16 @@ def _doctor_payload(
                     "jobId": job_id,
                     "engineAlive": claude_bg.engine_session_for_job(job_id) is not None,
                 }
+            if "_viewKind" in runtime:
+                # What the pane's viewer is showing right now — the member's
+                # own job, another session, or the panel list.
+                diag["claudeView"] = {
+                    "kind": runtime["_viewKind"],
+                    "certainty": runtime.get("_viewCertainty", ""),
+                    "jobId": runtime.get("_viewedJob", ""),
+                    "member": runtime.get("_viewedMember", ""),
+                    "onMember": bool(job_id) and runtime.get("_viewedJob") == job_id,
+                }
         if "_engineState" in runtime:
             diag["engineState"] = runtime["_engineState"]
         if "inputReason" in runtime:
@@ -986,6 +996,23 @@ def _claude_bg_runtime(pane_id: str) -> dict[str, Any] | None:
     return fields
 
 
+def _claude_view_fields(pane_id: str) -> dict[str, Any]:
+    """What the pane's attach viewer is actually showing (the human can
+    switch it to any other bg session)."""
+    from .adapters import claude_view
+
+    try:
+        view = claude_view.view_for_pane(pane_id)
+    except Exception:
+        return {}  # a diagnostic field must never break the runtime payload
+    return {
+        "_viewKind": view.kind,
+        "_viewCertainty": view.certainty,
+        "_viewedJob": view.job_id,
+        "_viewedMember": view.member,
+    }
+
+
 _CLAUDE_JOBS_CACHE_TTL = 30.0
 _CLAUDE_JOBS_CACHE: tuple[float, dict[str, dict[str, Any]] | None] | None = None
 
@@ -1048,6 +1075,7 @@ def _agent_runtime_payload(
             if resolved_model:
                 runtime["model"] = resolved_model
             runtime.update(bg_runtime)
+            runtime.update(_claude_view_fields(pane_id))
             return runtime
     if not profile:
         runtime["busy"] = False  # shell output is not agent activity
@@ -1991,6 +2019,65 @@ def _claude_supervisor_tick(workspace: str) -> None:
             claude_bg.stop_job(record[0])
 
 
+def _claude_view_tick(
+    *,
+    workspace: str,
+    team: str,
+    members: dict[str, dict[str, Any]],
+    state: dict[str, Any],
+) -> None:
+    """Follow the human's attach-panel switches on this team's claude panes.
+
+    A member pane is an attach viewer: pressing the panel key inside it opens
+    any other bg session, and the pane keeps its member tags while the screen
+    shows something else. Each pane's ``@hive-view`` tag carries what is
+    really on screen (empty while it shows its own member) and the border
+    renders it; a switch onto *another* hive member is also logged, which is
+    what a whole-window follow would key on later.
+
+    Two cheap signals gate the work: the attach journal's entry set (an entry
+    appears/disappears on every attach, switch and detach) and the panes'
+    titles (the panel writes the viewed session's name). Probing costs a ps
+    per pane, so it only runs when one of those changed.
+    """
+    from . import notify_debug, tmux
+    from .adapters import claude_bg, claude_view
+
+    panes = tmux.list_panes_all()
+    if not panes:
+        return  # an empty listing is a tmux failure, not an empty server
+    titles = {pane.pane_id: pane.title for pane in panes if pane.cli == "claude"}
+    signature = (claude_view.journal_signature(), tuple(sorted(titles.items())))
+    if signature == state.get("signature"):
+        return
+    state["signature"] = signature
+    labels: dict[str, str] = state.setdefault("labels", {})
+
+    for name, binding in sorted(members.items()):
+        pane_id = str(binding.get("pane") or "")
+        if binding.get("cli") != "claude" or pane_id not in titles:
+            continue
+        own_job = claude_bg.job_id_for_pane(pane_id) or ""
+        view = claude_view.view_for_pane(pane_id, panes=panes)
+        label = claude_view.view_label(view, own_job)
+        if labels.get(pane_id) == label:
+            continue
+        labels[pane_id] = label
+        tmux.set_pane_option(pane_id, "hive-view", label)
+        if view.kind == "member_view" and view.job_id != own_job:
+            notify_debug.emit(
+                workspace,
+                "claude.view.foreign_member",
+                team=team,
+                member=name,
+                pane=pane_id,
+                viewing=view.member,
+                viewingJob=view.job_id,
+                otherTeam=view.member.split(".", 1)[0] != team,
+                certainty=view.certainty,
+            )
+
+
 def _write_resume_snapshot(workspace: str, team: str) -> None:
     """Persist the team's durable resume snapshot (`hive ls` / `hive resume`).
 
@@ -2068,6 +2155,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     idle_notify: dict[str, dict[str, Any]] = {}
     notify_debug_state: dict[str, Any] = {}
     code_reexec_state: dict[str, Any] = {}
+    claude_view_state: dict[str, Any] = {}
     last_window_check = 0.0
     last_owner_check = 0.0
     last_daemon_cleanup = 0.0
@@ -2167,6 +2255,17 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 )
 
             tick_members = _team_member_bindings(team)
+
+            try:
+                _claude_view_tick(
+                    workspace=workspace,
+                    team=team,
+                    members=tick_members,
+                    state=claude_view_state,
+                )
+            except Exception:
+                # Border cosmetics must never take the sidecar down.
+                pass
 
             if not _serve_requests(
                 server=server,

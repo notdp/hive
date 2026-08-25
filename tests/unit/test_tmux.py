@@ -298,6 +298,27 @@ def test_pane_option_helpers_and_tagging(monkeypatch):
     assert calls[2] == ("set-option", "-p", "-t", "%1", "-u", "@hive-role")
     assert ("set-option", "-p", "-t", "%1", "@hive-agent", "claude") in calls
     assert ("set-option", "-p", "-t", "%1", "-u", "@hive-team") in calls
+    # `@hive-view` is derived from the claude view probe: release clears it
+    # with the identity tags, or a reused pane keeps a dead border suffix.
+    assert ("set-option", "-p", "-t", "%1", "-u", "@hive-view") in calls
+
+
+def test_tagging_a_pane_onto_another_cli_drops_the_claude_view(monkeypatch):
+    # Only the claude view tick maintains @hive-view, and it skips non-claude
+    # panes — an in-place retag must clear it or the suffix is stale forever.
+    calls = []
+    monkeypatch.setattr(
+        "hive.tmux._run",
+        lambda args, check=False, timeout=5: calls.append(tuple(args))
+        or subprocess.CompletedProcess(["tmux", *args], 0, "", ""),
+    )
+
+    tmux.tag_pane("%1", "agent", "blue", "team-a", cli="codex")
+    assert ("set-option", "-p", "-t", "%1", "-u", "@hive-view") in calls
+
+    calls.clear()
+    tmux.tag_pane("%1", "agent", "red", "team-a", cli="claude")
+    assert ("set-option", "-p", "-t", "%1", "-u", "@hive-view") not in calls
 
 
 def test_enable_pane_border_status_uses_hive_member_format(monkeypatch):
