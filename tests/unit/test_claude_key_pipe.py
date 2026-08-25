@@ -64,16 +64,18 @@ def _engine(job_id: str = "cafe1234", status: str = "idle") -> claude_bg.EngineS
     )
 
 
-def _wire(monkeypatch, pipe, *, screens, transcript=None, engine=None, baseline="> "):
+def _wire(monkeypatch, pipe, *, screens, transcript=None, engine=None, baseline="> ", draft=False):
     """Attach *pipe*, feed `claude logs` from *screens*, transcript from a file.
 
     *baseline* is what the screen shows before anything is typed — the pipe
     reads it first and only counts an echo that was not already there.
+    *draft* is what the dim-aware composer parser reports before the C-u.
     """
     monkeypatch.setattr(claude_bg, "_attach_pipe", lambda job, **kw: pipe)
     monkeypatch.setattr(claude_bg, "_wait_client_ready", lambda proc: True)
     monkeypatch.setattr(claude_bg, "_wait_engine_behind", lambda job, proc: engine or _engine())
     monkeypatch.setattr(claude_bg, "_transcript_cursor", lambda eng: (transcript, 0))
+    monkeypatch.setattr(claude_bg, "_composer_has_draft", lambda job, **kw: draft)
     monkeypatch.setattr(claude_bg.time, "sleep", lambda _s: None)
     feed = [baseline, *screens]
     monkeypatch.setattr(
@@ -466,3 +468,123 @@ def test_interrupt_on_other_clis_still_sends_escape_to_the_pane(monkeypatch):
     agent.Agent(name="blue", team_name="probe", pane_id="%2", cli="codex").interrupt()
 
     assert keys == [("%2", "Escape")]
+
+
+# --- draft save/restore ----------------------------------------------------
+
+
+def test_a_killed_draft_is_pasted_back_after_the_submit(monkeypatch, tmp_path):
+    """C-u parks the draft on claude's kill ring; a confirmed submit pastes
+    it back (C-y) so the human's half-typed thought survives the command."""
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [_user("hello there")])
+    _wire(monkeypatch, pipe, screens=["> hello there"], transcript=path, draft=True)
+
+    result = claude_bg.type_into_job("cafe1234", "hello there")
+
+    assert result.ok
+    assert pipe.writes == ["\x15", "hello there", "\r", "\x19"]
+
+
+def test_an_empty_composer_never_gets_a_stale_ring_pasted(monkeypatch, tmp_path):
+    """The kill ring survives a C-u that killed nothing; pasting it back
+    would resurrect unrelated content (real-machine verified)."""
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [_user("hello there")])
+    _wire(monkeypatch, pipe, screens=["> hello there"], transcript=path, draft=False)
+
+    assert claude_bg.type_into_job("cafe1234", "hello there").ok
+    assert "\x19" not in pipe.writes
+
+
+def test_a_retype_forfeits_the_restore(monkeypatch, tmp_path):
+    """The second C-u overwrites the single-slot ring with our own failed
+    text — pasting that back would fabricate a draft the human never typed."""
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [_user("ping")])
+    _wire(monkeypatch, pipe, screens=["> ", "> ", "> ping"], transcript=path, draft=True)
+    monkeypatch.setattr(claude_bg, "_TYPE_RETRY_AFTER", 0.0)
+
+    assert claude_bg.type_into_job("cafe1234", "ping").ok
+    assert "\x19" not in pipe.writes
+
+
+def test_a_slash_command_restores_the_draft_too(monkeypatch, tmp_path):
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [])
+    _wire(monkeypatch, pipe, screens=["> /cost"], transcript=path, draft=True)
+    monkeypatch.setattr(claude_bg, "_SLASH_CONFIRM_TIMEOUT", 0.0)
+
+    result = claude_bg.type_into_job("cafe1234", "/cost")
+
+    assert result.ok and result.confirmed == "written"
+    assert pipe.writes[-1] == "\x19"
+
+
+def test_a_failed_submit_does_not_touch_the_ring(monkeypatch, tmp_path):
+    """On corruption the composer state is unknown — pasting on top of it
+    could double the mess; the loud failure is the whole point."""
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [_user("DRAFT-hello there")])
+    _wire(monkeypatch, pipe, screens=["> hello there"], transcript=path, draft=True)
+
+    result = claude_bg.type_into_job("cafe1234", "hello there")
+
+    assert not result.ok
+    assert "\x19" not in pipe.writes
+def test_the_draft_gate_reads_the_pane_only_when_it_shows_this_job(monkeypatch):
+    """The logs replay is an incremental paint stream and cannot answer
+    "what is in the composer"; the member's own pane render can — but only
+    while it is actually showing this member."""
+    from types import SimpleNamespace
+
+    from hive import draft_guard
+    from hive.adapters import claude_view
+
+    monkeypatch.setattr(claude_bg, "pane_for_job", lambda job: "%7")
+    monkeypatch.setattr(
+        claude_view, "view_for_pane",
+        lambda pane: SimpleNamespace(job_id="cafe1234", certainty="certain"),
+    )
+    seen = []
+    monkeypatch.setattr(
+        draft_guard, "suspected_draft", lambda pane, prof: seen.append((pane, prof)) or True
+    )
+
+    assert claude_bg._composer_has_draft("cafe1234") is True
+    assert seen == [("%7", "claude")]
+
+
+def test_the_draft_gate_is_closed_when_the_viewer_shows_someone_else(monkeypatch):
+    from types import SimpleNamespace
+
+    from hive import draft_guard
+    from hive.adapters import claude_view
+
+    monkeypatch.setattr(claude_bg, "pane_for_job", lambda job: "%7")
+    monkeypatch.setattr(
+        claude_view, "view_for_pane",
+        lambda pane: SimpleNamespace(job_id="other999", certainty="certain"),
+    )
+    monkeypatch.setattr(
+        draft_guard, "suspected_draft",
+        lambda pane, prof: (_ for _ in ()).throw(AssertionError("must not capture")),
+    )
+
+    assert claude_bg._composer_has_draft("cafe1234") is False
+
+
+def test_the_draft_gate_is_closed_without_a_pane(monkeypatch):
+    monkeypatch.setattr(claude_bg, "pane_for_job", lambda job: None)
+    assert claude_bg._composer_has_draft("cafe1234") is False
+
+
+def test_a_probe_failure_closes_the_draft_gate(monkeypatch):
+    from hive.adapters import claude_view
+
+    monkeypatch.setattr(claude_bg, "pane_for_job", lambda job: "%7")
+    monkeypatch.setattr(
+        claude_view, "view_for_pane",
+        lambda pane: (_ for _ in ()).throw(RuntimeError("tmux gone")),
+    )
+    assert claude_bg._composer_has_draft("cafe1234") is False

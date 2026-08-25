@@ -114,6 +114,7 @@ class Team:
         team.tmux_window_id = tmux.get_window_id(window_target) or ""
         if tag_lead and team.lead_pane_id:
             tmux.tag_pane(team.lead_pane_id, member_role_for_pane(team.lead_pane_id), team.lead_name, name)
+            _rename_adopted_claude_lead(team.lead_pane_id, name, team.lead_name)
 
         team._write_window_options()
         return team
@@ -527,6 +528,27 @@ class Team:
             agent.kill()
         if self.lead_pane_id and tmux.is_pane_alive(self.lead_pane_id):
             tmux.clear_pane_tags(self.lead_pane_id)
+
+
+def _rename_adopted_claude_lead(pane_id: str, team_name: str, lead_name: str) -> None:
+    """Give an adopted lead's bg job its member name.
+
+    A lead's claude was launched before the team existed, so its job was
+    minted under a pane placeholder name (``hive-<pane>``). ``/rename`` is
+    the same command the agents panel runs; piping it through the job
+    keyboard updates the name everywhere — registry, ledger, panel — and a
+    mid-turn lead (this init runs inside its turn) queues the command and
+    still executes it when the turn ends.
+    """
+    from .adapters import claude_bg
+
+    job_id = claude_bg.job_id_for_pane(pane_id)
+    if not job_id:
+        return
+    try:
+        claude_bg.type_into_job(job_id, f"/rename {team_name}.{lead_name}")
+    except Exception:
+        pass  # the placeholder name is cosmetic; never fail team init on it
 
 
 def _window_has_live_team_members(window_target: str, team_name: str) -> bool:

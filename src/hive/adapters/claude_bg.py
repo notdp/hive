@@ -432,6 +432,7 @@ def ensure_engine(
 # wakes a parked engine, so the keyboard path self-heals the ~1h park for free.
 _CLEAR_LINE = "\x15"  # C-u: drop whatever is in the composer (claude keeps it
                       # on its own kill ring — Ctrl+Y pastes it back)
+_RESTORE_KILL = "\x19"  # C-y: paste the kill ring back into the composer
 _SUBMIT = "\r"
 _ESCAPE = "\x1b"  # interrupts the running turn
 
@@ -512,6 +513,38 @@ def job_screen(job_id: str, *, claude_bin: str = "claude") -> str:
     if result.returncode != 0:
         return ""
     return _strip_ansi(result.stdout or "")[-_LOGS_TAIL_CHARS:]
+
+
+def _composer_has_draft(job_id: str) -> bool:
+    """Is there real, human-typed text sitting in the engine's composer?
+
+    Read from the member's own tmux pane — the one place the composer is
+    rendered by a real terminal emulator — through the draft guard's styled
+    capture, whose dim tracking keeps autocomplete ghost text from counting
+    as a draft. The ``claude logs`` replay cannot answer this: it is an
+    incremental paint stream, and a partial repaint leaves the last ``❯`` on
+    a history echo rather than the composer (real-machine observed).
+
+    Only a pane that is certainly-or-likely showing this very job is read;
+    anything else — viewer elsewhere, panel list, no pane — returns False,
+    which just skips the restore. This gates the kill-ring paste: claude's
+    kill ring survives a C-u on an *empty* composer unchanged, so pasting
+    without the gate would resurrect whatever the ring happened to hold
+    (real-machine verified).
+    """
+    from .. import draft_guard
+    from .claude_view import view_for_pane
+
+    pane = pane_for_job(job_id)
+    if not pane:
+        return False
+    try:
+        view = view_for_pane(pane)
+        if view.job_id != job_id or view.certainty not in ("certain", "likely"):
+            return False
+        return draft_guard.suspected_draft(pane, "claude")
+    except Exception:
+        return False
 
 
 def _echo_needles(text: str) -> tuple[str, ...]:
@@ -701,6 +734,17 @@ def _clear_composer(proc: subprocess.Popen) -> bool:
     return True
 
 
+def _restore_draft(proc: subprocess.Popen) -> None:
+    """C-y: paste the draft the C-u killed back into the (now empty) composer.
+
+    Best-effort — a failed restore leaves what today's behavior always left,
+    the draft on claude's kill ring with the TUI's own Ctrl+Y hint on screen.
+    """
+    time.sleep(_CONTROL_KEY_GAP)
+    if _feed(proc, _RESTORE_KILL):
+        time.sleep(_CONTROL_KEY_GAP)  # let the client forward it before EOF
+
+
 def _close_pipe(proc: subprocess.Popen) -> None:
     """Let the attach client exit, and make sure it does.
 
@@ -732,6 +776,13 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
     echoes it back, which is the proof that the attach client is forwarding
     stdin; a slice without an echo re-types.
 
+    A real draft the C-u killed is pasted back (C-y) once the submit is
+    confirmed: claude parks the killed text on its kill ring, so the engine
+    itself restores the exact bytes. Gated by the dim-aware draft parser
+    (autocomplete ghost text never counts, and a C-u that killed nothing
+    must not paste whatever the ring held before) and forfeited on a re-type
+    (the second C-u overwrites the single-slot ring with our own text).
+
     ponytail: two pipes typing into the same job at once (a cvim sendback and
     a hand-run ``hive inject``) interleave — one of them wins the composer and
     the other fails loudly on the transcript compare, never silently. Serialize
@@ -750,21 +801,25 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
         if not _wait_client_ready(proc):
             return KeyResult(False, why=f"`attach {job_id}` never came up")
 
+        draft = _composer_has_draft(job_id)
         needles = _echo_needles(text)
         baseline = _echo_counts(job_id, needles, claude_bin=claude_bin)
         deadline = time.monotonic() + _TYPE_READY_TIMEOUT
         next_retype = 0.0
+        clears = 0
         echoed = False
         while time.monotonic() < deadline:
             if time.monotonic() >= next_retype:
                 if not _clear_composer(proc) or not _feed(proc, text):
                     return KeyResult(False, why="the attach client closed its stdin")
+                clears += 1
                 next_retype = time.monotonic() + _TYPE_RETRY_AFTER
             counts = _echo_counts(job_id, needles, claude_bin=claude_bin)
             if not needles or any(count > baseline[needle] for needle, count in counts.items()):
                 echoed = True
                 break
             time.sleep(_KEY_POLL_INTERVAL)
+        restore = draft and clears == 1
         if not echoed:
             return KeyResult(
                 False,
@@ -773,6 +828,8 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
         if not _feed(proc, _SUBMIT):
             return KeyResult(False, why="the attach client closed its stdin before Enter")
         if transcript is None:
+            if restore:
+                _restore_draft(proc)
             return KeyResult(True, "written", "no transcript to confirm against")
         slash = _is_slash_command(text)
         confirm_deadline = time.monotonic() + (
@@ -781,6 +838,8 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
         while time.monotonic() < confirm_deadline:
             verdict = _submit_verdict(transcript, offset, text)
             if verdict == "landed":
+                if restore:
+                    _restore_draft(proc)
                 return KeyResult(True, "transcript")
             if verdict == "corrupted":
                 return KeyResult(
@@ -795,6 +854,8 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
             # was forwarding, and a command swallowed as text would have shown
             # up as a turn by now. If a lost `/compact` ever needs catching,
             # the missing signal is "the composer emptied after Enter".
+            if restore:
+                _restore_draft(proc)
             return KeyResult(True, "written", "a slash command with no transcript record yet")
         return KeyResult(
             False,
