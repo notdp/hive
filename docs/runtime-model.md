@@ -313,12 +313,21 @@ Every subprocess in that path (`attach`, `logs`) is hard-bounded and its env
 is washed of `CLAUDE*`/`ANTHROPIC*` like the spawn's, and the subcommand is
 argv[1] — a leading flag silently downgrades `attach` into a prompt.
 
-The draft trade-off: `C-u` drops whatever the human was typing into the
-member's composer. Claude keeps it on its own kill ring (the TUI offers
-`Ctrl+Y to paste deleted txt` right after), so it is recoverable in the pane
-— hive does not save or restore it. The tmux buffer dance that guards codex
-and grok drafts does not apply here: it types at the pane, and the pane is
-not where a member's keyboard is.
+The draft round-trip: `C-u` drops whatever the human was typing into the
+member's composer onto claude's kill ring, and a confirmed submit pastes it
+back (`C-y`) — the engine itself restores the exact bytes. The paste is
+gated, because the ring survives a `C-u` that killed nothing and would
+otherwise resurrect unrelated content: only when the member's own pane is
+certainly-or-likely showing this job does the styled pane capture
+(`draft_guard`, dim-aware so autocomplete ghost text never counts) vouch for
+a real draft. The `claude logs` replay cannot stand in for that read — it is
+an incremental paint stream whose last `❯` can be a history echo, not the
+composer. A re-type forfeits the restore: the second `C-u` overwrites the
+single-slot ring with hive's own text. With the gate closed the behavior is
+the old trade-off — the draft stays on the ring and the TUI offers `Ctrl+Y
+to paste deleted txt`. The tmux buffer dance that guards codex and grok
+drafts still does not apply here: it types at the pane, and the pane is not
+where a member's keyboard is.
 
 Non-member claude panes — a plain interactive TUI with no job record — are a
 different target, not a fallback: they keep the tmux keystroke path with its
