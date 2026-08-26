@@ -167,3 +167,34 @@ def test_task_artifact_never_clobbers(monkeypatch, tmp_path):
     p2 = flow._task_artifact("explore", "two")
     assert p1 != p2
     assert open(p1).read() == "one" and open(p2).read() == "two"
+
+
+def test_dispatch_retries_transient_refusal_then_succeeds(monkeypatch):
+    rec, replies = _wire(monkeypatch)
+    replies["m1"] = {"body": "done", "artifact": "", "msgId": "r1"}
+    calls = {"n": 0}
+    import hive.cli as cli_mod
+
+    real = None
+    def flaky_send(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transport refused: leader RPC blip")
+        rec.dispatches.append({**kw, "msgId": "m1"})
+        return {"msgId": "m1"}
+
+    monkeypatch.setattr("hive.cli._request_send_payload", flaky_send)
+    member = flow.agent("task", name="impl")
+    assert member.summary == "done"
+    assert calls["n"] == 2  # one blip absorbed
+
+
+def test_dispatch_exhaustion_stays_loud(monkeypatch):
+    _wire(monkeypatch)
+    monkeypatch.setattr(
+        "hive.cli._request_send_payload",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("refused")),
+    )
+    monkeypatch.setattr(flow, "_DISPATCH_RETRY_GAP", 0.0)
+    with pytest.raises(flow.FlowError, match="after 3 attempts"):
+        flow.agent("task", name="impl")

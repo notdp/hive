@@ -51,6 +51,10 @@ from pathlib import Path
 
 _HANDSHAKE_TIMEOUT = 5.0
 _CALL_TIMEOUT = 10.0
+# Thread minting round-trips the codex backend, whose latency swings with
+# provider load/throttling (a trivial `codex exec` was measured at 35s on a
+# heavy-usage day). The generic call timeout stays tight; minting gets room.
+_MINT_TIMEOUT = 60.0
 
 # Worst-case local submission budget for one send_to_pane call (fresh daemon
 # handshake plus the turn/start RPC). The sidecar derives its request budgets
@@ -510,7 +514,7 @@ class CodexDaemonClient:
         params: dict = {"cwd": cwd}
         if model:
             params["model"] = model
-        res = self.call("thread/start", params)
+        res = self.call("thread/start", params, timeout=_MINT_TIMEOUT)
         result = res.get("result")
         if not isinstance(result, dict):
             return None

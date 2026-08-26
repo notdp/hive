@@ -33,7 +33,7 @@ def test_reply_identity_is_the_member_itself(rig):
     for cli in rig.clis:
         member = rig.member(cli)
         replies = rig.replies_for(member)
-        assert replies, f"{member}: no reply anchored to its dispatch"
+        assert replies, f"{member}: no reply anchored to any of its dispatches"
         for r in replies:
             assert r[1] == member, f"{member}: reply from_agent={r[1]!r} (identity hijack)"
             assert r[2] == "flow", f"{member}: reply to_agent={r[2]!r}, expected flow"
@@ -95,6 +95,7 @@ def test_semantic_coroner(rig):
         "2) 寻址错误:成员把回报发给了派发人以外的地址,或用错 send/reply\n"
         "3) 弹窗/菜单残留:pane 屏幕上有选择器或对话框挡着\n"
         "4) 越权行为:成员做了任务外的事(翻库/改文件/自己找活)\n"
+        "注:同内容的多条 dispatch 行是派发重试(合法的韧性机制),不算违规;只看成员自己的行为。\n"
         "5) 其他任何你觉得人类会皱眉的异常\n"
         '只输出 JSON:{"violations":[{"member":"...","kind":"...","evidence":"..."}]}。没有违规输出 {"violations":[]}。\n\n'
         "材料:\n" + json.dumps(material, ensure_ascii=False)

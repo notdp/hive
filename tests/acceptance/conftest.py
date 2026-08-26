@@ -69,17 +69,16 @@ class Rig:
     def want(self, cli: str) -> str:
         return f"{self.nonce}-{cli}"
 
-    def dispatch_for(self, member: str) -> tuple | None:
-        for r in self.bus_rows:
-            if r[1] == "flow" and r[2] == member:
-                return r
-        return None
+    def dispatches_for(self, member: str) -> list[tuple]:
+        # A refused delivery leaves its bus row behind (the bus is a ledger,
+        # not a queue) and the flow retries with a fresh msgId — several
+        # same-body dispatch rows are legal. The one that reached the member
+        # is whichever its reply anchors.
+        return [r for r in self.bus_rows if r[1] == "flow" and r[2] == member]
 
     def replies_for(self, member: str) -> list[tuple]:
-        d = self.dispatch_for(member)
-        if d is None:
-            return []
-        return [r for r in self.bus_rows if r[3] == d[0]]
+        ids = {d[0] for d in self.dispatches_for(member)}
+        return [r for r in self.bus_rows if r[3] in ids]
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
