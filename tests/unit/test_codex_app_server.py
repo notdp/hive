@@ -451,7 +451,9 @@ def test_connect_false_when_no_daemon(monkeypatch):
     assert m.connect() is False
 
 
-def test_start_member_thread_delegates_to_client(monkeypatch):
+def test_start_member_thread_delegates_to_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))  # freshen must not touch the real cache
+
     class FakeClient:
         def start_thread(self, cwd, *, name, model=""):
             return "tid-x" if (cwd, name, model) == ("/w", "n", "m") else None
@@ -462,7 +464,9 @@ def test_start_member_thread_delegates_to_client(monkeypatch):
     assert m.start_member_thread("/w", name="n") is None
 
 
-def test_fork_member_thread_delegates_to_client(monkeypatch):
+def test_fork_member_thread_delegates_to_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
     class FakeClient:
         def fork_thread(self, tid, *, name):
             return "tid-f" if (tid, name) == ("src", "n") else None
@@ -546,3 +550,72 @@ def test_ensure_dir_trusted_matches_literal_string_header(tmp_path, monkeypatch)
     m.ensure_dir_trusted("/work/dir")
     text = config.read_text()
     assert text.count("/work/dir") == 1
+
+
+# --- transport: reader must survive daemon silence --------------------------
+
+
+def test_wsconn_read_survives_silence_longer_than_handshake_timeout():
+    """The handshake timeout must not stay armed on post-handshake reads.
+
+    Guards the mint-hang regression: the daemon legally goes silent for 5.00s
+    mid thread/start (its models refresh stalls on a stale cache), and an
+    armed 5.0s socket timeout killed the reader right before the response.
+    """
+    import socket as socket_mod
+    import tempfile
+    from pathlib import Path
+
+    # pytest's tmp_path overflows AF_UNIX's 104-char limit on macOS
+    path = str(Path(tempfile.mkdtemp()) / "ws.sock")
+    ready = threading.Event()
+
+    def server():
+        srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        ready.set()
+        conn, _ = srv.accept()
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+        time.sleep(0.8)  # silence longer than the 0.3s handshake timeout
+        payload = b'{"id":1,"result":{}}'
+        conn.sendall(bytes([0x81, len(payload)]) + payload)
+        conn.close()
+        srv.close()
+
+    t = threading.Thread(target=server, daemon=True)
+    t.start()
+    ready.wait(2)
+    conn = m._WSConn(path, timeout=0.3)
+    assert json.loads(conn.recv_text()) == {"id": 1, "result": {}}
+    conn.close()
+
+
+# --- models cache freshening -------------------------------------------------
+
+
+def test_freshen_models_cache_renews_stamp_and_keeps_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    path = tmp_path / "models_cache.json"
+    path.write_text(json.dumps({
+        "fetched_at": "2026-08-26T05:00:00.000000Z",
+        "etag": "W/\"abc\"",
+        "client_version": "0.149.1",
+        "models": [{"slug": "m1"}],
+    }))
+    assert m.freshen_models_cache() is True
+    entry = json.loads(path.read_text())
+    assert entry["fetched_at"] != "2026-08-26T05:00:00.000000Z"
+    assert entry["fetched_at"].endswith("Z")
+    assert entry["etag"] == 'W/"abc"'
+    assert entry["models"] == [{"slug": "m1"}]
+
+
+def test_freshen_models_cache_tolerates_missing_and_garbage(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert m.freshen_models_cache() is False  # no file
+    (tmp_path / "models_cache.json").write_text("not json")
+    assert m.freshen_models_cache() is False

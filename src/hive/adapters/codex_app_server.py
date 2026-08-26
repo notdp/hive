@@ -243,6 +243,11 @@ class _WSConn:
         self.sock.connect(path)
         self._rx = b""
         self._handshake()
+        # The timeout guards only the handshake. A live daemon can legally go
+        # silent for 5s+ mid-call (its models refresh stalls exactly 5.00s on
+        # a stale cache), and socket.timeout is an OSError — leaving it armed
+        # lets that silence kill the reader thread right before the response.
+        self.sock.settimeout(None)
 
     def _handshake(self) -> None:
         key = base64.b64encode(os.urandom(16)).decode()
@@ -784,11 +789,35 @@ def session_id_for_pane(pane: str) -> str | None:
 # --------------------------------------------------------------------------
 # spawn-flow helpers
 # --------------------------------------------------------------------------
+def freshen_models_cache() -> bool:
+    """Renew ~/.codex/models_cache.json's fetched_at so a mint stays warm.
+
+    thread/start synchronously refetches /models when the cache is older
+    than codex's 300s TTL (~2.5s, up to its 5s timeout). The data barely
+    changes and codex itself renews the stamp without refetching on an
+    etag match, so extending the last real fetch is the same semantic;
+    the daemon's periodic Online refresh still overwrites with real data.
+    """
+    path = codex_home() / "models_cache.json"
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        entry["fetched_at"] = (
+            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000Z"
+        )
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(entry), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def start_member_thread(cwd: str, *, name: str, model: str = "") -> str | None:
     """Mint a resumable thread for a new member; None on any failure."""
     client = _shared_client()
     if client is None:
         return None
+    freshen_models_cache()
     return client.start_thread(cwd, name=name, model=model)
 
 
@@ -797,4 +826,5 @@ def fork_member_thread(thread_id: str, *, name: str) -> str | None:
     client = _shared_client()
     if client is None:
         return None
+    freshen_models_cache()
     return client.fork_thread(thread_id, name=name)
