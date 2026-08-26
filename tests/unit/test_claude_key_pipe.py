@@ -679,3 +679,34 @@ def test_spawn_job_parses_colored_output(monkeypatch):
 
     monkeypatch.setattr(claude_bg.subprocess, "run", fake_run)
     assert claude_bg.spawn_job(cwd="/tmp", name="x", prompt="hi") == "ce5de22a"
+
+
+def test_success_probe_short_circuits_the_slash_confirm_window(monkeypatch, tmp_path):
+    """A caller's positive oracle (the /rename registry flip) confirms the
+    submit immediately — without it every successful slash burned the full
+    slash-confirm window waiting for a failure shape that never came."""
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [])  # no confirming record ever appears
+    _wire(monkeypatch, pipe, screens=["> /rename comb.a"], transcript=path)
+
+    result = claude_bg.type_into_job(
+        "cafe1234", "/rename comb.a", success_probe=lambda: True
+    )
+
+    assert result.ok and result.confirmed == "probe"
+
+
+def test_ensure_job_named_confirms_via_registry_flip(monkeypatch, tmp_path):
+    pipe = FakePipe()
+    path = _transcript(tmp_path, [])
+    _wire(monkeypatch, pipe, screens=["> /rename comb.a"], transcript=path)
+    names = iter(["old-name", "comb.a"])  # pre-check, then probe
+
+    def fake_engine(_jid):
+        from types import SimpleNamespace
+        return SimpleNamespace(name=next(names), pid=1, job_id="cafe1234",
+                               session_id="s", socket_path="/tmp/x", cwd="",
+                               status="idle", waiting_for="", status_updated_at=0.0)
+
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", fake_engine)
+    assert claude_bg.ensure_job_named("cafe1234", "comb.a") is True
