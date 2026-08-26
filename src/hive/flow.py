@@ -186,22 +186,24 @@ def agent(prompt: str, *, name: str, cli: str | None = None, model: str = "") ->
                 team_name=ctx.team_name,
                 agent_name=name,
                 model=model,
-                prompt=cli_mod._member_bootstrap_prompt(),
-                skill="none",
+                prompt="",
+                skill="hive:hive",
                 cli_name=cli,
             )
         except (ValueError, RuntimeError) as exc:
             raise FlowError(f"spawn '{name}' failed: {exc}") from exc
-    _log(f"{name} spawned in {spawned.pane_id}; waiting for ready…")
+    _log(f"{name} spawned in {spawned.pane_id}")
 
     cli_mod._ensure_team_sidecar(ctx.team, Path(ctx.workspace))
-    not_ready = cli_mod._wait_for_peer_ready(
-        ctx.workspace,
-        team_name=ctx.team_name,
-        agents={name},
-    )
-    if not_ready:
-        raise FlowError(f"member '{name}' did not reach ready within the gate; inspect its pane")
+    if spawned.cli != "claude":
+        # claude inboxes queue; only TUI-injected CLIs need the ready gate.
+        not_ready = cli_mod._wait_for_peer_ready(
+            ctx.workspace,
+            team_name=ctx.team_name,
+            agents={name},
+        )
+        if not_ready:
+            raise FlowError(f"member '{name}' did not reach ready within the gate; inspect its pane")
 
     artifact = _task_artifact(name, prompt)
     msg_id = _dispatch(name, body=f"task dispatch: {Path(artifact).name}", artifact=artifact)

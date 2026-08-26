@@ -33,7 +33,7 @@ def _wire(monkeypatch, *, ready=True, replies=None):
 
     def fake_spawn(t, **kw):
         rec.spawns.append(kw)
-        return SimpleNamespace(pane_id=f"%{len(rec.spawns)}")
+        return SimpleNamespace(pane_id=f"%{len(rec.spawns)}", cli=kw.get("cli_name") or "claude")
 
     monkeypatch.setattr("hive.cli._spawn_team_agent", fake_spawn)
     monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda t, ws: 1)
@@ -65,13 +65,11 @@ def test_agent_spawns_dispatches_and_returns_reply(monkeypatch):
     assert member.name == "explore" and member.pane == "%1"
     assert member.summary == "done, see file"
     assert member.artifact == "/tmp/f.md"
-    # spawn used the generic member bootstrap, no plugin skill
-    import hive.cli as cli_mod
-
+    # spawn boots the member-contract plugin skill, no prose prompt
     spawn = rec.spawns[0]
     assert spawn["agent_name"] == "explore"
-    assert spawn["prompt"] == cli_mod._member_bootstrap_prompt()
-    assert spawn["skill"] == "none"
+    assert spawn["prompt"] == ""
+    assert spawn["skill"] == "hive:hive"
     # dispatch rode an artifact carrying the full prompt, from the flow sender
     d = rec.dispatches[0]
     assert d["sender_agent"] == "flow"
@@ -82,7 +80,14 @@ def test_agent_spawns_dispatches_and_returns_reply(monkeypatch):
 def test_agent_ready_timeout_raises(monkeypatch):
     _wire(monkeypatch, ready=False)
     with pytest.raises(flow.FlowError, match="did not reach ready"):
-        flow.agent("task", name="explore")
+        flow.agent("task", name="explore", cli="codex")
+
+
+def test_agent_claude_skips_ready_gate(monkeypatch):
+    rec, replies = _wire(monkeypatch, ready=False)  # gate would fail if consulted
+    replies["m1"] = {"body": "done", "artifact": "", "msgId": "r1"}
+    member = flow.agent("task", name="explore", cli="claude")
+    assert member.summary == "done"
 
 
 def test_agent_rejects_reserved_name(monkeypatch):
@@ -154,7 +159,7 @@ def test_parallel_returns_in_call_order_and_serializes_spawns(monkeypatch):
 def test_parallel_propagates_first_error(monkeypatch):
     _wire(monkeypatch, ready=False)
     with pytest.raises(flow.FlowError):
-        flow.parallel(lambda: flow.agent("t", name="x"), lambda: 42)
+        flow.parallel(lambda: flow.agent("t", name="x", cli="codex"), lambda: 42)
 
 
 def test_task_artifact_never_clobbers(monkeypatch, tmp_path):

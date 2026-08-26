@@ -1,9 +1,9 @@
 """Tests for `hive spawn` post role-decouple.
 
 `hive spawn <name>` keeps the plain pane-spawn contract; `--task <artifact>`
-turns it into the atomic dispatch primitive: member bootstrap prompt, wait
-for inputState=ready, then the task artifact rides the first `<HIVE>`
-message. `--workflow` is gone for good.
+turns it into the atomic dispatch primitive: the member boots into
+`/hive:hive` and the task artifact rides the first `<HIVE>` message.
+`--workflow` is gone for good.
 """
 
 import json
@@ -15,10 +15,6 @@ from hive.cli import cli
 pytestmark = pytest.mark.cli
 
 
-class _Spawned:
-    pane_id = "%55"
-
-
 class _FakeTeam:
     def __init__(self, workspace: str):
         self.name = "team-x"
@@ -27,9 +23,11 @@ class _FakeTeam:
         self.tmux_window = "dev:0"
 
     def spawn(self, name: str, **kwargs):
+        from types import SimpleNamespace
+
         self.spawn_calls = getattr(self, "spawn_calls", [])
         self.spawn_calls.append({"name": name, **kwargs})
-        return _Spawned()
+        return SimpleNamespace(pane_id="%55", cli=kwargs.get("cli") or "claude")
 
 
 def _setup(runner, configure_hive_home, monkeypatch, tmp_path, *, ready=True, dispatch_ok=True):
@@ -65,11 +63,9 @@ def _setup(runner, configure_hive_home, monkeypatch, tmp_path, *, ready=True, di
 
 
 def test_spawn_task_dispatches_atomically(runner, configure_hive_home, monkeypatch, tmp_path):
-    from hive.cli import _member_bootstrap_prompt
-
     team, waits, sends, task = _setup(runner, configure_hive_home, monkeypatch, tmp_path)
 
-    result = runner.invoke(cli, ["spawn", "explore", "--task", str(task)])
+    result = runner.invoke(cli, ["spawn", "explore", "--cli", "codex", "--task", str(task)])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload == {
@@ -78,11 +74,11 @@ def test_spawn_task_dispatches_atomically(runner, configure_hive_home, monkeypat
         "task": str(task.resolve()),
         "dispatched": True,
     }
-    # member boots with the generic bootstrap, no plugin skill load
+    # member boots straight into the member-contract plugin skill
     spawn_call = team.spawn_calls[0]
-    assert spawn_call["prompt"] == _member_bootstrap_prompt()
-    assert spawn_call["skill"] == "none"
-    # ready gate ran for exactly this member before the send
+    assert spawn_call["prompt"] == ""
+    assert spawn_call["skill"] == "hive:hive"
+    # ready gate ran for exactly this member before the send (TUI-injected CLI)
     assert waits == [{"workspace": team.workspace, "team": "team-x", "agents": {"explore"}}]
     (send,) = sends
     assert send["sender_agent"] == "orch"
@@ -91,12 +87,24 @@ def test_spawn_task_dispatches_atomically(runner, configure_hive_home, monkeypat
     assert send["command_name"] == "spawn-dispatch"
 
 
+def test_spawn_task_claude_skips_ready_gate(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A claude member's inbox queues: the task dispatches immediately after
+    spawn, no inputState=ready wait."""
+    team, waits, sends, task = _setup(runner, configure_hive_home, monkeypatch, tmp_path)
+
+    result = runner.invoke(cli, ["spawn", "explore", "--cli", "claude", "--task", str(task)])
+    assert result.exit_code == 0, result.output
+    assert waits == []
+    (send,) = sends
+    assert send["target_agent"] == "explore"
+
+
 def test_spawn_task_ready_timeout_fails_with_hint(runner, configure_hive_home, monkeypatch, tmp_path):
     _team, _waits, sends, task = _setup(
         runner, configure_hive_home, monkeypatch, tmp_path, ready=False
     )
 
-    result = runner.invoke(cli, ["spawn", "explore", "--task", str(task)])
+    result = runner.invoke(cli, ["spawn", "explore", "--cli", "codex", "--task", str(task)])
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["status"] == "spawn_ready_timeout"

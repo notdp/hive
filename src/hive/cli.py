@@ -1000,7 +1000,7 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Run `hive skills get core` first and follow "
+        "Context is pre-bound. Run `/hive:hive` first and follow "
         "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; reply on an existing thread with "
@@ -1681,7 +1681,7 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         "window": window,
         "orch": {"pane": orch_pane, "name": LEAD_AGENT_NAME, "cli": orch_cli},
         "workspace": str(ws_path),
-        "next": "hive skills get orch",
+        "protocol": "/hive:orch",
     }
 
 
@@ -1853,7 +1853,7 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 @click.option("--model", "-m", default="", help="Model ID")
 @click.option("--prompt", "-p", default="", help="Initial prompt (typed into TUI after startup)")
 @click.option("--cwd", default="", help="Working directory")
-@click.option("--skill", default="hive", help="Base skill to load after startup ('none' to skip)")
+@click.option("--skill", default="hive:hive", help="Base skill to load after startup ('none' to skip)")
 @click.option("--env", "-e", multiple=True, help="Extra env vars (KEY=VALUE, repeatable)")
 @click.option("--cli", "cli_name", type=click.Choice(["claude", "codex", "grok"]), default=None, help="Agent CLI to spawn (default: same as current pane)")
 @click.option(
@@ -1872,9 +1872,8 @@ def spawn(agent_name: str, model: str, prompt: str,
     agent CLI. By default spawns the same CLI as the current pane; use
     `--cli claude|codex|grok` to pick a specific one.
 
-    With `--task <artifact>`, the member boots with the generic member
-    bootstrap, the command waits until its first turn settles
-    (inputState=ready), then sends the task artifact as its first
+    With `--task <artifact>`, the member boots straight into the member
+    contract (`/hive:hive`) and the task artifact arrives as its first
     `<HIVE>` message — spawn and dispatch are one atomic step, so the
     member never wanders off exploring while waiting for work.
 
@@ -1895,9 +1894,9 @@ def spawn(agent_name: str, model: str, prompt: str,
             team_name=team_name,
             agent_name=agent_name,
             model=model,
-            prompt=(_member_bootstrap_prompt() if task_artifact else prompt),
+            prompt=("" if task_artifact else prompt),
             cwd=cwd,
-            skill=("none" if task_artifact else skill),
+            skill=("hive:hive" if task_artifact else skill),
             env_entries=env,
             cli_name=cli_name,
         )
@@ -1910,19 +1909,23 @@ def spawn(agent_name: str, model: str, prompt: str,
 
     workspace = _resolve_workspace(t, required=True)
     _ensure_team_sidecar(t, Path(workspace))
-    not_ready = _wait_for_peer_ready(
-        workspace,
-        team_name=team_name,
-        agents={agent_name},
-    )
-    if not_ready:
-        click.echo(json.dumps({
-            "status": "spawn_ready_timeout",
-            "agent": agent_name,
-            "pane": agent.pane_id,
-            "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
-        }, indent=2))
-        sys.exit(1)
+    if agent.cli != "claude":
+        # A claude member's inbox is a queue: the task can land while the
+        # bootstrap turn is still running and waits its turn. Only CLIs
+        # whose delivery injects into a live TUI need the ready gate.
+        not_ready = _wait_for_peer_ready(
+            workspace,
+            team_name=team_name,
+            agents={agent_name},
+        )
+        if not_ready:
+            click.echo(json.dumps({
+                "status": "spawn_ready_timeout",
+                "agent": agent_name,
+                "pane": agent.pane_id,
+                "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
+            }, indent=2))
+            sys.exit(1)
 
     task_path = str(Path(task_artifact).resolve())
     sender = _resolve_sender(None)
@@ -2387,89 +2390,6 @@ def layout_cmd(preset: str):
 # Thin discovery stub (skills/hive/SKILL.md) points here; the volatile
 # protocol/topology guidance ships inside the package and is fetched on
 # demand, so it can never drift from the installed CLI version.
-
-_SPEC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-
-def _spec_repo_dir() -> Path | None:
-    """Repo specs dir when running from a checkout; else None (packaged)."""
-    candidate = Path(__file__).resolve().parents[2] / "src" / "hive" / "core_assets" / "specs"
-    return candidate if candidate.is_dir() else None
-
-
-def _read_spec(name: str) -> str | None:
-    repo = _spec_repo_dir()
-    if repo is not None:
-        path = repo / f"{name}.md"
-        return path.read_text(encoding="utf-8") if path.is_file() else None
-    from importlib import resources
-
-    resource = resources.files("hive.core_assets").joinpath("specs", f"{name}.md")
-    try:
-        return resource.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return None
-
-
-def _list_specs() -> list[str]:
-    repo = _spec_repo_dir()
-    if repo is not None:
-        return sorted(p.stem for p in repo.glob("*.md"))
-    from importlib import resources
-
-    names: list[str] = []
-    try:
-        for entry in resources.files("hive.core_assets").joinpath("specs").iterdir():
-            if entry.name.endswith(".md"):
-                names.append(entry.name[:-3])
-    except (FileNotFoundError, OSError, NotADirectoryError):
-        pass
-    return sorted(names)
-
-
-@cli.group("skills")
-def skills_cmd():
-    """CLI-shipped skill specs (version-locked, never drift). Start: `hive skills get core`."""
-
-
-@skills_cmd.command("get")
-@click.argument("name")
-def skills_get_cmd(name: str):
-    """Print spec NAME (e.g. `core`). Content always matches the installed CLI version."""
-    if not _SPEC_NAME_RE.match(name):
-        _fail(f"invalid spec name '{name}' (lowercase letters, digits, dashes only)")
-    text = _read_spec(name)
-    if text is None:
-        available = ", ".join(_list_specs()) or "(none)"
-        _fail(f"unknown spec '{name}'. available: {available}")
-    click.echo(text)
-
-
-@skills_cmd.command("list")
-def skills_list_cmd():
-    """List spec names available on this installed version."""
-    click.echo(json.dumps({"specs": _list_specs()}, ensure_ascii=False, indent=2))
-
-
-@skills_cmd.command("ls", hidden=True)
-def skills_ls_cmd():
-    """Hidden alias of `hive skills list`."""
-    skills_list_cmd.callback()
-
-
-def _member_bootstrap_prompt() -> str:
-    """Spawn first-message for a member pane: identity + the one command that
-    loads the member contract. The spec itself stays CLI-served — the spawned
-    pane runs ``hive skills get core`` on boot, so there is no inlined spec
-    snapshot to keep in sync and the prompt stays short enough to inline into
-    the launch command.
-    """
-    return (
-        "你是这个 team 的成员,没有固定角色,只有任务。先跑 `hive skills get core` "
-        "取成员契约 —— 照它做。没有待办时结束当前 turn,让 pane 开着接收第一条"
-        "任务消息;在那之前别自己找活、别翻库、别 `sleep` 轮询。"
-    )
-
 
 def _prepare_window_for_new_team(window_target: str, *, current_pane: str) -> None:
     """Clear a stale ``@hive-team`` tag on *window_target* so a new team can
@@ -2967,13 +2887,13 @@ def _resume_members_into_live_team(
                 )
                 live_cwd = tmux.display_value(anchor_pane, "#{pane_current_path}") or ""
                 cwd = live_cwd or snap_anchor_cwd
-                session_kwargs: dict[str, str] = {"prompt": _member_bootstrap_prompt()}
+                session_kwargs: dict[str, str] = {"skill": "hive:hive"}
             else:
                 _resume_progress(
                     f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
                 )
                 cwd = str(m["cwd"])
-                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume"}
+                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume", "skill": "none"}
             agent = Agent.spawn(
                 name=name,
                 team_name=team_name,
@@ -2983,7 +2903,6 @@ def _resume_members_into_live_team(
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
-                skill="none",
                 workspace=ws,
                 **session_kwargs,
             )
@@ -3064,12 +2983,12 @@ def _resume_full_team(
                 _resume_progress(
                     f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
                 )
-                session_kwargs: dict[str, str] = {"prompt": _member_bootstrap_prompt()}
+                session_kwargs: dict[str, str] = {"skill": "hive:hive"}
             else:
                 _resume_progress(
                     f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
                 )
-                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume"}
+                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume", "skill": "none"}
             agent = Agent.spawn(
                 name=name,
                 team_name=team_name,
@@ -3080,7 +2999,6 @@ def _resume_full_team(
                 split_size="50%",
                 cli=str(m["cli"]),
                 model=str(m.get("model", "")),
-                skill="none",
                 workspace=ws,
                 **session_kwargs,
             )
