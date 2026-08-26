@@ -84,7 +84,7 @@ The generic three states:
 | live CLI | true | true | per runtime | per runtime | per runtime |
 
 Consumers — delivery refuses a dead runtime before any native transport (the
-send event stays durable on the bus); idle notify and duo pairing skip dead
+send event stays durable on the bus); idle notify skips dead
 runtimes.
 
 ### `inputState`
@@ -138,7 +138,7 @@ Meaning:
 
 - the phase the receiver's turn is in, per its daemon's events
 - consumers treat an absent `turnPhase` as "no turn structure available" and
-  fall back to `busy` / `_runtimeSource` (duo pairing does exactly this)
+  fall back to `busy` / `_runtimeSource`
 
 ## Claude Native Runtime (bg job source)
 
@@ -338,7 +338,7 @@ record went missing fails loudly instead of quietly typing into a stranger's
 turn.
 
 An unmanaged claude — a bare interactive TUI with no job record — is
-deliberately unsupported **as a Hive team member**: `hive init` / `hive duo`
+deliberately unsupported **as a Hive team member**: `hive init` / `hive spawn`
 reject it at team entry, and delivery to a recorded-less claude pane fails
 loudly. It still works as a `ccd.<name>` guest session over its own inbox.
 
@@ -373,7 +373,7 @@ config.toml on disk, so every new cwd gets `[projects."<dir>"] trust_level =
 This path is taken only when the pane has a recorded thread and the shared
 daemon answers. An unmanaged codex — embedded, or a `resume` picker launch
 whose chosen thread hive cannot know — is deliberately unsupported **as a Hive
-team member**: `hive init` / `hive duo` reject it at team entry. It still
+team member**: `hive init` / `hive spawn` reject it at team entry. It still
 runs, but hive reads no state from it — session id stays `unresolved`,
 `turnPhase` stays unknown, and there is no transcript fallback.
 

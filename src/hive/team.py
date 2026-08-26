@@ -169,39 +169,35 @@ class Team:
         for pane in panes:
             if pane.team != name:
                 continue
-            if pane.role in ("lead", "orchestrator", "agent"):
+            if pane.role == "agent":
                 if pane.agent and pane.group:
                     team.member_groups[pane.agent] = pane.group
-                if pane.role in ("lead", "orchestrator"):
-                    team.lead_pane_id = pane.pane_id
-                    team.lead_name = pane.agent or LEAD_AGENT_NAME
-                elif pane.role == "agent":
-                    from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, normalize_command
-                    resolved_cli = pane.cli or normalize_command(pane.command)
-                    if resolved_cli not in AGENT_CLI_NAMES:
-                        profile = detect_profile_for_pane(pane.pane_id)
-                        resolved_cli = profile.name if profile else "claude"
-                    agent = Agent(
-                        name=pane.agent,
-                        team_name=name,
-                        pane_id=pane.pane_id,
-                        cli=resolved_cli,
-                        cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
-                    )
-                    if resolved_cli == "codex":
-                        # A codex member's session id IS its threadId on the
-                        # shared app-server daemon, recorded per pane at
-                        # spawn/launch time.
-                        from .adapters.codex_app_server import thread_id_for_pane
-                        agent.session_id = thread_id_for_pane(pane.pane_id)
-                    elif resolved_cli == "claude":
-                        # A claude member's durable identity is its bg jobId,
-                        # recorded per pane at spawn/launch time — resume
-                        # wakes the job, so the jobId is what snapshots and
-                        # resume flows carry.
-                        from .adapters.claude_bg import job_id_for_pane
-                        agent.session_id = job_id_for_pane(pane.pane_id)
-                    team.agents[pane.agent] = agent
+                from .agent_cli import AGENT_CLI_NAMES, detect_profile_for_pane, normalize_command
+                resolved_cli = pane.cli or normalize_command(pane.command)
+                if resolved_cli not in AGENT_CLI_NAMES:
+                    profile = detect_profile_for_pane(pane.pane_id)
+                    resolved_cli = profile.name if profile else "claude"
+                agent = Agent(
+                    name=pane.agent,
+                    team_name=name,
+                    pane_id=pane.pane_id,
+                    cli=resolved_cli,
+                    cwd=tmux.display_value(pane.pane_id, "#{pane_current_path}") or "",
+                )
+                if resolved_cli == "codex":
+                    # A codex member's session id IS its threadId on the
+                    # shared app-server daemon, recorded per pane at
+                    # spawn/launch time.
+                    from .adapters.codex_app_server import thread_id_for_pane
+                    agent.session_id = thread_id_for_pane(pane.pane_id)
+                elif resolved_cli == "claude":
+                    # A claude member's durable identity is its bg jobId,
+                    # recorded per pane at spawn/launch time — resume
+                    # wakes the job, so the jobId is what snapshots and
+                    # resume flows carry.
+                    from .adapters.claude_bg import job_id_for_pane
+                    agent.session_id = job_id_for_pane(pane.pane_id)
+                team.agents[pane.agent] = agent
 
         team.peer_map = team._canonical_peer_map(team.peer_map)
         return team
@@ -241,7 +237,6 @@ class Team:
         prompt: str = "",
         cwd: str = "",
         skill: str = "hive",
-        workflow: str = "",
         extra_env: dict[str, str] | None = None,
         cli: str = "claude",
     ) -> Agent:
@@ -253,7 +248,10 @@ class Team:
 
         is_first = len(self.agents) == 0
         from . import layout
-        window_for_split = tmux.get_current_window_target() or ""
+        # The team's own window, never the caller's focused one — a spawn
+        # issued from another window must land and re-tile where the team
+        # lives (kill already resolves the same way).
+        window_for_split = self.tmux_window or tmux.get_current_window_target() or ""
         if is_first:
             target = self.lead_pane_id or tmux.get_current_pane_id() or ""
             split_horizontal = layout.split_horizontal(window_for_split, 2)
@@ -262,8 +260,6 @@ class Team:
             target = last_agent.pane_id
             split_horizontal = False
         split_size = "50%"
-
-        initial_skill = workflow or skill
 
         agent = Agent.spawn(
             name=name,
@@ -275,7 +271,7 @@ class Team:
             is_first=is_first,
             split_horizontal=split_horizontal,
             split_size=split_size,
-            skill=initial_skill,
+            skill=skill,
             extra_env=extra_env,
             cli=cli,
         )
@@ -283,7 +279,7 @@ class Team:
         tmux.tag_pane(agent.pane_id, "agent", name, self.name, cli=cli)
         self.agents[name] = agent
 
-        window_target = tmux.get_current_window_target()
+        window_target = self.tmux_window or tmux.get_current_window_target()
         if window_target:
             tmux.configure_hive_window(window_target)
             from . import layout
@@ -431,7 +427,7 @@ class Team:
     def resolve_peer(self, name: str) -> str | None:
         """Find *name*'s peer, preferring no-peer + anti-family CLI candidates.
 
-        Rule (mirrors `hive squad spawn-duo`'s anti-family philosophy):
+        Rule (anti-family philosophy — heterogeneous review):
           1. explicit peer from peer_map (set by `hive peer set`)
           2. otherwise: pick a member that has no explicit peer yet
              (`no-peer`), preferring one whose CLI is anti-family of *name*'s
@@ -623,7 +619,7 @@ def _gc_stale_team_windows(name: str, *, keep: str, all_windows: list[str]) -> N
 def duplicate_team_bindings() -> list[dict[str, object]]:
     """Report tmux windows that collide on the same ``@hive-team`` name.
 
-    Bug A could leave two live duos tagged with one team name across different
+    Bug A could leave two live teams tagged with one name across different
     windows. This scans all windows, groups by team, and returns every group
     with more than one window — including each window's id, workspace, and live
     member panes — so ``hive doctor`` can surface the collision. Detection only:

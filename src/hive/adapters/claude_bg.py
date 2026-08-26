@@ -969,7 +969,7 @@ def ensure_job_named(job_id: str, name: str, *, claude_bin: str = "claude") -> b
 
     A job minted before hive knew whose pane it was on carries a placeholder
     (`hive-<pane>`): every path that adopts an existing pane into a team —
-    duo, squad, resume — tags the pane after its CLI is already running, and
+    init, spawn, resume — tags the pane after its CLI is already running, and
     the mint cannot see a tag that does not exist yet. `/rename` is the only
     way back, the same command the agents panel runs, and it updates the
     panel row, the ledger and the registry at once. A busy engine queues it

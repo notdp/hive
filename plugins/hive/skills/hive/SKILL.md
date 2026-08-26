@@ -1,11 +1,11 @@
 ---
 name: hive
-description: Hive 是 tmux 里的多 agent 协作 runtime。当收到 HIVE 消息、被指定为 duo-worker/duo-validator/squad-orch/squad-challenger/squad-worker/squad-validator、被拉进 Hive team、或需要开/管理 duo/squad 协作时使用；用于确认身份、取当前角色协议、收发消息。
+description: Hive 是 tmux 里的多 agent 协作 runtime。当收到 HIVE 消息、被拉进 Hive team、被派发任务、或要发起协作拆任务派成员时使用；用于确认身份、取成员/编排协议、收发消息。
 ---
 
 # Hive — agent 协作入口
 
-Hive 让多个 agent 在 tmux 里用 `<HIVE ...>` 消息协作。这个文件只是发现入口；真正协议由 CLI 按当前角色取回。
+Hive 让多个 agent 在 tmux 里用 `<HIVE ...>` 消息协作。这个文件只是发现入口；真正协议由 CLI 取回。
 
 ## 已在 team 里
 
@@ -13,46 +13,26 @@ Hive 让多个 agent 在 tmux 里用 `<HIVE ...>` 消息协作。这个文件只
 
 ```bash
 hive team
-```
-
-看 `self`、`members`、`group`、`peer` 和当前 pane 状态。
-
-如果出生 prompt 或 init 输出给了角色，就只取那一份：
-
-```bash
-hive skills get duo-worker
-hive skills get duo-validator
-hive skills get squad-orch
-hive skills get squad-challenger
-hive skills get squad-worker
-hive skills get squad-validator
-```
-
-这些角色 spec 都是自包含协议。取回一份、读完、照它做；不要再拼别的 role spec。
-
-如果你只是被拉进已有 team、没有角色，取：
-
-```bash
 hive skills get core
 ```
 
-没有待办时结束当前 turn，pane 保持打开等下一条 `<HIVE>` 注入。不要 `sleep` 轮询，不要自己翻库找活。
+`hive team` 看 `self`、`members`、`group` 和当前 pane 状态。`core` 是成员契约：通信底座 + 任务契约。你没有固定角色，任务由派发消息和它的 artifact 定义；读完 core，没有待办就结束当前 turn，pane 保持打开等 `<HIVE>` 注入。不要 `sleep` 轮询，不要自己翻库找活。
 
-## 开新拓扑
-
-你要新开协作时，先用阻塞式提问工具问 human 要 **duo** 还是 **squad**。不要替 human 猜。
-
-- duo：你和一个异构 validator 闭环一件事。
-- squad：orch 拆多 feature，challenger 审 plan，再按需派多个 duo。
-
-按答案跑：
+出生 prompt 让你当 orch 时，再取编排协议：
 
 ```bash
-hive duo init
-hive squad init
+hive skills get orch
 ```
 
-init 的 JSON 会给 `next`，例如 `hive skills get duo-worker` 或 `hive skills get squad-orch`。你自己跑 `next` 取当前 pane 的完整协议。
+## 发起协作
+
+你要拆任务、派成员协作时：
+
+```bash
+hive init
+```
+
+当前 pane 即成为 orch。init 输出的 `next` 指向 `hive skills get orch`；成员之后由你按需 `hive spawn`。
 
 ## 速查
 
@@ -62,4 +42,4 @@ hive skills get debug
 hive skills get advanced-routing
 ```
 
-`debug` 和 `advanced-routing` 是按需逃生口；日常流程按当前角色 spec。
+`debug` 和 `advanced-routing` 是按需逃生口；日常流程按 core / orch。

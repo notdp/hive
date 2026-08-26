@@ -149,7 +149,7 @@ def _resume_mocks(monkeypatch, *, team_obj="default"):
     monkeypatch.setattr("hive.cli.tmux.kill_pane", lambda p: rec.killed_panes.append(p))
     monkeypatch.setattr(
         "hive.cli.tmux.new_window",
-        lambda session, name="", cwd=None, detach=True, index=None: rec.new_windows.append(
+        lambda session, name="", cwd=None, detach=True: rec.new_windows.append(
             {"session": session, "name": name, "cwd": cwd, "detach": detach}
         ) or ("dev:7", "%70"),
     )
@@ -207,19 +207,16 @@ def test_resume_precheck_failures_never_mutate(runner, configure_hive_home, monk
     # no handle / unknown handle
     cases.append((["resume"], "hive ls"))
     cases.append((["resume", "nope"], "no usable snapshot"))
-    # unsupported group
-    _save_snap("sq", group="squad", cwd=good_cwd)
-    cases.append((["resume", "sq"], "duo only"))
     # corrupt schema
+    (tmp_path / ".hive" / "state" / "resume").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".hive" / "state" / "resume" / "bad.json").write_text("{nope")
     cases.append((["resume", "bad"], "no usable snapshot"))
-    # missing sessionId for the worker — hard failure naming the worker only
-    # (a validator-only miss degrades to a fresh spawn instead of failing)
+    # every member sessionless — nothing to resume with original context
     _save_snap("nosess", cwd=good_cwd, members=[
         {"name": "worker", "cli": "claude", "sessionId": "", "cwd": good_cwd},
-        {"name": "validator", "cli": "codex", "sessionId": "sid-v", "cwd": good_cwd},
+        {"name": "validator", "cli": "codex", "sessionId": "", "cwd": good_cwd},
     ])
-    cases.append((["resume", "nosess"], "missing sessionId for worker"))
+    cases.append((["resume", "nosess"], "no member has a saved sessionId"))
     # missing cwd on disk
     _save_snap("nocwd", cwd=str(tmp_path / "gone"))
     cases.append((["resume", "nocwd"], "missing on disk"))
@@ -301,7 +298,7 @@ def test_resume_revives_missing_validator_with_session(runner, configure_hive_ho
     assert spawn["session_id"] == "sid-v" and spawn["session_mode"] == "resume"
     assert spawn["cwd"] == good_cwd and spawn["workspace"] == "/tmp/ws"
     assert spawn["skill"] == "none"
-    assert rec.peers == [("worker", "validator")]
+    assert rec.peers == []
     assert rec.layouts == ["dev:2"]
     assert rec.new_windows == []  # revived into the existing window
     assert rec.selects == ["dev:2"]  # human is taken to the team window
@@ -318,23 +315,6 @@ def test_resume_revives_missing_worker_too(runner, configure_hive_home, monkeypa
     assert rec.spawns[0]["name"] == "worker"
     assert rec.spawns[0]["session_id"] == "sid-w"
     assert rec.spawns[0]["session_mode"] == "resume"
-
-
-def test_resume_member_failure_cleans_only_new_panes(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    rec = _resume_mocks(monkeypatch)
-    _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
-
-    def failing_load(name, prefer_pane=""):
-        raise ValueError("peer wiring failed")
-
-    monkeypatch.setattr("hive.cli.Team.load", staticmethod(failing_load))
-
-    result = runner.invoke(cli, ["resume", "0-w2"])
-    assert result.exit_code != 0
-    assert rec.killed_panes == ["%71"]  # only the freshly spawned pane
-    assert rec.killed_windows == []  # survivors' window untouched
-    assert resume_store.load_snapshot("0-w2") is not None  # snapshot kept
 
 
 def test_resume_refuses_mismatched_live_identity(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -396,15 +376,16 @@ def test_resume_full_restore_rebuilds_team_in_new_window(runner, configure_hive_
 
     assert len(rec.spawns) == 2
     first, second = rec.spawns
-    # worker takes over the new window's shell pane in place; validator splits
-    assert first["name"] == "worker" and first["split_window"] is False
+    # name order (no orch in this roster): validator takes over the new
+    # window's shell pane in place; worker splits
+    assert first["name"] == "validator" and first["split_window"] is False
     assert first["target_pane"] == "%70"
-    assert first["session_id"] == "sid-w" and first["session_mode"] == "resume"
+    assert first["session_id"] == "sid-v" and first["session_mode"] == "resume"
     assert first["cwd"] == good_cwd
-    assert second["name"] == "validator" and second.get("split_window", True) is True
-    assert second["session_id"] == "sid-v" and second["session_mode"] == "resume"
+    assert second["name"] == "worker" and second.get("split_window", True) is True
+    assert second["session_id"] == "sid-w" and second["session_mode"] == "resume"
 
-    assert rec.peers == [("worker", "validator")]
+    assert rec.peers == []
     assert rec.sidecars and rec.sidecars[0][0] == "0-w2"
     # The human asked for the team: resume switches them to the new window.
     assert rec.selects == ["dev:7"]
@@ -441,34 +422,21 @@ def test_resume_full_restore_rolls_back_on_second_spawn_failure(
     assert snap is not None and snap["createdAt"] == "100.0"  # snapshot untouched, retryable
 
 
-def test_resume_full_restore_rolls_back_on_peer_and_sidecar_failure(
+def test_resume_full_restore_rolls_back_on_sidecar_failure(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home()
 
-    # peer failure
-    rec = _resume_mocks(monkeypatch)
-    _dead_setup(monkeypatch, tmp_path)
-    bad_peer = SimpleNamespace(
-        name="0-w2", created_at=555.0,
-        agents={"worker": SimpleNamespace(pane_id="%71"), "validator": SimpleNamespace(pane_id="%72")},
-        set_peer=lambda a, b: (_ for _ in ()).throw(KeyError("peer")),
-    )
-    monkeypatch.setattr("hive.cli.Team.load", staticmethod(lambda name, prefer_pane="": bad_peer))
-    result = runner.invoke(cli, ["resume", "0-w2"])
-    assert result.exit_code != 0
-    assert rec.killed_windows == ["dev:7"]
-    assert resume_store.load_snapshot("0-w2")["createdAt"] == "100.0"
-
     # sidecar failure (starts last, after the continuation snapshot commit:
     # the window still rolls back and the snapshot stays retryable)
-    rec2 = _resume_mocks(monkeypatch)
+    rec = _resume_mocks(monkeypatch)
+    _dead_setup(monkeypatch, tmp_path)
     def bad_sidecar(t, ws):
         raise RuntimeError("sidecar spawn failed")
     monkeypatch.setattr("hive.cli._ensure_team_sidecar", bad_sidecar)
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code != 0
-    assert rec2.killed_windows == ["dev:7"]
+    assert rec.killed_windows == ["dev:7"]
     assert resume_store.load_snapshot("0-w2") is not None  # retryable
 
 
@@ -516,60 +484,45 @@ def test_ls_superseded_snapshot_does_not_hide_live_team(runner, configure_hive_h
     assert live_row["window"] == "dev:2"
 
 
-def test_resume_rejects_non_duo_roster_shape(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_resume_restores_arbitrary_roster(runner, configure_hive_home, monkeypatch, tmp_path):
+    """Post role-decouple: any roster resumes — names carry no contract."""
     configure_hive_home()
     rec = _resume_mocks(monkeypatch)
     _tmux_state(monkeypatch, pane_list=[], window_list=[])
     good_cwd = str(tmp_path / "repo")
     (tmp_path / "repo").mkdir()
     _save_snap("odd", cwd=good_cwd, members=[
-        {"name": "worker", "cli": "claude", "sessionId": "s1", "cwd": good_cwd},
-        {"name": "observer", "cli": "codex", "sessionId": "s2", "cwd": good_cwd},
+        {"name": "impl-auth", "cli": "claude", "sessionId": "s1", "cwd": good_cwd},
+        {"name": "review", "cli": "codex", "sessionId": "s2", "cwd": good_cwd},
     ])
 
     result = runner.invoke(cli, ["resume", "odd"])
-    assert result.exit_code != 0
-    assert "worker + validator" in result.output
-    _assert_zero_mutation(rec)
+    assert result.exit_code == 0, result.output
+    assert [sp["name"] for sp in rec.spawns] == ["impl-auth", "review"]  # name order
 
 
-def test_resume_member_tag_failure_kills_fresh_pane(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_resume_member_context_failure_kills_fresh_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     rec = _resume_mocks(monkeypatch)
     _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
 
-    def bad_tag(*_a):
-        raise RuntimeError("tag failed")
+    def bad_context(pane, **kw):
+        raise RuntimeError("context save failed")
 
-    monkeypatch.setattr("hive.cli.tmux.set_pane_option", bad_tag)
+    monkeypatch.setattr("hive.cli.hive_context.save_context_for_pane", bad_context)
 
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code != 0
-    assert rec.killed_panes == ["%71"]  # pane tracked from birth, not after tagging
+    assert rec.killed_panes == ["%71"]  # pane tracked from birth, not after wiring
     assert rec.killed_windows == []
 
 
-def test_resume_member_layout_failure_restores_prior_peer_map(
+def test_resume_member_layout_failure_kills_fresh_pane(
     runner, configure_hive_home, monkeypatch, tmp_path
 ):
     configure_hive_home()
     rec = _resume_mocks(monkeypatch)
     _live_setup(monkeypatch, tmp_path, live_panes=[_pane("%1", "0-w2", "worker", "claude")])
-
-    saves: list[dict] = []
-    team = SimpleNamespace(
-        name="0-w2",
-        created_at=100.0,
-        agents={"worker": SimpleNamespace(pane_id="%1"), "validator": SimpleNamespace(pane_id="%71")},
-        peer_map={},
-    )
-
-    def fake_set_peer(a, b):
-        team.peer_map = {a: b, b: a}
-
-    team.set_peer = fake_set_peer
-    team.save = lambda: saves.append(dict(team.peer_map))
-    monkeypatch.setattr("hive.cli.Team.load", staticmethod(lambda name, prefer_pane="": team))
 
     def bad_layout(_t):
         raise RuntimeError("layout failed")
@@ -579,8 +532,7 @@ def test_resume_member_layout_failure_restores_prior_peer_map(
     result = runner.invoke(cli, ["resume", "0-w2"])
     assert result.exit_code != 0
     assert rec.killed_panes == ["%71"]
-    assert team.peer_map == {}  # prior (empty) peer state restored
-    assert saves and saves[-1] == {}
+    assert rec.killed_windows == []
 
 
 def test_resume_full_restore_commits_snapshot_before_sidecar(
@@ -638,20 +590,19 @@ def test_ls_json_live_rows_carry_repo_context(runner, configure_hive_home, monke
     # live truth overrides whatever the snapshot recorded
     assert merged["repo"] == "liverepo" and merged["branch"] == "livebranch"
     assert merged["repoCwd"] == "/live/repo-cwd"
-    assert [m["name"] for m in merged["members"]][0] == "worker"  # worker-first
+    assert [m["name"] for m in merged["members"]][0] == "validator"  # orch-first, then name
 
     live_only = by_team["0-w9"]
     assert live_only["repo"] == "liverepo" and live_only["windowName"] == "other"
 
 
-def test_ls_anchor_prefers_worker_then_orch_then_first(runner, configure_hive_home, monkeypatch):
+def test_ls_anchor_prefers_orch_then_first(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
-    import hive.cli as cli_mod
     from hive.cli import _live_anchor_pane
 
     worker, orch, zeta = _pane("%1", "t", "worker", "claude"), _pane("%2", "t", "orch", "claude"), _pane("%3", "t", "zeta", "codex")
-    assert _live_anchor_pane({"worker": worker, "orch": orch, "zeta": zeta}).pane_id == "%1"
-    assert _live_anchor_pane({"orch": orch, "zeta": zeta}).pane_id == "%2"
+    assert _live_anchor_pane({"worker": worker, "orch": orch, "zeta": zeta}).pane_id == "%2"
+    assert _live_anchor_pane({"worker": worker, "zeta": zeta}).pane_id == "%1"
     assert _live_anchor_pane({"zeta": zeta, "alpha": _pane("%4", "t", "alpha", "codex")}).pane_id == "%4"
 
 
@@ -728,7 +679,7 @@ def test_resume_progress_streams_to_stderr_stdout_stays_json(
     assert "resuming" not in result.stdout and "ready in" not in result.stdout
     err = result.stderr
     assert "window dev:7" in err
-    for name, pane in (("worker", "%71"), ("validator", "%72")):
+    for name, pane in (("validator", "%71"), ("worker", "%72")):
         assert f"resuming {name}" in err
         assert f"{name} ready in {pane}" in err
 
@@ -777,12 +728,12 @@ def test_resume_progress_ordering_locked_by_call_log(
     assert log == [
         "progress:window:dev:7",
         "select:dev:7",
-        "progress:resuming:worker",
-        "spawn:worker",
-        "progress:worker:ready",
         "progress:resuming:validator",
         "spawn:validator",
         "progress:validator:ready",
+        "progress:resuming:worker",
+        "spawn:worker",
+        "progress:worker:ready",
     ]
 
 
@@ -923,17 +874,18 @@ def test_resume_full_restore_spawns_fresh_validator_without_session(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
 
-    # window opens in the worker's cwd; worker spawns first
+    # window opens in the worker's cwd (the sessioned anchor); name order
+    # puts the fresh validator first
     assert rec.new_windows[0]["cwd"] == good_cwd
-    worker, validator = rec.spawns
+    validator, worker = rec.spawns
     assert worker["name"] == "worker"
     assert worker["session_id"] == "sid-w" and worker["session_mode"] == "resume"
     assert worker["cwd"] == good_cwd and worker["skill"] == "none"
-    # fresh validator: role bootstrap prompt, no session resume, worker's cwd,
-    # snapshot cli/model
+    # fresh validator: member bootstrap prompt, no session resume, anchor's
+    # cwd, snapshot cli/model
     assert validator["name"] == "validator"
     assert "session_id" not in validator and "session_mode" not in validator
-    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    assert validator["prompt"] == cli_mod._member_bootstrap_prompt()
     assert validator["skill"] == "none"
     assert validator["cwd"] == good_cwd
     assert validator["cli"] == "codex" and validator["model"] == "m2"
@@ -943,8 +895,8 @@ def test_resume_full_restore_spawns_fresh_validator_without_session(
     # progress must not claim the fresh validator is replaying a session
     assert "spawning fresh validator" in result.stderr
     assert "resuming validator" not in result.stderr
-    # transaction tail unchanged: peer, layout, sidecar
-    assert rec.peers == [("worker", "validator")]
+    # transaction tail unchanged: layout, sidecar
+    assert rec.peers == []
     assert rec.sidecars and rec.sidecars[0][0] == "0-w2"
 
 
@@ -981,7 +933,7 @@ def test_resume_live_revive_spawns_fresh_validator_in_live_worker_cwd(
     (validator,) = rec.spawns
     assert validator["name"] == "validator"
     assert "session_id" not in validator and "session_mode" not in validator
-    assert validator["prompt"] == cli_mod._role_bootstrap_prompt("duo-validator")
+    assert validator["prompt"] == cli_mod._member_bootstrap_prompt()
     # live worker pane's current cwd (mocked display_value), not the snapshot's
     assert validator["cwd"] == "/live/repo-cwd"
     sessions = {m["name"]: m["session"] for m in payload["members"]}

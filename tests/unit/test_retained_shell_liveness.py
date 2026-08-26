@@ -233,20 +233,6 @@ def test_idle_notify_excludes_retained_shell_pane(monkeypatch):
     assert sidecar._idle_notify_agent_panes("t") == ["%1"]
 
 
-def test_pairing_rejects_retained_shell_neighbor(monkeypatch):
-    from hive.cli import _duo_neighbor_for_pairing
-    from hive.tmux import PaneInfo
-
-    monkeypatch.setattr(
-        "hive.agent_cli.detect_cli_process_for_pane", lambda _p: None
-    )
-    neighbor = PaneInfo(pane_id="%2", title="OpenAI Codex")
-    picked = _duo_neighbor_for_pairing(
-        "%1", [PaneInfo(pane_id="%1", title="[worker]"), neighbor], "claude"
-    )
-    assert picked is None
-
-
 def test_doctor_payload_exposes_cli_alive(monkeypatch):
     fake_agent = SimpleNamespace(pane_id="%1", is_alive=lambda: True)
     fake_team = SimpleNamespace(name="t", agents={"v": fake_agent}, get=lambda _n: fake_agent)

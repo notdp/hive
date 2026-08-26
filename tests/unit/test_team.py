@@ -70,7 +70,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert borders == ["dev:0"]
 
     # Set up pane tags for load to find (in real usage, set during create/spawn)
-    _tmux.tag_pane("%0", "lead", "orch", "team-a")
+    _tmux.tag_pane("%0", "agent", "orch", "team-a", cli="claude")
     _tmux.tag_pane("%1", "agent", "claude", "team-a", cli="claude")
 
     loaded = Team.load("team-a")
@@ -79,7 +79,7 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.description == "demo"
     assert loaded.tmux_window == "dev:0"
     assert loaded.tmux_window_id == "@0"
-    assert loaded.lead_pane_id == "%0"
+    assert loaded.agents["orch"].pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
     assert loaded.peer_map == {"orch": "claude", "claude": "orch"}
 
@@ -256,7 +256,7 @@ def test_team_clear_peer_only_removes_explicit_mapping(configure_hive_home, monk
     assert team.peer_mode() == "none"
 
 
-def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hive_home, monkeypatch):
+def test_team_spawn_tags_agent_and_passes_skill(configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=True, current_pane="%0")
     spawned = []
     tagged = []
@@ -278,7 +278,7 @@ def test_team_spawn_tags_agent_and_passes_workflow_as_initial_skill(configure_hi
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: sent.append(text))
 
     team = Team(name="team-a", lead_pane_id="%0")
-    result = team.spawn("claude", workflow="demo-review", prompt="start now")
+    result = team.spawn("claude", skill="demo-review", prompt="start now")
 
     assert result is agent
     assert spawned[0]["target_pane"] == "%0"

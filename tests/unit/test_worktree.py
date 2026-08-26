@@ -90,11 +90,6 @@ def test_resolve_base_explicit_invalid_ref_fails(repo):
         wt.resolve_base(repo, "no-such-ref", None)
 
 
-def test_resolve_base_squad_without_integration_hard_fails(repo):
-    with pytest.raises(wt.WorktreeError, match="integration branch"):
-        wt.resolve_base(repo, None, "")
-
-
 def test_resolve_base_no_origin_head_hard_fails(tmp_path):
     bare = tmp_path / "solo"
     _run(["git", "init", "-q", str(bare)], tmp_path)
@@ -105,10 +100,10 @@ def test_resolve_base_no_origin_head_hard_fails(tmp_path):
         wt.resolve_base(bare, None, None)
 
 
-def test_resolve_base_squad_integration_resolves(repo):
+def test_resolve_base_integration_resolves(repo):
     _run(["git", "branch", "epic-integration"], repo)
     base = wt.resolve_base(repo, None, "epic-integration")
-    assert base.source == "squad-integration"
+    assert base.source == "integration"
     assert base.ref == "epic-integration"
 
 
@@ -135,10 +130,10 @@ def test_start_is_idempotent_for_existing_worktree(repo):
 
 def test_start_foreign_owner_hard_fails_without_config_overwrite(repo):
     _start(repo, "feat-a")
-    _run(["git", "config", "branch.feat-a.hive-owner", "squad:other"], repo)
-    with pytest.raises(wt.WorktreeError, match="owned by 'squad:other'"):
+    _run(["git", "config", "branch.feat-a.hive-owner", "team:other"], repo)
+    with pytest.raises(wt.WorktreeError, match="owned by 'team:other'"):
         _start(repo, "feat-a")
-    assert wt.read_meta(repo, "feat-a")["hive-owner"] == "squad:other"
+    assert wt.read_meta(repo, "feat-a")["hive-owner"] == "team:other"
 
 
 def test_start_needs_rebase_when_base_advances(repo):
@@ -186,14 +181,13 @@ def test_start_recovers_stale_worktree_entry(repo):
     assert Path(res2.path).is_dir()
 
 
-def test_start_squad_writes_gh_merge_base(repo):
+def test_start_integration_writes_gh_merge_base(repo):
     _run(["git", "branch", "epic-int"], repo)
     base = wt.resolve_base(repo, None, "epic-int")
-    res = wt.start(repo, "feat-a", base=base, owner="squad:epic", squad_name="epic", gh_merge_base="epic-int")
+    res = wt.start(repo, "feat-a", base=base, owner="team:epic", gh_merge_base="epic-int")
     assert res.ready
     meta = wt.read_meta(repo, "feat-a")
     assert meta["gh-merge-base"] == "epic-int"
-    assert meta["hive-squad"] == "epic"
 
 
 def test_start_standalone_writes_gh_merge_base_from_origin_base(repo):
@@ -216,10 +210,10 @@ def test_start_existing_refreshes_gh_merge_base_when_integration_moves(repo):
     _run(["git", "branch", "old-int"], repo)
     _run(["git", "branch", "new-int"], repo)
     base_old = wt.resolve_base(repo, None, "old-int")
-    wt.start(repo, "feat-a", base=base_old, owner="squad:epic", squad_name="epic", gh_merge_base="old-int")
+    wt.start(repo, "feat-a", base=base_old, owner="team:epic", gh_merge_base="old-int")
     created = wt.read_meta(repo, "feat-a")["hive-created"]
     base_new = wt.resolve_base(repo, None, "new-int")
-    res = wt.start(repo, "feat-a", base=base_new, owner="squad:epic", squad_name="epic", gh_merge_base="new-int")
+    res = wt.start(repo, "feat-a", base=base_new, owner="team:epic", gh_merge_base="new-int")
     assert res.mode == "existing"
     meta = wt.read_meta(repo, "feat-a")
     assert meta["gh-merge-base"] == "new-int"
@@ -231,10 +225,10 @@ def test_start_attach_backfills_stale_gh_merge_base(repo):
     _run(["git", "branch", "old-int"], repo)
     _run(["git", "branch", "new-int"], repo)
     base_old = wt.resolve_base(repo, None, "old-int")
-    res = wt.start(repo, "feat-a", base=base_old, owner="squad:epic", squad_name="epic", gh_merge_base="old-int")
+    res = wt.start(repo, "feat-a", base=base_old, owner="team:epic", gh_merge_base="old-int")
     _run(["git", "worktree", "remove", res.path], repo)  # meta survives manual remove
     base_new = wt.resolve_base(repo, None, "new-int")
-    res2 = wt.start(repo, "feat-a", base=base_new, owner="squad:epic", squad_name="epic", gh_merge_base="new-int")
+    res2 = wt.start(repo, "feat-a", base=base_new, owner="team:epic", gh_merge_base="new-int")
     assert res2.mode == "attached"
     assert wt.read_meta(repo, "feat-a")["gh-merge-base"] == "new-int"
 
@@ -244,7 +238,7 @@ def test_start_attach_backfills_stale_gh_merge_base(repo):
 def test_done_removes_worktree_keeps_branch_clears_hive_meta_only(repo):
     _run(["git", "branch", "epic-int"], repo)
     base = wt.resolve_base(repo, None, "epic-int")
-    res = wt.start(repo, "feat-a", base=base, owner="squad:epic", squad_name="epic", gh_merge_base="epic-int")
+    res = wt.start(repo, "feat-a", base=base, owner="team:epic", gh_merge_base="epic-int")
     out = wt.done(repo, "feat-a", caller_cwd=str(repo))
     assert out.branch_kept and not Path(res.path).exists()
     assert "hive-owner" in out.cleared_config_keys
