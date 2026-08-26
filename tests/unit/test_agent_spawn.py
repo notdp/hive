@@ -1,6 +1,7 @@
 """Tests for Agent.spawn model/skill/env handling."""
 
 import json
+import subprocess
 
 import pytest
 
@@ -1061,6 +1062,86 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
     assert daemon_calls == []  # codex daemon path not taken for claude
     assert len(inbox_calls) == 1  # claude delivers over its session inbox
     assert submitted == []  # inbox-only: no keystroke fallback
+
+
+def _stale_claude_record(monkeypatch):
+    """A recycled pane id still carrying a previous claude member's job record,
+    with that job's engine alive. Returns the inbox writes it would receive."""
+    writes: list[tuple] = []
+    _pin_job(monkeypatch, job_id="beef4321", engine=_fake_engine(job_id="beef4321"))
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender: writes.append((sock, text, sender))
+        or claude_sessions.ACCEPTED_UDS_WRITE,
+    )
+    return writes
+
+
+def test_send_codex_member_never_routes_into_a_stale_claude_record(monkeypatch):
+    """A blind probe (tmux busy, nothing on the pane tty) must not hand a codex
+    member's message to whatever claude job the pane id used to host."""
+    _pin_cli_probe(monkeypatch, "")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    writes = _stale_claude_record(monkeypatch)
+
+    with pytest.raises(DeliveryError, match="no live CLI process"):
+        Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert writes == []  # the other member's inbox was never opened
+    assert calls == []
+
+
+def test_send_codex_member_refuses_a_pane_probed_as_claude(monkeypatch):
+    """The probe itself reads the stale job record as evidence of a live
+    claude, so 'the probe said claude' is not enough — the member hive spawned
+    on this pane is codex, and its transport is the daemon."""
+    _pin_cli_probe(monkeypatch, "claude")
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    writes = _stale_claude_record(monkeypatch)
+    daemon_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.send_to_pane",
+        lambda *a: daemon_calls.append(a) or "turnStartAccepted",
+    )
+
+    with pytest.raises(DeliveryError, match="does not deliver across CLIs"):
+        Agent(name="w", team_name="t", pane_id="%3", cli="codex").send("hi")
+
+    assert writes == []
+    assert daemon_calls == []  # a claude-looking pane is not a codex thread either
+    assert calls == []
+
+
+def test_save_and_clear_draft_keeps_the_draft_when_the_buffer_save_fails(monkeypatch):
+    """tmux never took the buffer: clearing the composer now would destroy the
+    only copy of the user's draft."""
+    monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _p: True)
+    monkeypatch.setattr("hive.agent.draft_guard.parse_draft", lambda _p, _n: "unsent thought")
+    monkeypatch.setattr(
+        "hive.agent.tmux.load_buffer",
+        lambda *_a: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["tmux"], timeout=5)),
+    )
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "hive.agent.draft_guard.clear_input", lambda pane, _n: cleared.append(pane)
+    )
+
+    assert agent_mod._save_and_clear_draft("%3", "claude") == ""
+    assert cleared == []
+
+
+def test_save_and_clear_draft_still_restores_when_the_clear_fails(monkeypatch):
+    """The buffer holds the draft, so a half-done clear must still hand the
+    restore its buffer name."""
+    monkeypatch.setattr("hive.agent.draft_guard.supported_profile", lambda _p: True)
+    monkeypatch.setattr("hive.agent.draft_guard.parse_draft", lambda _p, _n: "unsent thought")
+    monkeypatch.setattr("hive.agent.tmux.load_buffer", lambda *_a: None)
+    monkeypatch.setattr(
+        "hive.agent.draft_guard.clear_input",
+        lambda *_a: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["tmux"], timeout=5)),
+    )
+
+    assert agent_mod._save_and_clear_draft("%3", "claude") == "hive_draft_3"
 
 
 def test_spawn_claude_skips_session_detection(monkeypatch):

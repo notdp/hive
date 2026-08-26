@@ -470,6 +470,24 @@ def test_member_interrupt_pipes_escape_into_the_job(monkeypatch):
     assert calls == ["cafe1234"]
 
 
+def test_member_interrupt_without_a_job_record_is_refused(monkeypatch):
+    """A lost job record leaves nothing addressable: Escape into the pane would
+    land in whatever session its viewer is showing, so hive refuses instead."""
+    _member_pane(monkeypatch, None)
+    _forbid_tmux(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no bg job record"):
+        agent.Agent(name="red", team_name="probe", pane_id="%1", cli="claude").interrupt()
+
+
+def test_member_shutdown_is_refused_rather_than_keystroked(monkeypatch):
+    _member_pane(monkeypatch, "cafe1234")
+    _forbid_tmux(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="cannot be shut down with keystrokes"):
+        agent.Agent(name="red", team_name="probe", pane_id="%1", cli="claude").shutdown()
+
+
 def test_interrupt_on_other_clis_still_sends_escape_to_the_pane(monkeypatch):
     keys = []
     monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: keys.append((pane, key)))
