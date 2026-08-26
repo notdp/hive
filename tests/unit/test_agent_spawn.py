@@ -61,6 +61,10 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.agent.tmux.split_window", lambda target, horizontal=True, size=None, cwd=None: target)
     monkeypatch.setattr("hive.agent.tmux.get_pane_tty", lambda _pane: None)
+    # The early re-tile and the engine tmux-context probe must never reach a
+    # real server from a unit test.
+    monkeypatch.setattr("hive.agent.tmux.get_pane_window_target", lambda _pane: "")
+    monkeypatch.setattr("hive.agent.tmux.display_value", lambda _pane, _fmt: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
     monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
     monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
