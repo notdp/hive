@@ -618,13 +618,15 @@ class Agent:
         )
 
     def interrupt(self) -> None:
-        """Press Escape to interrupt.
+        """Abort the member's running turn over its CLI's native transport.
 
-        A claude member's Escape rides the same pipe as its text — addressed
-        to the job, so it interrupts *that* engine's turn whatever the pane's
-        viewer happens to be showing. There is no fallback: a member pane
-        never gets send-keys, so a lost job record is a refusal rather than an
-        Escape into whatever the pane is showing.
+        Every branch is addressed to the engine, never to the pane: claude's
+        Escape rides the same pipe as its text, codex takes ``turn/interrupt``
+        on its recorded thread and grok the ACP ``session/cancel`` on its
+        recorded session. So the abort lands on *that* turn whatever the
+        pane's viewer happens to be showing, and a member whose transport is
+        gone is a refusal — never an Escape into a pager, a copy-mode scroll
+        or somebody else's session.
         """
         if self.cli == "claude":
             from .adapters import claude_bg
@@ -639,7 +641,29 @@ class Agent:
             if not result.ok:
                 raise RuntimeError(f"claude job {job_id} was not interrupted: {result.why}")
             return
-        tmux.send_key(self.pane_id, "Escape")
+        if self.cli == "codex":
+            from .adapters import codex_app_server
+
+            if codex_app_server.interrupt_pane(self.pane_id) is None:
+                raise RuntimeError(
+                    f"codex pane {self.pane_id} did not accept turn/interrupt "
+                    "(no recorded thread, daemon down, RPC error, or "
+                    "connection failure)"
+                )
+            return
+        if self.cli == "grok":
+            from .adapters import grok_leader
+
+            if grok_leader.interrupt_pane(self.pane_id) is None:
+                raise RuntimeError(
+                    f"grok pane {self.pane_id} did not accept session/cancel "
+                    "(no leader/session, or connection failure)"
+                )
+            return
+        raise RuntimeError(
+            f"member '{self.name}' runs '{self.cli}', which hive has no native "
+            "interrupt for; hive never send-keys a member pane"
+        )
 
     def capture(self, lines: int = 50) -> str:
         """Capture pane output."""

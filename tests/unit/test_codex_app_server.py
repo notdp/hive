@@ -449,6 +449,120 @@ def test_compact_pane_unavailable_without_record(monkeypatch, tmp_path):
     assert m.compact_pane("%1") == "unavailable"
 
 
+# --- interrupt --------------------------------------------------------------
+
+
+def _client_reading(turns, calls=None):
+    """A client whose thread/read answers with *turns*, recording every call."""
+    client = _bare_client()
+    client.call = lambda method, params=None, **kw: (
+        (calls.append((method, params)) if calls is not None else None)
+        or {"result": {"thread": {"turns": turns}}}
+    )
+    return client
+
+
+def test_active_turn_id_reads_the_in_progress_turn():
+    calls: list = []
+    client = _client_reading(
+        [{"id": "old", "status": "completed"}, {"id": "live", "status": "inProgress"}], calls
+    )
+    assert client.active_turn_id("t1") == "live"
+    assert calls == [("thread/read", {"threadId": "t1", "includeTurns": True})]
+
+
+def test_active_turn_id_none_when_every_turn_is_finished():
+    assert _client_reading([{"id": "old", "status": "completed"}]).active_turn_id("t1") is None
+
+
+def test_active_turn_id_none_on_rpc_error():
+    client = _bare_client()
+    client.call = lambda *_a, **_kw: {"__error__": "boom"}
+    assert client.active_turn_id("t1") is None
+
+
+def test_turn_interrupt_carries_thread_and_turn_id():
+    # The turnId is mandatory on this RPC and is checked against the live
+    # turn, so it must be passed through verbatim.
+    calls: list = []
+    client = _bare_client()
+    client.call = lambda method, params=None, **kw: calls.append((method, params)) or {"result": {}}
+    assert "result" in client.turn_interrupt("t1", "live")
+    assert calls == [("turn/interrupt", {"threadId": "t1", "turnId": "live"})]
+
+
+def test_interrupt_pane_aborts_the_running_turn(monkeypatch, tmp_path):
+    _record(monkeypatch, tmp_path)
+    aborted = []
+
+    class FakeClient:
+        def active_turn_id(self, tid):
+            assert tid == "t1"
+            return "live"
+
+        def turn_interrupt(self, tid, turn_id):
+            aborted.append((tid, turn_id))
+            return {"result": {}}
+
+    monkeypatch.setattr(m, "_shared_client", lambda: FakeClient())
+    assert m.interrupt_pane("%1") == m.TURN_INTERRUPT_ACCEPTED
+    assert aborted == [("t1", "live")]
+
+
+def test_interrupt_pane_reports_an_idle_thread_without_interrupting(monkeypatch, tmp_path):
+    _record(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def active_turn_id(self, _tid):
+            return None
+
+        def turn_interrupt(self, *_a):
+            raise AssertionError("no running turn -> nothing to interrupt")
+
+    monkeypatch.setattr(m, "_shared_client", lambda: FakeClient())
+    assert m.interrupt_pane("%1") == m.NO_RUNNING_TURN
+
+
+def test_interrupt_pane_fails_without_record(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        m, "_shared_client",
+        lambda: pytest.fail("no record -> the daemon must not even be dialed"),
+    )
+    assert m.interrupt_pane("%1") is None
+
+
+def test_interrupt_pane_fails_without_daemon(monkeypatch, tmp_path):
+    _record(monkeypatch, tmp_path)
+    monkeypatch.setattr(m, "_shared_client", lambda: None)
+    assert m.interrupt_pane("%1") is None
+
+
+def test_interrupt_pane_fails_on_rpc_error_response(monkeypatch, tmp_path):
+    _record(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def active_turn_id(self, _tid):
+            return "live"
+
+        def turn_interrupt(self, *_a):
+            return {"__error__": {"code": -32600, "message": "expected active turn id"}}
+
+    monkeypatch.setattr(m, "_shared_client", lambda: FakeClient())
+    assert m.interrupt_pane("%1") is None
+
+
+def test_interrupt_pane_fails_on_rpc_exception(monkeypatch, tmp_path):
+    _record(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def active_turn_id(self, _tid):
+            raise OSError("socket reset")
+
+    monkeypatch.setattr(m, "_shared_client", lambda: FakeClient())
+    assert m.interrupt_pane("%1") is None
+
+
 def test_connect_true_when_client_established(monkeypatch):
     monkeypatch.setattr(m, "_shared_client", lambda: object())
     assert m.connect() is True
