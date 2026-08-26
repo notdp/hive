@@ -244,7 +244,6 @@ def configure_hive_home(monkeypatch, tmp_path):
         # hermetic — no real tmux rename (would hit a live window on pane-id
         # collision) and no git subprocess against the test cwd.
         monkeypatch.setattr("hive.cli.tmux.rename_window", lambda *_a, **_k: None)
-        monkeypatch.setattr("hive.cli._git_branch_for_cwd", lambda _cwd: "")
         # No other live windows by default → duo window names don't collide.
         monkeypatch.setattr("hive.cli.tmux.list_window_names", lambda: [])
         # Duo formation during `hive init` spawns or adopts a validator pane.

@@ -2609,63 +2609,6 @@ class _DuoPlacement:
     validator_model: str
     adopt_pane: str = ""
     adopt_cli: str = ""
-    window_name: str = "duo"
-
-
-_DUO_NAME_NOISE_PREFIXES = ("feat/", "fix/", "feature/", "bugfix/", "chore/", "hotfix/", "worktree-")
-
-
-def _git_branch_for_cwd(cwd: str) -> str:
-    """Current git branch of *cwd*, or "" if it is not a git repo / is detached."""
-    if not cwd:
-        return ""
-    try:
-        r = subprocess.run(
-            ["git", "-C", cwd, "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return r.stdout.strip() if r.returncode == 0 else ""
-
-
-def _duo_window_name(worker_cwd: str) -> str:
-    """A meaningful tmux window label for a duo.
-
-    The worker cwd's git branch is what the duo is actually working on (Hive's
-    per-feature worktree workflow makes branch == feature), so use it — minus
-    noise prefixes (``feat/``, ``worktree-``, ...). On a default branch
-    (main/master) or outside git, fall back to the project (cwd basename); a
-    bare "duo" tells you nothing.
-    """
-    branch = _git_branch_for_cwd(worker_cwd)
-    if branch and branch not in ("main", "master"):
-        for prefix in _DUO_NAME_NOISE_PREFIXES:
-            if branch.startswith(prefix):
-                branch = branch[len(prefix):]
-                break
-        if branch:
-            return branch
-    base = os.path.basename(worker_cwd.rstrip("/")) if worker_cwd else ""
-    return base or "duo"
-
-
-def _unique_duo_window_name(base: str, this_window: str) -> str:
-    """Disambiguate *base* against other live windows.
-
-    Same-repo, same-branch duos compute the same label, so on a collision append
-    ``-2``, ``-3``, .... *this_window* is excluded so the duo never collides with
-    its own (already-set) name.
-    """
-    taken = {name for target, name in tmux.list_window_names() if target != this_window}
-    if base not in taken:
-        return base
-    n = 2
-    while f"{base}-{n}" in taken:
-        n += 1
-    return f"{base}-{n}"
 
 
 def _resolve_validator_cli_model(my_family: str, explicit_cli: str | None) -> tuple[str, str]:
@@ -2707,7 +2650,6 @@ def _prepare_duo_placement(
         _fail(f"current pane {current_pane} missing from {window} listing; rerun init")
     count = len(panes)
     worker_cwd = tmux.display_value(current_pane, "#{pane_current_path}") or ""
-    window_name = _duo_window_name(worker_cwd)
 
     # Decide adopt-vs-spawn before mutating any windows.
     adopt = _duo_neighbor_for_pairing(current_pane, panes, my_family) if count == 2 else None
@@ -2720,7 +2662,7 @@ def _prepare_duo_placement(
         adopt_cli = v_profile.name if v_profile else "claude"
     elif count >= 2:
         # Crowded / unpairable window — isolate the worker, then spawn clean.
-        new_window, worker_pane = tmux.break_pane(current_pane, name=window_name)
+        new_window, worker_pane = tmux.break_pane(current_pane)
         if not new_window:
             _fail("failed to break out into a new window")
         window = new_window
@@ -2734,7 +2676,6 @@ def _prepare_duo_placement(
         validator_model=v_model,
         adopt_pane=adopt_pane,
         adopt_cli=adopt_cli,
-        window_name=window_name,
     )
 
 
@@ -2859,7 +2800,7 @@ def _attach_duo_to_team(t: Team, *, placement: _DuoPlacement, ws: str) -> dict[s
 
     # Label the window after what the duo is working on, not a generic "duo";
     # disambiguate same-branch siblings with a -N suffix.
-    tmux.rename_window(window, _unique_duo_window_name(placement.window_name, window))
+    tmux.rename_window(window, t.name)
     tmux.configure_hive_window(window)
     tmux.set_pane_option(worker_pane, "hive-role", "agent")
     tmux.set_pane_option(worker_pane, "hive-agent", "worker")
@@ -3094,31 +3035,10 @@ def _derive_pr_window_status(global_format: str | None) -> str | None:
     return _WINDOW_INDEX_TOKEN_RE.sub(_PR_INDEX_TOKEN, global_format)
 
 
-def _feature_title_for_cwd(cwd: str) -> str:
-    """Feature branch of *cwd* when it is a hive-started worktree, else "".
-
-    Only branches carrying real ``hive-*`` metadata qualify — a bare
-    ``gh-merge-base`` (left behind after ``worktree done``) is not evidence,
-    and neither is an arbitrary user branch. Best-effort: any probe failure
-    means "no title", never a failed set-pr.
-    """
-    branch = _git_branch_for_cwd(cwd)
-    if not branch:
-        return ""
-    from . import worktree as wt_mod
-
-    try:
-        meta = wt_mod.read_meta(wt_mod.repo_anchor(cwd), branch)
-    except wt_mod.WorktreeError:
-        return ""
-    return branch if any(key in meta for key in wt_mod.META_KEYS) else ""
-
-
 @duo_cmd.command("set-pr")
 @click.argument("number", type=int)
-@click.argument("title", required=False, default=None)
 @_json_default_options
-def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
+def duo_set_pr_cmd(number: int, plain: bool):
     """Label the current duo window with its PR number and rename it to the feature.
 
     Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the
@@ -3144,10 +3064,6 @@ def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
             "run set-pr from your duo window"
         )
     tmux.set_window_option(window, "@hive-pr", str(number))
-    if not title:
-        title = _feature_title_for_cwd(os.getcwd()) or None
-    if title:
-        tmux.rename_window(window, title)
     display: dict[str, str] = {}
     for option in ("window-status-format", "window-status-current-format"):
         global_format = tmux.get_global_window_option(option)
@@ -3160,12 +3076,9 @@ def duo_set_pr_cmd(number: int, title: str | None, plain: bool):
         display[option] = "derived"
     if plain:
         summary = ", ".join(f"{key}={value}" for key, value in display.items())
-        title_note = f", title={title}" if title else ""
-        click.echo(f"window {window} labeled @hive-pr={number}{title_note} ({summary})")
+        click.echo(f"window {window} labeled @hive-pr={number} ({summary})")
     else:
         result: dict[str, object] = {"window": window, "pr": number, "display": display}
-        if title:
-            result["title"] = title
         click.echo(json.dumps(result, indent=2))
 
 
@@ -3576,7 +3489,7 @@ def _resume_full_team(
     members = _resume_member_order(list(snap.get("members", [])))  # type: ignore[arg-type]
     worker_cwd = str(members[0]["cwd"])  # worker-first order; preflight proved it exists
     session_name = tmux.get_current_session_name() or "hive"
-    window_name = str(snap.get("windowName") or "duo")
+    window_name = team_name
 
     window, first_pane = tmux.new_window(session_name, name=window_name, cwd=str(members[0]["cwd"]), detach=True)
     if not window or not first_pane:
@@ -3969,7 +3882,7 @@ def squad_init_cmd(peer_cli: str | None, squad_name: str | None, worker_cli: str
     # The pane is unbound here (bound squad orch returned early above). Decide the
     # final squad window before creating the main team, so the team identity
     # derives from where the squad actually lives (Bug A).
-    window_display_name = f"squad {squad_name}"
+    window_display_name = squad_name
     if tmux.get_pane_count(current_pane) <= 1:
         current_window = tmux.display_value(current_pane, "#{session_name}:#{window_index}")
         if not current_window:

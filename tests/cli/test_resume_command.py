@@ -391,7 +391,8 @@ def test_resume_full_restore_rebuilds_team_in_new_window(runner, configure_hive_
     payload = json.loads(result.stdout)
 
     assert payload["resumed"] == "full" and payload["window"] == "dev:7"
-    assert rec.new_windows == [{"session": "dev", "name": "hive", "cwd": good_cwd, "detach": True}]
+    # The restored window carries the team's name, not the snapshot's label.
+    assert rec.new_windows == [{"session": "dev", "name": "0-w2", "cwd": good_cwd, "detach": True}]
 
     assert len(rec.spawns) == 2
     first, second = rec.spawns

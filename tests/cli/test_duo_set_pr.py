@@ -25,7 +25,6 @@ def no_feature_cwd(monkeypatch):
     """Pin title derivation to "no feature": the test process itself runs on
     some real git branch, which must never leak into assertions. Rename-path
     tests override this explicitly."""
-    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "")
 
 
 def _capture_renames(monkeypatch) -> list:
@@ -82,34 +81,21 @@ def test_set_pr_stamps_option_and_derives_display_json(runner, configure_hive_ho
     assert renames == []
 
 
-def test_set_pr_auto_renames_to_feature_branch(runner, configure_hive_home, monkeypatch):
+def test_set_pr_never_renames_the_window(runner, configure_hive_home, monkeypatch):
+    """The window name is the team's identity; stamping a PR number labels the
+    window status format instead of overwriting that name."""
     configure_hive_home()
     _bind_team()
     renames = _capture_renames(monkeypatch)
-    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "my-feature")
 
     result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["title"] == "my-feature"
-    assert renames == [(("dev:0", "my-feature"), {})]
+    assert renames == []
+    assert "title" not in payload
     assert _window_option("hive-pr") == "87"
     assert _window_option("window-status-format") == DERIVED_DEFAULT
-
-
-def test_set_pr_explicit_title_beats_derivation(runner, configure_hive_home, monkeypatch):
-    configure_hive_home()
-    _bind_team()
-    renames = _capture_renames(monkeypatch)
-    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "derived-branch")
-
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "given-title", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["title"] == "given-title"
-    assert renames == [(("dev:0", "given-title"), {})]
 
 
 def test_set_pr_default_output_is_json(runner, configure_hive_home):
@@ -274,7 +260,6 @@ def test_set_pr_rejects_non_integer(runner, configure_hive_home):
 def test_set_pr_requires_hive_team_window(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     renames = _capture_renames(monkeypatch)
-    monkeypatch.setattr("hive.cli._feature_title_for_cwd", lambda _cwd: "my-feature")
 
     result = runner.invoke(cli, ["duo", "set-pr", "87"])
 

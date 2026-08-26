@@ -316,36 +316,19 @@ def test_duo_init_breakout_names_team_from_final_window_not_origin(
     assert sidecar_calls == [("/tmp/hive-dev-w77", "honey", "dev:7", "@77")]
 
 
-def test_duo_window_name_branch_then_project(monkeypatch):
-    """Duo window label = git branch with noise prefix stripped; falls back to
-    the project basename on a default branch or outside git."""
-    import hive.cli as cli_mod
-
-    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "feat/compose-creator-language")
-    assert cli_mod._duo_window_name("/Users/x/ordo_ai") == "compose-creator-language"
-
-    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "worktree-kol-task-control-board")
-    assert cli_mod._duo_window_name("/Users/x/ordo_ai") == "kol-task-control-board"
-
-    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "main")
-    assert cli_mod._duo_window_name("/Users/notdp/Developer/hive") == "hive"
-
-    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _c: "")
-    assert cli_mod._duo_window_name("/Users/x/myproj") == "myproj"
-
-
-def test_duo_init_window_named_after_git_branch(runner, configure_hive_home, monkeypatch, tmp_path):
-    """A formed duo renames its window to the worker's feature branch (noise
-    prefix stripped) instead of a generic 'duo'."""
+def test_duo_init_window_is_named_after_the_team(runner, configure_hive_home, monkeypatch, tmp_path):
+    """The window carries the team's name: with several duos on screen, a
+    branch- or project-derived label does not say whose window it is, and the
+    team name is already unique per window."""
     configure_hive_home(current_pane="%100", session_name="dev")
     import hive.cli as cli_mod
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    sent = _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
-    monkeypatch.setattr(cli_mod, "_git_branch_for_cwd", lambda _cwd: "feat/compose-creator-language")
+    _duo_mocks(cli_mod, monkeypatch, repo, pane_count=1)
     renamed: list[tuple[str, str]] = []
     monkeypatch.setattr(cli_mod.tmux, "rename_window", lambda target, name: renamed.append((target, name)))
+    monkeypatch.setattr(cli_mod, "_pick_team_name", lambda *a, **k: "honey")
     monkeypatch.setattr(
         cli_mod.Agent,
         "spawn",
@@ -355,30 +338,7 @@ def test_duo_init_window_named_after_git_branch(runner, configure_hive_home, mon
     result = runner.invoke(cli, ["duo", "init"])
     assert result.exit_code == 0, result.output
 
-    # 1-pane window dev:0 renamed to the feature (feat/ prefix stripped), not "duo".
-    assert ("dev:0", "compose-creator-language") in renamed
-
-
-def test_unique_duo_window_name_appends_counter_on_collision(monkeypatch):
-    """Same-branch siblings get -2, -3 ...; a free name stays clean; a window
-    never collides with its own name."""
-    import hive.cli as cli_mod
-
-    monkeypatch.setattr(
-        cli_mod.tmux,
-        "list_window_names",
-        lambda: [
-            ("dev:1", "compose-creator-language"),
-            ("dev:5", "compose-creator-language-2"),
-            ("dev:9", "other"),
-        ],
-    )
-    # free name → unchanged
-    assert cli_mod._unique_duo_window_name("kol-task-control-board", "dev:2") == "kol-task-control-board"
-    # base + -2 both taken → -3
-    assert cli_mod._unique_duo_window_name("compose-creator-language", "dev:2") == "compose-creator-language-3"
-    # this_window's own name is excluded → no self-collision
-    assert cli_mod._unique_duo_window_name("other", "dev:9") == "other"
+    assert ("dev:0", "honey") in renamed
 
 
 def test_inject_role_bootstrap_sends_full_prompt_once(monkeypatch):
