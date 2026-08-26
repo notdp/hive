@@ -37,10 +37,15 @@ entirely (invisible to ``agents --json`` and undeliverable).
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import pty
 import re
+import struct
 import subprocess
+import termios
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -437,6 +442,10 @@ _CLEAR_LINE = "\x15"  # C-u: drop whatever is in the composer (claude keeps it
 _RESTORE_KILL = "\x19"  # C-y: paste the kill ring back into the composer
 _SUBMIT = "\r"
 _ESCAPE = "\x1b"  # interrupts the running turn
+# Only used when the job is on nobody's screen: claude's own pty host
+# starts at this size, so it is the least surprising thing to wear.
+_DEFAULT_PTY_COLS = 200
+_DEFAULT_PTY_ROWS = 50
 
 _ENGINE_READY_TIMEOUT = 20.0  # our own attach is the wake; the entry follows it
 _CLIENT_READY_TIMEOUT = 15.0  # observed ~0.3s to the journal entry
@@ -670,21 +679,109 @@ def _submit_verdict(path: Path | None, offset: int, text: str) -> str:
     return "none"
 
 
-def _attach_pipe(job_id: str, *, claude_bin: str) -> subprocess.Popen | None:
-    try:
-        return subprocess.Popen(
-            [claude_bin, "attach", job_id],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=bg_env(),
-        )
-    except (OSError, subprocess.SubprocessError):
+class _AttachClient:
+    """A ``claude attach`` client on a pty, wearing the size already on screen.
+
+    The engine's pty follows whatever client is attached, so a client with no
+    tty drags it to a default the moment it connects and back when it leaves
+    — measured on a real engine: 180 columns, 120 while a tty-less pipe was
+    attached, 180 again after. The human watching that engine sees their
+    session reflow twice per hive keystroke. Wearing the viewer's own size
+    makes the connection invisible instead.
+
+    Exposes the parts of :class:`subprocess.Popen` the keystroke path uses,
+    with ``stdin`` writing into the pty master.
+    """
+
+    def __init__(self, proc: subprocess.Popen, master_fd: int) -> None:
+        self._proc = proc
+        self._fd: int | None = master_fd
+        self.stdin = self
+        self.pid = proc.pid
+        # The attached TUI paints continuously; an undrained master fills its
+        # buffer and blocks the engine's writes.
+        self._drain = threading.Thread(target=self._drain_master, args=(master_fd,), daemon=True)
+        self._drain.start()
+
+    @staticmethod
+    def _drain_master(fd: int) -> None:
+        while True:
+            try:
+                if not os.read(fd, 65536):
+                    return
+            except OSError:
+                return
+
+    def write(self, payload: str) -> None:
+        if self._fd is None:
+            raise BrokenPipeError("attach client closed")
+        os.write(self._fd, payload.encode("utf-8"))
+
+    def flush(self) -> None:
         return None
 
+    def close(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
 
-def _feed(proc: subprocess.Popen, payload: str) -> bool:
+    def poll(self) -> int | None:
+        return self._proc.poll()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._proc.wait(timeout=timeout)
+
+    def kill(self) -> None:
+        self._proc.kill()
+
+
+def _engine_screen_size(job_id: str) -> tuple[int, int]:
+    """(cols, rows) the engine is rendering at — its viewer pane's size.
+
+    The pane hive bound the job to is the client that set the current size,
+    so matching it means the attach changes nothing. With no pane on record
+    (or no tmux answer) the engine is not on anyone's screen and any size is
+    harmless; the fallback is the size claude's own pty host starts at.
+    """
+    pane = pane_for_job(job_id)
+    if pane:
+        try:
+            from .. import tmux
+
+            raw = tmux.display_value(pane, "#{pane_width}\t#{pane_height}") or ""
+            cols, _, rows = raw.partition("\t")
+            if cols.isdigit() and rows.isdigit() and int(cols) > 0 and int(rows) > 0:
+                return int(cols), int(rows)
+        except Exception:
+            pass
+    return _DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS
+
+
+def _attach_pipe(job_id: str, *, claude_bin: str) -> _AttachClient | None:
+    cols, rows = _engine_screen_size(job_id)
+    try:
+        master, slave = pty.openpty()
+    except OSError:
+        return None
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        proc = subprocess.Popen(
+            [claude_bin, "attach", job_id],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=bg_env(),
+            start_new_session=True,  # the pty is the client's tty, not ours
+        )
+    except (OSError, subprocess.SubprocessError):
+        os.close(master)
+        os.close(slave)
+        return None
+    os.close(slave)
+    return _AttachClient(proc, master)
+
+
+def _feed(proc: _AttachClient, payload: str) -> bool:
     try:
         assert proc.stdin is not None
         proc.stdin.write(payload)
@@ -694,7 +791,7 @@ def _feed(proc: subprocess.Popen, payload: str) -> bool:
         return False
 
 
-def _wait_engine_behind(job_id: str, proc: subprocess.Popen) -> EngineSession | None:
+def _wait_engine_behind(job_id: str, proc: _AttachClient) -> EngineSession | None:
     """The engine the pipe is typing into — the attach itself wakes a parked
     one, so this is also the wake wait. A client that exits first says the
     job is gone; there is nothing left to wait for."""
@@ -708,7 +805,7 @@ def _wait_engine_behind(job_id: str, proc: subprocess.Popen) -> EngineSession | 
         time.sleep(_ENTRY_POLL_INTERVAL)
 
 
-def _wait_client_ready(proc: subprocess.Popen) -> bool:
+def _wait_client_ready(proc: _AttachClient) -> bool:
     """Wait until the attach client has the session on screen.
 
     Its own attach-journal entry says so (~0.3s), and that matters for the
@@ -728,7 +825,7 @@ def _wait_client_ready(proc: subprocess.Popen) -> bool:
     return False
 
 
-def _clear_composer(proc: subprocess.Popen) -> bool:
+def _clear_composer(proc: _AttachClient) -> bool:
     """C-u, in a chunk of its own — see :func:`_wait_client_ready`."""
     if not _feed(proc, _CLEAR_LINE):
         return False
@@ -736,7 +833,7 @@ def _clear_composer(proc: subprocess.Popen) -> bool:
     return True
 
 
-def _restore_draft(proc: subprocess.Popen) -> None:
+def _restore_draft(proc: _AttachClient) -> None:
     """C-y: paste the draft the C-u killed back into the (now empty) composer.
 
     Best-effort — a failed restore leaves what today's behavior always left,
@@ -747,7 +844,7 @@ def _restore_draft(proc: subprocess.Popen) -> None:
         time.sleep(_CONTROL_KEY_GAP)  # let the client forward it before EOF
 
 
-def _close_pipe(proc: subprocess.Popen) -> None:
+def _close_pipe(proc: _AttachClient) -> None:
     """Let the attach client exit, and make sure it does.
 
     A wedged client would otherwise outlive the caller holding the pipe open;

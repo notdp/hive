@@ -49,19 +49,29 @@ def test_border_follows_the_viewed_session(border_pane):
     # A drifted terminal title never speaks for itself: the probe does.
     run_tmux(["select-pane", "-t", border_pane, "-T", "whatever the TUI wrote"])
 
-    # On its own member (or nothing identifiable on screen): bare name.
+    # On its own member (or nothing identifiable on screen): the member's
+    # full name. `red` alone says nothing about which team's red it is when
+    # several duos are on screen.
     _set(border_pane, "@hive-view", "")
-    assert _render(border_pane) == " red "
+    assert _render(border_pane) == " probe.red "
 
-    # Viewer switched to another member: dual display.
+    # Viewer switched to another member: dual display, both sides named.
     _set(border_pane, "@hive-view", "comb.blue")
-    assert _render(border_pane) == " red#[fg=colour220] -> comb.blue#[default] "
+    assert _render(border_pane) == " probe.red#[fg=colour220] -> comb.blue#[default] "
 
     # Notify marker composes with the drift suffix.
     _set(border_pane, "@hive-notify-active", "1")
-    assert _render(border_pane).startswith(" #[fg=colour220]#[bold][!] #[default]red")
+    assert _render(border_pane).startswith(" #[fg=colour220]#[bold][!] #[default]probe.red")
 
 
 def test_border_untagged_pane_falls_back_to_pane_title(border_pane):
     run_tmux(["select-pane", "-t", border_pane, "-T", "plain shell"])
     assert _render(border_pane) == " plain shell "
+
+
+def test_border_without_a_team_tag_shows_the_bare_agent(border_pane):
+    """A pane tagged as an agent but with no team is still labelled, not
+    dropped to its terminal title."""
+    _set(border_pane, "@hive-agent", "red")
+    run_tmux(["select-pane", "-t", border_pane, "-T", "whatever the TUI wrote"])
+    assert _render(border_pane) == " red "
