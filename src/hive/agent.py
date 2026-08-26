@@ -279,7 +279,10 @@ class Agent:
         # entirely.
         initial_prompt = ""
         if skill and skill != "none":
-            initial_prompt = profile.skill_cmd.format(name=skill) if profile else f"/{skill}"
+            # claude addresses plugin skills fully qualified (/hive:hive);
+            # codex and grok register them by bare skill name ($hive, /hive).
+            skill_ref = skill if cli == "claude" else skill.rsplit(":", 1)[-1]
+            initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
         if prompt:
             initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
         # The launch goes through `hive <cli>`, whose parser strips any `--`

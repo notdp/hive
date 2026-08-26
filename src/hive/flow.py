@@ -1,7 +1,7 @@
 """hive.flow — deterministic orchestration over live members.
 
 A flow script is plain Python the orch writes per task and runs with
-``hive flow run plan.py``. ``agent()`` spawns a real member pane, waits
+``hive flow run workflow.py``. ``agent()`` spawns a real member pane, waits
 until it is ready, dispatches the task as its first ``<HIVE>`` message,
 then blocks until the member replies — the visible counterpart of a
 headless subagent call. ``parallel()`` runs several of those at once.

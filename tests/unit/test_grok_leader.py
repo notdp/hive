@@ -818,3 +818,22 @@ def test_pool_rebinds_when_the_pane_session_record_rotates(tmp_path, monkeypatch
             client._reader.join(timeout=1.0)
         for proc in procs:
             proc.stdout.close()
+
+
+def test_daemon_env_washes_inherited_identity_markers(monkeypatch):
+    """Regression: a leader spawned from inside another member's engine
+    inherited that engine's CLAUDE_CODE_MESSAGING_SOCKET, so every hive call
+    in this grok member resolved to the orch's pane (replies came from=orch)."""
+    from hive.adapters import grok_leader
+
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/999.sock")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/elsewhere")
+    monkeypatch.setenv("CODEX_THREAD_ID", "tid-1")
+    monkeypatch.setenv("TMUX_PANE", "%stale")
+
+    env = grok_leader._daemon_env_for_pane("%42")
+
+    assert env["TMUX_PANE"] == "%42"
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" not in env
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert "CODEX_THREAD_ID" not in env

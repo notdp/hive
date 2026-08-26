@@ -284,14 +284,6 @@ def bg_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         k: v for k, v in os.environ.items()
         if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))
     }
-    # These invocations are programmatic: their stdout gets parsed (the
-    # spawn's jobId, `agents --json`). A member engine's tool env carries
-    # FORCE_COLOR, which makes the claude CLI wrap that output in ANSI
-    # codes — a jobId parsed with color codes polls a job that does not
-    # exist. Neutralize every color-forcing knob.
-    for knob in ("FORCE_COLOR", "CLICOLOR_FORCE", "CLICOLOR"):
-        env.pop(knob, None)
-    env["NO_COLOR"] = "1"
     config = _config_dir()
     if config != Path(os.path.expanduser("~/.claude")):
         env["CLAUDE_CONFIG_DIR"] = str(config)
@@ -316,7 +308,7 @@ def list_jobs(*, claude_bin: str = "claude") -> list[dict[str, Any]] | None:
     if result.returncode != 0:
         return None
     try:
-        rows = json.loads(result.stdout)
+        rows = json.loads(_ANSI_RE.sub("", result.stdout or ""))
     except ValueError:
         return None
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else None

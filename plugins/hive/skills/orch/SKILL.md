@@ -100,7 +100,7 @@ impl 回报后 **不 kill**，spawn verify（task 带验收标准 + branch + imp
 循环、fan-out、barrier 这类确定性控制流不用手工编排：写一个 Python 脚本交给 `hive flow run`，每个 `agent()` 都是真实 pane，human 全程可见可介入。
 
 ```python
-# plan.py
+# workflow.py
 from hive.flow import agent, parallel
 
 findings = agent("探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报", name="explore")
@@ -113,7 +113,7 @@ if "fail" in v.summary:
     a.ask(f"打回:按 {v.artifact} 的 required-changes 修")   # 同成员带上下文修
 ```
 
-- 跑法：把 `hive flow run plan.py` 放进后台 shell,完成后读输出。脚本跑着时你结束当前 turn 等完成通知;期间来了消息照常处理。
+- 跑法：把 `hive flow run workflow.py` 放进后台 shell,完成后读输出。脚本跑着时你结束当前 turn 等完成通知;期间来了消息照常处理。
 - API 全貌（不需要读源码）:
   - `agent(prompt, *, name, cli=None, model="") -> Member`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套。
   - `Member` 字段:`.summary`(回报 body)、`.artifact`(回报 artifact 路径)、`.name`、`.pane`。

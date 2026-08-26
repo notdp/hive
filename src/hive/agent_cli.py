@@ -149,7 +149,7 @@ PROFILES: dict[str, CLIProfile] = {
         name="grok",
         ready_text="Shift+Tab:mode",
         fork_cmd="hive grok --resume {session_id} --fork-session",
-        skill_cmd="/skills {name} ",
+        skill_cmd="/{name}",
     ),
 }
 
