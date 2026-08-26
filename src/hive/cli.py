@@ -43,6 +43,7 @@ _COMMAND_HELP_SECTIONS = {
     "fork": "Handoff",
     "spawn": "Handoff",
     # Workflow — higher-level flows on top of Hive.
+    "flow": "Workflow",
     "worktree": "Workflow",
     "pr": "Workflow",
     "ls": "Workflow",
@@ -975,6 +976,8 @@ def _window_seen_names(t: Team, panes: list[tmux.PaneInfo]) -> set[str]:
 def _claim_member_name(name_override: str, seen_names: set[str]) -> None:
     if not name_override:
         return
+    if name_override == "flow":
+        _fail("'flow' is the flow runner's reserved mailbox address, not a member name")
     if name_override in seen_names:
         _fail(f"name '{name_override}' is already taken in this window")
     seen_names.add(name_override)
@@ -2535,6 +2538,53 @@ def _derive_pr_window_status(global_format: str | None) -> str | None:
     if not _WINDOW_INDEX_TOKEN_RE.search(global_format):
         return None
     return _WINDOW_INDEX_TOKEN_RE.sub(_PR_INDEX_TOKEN, global_format)
+
+
+@cli.group("flow")
+def flow_cmd():
+    """Deterministic member orchestration from a Python script.
+
+    A flow script uses the `hive.flow` library: `agent()` spawns a live
+    member pane, dispatches a task atomically, and blocks for the reply;
+    `parallel()` fans out. Every node is a visible pane — watch, type
+    into, or interrupt any of them while the flow runs.
+    """
+
+
+@flow_cmd.command("run")
+@click.argument("script", type=click.Path(exists=True, dir_okay=False))
+def flow_run_cmd(script: str):
+    """Run SCRIPT against the current team.
+
+    The script is trusted Python (you or your orch wrote it). Members it
+    spawns reply to the reserved `flow` mailbox; the runner blocks until
+    the script finishes. Typical use from an orch: run it in a background
+    shell and read the output when it completes.
+
+    \b
+    Example script:
+      from hive.flow import agent, parallel
+      findings = agent("explore auth; write /tmp/f.md", name="explore")
+      a, b = parallel(
+          lambda: agent(f"impl auth, material: {findings.artifact}", name="impl-auth"),
+          lambda: agent("impl db layer", name="impl-db", cli="codex"),
+      )
+      agent(f"verify {a.artifact} {b.artifact}", name="verify", cli="codex")
+    """
+    _resolve_scoped_team(None, required=True)
+    import runpy
+
+    script_path = str(Path(script).resolve())
+    try:
+        runpy.run_path(script_path, run_name="__main__")
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface script failures as CLI errors
+        from .flow import FlowError
+
+        if isinstance(exc, FlowError):
+            _fail(str(exc))
+        raise
 
 
 @cli.group("pr")

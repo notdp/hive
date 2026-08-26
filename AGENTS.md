@@ -8,6 +8,7 @@ Hive is a small Python CLI project. Main code lives in `src/hive/`:
 - `cli.py` defines the Click command surface.
 - `agent.py`, `team.py`, and `tmux.py` implement runtime behavior.
 - `bus.py` and `context.py` handle workspace state and per-pane context.
+- `flow.py` is the deterministic orchestration library behind `hive flow run`.
 
 Tests live under `tests/` and are split by level:
 - `tests/unit/` for isolated logic

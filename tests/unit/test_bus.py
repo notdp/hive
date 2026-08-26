@@ -403,3 +403,17 @@ def test_init_workspace_migrates_legacy_runtime_columns(tmp_path):
         "metadata": {},
         "createdAt": "2026-03-17T10:00:00Z",
     }]
+
+
+def test_find_reply_to_returns_first_anchored_send(tmp_path):
+    from hive import bus
+
+    ws = tmp_path / "ws"
+    bus.init_workspace(ws)
+    root = bus.write_send_event(ws, from_agent="flow", to_agent="impl", body="task")
+    assert bus.find_reply_to(ws, msg_id=root.msg_id) is None
+    bus.write_send_event(ws, from_agent="impl", to_agent="flow", body="done", artifact="/tmp/a.md", reply_to=root.msg_id)
+    row = bus.find_reply_to(ws, msg_id=root.msg_id)
+    assert row is not None
+    assert row["body"] == "done" and row["artifact"] == "/tmp/a.md"
+    assert bus.find_reply_to(ws, msg_id="") is None

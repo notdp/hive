@@ -109,3 +109,27 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
     assert len({r["msgId"] for r in results}) == 3
     # the exception injector stays dead: nothing ever disturbs the sender pane
     assert not hasattr(sidecar, "_inject_exception")
+
+
+def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeypatch):
+    """The reserved `flow` address is a mailbox: the durable bus row IS the
+    delivery. No member resolution, no gate, no transport — a member's
+    `hive reply flow` must succeed with no flow-runner pane anywhere."""
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+
+    def boom(_t, _a):
+        raise AssertionError("mailbox send must not resolve a live agent")
+
+    monkeypatch.setattr("hive.sidecar._resolve_live_agent", boom)
+
+    payload = sidecar._send_payload(
+        workspace=str(workspace), team_name="team-x", sender_agent="impl",
+        sender_pane="%1", target_agent="flow", body="done", artifact="/tmp/a.md",
+        reply_to="m1",
+    )
+
+    assert payload["ok"] is True and payload["mailbox"] is True
+    (event,) = bus.read_all_events(workspace)
+    assert event["to"] == "flow" and event["from"] == "impl"
+    assert event["inReplyTo"] == "m1"

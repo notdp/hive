@@ -241,6 +241,8 @@ class Team:
         cli: str = "claude",
     ) -> Agent:
         """Spawn a new agent in the team."""
+        if name == "flow":
+            raise ValueError("'flow' is the flow runner's reserved mailbox address, not a member name")
         if name in self.agents:
             raise ValueError(f"Agent '{name}' already exists in team '{self.name}'")
         if not tmux.is_inside_tmux():
