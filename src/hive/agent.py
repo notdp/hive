@@ -85,21 +85,28 @@ def _submit_interactive_text(pane_id: str, text: str, cli: str) -> None:
 def _save_and_clear_draft(pane_id: str, profile_name: str) -> str:
     """Best-effort: if a draft exists, save it to a tmux buffer and clear input.
 
-    Returns the buffer name to restore later, or '' when no draft / on any error.
+    Returns the buffer name to restore later, or '' when there is no draft.
+    The composer is only cleared once tmux confirms the draft is in the
+    buffer — a save that did not happen must not cost the user the draft —
+    and a clear that failed halfway still reports its buffer so the restore
+    pastes it back.
     """
     if not draft_guard.supported_profile(profile_name):
         return ""
+    buffer_name = f"hive_draft_{pane_id.replace('%', '')}"
     try:
         draft_text = draft_guard.parse_draft(pane_id, profile_name)
         if not draft_text:
             return ""
-        buffer_name = f"hive_draft_{pane_id.replace('%', '')}"
         tmux.load_buffer(buffer_name, draft_text)
-        draft_guard.clear_input(pane_id, profile_name)
-        draft_guard.wait_input_empty(pane_id, profile_name, timeout=1.0)
-        return buffer_name
     except Exception:
         return ""
+    try:
+        draft_guard.clear_input(pane_id, profile_name)
+        draft_guard.wait_input_empty(pane_id, profile_name, timeout=1.0)
+    except Exception:
+        pass
+    return buffer_name
 
 
 def _restore_draft(pane_id: str, profile_name: str, buffer_name: str) -> None:
@@ -525,18 +532,23 @@ class Agent:
         """
         # A claude member's engine is not on the pane TTY at all: the pane's
         # job record is its address, and a parked engine (supervisor idles
-        # jobs after ~1h) is woken in-line. The record is only trusted when
-        # the pane shows no *other* live CLI — a recycled pane id running
-        # codex must never route into a stale claude record.
-        probe = None
-        try:
-            from .agent_cli import detect_cli_process_for_pane
+        # jobs after ~1h) is woken in-line — so a probe that sees nothing is
+        # still a deliverable claude member. That record is an address only
+        # for a member hive spawned as claude, and only while the pane shows
+        # no *other* live CLI: a recycled pane id whose member is codex must
+        # never route into a stale `hive-pane-<n>.job`, whichever way the
+        # probe happens to read that pane.
+        from .agent_cli import detect_cli_process_for_pane
 
-            probe = detect_cli_process_for_pane(self.pane_id)
-        except Exception:
-            probe = None
+        probe = detect_cli_process_for_pane(self.pane_id)
         profile_name = probe.name if probe is not None else ""
-        if profile_name in ("", "claude"):
+        claude_member = self.cli == "claude" and profile_name in ("", "claude")
+        if probe is None and not claude_member:
+            raise DeliveryError(
+                f"no live CLI process on pane {self.pane_id} (cli_exited): "
+                "refusing native transport to a retained shell"
+            )
+        if claude_member:
             from .adapters import claude_bg, claude_sessions
 
             job_id = claude_bg.job_id_for_pane(self.pane_id)
@@ -567,11 +579,6 @@ class Agent:
                         "listening on its inbox; the message stays on the bus"
                     )
                 return accepted
-        if probe is None:
-            raise DeliveryError(
-                f"no live CLI process on pane {self.pane_id} (cli_exited): "
-                "refusing native transport to a retained shell"
-            )
         if profile_name == "codex":
             from .adapters import codex_app_server
 
@@ -593,11 +600,17 @@ class Agent:
                     "(no leader/session, RPC error, or connection failure)"
                 )
             return accepted
-        if profile_name == "claude":
+        if claude_member:
             raise DeliveryError(
                 f"claude pane {self.pane_id} has no bg job record; a hive "
                 "claude member runs as a background job (relaunch it with "
                 "`hive claude`) — hive does not deliver to a bare claude TUI"
+            )
+        if profile_name == "claude":
+            raise DeliveryError(
+                f"pane {self.pane_id} shows claude but its member '{self.name}' "
+                f"is a {self.cli} member (recycled pane id, or a stale job "
+                "record); hive does not deliver across CLIs"
             )
         raise DeliveryError(
             f"pane {self.pane_id} runs no supported agent CLI "
@@ -610,17 +623,23 @@ class Agent:
 
         A claude member's Escape rides the same pipe as its text — addressed
         to the job, so it interrupts *that* engine's turn whatever the pane's
-        viewer happens to be showing.
+        viewer happens to be showing. There is no fallback: a member pane
+        never gets send-keys, so a lost job record is a refusal rather than an
+        Escape into whatever the pane is showing.
         """
         if self.cli == "claude":
             from .adapters import claude_bg
 
             job_id = claude_bg.job_id_for_pane(self.pane_id)
-            if job_id:
-                result = claude_bg.interrupt_job(job_id)
-                if not result.ok:
-                    raise RuntimeError(f"claude job {job_id} was not interrupted: {result.why}")
-                return
+            if not job_id:
+                raise RuntimeError(
+                    f"claude member on pane {self.pane_id} has no bg job record "
+                    "to interrupt; hive never send-keys a member pane"
+                )
+            result = claude_bg.interrupt_job(job_id)
+            if not result.ok:
+                raise RuntimeError(f"claude job {job_id} was not interrupted: {result.why}")
+            return
         tmux.send_key(self.pane_id, "Escape")
 
     def capture(self, lines: int = 50) -> str:
@@ -631,7 +650,17 @@ class Agent:
         return tmux.is_pane_alive(self.pane_id)
 
     def shutdown(self) -> None:
-        """Send Ctrl+C twice then exit."""
+        """Send Ctrl+C twice then exit.
+
+        Keystrokes only: a claude member's engine is not on the pane, so this
+        would type into someone else's attach viewer. Use :meth:`kill`, which
+        parks the engine through its job.
+        """
+        if self.cli == "claude":
+            raise RuntimeError(
+                f"claude member on pane {self.pane_id} cannot be shut down with "
+                "keystrokes; hive never send-keys a member pane — use kill()"
+            )
         tmux.send_key(self.pane_id, "C-c")
         time.sleep(0.5)
         tmux.send_key(self.pane_id, "C-c")

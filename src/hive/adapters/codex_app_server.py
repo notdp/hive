@@ -596,8 +596,16 @@ def _daemon_env() -> dict[str, str]:
     """Daemon env: the shared daemon serves every pane, so per-pane identity
     markers must not freeze into it — tool subprocesses inherit this env and a
     stale TMUX_PANE would impersonate whichever pane spawned the daemon.
-    Identity rides codex's own per-thread CODEX_THREAD_ID injection instead."""
-    env = dict(os.environ)
+    Identity rides codex's own per-thread CODEX_THREAD_ID injection instead.
+
+    CLAUDE*/ANTHROPIC* are washed for the same reason (as the grok leader
+    does): the spawner may itself run inside a claude engine, and an inherited
+    CLAUDE_CODE_MESSAGING_SOCKET makes every hive call from a codex tool shell
+    resolve to *that* engine's pane whenever the thread lookup misses."""
+    env = {
+        k: v for k, v in os.environ.items()
+        if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))
+    }
     env.pop("TMUX_PANE", None)
     env.pop("HIVE_CODEX_PANE", None)
     return env

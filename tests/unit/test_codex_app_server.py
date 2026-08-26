@@ -94,11 +94,19 @@ def test_list_recorded_panes_missing_dir(tmp_path, monkeypatch):
 def test_daemon_env_strips_pane_identity(monkeypatch):
     # The shared daemon serves every pane: a frozen TMUX_PANE in its env would
     # let untagged tool shells impersonate whichever pane spawned it.
+    # CLAUDE*/ANTHROPIC* go too: an inherited CLAUDE_CODE_MESSAGING_SOCKET
+    # resolves a codex tool shell to the spawning claude engine's pane.
     monkeypatch.setenv("TMUX_PANE", "%old")
     monkeypatch.setenv("HIVE_CODEX_PANE", "%old")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/321.sock")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-nope")
+    monkeypatch.setenv("CODEX_HOME", "/tmp/codex-home")
     env = m._daemon_env()
     assert "TMUX_PANE" not in env
     assert "HIVE_CODEX_PANE" not in env
+    assert not [k for k in env if k.startswith("CLAUDE") or k.startswith("ANTHROPIC")]
+    assert env["CODEX_HOME"] == "/tmp/codex-home"
 
 
 # --- status mapping ---------------------------------------------------------

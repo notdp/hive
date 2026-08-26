@@ -32,11 +32,8 @@ class RuntimeField:
     observed_at: float
     generation: int
     freshness_s: float | None = None
-    valid: bool = True
 
     def is_fresh(self, *, now: float | None = None) -> bool:
-        if not self.valid:
-            return False
         if self.freshness_s is None:
             return True
         return ((time.monotonic() if now is None else now) - self.observed_at) <= self.freshness_s
@@ -87,34 +84,6 @@ class RuntimeSnapshotStore:
             observed_at=time.monotonic() if observed_at is None else observed_at,
             generation=generation,
             freshness_s=freshness_s,
-        )
-        snapshot = RuntimeSnapshot(
-            pane_id=pane_id,
-            generation=generation,
-            sessionId=field,
-        )
-        self.snapshots[pane_id] = snapshot
-        return snapshot
-
-    def mark_session_stale(
-        self,
-        pane_id: str,
-        *,
-        observed_at: float | None = None,
-    ) -> RuntimeSnapshot | None:
-        previous = self.snapshots.get(pane_id)
-        if previous is None:
-            return None
-        self.generation += 1
-        generation = self.generation
-        previous_field = previous.sessionId
-        field = RuntimeField(
-            value=previous_field.value,
-            source=previous_field.source,
-            observed_at=time.monotonic() if observed_at is None else observed_at,
-            generation=generation,
-            freshness_s=previous_field.freshness_s,
-            valid=False,
         )
         snapshot = RuntimeSnapshot(
             pane_id=pane_id,

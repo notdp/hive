@@ -14,12 +14,21 @@ from dataclasses import dataclass
 
 
 def _run(args: list[str], check: bool = True, timeout: int = 5) -> subprocess.CompletedProcess:
+    """Run a tmux command.
+
+    ``check=True`` means the caller needs the command to have happened, so a
+    timeout raises like a nonzero exit does — a busy tmux server must never
+    look like a successful send-keys. ``check=False`` callers are probes that
+    read "unknown" out of the rc-1 sentinel, so they keep it.
+    """
     try:
         return subprocess.run(
             ["tmux", *args],
             capture_output=True, text=True, check=check, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
+        if check:
+            raise
         return subprocess.CompletedProcess(["tmux", *args], 1, "", "timeout")
 
 
@@ -432,17 +441,19 @@ def get_cursor_x(pane_id: str) -> int | None:
 
 
 def load_buffer(name: str, data: str) -> None:
-    """Load data into a named tmux buffer via stdin."""
-    try:
-        subprocess.run(
-            ["tmux", "load-buffer", "-b", name, "-"],
-            input=data,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-    except subprocess.TimeoutExpired:
-        pass
+    """Load data into a named tmux buffer via stdin.
+
+    Raises on failure (nonzero exit or timeout): callers clear the pane's
+    input on the strength of the buffer holding the draft, so a save that did
+    not happen must not read as one.
+    """
+    subprocess.run(
+        ["tmux", "load-buffer", "-b", name, "-"],
+        input=data,
+        text=True,
+        check=True,
+        timeout=5,
+    )
 
 
 def paste_buffer(name: str, target: str, *, bracketed: bool = False) -> None:
@@ -1221,7 +1232,10 @@ def wait_for_texts(
     """Wait until any text appears in pane output."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        output = capture_pane(pane_id)
+        try:
+            output = capture_pane(pane_id)
+        except subprocess.TimeoutExpired:
+            output = ""  # a busy tmux is not a missing match — keep polling
         if any(text in output for text in texts):
             return True
         time.sleep(interval)

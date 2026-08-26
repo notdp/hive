@@ -82,15 +82,22 @@ def test_agent_payload_grok_session_unresolved_without_record(monkeypatch):
     assert sidecar._agent_runtime_payload("%5")["sessionId"] == "unresolved"
 
 
-def test_agent_payload_grok_falls_through_before_the_first_observation(monkeypatch, tmp_path):
-    # the leader client has nothing folded yet: no native runtime, so the
-    # payload takes the adapter path but still names the pane's minted session
+def test_agent_payload_grok_reports_unknown_without_leader_runtime(monkeypatch, tmp_path):
+    # No leader state to read, and the transcript gate below only knows the
+    # claude/codex record shapes — it reads a pending grok permission request
+    # as clear and opens the send gate mid-permission. Never fall into it.
     monkeypatch.setenv("GROK_HOME", str(tmp_path))
     _live_grok_pane(monkeypatch, runtime=None, session_id="sid-grok-2")
-    monkeypatch.setattr("hive.tmux.display_value", lambda *_a, **_k: "/w")
+    monkeypatch.setattr(
+        "hive.adapters.base.check_input_gate",
+        lambda *_a, **_k: pytest.fail("grok must not reach the transcript gate"),
+    )
 
     rt = sidecar._agent_runtime_payload("%5")
     assert rt["sessionId"] == "sid-grok-2"
+    assert rt["inputState"] == "unknown"
+    assert rt["inputReason"] == "no_leader_runtime"
+    assert "_transcript" not in rt
     assert "_runtimeSource" not in rt
 
 

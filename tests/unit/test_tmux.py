@@ -1,19 +1,65 @@
 import subprocess
 import time
 
+import pytest
+
 from hive import tmux
 
 
-def test_run_returns_timeout_completed_process(monkeypatch):
+def _timeout_run(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["tmux"], timeout=5)
 
     monkeypatch.setattr("hive.tmux.subprocess.run", _boom)
 
-    result = tmux._run(["list-panes"])
+
+def test_run_probe_reads_timeout_as_unknown(monkeypatch):
+    _timeout_run(monkeypatch)
+
+    result = tmux._run(["list-panes"], check=False)
 
     assert result.returncode == 1
     assert result.stderr == "timeout"
+
+
+def test_run_timeout_raises_when_the_command_had_to_happen(monkeypatch):
+    """check=True means the caller needs the command to have run: a busy tmux
+    server must not be able to fake a successful send-keys."""
+    _timeout_run(monkeypatch)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        tmux._run(["list-panes"])
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        tmux.send_keys("%1", "hello")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        tmux.send_key("%1", "Escape")
+
+
+def test_load_buffer_timeout_raises(monkeypatch):
+    """A draft save that did not happen must not read as one — the caller
+    clears the pane's composer on the strength of this call."""
+    _timeout_run(monkeypatch)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        tmux.load_buffer("hive_draft_1", "unsent thought")
+
+
+def test_wait_for_texts_keeps_polling_through_a_tmux_timeout(monkeypatch):
+    captures = []
+
+    def _capture(pane_id, *_a, **_kw):
+        captures.append(pane_id)
+        if len(captures) == 1:
+            raise subprocess.TimeoutExpired(cmd=["tmux"], timeout=5)
+        return "ready >"
+
+    monkeypatch.setattr("hive.tmux.capture_pane", _capture)
+    monkeypatch.setattr("hive.tmux.time.sleep", lambda _s: None)
+
+    assert tmux.wait_for_texts("%1", ("ready",), timeout=5, interval=0) is True
+    assert len(captures) == 2
 
 
 def test_session_helpers_delegate_to_tmux(monkeypatch):

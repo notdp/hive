@@ -95,7 +95,9 @@ Source:
   (`inputReason: registry:<waitingFor>`)
 - codex: app-server `status.activeFlags` (see "Codex Native Runtime")
 - grok: leader `session/request_permission` (see "Grok Native Runtime")
-- unmanaged panes: transcript gate inspection via `check_input_gate()`
+- unmanaged claude / codex panes: transcript gate inspection via
+  `check_input_gate()` — it knows those two record shapes only, so a grok pane
+  with no leader state reports `unknown` instead of falling into it
 
 Current values:
 
@@ -453,6 +455,10 @@ Field mapping (notification → runtime field):
     gets its own copy) and emits `inputReason=leader_permission_request`
   - `ready` — `turn_completed`, `activity: idle`, or any `tool_call_update` (the
     permission it was blocked on has been decided)
+  - `unknown` (`inputReason: no_leader_runtime`) — no leader state for the pane.
+    Grok never falls back to the transcript gate: `check_input_gate()` knows
+    only the claude/codex record shapes and reads a pending grok permission
+    request as clear.
 
 Queue semantics: a prompt sent mid-turn is queued FIFO by the leader and runs
 when the current turn ends — there is no steering and no bounce, the same as

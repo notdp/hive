@@ -957,6 +957,28 @@ def test_interrupt_delegates_to_agent(runner, configure_hive_home, monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    "argv", [["inject", "ghost", "hi"], ["interrupt", "ghost"]], ids=["inject", "interrupt"]
+)
+def test_unknown_member_fails_with_a_message_not_a_traceback(runner, configure_hive_home, monkeypatch, argv):
+    configure_hive_home()
+
+    class _FakeTeam:
+        name = "team-x"
+        tmux_session = "dev"
+        tmux_window = "dev:0"
+
+        def get(self, name: str):
+            raise KeyError(f"Agent '{name}' not found")
+
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", _FakeTeam()))
+
+    result = runner.invoke(cli, argv)
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # no KeyError traceback
+    assert "member 'ghost' not found in team 'team-x'" in result.output
+
+
 def test_kill_removes_agent(runner, configure_hive_home, monkeypatch):
     configure_hive_home()
     killed: list[str] = []

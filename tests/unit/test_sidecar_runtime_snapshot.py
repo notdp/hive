@@ -4,6 +4,17 @@ import hive.sidecar as sidecar
 from hive.runtime_snapshot import RuntimeSnapshotStore
 
 
+def _aged_snapshot(store: RuntimeSnapshotStore, pane_id: str, session_id: str):
+    """A snapshot written past its freshness window (the `/new` case)."""
+    return store.update_session_id(
+        pane_id,
+        session_id,
+        source="pidfile",
+        observed_at=sidecar.time.monotonic() - sidecar._SESSION_SNAPSHOT_FRESHNESS_S - 1.0,
+        freshness_s=sidecar._SESSION_SNAPSHOT_FRESHNESS_S,
+    )
+
+
 def test_runtime_snapshot_payload_reads_store_without_live_probe(monkeypatch):
     store = RuntimeSnapshotStore()
     store.update_session_id("%1", "sid-tick", source="pidfile", observed_at=10.0)
@@ -19,8 +30,7 @@ def test_runtime_snapshot_payload_reads_store_without_live_probe(monkeypatch):
 
 def test_runtime_snapshot_payload_reports_stale_snapshot(monkeypatch):
     store = RuntimeSnapshotStore()
-    store.update_session_id("%1", "sid-old", source="pidfile", observed_at=10.0)
-    store.mark_session_stale("%1", observed_at=11.0)
+    _aged_snapshot(store, "%1", "sid-old")
     monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
 
     payload = sidecar._runtime_snapshot_payload("%1")
@@ -45,8 +55,7 @@ def test_resolve_transcript_path_cached_ignores_stale_snapshot_and_cached_path(
     tmp_path,
 ):
     store = RuntimeSnapshotStore()
-    store.update_session_id("%1", "sid-old", source="pidfile", observed_at=10.0)
-    store.mark_session_stale("%1", observed_at=11.0)
+    _aged_snapshot(store, "%1", "sid-old")
     old_transcript = tmp_path / "old.jsonl"
     new_transcript = tmp_path / "new.jsonl"
     old_transcript.write_text("old")
@@ -79,8 +88,7 @@ def test_resolve_transcript_path_cached_ignores_stale_snapshot_negative_cache(
     tmp_path,
 ):
     store = RuntimeSnapshotStore()
-    store.update_session_id("%1", "sid-old", source="pidfile", observed_at=10.0)
-    store.mark_session_stale("%1", observed_at=11.0)
+    _aged_snapshot(store, "%1", "sid-old")
     transcript = tmp_path / "new.jsonl"
     transcript.write_text("new")
 
@@ -140,9 +148,7 @@ def test_resolve_transcript_path_cached_requires_same_snapshot_session(
 
 def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkeypatch):
     store = RuntimeSnapshotStore()
-    store.update_session_id("%1", "sid-old", source="pidfile", observed_at=10.0)
-    stale = store.mark_session_stale("%1", observed_at=11.0)
-    assert stale is not None
+    stale = _aged_snapshot(store, "%1", "sid-old")
 
     fake_profile = SimpleNamespace(name="claude")
 
@@ -165,3 +171,34 @@ def test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile(monkey
     assert runtime["sessionId"] == "unresolved"
     assert runtime["inputState"] == "unknown"
     assert runtime["inputReason"] == "no_session"
+
+
+def test_agent_runtime_payload_stamps_a_freshness_window_on_a_probed_session(monkeypatch):
+    # Without a window the first probed id is pinned forever: after `/new` in
+    # an unmanaged pane the sidecar would keep serving the dead session.
+    store = RuntimeSnapshotStore()
+
+    class FakeAdapter:
+        def resolve_current_session_id(self, pane_id: str) -> str | None:
+            return "sid-new"
+
+        def find_session_file(self, session_id: str, *, cwd: str | None = None):
+            return None
+
+    monkeypatch.setattr(sidecar, "_RUNTIME_SNAPSHOTS", store)
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/repo")
+    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _pane_id: {"busy": False})
+    monkeypatch.setattr(sidecar, "_claude_bg_runtime", lambda _pane_id: None)
+    monkeypatch.setattr(
+        sidecar, "detect_cli_process_for_pane", lambda _pane_id: SimpleNamespace(name="claude")
+    )
+    monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("hive.adapters.get", lambda name: FakeAdapter() if name == "claude" else None)
+
+    assert sidecar._agent_runtime_payload("%1")["sessionId"] == "sid-new"
+
+    field = store.get("%1").sessionId
+    assert field.freshness_s == sidecar._SESSION_SNAPSHOT_FRESHNESS_S
+    assert field.is_fresh(now=field.observed_at + 1.0) is True
+    assert field.is_fresh(now=field.observed_at + field.freshness_s + 1.0) is False

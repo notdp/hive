@@ -412,20 +412,25 @@ def find_reply_to(
     workspace: str | Path,
     *,
     msg_id: str,
+    from_agent: str = "",
 ) -> dict[str, object] | None:
-    """Return the first send event anchored to ``msg_id``, or None."""
+    """Return the first send event anchored to ``msg_id``, or None.
+
+    ``from_agent`` scopes the match to one sender; without it any agent's
+    send anchored to ``msg_id`` wins. Nothing else is filtered — not the
+    recipient, not what the body means. A clarifying question and a
+    handoff announce are both "the reply" as far as this query knows.
+    """
     if not msg_id:
         return None
+    sql = "SELECT * FROM messages WHERE intent = 'send' AND in_reply_to = ?"
+    params: list[object] = [msg_id]
+    if from_agent:
+        sql += " AND from_agent = ?"
+        params.append(from_agent)
+    sql += " ORDER BY seq ASC LIMIT 1"
     with _connect(workspace) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM messages
-            WHERE intent = 'send' AND in_reply_to = ?
-            ORDER BY seq ASC
-            LIMIT 1
-            """,
-            (msg_id,),
-        ).fetchone()
+        row = conn.execute(sql, params).fetchone()
     return _row_to_event(row) if row is not None else None
 
 

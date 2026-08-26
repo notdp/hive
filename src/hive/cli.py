@@ -2042,6 +2042,17 @@ def handoff(
                 split="auto",
                 join_as=target_agent,
             )
+            if target_member.cli != "claude":
+                # Same gate as `spawn --task`: a claude clone's inbox queues
+                # the delegate, but the other transports refuse a member whose
+                # session the fork has not opened yet — and the refusal lands
+                # after the bus row is written.
+                _ensure_team_sidecar(t, ws)
+                if _wait_for_peer_ready(ws, team_name=team_name, agents={target_agent}):
+                    _fail(
+                        f"fork pane {target_member.pane_id} did not reach ready within 30s; "
+                        f"inspect it, then dispatch manually via `hive send {target_agent}`"
+                    )
 
     delegate_body = _handoff_delegate_body(
         sender_agent=sender,
@@ -2200,7 +2211,11 @@ def inject_cmd(agent_name: str, text: str):
     """
     team_name, t = _resolve_scoped_team(None, required=True)
     assert team_name is not None and t is not None
-    agent = t.get(agent_name)
+    try:
+        agent = t.get(agent_name)
+    except KeyError:
+        _fail(f"member '{agent_name}' not found in team '{t.name}'")
+        return
     # Documented low-level bypass: raw composer keystrokes for every CLI, so
     # delivery paths (channel/RPC) can be debugged from outside themselves.
     # A claude member's keystrokes are piped into its bg job rather than its
@@ -3483,7 +3498,11 @@ def interrupt(agent_name: str):
     """
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
-    agent = t.get(agent_name)
+    try:
+        agent = t.get(agent_name)
+    except KeyError:
+        _fail(f"member '{agent_name}' not found in team '{t.name}'")
+        return
     try:
         agent.interrupt()
     except RuntimeError as e:
@@ -3784,10 +3803,15 @@ def _codex_positional_after(args: list[str], sub_index: int) -> str | None:
 
 
 def _codex_opt_value(args: list[str], names: tuple[str, ...]) -> str | None:
-    """Value of the first `--opt value` / `--opt=value` occurrence in `args`."""
+    """Value of the first `--opt value` / `--opt=value` occurrence in `args`.
+
+    A following token starting with `-` is the next flag, not this option's
+    value: the option is read as bare (None) rather than swallowing it.
+    """
     for i, a in enumerate(args):
         if a in names:
-            return args[i + 1] if i + 1 < len(args) else None
+            nxt = args[i + 1] if i + 1 < len(args) else ""
+            return nxt if nxt and not nxt.startswith("-") else None
         for name in names:
             if a.startswith(f"{name}=" if name.startswith("--") else name) and a != name:
                 prefix = f"{name}=" if name.startswith("--") else name
@@ -4128,10 +4152,16 @@ _GROK_PASSTHROUGH_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
 
 
 def _grok_opt_value(args: list[str], names: tuple[str, ...]) -> str | None:
-    """Value of the first `--opt value` / `--opt=value` occurrence in `args`."""
+    """Value of the first `--opt value` / `--opt=value` occurrence in `args`.
+
+    A following token starting with `-` is the next flag, not this option's
+    value: `--resume -m grok-4` resumes grok's own picker instead of recording
+    `-m` as the pane's session id.
+    """
     for i, a in enumerate(args):
         if a in names:
-            return args[i + 1] if i + 1 < len(args) else None
+            nxt = args[i + 1] if i + 1 < len(args) else ""
+            return nxt if nxt and not nxt.startswith("-") else None
         for name in names:
             if a.startswith(f"{name}="):
                 return a[len(name) + 1:]
