@@ -1448,7 +1448,9 @@ def _send_to_ccd_session(label: str, message: str, artifact: str) -> None:
         to_agent=f"ccd.{target.name}",
         body=message,
     )
-    outcome = claude_sessions.send(target.socket_path, envelope, sender=sender)
+    outcome = claude_sessions.send(
+        target.socket_path, envelope, sender=sender, session_id=target.session_id
+    )
     if outcome is None:
         _fail(
             f"session '{target.name}' (pid {target.pid}) is not listening on "

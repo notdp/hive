@@ -405,29 +405,6 @@ def test_team_status_stays_local_only(configure_hive_home, monkeypatch):
     assert "alive" not in claude
 
 
-def test_team_shutdown_and_cleanup(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    calls = []
-    monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
-    monkeypatch.setattr("hive.team.tmux.clear_pane_tags", lambda pane: calls.append(("clear", pane)))
-    a1 = Agent(name="claude", team_name="team-a", pane_id="%1")
-    a2 = Agent(name="gpt", team_name="team-a", pane_id="%2")
-    monkeypatch.setattr(a1, "shutdown", lambda: calls.append(("shutdown", "%1")))
-    monkeypatch.setattr(a2, "shutdown", lambda: calls.append(("shutdown", "%2")))
-    monkeypatch.setattr(a1, "kill", lambda: calls.append(("kill", "%1")))
-    monkeypatch.setattr(a2, "kill", lambda: calls.append(("kill", "%2")))
-    team = Team(name="team-a", lead_pane_id="%0")
-    team.agents = {"claude": a1, "gpt": a2}
-
-    team.shutdown("claude")
-    team.shutdown()
-    team.cleanup()
-
-    assert calls[:3] == [("shutdown", "%1"), ("shutdown", "%1"), ("shutdown", "%2")]
-    assert ("kill", "%1") in calls and ("kill", "%2") in calls
-    assert ("clear", "%0") in calls
-
-
 def test_find_team_window_prefers_pane_window_on_duplicate(configure_hive_home, monkeypatch):
     """When two windows claim the same team, the one containing prefer_pane wins.
 

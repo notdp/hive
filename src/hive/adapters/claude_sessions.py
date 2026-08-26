@@ -22,12 +22,16 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ACCEPTED_UDS_WRITE = "udsWriteAccepted"
 # The listener accepted the connection but did not read the whole frame in
 # time — a stalled session, not an absent one; the frame may sit truncated on
 # its side.
 WRITE_TIMED_OUT = "udsWriteTimedOut"
+# The status vocabulary a session reports in its registry entry (observed on
+# 2.1.240, not a documented enum).
+STATUS_VALUES = ("busy", "shell", "idle", "waiting")
 _CONNECT_TIMEOUT = 2.0
 _WRITE_TIMEOUT = 10.0
 # The sidecar submit budget must cover a full send() worst case.
@@ -132,10 +136,11 @@ def _pid_alive(pid: int) -> bool:
 def list_sessions() -> list[ClaudeSession]:
     """Live sessions that bind an inbox socket, sorted by name.
 
-    A registration whose process is gone, or that records no socket (an older
-    CLI, bare mode), is not reachable and is left out. Each row carries the
-    session's Claude Code name and, when the desktop app set one, its title —
-    either addresses the session.
+    A registration whose process is gone, records no socket (an older CLI,
+    bare mode) or is a warm spare is not a session anyone is talking to, and
+    is left out — the same three cuts ``/list-agents`` makes. Each row
+    carries the session's Claude Code name and, when the desktop app set
+    one, its title — either addresses the session.
     """
     root = _registry_dir()
     if not root.is_dir():
@@ -153,6 +158,8 @@ def list_sessions() -> list[ClaudeSession]:
         sock = str(data.get("messagingSocketPath") or "")
         if not name or not isinstance(pid, int) or isinstance(pid, bool) or not sock:
             continue
+        if data.get("spare"):
+            continue  # a warm spare claude pre-started; nobody is behind it yet
         if not _pid_alive(pid):
             continue
         session_id = str(data.get("sessionId") or "")
@@ -172,8 +179,7 @@ def list_sessions() -> list[ClaudeSession]:
 def session_status(pid: int | None) -> tuple[str, str] | None:
     """(status, waitingFor) reported by the session running as *pid*.
 
-    Real terminal TUI sessions report ``status`` (idle|busy|waiting — an
-    observed vocabulary, not a documented enum) in their registry entry;
+    Real terminal TUI sessions report ``status`` in their registry entry;
     headless/desktop-hosted sessions never do. None when the entry is
     missing, the process is dead, or no status is reported.
     """
@@ -186,9 +192,28 @@ def session_status(pid: int | None) -> tuple[str, str] | None:
     if not isinstance(data, dict) or not _pid_alive(pid):
         return None
     status = data.get("status")
-    if status not in ("idle", "busy", "waiting"):
+    if status not in STATUS_VALUES:
         return None
     return str(status), str(data.get("waitingFor") or "")
+
+
+def runtime_from_status(status: str, waiting_for: str = "") -> dict[str, Any]:
+    """Fold a registry ``status`` into hive runtime fields.
+
+    ``shell`` is the session sitting at its own shell — not mid-turn, and not
+    waiting on an answer, so it reads exactly like ``idle``.
+    """
+    if status == "busy":
+        return {"busy": True, "inputState": "ready", "inputReason": ""}
+    if status == "waiting":
+        return {
+            "busy": False,
+            "inputState": "waiting_user",
+            "inputReason": f"registry:{waiting_for or 'unknown'}",
+        }
+    if status in ("idle", "shell"):
+        return {"busy": False, "inputState": "ready", "inputReason": ""}
+    return {"busy": False, "inputState": "unknown", "inputReason": "no_registry_status"}
 
 
 def own_socket() -> str:
@@ -247,7 +272,7 @@ def rename(sock_path: str | Path, name: str, *, session_id: str = "") -> bool:
         conn.close()
 
 
-def send(sock_path: str | Path, text: str, *, sender: str) -> str | None:
+def send(sock_path: str | Path, text: str, *, sender: str, session_id: str = "") -> str | None:
     """Queue *text* for the session listening on *sock_path*.
 
     Returns :data:`ACCEPTED_UDS_WRITE`; :data:`WRITE_TIMED_OUT` when the
@@ -259,15 +284,21 @@ def send(sock_path: str | Path, text: str, *, sender: str) -> str | None:
     *sender* is what the receiving session shows as the
     message's origin; it is not a reply address — a Claude session replies to
     hive members with the hive CLI, never with ``SendMessage``.
+    *session_id*, when given, must match the target's own id or the frame is
+    silently dropped — the same dispatch guard :func:`rename` uses, here
+    against a recycled ``<pid>.sock`` taking a dead session's mail.
     """
     if not sock_path:
         return None
-    payload = json.dumps({
+    frame: dict[str, Any] = {
         "type": "user",
         "priority": "later",
         "from": sender,
         "message": {"role": "user", "content": text},
-    })
+    }
+    if session_id:
+        frame["session_id"] = session_id
+    payload = json.dumps(frame)
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(_CONNECT_TIMEOUT)
     try:

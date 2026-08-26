@@ -15,8 +15,10 @@ from hive.cli import cli
 pytestmark = pytest.mark.cli
 
 
-def _session(name="desk", pid=4242, cwd="/w/desk", sock="/tmp/cc-socks/4242.sock", title=""):
-    return ClaudeSession(name=name, pid=pid, cwd=cwd, kind="interactive", socket_path=sock, title=title)
+def _session(name="desk", pid=4242, cwd="/w/desk", sock="/tmp/cc-socks/4242.sock", title="",
+             session_id="sess-desk"):
+    return ClaudeSession(name=name, pid=pid, cwd=cwd, kind="interactive", socket_path=sock,
+                         session_id=session_id, title=title)
 
 
 def _identity(monkeypatch, team="t", agent="w"):
@@ -64,17 +66,22 @@ def test_send_ccd_delivers_to_the_named_session_as_the_calling_member(runner, co
     monkeypatch.setattr("hive.adapters.claude_sessions.resolve", lambda name: [_session()] if name == "desk" else [])
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: sent.append((sock, text, sender)) or "udsWriteAccepted",
+        lambda sock, text, *, sender, session_id="": sent.append(
+            (sock, text, sender, session_id)
+        ) or "udsWriteAccepted",
     )
     result = runner.invoke(cli, ["send", "ccd.desk", "build is green, merge when ready"])
     assert result.exit_code == 0, result.output
     # the frame's `from` never reaches the receiving model, so the body rides
     # inside the ordinary <HIVE> envelope and self-identifies in band; the
     # from value IS the reply address (`hive send duo-1.validator`)
+    # the resolved session's own id rides the frame — claude drops a
+    # mismatching one, so a recycled `<pid>.sock` cannot take the message
     assert sent == [(
         "/tmp/cc-socks/4242.sock",
         "<HIVE from=duo-1.validator to=ccd.desk>\nbuild is green, merge when ready\n</HIVE>",
         "duo-1.validator",
+        "sess-desk",
     )]
     assert json.loads(result.output) == {
         "session": "desk", "title": "", "pid": 4242, "cwd": "/w/desk",
@@ -151,7 +158,7 @@ def test_send_ccd_wraps_the_body_in_a_hive_envelope(runner, configure_hive_home,
     monkeypatch.setattr("hive.adapters.claude_sessions.resolve", lambda name: [_session()])
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: texts.append(text) or "udsWriteAccepted",
+        lambda sock, text, *, sender, session_id="": texts.append(text) or "udsWriteAccepted",
     )
     runner.invoke(cli, ["send", "ccd.desk", "hello there"])
     assert texts == ["<HIVE from=t.w to=ccd.desk>\nhello there\n</HIVE>"]
@@ -206,7 +213,7 @@ def test_send_ccd_accepts_the_desktop_title_with_dots_and_spaces(runner, configu
     sent: list[str] = []
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: sent.append(text) or "udsWriteAccepted",
+        lambda sock, text, *, sender, session_id="": sent.append(text) or "udsWriteAccepted",
     )
     result = runner.invoke(cli, ["send", "ccd.PR 0.70 审查", "merge when green"])
     assert result.exit_code == 0, result.output

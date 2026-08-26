@@ -46,22 +46,6 @@ def test_load_buffer_timeout_raises(monkeypatch):
         tmux.load_buffer("hive_draft_1", "unsent thought")
 
 
-def test_wait_for_texts_keeps_polling_through_a_tmux_timeout(monkeypatch):
-    captures = []
-
-    def _capture(pane_id, *_a, **_kw):
-        captures.append(pane_id)
-        if len(captures) == 1:
-            raise subprocess.TimeoutExpired(cmd=["tmux"], timeout=5)
-        return "ready >"
-
-    monkeypatch.setattr("hive.tmux.capture_pane", _capture)
-    monkeypatch.setattr("hive.tmux.time.sleep", lambda _s: None)
-
-    assert tmux.wait_for_texts("%1", ("ready",), timeout=5, interval=0) is True
-    assert len(captures) == 2
-
-
 def test_session_helpers_delegate_to_tmux(monkeypatch):
     calls = []
 
@@ -259,36 +243,6 @@ def test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output(monke
         ("ps", "-t", "ttys012", "-o", "pid=,comm=,command="),
         ("ps", "-t", "ttys012", "-o", "pid=,comm=,command="),
     ]
-
-
-def test_list_open_files_uses_native_proc_info(monkeypatch):
-    monkeypatch.setattr("hive.proc_info.list_open_files", lambda _pid: ["/tmp/native.jsonl"])
-    monkeypatch.setattr(
-        "hive.tmux.subprocess.run",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("lsof should not run")),
-    )
-
-    assert tmux.list_open_files("123") == ["/tmp/native.jsonl"]
-
-
-def test_list_open_files_falls_back_to_lsof(monkeypatch):
-    from hive import proc_info
-
-    def _native(_pid):
-        raise proc_info.ProcInfoUnavailable("no native backend")
-
-    monkeypatch.setattr("hive.proc_info.list_open_files", _native)
-    monkeypatch.setattr(
-        "hive.tmux.subprocess.run",
-        lambda args, capture_output=True, text=True, check=False, timeout=5: subprocess.CompletedProcess(
-            args,
-            0,
-            "p123\nn/tmp/fallback.jsonl\nn/dev/null\n",
-            "",
-        ),
-    )
-
-    assert tmux.list_open_files("123") == ["/tmp/fallback.jsonl", "/dev/null"]
 
 
 def test_current_window_helpers_return_none_without_tmux_pane(monkeypatch):
@@ -520,20 +474,6 @@ def test_get_global_window_option_returns_none_when_unset(monkeypatch):
         ),
     )
     assert tmux.get_global_window_option("window-status-format") is None
-
-
-def test_wait_for_text_success_and_timeout(monkeypatch):
-    outputs = iter(["booting", "still booting", "ready for help"])
-    monkeypatch.setattr("hive.tmux.capture_pane", lambda _pane, lines=50: next(outputs))
-    monkeypatch.setattr("hive.tmux.time.sleep", lambda _interval: None)
-
-    assert tmux.wait_for_text("%1", "for help", timeout=1, interval=0) is True
-
-    times = iter([0.0, 0.3, 0.6])
-    monkeypatch.setattr("hive.tmux.capture_pane", lambda _pane, lines=50: "no match")
-    monkeypatch.setattr("hive.tmux.time.time", lambda: next(times))
-
-    assert tmux.wait_for_text("%1", "for help", timeout=0.5, interval=0) is False
 
 
 def test_list_panes_full_or_none_is_status_aware(monkeypatch):

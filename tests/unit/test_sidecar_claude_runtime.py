@@ -160,6 +160,90 @@ def test_claude_registry_busy_none_without_any_source(monkeypatch):
     assert sidecar._claude_registry_busy("%1") is None
 
 
+# --- interactive claude: the session registry, not the transcript gate --------
+
+
+def _interactive_claude_pane(monkeypatch, tmp_path, *, status, transcript=True):
+    """A live interactive (non-member) claude on the pane tty: no job record,
+    a resolvable session, and *status* as its registry entry's report."""
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
+    monkeypatch.setattr("hive.tmux.display_value", lambda *_a: "/w")
+    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _p: {"busy": False})
+    monkeypatch.setattr(
+        sidecar, "detect_cli_process_for_pane", lambda _p: SimpleNamespace(name="claude")
+    )
+    monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_k: "")
+    monkeypatch.setattr("hive.adapters.claude_bg.read_pane_job", lambda _p: None)
+    path = tmp_path / "sess-i.jsonl"
+    path.write_text("{}\n")
+    monkeypatch.setattr(
+        "hive.adapters.get",
+        lambda _name: SimpleNamespace(
+            resolve_current_session_id=lambda _p: "sess-i",
+            find_session_file=lambda _sid, cwd=None: path if transcript else None,
+        ),
+    )
+    monkeypatch.setattr("hive.agent_cli.claude_pid_for_pane", lambda _p: 777)
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.session_status",
+        lambda pid: status if pid == 777 else None,
+    )
+
+
+def test_interactive_claude_takes_input_state_from_its_registry_entry(monkeypatch, tmp_path):
+    # the transcript gate only sees an AskUserQuestion record, so it reads every
+    # other wait as clear (and a stale ask as pending) — and the send gate
+    # refuses on that verdict. The registry is the authority when it speaks.
+    _interactive_claude_pane(monkeypatch, tmp_path, status=("waiting", "input needed"))
+    monkeypatch.setattr(
+        "hive.adapters.base.check_input_gate",
+        lambda *_a, **_k: pytest.fail("the registry answered; the gate must not run"),
+    )
+
+    rt = sidecar._agent_runtime_payload("%7")
+
+    assert rt["inputState"] == "waiting_user"
+    assert rt["inputReason"] == "registry:input needed"
+    assert rt["busy"] is False
+    assert rt["sessionId"] == "sess-i"
+    assert rt["_runtimeSource"] == "claude_registry"
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("busy", True),
+    ("shell", False),
+    ("idle", False),
+])
+def test_interactive_claude_status_maps_like_the_bg_engine(monkeypatch, tmp_path, status, expected):
+    _interactive_claude_pane(monkeypatch, tmp_path, status=(status, ""))
+    monkeypatch.setattr(
+        "hive.adapters.base.check_input_gate",
+        lambda *_a, **_k: pytest.fail("the registry answered; the gate must not run"),
+    )
+
+    rt = sidecar._agent_runtime_payload("%7")
+
+    assert rt["busy"] is expected
+    assert rt["inputState"] == "ready"  # `shell` is neither mid-turn nor a wait
+
+
+def test_interactive_claude_without_a_registry_status_falls_back_to_the_gate(monkeypatch, tmp_path):
+    # headless/desktop-hosted sessions report nothing; the transcript gate is
+    # still the only answer available for them
+    _interactive_claude_pane(monkeypatch, tmp_path, status=None)
+    from hive.adapters.base import GateResult
+
+    monkeypatch.setattr(
+        "hive.adapters.base.check_input_gate", lambda _path: GateResult("waiting", "")
+    )
+
+    rt = sidecar._agent_runtime_payload("%7")
+
+    assert rt["inputState"] == "waiting_user"
+    assert rt["inputReason"] == "ask_pending"
+    assert "_runtimeSource" not in rt
+
+
 # --- supervisor tick: prune records, park orphans -----------------------------
 
 

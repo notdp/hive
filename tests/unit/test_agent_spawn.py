@@ -68,8 +68,6 @@ def _setup_tmux_mocks(monkeypatch):
     monkeypatch.setattr("hive.agent.tmux.display_value", lambda _pane, _fmt: None)
     monkeypatch.setattr("hive.agent.tmux.set_pane_title", lambda *_: None)
     monkeypatch.setattr("hive.agent.tmux.tag_pane", lambda *args, **_kwargs: tags.append(args))
-    monkeypatch.setattr("hive.agent.tmux.wait_for_text", lambda *_args, **_kw: True)
-    monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: True)
     monkeypatch.setattr("hive.agent.tmux.is_pane_in_mode", lambda _pane: False)
     monkeypatch.setattr("hive.agent.tmux.cancel_pane_mode", lambda _pane: None)
     def _send_keys(_pane, text, enter=True):
@@ -365,7 +363,6 @@ def test_spawn_claude_resume_of_a_gone_job_fails_and_gives_the_pane_back(monkeyp
 
 def test_spawn_tags_pane_before_waiting_for_ready(monkeypatch):
     calls, tags = _setup_tmux_mocks(monkeypatch)
-    monkeypatch.setattr("hive.agent.tmux.wait_for_texts", lambda *_args, **_kw: False)
 
     Agent.spawn(
         name="w1", team_name="t", target_pane="%9",
@@ -882,14 +879,17 @@ def test_send_claude_writes_to_the_engine_inbox_as_the_member_address(monkeypatc
     writes: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: writes.append((sock, text, sender))
-        or claude_sessions.ACCEPTED_UDS_WRITE,
+        lambda sock, text, *, sender, session_id="": writes.append(
+            (sock, text, sender, session_id)
+        ) or claude_sessions.ACCEPTED_UDS_WRITE,
     )
 
     accepted = Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
 
     assert accepted == "udsWriteAccepted"
-    assert writes == [(engine.socket_path, "hi", "t.w")]
+    # the engine's own session id rides the frame: claude drops a mismatching
+    # one, so a recycled socket cannot take a dead session's mail
+    assert writes == [(engine.socket_path, "hi", "t.w", engine.session_id)]
     assert calls == []  # native transport only — the composer is never touched
 
 
@@ -910,7 +910,7 @@ def test_send_claude_resolves_the_engine_from_the_pane_job_record(monkeypatch):
     )
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: claude_sessions.ACCEPTED_UDS_WRITE,
+        lambda sock, text, *, sender, session_id="": claude_sessions.ACCEPTED_UDS_WRITE,
     )
 
     Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
@@ -954,8 +954,9 @@ def test_send_claude_asleep_engine_is_woken_then_delivered(monkeypatch):
     writes: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: writes.append((sock, text, sender))
-        or claude_sessions.ACCEPTED_UDS_WRITE,
+        lambda sock, text, *, sender, session_id="": writes.append(
+            (sock, text, sender)
+        ) or claude_sessions.ACCEPTED_UDS_WRITE,
     )
 
     accepted = Agent(name="w", team_name="t", pane_id="%3", cli="claude").send("hi")
@@ -1049,8 +1050,9 @@ def test_send_claude_never_uses_codex_daemon(monkeypatch):
     inbox_calls: list[tuple] = []
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: inbox_calls.append((sock, text, sender))
-        or claude_sessions.ACCEPTED_UDS_WRITE,
+        lambda sock, text, *, sender, session_id="": inbox_calls.append(
+            (sock, text, sender)
+        ) or claude_sessions.ACCEPTED_UDS_WRITE,
     )
     submitted: list[tuple] = []
     monkeypatch.setattr(
@@ -1071,8 +1073,9 @@ def _stale_claude_record(monkeypatch):
     _pin_job(monkeypatch, job_id="beef4321", engine=_fake_engine(job_id="beef4321"))
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda sock, text, *, sender: writes.append((sock, text, sender))
-        or claude_sessions.ACCEPTED_UDS_WRITE,
+        lambda sock, text, *, sender, session_id="": writes.append(
+            (sock, text, sender)
+        ) or claude_sessions.ACCEPTED_UDS_WRITE,
     )
     return writes
 
@@ -1262,20 +1265,15 @@ def test_spawn_rejects_unknown_session_mode(monkeypatch):
 # --- readiness oracles: runtime signals, not screen text (VAL 1-7) ---
 
 
-def _watch_banner_and_sleep(monkeypatch):
-    banner_waits: list[tuple] = []
+def _watch_sleeps(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr(
-        "hive.agent.tmux.wait_for_text",
-        lambda pane, text, timeout=0: banner_waits.append((pane, text)) or True,
-    )
     monkeypatch.setattr("hive.agent.time.sleep", lambda d: sleeps.append(d))
-    return banner_waits, sleeps
+    return sleeps
 
 
 def test_spawn_claude_engine_readiness_skips_banner_and_settle(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
-    banner_waits, sleeps = _watch_banner_and_sleep(monkeypatch)
+    sleeps = _watch_sleeps(monkeypatch)
 
     # fresh and resume: the engine's registry entry is the oracle, the banner
     # (the pane only shows an attach viewer) is not consulted at all
@@ -1283,14 +1281,12 @@ def test_spawn_claude_engine_readiness_skips_banner_and_settle(monkeypatch):
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="claude", session_id="cafe0123", session_mode="resume")
 
-    assert banner_waits == []
     assert 1 not in sleeps  # no fixed 1s settle either
 
 
 def test_spawn_codex_waits_on_process_not_banner(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
-    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
     waited: list[str] = []
     monkeypatch.setattr(
         "hive.agent._wait_codex_attached",
@@ -1300,7 +1296,6 @@ def test_spawn_codex_waits_on_process_not_banner(monkeypatch):
     Agent.spawn(name="v", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="codex", skill="none", session_id="roll-1", session_mode="resume")
 
-    assert banner_waits == []
     assert waited == ["%0"]
 
 
@@ -1340,7 +1335,6 @@ def test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner(monkeypatch):
         "hive.adapters.grok_leader.write_pane_session",
         lambda pane, session_id, cwd: sessions.append((pane, session_id, cwd)),
     )
-    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
     waited: list[str] = []
     monkeypatch.setattr(
         "hive.agent._wait_grok_session_ready", lambda pane, sid: waited.append(sid) or True
@@ -1349,7 +1343,6 @@ def test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner(monkeypatch):
     Agent.spawn(name="w", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="grok", skill="none")
 
-    assert banner_waits == []
     assert waited == [sessions[0][1]]  # the id hive minted, not the pane's cwd
 
 
@@ -1378,7 +1371,6 @@ def test_wait_grok_session_ready_sees_the_session_dir_and_is_nonfatal(monkeypatc
 
 def test_spawn_codex_fork_waits_on_process_not_banner(monkeypatch):
     _setup_tmux_mocks(monkeypatch)
-    banner_waits, _ = _watch_banner_and_sleep(monkeypatch)
     waited: list[str] = []
     monkeypatch.setattr(
         "hive.agent._wait_codex_attached",
@@ -1388,7 +1380,6 @@ def test_spawn_codex_fork_waits_on_process_not_banner(monkeypatch):
     Agent.spawn(name="f", team_name="t", target_pane="%0", cwd="/tmp",
                 cli="codex", session_id="roll-1")  # fork mode
 
-    assert banner_waits == []  # every codex spawn shares the process oracle
     assert waited == ["%0"]
 
 

@@ -47,9 +47,13 @@ def test_list_sessions_keeps_only_live_entries_with_an_inbox(monkeypatch, tmp_pa
     (tmp_path / "sessions" / "5.json").write_text("{not json")
     (tmp_path / "sessions" / "6.json").write_text("[1, 2]")
 
+    _write_entry(tmp_path, "7.json", name="spare", pid=me, cwd="/w/s", kind="interactive",
+                 messagingSocketPath="/tmp/s.sock", spare=True)
+
     rows = m.list_sessions()
 
     assert [(s.name, s.pid, s.cwd, s.socket_path) for s in rows] == [("alpha", me, "/w/a", "/tmp/a.sock")]
+    assert m.resolve("spare") == []  # a warm spare is nobody's address
     assert [s.name for s in m.resolve("alpha")] == ["alpha"]
     assert m.resolve("nosock") == []
     assert m.resolve("dead") == []
@@ -182,6 +186,52 @@ def test_send_writes_one_peer_message_line_and_reports_acceptance(short_tmp):
     }
 
 
+def _listener(path: str):
+    """A throwaway inbox listener on *path*; returns (srv, frames, thread)."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    got: list[bytes] = []
+
+    def _accept():
+        conn, _ = srv.accept()
+        with conn:
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            got.append(buf)
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    return srv, got, thread
+
+
+def test_send_carries_the_session_id_guard_only_when_given(short_tmp):
+    # claude drops a frame whose session_id is not the target's own: that is
+    # what keeps a recycled `<pid>.sock` from taking a dead session's mail.
+    # With no id there is no guard — the frame must not carry an empty one.
+    path = str(short_tmp / "g.sock")
+    srv, got, thread = _listener(path)
+    try:
+        assert m.send(path, "x", sender="t.w", session_id="sid-1") == m.ACCEPTED_UDS_WRITE
+        thread.join(timeout=5)
+    finally:
+        srv.close()
+    assert json.loads(got[0].decode())["session_id"] == "sid-1"
+
+    path = str(short_tmp / "n.sock")
+    srv, got, thread = _listener(path)
+    try:
+        assert m.send(path, "x", sender="t.w") == m.ACCEPTED_UDS_WRITE
+        thread.join(timeout=5)
+    finally:
+        srv.close()
+    assert "session_id" not in json.loads(got[0].decode())
+
+
 def test_send_to_a_dead_socket_is_none(short_tmp):
     assert m.send(str(short_tmp / "gone.sock"), "x", sender="hive") is None
     assert m.send("", "x", sender="hive") is None
@@ -229,6 +279,12 @@ def test_session_status_reports_only_live_tui_vocabulary(monkeypatch, tmp_path):
                  status="busy")
     assert m.session_status(me) == ("busy", "")
 
+    # `shell` is in the registry's own vocabulary — dropping it made a session
+    # at its shell read as "nothing reported" and fall into the transcript gate
+    _write_entry(tmp_path, f"{me}.json", name="w", pid=me, kind="interactive",
+                 status="shell")
+    assert m.session_status(me) == ("shell", "")
+
     # headless/desktop-hosted sessions never report status
     _write_entry(tmp_path, f"{me}.json", name="w", pid=me, kind="interactive")
     assert m.session_status(me) is None
@@ -243,3 +299,13 @@ def test_session_status_reports_only_live_tui_vocabulary(monkeypatch, tmp_path):
     assert m.session_status(None) is None
 
 
+def test_runtime_from_status_maps_the_registry_vocabulary():
+    assert m.runtime_from_status("busy") == {"busy": True, "inputState": "ready", "inputReason": ""}
+    assert m.runtime_from_status("idle") == {"busy": False, "inputState": "ready", "inputReason": ""}
+    # at its shell: not mid-turn, and not waiting on an answer either
+    assert m.runtime_from_status("shell") == {"busy": False, "inputState": "ready", "inputReason": ""}
+    assert m.runtime_from_status("waiting", "input needed") == {
+        "busy": False, "inputState": "waiting_user", "inputReason": "registry:input needed",
+    }
+    assert m.runtime_from_status("waiting")["inputReason"] == "registry:unknown"
+    assert m.runtime_from_status("")["inputState"] == "unknown"
