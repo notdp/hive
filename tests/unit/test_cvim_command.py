@@ -248,11 +248,19 @@ if out:
 
 
 def _isolated_env(tmp_path: Path) -> dict[str, str]:
-    """Env bits that keep a cvim run off the developer's real claude tree."""
+    """Env bits that keep a cvim run off the developer's real agent trees.
+
+    The sendback resolves a pane's engine address from those trees (claude's
+    job records, codex's thread records, grok's session records), so all
+    three are pinned at disposable paths: a stray record on the developer's
+    machine must never make a fixture pane look hive-managed.
+    """
     return {
         "HIVE_PYTHON": sys.executable,
         "PYTHONPATH": str(ROOT / "src"),
         "CLAUDE_HOME": str(tmp_path / "claude-home"),
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "GROK_HOME": str(tmp_path / "grok-home"),
     }
 
 
@@ -815,6 +823,58 @@ def test_claude_post_refuses_when_nothing_is_running_on_the_pane(tmp_path):
         event["cmd"] in {"send-keys", "load-buffer", "paste-buffer"}
         for event in actions
     )
+
+
+def _record_pane_thread(tmp_path: Path, pane: str, thread_id: str) -> Path:
+    control = tmp_path / "codex-home" / "app-server-control"
+    control.mkdir(parents=True, exist_ok=True)
+    slug = pane.replace("%", "")
+    (control / f"hive-pane-{slug}.thread").write_text(
+        json.dumps({"threadId": thread_id, "cwd": str(tmp_path)})
+    )
+    return tmp_path / "codex-home"
+
+
+def test_codex_pane_with_a_recorded_thread_never_reaches_for_tmux(tmp_path):
+    # The thread record is the pane's engine address, so the sendback is a
+    # turn/interrupt + turn/start on it. Here the daemon is absent (scratch
+    # CODEX_HOME, no socket), which is a failed delivery — and a failed
+    # native delivery still never degrades into keystrokes.
+    cache_dir = tmp_path / "cache"
+    codex_home = _record_pane_thread(tmp_path, "%1", "th-cafe")
+    actions = _run_command_actions(
+        tmp_path,
+        current_pane="%1",
+        panes=[
+            {"id": "%1", "left": 0, "top": 0, "width": 200, "height": 100,
+             "command": "codex"},
+        ],
+        extra_env={
+            "FAKE_EDITOR_APPEND_TEXT": "new line added",
+            "CODEX_HOME": str(codex_home),
+            "XDG_CACHE_HOME": str(cache_dir),
+        },
+    )
+
+    records = _read_latest_cvim_records(cache_dir)
+
+    assert not any(
+        event["cmd"] in {"send-keys", "load-buffer", "paste-buffer", "capture-pane"}
+        for event in actions
+    )
+    assert any(
+        record.get("event") == "post.sendback"
+        and "route=codexThread" in str(record.get("message", ""))
+        for record in records
+    )
+    # The user's edit outlived the refusal instead of being deleted with the
+    # popup's tmpdir.
+    retained = [
+        record for record in records if record.get("event") == "post.sendback_retained"
+    ]
+    assert len(retained) == 1
+    send_file = str(retained[0]["message"]).split("send_file=", 1)[1]
+    assert Path(send_file).read_text().strip() == "new line added"
 
 
 def test_popup_schedules_post_after_popup_exits(tmp_path):

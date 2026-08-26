@@ -65,6 +65,7 @@ seed_helper="$script_dir/cvim-seed"
 session_helper="$script_dir/cvim-session"
 list_helper="$script_dir/cvim-list"
 payload_builder="$script_dir/cvim-payload"
+sendback_helper="$script_dir/cvim-sendback"
 menu_vim_template="$resources_dir/menu.vim"
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/cvim.XXXXXX")"
 msg_file="$tmpdir/message.md"
@@ -203,7 +204,7 @@ queue_post_run() {
   fi
 
   debug_log "queue_post_run.enqueue tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
-  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib" "$hive_python"
+  printf -v post_cmd '%q ' "$post_file" "$reply_pane" "$send_file" "$tmpdir" "$paste_delay_default" "$content_changed" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib" "$hive_python" "$sendback_helper"
   tmux run-shell -b "$post_cmd"
 }
 
@@ -523,6 +524,7 @@ debug_workspace="${13}"
 debug_run_id="${14}"
 debug_lib="${15}"
 hive_python="${16}"
+sendback_helper="${17}"
 did_pre_interrupt="0"
 . "$debug_lib"
 
@@ -621,48 +623,32 @@ if [[ -f "$send_file" ]]; then
 fi
 debug_log "post.start tmpdir=$tmpdir content_changed=$content_changed send_exists=$send_exists send_bytes=$send_bytes"
 
-if [[ "$reply_profile" == "claude" ]]; then
-  # A claude member's keyboard is its bg job, not its pane: hive pipes the
-  # sendback straight into `claude attach <jobId>`, so nothing below has to
-  # run and the pane's viewer is left alone. Exit codes: 0 delivered, 10 this
-  # pane is a plain interactive claude (keep going with tmux keys), anything
-  # else nothing safe to type into.
-  pipe_rc=0
-  "$hive_python" - "$reply_pane" "$send_file" "$content_changed" "$interrupt_before_paste" "$interrupt_after_paste" <<'PY' || pipe_rc=$?
-import importlib
-import sys
-
-pane, send_file, content_changed, interrupt_first, interrupt_after = sys.argv[1:6]
-claude_bg = importlib.import_module("hive.adapters.claude_bg")
-claude_view = importlib.import_module("hive.adapters.claude_view")
-
-job_id = claude_bg.job_id_for_pane(pane)
-if not job_id:
-    raise SystemExit(10 if claude_view.interactive_claude_pid(pane) is not None else 1)
-interrupt = interrupt_first != "0" or interrupt_after != "0"
-if content_changed != "1":
-    # Nothing was edited: the sendback is just the interrupt (if any).
-    raise SystemExit(0 if not interrupt or claude_bg.interrupt_job(job_id).ok else 1)
-if interrupt:
-    # Either flag means "interrupt this turn". The tmux path can only honour
-    # the `after` one post-paste; the pipe types and submits in one call, so
-    # both land here, before the text.
-    claude_bg.interrupt_job(job_id)
-with open(send_file, encoding="utf-8") as handle:
-    text = handle.read().rstrip("\n")  # same trailing-newline trim as the tmux path
-raise SystemExit(0 if claude_bg.type_into_job(job_id, text).ok else 1)
-PY
-  if (( pipe_rc != 10 )); then
-    debug_log "post.pipe rc=$pipe_rc"
-    if (( pipe_rc == 0 )); then
-      rm -rf "$tmpdir"
-    else
-      # The edit is the user's work and the pipe refused to deliver it: keep
-      # the payload on disk (the debug log names it) instead of deleting it.
-      debug_log "post.pipe_retained send_file=$send_file"
-    fi
-    exit 0
+# A hive-managed agent's keyboard is not its pane: claude's engine answers on
+# its bg job, codex's on its recorded thread, grok's on its recorded session.
+# The sendback rides that address — no keystroke, no paste settle, no
+# capture-pane scrape — and everything below is the fallback for a pane with
+# no such address. Either interrupt flag means "interrupt this turn": the
+# native routes deliver in one call, so both collapse to a single interrupt
+# before the text.
+sendback_interrupt="0"
+if [[ "$interrupt_before_paste" != "0" || "$interrupt_after_paste" != "0" ]]; then
+  sendback_interrupt="1"
+fi
+sendback_rc=0
+# stderr rides into the log line too: a helper that crashed is the one case
+# where the run log is all there is to read.
+sendback_out="$("$hive_python" "$sendback_helper" "$reply_pane" "$reply_profile" "$send_file" "$content_changed" "$sendback_interrupt" 2>&1)" || sendback_rc=$?
+debug_log "post.sendback rc=$sendback_rc ${sendback_out:-route=error}"
+if (( sendback_rc != 10 )); then
+  if (( sendback_rc == 0 )); then
+    rm -rf "$tmpdir"
+  else
+    # The edit is the user's work and the transport refused to deliver it:
+    # keep the payload on disk (the debug log names it) instead of deleting
+    # it. A native address that failed never falls back to keystrokes.
+    debug_log "post.sendback_retained send_file=$send_file"
   fi
+  exit 0
 fi
 
 sleep "$paste_delay"
