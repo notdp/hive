@@ -322,7 +322,7 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     # Stale "ghost" tag cleared; a fresh orch team is bound to this window.
     assert payload["team"] == "honey"
     assert payload["orch"]["name"] == "orch"
-    assert payload["next"] == "hive skills get orch"
+    assert payload["protocol"] == "/hive:orch"
     assert tmux.get_window_option("dev:0", "hive-team") == "honey"
 
 
@@ -353,7 +353,7 @@ def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypat
     assert payload["team"] == "honey"
     assert payload["orch"]["name"] == "orch"
     assert payload["orch"]["pane"] == "%5"
-    assert payload["next"] == "hive skills get orch"
+    assert payload["protocol"] == "/hive:orch"
 
     # The team is created and the current pane is remembered as the orch.
     from hive.team import Team

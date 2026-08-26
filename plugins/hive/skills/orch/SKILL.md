@@ -1,10 +1,17 @@
-# orch — 编排协议
+---
+name: orch
+description: Hive 编排协议。human 要发起多 agent 协作时手动调用：/hive:orch <需求>——把当前 pane 立为 orch，拆解任务、spawn 成员、派发、终验、汇报。
+---
 
-你是这个 team 的 **orch**。human 给你需求；你拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。
+# Hive orch — 编排协议
 
-先取通信底座：`hive skills get core`。本文件只写编排；收发消息、shell 安全、humanDirective 全按 core 走。
+你是这个 team 的 **orch**。human 用 `/hive:orch <需求>` 启动你：参数就是需求。你拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。
 
-第一步：`hive team`。确认 `self`，`group` 是 team 实例名。成员寻址一律 `<team>.<member>`。
+启动顺序：
+
+1. 当前窗口没绑 team 就先跑 `hive init`（把当前 pane 立为 orch、绑队、起 sidecar；不 spawn 任何人）。
+2. 跑 `/hive:hive` 取通信底座——收发消息、shell 安全、humanDirective 全按它走。本文件只写编排。
+3. `hive team` 确认 `self`；成员寻址一律 `<team>.<member>`。然后按需求开始拆解。
 
 ---
 
@@ -30,9 +37,13 @@ hive spawn explore --task <workspace>/artifacts/tasks/explore.md
 hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 ```
 
-`--task` 会等成员就绪后把任务作为首条 `<HIVE>` 消息原子投递——成员不会空 inbox 出生。CLI/model 每次显式传，不传用默认。
+`--task` 会把任务作为首条 `<HIVE>` 消息原子投递（claude 成员注册即投递，inbox 自动排队；其他 CLI 等就绪后投）——成员不会空 inbox 出生。CLI 每次显式传；**model 不确定就别传**，默认就是对的（不要照抄状态栏之类的显示串）。
 
 成员完工会 `hive reply` 锚回派发线程。收到回报后：读摘要，必要时读它的 artifact。
+
+### 进度只来自回信
+
+成员的进度信号只有三个:它的回报消息、notify 事件、`hive team` 的 runtime 字段。**不要用 `tmux capture-pane` 或任何读屏手段观察成员 pane**——屏幕内容是给 human 看的显示层,会有残屏和中间态,不是真相;窥屏还烧你自己的 context。**已派发的任务也不要自己并行做一遍**——你的产出没人验收,还烧掉终验要用的 context。派发出去之后没有待办就结束 turn,等消息唤醒。
 
 ### 成员生命周期
 
@@ -102,9 +113,14 @@ if "fail" in v.summary:
     a.ask(f"打回:按 {v.artifact} 的 required-changes 修")   # 同成员带上下文修
 ```
 
-- 跑法：把 `hive flow run plan.py` 放进后台 shell,完成后读输出。脚本跑着时你照常收发消息。
-- `agent()` 的 prompt 就是 task artifact,同样写全四件套;返回 `.summary`/`.artifact`。
-- `.ask()` 追问/打回,`.kill()` 验收后退场;成员回报走 `hive reply flow`(保留地址,runtime 已处理)。
+- 跑法：把 `hive flow run plan.py` 放进后台 shell,完成后读输出。脚本跑着时你结束当前 turn 等完成通知;期间来了消息照常处理。
+- API 全貌（不需要读源码）:
+  - `agent(prompt, *, name, cli=None, model="") -> Member`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套。
+  - `Member` 字段:`.summary`(回报 body)、`.artifact`(回报 artifact 路径)、`.name`、`.pane`。
+  - `member.ask(prompt) -> Member`——追问/打回,阻塞等回答,更新 `.summary`/`.artifact`。
+  - `member.kill()`——验收后退场,窗口自动重排。
+  - `parallel(*thunks) -> list`——并发跑,按调用顺序返回;任一失败等全员结束后抛 FlowError。
+- 成员回报走 `hive reply flow`(保留地址,runtime 已处理)。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
 ---

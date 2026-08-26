@@ -154,13 +154,6 @@ def test_dash_h_still_reaches_status_tombstone(runner):
 # --- B5: ls aliases ---
 
 
-def test_skills_ls_matches_skills_list(runner):
-    ls = runner.invoke(cli, ["skills", "ls"])
-    lst = runner.invoke(cli, ["skills", "list"])
-    assert ls.exit_code == lst.exit_code == 0
-    assert json.loads(ls.output) == json.loads(lst.output)
-
-
 def test_plugin_ls_matches_plugin_list_in_all_modes(runner, configure_hive_home):
     configure_hive_home(tmux_inside=False)
     for extra in ([], ["--json"], ["--plain"]):
@@ -170,6 +163,5 @@ def test_plugin_ls_matches_plugin_list_in_all_modes(runner, configure_hive_home)
         assert ls.output == lst.output, extra
 
 
-def test_ls_aliases_are_hidden():
-    assert cli.commands["skills"].commands["ls"].hidden
+def test_plugin_ls_alias_is_hidden():
     assert cli.commands["plugin"].commands["ls"].hidden

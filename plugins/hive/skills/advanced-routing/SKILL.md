@@ -1,6 +1,11 @@
-# advanced routing — thread takeover
+---
+name: advanced-routing
+description: Hive thread 接管路由。被 spawn/handoff 接管一条不属于自己的 thread 时的第一条 reply 规则；低频场景。
+---
 
-hive 路由的低频场景。常规 `hive send` / `hive reply` 流程不需要读这份,core「消息机制」已经覆盖。
+# Hive advanced routing — thread takeover
+
+hive 路由的低频场景。常规 `hive send` / `hive reply` 流程不需要读这份,`/hive:hive` 已经覆盖。
 
 命中以下情况才查这里:
 

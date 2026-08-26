@@ -13,7 +13,7 @@ from . import draft_guard
 from . import tmux
 from .agent_cli import resolve_session_id_for_pane
 
-AGENT_STARTUP_TIMEOUT = 30
+AGENT_STARTUP_TIMEOUT = 90
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
 SUPPORTED_CLIS: tuple[str, ...] = ("claude", "codex", "grok")
@@ -250,6 +250,13 @@ class Agent:
 
         if split_window:
             pane_id = tmux.split_window(target_pane, horizontal=split_horizontal, size=split_size)
+            # Re-tile the moment the pane exists — the CLI boot below can
+            # block for tens of seconds, and a 50% split left un-tiled that
+            # long is the distorted-window the human stares at.
+            window_for_tile = tmux.get_pane_window_target(pane_id) or ""
+            if window_for_tile:
+                from . import layout as _layout
+                _layout.apply_adaptive(window_for_tile)
         else:
             pane_id = target_pane
         tmux.set_pane_title(pane_id, f"[{name}]")
