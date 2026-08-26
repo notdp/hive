@@ -193,19 +193,31 @@ def agent(prompt: str, *, name: str, cli: str | None = None, model: str = "") ->
     if name == FLOW_SENDER:
         raise FlowError(f"'{FLOW_SENDER}' is the flow runner's own address; pick another member name")
     ctx = _context()
-    with _SPAWN_LOCK:
-        try:
-            spawned = cli_mod._spawn_team_agent(
-                ctx.team,
-                team_name=ctx.team_name,
-                agent_name=name,
-                model=model,
-                prompt="",
-                skill="hive:hive",
-                cli_name=cli,
-            )
-        except (ValueError, RuntimeError) as exc:
-            raise FlowError(f"spawn '{name}' failed: {exc}") from exc
+    last: Exception | None = None
+    spawned = None
+    for attempt in range(_DISPATCH_ATTEMPTS):
+        with _SPAWN_LOCK:
+            try:
+                spawned = cli_mod._spawn_team_agent(
+                    ctx.team,
+                    team_name=ctx.team_name,
+                    agent_name=name,
+                    model=model,
+                    prompt="",
+                    skill="hive:hive",
+                    cli_name=cli,
+                )
+                break
+            except (ValueError, RuntimeError) as exc:
+                # A cloud transport (codex mint, grok leader) fails fast under
+                # provider throttling; absorb blips here instead of widening
+                # its RPC timeout — each retry is visible, the total bounded.
+                last = exc
+        if attempt + 1 < _DISPATCH_ATTEMPTS:
+            _log(f"{name} spawn failed ({last}); retry {attempt + 2}/{_DISPATCH_ATTEMPTS}")
+            time.sleep(_DISPATCH_RETRY_GAP)
+    if spawned is None:
+        raise FlowError(f"spawn '{name}' failed after {_DISPATCH_ATTEMPTS} attempts: {last}") from last
     _log(f"{name} spawned in {spawned.pane_id}")
 
     cli_mod._ensure_team_sidecar(ctx.team, Path(ctx.workspace))
