@@ -50,6 +50,10 @@ SUBMIT_TIMEOUT = _HANDSHAKE_TIMEOUT + _ACK_TIMEOUT
 # leader took the prompt into the session queue. Not proof the turn ran.
 PROMPT_QUEUED = "sessionPromptQueued"
 
+# The ACP cancel left for the leader. It is a notification, so this is the
+# only accept class there is — see :meth:`GrokStdioClient.cancel`.
+CANCEL_SENT = "sessionCancelSent"
+
 _TOOL_PHASES = ("tool_open", "tool_result_pending_reply")
 _MESSAGE_CHUNKS = ("agent_message_chunk", "agent_thought_chunk", "user_message_chunk")
 
@@ -395,6 +399,27 @@ class GrokStdioClient:
             with self._state_lock:
                 self._ack = None
 
+    def cancel(self) -> bool:
+        """Abort the session's running turn with ACP ``session/cancel``.
+
+        Cancel is a *notification*, not a request: 1.0.5 real-machine
+        verified, one carrying an id is refused ``-32601 Method not found``
+        and the turn runs to completion, while the bare notification ended
+        the pending ``session/prompt`` with ``stopReason: "cancelled"``
+        (``MidTurnAbort``) ~0.1 s later. So it goes out without an id and
+        there is nothing to wait for — the accept boundary is the write onto
+        a loaded session, and a cancel on an idle session is a no-op.
+        """
+        with self._state_lock:
+            session_id = self._runtime.session_id
+        if session_id is None:
+            return False
+        return self._write({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {"sessionId": session_id},
+        })
+
     def compact(self) -> str:
         """Compact the session's context; ``busy`` defers instead of aborting.
 
@@ -601,6 +626,20 @@ class GrokClientPool:
         except Exception:  # noqa: BLE001 — any client failure is a transport failure
             return None
 
+    def interrupt_pane(self, pane: str) -> str | None:
+        """Cancel the running turn over the pane's leader.
+
+        Returns ``CANCEL_SENT`` when the notification went out on a loaded
+        session, else None: no daemon, no session record, or a dead pipe.
+        """
+        client = self._client_for(pane)
+        if client is None:
+            return None
+        try:
+            return CANCEL_SENT if client.cancel() else None
+        except Exception:  # noqa: BLE001 — any client failure is a transport failure
+            return None
+
     def compact_pane(self, pane: str) -> str:
         client = self._client_for(pane)
         return client.compact() if client is not None else "unavailable"
@@ -670,6 +709,10 @@ def connect_pane(pane: str) -> bool:
 
 def send_to_pane(pane: str, text: str) -> str | None:
     return pool().send_to_pane(pane, text)
+
+
+def interrupt_pane(pane: str) -> str | None:
+    return pool().interrupt_pane(pane)
 
 
 def compact_pane(pane: str) -> str:

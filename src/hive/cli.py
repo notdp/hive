@@ -3496,11 +3496,11 @@ def capture(member_name: str, lines: int):
 @cli.command()
 @click.argument("agent_name")
 def interrupt(agent_name: str):
-    """Interrupt an agent pane.
+    """Interrupt an agent's running turn.
 
-    Sends the agent's native interrupt keystroke (e.g. Esc for Claude
-    Code) to cancel an in-progress turn. Use when a peer is stuck in a
-    tool loop or you need to abort a runaway action.
+    Aborts the turn over the member's own transport — addressed to its
+    engine, not typed at its pane. Use when a peer is stuck in a tool
+    loop or you need to abort a runaway action.
 
     \b
     Example:

@@ -236,6 +236,11 @@ def ensure_dir_trusted(directory: str) -> None:
 # shared daemon took the turn. Not proof the turn produced output.
 TURN_START_ACCEPTED = "turnStartAccepted"
 
+# Interrupt outcomes: the daemon aborted the running turn, or there was no
+# turn to abort (an idle thread is nothing to interrupt, not a failure).
+TURN_INTERRUPT_ACCEPTED = "turnInterruptAccepted"
+NO_RUNNING_TURN = "noRunningTurn"
+
 class _WSConn:
     def __init__(self, path: str, timeout: float = _HANDSHAKE_TIMEOUT):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -549,6 +554,36 @@ class CodexDaemonClient:
             "input": [{"type": "text", "text": text}],
         })
 
+    def active_turn_id(self, thread_id: str) -> str | None:
+        """Id of the thread's in-progress turn, read from the daemon.
+
+        ``turn/interrupt`` requires the turnId and ``ThreadStatus::Active``
+        carries none, so the id has to be read back — hive never owns the
+        turn (the pane's TUI started it) and only the starting client gets
+        ``turn/*`` notifications. ``thread/read`` with ``includeTurns`` is the
+        one route: there is no ``thread/turns/list`` on this surface.
+        """
+        res = self.call("thread/read", {"threadId": thread_id, "includeTurns": True})
+        result = res.get("result")
+        if not isinstance(result, dict):
+            return None
+        thread = result.get("thread")
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        for turn in reversed(turns or []):
+            if isinstance(turn, dict) and turn.get("status") == "inProgress":
+                return str(turn.get("id") or "") or None
+        return None
+
+    def turn_interrupt(self, thread_id: str, turn_id: str) -> dict:
+        """Abort *turn_id* on *thread_id*.
+
+        0.149.1 verified: the turnId is mandatory (omitting it answers
+        ``-32600 Invalid request: missing field turnId``) and is checked
+        against the live turn (``-32600 expected active turn id <x> but found
+        <y>``), so a stale id can never abort a turn that started since.
+        """
+        return self.call("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+
     def compact_start(self, thread_id: str) -> dict:
         """Start a context-compaction turn (the ``/compact`` slash equivalent).
 
@@ -758,6 +793,32 @@ def send_to_pane(pane: str, text: str) -> str | None:
     except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
         return None
     return TURN_START_ACCEPTED if "result" in response else None
+
+
+def interrupt_pane(pane: str) -> str | None:
+    """Abort the running turn on the pane's recorded thread.
+
+    Returns ``TURN_INTERRUPT_ACCEPTED`` when the daemon took the interrupt,
+    ``NO_RUNNING_TURN`` when the thread has no in-progress turn (nothing to
+    abort — not a failure), and ``None`` on transport failure: no recorded
+    thread, no daemon, an RPC error, or a connection failure. There is no
+    keystroke fallback: an Escape into the pane would land on whatever the
+    viewer is showing, while ``turn/interrupt`` is addressed to the thread.
+    """
+    tid = thread_id_for_pane(pane)
+    if not tid:
+        return None
+    client = _shared_client()
+    if client is None:
+        return None
+    try:
+        turn_id = client.active_turn_id(tid)
+        if not turn_id:
+            return NO_RUNNING_TURN
+        response = client.turn_interrupt(tid, turn_id)
+    except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
+        return None
+    return TURN_INTERRUPT_ACCEPTED if "result" in response else None
 
 
 def compact_pane(pane: str) -> str:

@@ -434,6 +434,36 @@ def test_permission_request_is_cancelled_and_marks_waiting_user(grok_client):
 
 
 # --------------------------------------------------------------------------
+# interrupt
+# --------------------------------------------------------------------------
+def test_cancel_writes_a_bare_notification_for_the_session(grok_client):
+    # ACP cancel is a notification: the leader answers a cancel carrying an
+    # id with -32601 and keeps running the turn, so the write must have no id.
+    client, proc = _loaded(grok_client)
+    assert client.cancel() is True
+    cancel = proc.sent()[-1]
+    assert cancel["method"] == "session/cancel"
+    assert cancel["params"] == {"sessionId": SID}
+    assert "id" not in cancel
+
+
+def test_cancel_false_without_a_loaded_session(grok_client):
+    client, proc = grok_client(responder())  # no handshake -> no session bound
+    assert client.cancel() is False
+    assert not any(msg.get("method") == "session/cancel" for msg in proc.sent())
+
+
+def test_cancel_false_when_the_pipe_is_dead(grok_client):
+    client, proc = _loaded(grok_client)
+
+    def broken(_text):
+        raise OSError("broken pipe")
+
+    proc.stdin.write = broken
+    assert client.cancel() is False
+
+
+# --------------------------------------------------------------------------
 # compaction
 # --------------------------------------------------------------------------
 def test_compact_returns_compacted_when_idle(grok_client):
@@ -737,6 +767,48 @@ def test_pool_send_to_pane_none_when_client_raises(monkeypatch):
 
     monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
     assert grok_pool.send_to_pane("%19", "hi") is None
+
+
+def test_pool_interrupt_pane_returns_cancel_sent(monkeypatch):
+    grok_pool = m.GrokClientPool()
+    cancelled = []
+
+    class FakeClient:
+        def cancel(self):
+            cancelled.append(True)
+            return True
+
+    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_pane("%19") == m.CANCEL_SENT
+    assert cancelled == [True]
+
+
+def test_pool_interrupt_pane_none_without_client(monkeypatch):
+    grok_pool = m.GrokClientPool()
+    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: None)
+    assert grok_pool.interrupt_pane("%19") is None
+
+
+def test_pool_interrupt_pane_none_when_the_write_fails(monkeypatch):
+    grok_pool = m.GrokClientPool()
+
+    class FakeClient:
+        def cancel(self):
+            return False
+
+    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_pane("%19") is None
+
+
+def test_pool_interrupt_pane_none_when_client_raises(monkeypatch):
+    grok_pool = m.GrokClientPool()
+
+    class FakeClient:
+        def cancel(self):
+            raise OSError("broken pipe")
+
+    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_pane("%19") is None
 
 
 def test_pool_compact_pane_unavailable_without_client(monkeypatch):

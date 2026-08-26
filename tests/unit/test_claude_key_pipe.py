@@ -481,13 +481,53 @@ def test_member_interrupt_without_a_job_record_is_refused(monkeypatch):
         agent.Agent(name="red", team_name="probe", pane_id="%1", cli="claude").interrupt()
 
 
-def test_interrupt_on_other_clis_still_sends_escape_to_the_pane(monkeypatch):
-    keys = []
-    monkeypatch.setattr("hive.agent.tmux.send_key", lambda pane, key: keys.append((pane, key)))
+def test_codex_interrupt_goes_to_the_thread_not_the_pane(monkeypatch):
+    _forbid_tmux(monkeypatch)
+    panes = []
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.interrupt_pane",
+        lambda pane: panes.append(pane) or "turnInterruptAccepted",
+    )
 
     agent.Agent(name="blue", team_name="probe", pane_id="%2", cli="codex").interrupt()
 
-    assert keys == [("%2", "Escape")]
+    assert panes == ["%2"]
+
+
+def test_codex_interrupt_is_refused_when_the_rpc_is_not_accepted(monkeypatch):
+    _forbid_tmux(monkeypatch)
+    monkeypatch.setattr("hive.adapters.codex_app_server.interrupt_pane", lambda _pane: None)
+
+    with pytest.raises(RuntimeError, match="turn/interrupt"):
+        agent.Agent(name="blue", team_name="probe", pane_id="%2", cli="codex").interrupt()
+
+
+def test_grok_interrupt_goes_to_the_session_not_the_pane(monkeypatch):
+    _forbid_tmux(monkeypatch)
+    panes = []
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.interrupt_pane",
+        lambda pane: panes.append(pane) or "sessionCancelSent",
+    )
+
+    agent.Agent(name="grey", team_name="probe", pane_id="%3", cli="grok").interrupt()
+
+    assert panes == ["%3"]
+
+
+def test_grok_interrupt_is_refused_when_the_cancel_is_not_accepted(monkeypatch):
+    _forbid_tmux(monkeypatch)
+    monkeypatch.setattr("hive.adapters.grok_leader.interrupt_pane", lambda _pane: None)
+
+    with pytest.raises(RuntimeError, match="session/cancel"):
+        agent.Agent(name="grey", team_name="probe", pane_id="%3", cli="grok").interrupt()
+
+
+def test_interrupt_of_an_unsupported_cli_is_refused(monkeypatch):
+    _forbid_tmux(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no native interrupt"):
+        agent.Agent(name="odd", team_name="probe", pane_id="%4", cli="cursor").interrupt()
 
 
 # --- draft save/restore ----------------------------------------------------
