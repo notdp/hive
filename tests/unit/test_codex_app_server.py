@@ -451,7 +451,9 @@ def test_connect_false_when_no_daemon(monkeypatch):
     assert m.connect() is False
 
 
-def test_start_member_thread_delegates_to_client(monkeypatch):
+def test_start_member_thread_delegates_to_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))  # freshen must not touch the real cache
+
     class FakeClient:
         def start_thread(self, cwd, *, name, model=""):
             return "tid-x" if (cwd, name, model) == ("/w", "n", "m") else None
@@ -462,7 +464,9 @@ def test_start_member_thread_delegates_to_client(monkeypatch):
     assert m.start_member_thread("/w", name="n") is None
 
 
-def test_fork_member_thread_delegates_to_client(monkeypatch):
+def test_fork_member_thread_delegates_to_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
     class FakeClient:
         def fork_thread(self, tid, *, name):
             return "tid-f" if (tid, name) == ("src", "n") else None
@@ -588,3 +592,30 @@ def test_wsconn_read_survives_silence_longer_than_handshake_timeout():
     conn = m._WSConn(path, timeout=0.3)
     assert json.loads(conn.recv_text()) == {"id": 1, "result": {}}
     conn.close()
+
+
+# --- models cache freshening -------------------------------------------------
+
+
+def test_freshen_models_cache_renews_stamp_and_keeps_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    path = tmp_path / "models_cache.json"
+    path.write_text(json.dumps({
+        "fetched_at": "2026-08-26T05:00:00.000000Z",
+        "etag": "W/\"abc\"",
+        "client_version": "0.149.1",
+        "models": [{"slug": "m1"}],
+    }))
+    assert m.freshen_models_cache() is True
+    entry = json.loads(path.read_text())
+    assert entry["fetched_at"] != "2026-08-26T05:00:00.000000Z"
+    assert entry["fetched_at"].endswith("Z")
+    assert entry["etag"] == 'W/"abc"'
+    assert entry["models"] == [{"slug": "m1"}]
+
+
+def test_freshen_models_cache_tolerates_missing_and_garbage(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert m.freshen_models_cache() is False  # no file
+    (tmp_path / "models_cache.json").write_text("not json")
+    assert m.freshen_models_cache() is False
