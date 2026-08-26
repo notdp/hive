@@ -27,6 +27,17 @@ class FakePipe:
         self.killed = False
         self.stdin = self
         self._broken_after = broken_after
+        self._stream = ""
+        self._pending: list[str] = []
+
+    # own-pty echo surface: each poll drains the next scripted frame
+    def mark(self) -> int:
+        return len(self._stream)
+
+    def text_since(self, mark: int) -> str:
+        if self._pending:
+            self._stream += self._pending.pop(0)
+        return self._stream[mark:]
 
     # stdin surface
     def write(self, payload: str) -> None:
@@ -77,10 +88,10 @@ def _wire(monkeypatch, pipe, *, screens, transcript=None, engine=None, baseline=
     monkeypatch.setattr(claude_bg, "_transcript_cursor", lambda eng: (transcript, 0))
     monkeypatch.setattr(claude_bg, "_composer_has_draft", lambda job, **kw: draft)
     monkeypatch.setattr(claude_bg.time, "sleep", lambda _s: None)
-    feed = [baseline, *screens]
-    monkeypatch.setattr(
-        claude_bg, "job_screen", lambda job, **kw: feed.pop(0) if feed else screens[-1]
-    )
+    # baseline is on screen before anything is typed (pre-mark); the scripted
+    # frames arrive as the echo loop polls.
+    pipe._stream = baseline
+    pipe._pending = list(screens)
 
 
 def _transcript(tmp_path, records):
@@ -96,27 +107,26 @@ def _user(text):
 # --- argv shape ------------------------------------------------------------
 
 
-def test_attach_and_logs_put_the_subcommand_first(monkeypatch):
-    """Hidden subcommands are only recognized at argv[1]; a leading flag
-    silently downgrades `attach` into a prompt."""
+def test_attach_puts_the_subcommand_first(monkeypatch):
+    """`claude attach <job>` — subcommand before the job id, always."""
     seen: list[list[str]] = []
 
     class Result:
         returncode = 0
-        stdout = "screen"
+        stdout = ""
+        stderr = ""
 
-    monkeypatch.setattr(
-        claude_bg.subprocess, "run", lambda argv, **kw: seen.append(argv) or Result()
-    )
     monkeypatch.setattr(
         claude_bg.subprocess, "Popen", lambda argv, **kw: seen.append(argv) or FakePipe()
     )
+    monkeypatch.setattr(claude_bg.pty, "openpty", lambda: (0, 1))
+    monkeypatch.setattr(claude_bg.fcntl, "ioctl", lambda *a: None)
+    monkeypatch.setattr(claude_bg.os, "close", lambda fd: None)
+    monkeypatch.setattr(claude_bg, "_engine_screen_size", lambda job: (200, 50))
 
-    claude_bg.job_screen("cafe1234")
     claude_bg._attach_pipe("cafe1234", claude_bin="claude")
 
-    assert seen == [["claude", "logs", "cafe1234"], ["claude", "attach", "cafe1234"]]
-
+    assert seen and seen[0][:3] == ["claude", "attach", "cafe1234"]
 
 def test_pipe_env_is_washed_of_claude_vars(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
@@ -178,18 +188,17 @@ def test_the_echo_survives_the_composer_wrapping_the_text(monkeypatch, tmp_path)
 
 
 def test_text_already_on_the_screen_is_not_taken_for_the_echo(monkeypatch, tmp_path):
-    """The screen is the tail of the whole pty replay, so the same sendback
-    delivered twice (or a payload quoting what is displayed) is already there
-    before a byte is typed. Only a *new* copy proves the client forwarded."""
+    """The attach stream starts at attach time (no history replay), and the
+    mark is taken at type time: a stale identical copy that was already on
+    screen before the type proves nothing — with no new echo, no submit."""
     pipe = FakePipe()
     stale = "> ping\n(the previous delivery, still in the scrollback)"
-    _wire(monkeypatch, pipe, screens=[stale], transcript=tmp_path / "none.jsonl", baseline=stale)
+    _wire(monkeypatch, pipe, screens=[], transcript=tmp_path / "none.jsonl", baseline=stale)
     monkeypatch.setattr(claude_bg, "_TYPE_READY_TIMEOUT", 0.01)
 
     result = claude_bg.type_into_job("cafe1234", "ping")
 
     assert not result.ok and "ping" in pipe.writes and "\r" not in pipe.writes
-
 
 def test_a_second_copy_of_the_same_text_is_the_echo(monkeypatch, tmp_path):
     pipe = FakePipe()

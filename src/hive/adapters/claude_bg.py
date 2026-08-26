@@ -461,12 +461,12 @@ _SUBMIT_CONFIRM_TIMEOUT = 20.0  # the user turn is written the moment it lands
 # writes its turn immediately.
 _SLASH_CONFIRM_TIMEOUT = 5.0
 _INTERRUPT_CONFIRM_TIMEOUT = 12.0
-_LOGS_TIMEOUT = 15.0
 _KEY_POLL_INTERVAL = 0.4
+_ECHO_POLL_INTERVAL = 0.05  # in-memory read of our own attach stream
+_PROBE_POLL_INTERVAL = 0.1  # registry file reads are cheap
 _CONTROL_KEY_GAP = 0.25  # a control byte must not ride in the text's chunk
 _ATTACH_EXIT_TIMEOUT = 10.0
 
-_LOGS_TAIL_CHARS = 4000  # the composer is at the very end of the pty stream
 _ECHO_PREFIX_CHARS = 40  # head/tail slice: unique enough, short enough to survive a wrap
 _PASTE_PLACEHOLDER = "[Pastedtext#"  # squashed `[Pasted text #N]`
 _INTERRUPT_MARKER = "[Request interrupted by user]"
@@ -500,32 +500,6 @@ def _strip_ansi(text: str) -> str:
 
 def _squash(text: str) -> str:
     return _CHROME_RE.sub("", text)
-
-
-def job_screen(job_id: str, *, claude_bin: str = "claude") -> str:
-    """Tail of ``claude logs <jobId>`` with escape sequences stripped.
-
-    The engine's own pty output — the composer's unsubmitted content included
-    — read headlessly, with no pane or viewer involved. Empty when the CLI
-    call failed.
-    """
-    if not job_id:
-        return ""
-    try:
-        result = subprocess.run(
-            [claude_bin, "logs", job_id],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=_LOGS_TIMEOUT,
-            env=bg_env(),
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return _strip_ansi(result.stdout or "")[-_LOGS_TAIL_CHARS:]
 
 
 def _composer_has_draft(job_id: str) -> bool:
@@ -580,19 +554,6 @@ def _echo_needles(text: str) -> tuple[str, ...]:
             )
         )
     )
-
-
-def _echo_counts(job_id: str, needles: tuple[str, ...], *, claude_bin: str) -> dict[str, int]:
-    """How often each needle is on the job's screen right now.
-
-    Counted, not tested for presence: the screen is the tail of the whole pty
-    replay, so a repeat delivery of the same text, a payload quoting what is
-    already displayed, or a leftover placeholder from an earlier paste all sit
-    there *before* anything is typed. Only a count that goes up was caused by
-    this call.
-    """
-    screen = _squash(job_screen(job_id, claude_bin=claude_bin))
-    return {needle: screen.count(needle) for needle in needles}
 
 
 def _transcript_cursor(engine: EngineSession | None) -> tuple[Path | None, int]:
@@ -701,18 +662,42 @@ class _AttachClient:
         self.stdin = self
         self.pid = proc.pid
         # The attached TUI paints continuously; an undrained master fills its
-        # buffer and blocks the engine's writes.
+        # buffer and blocks the engine's writes. The drained bytes are the
+        # engine's own screen — kept (bounded) so the echo check reads them
+        # in-memory instead of shelling out to `claude logs` per poll.
+        self._buf = bytearray()
+        self._buf_lock = threading.Lock()
+        self._seen = 0
         self._drain = threading.Thread(target=self._drain_master, args=(master_fd,), daemon=True)
         self._drain.start()
 
-    @staticmethod
-    def _drain_master(fd: int) -> None:
+    _BUF_CAP = 262144
+
+    def _drain_master(self, fd: int) -> None:
         while True:
             try:
-                if not os.read(fd, 65536):
-                    return
+                chunk = os.read(fd, 65536)
             except OSError:
                 return
+            if not chunk:
+                return
+            with self._buf_lock:
+                self._buf.extend(chunk)
+                self._seen += len(chunk)
+                if len(self._buf) > self._BUF_CAP:
+                    del self._buf[: len(self._buf) - self._BUF_CAP]
+
+    def mark(self) -> int:
+        """Position marker: ``text_since(mark())`` sees only later output."""
+        with self._buf_lock:
+            return self._seen
+
+    def text_since(self, mark: int) -> str:
+        with self._buf_lock:
+            kept = len(self._buf)
+            start = max(0, kept - max(0, self._seen - mark))
+            data = bytes(self._buf[start:])
+        return data.decode("utf-8", "replace")
 
     def write(self, payload: str) -> None:
         if self._fd is None:
@@ -857,14 +842,19 @@ def _close_pipe(proc: _AttachClient) -> None:
             proc.stdin.close()
     except (BrokenPipeError, OSError):
         pass
-    try:
-        proc.wait(timeout=_ATTACH_EXIT_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    def _reap() -> None:
         try:
             proc.wait(timeout=_ATTACH_EXIT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            pass
+            proc.kill()
+            try:
+                proc.wait(timeout=_ATTACH_EXIT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                pass
+
+    # The exit is the client's own business; nothing downstream needs to
+    # block on it — reap off-thread so the caller returns immediately.
+    threading.Thread(target=_reap, daemon=True).start()
 
 
 def type_into_job(
@@ -910,22 +900,23 @@ def type_into_job(
 
         draft = _composer_has_draft(job_id)
         needles = _echo_needles(text)
-        baseline = _echo_counts(job_id, needles, claude_bin=claude_bin)
         deadline = time.monotonic() + _TYPE_READY_TIMEOUT
         next_retype = 0.0
         clears = 0
         echoed = False
+        mark = proc.mark()
         while time.monotonic() < deadline:
             if time.monotonic() >= next_retype:
+                mark = proc.mark()  # only output after this counts as our echo
                 if not _clear_composer(proc) or not _feed(proc, text):
                     return KeyResult(False, why="the attach client closed its stdin")
                 clears += 1
                 next_retype = time.monotonic() + _TYPE_RETRY_AFTER
-            counts = _echo_counts(job_id, needles, claude_bin=claude_bin)
-            if not needles or any(count > baseline[needle] for needle, count in counts.items()):
+            screen = _squash(_strip_ansi(proc.text_since(mark)))
+            if not needles or any(needle in screen for needle in needles):
                 echoed = True
                 break
-            time.sleep(_KEY_POLL_INTERVAL)
+            time.sleep(_ECHO_POLL_INTERVAL)
         restore = draft and clears == 1
         if not echoed:
             return KeyResult(
@@ -963,7 +954,7 @@ def type_into_job(
                     False,
                     why=f"job {job_id} submitted the text with a leftover draft in front of it",
                 )
-            time.sleep(_KEY_POLL_INTERVAL)
+            time.sleep(_PROBE_POLL_INTERVAL if success_probe is not None else _KEY_POLL_INTERVAL)
         if slash:
             # ponytail: a slash command's record comes late (or never — /cost
             # and other UI-only commands write none), so silence here is not
