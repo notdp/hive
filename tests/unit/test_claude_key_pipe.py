@@ -633,3 +633,34 @@ def test_the_registry_name_is_read_into_the_engine_session():
         "messagingSocketPath": __file__, "name": "honey.worker",
     })
     assert engine is not None and engine.name == "honey.worker"
+
+
+def test_bg_env_neutralizes_color_forcing(monkeypatch):
+    """A member engine's tool env carries FORCE_COLOR; parsed CLI output
+    (spawn jobId, agents --json) must never be ANSI-wrapped."""
+    from hive.adapters import claude_bg
+
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    monkeypatch.setenv("CLICOLOR_FORCE", "1")
+    env = claude_bg.bg_env()
+    assert "FORCE_COLOR" not in env
+    assert "CLICOLOR_FORCE" not in env
+    assert env["NO_COLOR"] == "1"
+
+
+def test_spawn_job_parses_colored_output(monkeypatch):
+    """Regression: an ANSI-wrapped jobId polled a job that does not exist,
+    so every engine-parented spawn timed out as 'never registered'."""
+    from types import SimpleNamespace
+
+    from hive.adapters import claude_bg
+
+    def fake_run(argv, **kw):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="opus backgrounded · \x1b[36mce5de22a\x1b[39m\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(claude_bg.subprocess, "run", fake_run)
+    assert claude_bg.spawn_job(cwd="/tmp", name="x", prompt="hi") == "ce5de22a"

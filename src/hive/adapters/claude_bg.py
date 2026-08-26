@@ -68,6 +68,7 @@ WAKE_SUBMIT_BUDGET = _AGENTS_TIMEOUT + _WAKE_TIMEOUT + _WAKE_ENTRY_TIMEOUT
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{6,12}$")
 # `claude --bg` announces the job on stdout: `backgrounded · 7fcc705f · <name>`
 _SPAWN_OUTPUT_RE = re.compile(r"backgrounded\s*·\s*(\S+)")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # An engine entry whose statusUpdatedAt stopped advancing this long ago is not
 # trusted as busy/waiting truth (wedged engine, clock issues); liveness still
@@ -283,6 +284,14 @@ def bg_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         k: v for k, v in os.environ.items()
         if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))
     }
+    # These invocations are programmatic: their stdout gets parsed (the
+    # spawn's jobId, `agents --json`). A member engine's tool env carries
+    # FORCE_COLOR, which makes the claude CLI wrap that output in ANSI
+    # codes — a jobId parsed with color codes polls a job that does not
+    # exist. Neutralize every color-forcing knob.
+    for knob in ("FORCE_COLOR", "CLICOLOR_FORCE", "CLICOLOR"):
+        env.pop(knob, None)
+    env["NO_COLOR"] = "1"
     config = _config_dir()
     if config != Path(os.path.expanduser("~/.claude")):
         env["CLAUDE_CONFIG_DIR"] = str(config)
@@ -371,7 +380,8 @@ def spawn_job(
         return None
     if result.returncode != 0:
         return None
-    match = _SPAWN_OUTPUT_RE.search(result.stdout or "")
+    plain = _ANSI_RE.sub("", result.stdout or "")
+    match = _SPAWN_OUTPUT_RE.search(plain)
     return match.group(1) if match else None
 
 
