@@ -129,10 +129,11 @@ def rig():
             "for m in parallel(*thunks):\n"
             "    print('RESULT', m.name, (m.summary or '')[:100])\n"
         )
+        # Reproduce the honest parentage: an orch's flow runner lives inside
+        # a headless engine — no $TMUX. Only the pinned pane identity rides
+        # in, exactly what a spawned daemon's tools get.
         env = dict(os.environ)
-        sock = _tmux("display", "-t", pane, "-p", "#{socket_path},#{pid},#{session_id}").strip()
-        parts = (sock.split(",") + ["", ""])[:3]
-        env["TMUX"] = f"{parts[0]},{parts[1]},{parts[2].lstrip('$')}"
+        env.pop("TMUX", None)
         env["TMUX_PANE"] = pane
         env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
         env.pop("CODEX_THREAD_ID", None)
