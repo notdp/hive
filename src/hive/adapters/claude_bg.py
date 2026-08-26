@@ -867,7 +867,13 @@ def _close_pipe(proc: _AttachClient) -> None:
             pass
 
 
-def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyResult:
+def type_into_job(
+    job_id: str,
+    text: str,
+    *,
+    claude_bin: str = "claude",
+    success_probe=None,
+) -> KeyResult:
     """Type *text* into the engine's composer and press Enter.
 
     The composer is cleared first (C-u), so an unsent draft can never be
@@ -937,6 +943,16 @@ def type_into_job(job_id: str, text: str, *, claude_bin: str = "claude") -> KeyR
             _SLASH_CONFIRM_TIMEOUT if slash else _SUBMIT_CONFIRM_TIMEOUT
         )
         while time.monotonic() < confirm_deadline:
+            # A caller with its own positive oracle (e.g. /rename: the
+            # registry name flips the moment the command runs) exits here
+            # instead of waiting out the slash window — which otherwise
+            # burns its full length on every SUCCESSFUL slash, since that
+            # window only exists to catch the submitted-as-plain-text
+            # failure shape.
+            if success_probe is not None and success_probe():
+                if restore:
+                    _restore_draft(proc)
+                return KeyResult(True, "probe")
             verdict = _submit_verdict(transcript, offset, text)
             if verdict == "landed":
                 if restore:
@@ -988,7 +1004,14 @@ def ensure_job_named(job_id: str, name: str, *, claude_bin: str = "claude") -> b
         return False
     if engine.name == name:
         return True
-    return type_into_job(job_id, f"/rename {name}", claude_bin=claude_bin).ok
+
+    def _renamed() -> bool:
+        e = engine_session_for_job(job_id)
+        return e is not None and e.name == name
+
+    return type_into_job(
+        job_id, f"/rename {name}", claude_bin=claude_bin, success_probe=_renamed
+    ).ok
 
 
 def interrupt_job(job_id: str, *, claude_bin: str = "claude") -> KeyResult:
