@@ -104,7 +104,7 @@ def classify_model_family(model: str) -> str:
         return "unknown"
     m = model.lower().strip()
     m = m.lstrip("-")
-    if "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
+    if "claude" in m or m.startswith(("opus", "sonnet", "haiku", "fable")):
         return "anthropic"
     if "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"

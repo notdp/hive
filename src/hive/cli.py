@@ -1855,7 +1855,7 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 
 @cli.command()
 @click.argument("agent_name")
-@click.option("--model", "-m", default="", help="Model ID")
+@click.option("--model", "-m", default="", help="Model ID. claude: prefer aliases (fable/opus/sonnet) — they always track the latest; codex/grok: checked against the CLI's own catalog")
 @click.option("--prompt", "-p", default="", help="Initial prompt (typed into TUI after startup)")
 @click.option("--cwd", default="", help="Working directory")
 @click.option("--skill", default="hive:hive", help="Base skill to load after startup ('none' to skip)")
