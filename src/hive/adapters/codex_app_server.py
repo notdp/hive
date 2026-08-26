@@ -243,6 +243,11 @@ class _WSConn:
         self.sock.connect(path)
         self._rx = b""
         self._handshake()
+        # The timeout guards only the handshake. A live daemon can legally go
+        # silent for 5s+ mid-call (its models refresh stalls exactly 5.00s on
+        # a stale cache), and socket.timeout is an OSError — leaving it armed
+        # lets that silence kill the reader thread right before the response.
+        self.sock.settimeout(None)
 
     def _handshake(self) -> None:
         key = base64.b64encode(os.urandom(16)).decode()

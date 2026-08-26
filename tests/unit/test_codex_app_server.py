@@ -546,3 +546,45 @@ def test_ensure_dir_trusted_matches_literal_string_header(tmp_path, monkeypatch)
     m.ensure_dir_trusted("/work/dir")
     text = config.read_text()
     assert text.count("/work/dir") == 1
+
+
+# --- transport: reader must survive daemon silence --------------------------
+
+
+def test_wsconn_read_survives_silence_longer_than_handshake_timeout():
+    """The handshake timeout must not stay armed on post-handshake reads.
+
+    Guards the mint-hang regression: the daemon legally goes silent for 5.00s
+    mid thread/start (its models refresh stalls on a stale cache), and an
+    armed 5.0s socket timeout killed the reader right before the response.
+    """
+    import socket as socket_mod
+    import tempfile
+    from pathlib import Path
+
+    # pytest's tmp_path overflows AF_UNIX's 104-char limit on macOS
+    path = str(Path(tempfile.mkdtemp()) / "ws.sock")
+    ready = threading.Event()
+
+    def server():
+        srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        ready.set()
+        conn, _ = srv.accept()
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+        time.sleep(0.8)  # silence longer than the 0.3s handshake timeout
+        payload = b'{"id":1,"result":{}}'
+        conn.sendall(bytes([0x81, len(payload)]) + payload)
+        conn.close()
+        srv.close()
+
+    t = threading.Thread(target=server, daemon=True)
+    t.start()
+    ready.wait(2)
+    conn = m._WSConn(path, timeout=0.3)
+    assert json.loads(conn.recv_text()) == {"id": 1, "result": {}}
+    conn.close()
