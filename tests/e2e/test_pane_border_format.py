@@ -51,7 +51,7 @@ def test_border_follows_the_viewed_session(border_pane):
 
     # On its own member (or nothing identifiable on screen): the member's
     # full name. `red` alone says nothing about which team's red it is when
-    # several duos are on screen.
+    # several teams are on screen.
     _set(border_pane, "@hive-view", "")
     assert _render(border_pane) == " probe.red "
 

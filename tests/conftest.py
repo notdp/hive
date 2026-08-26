@@ -210,7 +210,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         monkeypatch.setattr("hive.cli.tmux.get_window_option", state.get_window_option)
         monkeypatch.setattr("hive.cli.tmux.set_window_option", state.set_window_option)
         # Deterministic global window-status formats (tmux defaults) so
-        # `duo set-pr` display derivation never shells to the real server.
+        # `hive pr set` display derivation never shells to the real server.
         global_window_formats = {
             "window-status-format": "#I:#W#{?window_flags,#{window_flags}, }",
             "window-status-current-format": "#I:#W#{?window_flags,#{window_flags}, }",
@@ -240,28 +240,11 @@ def configure_hive_home(monkeypatch, tmp_path):
             )
 
         monkeypatch.setattr("hive.cli.tmux.break_pane", _guard_break_pane)
-        # Duo windows are renamed after the worker's git branch; keep the suite
-        # hermetic — no real tmux rename (would hit a live window on pane-id
-        # collision) and no git subprocess against the test cwd.
+        # Team windows are renamed to the team name; keep the suite hermetic —
+        # no real tmux rename (would hit a live window on pane-id collision).
         monkeypatch.setattr("hive.cli.tmux.rename_window", lambda *_a, **_k: None)
-        # No other live windows by default → duo window names don't collide.
+        # No other live windows by default → window names don't collide.
         monkeypatch.setattr("hive.cli.tmux.list_window_names", lambda: [])
-        # Duo formation during `hive init` spawns or adopts a validator pane.
-        # Tests that want to exercise that flow must override this mock; by
-        # default we return a representative descriptor so plain `hive init`
-        # tests stay focused on the init scaffolding itself.
-        monkeypatch.setattr(
-            "hive.cli._attach_duo_to_team",
-            lambda t, **_kw: {
-                "team": t.name,
-                "window": t.tmux_window,
-                "group": "duo",
-                "worker": {"pane": "%self", "name": "worker", "cli": "claude"},
-                "validator": {"pane": "%peer", "name": "validator", "cli": "codex", "mode": "spawned"},
-                "dispatched": ["validator"],
-                "next": "hive skills get duo-worker",
-            },
-        )
         monkeypatch.delenv("TMUX_PANE", raising=False)
         # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
         # that want to observe sidecar startup patch this themselves.

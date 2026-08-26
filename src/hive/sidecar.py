@@ -70,7 +70,7 @@ BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
-_AGENT_NOTIFY_ROLES = {"agent", "lead", "orchestrator"}
+_AGENT_NOTIFY_ROLES = {"agent"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 
 
@@ -2023,7 +2023,7 @@ def _claude_name_tick(*, members: dict[str, dict[str, Any]], team: str, state: d
     """Keep each claude member's job labelled `<team>.<member>`.
 
     A member spawned by hive is minted under that name already; one adopted
-    from a pane that was running claude first (duo, squad, resume) was minted
+    from a pane that was running claude first (init, spawn, resume) was minted
     before the pane carried any tag, so its job keeps a `hive-<pane>`
     placeholder. The engine's registry entry — read anyway on every tick —
     carries the current label, so the comparison is free and the rename fires
@@ -2134,9 +2134,6 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
         return
     if not t.name or not t.tmux_window or not t.agents:
         return
-    if not any(t.member_groups.get(name) == "duo" for name in t.agents):
-        return  # only duo snapshots are resumable today
-
     observed: list[dict[str, str]] = []
     for name, agent in sorted(t.agents.items()):
         session_id = _fresh_snapshot_session_id(agent.pane_id) or (agent.session_id or "")
@@ -2158,19 +2155,19 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
         prior = list(existing.get("members", []))
     members = resume_store.merge_members(prior, observed)
     repo_cwd = next(
-        (m.get("cwd", "") for m in members if m.get("name") == "worker" and m.get("cwd")),
+        (m.get("cwd", "") for m in members if m.get("name") == "orch" and m.get("cwd")),
         members[0].get("cwd", "") if members else "",
     )
     window_name = dict(tmux.list_window_names()).get(t.tmux_window, "") or str(
         (existing or {}).get("windowName", "")
     )
-    # The window option is current truth: cleared (hive duo clear-pr) means
+    # The window option is current truth: cleared (hive pr clear) means
     # empty — never resurrect the previous snapshot's PR stamp.
     pr = tmux.get_window_option(t.tmux_window, "hive-pr") or ""
     snap = resume_store.build_snapshot(
         handle=t.name,
         team=t.name,
-        group="duo",
+        group=t.name,
         window_name=window_name,
         workspace=workspace,
         repo_cwd=repo_cwd,

@@ -1,6 +1,6 @@
-# core — 无角色 pane 的通信协议
+# core — 成员契约
 
-你在一个 Hive team 里，但没有固定角色。先拿到通信底座，再按 team 里的任务做事。
+你在一个 Hive team 里。你没有固定角色，只有任务：任务由派发消息和它的 artifact 定义，做完回报派发人。
 
 第一步：跑 `hive team`。用返回的 `self` 在 `members` 里找到自己，确认 member name、group、当前状态和能协作的人。
 
@@ -19,7 +19,7 @@ hive reply dodo "ack, looking"
 `hive team` 字段：
 
 - `self`：你的 member name。
-- `group`：pane 上的 `@hive-group`，例如 squad 名或 duo group。
+- `group`：pane 上的 `@hive-group`，即 team 实例名。
 - `inputState=waiting_user`：对方在等 human 作答（AskUserQuestion 打开中）。别注入消息，等它清掉。
 - `busy=true/false`：tmux 输出层活动，不等于语义上的忙闲。
 - `turnPhase`：比 `busy` 更适合判断发 new root 是否会打断对方。
@@ -80,26 +80,31 @@ Hive 是 push 模型：有新消息时 runtime 会注入 `<HIVE>` block 并唤�
 
 ---
 
+## 任务契约
+
+### 任务以派发 artifact 为准
+
+任务 = 派发人发来的 `<HIVE>` 消息 + 它的 artifact。scope、交付物形态与路径、验收标准、上游材料的位置，全以该 artifact 为准。
+
+- artifact 引用了别的文件（上游产出、材料），直接打开读，不要凭摘要猜。
+- 材料不够、目标含糊时，`hive reply` 问派发人一句。不要自己翻库扩 scope。
+
+### 一切终态回报派发人
+
+成果、blocked、失败，全部 `hive reply` 回派发消息，锚回派发线程。body=短摘要，详情落 artifact。
+
+- 不向 human 宣布完成，不越过派发人上行。human 问起时给状态，但交付走派发人。
+- 回报 ≠ 结束。派发人可能追问或打回，你的上下文还在，接着答、接着改。
+
+### 最新指令覆盖旧计划
+
+被 `hive interrupt` 打断，或派发人发来新指令：以最新指令为准，不辩护旧计划。
+
+human 直接在你 pane 里打字给了指示：照做——human 的指示覆盖旧任务描述；下次回报派发人时说明 human 改了什么。
+
+---
+
 ## 协作规则
-
-### 先 team 内，再找 human
-
-先和 team 里能接的人收敛，再对 human 汇报。对 human 只给：
-
-- 已收敛的结论。
-- 仍阻断推进的单个问题。
-- 你建议的下一步。
-
-需要 human 拍板时，用阻塞式提问工具：claude 用 `AskUserQuestion`，codex 用 `request_user_input`。没有工具时才在普通对话里问。
-
-### producer / reviewer 站位
-
-Hive 的协作原子是 producer + 异构 reviewer。
-
-- producer：认具体反馈就改；不认就拿证据回。
-- reviewer：独立审计，不照抄 producer 叙事。关键结论从 artifact、diff、日志、命令输出、原始数据里自己核。给明确 verdict。
-
-采纳谁的方案，谁负责实施；另一方 review。
 
 ### 共享 checkout 纪律
 
@@ -108,6 +113,17 @@ Hive 的协作原子是 producer + 异构 reviewer。
 - commit 前看 `git status --short` 和 `git diff --cached --stat`。staged 里有别人或越 scope 文件，先收敛。
 - stash 前看 `git stash list`。不要 pop 别人的 stash，不要静默 stash 别人的 untracked 文件。
 - 并行独立 PR 用各自 worktree，不在共享 checkout 里直接 branch / commit / push。
+
+### 写码任务
+
+只读任务（探索、审查、验证）直接在共享 checkout 里做。要改文件时才开 worktree：
+
+1. `hive worktree start <task>`（输出 JSON）。`<task>` 同时是 branch 名和 worktree 目录名：语义化 kebab-case、≤4 词、合法 branch。
+2. 取输出 JSON 的 `path`，进入并证明入场：claude 用 `EnterWorktree path=<路径>`；codex 每条 repo 命令都把 working directory 设为该路径，并先跑 `pwd`、`git rev-parse --show-toplevel`、`git status --short --branch`。
+3. base 解析不出就带 `--base`；`needs-rebase` 时进 worktree rebase 到提示 base，再重跑 start。
+4. 验收对象是 commit。只提交本任务范围；WIP commit 可以。
+5. 任务 artifact 要求开 PR 才开。实质 push、`gh pr ready`、merge 都要 human 授权（空提交 draft 锚是默认例外）。
+6. 退场：claude `ExitWorktree action=keep`，然后 `hive worktree done <task>`。只删 worktree，branch 留给 PR 生命周期。`done --force` 只有 human 明确 abandon 时才用。
 
 ### Human Directive
 
@@ -128,3 +144,4 @@ source: ...
 
 - 排障命令、delivery、thread、capture、inject、interrupt、kill：`hive skills get debug`
 - active-turn fork、handoff 接管、复杂 thread routing：`hive skills get advanced-routing`
+- 你要发起协作、拆任务派人：`hive skills get orch`

@@ -177,7 +177,9 @@ def test_writer_persists_full_roster_then_keeps_dead_member(store, monkeypatch):
     assert by_name2["worker"]["sessionId"] == "sid-w2"
 
 
-def test_writer_skips_non_duo_and_unloadable_teams(store, monkeypatch):
+def test_writer_snapshots_groupless_teams_and_skips_unloadable(store, monkeypatch):
+    # Post role-decouple, every loadable team is snapshotted — group tags are
+    # display-only and no longer gate resumability.
     worker = _fake_agent("%1", "claude")
     sidecar = _writer_mocks(
         monkeypatch,
@@ -185,14 +187,17 @@ def test_writer_skips_non_duo_and_unloadable_teams(store, monkeypatch):
         {"%1": "sid-w"},
     )
     sidecar._write_resume_snapshot("/ws", "0-w2")
-    assert resume.load_snapshot("0-w2") is None
+    snap = resume.load_snapshot("0-w2")
+    assert snap is not None and snap["group"] == "0-w2"
 
     def _boom(name, prefer_pane=""):
         raise FileNotFoundError(name)
 
     monkeypatch.setattr("hive.team.Team.load", staticmethod(_boom))
-    sidecar._write_resume_snapshot("/ws", "0-w2")
-    assert resume.load_snapshot("0-w2") is None
+    store_before = snap
+    sidecar._write_resume_snapshot("/ws", "other-team")
+    assert resume.load_snapshot("other-team") is None
+    assert resume.load_snapshot("0-w2") == store_before
 
 
 def test_writer_never_leaks_sessions_across_instances(store, monkeypatch):

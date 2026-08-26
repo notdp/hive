@@ -488,8 +488,8 @@ def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):
         lambda _team_name: {
             "agent-a": {"role": "agent", "pane": "%1"},
             "terminal": {"role": "terminal", "pane": "%2"},
-            "orch": {"role": "orchestrator", "pane": "%3"},
-            "dead": {"role": "lead", "pane": "%4"},
+            "legacy-orch": {"role": "orchestrator", "pane": "%3"},
+            "dead": {"role": "agent", "pane": "%4"},
             "dup": {"role": "agent", "pane": "%1"},
         },
     )
@@ -498,4 +498,4 @@ def test_idle_notify_agent_panes_filters_to_live_agent_roles(monkeypatch):
         sidecar, "detect_cli_process_for_pane", lambda pane: object()
     )
 
-    assert sidecar._idle_notify_agent_panes("team-a") == ["%1", "%3"]
+    assert sidecar._idle_notify_agent_panes("team-a") == ["%1"]

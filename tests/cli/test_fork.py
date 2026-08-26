@@ -125,51 +125,6 @@ def test_fork_stale_runtime_snapshot_falls_back_to_resolver(runner, configure_hi
     assert sent[0][1].startswith("hive claude -r sess-fallback --fork-session")
 
 
-def test_fork_in_squad_prefixes_agent_name(runner, configure_hive_home, monkeypatch, tmp_path):
-    """Forking in a squad pane auto-prefixes the derived name with the squad
-    namespace (e.g. 'coco' → 'peaky.coco') and sets @hive-group on the new pane
-    so qualified routing works."""
-    configure_hive_home(current_pane="%99", session_name="dev")
-
-    workspace = tmp_path / "ws"
-    assert runner.invoke(cli, ["create", "team-x", "--workspace", str(workspace)]).exit_code == 0
-
-    sent: list[tuple[str, str, bool]] = []
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
-    monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: "%99")
-    monkeypatch.setattr(
-        "hive.cli.detect_profile_for_pane",
-        lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
-        )(),
-    )
-    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
-    monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
-    monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
-    monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
-    monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
-    monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
-
-    from hive import tmux
-    from hive.tmux import PaneInfo
-
-    tmux.tag_pane("%99", "agent", "peaky.orch", "team-x", cli="claude", group="peaky")
-    monkeypatch.setattr(
-        "hive.cli.tmux.list_panes_full",
-        lambda _target: [PaneInfo("%99", "orch", command="claude", role="agent", agent="peaky.orch", team="team-x", cli="claude", group="peaky")],
-    )
-
-    result = runner.invoke(cli, ["fork", "--pane", "%99", "-s", "h"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["registered"].startswith("peaky."), (
-        f"expected squad-prefixed name, got {payload['registered']!r}"
-    )
-    assert tmux.get_pane_option("%100", "hive-group") == "peaky"
-
-
 def test_fork_in_duo_does_not_prefix_agent_name(runner, configure_hive_home, monkeypatch, tmp_path):
     """Forking in a duo pane (group='duo') should NOT add a prefix and should
     NOT set @hive-group on the new pane."""

@@ -26,7 +26,7 @@ DEAD_PID = 4242424  # out of range on macOS/Linux: never a live process
 def _pane(pane_id: str, *, agent: str, team: str, cli: str = "claude") -> tmux.PaneInfo:
     return tmux.PaneInfo(
         pane_id=pane_id, title="", command="2.1.240", role="agent",
-        agent=agent, team=team, cli=cli, group="", owner="",
+        agent=agent, team=team, cli=cli, group="",
     )
 
 

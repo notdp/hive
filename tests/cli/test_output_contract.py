@@ -22,10 +22,9 @@ JSON_DEFAULT_PATHS = {
     "plugin ls",
     "plugin enable",
     "plugin disable",
-    "duo set-pr",
-    "duo clear-pr",
-    "config roles",
-    "squad set-integration-branch",
+    "pr set",
+    "pr clear",
+    "worktree set-base",
 }
 
 
@@ -106,41 +105,12 @@ def test_plugin_list_default_json_equals_legacy_json_and_plain_wins(runner, conf
     assert "Plugins (" in plain.output  # human rendering, not JSON
 
 
-def test_config_roles_default_is_json_and_never_interactive(runner, configure_hive_home, monkeypatch):
-    configure_hive_home(tmux_inside=False)
-    # A mocked TTY on both ends must NOT open the picker on the default path.
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
-    monkeypatch.setattr(
-        "hive.cli._term_menu",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("picker opened on default path")),
-    )
-    result = runner.invoke(cli, ["config", "roles"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert set(payload) >= {"worker", "validator"}
-
-
-def test_config_roles_plain_without_tty_fails_without_mutation(runner, configure_hive_home, tmp_path):
-    hive_home = configure_hive_home(tmux_inside=False)
-    settings = hive_home / "settings.json"
-    before = settings.read_text() if settings.exists() else None
-    result = runner.invoke(cli, ["config", "roles", "--plain"])
-    assert result.exit_code == 1
-    assert "terminal" in result.output
-    after = settings.read_text() if settings.exists() else None
-    assert before == after
-
-
-# --- B3: -h scope and exemptions ---
-
-
 def test_root_registers_dash_h():
     assert cli.context_settings.get("help_option_names") == ["-h", "--help"]
 
 
 def test_dash_h_shows_help_on_strict_commands(runner):
-    for argv in (["-h"], ["send", "-h"], ["team", "-h"], ["duo", "-h"]):
+    for argv in (["-h"], ["send", "-h"], ["team", "-h"], ["pr", "-h"]):
         result = runner.invoke(cli, argv)
         assert result.exit_code == 0, (argv, result.output)
         assert "Usage:" in result.output

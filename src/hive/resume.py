@@ -5,7 +5,7 @@ server. The snapshot store keeps one JSON file per team handle under
 ``$HIVE_HOME/state/resume/`` so a dead team (tmux restart, reboot) can be
 listed and rebuilt with each member's original agent session.
 
-The store is deliberately dumb: callers (sidecar writer, duo init, `hive
+The store is deliberately dumb: callers (sidecar writer, `hive
 resume`) compute the payload; this module owns schema validation, safe
 file naming, atomic writes, roster merging, change detection, and the
 one-predecessor archive on a new team instance.

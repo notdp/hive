@@ -36,18 +36,20 @@ def test_skills_get_unknown_lists_available(runner):
     assert "core" in result.output  # error names the available specs
 
 
-def test_skills_get_serves_role_specs(runner):
-    """Role content lives in CLI-served specs now (no per-role SKILL.md). Every
-    role a spawn dispatches `hive skills get <role>` for must be fetchable."""
+def test_skills_get_serves_core_and_orch_specs(runner):
+    """Protocol content lives in CLI-served specs. The member contract (core)
+    and the orch protocol are the only two the bootstrap dispatches."""
     listed = json.loads(runner.invoke(cli, ["skills", "list"]).output)["specs"]
-    for role in (
+    for name in ("core", "orch"):
+        assert name in listed
+        result = runner.invoke(cli, ["skills", "get", name])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip()
+    for retired in (
         "squad-orch", "squad-challenger", "squad-worker", "squad-validator",
         "duo-worker", "duo-validator",
     ):
-        assert role in listed
-        result = runner.invoke(cli, ["skills", "get", role])
-        assert result.exit_code == 0, result.output
-        assert result.output.strip()
+        assert retired not in listed
 
 
 def test_skills_get_serves_debug_and_advanced_routing(runner):

@@ -48,8 +48,8 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     assert payload["tmux"]["panes"][0]["id"] == "%0"
     assert payload["tmux"]["panes"][0]["role"] == "agent"
     assert payload["tmux"]["panes"][1]["role"] == "agent"
-    # no-team hint defers the topology choice to the user (ask, don't self-init)
-    assert "duo" in payload["hint"] and "squad" in payload["hint"]
+    # no-team hint points straight at orch init
+    assert "hive init" in payload["hint"]
 
 
 def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(runner, configure_hive_home, tmp_path):
@@ -100,7 +100,7 @@ def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hiv
     tmux.set_window_option("dev:0", "@hive-team", "dev")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
-    tmux.tag_pane("%0", "lead", "orch", "dev")
+    tmux.tag_pane("%0", "agent", "orch", "dev")
     tmux.tag_pane("%9", "agent", "alpha", "dev")
 
     result = runner.invoke(cli, ["team"])
@@ -124,7 +124,7 @@ def test_current_shows_tagged_role_for_lead_pane(runner, configure_hive_home, mo
     tmux.set_window_option("dev:0", "@hive-team", "dev")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
-    tmux.tag_pane("%0", "lead", "orch", "dev")
+    tmux.tag_pane("%0", "agent", "orch", "dev")
 
     # Even when the pane command is a shell, self discovery still works off the tmux tag.
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "python3.12")
@@ -145,7 +145,7 @@ def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_ho
     tmux.set_window_option("dev:0", "@hive-team", "dev")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
-    tmux.tag_pane("%0", "lead", "orch", "dev")
+    tmux.tag_pane("%0", "agent", "orch", "dev")
 
     # These overrides don't break self discovery (self is taken from the pane tag).
     monkeypatch.setattr("hive.cli.tmux.get_pane_current_command", lambda _pane: "2.1.88")
@@ -169,7 +169,7 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
     tmux.set_window_option("dev:0", "@hive-team", "dev")
     tmux.set_window_option("dev:0", "@hive-workspace", str(tmp_path / "ws"))
     tmux.set_window_option("dev:0", "@hive-created", "0")
-    tmux.tag_pane("%0", "lead", "orch", "dev")
+    tmux.tag_pane("%0", "agent", "orch", "dev")
     tmux.tag_pane("%9", "agent", "alpha", "dev")
 
     result = runner.invoke(cli, ["init"])
@@ -296,8 +296,8 @@ def test_init_self_register_never_injects_hive_slash_into_own_input(
 
 def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
     """A window carrying only a stale `@hive-team` tag (no registered self pane)
-    is not treated as a binding: init clears the stale tag and forms a fresh
-    duo named after the current window."""
+    is not treated as a binding: init clears the stale tag and binds a fresh
+    orch team named after the current window."""
     configure_hive_home(current_pane="%9", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -319,15 +319,14 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # Stale "ghost" tag cleared; a fresh duo is formed for this window.
+    # Stale "ghost" tag cleared; a fresh orch team is bound to this window.
     assert payload["team"] == "honey"
-    assert payload["group"] == "duo"
-    assert payload["worker"]["name"] == "worker"
-    assert payload["validator"]["name"] == "validator"
+    assert payload["orch"]["name"] == "orch"
+    assert payload["next"] == "hive skills get orch"
     assert tmux.get_window_option("dev:0", "hive-team") == "honey"
 
 
-def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -350,27 +349,25 @@ def test_init_creates_team_and_forms_duo(runner, configure_hive_home, monkeypatc
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    # init now delegates to the duo topology and echoes its result dict.
+    # init binds the current pane as orch and spawns nobody.
     assert payload["team"] == "honey"
-    assert payload["group"] == "duo"
-    assert payload["worker"]["name"] == "worker"
-    assert payload["validator"]["name"] == "validator"
-    assert payload["dispatched"] == ["validator"]
-    assert payload["next"] == "hive skills get duo-worker"
+    assert payload["orch"]["name"] == "orch"
+    assert payload["orch"]["pane"] == "%5"
+    assert payload["next"] == "hive skills get orch"
 
-    # The team is created and the current pane is remembered as the worker.
+    # The team is created and the current pane is remembered as the orch.
     from hive.team import Team
     assert Team.load("honey").workspace == str(workspace)
     current = json.loads((tmp_path / ".hive" / "contexts" / "pane-5.json").read_text())
     assert current["team"] == "honey"
-    assert current["agent"] == "worker"
+    assert current["agent"] == "orch"
 
 
-def test_init_accepts_preopened_codex_worker_pane(
+def test_init_accepts_preopened_codex_orch_pane(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
-    """A pre-opened codex CLI in the current pane is a valid worker: init
-    detects the codex profile and forms the duo."""
+    """A pre-opened codex CLI in the current pane is a valid orch: init
+    detects the codex profile and binds the team."""
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -404,18 +401,18 @@ def test_init_accepts_preopened_codex_worker_pane(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "honey"
-    assert payload["group"] == "duo"
-    assert payload["worker"]["name"] == "worker"
+    assert payload["orch"]["name"] == "orch"
+    assert payload["orch"]["cli"] == "codex"
 
 
 def test_init_removed_options_are_rejected(runner, configure_hive_home, monkeypatch):
-    """--name/--workspace/--notify were removed from init (B2): Click rejects
-    them at the parser layer and the duo bring-up is never entered."""
+    """Removed init options are rejected at the Click parser layer and the
+    orch bring-up is never entered."""
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
 
     calls: list[object] = []
-    monkeypatch.setattr("hive.cli._create_standalone_duo", lambda **kw: calls.append(kw) or {})
+    monkeypatch.setattr("hive.cli._create_orch_team", lambda **kw: calls.append(kw) or {})
 
     for argv in (
         ["init", "--name", "my-team"],
@@ -424,6 +421,7 @@ def test_init_removed_options_are_rejected(runner, configure_hive_home, monkeypa
         ["init", "-w", "/tmp/x"],
         ["init", "--notify"],
         ["init", "--no-notify"],
+        ["init", "--validator-cli", "codex"],
     ):
         result = runner.invoke(cli, argv)
         assert result.exit_code == 2, (argv, result.output)
@@ -710,11 +708,14 @@ def test_root_help_groups_commands_by_area(runner):
     ):
         assert short_help in output
 
-    # init now leads into the duo topology.
-    assert "Initialize a duo in this window" in output
-    # duo / squad live under Workflow; register / peer / layout under Team.
-    for command in ("duo", "squad", "register", "peer", "layout"):
+    # init binds the orch.
+    assert "Make the current pane the orch of a fresh team." in output
+    # pr / worktree live under Workflow; register / peer / layout under Team.
+    for command in ("pr", "worktree", "register", "peer", "layout"):
         assert f"  {command} " in output
+    # topology commands are gone for good.
+    for removed in ("duo", "squad"):
+        assert f"  {removed} " not in output
     # terminal / exec are gone for good.
     for removed in ("terminal", "exec"):
         assert f"  {removed} " not in output

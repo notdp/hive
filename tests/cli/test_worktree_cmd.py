@@ -40,12 +40,11 @@ def repo(tmp_path: Path, monkeypatch) -> Path:
     return main
 
 
-def _set_squad_window(target: str = "dev:0", squad: str = "epic", integration: str | None = "epic-int"):
+def _set_integration_window(target: str = "dev:0", integration: str | None = "epic-int"):
     from hive import cli as cli_mod
 
-    cli_mod.tmux.set_window_option(target, "@hive-squad-name", squad)
     if integration is not None:
-        cli_mod.tmux.set_window_option(target, "@hive-squad-integration-branch", integration)
+        cli_mod.tmux.set_window_option(target, "@hive-integration-branch", integration)
 
 
 def test_start_json_schema_and_created(runner, configure_hive_home, repo):
@@ -54,7 +53,7 @@ def test_start_json_schema_and_created(runner, configure_hive_home, repo):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload) == {
-        "feature", "branch", "path", "mode", "owner", "team", "squadName",
+        "feature", "branch", "path", "mode", "owner", "team",
         "base", "baseOid", "worktreeRoot", "gitCommonDir", "warnings",
     }
     assert payload["mode"] == "created"
@@ -90,33 +89,31 @@ def test_start_needs_rebase_exits_nonzero_with_json(runner, configure_hive_home,
     assert payload["warnings"]
 
 
-def test_start_squad_context_writes_gh_merge_base(runner, configure_hive_home, repo):
+def test_start_integration_context_writes_gh_merge_base(runner, configure_hive_home, repo):
     configure_hive_home()
     _run(["git", "branch", "epic-int"], repo)
-    _set_squad_window()
+    _set_integration_window()
     result = runner.invoke(cli, ["worktree", "start", "feat-a", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["owner"] == "squad:epic"
-    assert payload["squadName"] == "epic"
     assert payload["base"] == "epic-int"
     assert _run(["git", "config", "branch.feat-a.gh-merge-base"], repo) == "epic-int"
 
 
-def test_start_squad_missing_integration_hard_fails(runner, configure_hive_home, repo):
+def test_start_without_integration_uses_default_branch(runner, configure_hive_home, repo):
     configure_hive_home()
-    _set_squad_window(integration=None)
-    result = runner.invoke(cli, ["worktree", "start", "feat-a"])
-    assert result.exit_code == 1
-    assert "integration branch" in result.output
-    assert "--base" in result.output
+    default = _run(["git", "symbolic-ref", "--short", "HEAD"], repo)
+    _set_integration_window(integration=None)
+    result = runner.invoke(cli, ["worktree", "start", "feat-a", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["base"].endswith(default)
 
 
-def test_start_explicit_base_overrides_squad_integration(runner, configure_hive_home, repo):
+def test_start_explicit_base_overrides_integration(runner, configure_hive_home, repo):
     configure_hive_home()
     _run(["git", "branch", "epic-int"], repo)
     _run(["git", "branch", "other-base"], repo)
-    _set_squad_window()
+    _set_integration_window()
     result = runner.invoke(cli, ["worktree", "start", "feat-a", "--base", "other-base", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -205,17 +202,45 @@ def test_worktree_group_help_shows_subcommands(runner):
         assert sub in result.output
 
 
-def test_start_hard_fails_on_pre_rename_crew_window_state(runner, configure_hive_home, repo):
-    """A window still carrying old @hive-crew-name (and no @hive-squad-name)
-    must hard-fail with a rebuild hint — never pass as squad context, never
-    fall through to default-branch base resolution."""
+# --- hive worktree set-base ---
+
+
+def test_set_base_writes_integration_option(runner, configure_hive_home, repo):
     configure_hive_home()
     from hive import cli as cli_mod
 
-    cli_mod.tmux.set_window_option("dev:0", "@hive-crew-name", "ghost")
-    result = runner.invoke(cli, ["worktree", "start", "feat-a"])
+    cli_mod.tmux.set_window_option("dev:0", "@hive-team", "t-x")
+    _run(["git", "branch", "epic-int"], repo)
+
+    result = runner.invoke(cli, ["worktree", "set-base", "epic-int", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["team"] == "t-x"
+    assert payload["integrationBranch"] == "epic-int"
+    assert payload["oid"]
+    assert cli_mod.tmux.get_window_option("dev:0", "hive-integration-branch") == "epic-int"
+
+    # subsequent start resolves base from the declared branch
+    start = runner.invoke(cli, ["worktree", "start", "feat-a", "--json"])
+    assert start.exit_code == 0, start.output
+    assert json.loads(start.output)["base"] == "epic-int"
+
+
+def test_set_base_requires_team_window(runner, configure_hive_home, repo):
+    configure_hive_home()
+    from hive import cli as cli_mod
+
+    result = runner.invoke(cli, ["worktree", "set-base", "main"])
     assert result.exit_code == 1
-    assert "pre-rename" in result.output
-    assert "hive squad init" in result.output
-    # Guard fires before base resolution: no default-branch error text.
-    assert "default branch" not in result.output
+    assert "@hive-team" in result.output
+    assert cli_mod.tmux.get_window_option("dev:0", "hive-integration-branch") is None
+
+
+def test_set_base_rejects_unknown_ref(runner, configure_hive_home, repo):
+    configure_hive_home()
+    from hive import cli as cli_mod
+
+    cli_mod.tmux.set_window_option("dev:0", "@hive-team", "t-x")
+    result = runner.invoke(cli, ["worktree", "set-base", "no-such-ref"])
+    assert result.exit_code == 1
+    assert cli_mod.tmux.get_window_option("dev:0", "hive-integration-branch") is None

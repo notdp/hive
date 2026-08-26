@@ -63,6 +63,7 @@ def test_apply_adaptive_empty_window_target_is_noop(monkeypatch):
 
 def test_apply_adaptive_portrait_applies_even_vertical(monkeypatch):
     calls: list[tuple] = []
+    monkeypatch.setattr("hive.layout.tmux.window_zoomed", lambda t: False)
     monkeypatch.setattr("hive.layout.tmux.window_size", lambda t: (191, 171))
     monkeypatch.setattr("hive.layout.tmux.list_panes", lambda t: ["%1", "%2"])
     monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda t, k, v: calls.append(("opt", t, k, v)))
@@ -75,6 +76,7 @@ def test_apply_adaptive_portrait_applies_even_vertical(monkeypatch):
 
 def test_apply_adaptive_landscape_sets_main_pane_width_before_select(monkeypatch):
     calls: list[tuple] = []
+    monkeypatch.setattr("hive.layout.tmux.window_zoomed", lambda t: False)
     monkeypatch.setattr("hive.layout.tmux.window_size", lambda t: (200, 50))
     monkeypatch.setattr("hive.layout.tmux.list_panes", lambda t: ["%1", "%2", "%3"])
     monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda t, k, v: calls.append(("opt", t, k, v)))
@@ -90,9 +92,35 @@ def test_apply_adaptive_landscape_sets_main_pane_width_before_select(monkeypatch
 
 def test_apply_adaptive_single_pane_skips_select_layout(monkeypatch):
     calls: list[tuple] = []
+    monkeypatch.setattr("hive.layout.tmux.window_zoomed", lambda t: False)
     monkeypatch.setattr("hive.layout.tmux.window_size", lambda t: (200, 50))
     monkeypatch.setattr("hive.layout.tmux.list_panes", lambda t: ["%1"])
     monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda t, k, v: calls.append(("opt", t, k, v)))
     monkeypatch.setattr("hive.layout.tmux.select_layout", lambda t, p: calls.append(("layout", t, p)))
     assert layout.apply_adaptive("dev:0") is None
     assert calls == []
+
+
+def test_pick_five_panes_tiles_regardless_of_orientation():
+    landscape = layout.pick((200, 50), 5)
+    assert landscape is not None and landscape.preset == "tiled"
+    assert landscape.orientation == "horizontal"
+    portrait = layout.pick((100, 100), 6)
+    assert portrait is not None and portrait.preset == "tiled"
+    assert portrait.orientation == "vertical"
+
+
+def test_pick_four_panes_keeps_main_layout():
+    choice = layout.pick((200, 50), 4)
+    assert choice is not None and choice.preset == "main-vertical"
+
+
+def test_apply_adaptive_skips_while_zoomed(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr("hive.layout.tmux.window_zoomed", lambda t: True)
+    monkeypatch.setattr("hive.layout.tmux.window_size", lambda t: (200, 50))
+    monkeypatch.setattr("hive.layout.tmux.list_panes", lambda t: ["%1", "%2"])
+    monkeypatch.setattr("hive.layout.tmux.set_window_option", lambda t, k, v: calls.append(("opt", t, k, v)))
+    monkeypatch.setattr("hive.layout.tmux.select_layout", lambda t, p: calls.append(("layout", t, p)))
+    assert layout.apply_adaptive("dev:0") is None
+    assert calls == []  # a zoomed window is never re-tiled under the human

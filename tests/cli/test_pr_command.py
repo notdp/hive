@@ -1,11 +1,10 @@
-"""Tests for `hive duo set-pr`: PR-number window labeling + native display.
+"""Tests for `hive pr set/clear`: PR-number window labeling + native display.
 
 set-pr writes window-local state only — the `@hive-pr` data option plus
 per-window `window-status-format` / `window-status-current-format` derived
 from the *global* values (the index position renders `PR<n>`, user styling
-preserved). It also renames the window to the feature: explicit TITLE wins,
-otherwise the cwd's hive feature branch; with neither the name is left
-alone. It must never touch the window index or write global options; every
+preserved). It never renames the window (the window name is the team name)
+and must never touch the window index or write global options; every
 failure path must leave all options unwritten.
 """
 
@@ -37,7 +36,7 @@ def _capture_renames(monkeypatch) -> list:
     return calls
 
 
-def _bind_team(window: str = "dev:0", team: str = "t-duo") -> None:
+def _bind_team(window: str = "dev:0", team: str = "t-x") -> None:
     from hive import cli as cli_mod
 
     cli_mod.tmux.set_window_option(window, "@hive-team", team)
@@ -60,7 +59,7 @@ def test_set_pr_stamps_option_and_derives_display_json(runner, configure_hive_ho
     _bind_team()
     renames = _capture_renames(monkeypatch)
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
+    result = runner.invoke(cli, ["pr", "set", "87", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -88,7 +87,7 @@ def test_set_pr_never_renames_the_window(runner, configure_hive_home, monkeypatc
     _bind_team()
     renames = _capture_renames(monkeypatch)
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
+    result = runner.invoke(cli, ["pr", "set", "87", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -102,7 +101,7 @@ def test_set_pr_default_output_is_json(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87"])
+    result = runner.invoke(cli, ["pr", "set", "87"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -114,7 +113,7 @@ def test_set_pr_plain_output_is_human_line(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "--plain"])
+    result = runner.invoke(cli, ["pr", "set", "87", "--plain"])
 
     assert result.exit_code == 0, result.output
     assert "@hive-pr=87" in result.output
@@ -127,7 +126,7 @@ def test_set_pr_skips_display_when_global_already_wired(runner, configure_hive_h
     wired = "#{?#{@hive-pr},PR#{@hive-pr},#I}:#W"
     monkeypatch.setattr("hive.cli.tmux.get_global_window_option", lambda _option: wired)
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
+    result = runner.invoke(cli, ["pr", "set", "87", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -146,7 +145,7 @@ def test_set_pr_reports_skip_for_formats_without_index_token(runner, configure_h
     _bind_team()
     monkeypatch.setattr("hive.cli.tmux.get_global_window_option", lambda _option: "#W only")
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87", "--json"])
+    result = runner.invoke(cli, ["pr", "set", "87", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -163,8 +162,8 @@ def test_set_pr_rerun_overwrites_stamp_and_rederives_from_global(runner, configu
     configure_hive_home()
     _bind_team()
 
-    assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
-    assert runner.invoke(cli, ["duo", "set-pr", "91"]).exit_code == 0
+    assert runner.invoke(cli, ["pr", "set", "87"]).exit_code == 0
+    assert runner.invoke(cli, ["pr", "set", "91"]).exit_code == 0
 
     assert _window_option("hive-pr") == "91"
     # Re-derived from the *global* value, never the window-local one — the
@@ -176,9 +175,9 @@ def test_set_pr_rerun_overwrites_stamp_and_rederives_from_global(runner, configu
 def test_clear_pr_json_removes_stamp_and_keeps_status_formats(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
-    assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
+    assert runner.invoke(cli, ["pr", "set", "87"]).exit_code == 0
 
-    result = runner.invoke(cli, ["duo", "clear-pr", "--json"])
+    result = runner.invoke(cli, ["pr", "clear", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -191,9 +190,9 @@ def test_clear_pr_json_removes_stamp_and_keeps_status_formats(runner, configure_
 def test_clear_pr_human_output_reports_previous_stamp(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
-    assert runner.invoke(cli, ["duo", "set-pr", "87"]).exit_code == 0
+    assert runner.invoke(cli, ["pr", "set", "87"]).exit_code == 0
 
-    result = runner.invoke(cli, ["duo", "clear-pr", "--plain"])
+    result = runner.invoke(cli, ["pr", "clear", "--plain"])
 
     assert result.exit_code == 0, result.output
     assert "cleared" in result.output
@@ -205,7 +204,7 @@ def test_clear_pr_idempotent_without_stamp(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
-    result = runner.invoke(cli, ["duo", "clear-pr", "--json"])
+    result = runner.invoke(cli, ["pr", "clear", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -216,7 +215,7 @@ def test_clear_pr_idempotent_without_stamp(runner, configure_hive_home):
 def test_clear_pr_requires_hive_team_window(runner, configure_hive_home):
     configure_hive_home()
 
-    result = runner.invoke(cli, ["duo", "clear-pr"])
+    result = runner.invoke(cli, ["pr", "clear"])
 
     assert result.exit_code == 1
     assert "@hive-team" in result.output
@@ -226,7 +225,7 @@ def test_clear_pr_requires_hive_team_window(runner, configure_hive_home):
 def test_set_pr_fails_outside_tmux(runner, configure_hive_home):
     configure_hive_home(tmux_inside=False)
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87"])
+    result = runner.invoke(cli, ["pr", "set", "87"])
 
     assert result.exit_code == 1
     # The root-level CLI gate ("Hive requires tmux") fires before the
@@ -239,7 +238,7 @@ def test_set_pr_rejects_nonpositive_number(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
-    result = runner.invoke(cli, ["duo", "set-pr", "0"])
+    result = runner.invoke(cli, ["pr", "set", "0"])
 
     assert result.exit_code == 1
     assert "positive" in result.output
@@ -251,7 +250,7 @@ def test_set_pr_rejects_non_integer(runner, configure_hive_home):
     configure_hive_home()
     _bind_team()
 
-    result = runner.invoke(cli, ["duo", "set-pr", "abc"])
+    result = runner.invoke(cli, ["pr", "set", "abc"])
 
     assert result.exit_code == 2
     assert _window_option("hive-pr") is None
@@ -261,7 +260,7 @@ def test_set_pr_requires_hive_team_window(runner, configure_hive_home, monkeypat
     configure_hive_home()
     renames = _capture_renames(monkeypatch)
 
-    result = runner.invoke(cli, ["duo", "set-pr", "87"])
+    result = runner.invoke(cli, ["pr", "set", "87"])
 
     assert result.exit_code == 1
     assert "@hive-team" in result.output

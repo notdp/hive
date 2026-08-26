@@ -2,7 +2,7 @@
 
 Picks a preset from the window's aspect ratio (tmux cell ≈ 1:2 pixel,
 so char-width >= 2*char-height ≈ landscape pixels) and current pane count.
-Used by Team.spawn, hive init peer attach, hive kill, and squad.
+Used by Team.spawn, hive kill, hive layout, and resume.
 """
 
 from __future__ import annotations
@@ -15,6 +15,9 @@ from . import tmux
 LANDSCAPE_PRESET = "main-vertical"
 PORTRAIT_PRESET = "even-vertical"
 MAIN_PANE_FRACTION = "50%"
+# From this many panes, a main pane plus a single strip squeezes members
+# into slivers — tile instead.
+TILED_THRESHOLD = 5
 
 
 @dataclass(frozen=True)
@@ -35,7 +38,10 @@ def pick(window_size: tuple[int, int], pane_count: int) -> LayoutChoice | None:
     if pane_count < 2:
         return None
     w, h = window_size
-    if _is_landscape(w, h):
+    orientation = "horizontal" if _is_landscape(w, h) else "vertical"
+    if pane_count >= TILED_THRESHOLD:
+        return LayoutChoice(orientation=orientation, preset="tiled")
+    if orientation == "horizontal":
         return LayoutChoice(
             orientation="horizontal",
             preset=LANDSCAPE_PRESET,
@@ -47,6 +53,10 @@ def pick(window_size: tuple[int, int], pane_count: int) -> LayoutChoice | None:
 def apply_adaptive(window_target: str) -> LayoutChoice | None:
     """Read window size + pane count from tmux, apply the matching preset."""
     if not window_target:
+        return None
+    if tmux.window_zoomed(window_target):
+        # The human zoomed in on a member: a re-tile would both unzoom and
+        # rearrange under them. Skip; the next unzoomed apply catches up.
         return None
     size = tmux.window_size(window_target)
     pane_count = len(tmux.list_panes(window_target))

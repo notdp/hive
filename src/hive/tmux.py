@@ -280,24 +280,13 @@ def new_window(
     name: str = "",
     cwd: str | None = None,
     detach: bool = True,
-    index: int | None = None,
 ) -> tuple[str, str]:
-    """Create a new tmux window in *session*. Returns (window_target, pane_id).
-
-    If *index* is given, the new window is created at that explicit tmux
-    window index via `-t session:index`. Caller must ensure the index is
-    free — tmux refuses with "index N in use" otherwise. Used by squad
-    spawn-duo to place peer windows at 1000+ so they never collide with
-    the user's regular low-index windows.
-    """
-    if index is not None:
-        target = f"{session}:{index}"
-    else:
-        # Force `-t` to reference a session, not a window index. Bare numeric
-        # session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
-        # as an index rather than a session, which fails with "index N in use"
-        # once any window exists at that index.
-        target = session if (":" in session or session.startswith("$")) else f"{session}:"
+    """Create a new tmux window in *session*. Returns (window_target, pane_id)."""
+    # Force `-t` to reference a session, not a window index. Bare numeric
+    # session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
+    # as an index rather than a session, which fails with "index N in use"
+    # once any window exists at that index.
+    target = session if (":" in session or session.startswith("$")) else f"{session}:"
     args = ["new-window", "-t", target]
     if detach:
         args.append("-d")
@@ -364,6 +353,15 @@ def window_size(window_target: str) -> tuple[int, int]:
         return 0, 0
 
 
+def window_zoomed(window_target: str) -> bool:
+    """True when a pane in *window_target* is zoomed (unknown reads as False)."""
+    r = _run(
+        ["display-message", "-t", window_target, "-p", "#{window_zoomed_flag}"],
+        check=False,
+    )
+    return r.stdout.strip() == "1"
+
+
 def select_window(window_target: str) -> None:
     _run(["select-window", "-t", window_target], check=False)
 
@@ -390,7 +388,15 @@ def split_window(
     if cwd:
         args.extend(["-c", cwd])
     args.extend(["-P", "-F", "#{pane_id}"])
-    r = _run(args)
+    try:
+        r = _run(args)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip() if isinstance(e.stderr, str) else ""
+        detail = f" ({stderr})" if stderr else ""
+        raise RuntimeError(
+            f"tmux refused to split {target}{detail} — the window is likely "
+            "full; kill a finished member (hive kill <name>) and retry"
+        ) from e
     return r.stdout.strip()
 
 
@@ -515,8 +521,8 @@ def set_pane_title(pane_id: str, title: str) -> None:
 # probe writes what is really on screen into `@hive-view` (empty while the
 # pane shows its own member), so the border reads "name -> what you are
 # actually looking at" without the format having to guess from the title.
-# Both halves carry the team: with several duos on screen, `worker` and
-# `validator` alone say nothing about which team a pane belongs to, and
+# Both halves carry the team: with several teams on screen, a bare member
+# name says nothing about which team a pane belongs to, and
 # the view suffix already names its member as `<team>.<member>`.
 _HIVE_PANE_BORDER_FORMAT = (
     " #{?@hive-notify-active,#[fg=colour220]#[bold][!] #[default],}"
@@ -976,7 +982,6 @@ class PaneInfo:
     team: str = ""
     cli: str = ""
     group: str = ""
-    owner: str = ""
 
 
 def list_panes_with_titles(target: str) -> list[PaneInfo]:
@@ -1007,7 +1012,6 @@ _PANE_FIELDS: tuple[tuple[str, str], ...] = (
     ("team", "#{@hive-team}"),
     ("cli", "#{@hive-cli}"),
     ("group", "#{@hive-group}"),
-    ("owner", "#{@hive-owner}"),
 )
 _PANE_BASE_FMT = "\t".join(fmt for _name, fmt in _PANE_FIELDS)
 
