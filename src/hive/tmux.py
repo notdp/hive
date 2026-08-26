@@ -641,6 +641,15 @@ def _member_env_pane() -> str | None:
                 pane = pane_for_job(engine.job_id)
                 if pane:
                     return pane
+    # A per-pane daemon (the grok leader) pins its member's TMUX_PANE into
+    # the env it spawns tools with, but carries no $TMUX — grok has no
+    # per-CLI marker of its own, so the pinned pane is its identity. Trust
+    # it only when the pane is real on the default server.
+    pinned = os.environ.get("TMUX_PANE", "").strip()
+    if pinned and not os.environ.get("TMUX"):
+        r = _run(["display-message", "-t", pinned, "-p", "#{pane_id}"], check=False)
+        if r.stdout.strip() == pinned:
+            return pinned
     return None
 
 

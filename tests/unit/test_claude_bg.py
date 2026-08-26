@@ -285,3 +285,41 @@ def test_member_env_pane_ignores_interactive_sessions(monkeypatch, tmp_path):
 
     # an interactive claude's tool falls through to its own TMUX_PANE
     assert tmux.get_current_pane_id() == "%88"
+
+
+def test_member_env_pane_trusts_pinned_tmux_pane_without_tmux(monkeypatch):
+    """Regression: a grok leader pins TMUX_PANE (no $TMUX, no per-CLI marker);
+    post the env wash its tools failed the root gate and members hand-forged
+    their own $TMUX to crawl past it."""
+    from types import SimpleNamespace
+
+    from hive import tmux as tmux_mod
+
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_MESSAGING_SOCKET", raising=False)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    monkeypatch.setattr(
+        tmux_mod, "_run",
+        lambda args, check=False, **kw: SimpleNamespace(stdout="%42\n", returncode=0),
+    )
+    assert tmux_mod._member_env_pane() == "%42"
+    assert tmux_mod.is_inside_tmux() is True
+    assert tmux_mod.get_current_pane_id() == "%42"
+
+
+def test_member_env_pane_rejects_dead_pinned_pane(monkeypatch):
+    from types import SimpleNamespace
+
+    from hive import tmux as tmux_mod
+
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_MESSAGING_SOCKET", raising=False)
+    monkeypatch.setenv("TMUX_PANE", "%dead")
+    monkeypatch.setattr(
+        tmux_mod, "_run",
+        lambda args, check=False, **kw: SimpleNamespace(stdout="", returncode=1),
+    )
+    assert tmux_mod._member_env_pane() is None
+    assert tmux_mod.is_inside_tmux() is False
