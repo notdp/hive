@@ -75,25 +75,39 @@ def _task_artifact(name: str, text: str) -> str:
     return str(path)
 
 
+_DISPATCH_ATTEMPTS = 3
+_DISPATCH_RETRY_GAP = 3.0
+
+
 def _dispatch(name: str, *, body: str, artifact: str, reply_to: str = "") -> str:
+    """Send with bounded retries: a cloud-backed transport (grok leader RPC,
+    codex daemon) can refuse transiently under provider throttling, and a
+    single blip must not kill a whole orchestration. Still loud on exhaustion.
+    """
     from . import cli as cli_mod
 
     ctx = _context()
-    try:
-        payload = cli_mod._request_send_payload(
-            workspace=ctx.workspace,
-            team=ctx.team,
-            sender_agent=FLOW_SENDER,
-            target_agent=name,
-            body=body,
-            artifact=artifact,
-            reply_to=reply_to,
-            command_name="flow-dispatch",
-            warn_on_long_body=False,
-        )
-    except RuntimeError as exc:
-        raise FlowError(f"dispatch to '{name}' failed: {exc}") from exc
-    return str(payload.get("msgId") or "")
+    last: RuntimeError | None = None
+    for attempt in range(_DISPATCH_ATTEMPTS):
+        try:
+            payload = cli_mod._request_send_payload(
+                workspace=ctx.workspace,
+                team=ctx.team,
+                sender_agent=FLOW_SENDER,
+                target_agent=name,
+                body=body,
+                artifact=artifact,
+                reply_to=reply_to,
+                command_name="flow-dispatch",
+                warn_on_long_body=False,
+            )
+            return str(payload.get("msgId") or "")
+        except RuntimeError as exc:
+            last = exc
+            if attempt + 1 < _DISPATCH_ATTEMPTS:
+                _log(f"{name} dispatch refused ({exc}); retry {attempt + 2}/{_DISPATCH_ATTEMPTS}")
+                time.sleep(_DISPATCH_RETRY_GAP)
+    raise FlowError(f"dispatch to '{name}' failed after {_DISPATCH_ATTEMPTS} attempts: {last}") from last
 
 
 def _await_reply(name: str, msg_id: str) -> dict[str, object]:
