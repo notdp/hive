@@ -159,3 +159,18 @@ def test_plain_spawn_contract_unchanged(runner, configure_hive_home, monkeypatch
     spawn_call = team.spawn_calls[0]
     assert spawn_call["prompt"] == "hello" and spawn_call["skill"] == "none"
     assert waits == [] and sends == []  # no ready gate, no dispatch
+
+
+def test_spawn_rejects_a_model_outside_the_cli_catalog(runner, configure_hive_home, monkeypatch, tmp_path):
+    team, waits, sends, task = _setup(runner, configure_hive_home, monkeypatch, tmp_path)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps({"models": [{"slug": "gpt-5.6-sol"}, {"slug": "gpt-5.5"}]})
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    result = runner.invoke(cli, ["spawn", "impl", "--cli", "codex", "-m", "gpt-5.6-soul"])
+    assert result.exit_code == 1
+    assert "gpt-5.6-soul" in result.output and "gpt-5.6-sol" in result.output
+    assert not getattr(team, "spawn_calls", [])  # refused before any pane exists

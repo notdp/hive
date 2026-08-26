@@ -15,6 +15,51 @@ from . import tmux
 
 AGENT_CLI_NAMES = frozenset({"claude", "codex", "grok"})
 
+def _catalog_model_ids(cli: str) -> list[str]:
+    """Model ids from the CLI's own backend catalog on disk; [] = no catalog.
+
+    codex and grok refresh these caches from their backends themselves, so
+    the list never drifts the way a hand-maintained table did. claude keeps
+    no local catalog — its aliases and ids are validated by the CLI itself.
+    """
+    try:
+        if cli == "codex":
+            from .adapters.codex_app_server import codex_home
+
+            data = json.loads((codex_home() / "models_cache.json").read_text())
+            return [str(m["slug"]) for m in data.get("models", []) if m.get("slug")]
+        if cli == "grok":
+            from .adapters.grok_leader import grok_home
+
+            data = json.loads((grok_home() / "models_cache.json").read_text())
+            return [str(k) for k in data.get("models", {})]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    return []
+
+
+def validate_spawn_model(cli: str, model: str) -> str | None:
+    """Error string when *model* is surely wrong for *cli*, else None.
+
+    Judged against the CLI's own catalog when one exists on disk; no catalog
+    or an unreadable cache fails open — the CLI is the final authority and
+    its own rejection is visible in the pane.
+    """
+    if not model:
+        return None
+    known = _catalog_model_ids(cli)
+    if not known or model in known:
+        return None
+    import difflib
+
+    close = difflib.get_close_matches(model, known, n=1, cutoff=0.4)
+    hint = f" (did you mean '{close[0]}'?)" if close else ""
+    return (
+        f"unknown {cli} model '{model}'{hint}; "
+        f"its catalog has: {', '.join(known)}"
+    )
+
+
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
     "claude-code": "claude",

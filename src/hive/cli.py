@@ -1067,6 +1067,11 @@ def _spawn_team_agent(
     cli_name: str | None = None,
 ) -> Agent:
     resolved_cli_name = _resolve_spawn_cli_name(cli_name)
+    from .agent_cli import validate_spawn_model
+
+    model_error = validate_spawn_model(resolved_cli_name, model)
+    if model_error:
+        raise ValueError(model_error)
     extra_env = _parse_entries(env_entries) if env_entries else {}
     agent = t.spawn(
         agent_name,
@@ -1882,7 +1887,7 @@ def spawn(agent_name: str, model: str, prompt: str,
       hive spawn explore --task /tmp/tasks/explore.md
       hive spawn review --cli codex --task /tmp/tasks/review.md
       hive spawn dodo --cli codex
-      hive spawn claude -m claude-opus-4-7 --skill none
+      hive spawn claude -m claude-opus-5 --skill none
     """
     if task_artifact and prompt:
         _fail("--task and --prompt are mutually exclusive (the task rides the message, not the birth prompt)")
