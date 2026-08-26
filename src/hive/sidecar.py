@@ -747,6 +747,9 @@ def _check_send_gate(target) -> None:
     )
 
 
+FLOW_MAILBOX_AGENT = "flow"
+
+
 def _send_payload(
     *,
     workspace: str,
@@ -758,6 +761,21 @@ def _send_payload(
     artifact: str,
     reply_to: str,
 ) -> dict[str, Any]:
+    if target_agent == FLOW_MAILBOX_AGENT:
+        # The flow runner's mailbox: it owns no pane and no transport —
+        # the durable bus row IS the delivery, and the runner polls for
+        # it. Members answer a flow dispatch with an ordinary
+        # `hive reply flow`, which lands here.
+        event = bus.write_send_event(
+            workspace,
+            from_agent=sender_agent,
+            to_agent=target_agent,
+            body=body.strip(),
+            artifact=artifact,
+            reply_to=reply_to,
+        )
+        return {"ok": True, "to": target_agent, "msgId": event.msg_id, "mailbox": True}
+
     team, target = _resolve_live_agent(team_name, target_agent)
     normalized_body = body.strip()
 

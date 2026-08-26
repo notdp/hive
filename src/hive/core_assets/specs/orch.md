@@ -84,6 +84,29 @@ impl 回报后 **不 kill**，spawn verify（task 带验收标准 + branch + imp
 
 所有任务 DONE 后，你自己跑集成验（拉集成分支、跑测试、核验收标准）。过了才向 human 汇报。终验不外包。
 
+### ⑥ flow 脚本（机械流程的一把梭）
+
+循环、fan-out、barrier 这类确定性控制流不用手工编排：写一个 Python 脚本交给 `hive flow run`，每个 `agent()` 都是真实 pane，human 全程可见可介入。
+
+```python
+# plan.py
+from hive.flow import agent, parallel
+
+findings = agent("探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报", name="explore")
+a, b = parallel(
+    lambda: agent(f"实现 auth,材料见 {findings.artifact};交付 commit", name="impl-auth"),
+    lambda: agent("实现 db 层;交付 commit", name="impl-db", cli="codex"),
+)
+v = agent(f"验证 {a.artifact} {b.artifact};给 pass/fail verdict", name="verify", cli="codex")
+if "fail" in v.summary:
+    a.ask(f"打回:按 {v.artifact} 的 required-changes 修")   # 同成员带上下文修
+```
+
+- 跑法：把 `hive flow run plan.py` 放进后台 shell,完成后读输出。脚本跑着时你照常收发消息。
+- `agent()` 的 prompt 就是 task artifact,同样写全四件套;返回 `.summary`/`.artifact`。
+- `.ask()` 追问/打回,`.kill()` 验收后退场;成员回报走 `hive reply flow`(保留地址,runtime 已处理)。
+- 动态判断仍然手工编排;脚本只接机械流程。
+
 ---
 
 ## git / 集成纪律
