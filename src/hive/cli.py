@@ -3251,7 +3251,10 @@ def send(
     \b
     Delivery is binary: the native transport (claude inbox / codex daemon)
     either accepted the message — its runtime owns it from there — or the
-    command fails with the transport error. Nothing to poll afterwards.
+    command fails with the transport error. Nothing to poll afterwards. A
+    claude member that is mid-turn answers `held: true` instead: hive hands
+    the message over the moment it goes idle, so it lands in front of the
+    member without an interruption banner.
 
     \b
     Examples:

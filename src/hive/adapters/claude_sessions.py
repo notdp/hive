@@ -224,9 +224,11 @@ def send(sock_path: str | Path, text: str, *, sender: str) -> str | None:
 
     Returns :data:`ACCEPTED_UDS_WRITE`; :data:`WRITE_TIMED_OUT` when the
     session accepted the connection but did not read the frame in time; or
-    ``None`` when nothing is listening. ``priority: next`` queues behind the
-    current model call: the message lands between tool calls, never
-    mid-generation. *sender* is what the receiving session shows as the
+    ``None`` when nothing is listening. ``priority: later`` queues behind the
+    whole turn: the message never interjects between tool calls, so a session
+    that is working sees it when it stops — and one that is already idle
+    takes it straight into its composer, without any interruption chrome.
+    *sender* is what the receiving session shows as the
     message's origin; it is not a reply address — a Claude session replies to
     hive members with the hive CLI, never with ``SendMessage``.
     """
@@ -234,7 +236,7 @@ def send(sock_path: str | Path, text: str, *, sender: str) -> str | None:
         return None
     payload = json.dumps({
         "type": "user",
-        "priority": "next",
+        "priority": "later",
         "from": sender,
         "message": {"role": "user", "content": text},
     })

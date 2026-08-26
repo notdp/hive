@@ -261,6 +261,33 @@ runtime fields `_viewKind` / `_viewCertainty` / `_viewedJob` /
 really looking at` (the sidecar refreshes it whenever the journal or a pane
 title changes). Nothing about typing depends on it.
 
+### Delivery waits for idle
+
+Claude Code renders an inbox message by *arrival timing*, not by content: one
+that arrives while the session is idle becomes a queued command, drawn exactly
+like something the human typed; one that arrives during a turn is wrapped in an
+interruption banner and a security paragraph. Hive delivers with `priority:
+later` (never `now`, which aborts the running turn; no longer `next`, which
+interjects between tool calls) and, on top of that, holds messages back:
+`_send_payload` parks a send whose claude target's registry says `busy` and
+answers the sender `{ok, msgId, held: true}` — the durable bus row is already
+written, so the hold changes nothing about the record.
+
+The sidecar's flusher thread hands parked messages over the moment the
+registry reports idle, FIFO per target (a fresh send to a target with a
+non-empty queue parks behind it, so nothing overtakes). The queue is durable —
+`<workspace>/run/parked.jsonl`, reloaded on sidecar start, corrupt rows skipped
+and logged — because the sender was already told `ok`. Two escapes: a hold older
+than `parked.MAX_HOLD_SECONDS` (300s) is handed over even to a still-busy
+member (`priority: later` still keeps it out of the running turn), and a
+hand-over that fails (member gone, transport refused) drops the hold, logs it to
+`notify.jsonl`, and leaves the bus row as the record — nothing is retried
+forever.
+
+Only claude parks, and only on its registry's own verdict: an unknown status
+(asleep engine, unmanaged pane) is not evidence of a turn, and no other CLI
+renders a message differently for having arrived mid-turn.
+
 ### The member keyboard is the job, not the pane
 
 Every keyboard path for a claude member (`hive inject`, `/compact`, cvim
