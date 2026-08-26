@@ -417,3 +417,18 @@ def test_find_reply_to_returns_first_anchored_send(tmp_path):
     assert row is not None
     assert row["body"] == "done" and row["artifact"] == "/tmp/a.md"
     assert bus.find_reply_to(ws, msg_id="") is None
+
+
+def test_find_reply_to_scopes_to_from_agent(tmp_path):
+    from hive import bus
+
+    ws = tmp_path / "ws"
+    bus.init_workspace(ws)
+    root = bus.write_send_event(ws, from_agent="flow", to_agent="impl", body="task")
+    bus.write_send_event(ws, from_agent="bystander", to_agent="flow", body="not mine", reply_to=root.msg_id)
+    assert bus.find_reply_to(ws, msg_id=root.msg_id)["body"] == "not mine"
+    assert bus.find_reply_to(ws, msg_id=root.msg_id, from_agent="impl") is None
+
+    bus.write_send_event(ws, from_agent="impl", to_agent="flow", body="done", reply_to=root.msg_id)
+    row = bus.find_reply_to(ws, msg_id=root.msg_id, from_agent="impl")
+    assert row is not None and row["body"] == "done" and row["from"] == "impl"

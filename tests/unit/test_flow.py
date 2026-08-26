@@ -28,7 +28,7 @@ def _fresh_ctx(monkeypatch, tmp_path):
 
 def _wire(monkeypatch, *, ready=True, replies=None):
     """Mock the cli seams; *replies* maps dispatched msgId → reply row."""
-    rec = SimpleNamespace(spawns=[], dispatches=[], msg_seq=iter(f"m{i}" for i in range(1, 99)))
+    rec = SimpleNamespace(spawns=[], dispatches=[], awaits=[], msg_seq=iter(f"m{i}" for i in range(1, 99)))
     replies = replies if replies is not None else {}
 
     def fake_spawn(t, **kw):
@@ -49,7 +49,8 @@ def _wire(monkeypatch, *, ready=True, replies=None):
 
     monkeypatch.setattr("hive.cli._request_send_payload", fake_send)
 
-    def fake_find_reply(ws, *, msg_id):
+    def fake_find_reply(ws, *, msg_id, from_agent=""):
+        rec.awaits.append((from_agent, msg_id))
         return replies.get(msg_id)
 
     monkeypatch.setattr("hive.bus.find_reply_to", fake_find_reply)
@@ -75,6 +76,8 @@ def test_agent_spawns_dispatches_and_returns_reply(monkeypatch):
     assert d["sender_agent"] == "flow"
     assert d["target_agent"] == "explore"
     assert open(d["artifact"]).read() == "explore auth\nwrite findings"
+    # the wait is scoped to the member: a row anchored to m1 by anyone else is not the reply
+    assert rec.awaits == [("explore", "m1")]
 
 
 def test_agent_ready_timeout_raises(monkeypatch):
@@ -142,7 +145,7 @@ def test_kill_retires_pane_and_blocks_further_asks(monkeypatch, _fresh_ctx):
 def test_parallel_returns_in_call_order_and_serializes_spawns(monkeypatch):
     rec, replies = _wire(monkeypatch)
 
-    def fake_find_reply(ws, *, msg_id):
+    def fake_find_reply(ws, *, msg_id, from_agent=""):
         return {"body": f"done-{msg_id}", "artifact": "", "msgId": f"r-{msg_id}"}
 
     monkeypatch.setattr("hive.bus.find_reply_to", fake_find_reply)

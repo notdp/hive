@@ -111,7 +111,10 @@ def _dispatch(name: str, *, body: str, artifact: str, reply_to: str = "") -> str
 
 
 def _await_reply(name: str, msg_id: str) -> dict[str, object]:
-    """Block until a reply anchored to *msg_id* lands on the bus.
+    """Block until a reply from *name* anchored to *msg_id* lands on the bus.
+
+    Scoped to *name*: a row anchored to the dispatch by anyone else — a
+    handoff target, a bystander — is not this member's deliverable.
 
     No timeout by design: the members are visible panes and the human is
     the supervisor — interrupt the flow run to stop waiting.
@@ -120,7 +123,7 @@ def _await_reply(name: str, msg_id: str) -> dict[str, object]:
 
     ctx = _context()
     while True:
-        row = bus.find_reply_to(ctx.workspace, msg_id=msg_id)
+        row = bus.find_reply_to(ctx.workspace, msg_id=msg_id, from_agent=name)
         if row is not None:
             return row
         time.sleep(_REPLY_POLL_SECONDS)

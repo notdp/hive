@@ -7,7 +7,6 @@ without knowing the per-CLI on-disk layout.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -120,36 +119,6 @@ def safe_mtime(path: Path) -> float:
         return -1
 
 
-def iter_jsonl_records_reverse(path: Path, *, chunk_size: int = 64 * 1024) -> Iterator[dict[str, Any]]:
-    """Yield JSONL records from *path* newest-to-oldest without loading the whole file."""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            position = handle.tell()
-            pending = b""
-            while position > 0:
-                read_size = min(chunk_size, position)
-                position -= read_size
-                handle.seek(position)
-                pending = handle.read(read_size) + pending
-                lines = pending.split(b"\n")
-                if position > 0:
-                    pending = lines[0]
-                    complete = lines[1:]
-                else:
-                    pending = b""
-                    complete = lines
-                for raw in reversed(complete):
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    payload = safe_json_loads(line.decode("utf-8", errors="replace"))
-                    if payload is not None:
-                        yield payload
-    except OSError:
-        return
-
-
 # --- Send gate helpers ---
 # Detect whether the target agent is waiting for a user answer
 # (AskUserQuestion) before allowing message injection.
@@ -211,6 +180,22 @@ def _is_function_call_output(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _is_user_turn(payload: dict[str, Any]) -> bool:
+    """Check whether a raw JSONL record represents a user turn.
+
+    Checks both CLI formats; only one will match for any given file.
+    """
+    record_type = payload.get("type", "")
+    # claude: {"type": "user", ...}
+    if record_type == "user":
+        return True
+    # codex: {"type": "response_item", "payload": {"type": "message", "role": "user", ...}}
+    if record_type == "response_item":
+        inner = payload.get("payload")
+        return isinstance(inner, dict) and inner.get("type") == "message" and inner.get("role") == "user"
+    return False
+
+
 def check_input_gate(path: Path) -> GateResult:
     """Check if the agent owning *path* is waiting for a user answer.
 
@@ -268,86 +253,3 @@ def check_input_gate(path: Path) -> GateResult:
         chunk *= 2
 
     return GateResult("unknown", "no relevant record found")
-
-
-# --- ACK helpers ---
-# These operate on raw JSONL lines to detect whether a sent message was
-# accepted by the receiver's CLI session transcript.  The _is_user_turn
-# matcher knows the raw record shapes of both supported CLIs
-# (claude, codex) so the wait helper can stay CLI-agnostic.
-
-
-def get_transcript_baseline(path: Path) -> int:
-    """Return current file size in bytes, or 0 if the file does not exist."""
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
-def _is_user_turn(payload: dict[str, Any]) -> bool:
-    """Check whether a raw JSONL record represents a user turn.
-
-    Checks both CLI formats; only one will match for any given file.
-    """
-    record_type = payload.get("type", "")
-    # claude: {"type": "user", ...}
-    if record_type == "user":
-        return True
-    # codex: {"type": "response_item", "payload": {"type": "message", "role": "user", ...}}
-    if record_type == "response_item":
-        inner = payload.get("payload")
-        return isinstance(inner, dict) and inner.get("type") == "message" and inner.get("role") == "user"
-    return False
-
-
-def _poll_interval(elapsed: float) -> float:
-    if elapsed < 5.0:
-        return 0.2
-    if elapsed < 15.0:
-        return 0.5
-    return 1.0
-
-
-def transcript_has_id_in_new_user_turn(
-    path: Path,
-    message_id: str,
-    baseline: int,
-) -> bool:
-    """Return whether *message_id* appears in a new user turn after *baseline*."""
-    try:
-        with path.open("r") as handle:
-            handle.seek(baseline)
-            data = handle.read()
-    except OSError:
-        return False
-
-    for line in data.splitlines():
-        if not line or message_id not in line:
-            continue
-        parsed = safe_json_loads(line)
-        if parsed is not None and _is_user_turn(parsed):
-            return True
-    return False
-
-
-def wait_for_id_in_transcript(
-    path: Path,
-    message_id: str,
-    baseline: int,
-    timeout: float = 60.0,
-) -> bool:
-    """Block until *message_id* appears in a new user turn after *baseline* bytes.
-
-    Returns True if confirmed, False on timeout.
-    """
-    import time
-
-    deadline = time.monotonic() + timeout
-
-    while time.monotonic() < deadline:
-        if transcript_has_id_in_new_user_turn(path, message_id, baseline):
-            return True
-        elapsed = time.monotonic() - (deadline - timeout)
-        time.sleep(_poll_interval(elapsed))
-    return False
