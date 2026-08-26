@@ -198,3 +198,34 @@ def test_dispatch_exhaustion_stays_loud(monkeypatch):
     monkeypatch.setattr(flow, "_DISPATCH_RETRY_GAP", 0.0)
     with pytest.raises(flow.FlowError, match="after 3 attempts"):
         flow.agent("task", name="impl")
+
+
+def test_spawn_retries_transient_failure_then_succeeds(monkeypatch):
+    rec, replies = _wire(monkeypatch)
+    replies["m1"] = {"body": "done", "artifact": "", "msgId": "r1"}
+    monkeypatch.setattr(flow, "_DISPATCH_RETRY_GAP", 0.0)
+    calls = {"n": 0}
+    from types import SimpleNamespace
+
+    def flaky_spawn(t, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("codex app-server refused to mint a thread")
+        rec.spawns.append(kw)
+        return SimpleNamespace(pane_id="%9", cli=kw.get("cli_name") or "claude")
+
+    monkeypatch.setattr("hive.cli._spawn_team_agent", flaky_spawn)
+    member = flow.agent("task", name="impl", cli="codex")
+    assert member.summary == "done"
+    assert calls["n"] == 2
+
+
+def test_spawn_exhaustion_stays_loud(monkeypatch):
+    _wire(monkeypatch)
+    monkeypatch.setattr(flow, "_DISPATCH_RETRY_GAP", 0.0)
+    monkeypatch.setattr(
+        "hive.cli._spawn_team_agent",
+        lambda t, **kw: (_ for _ in ()).throw(RuntimeError("mint refused")),
+    )
+    with pytest.raises(flow.FlowError, match="after 3 attempts"):
+        flow.agent("task", name="impl", cli="codex")
