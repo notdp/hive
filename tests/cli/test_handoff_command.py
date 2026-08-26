@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from hive import bus
 from hive.cli import cli
 
@@ -50,10 +52,11 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
 
 
 class _FakeAgent:
-    def __init__(self, name: str, pane_id: str, *, alive: bool = True):
+    def __init__(self, name: str, pane_id: str, *, alive: bool = True, cli: str = "claude"):
         self.name = name
         self.pane_id = pane_id
         self.alive = alive
+        self.cli = cli
         self.sent: list[str] = []
 
     def is_alive(self) -> bool:
@@ -262,6 +265,10 @@ def test_handoff_fork_mode_creates_worker_then_sends_delegate_and_announce(runne
         return agent, "%41"
 
     monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+    monkeypatch.setattr(
+        "hive.cli._wait_for_peer_ready",
+        lambda *a, **kw: pytest.fail("a claude clone's inbox queues the delegate; no gate"),
+    )
     _patch_sidecar_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["handoff", "orch-2", "--fork"])
@@ -277,6 +284,75 @@ def test_handoff_fork_mode_creates_worker_then_sends_delegate_and_announce(runne
     handoff = [event for event in events if event.get("intent") == "handoff"][-1]
     assert handoff["metadata"]["anchorMsgId"] == inbound.msg_id
     assert handoff["metadata"]["mode"] == "fork"
+
+
+def _fork_handoff_env(monkeypatch, tmp_path, *, cli_name: str):
+    """Fork-mode handoff with a `cli_name` clone; returns (workspace, team, order)."""
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    bus.write_send_event(workspace, from_agent="lulu", to_agent="orch", body="need help")
+
+    team = _FakeTeam(str(workspace))
+    team.agents["lulu"] = _FakeAgent("lulu", "%22")
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
+
+    order: list[str] = []
+
+    def _fork_registered_agent(*_args, join_as: str, **_kwargs):
+        agent = _FakeAgent(join_as, "%41", cli=cli_name)
+        team.agents[join_as] = agent
+        order.append("fork")
+        return agent, "%41"
+
+    monkeypatch.setattr("hive.cli._fork_registered_agent", _fork_registered_agent)
+    _patch_sidecar_requests(monkeypatch, team)
+
+    import hive.sidecar as sidecar_mod
+
+    patched_send = sidecar_mod.request_send
+
+    def _recording_send(*args, **kwargs):
+        order.append(f"dispatch:{kwargs.get('target_agent')}")
+        return patched_send(*args, **kwargs)
+
+    monkeypatch.setattr("hive.sidecar.request_send", _recording_send)
+    return workspace, team, order
+
+
+def test_handoff_fork_waits_for_a_non_claude_clone_before_dispatching(runner, configure_hive_home, monkeypatch, tmp_path):
+    # codex/grok refuse a member whose session the fork has not opened yet, and
+    # the refusal lands after the bus row is written: gate first, dispatch after
+    configure_hive_home()
+    _, _, order = _fork_handoff_env(monkeypatch, tmp_path, cli_name="codex")
+    gated: list[set[str]] = []
+
+    def _wait_for_peer_ready(_workspace, *, team_name, agents, **_kwargs):
+        assert team_name == "team-x"
+        gated.append(set(agents))
+        order.append("gate")
+        return set()
+
+    monkeypatch.setattr("hive.cli._wait_for_peer_ready", _wait_for_peer_ready)
+
+    result = runner.invoke(cli, ["handoff", "orch-2", "--fork"])
+
+    assert result.exit_code == 0, result.output
+    assert gated == [{"orch-2"}]
+    assert order[:3] == ["fork", "gate", "dispatch:orch-2"]
+
+
+def test_handoff_fork_fails_naming_the_pane_when_the_clone_never_readies(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace, _, order = _fork_handoff_env(monkeypatch, tmp_path, cli_name="codex")
+    monkeypatch.setattr("hive.cli._wait_for_peer_ready", lambda *a, **kw: {"orch-2"})
+
+    result = runner.invoke(cli, ["handoff", "orch-2", "--fork"])
+
+    assert result.exit_code == 1
+    assert "%41" in result.output  # the pane the human has to inspect
+    assert order == ["fork"]  # nothing dispatched
+    assert [event for event in bus.read_all_events(workspace) if event.get("to") == "orch-2"] == []
 
 
 def test_handoff_treats_announce_failure_as_best_effort(runner, configure_hive_home, monkeypatch, tmp_path):
