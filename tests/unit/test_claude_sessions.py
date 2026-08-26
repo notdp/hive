@@ -176,7 +176,7 @@ def test_send_writes_one_peer_message_line_and_reports_acceptance(short_tmp):
     frame = json.loads(got[0].decode())
     assert frame == {
         "type": "user",
-        "priority": "next",
+        "priority": "later",
         "from": "t.w",
         "message": {"role": "user", "content": "hello there"},
     }

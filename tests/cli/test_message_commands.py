@@ -196,6 +196,70 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
     assert sent[0].startswith("<HIVE from=claude to=gpt ")
 
 
+def _claude_member_team(workspace, sent):
+    class _FakeAgent:
+        pane_id = "%99"
+        cli = "claude"
+
+        def is_alive(self) -> bool:
+            return True
+
+        def send(self, text: str) -> None:
+            sent.append(text)
+
+    class _FakeTeam:
+        def __init__(self):
+            self.workspace = str(workspace)
+            self.name = "team-x"
+            self.tmux_session = "dev"
+            self.tmux_window = "dev:0"
+
+        def get(self, name: str):
+            assert name == "gpt"
+            return _FakeAgent()
+
+    return _FakeTeam()
+
+
+def _wire_claude_send(monkeypatch, team, *, busy):
+    monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
+    monkeypatch.setattr("hive.sidecar._claude_registry_busy", lambda _pane_id: busy)
+    _patch_sidecar_requests(monkeypatch, team)
+
+
+def test_send_to_a_busy_claude_member_is_held(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    sent: list[str] = []
+    _wire_claude_send(monkeypatch, _claude_member_team(workspace, sent), busy=True)
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["held"] is True
+    assert payload["msgId"] == FIXED_ID
+    assert sent == []  # the inbox is not touched mid-turn
+
+
+def test_send_to_an_idle_claude_member_delivers_now(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    workspace = tmp_path / "ws"
+    bus.init_workspace(workspace)
+    sent: list[str] = []
+    _wire_claude_send(monkeypatch, _claude_member_team(workspace, sent), busy=False)
+
+    result = runner.invoke(cli, ["send", "gpt", "please review this"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "held" not in payload
+    assert len(sent) == 1
+
 
 def _reply_fake_team(workspace, *, sent_transcript):
     class _FakeAgent:
