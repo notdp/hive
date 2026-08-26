@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Deliver a /cvim popup edit over the target agent's native transport.
+
+A hive-managed agent has an engine address that is not its pane: claude's bg
+job (typed through ``claude attach <jobId>``), codex's recorded thread
+(``turn/start`` / ``turn/interrupt``) and grok's recorded session
+(``session/prompt`` / ``session/cancel``). The sendback rides that address,
+so the edit reaches the engine that wrote the message it comments on — no
+matter what the pane's viewer is showing — and no keystroke, sleep or
+capture-pane scrape is involved. Acceptance is the transport's own answer,
+which the caller logs.
+
+Exit codes:
+  0   delivered
+  10  the pane has no native address (an unmanaged CLI); the caller falls
+      back to the tmux keystroke chain
+  1   a native address that refused, or a pane with nothing safe to type
+      into — never a keystroke, and the caller keeps the payload on disk
+
+The claude branch deliberately keeps the typing pipe instead of the inbox
+socket every other hive delivery uses: an inbox frame is a *peer* message,
+and Claude Code wraps it in "Another Claude session sent a message ... not
+typed by your user" plus a paragraph telling the model never to read it as
+the user's approval. A cvim payload is the human's own keyboard, so that
+framing would be a lie the transcript keeps.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+OK = 0
+REFUSED = 1
+NO_NATIVE_ADDRESS = 10
+
+
+def _claude(pane: str, text: str | None, interrupt: bool) -> tuple[int, dict[str, str]]:
+    from hive.adapters import claude_bg, claude_view
+
+    job_id = claude_bg.job_id_for_pane(pane)
+    if not job_id:
+        if claude_view.interactive_claude_pid(pane) is not None:
+            # A plain interactive claude TUI: no job to address, but its
+            # composer is its own, so keystrokes are safe.
+            return NO_NATIVE_ADDRESS, {"route": "tmuxKeys", "why": "no_job_record"}
+        # An attach viewer (its composer belongs to whatever session it
+        # shows) or nothing at all: typing here would land in a stranger's
+        # turn, or in the pane shell.
+        return REFUSED, {"route": "none", "why": "no_job_record_and_no_interactive_claude"}
+
+    fields = {"route": "claudeJobPipe", "job": job_id}
+    if interrupt:
+        result = claude_bg.interrupt_job(job_id)
+        fields["interrupt"] = result.confirmed if result.ok else "failed"
+        if not result.ok and text is None:
+            fields["why"] = result.why
+            return REFUSED, fields
+    if text is None:
+        return OK, fields
+    result = claude_bg.type_into_job(job_id, text)
+    fields["send"] = result.confirmed if result.ok else "failed"
+    if not result.ok:
+        fields["why"] = result.why
+        return REFUSED, fields
+    return OK, fields
+
+
+def _codex(pane: str, text: str | None, interrupt: bool) -> tuple[int, dict[str, str]]:
+    from hive.adapters import codex_app_server
+
+    if not codex_app_server.thread_id_for_pane(pane):
+        return NO_NATIVE_ADDRESS, {"route": "tmuxKeys", "why": "no_recorded_thread"}
+    fields = {"route": "codexThread"}
+    if interrupt:
+        accepted = codex_app_server.interrupt_pane(pane)
+        fields["interrupt"] = accepted or "failed"
+        if accepted is None and text is None:
+            return REFUSED, fields
+    if text is None:
+        return OK, fields
+    accepted = codex_app_server.send_to_pane(pane, text)
+    fields["send"] = accepted or "failed"
+    return (OK if accepted else REFUSED), fields
+
+
+def _grok(pane: str, text: str | None, interrupt: bool) -> tuple[int, dict[str, str]]:
+    from hive.adapters import grok_leader
+
+    if not grok_leader.session_id_for_pane(pane):
+        return NO_NATIVE_ADDRESS, {"route": "tmuxKeys", "why": "no_recorded_session"}
+    fields = {"route": "grokSession"}
+    if interrupt:
+        accepted = grok_leader.interrupt_pane(pane)
+        fields["interrupt"] = accepted or "failed"
+        if accepted is None and text is None:
+            return REFUSED, fields
+    if text is None:
+        return OK, fields
+    accepted = grok_leader.send_to_pane(pane, text)
+    fields["send"] = accepted or "failed"
+    return (OK if accepted else REFUSED), fields
+
+
+def _is_slash_command(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("/") and "\n" not in stripped
+
+
+def sendback(pane: str, profile: str, text: str | None, interrupt: bool) -> tuple[int, dict[str, str]]:
+    """Route one sendback; *text* is None when the popup changed nothing."""
+    if profile in ("codex", "grok") and text is not None and _is_slash_command(text):
+        # A slash command is TUI vocabulary, not a prompt: turn/start and
+        # session/prompt would only feed the model the literal "/compact".
+        # It goes to the composer — the same route `hive compact` falls back
+        # to when its RPC cannot run.
+        return NO_NATIVE_ADDRESS, {"route": "tmuxKeys", "why": "slash_command"}
+    router = {"claude": _claude, "codex": _codex, "grok": _grok}.get(profile)
+    if router is None:
+        return NO_NATIVE_ADDRESS, {"route": "tmuxKeys", "why": f"profile_{profile or 'unknown'}"}
+    return router(pane, text, interrupt)
+
+
+def main() -> int:
+    pane, profile, send_file, content_changed, interrupt = sys.argv[1:6]
+    text = None
+    if content_changed == "1" and send_file:
+        # Same trailing-newline trim the keystroke path applies.
+        text = Path(send_file).read_text(encoding="utf-8", errors="ignore").rstrip("\n")
+    code, fields = sendback(pane, profile, text, interrupt != "0")
+    print(" ".join(f"{key}={value}" for key, value in fields.items()))
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
