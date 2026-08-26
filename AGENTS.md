@@ -34,6 +34,7 @@ Tests live under `tests/` and are split by level:
 - `PYTHONPATH=src python -m pytest tests/ -m unit -q` — fast unit tests only.
 - `PYTHONPATH=src python -m pytest tests/ -m cli -q` — CLI-layer tests.
 - `PYTHONPATH=src python -m pytest tests/ -m e2e -q` — end-to-end tmux tests.
+- `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok PYTHONPATH=src python -m pytest tests/acceptance -q` — post-install live acceptance: spawns one real member per CLI through the installed `hive` and asserts the oracles unit suites cannot see (reply identity, no acks, pane color via `capture-pane -e`, no picker residue, nonce causality) plus a headless-claude semantic coroner. Run it after every live install; it is skipped everywhere else.
 - `PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_cvim_payload.py -q` — focused `/cvim` and `/vim` sendback coverage.
 - Plugin/skill materialization and sidecar behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's sidecar onto checkout code; the live sidecar stays on the stable install until an intentional upgrade.
 

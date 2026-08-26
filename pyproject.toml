@@ -31,4 +31,5 @@ markers = [
     "unit: fast isolated unit tests",
     "cli: click CLI tests with mocked dependencies",
     "e2e: end-to-end tests with real tmux/runtime behavior",
+    "acceptance: post-install live acceptance against the installed hive (HIVE_ACCEPTANCE=1 to enable)",
 ]
