@@ -1,9 +1,107 @@
 import fcntl
 import os
+import shutil
+import tempfile
+import threading
+import time
+from pathlib import Path
 
 import pytest
 
 import hive.sidecar as sidecar
+
+
+@pytest.fixture
+def short_workspace():
+    # AF_UNIX sun_path caps near 104 bytes: the sidecar socket cannot live
+    # under pytest's long tmp_path.
+    base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    d = Path(tempfile.mkdtemp(prefix="hive-sq-", dir=base))
+    yield str(d)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def _serve_in_background(server, workspace: str, *, timeout: float) -> tuple[threading.Thread, dict]:
+    served: dict = {}
+
+    def _serve() -> None:
+        served["keep_running"] = sidecar._serve_requests(
+            server=server,
+            workspace=workspace,
+            team="team-a",
+            tmux_window="dev:3",
+            tmux_window_id="@99",
+            sidecar_started_at="2026-01-01T00:00:00Z",
+            timeout=timeout,
+        )
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    return thread, served
+
+
+def test_serve_requests_answers_a_read_while_a_send_holds_the_transport(monkeypatch, short_workspace):
+    # C1: delivery may hold the native transport for ~52s while `hive team`
+    # gives up after 2s and reports "no sidecar". Handlers run off the accept
+    # loop so the short read is answered immediately.
+    started = threading.Event()
+    release = threading.Event()
+
+    def _handle(*, request, **_kwargs):
+        if request.get("action") == "send":
+            started.set()
+            release.wait(10.0)
+            return {"ok": True, "slow": True}, True
+        return {"ok": True, "fast": True}, True
+
+    monkeypatch.setattr(sidecar, "_handle_request", _handle)
+    workspace = short_workspace
+    server = sidecar._open_server_socket(workspace)
+    slow_client = threading.Thread(
+        target=lambda: sidecar._request_sidecar(workspace, {"action": "send"}, timeout=10.0),
+        daemon=True,
+    )
+    serve_thread, served = _serve_in_background(server, workspace, timeout=2.0)
+    try:
+        slow_client.start()
+        assert started.wait(2.0)
+
+        began = time.monotonic()
+        response = sidecar._request_sidecar(
+            workspace,
+            {"action": "team-runtime"},
+            timeout=sidecar.SOCKET_READY_TIMEOUT,
+        )
+        elapsed = time.monotonic() - began
+
+        assert response == {"ok": True, "fast": True}
+        assert elapsed < 1.0
+    finally:
+        release.set()
+        slow_client.join(timeout=5.0)
+        serve_thread.join(timeout=5.0)
+        server.close()
+        sidecar._cleanup_socket(workspace)
+
+    assert served["keep_running"] is True
+    assert sidecar._requests_in_flight() is False
+
+
+def test_serve_requests_still_retires_the_loop_on_shutdown(monkeypatch, short_workspace):
+    monkeypatch.setattr(sidecar, "_handle_request", lambda **_kwargs: ({"ok": True}, False))
+    workspace = short_workspace
+    server = sidecar._open_server_socket(workspace)
+    serve_thread, served = _serve_in_background(server, workspace, timeout=1.0)
+    try:
+        response = sidecar._request_sidecar(workspace, {"action": "shutdown"}, timeout=2.0)
+        serve_thread.join(timeout=5.0)
+
+        assert response == {"ok": True}
+        assert served["keep_running"] is False
+    finally:
+        sidecar._SHUTDOWN.clear()
+        server.close()
+        sidecar._cleanup_socket(workspace)
 
 
 def test_socket_alive_requires_matching_api_version(monkeypatch):
@@ -309,7 +407,7 @@ def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
     monkeypatch.setattr(sidecar, "_try_acquire_reexec_lock", lambda _workspace: None)
     monkeypatch.setattr(sidecar.os, "execv", lambda *_args: calls.append("execv"))
 
-    did_reexec = sidecar._reexec_sidecar(
+    replacement = sidecar._reexec_sidecar(
         workspace=str(tmp_path),
         team="team-a",
         tmux_window="dev:3",
@@ -318,8 +416,57 @@ def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
         busy_monitor=_Monitor(),
     )
 
-    assert did_reexec is False
+    assert replacement is None
     assert calls == []
+
+
+def test_reexec_sidecar_rebinds_and_keeps_serving_when_execv_fails(monkeypatch, tmp_path):
+    # execv failing after the teardown used to punch through the loop and
+    # leave the window with no sidecar *and* no socket.
+    calls: list[tuple] = []
+
+    class _Server:
+        def close(self):
+            calls.append(("server.close",))
+
+    class _Monitor:
+        def stop(self):
+            calls.append(("monitor.stop",))
+
+        def start(self):
+            calls.append(("monitor.start",))
+
+    def _execv(_executable, _argv):
+        raise OSError(8, "Exec format error")
+
+    rebound = object()
+    monitor = _Monitor()
+    monkeypatch.delenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, raising=False)
+    monkeypatch.setattr(sidecar.os, "execv", _execv)
+    monkeypatch.setattr(sidecar, "_try_acquire_reexec_lock", lambda _workspace: 42)
+    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(
+        sidecar,
+        "_open_server_socket",
+        lambda workspace: calls.append(("open", workspace)) or rebound,
+    )
+
+    replacement = sidecar._reexec_sidecar(
+        workspace=str(tmp_path),
+        team="team-a",
+        tmux_window="dev:3",
+        tmux_window_id="@99",
+        server=_Server(),
+        busy_monitor=monitor,
+    )
+
+    assert replacement is rebound
+    assert ("open", str(tmp_path)) in calls
+    assert ("monitor.start",) in calls
+    assert sidecar._OUTPUT_BUSY_MONITOR is monitor
+    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+    sidecar._set_output_busy_monitor(None)
 
 
 def test_cleanup_socket_if_owner_skips_foreign_owner(monkeypatch, tmp_path):

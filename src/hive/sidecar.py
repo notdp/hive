@@ -15,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -67,11 +68,23 @@ def _send_request_timeout() -> float:
     return _native_submit_timeout() + REQUEST_SLACK
 SIDECAR_API_VERSION = 5
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
+# A probed session id only speaks for the session it saw: nothing tells the
+# sidecar that the human typed `/new` in an unmanaged pane, so the snapshot
+# ages out and the adapter re-probes instead of pinning a dead id forever.
+_SESSION_SNAPSHOT_FRESHNESS_S = 600.0
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
 _OUTPUT_BUSY_MONITOR = None
 _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
 _AGENT_NOTIFY_ROLES = {"agent"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
+# Requests run on their own threads (see _serve_requests). This guards the
+# sidecar's own short in-memory mutations — never held across transport,
+# subprocess or socket work, which is the starvation this threading exists to
+# end. The read caches (_TRANSCRIPT_PATH_CACHE, _CLAUDE_JOBS_CACHE) stay
+# unguarded: a lost race there costs a duplicate probe, not correctness.
+_STATE_LOCK = threading.Lock()
+_SHUTDOWN = threading.Event()
+_INFLIGHT_REQUESTS = 0
 
 
 def _compute_build_hash() -> str:
@@ -180,10 +193,18 @@ def _reexec_sidecar(
     server: socket.socket,
     busy_monitor: Any,
     on_reexec: Any = None,
-) -> bool:
+) -> socket.socket | None:
+    """Replace this process with the on-disk build.
+
+    Returns None when nothing was torn down (another sidecar holds the reexec
+    lock) — the caller keeps serving on its own socket. When ``execv`` itself
+    fails, the old build has to keep serving rather than leave the window with
+    a dead sidecar and no socket: the listener is rebound, the output monitor
+    restarted, and the replacement socket returned for the caller to serve on.
+    """
     lock_fd = _try_acquire_reexec_lock(workspace)
     if lock_fd is None:
-        return False
+        return None
 
     previous_lock_env = os.environ.get(_SIDECAR_REEXEC_LOCK_ENV)
     try:
@@ -196,14 +217,29 @@ def _reexec_sidecar(
         if on_reexec is not None:
             on_reexec()
         argv = _sidecar_reexec_argv(workspace, team, tmux_window, tmux_window_id)
-        os.execv(sys.executable, argv)
+        try:
+            os.execv(sys.executable, argv)
+        except OSError as exc:
+            print(
+                f"hive sidecar: reexec failed ({exc}); staying on build "
+                f"{SIDECAR_BUILD_HASH[:12]}",
+                file=sys.stderr,
+                flush=True,
+            )
     finally:
         if previous_lock_env is None:
             os.environ.pop(_SIDECAR_REEXEC_LOCK_ENV, None)
         else:
             os.environ[_SIDECAR_REEXEC_LOCK_ENV] = previous_lock_env
         _release_reexec_lock_fd(lock_fd)
-    return True
+
+    # Only reached when execv failed. Rebinding is the recovery; if it too
+    # fails the raised OSError takes the loop through its own teardown.
+    replacement = _open_server_socket(workspace)
+    if busy_monitor is not None:
+        busy_monitor.start()
+        _set_output_busy_monitor(busy_monitor)
+    return replacement
 
 
 
@@ -1133,15 +1169,21 @@ def _agent_runtime_payload(
 
     # hive-spawned grok is the same shape over its per-pane leader daemon, and
     # its session id needs no probing: hive minted it at spawn time and wrote
-    # it beside the socket.
+    # it beside the socket. Unlike codex it never falls through to the
+    # transcript path — that gate only knows claude/codex record shapes and
+    # reads a pending grok permission request as clear — so with no leader
+    # state the honest answer is unknown.
     if profile.name == "grok":
-        leader_runtime = _grok_leader_runtime(pane_id)
-        if leader_runtime is not None:
-            from .adapters import grok_leader
+        from .adapters import grok_leader
 
+        leader_runtime = _grok_leader_runtime(pane_id)
+        runtime["sessionId"] = grok_leader.session_id_for_pane(pane_id) or "unresolved"
+        if leader_runtime is not None:
             runtime.update(leader_runtime)
-            runtime["sessionId"] = grok_leader.session_id_for_pane(pane_id) or "unresolved"
-            return runtime
+        else:
+            runtime["inputState"] = "unknown"
+            runtime["inputReason"] = "no_leader_runtime"
+        return runtime
 
     if (
         runtime_snapshot is not None
@@ -1155,11 +1197,13 @@ def _agent_runtime_payload(
         source = "adapter" if session_id else ""
         runtime["sessionId"] = session_id or "unresolved"
         if session_id:
-            snapshot = _RUNTIME_SNAPSHOTS.update_session_id(
-                pane_id,
-                session_id,
-                source=source,
-            )
+            with _STATE_LOCK:
+                snapshot = _RUNTIME_SNAPSHOTS.update_session_id(
+                    pane_id,
+                    session_id,
+                    source=source,
+                    freshness_s=_SESSION_SNAPSHOT_FRESHNESS_S,
+                )
             runtime.update(snapshot.to_runtime_fields())
     if not session_id:
         runtime["inputState"] = "unknown"
@@ -1833,32 +1877,28 @@ def _handle_request(
     return {"ok": False, "error": "unknown action"}, True
 
 
-def _serve_requests(
+def _requests_in_flight() -> bool:
+    with _STATE_LOCK:
+        return _INFLIGHT_REQUESTS > 0
+
+
+def _serve_connection(
+    conn: socket.socket,
     *,
-    server: socket.socket,
     workspace: str,
     team: str,
     tmux_window: str,
     tmux_window_id: str,
     sidecar_started_at: str,
-    timeout: float,
-) -> bool:
-    end = time.monotonic() + timeout
-    while True:
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            return True
-        server.settimeout(remaining)
-        try:
-            conn, _ = server.accept()
-        except socket.timeout:
-            return True
-        except OSError:
-            return True
+    read_timeout: float,
+) -> None:
+    global _INFLIGHT_REQUESTS
 
-        keep_running = True
+    with _STATE_LOCK:
+        _INFLIGHT_REQUESTS += 1
+    try:
         with conn:
-            conn.settimeout(timeout)
+            conn.settimeout(read_timeout)
             raw = b""
             try:
                 while True:
@@ -1885,8 +1925,62 @@ def _serve_requests(
                 conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode())
             except OSError:
                 pass
-        if not keep_running:
-            return False
+            # Answer first, then retire: the reply must be on the wire before
+            # the loop tears the socket down.
+            if not keep_running:
+                _SHUTDOWN.set()
+    finally:
+        with _STATE_LOCK:
+            _INFLIGHT_REQUESTS -= 1
+
+
+def _serve_requests(
+    *,
+    server: socket.socket,
+    workspace: str,
+    team: str,
+    tmux_window: str,
+    tmux_window_id: str,
+    sidecar_started_at: str,
+    timeout: float,
+) -> bool:
+    """Accept for up to ``timeout`` seconds, handling each request off-loop.
+
+    Handlers run on their own thread because their budgets differ by an order
+    of magnitude: a delivery may hold the native transport for
+    ``_send_request_timeout()`` while ``hive team`` / ``hive doctor`` give up
+    after ``SOCKET_READY_TIMEOUT`` and report a missing sidecar. Serving them
+    in accept order made one slow send fake the sidecar's death for every
+    short read behind it.
+    """
+    end = time.monotonic() + timeout
+    while not _SHUTDOWN.is_set():
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        server.settimeout(remaining)
+        try:
+            conn, _ = server.accept()
+        except socket.timeout:
+            break
+        except OSError:
+            break
+
+        threading.Thread(
+            target=_serve_connection,
+            args=(conn,),
+            kwargs={
+                "workspace": workspace,
+                "team": team,
+                "tmux_window": tmux_window,
+                "tmux_window_id": tmux_window_id,
+                "sidecar_started_at": sidecar_started_at,
+                "read_timeout": timeout,
+            },
+            name="hive-sidecar-request",
+            daemon=True,
+        ).start()
+    return not _SHUTDOWN.is_set()
 
 
 def _cleanup_dead_daemons(workspace: str) -> None:
@@ -2203,6 +2297,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
 
     from . import notify_debug
 
+    _SHUTDOWN.clear()
     sidecar_started_at = _now_iso()
     idle_notify: dict[str, dict[str, Any]] = {}
     notify_debug_state: dict[str, Any] = {}
@@ -2284,7 +2379,10 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 code_reexec_state,
                 now=now,
             )
-            if stale_hash:
+            # Never exec out from under an in-flight request thread: its
+            # transport work would die mid-flight with the message already on
+            # the bus. The stale hash is still stale 5s later.
+            if stale_hash and not _requests_in_flight():
                 def _emit_reexec() -> None:
                     notify_debug.emit(
                         workspace,
@@ -2296,7 +2394,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                         newHash=stale_hash,
                     )
 
-                _reexec_sidecar(
+                replacement = _reexec_sidecar(
                     workspace=workspace,
                     team=team,
                     tmux_window=tmux_window,
@@ -2305,6 +2403,10 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     busy_monitor=busy_monitor,
                     on_reexec=_emit_reexec,
                 )
+                if replacement is not None:
+                    # exec failed: keep serving the old build on the rebound
+                    # socket instead of dying with the socket torn down.
+                    server = replacement
 
             tick_members = _team_member_bindings(team)
 
