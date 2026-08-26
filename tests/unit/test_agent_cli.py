@@ -359,3 +359,15 @@ def test_validate_spawn_model_fails_open_without_a_catalog(tmp_path, monkeypatch
 
 def test_validate_spawn_model_ignores_empty_model():
     assert agent_cli.validate_spawn_model("codex", "") is None
+
+
+def test_validate_spawn_model_refuses_cross_family_mistakes(tmp_path, monkeypatch):
+    # no catalog needed: a gpt model on claude is wrong whatever the catalog says
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "none"))
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "none"))
+    assert agent_cli.validate_spawn_model("claude", "gpt-5.5") is not None
+    assert agent_cli.validate_spawn_model("claude", "grok-4.6") is not None
+    assert agent_cli.validate_spawn_model("codex", "claude-opus-5") is not None
+    assert agent_cli.validate_spawn_model("grok", "gpt-5.6-sol") is not None
+    # same family without a catalog still fails open
+    assert agent_cli.validate_spawn_model("claude", "claude-opus-5") is None

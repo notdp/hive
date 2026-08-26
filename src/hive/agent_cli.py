@@ -38,15 +38,27 @@ def _catalog_model_ids(cli: str) -> list[str]:
     return []
 
 
+_CLI_FAMILY = {"claude": "anthropic", "codex": "openai", "grok": "xai"}
+
+
 def validate_spawn_model(cli: str, model: str) -> str | None:
     """Error string when *model* is surely wrong for *cli*, else None.
 
-    Judged against the CLI's own catalog when one exists on disk; no catalog
-    or an unreadable cache fails open — the CLI is the final authority and
-    its own rejection is visible in the pane.
+    Two gates: a cross-family check (a gpt model handed to claude is always
+    a mistake, catalog or not), then the CLI's own catalog when one exists
+    on disk. No catalog or an unreadable cache fails open — the CLI is the
+    final authority and its own rejection is visible in the pane (claude
+    keeps no local catalog but rejects unknown ids itself at launch).
     """
     if not model:
         return None
+    family = classify_model_family(model)
+    cli_family = _CLI_FAMILY.get(cli)
+    if family != "unknown" and cli_family and family != cli_family:
+        return (
+            f"model '{model}' is a {family} model, but {cli} runs "
+            f"{cli_family} models — wrong --cli or wrong -m"
+        )
     known = _catalog_model_ids(cli)
     if not known or model in known:
         return None
@@ -114,13 +126,7 @@ def family_for_pane(pane_id: str) -> str:
     family = classify_model_family(model)
     if family != "unknown":
         return family
-    if profile.name == "claude":
-        return "anthropic"
-    if profile.name == "codex":
-        return "openai"
-    if profile.name == "grok":
-        return "xai"
-    return "unknown"
+    return _CLI_FAMILY.get(profile.name, "unknown")
 
 
 def peer_cli_for_family(my_family: str) -> str:
