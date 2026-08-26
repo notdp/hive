@@ -635,17 +635,32 @@ def test_the_registry_name_is_read_into_the_engine_session():
     assert engine is not None and engine.name == "honey.worker"
 
 
-def test_bg_env_neutralizes_color_forcing(monkeypatch):
-    """A member engine's tool env carries FORCE_COLOR; parsed CLI output
-    (spawn jobId, agents --json) must never be ANSI-wrapped."""
+def test_bg_env_keeps_color_forcing_for_the_renderer(monkeypatch):
+    """Color is the engine's to keep — a cold-spawned engine renders its TUI
+    with this env for its whole life. Safety against colored output lives at
+    the parse sites (ANSI strip), never in the env."""
     from hive.adapters import claude_bg
 
     monkeypatch.setenv("FORCE_COLOR", "3")
-    monkeypatch.setenv("CLICOLOR_FORCE", "1")
     env = claude_bg.bg_env()
-    assert "FORCE_COLOR" not in env
-    assert "CLICOLOR_FORCE" not in env
-    assert env["NO_COLOR"] == "1"
+    assert env["FORCE_COLOR"] == "3"
+    assert "NO_COLOR" not in env
+
+
+def test_list_jobs_parses_colored_json(monkeypatch):
+    from types import SimpleNamespace
+
+    from hive.adapters import claude_bg
+
+    def fake_run(argv, **kw):
+        return SimpleNamespace(
+            returncode=0,
+            stdout='\x1b[32m[{"jobId": "abcd1234"}]\x1b[39m',
+            stderr="",
+        )
+
+    monkeypatch.setattr(claude_bg.subprocess, "run", fake_run)
+    assert claude_bg.list_jobs() == [{"jobId": "abcd1234"}]
 
 
 def test_spawn_job_parses_colored_output(monkeypatch):

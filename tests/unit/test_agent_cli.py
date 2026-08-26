@@ -24,7 +24,7 @@ def test_member_role_classifies_agents_and_shells():
 def test_profiles_use_expected_skill_commands():
     assert agent_cli.get_profile("claude").skill_cmd == "/{name}"
     assert agent_cli.get_profile("codex").skill_cmd == "${name}"
-    assert agent_cli.get_profile("grok").skill_cmd == "/skills {name} "
+    assert agent_cli.get_profile("grok").skill_cmd == "/{name}"
 
 
 def test_grok_profile_forks_through_the_hive_launcher():

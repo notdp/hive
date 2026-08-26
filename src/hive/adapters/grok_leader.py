@@ -103,7 +103,17 @@ def read_pane_session(pane: str) -> tuple[str, str] | None:
 
 
 def _daemon_env_for_pane(pane: str) -> dict[str, str]:
-    env = dict(os.environ)
+    """Leader env: the member pane's identity, nothing inherited that lies.
+
+    The spawner may itself run inside another member's engine (an orch's
+    flow runner), whose env carries that engine's identity markers —
+    CLAUDE_CODE_MESSAGING_SOCKET would make every hive call inside this
+    grok member resolve to the *orch's* pane. Wash them; pin our own.
+    """
+    env = {
+        k: v for k, v in os.environ.items()
+        if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC") or k == "CODEX_THREAD_ID")
+    }
     env["TMUX_PANE"] = pane
     return env
 

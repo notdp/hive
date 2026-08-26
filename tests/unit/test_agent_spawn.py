@@ -1373,3 +1373,25 @@ def test_spawn_codex_fork_shortcut_launch_keeps_shell(monkeypatch):
     startup_cmd = calls[0]
     _assert_launch_keeps_shell(startup_cmd)
     assert "fork" in startup_cmd and "sess-abc" in startup_cmd
+
+
+def test_spawn_skill_ref_is_bare_for_grok_and_qualified_for_claude(monkeypatch):
+    """grok/codex register plugin skills by bare name (/hive, $hive); claude
+    addresses them fully qualified (/hive:hive). /skills in grok only opens
+    the picker — never format the grok launch with it."""
+    calls, _ = _setup_tmux_mocks(monkeypatch)
+    state = _mock_claude_bg_up(monkeypatch)
+    monkeypatch.setattr("hive.adapters.grok_leader.spawn_daemon", lambda *_a, **_kw: True)
+    monkeypatch.setattr("hive.agent._wait_grok_session_ready", lambda *_a, **_kw: True)
+
+    Agent.spawn(name="g", team_name="t", target_pane="%0", cwd="/tmp",
+                is_first=True, cli="grok", skill="hive:hive")
+    grok_all = " ".join(calls)
+    assert "/hive" in grok_all
+    assert "/skills" not in grok_all and "/hive:hive" not in grok_all
+
+    calls.clear()
+    Agent.spawn(name="c", team_name="t", target_pane="%0", cwd="/tmp",
+                is_first=True, cli="claude", skill="hive:hive")
+    # claude's skill rides the bg spawn prompt, fully qualified
+    assert state["spawns"][-1]["prompt"].startswith("/hive:hive")
