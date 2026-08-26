@@ -37,7 +37,7 @@ hive spawn explore --task <workspace>/artifacts/tasks/explore.md
 hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 ```
 
-`--task` 会把任务作为首条 `<HIVE>` 消息原子投递（claude 成员注册即投递，inbox 自动排队；其他 CLI 等就绪后投）——成员不会空 inbox 出生。CLI 每次显式传；**model 不确定就别传**，默认就是对的（不要照抄状态栏之类的显示串）。
+`--task` 会把任务作为首条 `<HIVE>` 消息原子投递（claude 成员注册即投递，inbox 自动排队；其他 CLI 等就绪后投）——成员不会空 inbox 出生。CLI 每次显式传；**model 不确定就别传**，默认就是对的（不要照抄状态栏之类的显示串）。要传 model 时：claude 用别名 `fable` / `opus` / `sonnet`（别名永远指向该档当前最新，不会过期；典型分工：`fable` 做终验/裁决，`opus` 做执行主力）；codex/grok 传具体 id，spawn 会按该 CLI 自己的 catalog 校验，打错会带 did-you-mean 拒收。
 
 成员完工会 `hive reply` 锚回派发线程。收到回报后：读摘要，必要时读它的 artifact。
 

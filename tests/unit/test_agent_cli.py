@@ -307,3 +307,67 @@ def test_family_for_pane_uses_grok_identity_when_the_model_is_unknown(monkeypatc
 
     assert agent_cli.family_for_pane("%19") == "xai"  # CLI identity fallback
     assert agent_cli.family_for_pane("%19") == "xai"  # and via the resolved model
+
+
+# --- spawn model validation --------------------------------------------------
+
+
+def _codex_cache(tmp_path, slugs):
+    home = tmp_path / "codex"
+    (home / "models_cache.json").parent.mkdir(parents=True, exist_ok=True)
+    (home / "models_cache.json").write_text(
+        json.dumps({"models": [{"slug": s} for s in slugs]})
+    )
+    return home
+
+
+def _grok_cache(tmp_path, ids):
+    home = tmp_path / "grok"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "models_cache.json").write_text(
+        json.dumps({"models": {i: {} for i in ids}})
+    )
+    return home
+
+
+def test_validate_spawn_model_accepts_a_catalog_hit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(_codex_cache(tmp_path, ["gpt-5.6-sol", "gpt-5.5"])))
+    assert agent_cli.validate_spawn_model("codex", "gpt-5.6-sol") is None
+
+
+def test_validate_spawn_model_rejects_a_miss_with_a_hint(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(_codex_cache(tmp_path, ["gpt-5.6-sol", "gpt-5.5"])))
+    error = agent_cli.validate_spawn_model("codex", "gpt-5.6-sole")
+    assert error is not None
+    assert "gpt-5.6-sole" in error and "gpt-5.6-sol" in error
+
+
+def test_validate_spawn_model_reads_the_grok_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROK_HOME", str(_grok_cache(tmp_path, ["grok-4.6", "grok-4.5"])))
+    assert agent_cli.validate_spawn_model("grok", "grok-4.6") is None
+    assert agent_cli.validate_spawn_model("grok", "grok-build") is not None
+
+
+def test_validate_spawn_model_fails_open_without_a_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty"))
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "empty"))
+    assert agent_cli.validate_spawn_model("codex", "gpt-anything") is None
+    assert agent_cli.validate_spawn_model("grok", "grok-anything") is None
+    # claude keeps no local catalog: always the CLI's own call
+    assert agent_cli.validate_spawn_model("claude", "claude-nope") is None
+
+
+def test_validate_spawn_model_ignores_empty_model():
+    assert agent_cli.validate_spawn_model("codex", "") is None
+
+
+def test_validate_spawn_model_refuses_cross_family_mistakes(tmp_path, monkeypatch):
+    # no catalog needed: a gpt model on claude is wrong whatever the catalog says
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "none"))
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "none"))
+    assert agent_cli.validate_spawn_model("claude", "gpt-5.5") is not None
+    assert agent_cli.validate_spawn_model("claude", "grok-4.6") is not None
+    assert agent_cli.validate_spawn_model("codex", "claude-opus-5") is not None
+    assert agent_cli.validate_spawn_model("grok", "gpt-5.6-sol") is not None
+    # same family without a catalog still fails open
+    assert agent_cli.validate_spawn_model("claude", "claude-opus-5") is None

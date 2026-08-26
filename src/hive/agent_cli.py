@@ -15,23 +15,63 @@ from . import tmux
 
 AGENT_CLI_NAMES = frozenset({"claude", "codex", "grok"})
 
-# Non-authoritative suggestions for the interactive picker. Custom values
-# always accepted; these just save the user from typing common aliases.
-# Sources:
-#   claude: https://code.claude.com/docs/en/model-config
-#   codex:  https://developers.openai.com/codex/models
-#   grok:   https://docs.x.ai/docs/models
-MODEL_SUGGESTIONS: dict[str, list[str]] = {
-    "claude": [
-        "claude-fable-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7[1m]", "claude-opus-4-7",
-        "claude-opus-4-6[1m]", "claude-opus-4-6",
-        "claude-sonnet-4-6[1m]", "claude-sonnet-4-6",
-    ],
-    "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
-    "grok": ["grok-4.6", "grok-build"],
-}
+def _catalog_model_ids(cli: str) -> list[str]:
+    """Model ids from the CLI's own backend catalog on disk; [] = no catalog.
+
+    codex and grok refresh these caches from their backends themselves, so
+    the list never drifts the way a hand-maintained table did. claude keeps
+    no local catalog — its aliases and ids are validated by the CLI itself.
+    """
+    try:
+        if cli == "codex":
+            from .adapters.codex_app_server import codex_home
+
+            data = json.loads((codex_home() / "models_cache.json").read_text())
+            return [str(m["slug"]) for m in data.get("models", []) if m.get("slug")]
+        if cli == "grok":
+            from .adapters.grok_leader import grok_home
+
+            data = json.loads((grok_home() / "models_cache.json").read_text())
+            return [str(k) for k in data.get("models", {})]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    return []
+
+
+_CLI_FAMILY = {"claude": "anthropic", "codex": "openai", "grok": "xai"}
+
+
+def validate_spawn_model(cli: str, model: str) -> str | None:
+    """Error string when *model* is surely wrong for *cli*, else None.
+
+    Two gates: a cross-family check (a gpt model handed to claude is always
+    a mistake, catalog or not), then the CLI's own catalog when one exists
+    on disk. No catalog or an unreadable cache fails open — the CLI is the
+    final authority and its own rejection is visible in the pane (claude
+    keeps no local catalog but rejects unknown ids itself at launch).
+    """
+    if not model:
+        return None
+    family = classify_model_family(model)
+    cli_family = _CLI_FAMILY.get(cli)
+    if family != "unknown" and cli_family and family != cli_family:
+        return (
+            f"model '{model}' is a {family} model, but {cli} runs "
+            f"{cli_family} models — wrong --cli or wrong -m"
+        )
+    known = _catalog_model_ids(cli)
+    if not known or model in known:
+        return None
+    import difflib
+
+    close = difflib.get_close_matches(model, known, n=1, cutoff=0.4)
+    hint = f" (did you mean '{close[0]}'?)" if close else ""
+    return (
+        f"unknown {cli} model '{model}'{hint}; "
+        f"its catalog has: {', '.join(known)}"
+    )
+
+
 SHELL_NAMES = frozenset({"zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh"})
 CLI_ALIASES = {
     "claude-code": "claude",
@@ -64,7 +104,7 @@ def classify_model_family(model: str) -> str:
         return "unknown"
     m = model.lower().strip()
     m = m.lstrip("-")
-    if "claude" in m or m.startswith(("opus", "sonnet", "haiku")):
+    if "claude" in m or m.startswith(("opus", "sonnet", "haiku", "fable")):
         return "anthropic"
     if "codex" in m or m.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
@@ -86,13 +126,7 @@ def family_for_pane(pane_id: str) -> str:
     family = classify_model_family(model)
     if family != "unknown":
         return family
-    if profile.name == "claude":
-        return "anthropic"
-    if profile.name == "codex":
-        return "openai"
-    if profile.name == "grok":
-        return "xai"
-    return "unknown"
+    return _CLI_FAMILY.get(profile.name, "unknown")
 
 
 def peer_cli_for_family(my_family: str) -> str:
