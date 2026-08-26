@@ -912,43 +912,6 @@ def list_tty_processes(tty: str) -> list[TTYProcessInfo]:
     return processes
 
 
-def _list_open_files_lsof(pid: str) -> list[str]:
-    """Return file paths held open by *pid* via ``lsof -p <pid> -Fn``."""
-    if not pid:
-        return []
-    try:
-        result = subprocess.run(
-            ["lsof", "-p", str(pid), "-Fn"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
-    paths: list[str] = []
-    for line in result.stdout.splitlines():
-        if line.startswith("n") and line[1:].startswith("/"):
-            paths.append(line[1:])
-    return paths
-
-
-def list_open_files(pid: str) -> list[str]:
-    """Return file paths held open by *pid*.
-
-    Darwin uses the native ``proc_pidinfo`` provider first; other platforms and
-    native failures fall back to ``lsof``.
-    """
-    if not pid:
-        return []
-    try:
-        from . import proc_info
-
-        return proc_info.list_open_files(pid)
-    except Exception:
-        return _list_open_files_lsof(pid)
-
-
 def list_tty_commands(tty: str) -> list[str]:
     return [process.command for process in list_tty_processes(tty)]
 
@@ -1209,34 +1172,3 @@ def clear_pane_tags(pane_id: str) -> None:
     """Remove all hive identity options from a pane."""
     for key in _PANE_TAG_KEYS:
         clear_pane_option(pane_id, key)
-
-
-# --- Utility ---
-
-def wait_for_text(
-    pane_id: str,
-    text: str,
-    timeout: float = 30,
-    interval: float = 1,
-) -> bool:
-    """Wait until text appears in pane output."""
-    return wait_for_texts(pane_id, (text,), timeout=timeout, interval=interval)
-
-
-def wait_for_texts(
-    pane_id: str,
-    texts: tuple[str, ...],
-    timeout: float = 30,
-    interval: float = 1,
-) -> bool:
-    """Wait until any text appears in pane output."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            output = capture_pane(pane_id)
-        except subprocess.TimeoutExpired:
-            output = ""  # a busy tmux is not a missing match — keep polling
-        if any(text in output for text in texts):
-            return True
-        time.sleep(interval)
-    return False

@@ -250,7 +250,6 @@ class Agent:
 
         from .agent_cli import get_profile
         profile = get_profile(cli)
-        ready_text = profile.ready_text if profile else "for help"
 
         resolved_model = model
 
@@ -336,6 +335,7 @@ class Agent:
                         engine.socket_path,
                         initial_prompt,
                         sender=f"{team_name}.{name}",
+                        session_id=engine.session_id,
                     )
             else:
                 extra_args: list[str] = []
@@ -353,8 +353,9 @@ class Agent:
                 if not claude_job_id:
                     _undo_pane_side_effects()
                     raise RuntimeError(
-                        f"`claude --bg` refused to mint a job for '{name}' "
-                        f"(cwd {cwd}); refusing to spawn a claude member "
+                        f"`claude --bg` returned no usable job id for '{name}' "
+                        f"(it failed, or announced one hive could not read); "
+                        f"cwd {cwd}. Refusing to spawn a claude member "
                         "without a job identity (needs a Claude Code with "
                         "background sessions, 2.1.240+)"
                     )
@@ -491,14 +492,12 @@ class Agent:
             cli=cli,
         )
 
-        # Readiness comes from runtime signals, not screen text: the claude
-        # engine's registry entry (proven before the pane command was even
-        # typed), the codex TUI process on the pane TTY, and the minted
-        # session directory (grok) can only appear once the agent is actually
-        # up.
-        if cli == "claude":
-            pass  # engine entry proven pre-launch; the pane only watches
-        elif cli == "codex":
+        # Readiness comes from runtime signals, not screen text: the codex TUI
+        # process on the pane TTY and the minted session directory (grok) can
+        # only appear once the agent is actually up. A claude member needs no
+        # wait at all — its engine entry was proven before the pane command
+        # was even typed, and the pane only watches.
+        if cli == "codex":
             _wait_codex_attached(pane_id)
         elif cli == "grok":
             # The 2nd client can only load a session the TUI has opened, so the
@@ -506,9 +505,6 @@ class Agent:
             if _wait_grok_session_ready(pane_id, grok_session_id) and workspace:
                 from .sidecar import request_connect_grok
                 request_connect_grok(workspace, pane_id)
-        elif tmux.wait_for_text(pane_id, ready_text, timeout=AGENT_STARTUP_TIMEOUT):
-            time.sleep(1)
-
 
         return agent
 
@@ -566,7 +562,10 @@ class Agent:
                         "failed); the message stays on the bus"
                     )
                 accepted = claude_sessions.send(
-                    engine.socket_path, text, sender=f"{self.team_name}.{self.name}"
+                    engine.socket_path,
+                    text,
+                    sender=f"{self.team_name}.{self.name}",
+                    session_id=engine.session_id,
                 )
                 if accepted == claude_sessions.WRITE_TIMED_OUT:
                     raise DeliveryError(
@@ -648,24 +647,6 @@ class Agent:
 
     def is_alive(self) -> bool:
         return tmux.is_pane_alive(self.pane_id)
-
-    def shutdown(self) -> None:
-        """Send Ctrl+C twice then exit.
-
-        Keystrokes only: a claude member's engine is not on the pane, so this
-        would type into someone else's attach viewer. Use :meth:`kill`, which
-        parks the engine through its job.
-        """
-        if self.cli == "claude":
-            raise RuntimeError(
-                f"claude member on pane {self.pane_id} cannot be shut down with "
-                "keystrokes; hive never send-keys a member pane — use kill()"
-            )
-        tmux.send_key(self.pane_id, "C-c")
-        time.sleep(0.5)
-        tmux.send_key(self.pane_id, "C-c")
-        time.sleep(0.5)
-        tmux.send_keys(self.pane_id, "exit")
 
     def kill(self) -> None:
         """Force kill the pane — and, for a claude member, park its engine.

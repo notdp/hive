@@ -48,8 +48,8 @@ class CodexAdapter:
     # --- discovery ---
 
     def resolve_current_session_id(self, pane_id: str) -> str | None:
-        # A codex session is owned by its per-pane app-server daemon — thread
-        # metadata, then lsof on the daemon pid. An embedded codex (no daemon
+        # A codex session is owned by its app-server daemon: the pane's
+        # thread record is the whole answer. An embedded codex (no daemon
         # socket) is deliberately unsupported: hive rejects it at team entry,
         # so with no daemon to ask there is no session to report.
         from .codex_app_server import session_id_for_pane as _daemon_session_id

@@ -176,7 +176,7 @@ def _wire_claude_transport(monkeypatch, sent, accepted):
     )
     monkeypatch.setattr(
         "hive.adapters.claude_sessions.send",
-        lambda path, text, *, sender: (
+        lambda path, text, *, sender, session_id="": (
             sent.append(("%9" if path == sock else path, text)) or accepted
         ),
     )

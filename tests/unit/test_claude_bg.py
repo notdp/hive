@@ -192,6 +192,25 @@ def test_spawn_job_returns_none_on_failure(monkeypatch, tmp_path):
     assert m.spawn_job(cwd="/w", name="t.w1") is None
 
 
+@pytest.mark.parametrize("stdout", [
+    "backgrounded · \x1b]8;;x\x07 · probe\n",  # an escape the strip missed
+    "backgrounded · not-a-job-id · probe\n",  # reworded / renamed announcement
+    "started probe in the background\n",  # no announcement at all
+])
+def test_spawn_job_refuses_an_announcement_that_is_not_a_job_id(monkeypatch, tmp_path, stdout):
+    # a token no registry row can carry as its `jobId` is not an address: the
+    # caller would poll for it until the whole startup budget burned
+    _claude_home(monkeypatch, tmp_path)
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    _Result.stdout = stdout
+    monkeypatch.setattr(m.subprocess, "run", lambda *_a, **_kw: _Result())
+    assert m.spawn_job(cwd="/w", name="t.w1") is None
+
+
 def test_ensure_engine_wakes_a_parked_job_once(monkeypatch, tmp_path):
     _claude_home(monkeypatch, tmp_path)
     engines = iter([None, "ENGINE"])

@@ -19,14 +19,13 @@ def test_fork_auto_registers_with_derived_name(runner, configure_hive_home, monk
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: prompted.append((self.name, self.pane_id, text)))
 
@@ -61,13 +60,12 @@ def _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
 
@@ -139,14 +137,13 @@ def test_fork_in_duo_does_not_prefix_agent_name(runner, configure_hive_home, mon
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
 
@@ -182,14 +179,13 @@ def test_fork_join_as_registers_new_agent_in_current_team(runner, configure_hive
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: prompted.append((self.name, self.pane_id, text)))
 
@@ -239,14 +235,13 @@ def test_fork_join_as_qualified_sets_group_tag(runner, configure_hive_home, monk
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: None)
 
@@ -280,14 +275,13 @@ def test_fork_join_as_prompt_embeds_in_resume_command(runner, configure_hive_hom
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
     monkeypatch.setattr("hive.agent.Agent.send", lambda self, text: prompted.append((self.name, self.pane_id, text)))
 
@@ -404,7 +398,7 @@ def test_fork_codex_team_bound_launches_through_hive_codex(runner, configure_hiv
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "codex", "fork_cmd": "hive codex fork {session_id}", "ready_text": "codex"},
+            "P", (), {"name": "codex", "fork_cmd": "hive codex fork {session_id}"},
         )(),
     )
     monkeypatch.setattr(
@@ -418,7 +412,6 @@ def test_fork_codex_team_bound_launches_through_hive_codex(runner, configure_hiv
         lambda _pane, horizontal=True, cwd=None, detach=False: splits.append(_pane) or "%100",
     )
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))
-    monkeypatch.setattr("hive.cli.tmux.wait_for_text", lambda _pane, _text, timeout=0, interval=1: True)
     monkeypatch.setattr("hive.cli.time.sleep", lambda _s: None)
 
     from hive.tmux import PaneInfo
@@ -453,7 +446,7 @@ def test_fork_non_team_pane_bare_clone(runner, configure_hive_home, monkeypatch,
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
@@ -492,7 +485,7 @@ def test_fork_non_team_current_pane_bare_clone(runner, configure_hive_home, monk
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session", "ready_text": "Claude Code"},
+            "P", (), {"name": "claude", "fork_cmd": "hive claude -r {session_id} --fork-session"},
         )(),
     )
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane, profile=None: "sess-123")
@@ -551,7 +544,7 @@ def test_fork_non_team_codex_resolves_session_via_daemon(runner, configure_hive_
     monkeypatch.setattr(
         "hive.cli.detect_profile_for_pane",
         lambda _pane: type(
-            "P", (), {"name": "codex", "fork_cmd": "hive codex fork {session_id}", "ready_text": "codex"},
+            "P", (), {"name": "codex", "fork_cmd": "hive codex fork {session_id}"},
         )(),
     )
     monkeypatch.setattr(

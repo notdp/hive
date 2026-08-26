@@ -30,7 +30,6 @@ def test_profiles_use_expected_skill_commands():
 def test_grok_profile_forks_through_the_hive_launcher():
     profile = agent_cli.get_profile("/usr/local/bin/grok")
     assert profile.name == "grok"
-    assert profile.ready_text == "Shift+Tab:mode"
     assert profile.fork_cmd.format(session_id="sess-1") == (
         "hive grok --resume sess-1 --fork-session"
     )

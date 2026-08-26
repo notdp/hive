@@ -234,11 +234,6 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
         return []
 
     monkeypatch.setattr("hive.tmux.list_tty_processes", _list_tty_processes)
-    monkeypatch.setattr(
-        "hive.tmux.list_open_files",
-        lambda pid: [str(stale)] if str(pid) == "42424" else ([str(fresh)] if str(pid) == "52525" else []),
-    )
-
     result = runner.invoke(cli, ["team"])
 
     assert result.exit_code == 0

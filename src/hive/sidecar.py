@@ -1314,6 +1314,22 @@ def _agent_runtime_payload(
                     freshness_s=_SESSION_SNAPSHOT_FRESHNESS_S,
                 )
             runtime.update(snapshot.to_runtime_fields())
+
+    # An interactive claude reports its own state in the session registry —
+    # the same fields the bg engine path maps. It is the authority when it
+    # speaks: the transcript gate can only see an AskUserQuestion record, so
+    # it reads every other wait (and a stale ask) wrong, and the send gate
+    # refuses on that verdict.
+    if profile.name == "claude":
+        from .adapters import claude_sessions
+        from .agent_cli import claude_pid_for_pane
+
+        reported = claude_sessions.session_status(claude_pid_for_pane(pane_id))
+        if reported is not None:
+            runtime.update(claude_sessions.runtime_from_status(*reported))
+            runtime["_runtimeSource"] = "claude_registry"
+            return runtime
+
     if not session_id:
         runtime["inputState"] = "unknown"
         runtime["inputReason"] = "no_session"

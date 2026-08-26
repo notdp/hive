@@ -513,12 +513,6 @@ class Team:
         if peer_map.get(peer) == name:
             peer_map.pop(peer, None)
 
-    def shutdown(self, name: str | None = None) -> None:
-        """Shutdown one or all agents."""
-        targets = [self.agents[name]] if name else list(self.agents.values())
-        for agent in targets:
-            agent.shutdown()
-
     def cleanup(self) -> None:
         """Kill all agent panes (not the session itself if in-place)."""
         for agent in self.agents.values():

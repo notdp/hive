@@ -44,10 +44,10 @@ Source — the pane's native runtime source, when one holds state for it:
 
 1. codex: shared daemon `thread/status/changed`
 2. grok: leader `activity` notifications
-3. claude: the session registry `status` field (`busy` / `idle` / `waiting`),
-   read from the bg engine's entry (via the pane's job record) or, for an
-   interactive non-member claude on the pane tty, from that session's own
-   entry
+3. claude: the session registry `status` field (`busy` / `shell` / `idle` /
+   `waiting`), read from the bg engine's entry (via the pane's job record) or,
+   for an interactive non-member claude on the pane tty, from that session's
+   own entry
 
 Fallback (no native state) — tmux control-mode output within the last `3s`,
 gated by transcript jsonl mtime advance within the same window (the
@@ -92,10 +92,13 @@ runtimes.
 Source:
 
 - claude: registry `status == waiting` plus its `waitingFor` label
-  (`inputReason: registry:<waitingFor>`)
+  (`inputReason: registry:<waitingFor>`) — from the bg engine's entry for a
+  member, from the session's own entry for an interactive pane
+  (`_runtimeSource: claude_registry`)
 - codex: app-server `status.activeFlags` (see "Codex Native Runtime")
 - grok: leader `session/request_permission` (see "Grok Native Runtime")
-- unmanaged claude / codex panes: transcript gate inspection via
+- unmanaged codex panes, and claude panes whose session reports no `status`
+  at all (headless/desktop-hosted): transcript gate inspection via
   `check_input_gate()` — it knows those two record shapes only, so a grok pane
   with no leader state reports `unknown` instead of falling into it
 
@@ -167,8 +170,8 @@ engine's tools, whose env has no usable `$TMUX`.
 Signal surfaces:
 
 - `<claude-config>/sessions/<enginePid>.json` — the live engine's registry
-  entry: `kind:"bg"`, `jobId`, `status` (`idle`/`busy`/`waiting`, an observed
-  vocabulary, not a documented enum), `waitingFor` (only while waiting),
+  entry: `kind:"bg"`, `jobId`, `status` (`idle`/`busy`/`waiting`/`shell`, an
+  observed vocabulary, not a documented enum), `waitingFor` (only while waiting),
   `statusUpdatedAt`, `sessionId`, `messagingSocketPath`. The attach viewer
   never registers. This entry is the busy/inputState/delivery authority; a
   `statusUpdatedAt` older than 30 minutes demotes the status to `unknown`
@@ -190,7 +193,7 @@ Three-tier liveness:
 Status mapping (registry `status` → runtime fields):
 
 - `busy` → `busy: true`, `inputState: ready`
-- `idle` → `busy: false`, `inputState: ready`
+- `idle` / `shell` → `busy: false`, `inputState: ready`
 - `waiting` → `busy: false`, `inputState: waiting_user`,
   `inputReason: registry:<waitingFor>`
 

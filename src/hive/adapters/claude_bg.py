@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .claude_sessions import _config_dir, _pid_alive, _registry_dir
+from .claude_sessions import _config_dir, _pid_alive, _registry_dir, runtime_from_status
 
 _AGENTS_TIMEOUT = 10.0  # observed ~270ms; the cap only bounds a hung CLI
 _SPAWN_TIMEOUT = 60.0
@@ -374,7 +374,12 @@ def spawn_job(
         return None
     plain = _ANSI_RE.sub("", result.stdout or "")
     match = _SPAWN_OUTPUT_RE.search(plain)
-    return match.group(1) if match else None
+    announced = match.group(1) if match else ""
+    # The announcement is stdout, not a contract: an escape hive does not
+    # strip (the FORCE_COLOR class) or a reworded line yields a token no
+    # registry row can ever carry as its `jobId`, and the caller would poll
+    # for it until the whole startup budget burned. Refuse it here instead.
+    return announced if looks_like_job_id(announced) else None
 
 
 def wake_job(job_id: str, *, claude_bin: str = "claude") -> bool:
@@ -1081,16 +1086,5 @@ def runtime_from_engine(engine: EngineSession, *, now: float | None = None) -> d
     ):
         fields.update(busy=False, inputState="unknown", inputReason="stale_status")
         return fields
-    if engine.status == "busy":
-        fields.update(busy=True, inputState="ready", inputReason="")
-    elif engine.status == "waiting":
-        fields.update(
-            busy=False,
-            inputState="waiting_user",
-            inputReason=f"registry:{engine.waiting_for or 'unknown'}",
-        )
-    elif engine.status == "idle":
-        fields.update(busy=False, inputState="ready", inputReason="")
-    else:
-        fields.update(busy=False, inputState="unknown", inputReason="no_registry_status")
+    fields.update(runtime_from_status(engine.status, engine.waiting_for))
     return fields

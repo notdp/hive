@@ -161,7 +161,6 @@ def member_role(command: str) -> str:
 @dataclass(frozen=True)
 class CLIProfile:
     name: str
-    ready_text: str
     fork_cmd: str
     skill_cmd: str
 
@@ -169,19 +168,16 @@ class CLIProfile:
 PROFILES: dict[str, CLIProfile] = {
     "claude": CLIProfile(
         name="claude",
-        ready_text="Claude Code",
         fork_cmd="hive claude -r {session_id} --fork-session",
         skill_cmd="/{name}",
     ),
     "codex": CLIProfile(
         name="codex",
-        ready_text="OpenAI Codex",
         fork_cmd="hive codex fork {session_id}",
         skill_cmd="${name}",
     ),
     "grok": CLIProfile(
         name="grok",
-        ready_text="Shift+Tab:mode",
         fork_cmd="hive grok --resume {session_id} --fork-session",
         skill_cmd="/{name}",
     ),
