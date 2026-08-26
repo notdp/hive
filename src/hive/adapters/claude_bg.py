@@ -463,7 +463,8 @@ _SLASH_CONFIRM_TIMEOUT = 5.0
 _INTERRUPT_CONFIRM_TIMEOUT = 12.0
 _KEY_POLL_INTERVAL = 0.4
 _ECHO_POLL_INTERVAL = 0.05  # in-memory read of our own attach stream
-_PROBE_POLL_INTERVAL = 0.1  # registry file reads are cheap
+_RENAME_CONFIRM_TIMEOUT = 5.0  # a control/rename lands in ~0.1s; this is slack
+_RENAME_POLL_INTERVAL = 0.1  # registry file reads are cheap
 _CONTROL_KEY_GAP = 0.25  # a control byte must not ride in the text's chunk
 _ATTACH_EXIT_TIMEOUT = 10.0
 
@@ -862,7 +863,6 @@ def type_into_job(
     text: str,
     *,
     claude_bin: str = "claude",
-    success_probe=None,
 ) -> KeyResult:
     """Type *text* into the engine's composer and press Enter.
 
@@ -934,16 +934,6 @@ def type_into_job(
             _SLASH_CONFIRM_TIMEOUT if slash else _SUBMIT_CONFIRM_TIMEOUT
         )
         while time.monotonic() < confirm_deadline:
-            # A caller with its own positive oracle (e.g. /rename: the
-            # registry name flips the moment the command runs) exits here
-            # instead of waiting out the slash window — which otherwise
-            # burns its full length on every SUCCESSFUL slash, since that
-            # window only exists to catch the submitted-as-plain-text
-            # failure shape.
-            if success_probe is not None and success_probe():
-                if restore:
-                    _restore_draft(proc)
-                return KeyResult(True, "probe")
             verdict = _submit_verdict(transcript, offset, text)
             if verdict == "landed":
                 if restore:
@@ -954,7 +944,7 @@ def type_into_job(
                     False,
                     why=f"job {job_id} submitted the text with a leftover draft in front of it",
                 )
-            time.sleep(_PROBE_POLL_INTERVAL if success_probe is not None else _KEY_POLL_INTERVAL)
+            time.sleep(_KEY_POLL_INTERVAL)
         if slash:
             # ponytail: a slash command's record comes late (or never — /cost
             # and other UI-only commands write none), so silence here is not
@@ -973,16 +963,17 @@ def type_into_job(
         _close_pipe(proc)
 
 
-def ensure_job_named(job_id: str, name: str, *, claude_bin: str = "claude") -> bool:
+def ensure_job_named(job_id: str, name: str) -> bool:
     """Make the job's own label read *name*; True when it already did or now does.
 
     A job minted before hive knew whose pane it was on carries a placeholder
     (`hive-<pane>`): every path that adopts an existing pane into a team —
     init, spawn, resume — tags the pane after its CLI is already running, and
-    the mint cannot see a tag that does not exist yet. `/rename` is the only
-    way back, the same command the agents panel runs, and it updates the
-    panel row, the ledger and the registry at once. A busy engine queues it
-    and runs it when the turn ends.
+    the mint cannot see a tag that does not exist yet. The rename is a
+    ``control/rename`` frame on the engine's inbox socket: the dispatcher
+    handles it immediately — mid-turn included — and it never touches the
+    composer, so a human's draft and a running turn are left alone. The
+    registry flip confirms it, the same oracle the agents panel reads.
 
     The name is not cosmetic: the view probe recognizes a session on screen
     by matching the panel title against member names, so a placeholder-named
@@ -995,14 +986,19 @@ def ensure_job_named(job_id: str, name: str, *, claude_bin: str = "claude") -> b
         return False
     if engine.name == name:
         return True
+    from . import claude_sessions
 
-    def _renamed() -> bool:
-        e = engine_session_for_job(job_id)
-        return e is not None and e.name == name
-
-    return type_into_job(
-        job_id, f"/rename {name}", claude_bin=claude_bin, success_probe=_renamed
-    ).ok
+    if not claude_sessions.rename(
+        engine.socket_path, name, session_id=engine.session_id
+    ):
+        return False
+    deadline = time.monotonic() + _RENAME_CONFIRM_TIMEOUT
+    while time.monotonic() < deadline:
+        refreshed = engine_session_for_job(job_id)
+        if refreshed is not None and refreshed.name == name:
+            return True
+        time.sleep(_RENAME_POLL_INTERVAL)
+    return False
 
 
 def interrupt_job(job_id: str, *, claude_bin: str = "claude") -> KeyResult:

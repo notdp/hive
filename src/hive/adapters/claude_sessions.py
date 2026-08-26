@@ -219,6 +219,34 @@ def resolve(label: str) -> list[ClaudeSession]:
     return [s for s in list_sessions() if s.answers_to(label)]
 
 
+def rename(sock_path: str | Path, name: str, *, session_id: str = "") -> bool:
+    """Ask the session on *sock_path* to take *name* as its own.
+
+    A ``control/rename`` frame is handled at dispatch — immediately, busy or
+    idle — and never touches the composer or the transcript. *session_id*,
+    when given, must match the target's own id or the frame is silently
+    dropped: the guard against a recycled socket path renaming a stranger.
+    True means the frame was written, not that the name changed — the caller
+    confirms against the registry.
+    """
+    if not sock_path or not name:
+        return False
+    payload: dict[str, str] = {"type": "control", "action": "rename", "name": name}
+    if session_id:
+        payload["session_id"] = session_id
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(_CONNECT_TIMEOUT)
+    try:
+        conn.connect(str(sock_path))
+        conn.settimeout(_WRITE_TIMEOUT)
+        conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        return True
+    except OSError:
+        return False
+    finally:
+        conn.close()
+
+
 def send(sock_path: str | Path, text: str, *, sender: str) -> str | None:
     """Queue *text* for the session listening on *sock_path*.
 

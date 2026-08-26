@@ -8,6 +8,7 @@ idempotently, and the submit only counts once the transcript shows the turn.
 """
 
 import json
+import os
 
 import pytest
 
@@ -627,26 +628,53 @@ def _named_engine(name):
     )
 
 
-def test_a_wrongly_named_job_is_renamed_with_the_slash_command(monkeypatch):
-    typed = []
-    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("hive-183"))
+def test_a_wrongly_named_job_is_renamed_with_a_control_frame(monkeypatch):
+    from hive.adapters import claude_sessions
+
+    sent = []
+    names = iter(["hive-183", "honey.worker"])  # pre-check, then confirm poll
     monkeypatch.setattr(
-        claude_bg, "type_into_job",
-        lambda job, text, **kw: typed.append((job, text)) or claude_bg.KeyResult(True, "transcript"),
+        claude_bg, "engine_session_for_job", lambda job: _named_engine(next(names))
+    )
+    monkeypatch.setattr(
+        claude_sessions, "rename",
+        lambda sock, name, **kw: sent.append((sock, name, kw.get("session_id"))) or True,
     )
 
     assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is True
-    assert typed == [("cafe1234", "/rename honey.worker")]
+    assert sent == [("/tmp/s", "honey.worker", "s")]
 
 
-def test_a_correctly_named_job_types_nothing(monkeypatch):
+def test_a_correctly_named_job_sends_no_frame(monkeypatch):
+    from hive.adapters import claude_sessions
+
     monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("honey.worker"))
     monkeypatch.setattr(
-        claude_bg, "type_into_job",
-        lambda job, text, **kw: (_ for _ in ()).throw(AssertionError("must not type")),
+        claude_sessions, "rename",
+        lambda sock, name, **kw: (_ for _ in ()).throw(AssertionError("must not send")),
     )
 
     assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is True
+
+
+def test_a_refused_rename_frame_reports_failure(monkeypatch):
+    from hive.adapters import claude_sessions
+
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("hive-183"))
+    monkeypatch.setattr(claude_sessions, "rename", lambda sock, name, **kw: False)
+
+    assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is False
+
+
+def test_a_rename_the_registry_never_confirms_reports_failure(monkeypatch):
+    from hive.adapters import claude_sessions
+
+    monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: _named_engine("hive-183"))
+    monkeypatch.setattr(claude_sessions, "rename", lambda sock, name, **kw: True)
+    monkeypatch.setattr(claude_bg, "_RENAME_CONFIRM_TIMEOUT", 0.2)
+    monkeypatch.setattr(claude_bg, "_RENAME_POLL_INTERVAL", 0.05)
+
+    assert claude_bg.ensure_job_named("cafe1234", "honey.worker") is False
 
 
 def test_naming_an_engineless_job_reports_failure(monkeypatch):
@@ -708,32 +736,49 @@ def test_spawn_job_parses_colored_output(monkeypatch):
     assert claude_bg.spawn_job(cwd="/tmp", name="x", prompt="hi") == "ce5de22a"
 
 
-def test_success_probe_short_circuits_the_slash_confirm_window(monkeypatch, tmp_path):
-    """A caller's positive oracle (the /rename registry flip) confirms the
-    submit immediately — without it every successful slash burned the full
-    slash-confirm window waiting for a failure shape that never came."""
-    pipe = FakePipe()
-    path = _transcript(tmp_path, [])  # no confirming record ever appears
-    _wire(monkeypatch, pipe, screens=["> /rename comb.a"], transcript=path)
+def test_rename_frame_reaches_the_socket_with_the_session_guard(tmp_path):
+    """The wire contract: one control/rename frame, name and session_id
+    carried, so a recycled socket path can never rename a stranger."""
+    import socket as socketlib
+    import tempfile
+    import threading
 
-    result = claude_bg.type_into_job(
-        "cafe1234", "/rename comb.a", success_probe=lambda: True
-    )
+    from hive.adapters import claude_sessions
 
-    assert result.ok and result.confirmed == "probe"
+    sock_path = os.path.join(tempfile.mkdtemp(), "s.sock")  # AF_UNIX 104-char cap
+    srv = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(1)
+    received = []
+
+    def _accept():
+        conn, _ = srv.accept()
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        received.append(buf)
+        conn.close()
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    try:
+        assert claude_sessions.rename(sock_path, "comb.a", session_id="sid-1") is True
+        thread.join(timeout=5)
+        frame = json.loads(received[0])
+        assert frame == {
+            "type": "control",
+            "action": "rename",
+            "name": "comb.a",
+            "session_id": "sid-1",
+        }
+    finally:
+        srv.close()
 
 
-def test_ensure_job_named_confirms_via_registry_flip(monkeypatch, tmp_path):
-    pipe = FakePipe()
-    path = _transcript(tmp_path, [])
-    _wire(monkeypatch, pipe, screens=["> /rename comb.a"], transcript=path)
-    names = iter(["old-name", "comb.a"])  # pre-check, then probe
+def test_rename_with_nothing_listening_reports_failure(tmp_path):
+    from hive.adapters import claude_sessions
 
-    def fake_engine(_jid):
-        from types import SimpleNamespace
-        return SimpleNamespace(name=next(names), pid=1, job_id="cafe1234",
-                               session_id="s", socket_path="/tmp/x", cwd="",
-                               status="idle", waiting_for="", status_updated_at=0.0)
-
-    monkeypatch.setattr(claude_bg, "engine_session_for_job", fake_engine)
-    assert claude_bg.ensure_job_named("cafe1234", "comb.a") is True
+    assert claude_sessions.rename(str(tmp_path / "gone.sock"), "comb.a") is False

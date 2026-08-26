@@ -2141,8 +2141,8 @@ def _claude_name_tick(*, members: dict[str, dict[str, Any]], team: str, state: d
     carries the current label, so the comparison is free and the rename fires
     at most once per job.
 
-    The rename types into the engine, which can take seconds and can queue
-    behind a running turn, so it goes to a thread: identity repair must not
+    The rename is one control frame, but its confirmation polls the registry
+    for up to a few seconds, so it goes to a thread: identity repair must not
     stall delivery.
     """
     import threading
