@@ -329,14 +329,15 @@ class Agent:
                         "cannot resume this member"
                     )
                 if initial_prompt:
-                    # Resume carries no launch prompt; the engine's inbox is
-                    # already live, so hand it over there (best-effort).
-                    claude_sessions.send(
-                        engine.socket_path,
-                        initial_prompt,
-                        sender=f"{team_name}.{name}",
-                        session_id=engine.session_id,
-                    )
+                    # Resume carries no launch prompt; hand it over on the
+                    # daemon reply lane, inbox as fallback (best-effort).
+                    if claude_sessions.daemon_reply(engine.session_id, initial_prompt) is None:
+                        claude_sessions.send(
+                            engine.socket_path,
+                            initial_prompt,
+                            sender=f"{team_name}.{name}",
+                            session_id=engine.session_id,
+                        )
             else:
                 extra_args: list[str] = []
                 if model:
@@ -561,6 +562,13 @@ class Agent:
                         "gone (removed from the job ledger, or the wake "
                         "failed); the message stays on the bus"
                     )
+                # Primary lane: the supervisor daemon's reply channel — the
+                # typed-keystroke lane, no peer wrapper in any state. Any
+                # failure falls back to the inbox socket, which still
+                # delivers (wrapped) with today's error semantics.
+                accepted = claude_sessions.daemon_reply(engine.session_id, text)
+                if accepted is not None:
+                    return accepted
                 accepted = claude_sessions.send(
                     engine.socket_path,
                     text,
