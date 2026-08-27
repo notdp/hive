@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wrapped 机制盲验收束报告</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #171a23; --card2: #1d212d; --text: #d8dce6; --dim: #8b91a0;
+    --accent: #4ade80; --warn: #fbbf24; --red: #f87171; --blue: #60a5fa; --border: #2a2f3d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.75; padding: 48px 24px; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 25px; margin-bottom: 6px; }
+  .sub { color: var(--dim); font-size: 14px; margin-bottom: 30px; }
+  h2 { font-size: 18px; margin: 38px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h2 .n { color: var(--dim); font-weight: 400; margin-right: 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 22px; margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; white-space: nowrap; }
+  td.k { white-space: nowrap; font-weight: 600; }
+  code { background: var(--card2); padding: 1px 6px; border-radius: 4px; font-size: 13px; font-family: "SF Mono", Menlo, monospace; color: var(--blue); }
+  .ok { color: var(--accent); font-weight: 700; }
+  .warn { color: var(--warn); font-weight: 700; }
+  .red { color: var(--red); font-weight: 700; }
+  ul, ol { padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  .dim { color: var(--dim); font-size: 13px; }
+  .callout { border-left: 3px solid var(--red); background: var(--card2); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; font-size: 14px; }
+  .callout.g { border-left-color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>inbox CLEAN/WRAPPED 机制 · 盲验收束报告</h1>
+<div class="sub">2026-08-27 · 双 opus 互盲探针（wrapa/wrapb，拿不到预期结果）→ fable 高 effort 收束 · claude 2.1.240 / Haiku 目标 · 3 agents / ~30 min / 455k tokens · 时间戳互相咬合，无复制污染 · <b>同日更新</b>：回执协议实验 + scratch 队实机验证 + hive 缺省 later→next 翻转（见 04）</div>
+
+<div class="callout"><b>头条：连"CLEAN"都是假的。</b>spike-e 矩阵里 next 折进 turn 的 queued_command 在 transcript 无 banner，被当成"零 chrome 干净落地"——盲验用两条独立路径（让模型逐字复述它看到的第一行 + 二进制源码提取）证实：<b>模型实收 midTurn 变体 wrapper</b>（banner "while you were working" + 541 字安全段 + 回信尾巴），比 later 的包装还重。transcript 只是存储层假象。<b>peer 消息不存在任何无包装 lane。</b></div>
+
+<div class="callout g"><b>结论一："wrapped 去不掉"在模型可见层成立</b>——模型无论如何都收到 wrapper。<b>显示层（pane）的干净真实存在</b>：next 折入渲染 <code>❯ 原文</code> 与人打字同形（#102 前默认 next 时代人眼常见），但只在 next+忙+工具边界窗口出现，且折入消息执不执行是模型裁量（两轮实验 0/3 无视 vs 4/4 ACK，矛盾→无保证）。真实菜单：<b>next = pane 常好看 + 响应靠裁量；later = pane 一定难看 + 必有一次响应</b>。<b>结论二：park 删除前提稳固，可开 PR</b>（终态落地 byte-identical 双确认）。<span class="dim">（后续：next 的裁量缺口已被出生协议的回执义务补上，hive 缺省翻转为 next——见 04。）</span></div>
+
+<h2><span class="n">01</span>K1–K8 裁决表</h2>
+<div class="card">
+<table>
+<tr><th>#</th><th>假设</th><th>裁决</th><th>要点</th></tr>
+<tr><td class="k">K1</td><td>busy+later → 等 turn 结束自起 turn，WRAPPED</td><td class="ok">双重确认</td><td>A: 39.07s 压队、turn_duration 后 14ms 落地；B 同形。全 banner+安全段逐字一致。</td></tr>
+<tr><td class="k">K2</td><td>idle+later → WRAPPED</td><td class="ok">双重确认</td><td>35ms/21ms dequeue，与 K1 byte-identical framing，自起新 turn。</td></tr>
+<tr><td class="k">K3</td><td>busy+next+工具边界 → CLEAN 折入</td><td class="red">机制确认，"CLEAN"推翻</td><td>enqueue→remove、attachment 挂 tool_result 属实——但模型实收 midTurn wrapper（quoteback + 二进制双路证实）。人类打字同载体但无 banner（不同变体），"与人类同形"仅存储层成立。</td></tr>
+<tr><td class="k">K4</td><td>busy+next+无工具调用 → 退化 WRAPPED</td><td class="ok">双重确认</td><td>动词变 dequeue，turn 后全 wrapper。附带：queuePriority 只在 later 时盖章。</td></tr>
+<tr><td class="k">K5</td><td>折入消息 nonce 被无视是常态</td><td class="warn">降级：模型裁量，无保证</td><td>盲验 4/4 被 ACK（2 peer + 2 人类对照），但 spike-e 三格 0/3 全无视——两轮真实观测矛盾，唯一稳定结论是"折入无自己的 turn、无保证"。盲验中唯一不 ACK 是 now 路径模型<b>引用安全段的显式拒绝</b>。</td></tr>
+<tr><td class="k">K6</td><td>now 非 abort、工具边界落地、turn 照跑</td><td class="ok">核心确认 + 两处细化</td><td>4/4 turn 跑完无中止。细化：落地是<b>立即</b> dequeue（22–260ms）写 mid-turn user record，不等工具边界；用 non-midTurn banner。A 观测到 now 存在"安全段服从税"（模型自述拒绝）[推断, n=3]。</td></tr>
+<tr><td class="k">K7</td><td>包装接收端写死，发送侧无开关</td><td class="ok">双重确认（实证+源码）</td><td>23 个 fuzz 变体全灭；UDS handler 白名单仅 8 字段，origin.kind="peer"/isMeta:!0 是字面量。幂等门只防双包不去 banner。</td></tr>
+<tr><td class="k">K8</td><td>busy+later 直发 ≡ park-to-idle → park 零收益</td><td class="ok">成立</td><td>前提 K1+K2 双确认且 byte-identical。CC 自身 later 队列 turn 后 6–105ms 落地，快过 park 的 1s flusher。</td></tr>
+</table>
+</div>
+
+<h2><span class="n">01b</span>现场复测 11 格对账（human 可见 tmux demo 窗口，全绿）</h2>
+<div class="card">
+<table>
+<tr><th>格</th><th>预期</th><th>实际</th><th>判</th></tr>
+<tr><td class="k">A1 busy+next（有工具）</td><td>折入干净行</td><td><code>❯ NEXT-A1</code> 干净插在第 6 个 sleep 后，verb=remove</td><td class="ok">✓</td></tr>
+<tr><td class="k">A2 busy+later</td><td>turn 后 wrapped</td><td>DONE-A2 先出，再落 banner+安全段大块，verb=dequeue</td><td class="ok">✓</td></tr>
+<tr><td class="k">A3 busy+now</td><td>插 turn 内、wrapped、不中断</td><td>wrapped 块插在 sleep 和 DONE-A3 之间，6 个 sleep 全跑完</td><td class="ok">✓</td></tr>
+<tr><td class="k">A4 busy+next（纯文本诗）</td><td>退化 wrapped</td><td>200 行诗写完才落 wrapped，verb=dequeue</td><td class="ok">✓</td></tr>
+<tr><td class="k">A5 不带 priority</td><td>默认=next，折入</td><td>干净折入，verb=remove——缺省坑实锤</td><td class="ok">✓</td></tr>
+<tr><td class="k">A6 人类打字对照</td><td>同载体折入</td><td>干净折入，verb=remove，与 A1 同形</td><td class="ok">✓</td></tr>
+<tr><td class="k">B1 idle+later</td><td>立即 wrapped</td><td>如预期</td><td class="ok">✓</td></tr>
+<tr><td class="k">B2 idle+next</td><td>priority 无关，wrapped</td><td>如预期</td><td class="ok">✓</td></tr>
+<tr><td class="k">B3 伪造字段（origin:human/isMeta:false/wrap:false/raw:true）</td><td>全部无效</td><td>照包，一字不差</td><td class="ok">✓</td></tr>
+<tr><td class="k">C1 quoteback NEXT-A1</td><td>正文前有 banner</td><td>抄出"另一个 Claude 会话发来了消息:"（中文转述，包装在场确认，逐字性弱）</td><td class="ok">✓</td></tr>
+<tr><td class="k">C2 quoteback LATER-B1</td><td>banner 头</td><td>逐字英文抄出 "Another Claude session sent a message:"</td><td class="ok">✓</td></tr>
+</table>
+<div class="dim">C1/C2 是模型层永远 wrapped 的直接证据：折入（next）与自起 turn（later）两条 lane 的 quoteback 都抄出 banner。A4/B2 是 next 的两个逃逸口：无工具边界退化 wrapped、idle 到达自起 turn——"翻转到 next"只让 busy+有工具边界这一窗口的 pane 显示变干净，模型可见层不变。</div>
+</div>
+
+<h2><span class="n">02</span>边角硬发现（都有二进制/实测双源）</h2>
+<div class="card">
+<ul>
+<li><span class="warn">帧内 priority 缺省或非法 → 默认 "next"，不是 "later"。</span><code>claude_sessions.send()</code> 始终显式携带 priority（当时是 "later"；缺省翻转后是 "next"），不依赖接收端缺省。</li>
+<li><code>type:"human"</code> 帧被接收端<b>静默丢弃</b>（无任何 transcript 记录）。</li>
+<li>byte-exact 预包装 payload 触发幂等门（不二次包装），差一字节就双包——只防双包，去不掉 banner，且对 541 字常量逐字节敏感，跨版本脆弱，不是可用杠杆。</li>
+<li>busy 排队期间，TUI pane 会以队列行显示<b>裸 payload</b>（"Press up to edit queued messages"）——人可编辑/删除。这是 park 与直发的唯一残余差异（过程态，非终态）。</li>
+<li>读 transcript 审计 peer 流量会<b>系统性漏计 wrapper</b>——模型可见层和存储层不同形，以后所有渲染类探针必须带 quoteback 或二进制交叉验证。</li>
+</ul>
+</div>
+
+<h2><span class="n">03</span>对 hive 的直接后果</h2>
+<div class="card">
+<ol>
+<li><b>park 删除 PR 解锁</b>：前提"busy+later 直发与 park-to-idle 终态一字不差"被互盲双确认。删 <code>parked.py</code> + sidecar park/flush 分支，保留 later 直发。三防坑：显式 priority:"later"（已满足）；知悉 TUI 队列行的过程态差异；别拿 queuePriority 当 oracle。</li>
+<li><b>"wrapped 认了"的论证换了更硬的地基</b>：不再依赖"CLEAN 不可靠"（K5 已推翻），而是"CLEAN 根本不存在"（K3 推翻）——模型无论如何都看到 banner+安全段，唯一无 banner 的 lane 是真键盘（origin.kind=human），peer 伪造会被改写回 peer。</li>
+<li><b>安全段是功能不是噪音</b>再获实证：now 路径的不执行案例全是模型引用安全段的显式拒绝——它真的在挡"peer 消息当 user 授权"。</li>
+</ol>
+</div>
+
+<h2><span class="n">04</span>同日续篇：回执协议 + 实机验证 + 缺省翻转</h2>
+<div class="card">
+<p style="margin-bottom:10px">K5 的"折入响应靠裁量"缺口被三臂实验定量收束（Haiku，每臂独立 fresh session，folded <code>next</code> 帧 mid-turn 注入）：</p>
+<table>
+<tr><th>臂</th><th>协议通道</th><th>ACK 率</th><th>要点</th></tr>
+<tr><td class="k">1</td><td>无协议（基线）</td><td class="red">0/3</td><td>折入消息 100% 可见（枚举探针 9/9 在上下文），但零响应义务 → 静默。</td></tr>
+<tr><td class="k">2</td><td>聊天注入协议</td><td class="red">0/4</td><td>模型把聊天里的回执指令判为 prompt injection，显式拒绝。</td></tr>
+<tr><td class="k">3</td><td>CLAUDE.md 配置通道</td><td class="ok">4/4</td><td>合法配置通道立协议 → 全部回执。注入疑心只对聊天通道生效。</td></tr>
+</table>
+<p style="margin:10px 0">协议随即写进成员出生 skill（<code>/hive:hive</code>，PR #108）：两种 wrapper 变体二进制逐字入文 + SendMessage 纠偏 + 回执义务。scratch 队实机验证（nest 队，rex/probe 两真成员，claude 2.1.240/Haiku）：</p>
+<ul>
+<li><b>A（later 途中到达）</b>：收尾零静默处理全部消息，全程只用 <code>hive reply</code>/<code>hive send</code>——老指纹 SendMessage "no agent named" 消失。</li>
+<li><b>B（raw next 折入）</b>：pane 干净折入 <code>❯ &lt;HIVE ...&gt;</code>，收尾<b>主动回执</b>（对照基线 0/3 静默）——回执义务经 skill 通道生效。</li>
+<li><b>A2（member→member 回环）</b>：<code>hive reply probe --reply-to 3kIp</code> 一次成功，对端实收。</li>
+</ul>
+<div class="callout g" style="margin-bottom:0"><b>缺省翻转</b>：义务由协议扛住后，传输换回 clean 观感——<code>claude_sessions.send()</code> 的 <code>priority</code> 由 "later" 翻转为 "next"（本报告入库同一 PR）。mid-turn 折入 = pane 与人打字同形；idle 或无剩余工具边界 = 自起 turn。模型可见层永远 wrapped 不变。</div>
+</div>
+
+<h2><span class="n">05</span>置信与缺口</h2>
+<div class="card">
+<ul class="dim">
+<li>机制类结论（queue 动词、落地字段、二进制常量与白名单）：硬观测+源码提取，两探针互盲一致，置信高。单版本 2.1.240，[未验证] 作为跨版本保证。</li>
+<li>模型行为类结论（now 服从税、ACK 率）：LLM 非确定行为，n 小且全 Haiku，[未验证] 为普适规律。</li>
+<li>B 提取的 hsr 模板有 strings 截断，A 版完整且与观测吻合，不影响结论。</li>
+</ul>
+</div>
+
+<div class="dim">完整探针 verbatim 记录：<code>…/subagents/workflows/wf_ef083b4e-8d1/journal.jsonl</code></div>
+
+</div>
+</body>
+</html>

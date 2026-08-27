@@ -277,13 +277,17 @@ everything else — every idle arrival, every `later` — is dequeued into its o
 turn, which is what guarantees it gets processed. `now` is not an abort: it
 lands inside the running turn, wrapped, and the turn runs on.
 
-Hive delivers with an explicit `priority: later` (a frame that omits the
-field defaults to `next`): the message never interjects into a running turn —
-the receiver's own queue holds it and lands it the moment the turn closes —
-and it always starts its own turn, so getting handled is never at the model's
-discretion. The sidecar adds nothing on top: the durable bus row is written,
-the transport either accepts or refuses, and scheduling around a mid-turn
-target is the receiver's queue's job, not hive's.
+Hive delivers with an explicit `priority: next`: a mid-turn arrival folds
+into the running turn at the next tool boundary — the pane draws it like
+typed input, no banner block — and an idle target (or a turn with no
+boundary left) takes it as its own turn. A folded arrival has no mechanical
+guarantee of a response; that obligation is supplied by the member skill's
+receipt duty, which teaches both wrapper shapes at birth and makes silent
+skips a protocol violation. The blind-verified evidence for this split lives
+in [reports/wrapped-verdict.html](reports/wrapped-verdict.html). The sidecar adds nothing on
+top: the durable bus row is written, the transport either accepts or
+refuses, and scheduling around a mid-turn target is the receiver's queue's
+job, not hive's.
 
 ### The member keyboard is the job, not the pane
 

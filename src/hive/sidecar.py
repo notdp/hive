@@ -843,8 +843,8 @@ def _send_payload(
     # delivery state. The daemon/channel either accepted the message (its
     # own contract queues and processes it) or refused it — there is no
     # tracked in-between, no confirmation oracle, and nothing to poll. A
-    # claude member mid-turn queues the message itself (`priority: later`
-    # lands it the moment the turn closes) — no sidecar hold on top.
+    # claude member mid-turn queues the message itself (`priority: next`
+    # folds it in at the next tool boundary) — no sidecar hold on top.
     try:
         target.send(envelope)
     except Exception as exc:

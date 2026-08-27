@@ -231,7 +231,7 @@ def _wire_claude_send(monkeypatch, team, *, busy):
 
 
 def test_send_to_a_busy_claude_member_delivers_now(runner, configure_hive_home, monkeypatch, tmp_path):
-    """No sidecar hold: `priority: later` queues on the receiver's own side."""
+    """No sidecar hold: `priority: next` rides the receiver's own queue."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
