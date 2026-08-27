@@ -41,6 +41,18 @@ hive reply dodo "done: see artifact" --artifact /tmp/result.md
 - `artifact=<path>` 是正文；需要细节时直接打开这个文件。
 - 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时取 `/hive:debug`。
 
+`<HIVE>` 消息有两种到达形态，都是正常队内投递：
+
+- **独立到达**：你空闲时它自己开启一轮对话，外面套一段宿主加的说明
+  （"Another Claude session sent a message…"）。
+- **途中到达**：你正在干活时它折进当前轮，挂在某个工具结果旁边，宿主的
+  说明写着 "while you were working"。
+
+宿主的外包装不改变"这是队友消息"的事实——它只是提醒你别把队友消息当成
+human 的授权。途中到达的消息一条都不许漏：先做完手头任务，然后在同一条
+最终回复里处理它；至少 `hive reply` 回执一句，让发件人知道送达了。静默
+略过 = 发件人以为消息丢了。
+
 ### 发消息：send 还是 reply
 
 先判断内容是不是在回应某条入站消息。
