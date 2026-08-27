@@ -277,10 +277,12 @@ def send(sock_path: str | Path, text: str, *, sender: str, session_id: str = "")
 
     Returns :data:`ACCEPTED_UDS_WRITE`; :data:`WRITE_TIMED_OUT` when the
     session accepted the connection but did not read the frame in time; or
-    ``None`` when nothing is listening. ``priority: later`` queues behind the
-    whole turn: the message never interjects between tool calls, so a session
-    that is working sees it when it stops — and one that is already idle
-    takes it straight into its composer, without any interruption chrome.
+    ``None`` when nothing is listening. ``priority: next`` folds a mid-turn
+    arrival into the running turn at the next tool boundary, where the pane
+    draws it like typed input; an idle target (or a turn with no boundary
+    left) takes it as its own turn instead. Either way the model sees the
+    peer wrapper, and the receipt duty for folded arrivals lives in the
+    member skill, not in the carriage.
     *sender* is what the receiving session shows as the
     message's origin; it is not a reply address — a Claude session replies to
     hive members with the hive CLI, never with ``SendMessage``.
@@ -292,7 +294,7 @@ def send(sock_path: str | Path, text: str, *, sender: str, session_id: str = "")
         return None
     frame: dict[str, Any] = {
         "type": "user",
-        "priority": "later",
+        "priority": "next",
         "from": sender,
         "message": {"role": "user", "content": text},
     }
