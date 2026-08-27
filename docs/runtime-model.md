@@ -277,14 +277,24 @@ everything else — every idle arrival, every `later` — is dequeued into its o
 turn, which is what guarantees it gets processed. `now` is not an abort: it
 lands inside the running turn, wrapped, and the turn runs on.
 
-Hive delivers with an explicit `priority: next`: a mid-turn arrival folds
-into the running turn at the next tool boundary — the pane draws it like
-typed input, no banner block — and an idle target (or a turn with no
-boundary left) takes it as its own turn. A folded arrival has no mechanical
-guarantee of a response; that obligation is supplied by the member skill's
-receipt duty, which teaches both wrapper shapes at birth and makes silent
-skips a protocol violation. The blind-verified evidence for this split lives
-in [reports/wrapped-verdict.html](reports/wrapped-verdict.html). The sidecar adds nothing on
+Hive's primary lane for a claude member sidesteps the wrapper entirely: the
+supervisor daemon's `op:"reply"` (`claude_sessions.daemon_reply`) hands the
+envelope to the worker as its own typed input — `origin:{kind:"human"}`, the
+keystroke lane — so it lands with no banner in any state: idle starts its
+own turn (a mechanical response guarantee), mid-turn folds in at the next
+tool boundary as a bare `❯` line, and a blocked worker takes it on its rv
+channel. Protocol details live in
+[daemon-control-socket.md](daemon-control-socket.md).
+
+When the daemon lane is unavailable the delivery falls back to the inbox
+socket with an explicit `priority: next`: a mid-turn arrival folds into the
+running turn at the next tool boundary, everything else lands as its own
+turn wearing the peer wrapper. On either lane a folded arrival has no
+mechanical guarantee of a response; that obligation is supplied by the
+member skill's receipt duty, which teaches the arrival shapes at birth and
+makes silent skips a protocol violation. The blind-verified evidence for
+this split lives in
+[reports/wrapped-verdict.html](reports/wrapped-verdict.html). The sidecar adds nothing on
 top: the durable bus row is written, the transport either accepts or
 refuses, and scheduling around a mid-turn target is the receiver's queue's
 job, not hive's.
