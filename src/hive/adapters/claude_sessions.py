@@ -17,14 +17,17 @@ receiving session's decision, invisible from here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 ACCEPTED_UDS_WRITE = "udsWriteAccepted"
+ACCEPTED_DAEMON_REPLY = "daemonReplyAccepted"
 # The listener accepted the connection but did not read the whole frame in
 # time — a stalled session, not an absent one; the frame may sit truncated on
 # its side.
@@ -34,8 +37,19 @@ WRITE_TIMED_OUT = "udsWriteTimedOut"
 STATUS_VALUES = ("busy", "shell", "idle", "waiting")
 _CONNECT_TIMEOUT = 2.0
 _WRITE_TIMEOUT = 10.0
-# The sidecar submit budget must cover a full send() worst case.
-SUBMIT_TIMEOUT = _CONNECT_TIMEOUT + _WRITE_TIMEOUT
+# Daemon control-socket lane (op "reply"): retry codes are the daemon's own
+# readiness vocabulary (observed on 2.1.240) — the worker exists but cannot
+# take input this instant. The bound keeps a sidecar RPC from hanging on a
+# worker that never comes up; past it the caller falls back to the inbox lane.
+_DAEMON_PROTO = 1
+_DAEMON_RETRY_CODES = ("ESTARTING", "ENOREPLY", "ERESPAWNING")
+_DAEMON_RETRY_LIMIT = 24
+_DAEMON_RETRY_DELAY = 0.2
+# The sidecar submit budget must cover a daemon_reply retry run plus a full
+# fallback send() worst case.
+SUBMIT_TIMEOUT = (
+    _CONNECT_TIMEOUT + _WRITE_TIMEOUT + _DAEMON_RETRY_LIMIT * _DAEMON_RETRY_DELAY + 2.0
+)
 
 
 # Transcript bytes scanned for the desktop title: the `custom-title` record is
@@ -318,3 +332,88 @@ def send(sock_path: str | Path, text: str, *, sender: str, session_id: str = "")
         return None
     finally:
         conn.close()
+
+
+def _daemon_control_sock() -> Path:
+    # The supervisor daemon namespaces itself by config dir: sha256 of the
+    # resolved path, first 8 hex (observed on 2.1.240). /tmp is fixed — the
+    # daemon does not honour $TMPDIR.
+    ns = hashlib.sha256(os.path.abspath(_config_dir()).encode()).hexdigest()[:8]
+    return Path("/tmp") / f"cc-daemon-{os.getuid()}" / ns / "control.sock"
+
+
+def _daemon_control_key() -> str:
+    try:
+        return (_config_dir() / "daemon" / "control.key").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _daemon_roundtrip(sock_path: Path, frame: dict[str, Any]) -> dict[str, Any] | None:
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(_CONNECT_TIMEOUT)
+    try:
+        conn.connect(str(sock_path))
+        conn.settimeout(_WRITE_TIMEOUT)
+        conn.sendall((json.dumps(frame) + "\n").encode("utf-8"))
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        parsed = json.loads(buf.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def daemon_reply(session_id: str, text: str) -> str | None:
+    """Hand *text* to the claude supervisor daemon as the job's own input.
+
+    ``op: "reply"`` routes to the worker's reply channel: the engine enqueues
+    it ``origin: {kind: "human"}`` / ``priority: next`` — the typed-keystroke
+    lane, so it lands with no peer wrapper in any state (idle starts a turn,
+    mid-turn folds in at the next tool boundary, a blocked worker takes it on
+    its rv channel). The job is addressed by ``short`` — the first 8 hex of
+    its session id. Returns :data:`ACCEPTED_DAEMON_REPLY`, or ``None`` when
+    this lane is unavailable (no daemon, unknown job, retries exhausted) —
+    the caller falls back to the inbox-socket lane, which still delivers.
+    """
+    short = (session_id or "")[:8]
+    if len(short) != 8:
+        return None
+    sock_path = _daemon_control_sock()
+    auth = _daemon_control_key()
+    if not auth:
+        return None
+    frame: dict[str, Any] = {
+        "proto": _DAEMON_PROTO,
+        "op": "reply",
+        "short": short,
+        "auth": auth,
+        "text": text,
+    }
+    reauthed = False
+    for _ in range(_DAEMON_RETRY_LIMIT):
+        resp = _daemon_roundtrip(sock_path, frame)
+        if resp is None:
+            return None
+        if resp.get("ok") is True:
+            return ACCEPTED_DAEMON_REPLY
+        code = resp.get("code")
+        if code == "EAUTH" and not reauthed:
+            # One re-read: the daemon may have rotated the key under us.
+            reauthed = True
+            auth = _daemon_control_key()
+            if not auth:
+                return None
+            frame["auth"] = auth
+            continue
+        if code in _DAEMON_RETRY_CODES:
+            time.sleep(_DAEMON_RETRY_DELAY)
+            continue
+        return None
+    return None
