@@ -230,7 +230,8 @@ def _wire_claude_send(monkeypatch, team, *, busy):
     _patch_sidecar_requests(monkeypatch, team)
 
 
-def test_send_to_a_busy_claude_member_is_held(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_to_a_busy_claude_member_delivers_now(runner, configure_hive_home, monkeypatch, tmp_path):
+    """No sidecar hold: `priority: later` queues on the receiver's own side."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -241,9 +242,9 @@ def test_send_to_a_busy_claude_member_is_held(runner, configure_hive_home, monke
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["held"] is True
+    assert "held" not in payload
     assert payload["msgId"] == FIXED_ID
-    assert sent == []  # the inbox is not touched mid-turn
+    assert len(sent) == 1 and "please review this" in sent[0]
 
 
 def test_send_to_an_idle_claude_member_delivers_now(runner, configure_hive_home, monkeypatch, tmp_path):

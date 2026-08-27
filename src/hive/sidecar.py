@@ -3,10 +3,7 @@
 Delivery has exactly one state: the native transport (claude inbox /
 codex daemon / grok leader) either accepted the message or refused it.
 There is no tracked in-between and no confirmation oracle — acceptance means the
-target's own runtime owns it from there. The one thing that happens *before*
-that verdict is the hold: a message for a claude member that is mid-turn waits
-in the durable park queue (see ``parked``) until the member goes idle, so it
-arrives as ordinary input instead of an interruption.
+target's own runtime owns it from there.
 """
 
 from __future__ import annotations
@@ -27,7 +24,6 @@ from typing import Any
 from . import bus
 from . import devlog
 from . import notify_ui
-from . import parked
 from .agent_cli import detect_cli_process_for_pane, detect_profile_for_pane
 from .runtime_state import (
     format_hive_envelope,
@@ -89,10 +85,6 @@ _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 _STATE_LOCK = threading.Lock()
 _SHUTDOWN = threading.Event()
 _INFLIGHT_REQUESTS = 0
-PARK_FLUSH_INTERVAL_SECONDS = 1.0
-_PARK_QUEUES: dict[str, parked.ParkQueue] = {}
-
-
 def _compute_build_hash() -> str:
     try:
         root = Path(__file__).resolve().parent
@@ -792,91 +784,6 @@ def _check_send_gate(target) -> None:
 FLOW_MAILBOX_AGENT = "flow"
 
 
-def _park_queue(workspace: str) -> parked.ParkQueue:
-    from . import notify_debug
-
-    path = _run_dir(workspace) / parked.PARKED_FILE_NAME
-    key = str(path)
-    with _STATE_LOCK:
-        queue = _PARK_QUEUES.get(key)
-        fresh = queue is None
-        if queue is None:
-            queue = parked.ParkQueue(path)
-            _PARK_QUEUES[key] = queue
-    if fresh:
-        held = len(queue.pending())
-        if held or queue.skipped:
-            notify_debug.emit(
-                workspace, "claude.park.load", held=held or None, skipped=queue.skipped or None
-            )
-    return queue
-
-
-def _claude_member_busy(target) -> bool:
-    """True when *target* is a claude member whose engine is mid-turn.
-
-    Claude only, and only on its own registry's verdict: an unknown status
-    (asleep engine, unmanaged pane) is not evidence of a turn, and the
-    heuristic output monitor cannot tell a member's turn from its pane viewer
-    redrawing — either would hold a message from a target that is not busy.
-    """
-    if getattr(target, "cli", "") != "claude":
-        return False
-    return _claude_registry_busy(target.pane_id) is True
-
-
-def _hand_over_parked(message: parked.ParkedMessage, *, forced: bool) -> str | None:
-    """Deliver *message* now; None when its target is still mid-turn.
-
-    Returns "" on acceptance and the failure text otherwise — either way the
-    hold is done: a member that is gone, or a transport that refused, drops the
-    entry and leaves the durable bus row as the record.
-    """
-    try:
-        _, target = _resolve_live_agent(message.team, message.target)
-    except Exception as exc:
-        return f"target unavailable: {exc}"
-    if not forced and _claude_member_busy(target):
-        return None
-    try:
-        target.send(message.envelope)
-    except Exception as exc:
-        return f"transport refused: {exc}"
-    return ""
-
-
-def _flush_parked(workspace: str) -> None:
-    """Hand over every held message whose target went idle, FIFO per target."""
-    from . import notify_debug
-
-    queue = _park_queue(workspace)
-    now = time.time()
-    for message in queue.heads():
-        forced = message.expired(now)
-        error = _hand_over_parked(message, forced=forced)
-        if error is None:
-            continue
-        queue.release(message)
-        notify_debug.emit(
-            workspace,
-            "claude.park.failed" if error else "claude.park.delivered",
-            agent=message.target,
-            msgId=message.msg_id,
-            heldFor=round(message.held_for(now), 1),
-            forced=forced or None,
-            error=error or None,
-        )
-
-
-def _park_flush_loop(workspace: str) -> None:
-    while not _SHUTDOWN.wait(PARK_FLUSH_INTERVAL_SECONDS):
-        try:
-            _flush_parked(workspace)
-        except Exception:
-            # A stuck hold must never take the sidecar down.
-            pass
-
-
 def _send_payload(
     *,
     workspace: str,
@@ -932,32 +839,16 @@ def _send_payload(
         "to": target_agent,
         "msgId": message_id,
     }
-    # A claude member mid-turn would render this as an interruption banner, so
-    # the sidecar holds it until the member is idle and it lands like typed
-    # input. The row is already durable, so the sender is answered now, and a
-    # non-empty queue keeps a fresh send behind the ones already waiting.
-    queue = _park_queue(workspace)
-    if queue.holds(team_name, target_agent) or _claude_member_busy(target):
-        from . import notify_debug
-
-        queue.park(parked.ParkedMessage(
-            team=team_name,
-            target=target_agent,
-            msg_id=message_id,
-            envelope=envelope,
-            parked_at=time.time(),
-        ))
-        notify_debug.emit(workspace, "claude.park", agent=target_agent, msgId=message_id)
-        payload["held"] = True
-    else:
-        # Fire-and-forget past this point: the transport verdict is the only
-        # delivery state. The daemon/channel either accepted the message (its
-        # own contract queues and processes it) or refused it — there is no
-        # tracked in-between, no confirmation oracle, and nothing to poll.
-        try:
-            target.send(envelope)
-        except Exception as exc:
-            return {"ok": False, "error": f"transport refused {target_agent}: {exc}", "msgId": message_id}
+    # Fire-and-forget past this point: the transport verdict is the only
+    # delivery state. The daemon/channel either accepted the message (its
+    # own contract queues and processes it) or refused it — there is no
+    # tracked in-between, no confirmation oracle, and nothing to poll. A
+    # claude member mid-turn queues the message itself (`priority: later`
+    # lands it the moment the turn closes) — no sidecar hold on top.
+    try:
+        target.send(envelope)
+    except Exception as exc:
+        return {"ok": False, "error": f"transport refused {target_agent}: {exc}", "msgId": message_id}
 
     if artifact:
         payload["artifact"] = artifact
@@ -2455,12 +2346,6 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     _set_output_busy_monitor(busy_monitor)
     if busy_monitor is not None:
         busy_monitor.start()
-    # Off the loop: a hand-over can hold the native transport for seconds, and
-    # this loop's accept budget is what `hive team` reads as sidecar liveness.
-    threading.Thread(
-        target=_park_flush_loop, args=(workspace,), name="hive-park-flush", daemon=True
-    ).start()
-
     try:
         while True:
             if not Path(workspace).is_dir():
