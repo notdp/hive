@@ -309,3 +309,128 @@ def test_runtime_from_status_maps_the_registry_vocabulary():
     }
     assert m.runtime_from_status("waiting")["inputReason"] == "registry:unknown"
     assert m.runtime_from_status("")["inputState"] == "unknown"
+
+
+def _control_server(path: str, replies: list[dict]):
+    """A throwaway daemon control socket: answers one JSON line per
+    connection from *replies* in order and records each received frame."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(4)
+    got: list[dict] = []
+
+    def _serve():
+        for reply in replies:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                got.append(json.loads(buf.decode()))
+                conn.sendall((json.dumps(reply) + "\n").encode())
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    return srv, got, t
+
+
+def _wire_daemon(monkeypatch, short_tmp, replies):
+    sock_path = short_tmp / "control.sock"
+    key = short_tmp / "daemon" / "control.key"
+    key.parent.mkdir(parents=True)
+    key.write_text("k3y\n")
+    monkeypatch.setenv("CLAUDE_HOME", str(short_tmp))
+    monkeypatch.setattr(m, "_daemon_control_sock", lambda: sock_path)
+    monkeypatch.setattr(m, "_DAEMON_RETRY_DELAY", 0.01)
+    return _control_server(str(sock_path), replies)
+
+
+def test_daemon_reply_sends_the_exact_frame_and_reports_acceptance(monkeypatch, short_tmp):
+    srv, got, t = _wire_daemon(monkeypatch, short_tmp, [{"ok": True, "op": "reply"}])
+    try:
+        out = m.daemon_reply("a65300e6-fed7-460f-ae17-9a94752d6fce", "<HIVE>hi</HIVE>")
+        t.join(timeout=5)
+    finally:
+        srv.close()
+    assert out == m.ACCEPTED_DAEMON_REPLY
+    assert got == [
+        {
+            "proto": 1,
+            "op": "reply",
+            "short": "a65300e6",
+            "auth": "k3y",
+            "text": "<HIVE>hi</HIVE>",
+        }
+    ]
+
+
+def test_daemon_reply_retries_readiness_codes_then_lands(monkeypatch, short_tmp):
+    srv, got, t = _wire_daemon(
+        monkeypatch,
+        short_tmp,
+        [
+            {"ok": False, "code": "ESTARTING"},
+            {"ok": False, "code": "ERESPAWNING"},
+            {"ok": True, "op": "reply"},
+        ],
+    )
+    try:
+        out = m.daemon_reply("a65300e6-0000", "ping")
+        t.join(timeout=5)
+    finally:
+        srv.close()
+    assert out == m.ACCEPTED_DAEMON_REPLY
+    assert len(got) == 3
+
+
+def test_daemon_reply_does_not_retry_a_terminal_code(monkeypatch, short_tmp):
+    srv, got, t = _wire_daemon(monkeypatch, short_tmp, [{"ok": False, "code": "ENOJOB"}])
+    try:
+        out = m.daemon_reply("a65300e6-0000", "ping")
+        t.join(timeout=5)
+    finally:
+        srv.close()
+    assert out is None
+    assert len(got) == 1
+
+
+def test_daemon_reply_rereads_the_key_once_on_eauth(monkeypatch, short_tmp):
+    srv, got, t = _wire_daemon(
+        monkeypatch,
+        short_tmp,
+        [{"ok": False, "code": "EAUTH"}, {"ok": False, "code": "EAUTH"}],
+    )
+    try:
+        out = m.daemon_reply("a65300e6-0000", "ping")
+        t.join(timeout=5)
+    finally:
+        srv.close()
+    assert out is None
+    assert len(got) == 2
+
+
+def test_daemon_reply_without_a_daemon_is_none(monkeypatch, short_tmp):
+    (short_tmp / "daemon").mkdir()
+    (short_tmp / "daemon" / "control.key").write_text("k3y")
+    monkeypatch.setenv("CLAUDE_HOME", str(short_tmp))
+    monkeypatch.setattr(m, "_daemon_control_sock", lambda: short_tmp / "no.sock")
+    assert m.daemon_reply("a65300e6-0000", "ping") is None
+
+
+def test_daemon_reply_rejects_a_short_session_id(monkeypatch, short_tmp):
+    assert m.daemon_reply("abc", "ping") is None
+    assert m.daemon_reply("", "ping") is None
+
+
+def test_daemon_control_sock_derives_from_the_config_dir(monkeypatch, tmp_path):
+    import hashlib as _h
+
+    monkeypatch.setenv("CLAUDE_HOME", str(tmp_path))
+    ns = _h.sha256(os.path.abspath(str(tmp_path)).encode()).hexdigest()[:8]
+    assert m._daemon_control_sock() == Path("/tmp") / f"cc-daemon-{os.getuid()}" / ns / "control.sock"

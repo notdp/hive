@@ -112,6 +112,7 @@
 <li><b>A2（member→member 回环）</b>：<code>hive reply probe --reply-to 3kIp</code> 一次成功，对端实收。</li>
 </ul>
 <div class="callout g" style="margin-bottom:0"><b>缺省翻转</b>：义务由协议扛住后，传输换回 clean 观感——<code>claude_sessions.send()</code> 的 <code>priority</code> 由 "later" 翻转为 "next"（本报告入库同一 PR）。mid-turn 折入 = pane 与人打字同形；idle 或无剩余工具边界 = 自起 turn。模型可见层永远 wrapped 不变。</div>
+<p style="margin:14px 0 10px"><b>终章：daemon <code>op:"reply"</code> 取代包装问题本身。</b>继续探后发现 supervisor daemon control.sock 的 <code>reply</code> 动词——worker 三分支（blocked→rv 直入队/可替 prompt 作答；正常+pty→官方括号粘贴+回车；无 pty→rv）全部以 <code>origin:{kind:"human"}</code> 入队，即打字 lane：<b>任何状态落地都无包装</b>。三格实测全绿（E1 idle：裸 <code>❯</code> 行+必起 turn+即时回执；E2 busy：干净折入+双回复；E3 blocked：裸落地+往返闭环），同 pane 对照实拍：op:"reply" 一行裸信封 vs socket 回复整块 wrapped。自带 readiness 错误码重试协议（ESTARTING/ERESPAWNING/ENOREPLY）。hive 已切主 lane（<code>daemon_reply</code>），socket next 帧降级为 fallback；协议全谱见 <code>docs/daemon-control-socket.md</code>。idle 到达白赚必响应，折入仍靠出生协议回执义务。</p>
 </div>
 
 <h2><span class="n">05</span>置信与缺口</h2>
