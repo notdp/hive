@@ -26,7 +26,7 @@ description: Hive 排障命令清单与协议硬边界。doctor/thread/capture/i
 
 ## 协议边界
 
-- `hive send` 永远开新 thread root;`hive reply` 续已有 thread、必带 `in_reply_to`
+- `hive send` 是唯一消息动词;对方最近一条未回的入站消息存在时自动续该 thread(带 `in_reply_to`),否则开新 root
 - Hive 不是严格可靠消息队列;没有幂等性或 backpressure。
 - 收件箱一律是 pane 内联的 `<HIVE ...>` block。
 - 排障用 `hive thread`,不要把内部存储或日志当收件箱轮询。

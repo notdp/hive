@@ -9,7 +9,8 @@ headless subagent call. ``parallel()`` runs several of those at once.
 The runner never owns a pane: it dispatches as the reserved ``flow``
 address, whose delivery is the durable bus row itself (the sidecar's
 mailbox branch), and reads replies straight off the bus. Members answer
-with an ordinary ``hive reply flow`` — no new addressing concepts.
+with an ordinary ``hive send flow`` — auto-anchoring threads it back to
+the dispatch, no new addressing concepts.
 
 Deliberately not here: sandboxing (the script author is the orch),
 schema validation, resume journals, token budgets, progress UI — the
@@ -79,7 +80,7 @@ _DISPATCH_ATTEMPTS = 3
 _DISPATCH_RETRY_GAP = 3.0
 
 
-def _dispatch(name: str, *, body: str, artifact: str, reply_to: str = "") -> str:
+def _dispatch(name: str, *, body: str, artifact: str) -> str:
     """Send with bounded retries: a cloud-backed transport (grok leader RPC,
     codex daemon) can refuse transiently under provider throttling, and a
     single blip must not kill a whole orchestration. Still loud on exhaustion.
@@ -97,7 +98,6 @@ def _dispatch(name: str, *, body: str, artifact: str, reply_to: str = "") -> str
                 target_agent=name,
                 body=body,
                 artifact=artifact,
-                reply_to=reply_to,
                 command_name="flow-dispatch",
                 warn_on_long_body=False,
             )
@@ -114,7 +114,7 @@ def _await_reply(name: str, msg_id: str) -> dict[str, object]:
     """Block until a reply from *name* anchored to *msg_id* lands on the bus.
 
     Scoped to *name*: a row anchored to the dispatch by anyone else — a
-    handoff target, a bystander — is not this member's deliverable.
+    bystander touching the thread — is not this member's deliverable.
 
     No timeout by design: the members are visible panes and the human is
     the supervisor — interrupt the flow run to stop waiting.

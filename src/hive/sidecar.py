@@ -799,7 +799,7 @@ def _send_payload(
         # The flow runner's mailbox: it owns no pane and no transport —
         # the durable bus row IS the delivery, and the runner polls for
         # it. Members answer a flow dispatch with an ordinary
-        # `hive reply flow`, which lands here.
+        # `hive send flow`, which lands here.
         event = bus.write_send_event(
             workspace,
             from_agent=sender_agent,

@@ -33,15 +33,13 @@ _COMMAND_HELP_SECTIONS = {
     "init": "Daily",
     "team": "Daily",
     "send": "Daily",
-    "reply": "Daily",
     "ccd": "Daily",
     "notify": "Daily",
     "compact": "Daily",
     "skills": "Daily",
-    # Handoff — hand a thread to another pane (same/new/forked).
-    "handoff": "Handoff",
-    "fork": "Handoff",
-    "spawn": "Handoff",
+    # Panes — bring up another agent pane (fresh or forked).
+    "fork": "Panes",
+    "spawn": "Panes",
     # Workflow — higher-level flows on top of Hive.
     "flow": "Workflow",
     "worktree": "Workflow",
@@ -77,7 +75,7 @@ _COMMAND_HELP_SECTIONS = {
 }
 _COMMAND_HELP_SECTION_ORDER = [
     "Daily",
-    "Handoff",
+    "Panes",
     "Workflow",
     "Team",
     "Human Helpers",
@@ -88,7 +86,7 @@ _COMMAND_HELP_SECTION_ORDER = [
 ]
 _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     "Daily": "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
-    "Handoff": "Hand a thread to another worker — same pane, a fresh spawn, or a forked clone.",
+    "Panes": "Bring up another agent pane — a fresh spawn or a forked clone.",
     "Workflow": "Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.",
     "Team": "Create, extend, and wire up the tmux team around the current window.",
     "Human Helpers": "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
@@ -112,11 +110,7 @@ hive send dodo "see report" --artifact - <<'EOF'
 - item
 EOF
 
-# Reply (continue an existing thread)
-hive reply dodo "fixed"                      # auto-picks latest unanswered inbound
-
-# Handoff, fork, spawn
-hive handoff dodo --artifact /tmp/task.md    # delegate a thread
+# Fork, spawn
 hive fork                                    # split the current pane into a clone
 hive spawn claude                            # bring up a new agent pane
 
@@ -880,8 +874,8 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
     """Fork the current agent session into a new split pane.
 
     Humans typically bind this to a keyboard shortcut (terminal + tmux).
-    Agents also invoke it during handoff to create a clone that can pick
-    up work without interrupting the current turn.
+    Agents also invoke it to create a clone that can pick up work without
+    interrupting the current turn.
 
     Pass `--join-as <name>` to register the new pane as a team member;
     `--prompt` then sends an initial message after the fork is ready.
@@ -1003,8 +997,7 @@ def _hive_join_message(agent_name: str, team_name: str) -> str:
         "Context is pre-bound. Run `/hive:hive` first and follow "
         "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
-        "Use `hive team` to inspect the team; reply on an existing thread with "
-        "`hive reply <name> \"...\"`; open a new thread with "
+        "Use `hive team` to inspect the team; message any peer with "
         "`hive send <name> \"<summary>\" --artifact -`."
     )
 
@@ -1265,29 +1258,6 @@ def _fork_orphan_clone(pane_id: str, split: str, prompt: str = "") -> str:
     return new_pane
 
 
-def _resolve_handoff_anchor_event(
-    workspace: str,
-    *,
-    current_agent: str,
-    reply_to_override: str,
-) -> dict[str, object]:
-    if reply_to_override:
-        event = bus.find_send_event(workspace, reply_to_override)
-        if event is None or str(event.get("to") or "") != current_agent:
-            _fail(
-                f"msgId '{reply_to_override}' is not an inbound send event for '{current_agent}'"
-            )
-        return event
-
-    latest = bus.latest_unanswered_inbound_send_event(workspace, recipient=current_agent)
-    if latest is None:
-        _fail(
-            f"no unanswered inbound message for '{current_agent}'; "
-            "pass --reply-to explicitly to hand off a different thread"
-        )
-    return latest
-
-
 def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
     """Locate a pane by qualified agent name ``<prefix>.<name>``.
 
@@ -1328,7 +1298,7 @@ def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
 
 
 def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
-    """Resolve the team that owns *to_agent* for send/reply.
+    """Resolve the team that owns *to_agent* for a send.
 
     Qualified names (`<group>.<name>`) bypass the current-window check
     and load the target pane's team directly, so cross-team sends work
@@ -1433,7 +1403,7 @@ def _send_to_ccd_session(label: str, message: str, artifact: str) -> None:
         if m_team == team:
             _fail(
                 f"'{label}' is your teammate {m_agent}; members talk over "
-                f"the bus: `hive send {m_agent}` / `hive reply`"
+                f"the bus: `hive send {m_agent}`"
             )
         _fail(f"'{label}' is {m_team}.{m_agent}, a member of another team, not an outside session")
     sender = f"{team}.{agent}"
@@ -1462,14 +1432,8 @@ def _send_to_ccd_session(label: str, message: str, artifact: str) -> None:
             f"not read the message (~{max(1, len(message) // 1024)} KB) in time; it looks "
             "stalled and may hold a truncated frame — retry once it is responsive"
         )
-    click.echo(json.dumps({
-        "session": target.name,
-        "title": target.title,
-        "pid": target.pid,
-        "cwd": target.cwd,
-        "from": sender,
-        "accepted": outcome,
-    }, indent=2, ensure_ascii=False))
+    # Fire-and-forget: success is silent (rule of silence); failures above
+    # already exited non-zero with the reason.
 
 
 def _existing_team_agent(t: Team, agent_name: str) -> Agent | None:
@@ -1477,34 +1441,6 @@ def _existing_team_agent(t: Team, agent_name: str) -> Agent | None:
         return t.get(agent_name)
     except KeyError:
         return None
-
-
-def _handoff_delegate_body(
-    *,
-    sender_agent: str,
-    original_sender: str,
-    anchor_msg_id: str,
-    note: str,
-) -> str:
-    lines = [
-        f"Handoff from {sender_agent}.",
-        f"Original sender: {original_sender}",
-        f"Anchor msgId: {anchor_msg_id}",
-        f"First step: hive thread {anchor_msg_id}",
-        f"First reply: hive reply {original_sender} --reply-to {anchor_msg_id} \"<takeover>\"",
-        f"(--reply-to is required on the first reply because you never received {anchor_msg_id} yourself.)",
-        f"Once {original_sender} replies back, continue with plain 'hive reply {original_sender} \"...\"' — autoReply picks the thread.",
-    ]
-    if note.strip():
-        lines.append(f"Note: {note.strip()}")
-    return "\n".join(lines)
-
-
-def _handoff_announce_body(*, target_agent: str) -> str:
-    return (
-        f"Delegating this thread to {target_agent}. "
-        "Their handoff message is in flight."
-    )
 
 
 def _require_daemon_backed(pane: str) -> None:
@@ -1962,176 +1898,6 @@ def spawn(agent_name: str, model: str, prompt: str,
         "task": task_path,
         "dispatched": True,
     }, indent=2))
-
-
-@cli.command()
-@click.argument("target_agent")
-@click.option("--artifact", default="", help="Artifact path for handoff context")
-@click.option("--note", default="", help="Short note appended to the standard handoff message")
-@click.option("--reply-to", "reply_to_override", default="", help="Anchor msgId to delegate (default: latest unanswered inbound)")
-@click.option("--spawn", "spawn_target", is_flag=True, help="Create a fresh worker before sending the handoff")
-@click.option("--fork", "fork_target", is_flag=True, help="Fork the current session into a new worker before sending the handoff")
-def handoff(
-    target_agent: str,
-    artifact: str,
-    note: str,
-    reply_to_override: str,
-    spawn_target: bool,
-    fork_target: bool,
-):
-    """Delegate a thread via send / spawn / fork wrapper.
-
-    \b
-    Three modes, chosen by flags:
-      direct  (no flag)  target agent already exists in the team;
-                         the anchor inbound is forwarded to them.
-      --spawn            spin up a fresh agent pane first, then hand off.
-      --fork             fork the current session into a new clone, then
-                         hand off (preserves model + context).
-
-    By default the anchor is the latest unanswered inbound to you; pass
-    `--reply-to <msgId>` to pick a specific thread. `--note` appends a
-    short comment to the standard handoff message; `--artifact` attaches
-    a file.
-
-    \b
-    Examples:
-      hive handoff dodo --artifact /tmp/task.md       # direct, dodo already there
-      hive handoff worker1 --spawn --artifact /tmp/task.md
-      hive handoff dodo-c1 --fork --note "continue this"
-    """
-    if spawn_target and fork_target:
-        _fail("choose at most one of --spawn or --fork")
-
-    team_name, t = _resolve_scoped_team(None, required=True)
-    assert team_name is not None and t is not None
-    sender = _resolve_sender(None)
-    ws = _resolve_workspace(t, required=True)
-
-    existing_target = _existing_team_agent(t, target_agent)
-    if existing_target is not None:
-        if spawn_target or fork_target:
-            _fail(f"agent '{target_agent}' already exists; direct handoff does not accept --spawn/--fork")
-        if target_agent == sender:
-            _fail("cannot hand off to yourself; use --spawn or --fork with a new agent name")
-    else:
-        if not spawn_target and not fork_target:
-            _fail(f"agent '{target_agent}' does not exist; pass --spawn or --fork explicitly")
-
-    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    anchor_event = _resolve_handoff_anchor_event(
-        ws,
-        current_agent=sender,
-        reply_to_override=reply_to_override,
-    )
-    anchor_msg_id = str(anchor_event.get("msgId") or "")
-    original_sender = str(anchor_event.get("from") or "")
-    if not anchor_msg_id or not original_sender:
-        _fail("invalid anchor event for handoff")
-
-    if existing_target is not None:
-        mode = "direct"
-        target_member = existing_target
-    else:
-        if spawn_target:
-            mode = "spawn"
-            target_member = _spawn_team_agent(
-                t,
-                team_name=team_name,
-                agent_name=target_agent,
-                cwd=os.getcwd(),
-            )
-        else:
-            mode = "fork"
-            target_member, _ = _fork_registered_agent(
-                t=t,
-                pane_id="",
-                split="auto",
-                join_as=target_agent,
-            )
-            if target_member.cli != "claude":
-                # Same gate as `spawn --task`: a claude clone's inbox queues
-                # the delegate, but the other transports refuse a member whose
-                # session the fork has not opened yet — and the refusal lands
-                # after the bus row is written.
-                _ensure_team_sidecar(t, ws)
-                if _wait_for_peer_ready(ws, team_name=team_name, agents={target_agent}):
-                    _fail(
-                        f"fork pane {target_member.pane_id} did not reach ready within 30s; "
-                        f"inspect it, then dispatch manually via `hive send {target_agent}`"
-                    )
-
-    delegate_body = _handoff_delegate_body(
-        sender_agent=sender,
-        original_sender=original_sender,
-        anchor_msg_id=anchor_msg_id,
-        note=note,
-    )
-    try:
-        delegate_payload = _request_send_payload(
-            workspace=ws,
-            team=t,
-            sender_agent=sender,
-            target_agent=target_agent,
-            body=delegate_body,
-            artifact=resolved_artifact,
-            command_name="handoff",
-            warn_on_long_body=False,
-        )
-    except RuntimeError as exc:
-        _fail(str(exc))
-        return
-
-    announce_msg_id = ""
-    if original_sender == target_agent:
-        announce_payload: dict[str, object] = {
-            "delivery": "skipped",
-            "reason": "target_is_original_sender",
-        }
-    else:
-        try:
-            announce_payload = _request_send_payload(
-                workspace=ws,
-                team=t,
-                sender_agent=sender,
-                target_agent=original_sender,
-                body=_handoff_announce_body(target_agent=target_agent),
-                reply_to=anchor_msg_id,
-                command_name="handoff",
-                warn_on_long_body=False,
-            )
-            announce_msg_id = str(announce_payload.get("msgId") or "")
-        except RuntimeError as exc:
-            announce_payload = {
-                "delivery": "failed",
-                "error": str(exc),
-            }
-
-    handoff_id = f"hf_{secrets.token_hex(4)}"
-    bus.write_event(
-        ws,
-        from_agent=sender,
-        to_agent=target_agent,
-        intent="handoff",
-        message_id=handoff_id,
-        metadata={
-            "anchorMsgId": anchor_msg_id,
-            "mode": mode,
-            "delegateMsgId": str(delegate_payload.get("msgId") or ""),
-            "announceMsgId": announce_msg_id,
-        },
-    )
-    payload = {
-        "handoffId": handoff_id,
-        "mode": mode,
-        "target": target_agent,
-        "targetPane": target_member.pane_id,
-        "originalSender": original_sender,
-        "anchorMsgId": anchor_msg_id,
-        "delegate": delegate_payload,
-        "announce": announce_payload,
-    }
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 @cli.group("config")
@@ -3232,10 +2998,11 @@ def send(
     to_option: str | None,
     msg_option: str | None,
 ):
-    """Start a new thread to another agent (root send only).
+    """Send a message to another agent — the only message verb.
 
-    `hive send` always opens a root thread; it does not accept
-    `--reply-to`. To reply on an existing thread, use `hive reply`.
+    Threading is automatic: when the latest inbound message from the
+    recipient is still unanswered, this send is recorded as its reply;
+    otherwise it opens a new thread. Senders never handle msgIds.
 
     The recipient is an address, and every `from=` value on a received
     envelope is one — answer by copying it verbatim. A teammate is a bare
@@ -3245,18 +3012,16 @@ def send(
     `from=ccd.<its name>`). A Claude session outside any team is
     `ccd.<name or title or pid>` (how a member reaches out).
 
-    Root sends must keep `body` to a short summary and put details in
-    `--artifact`; the body is rejected if longer than 500 chars, has
+    New-thread sends must keep `body` to a short summary and put details
+    in `--artifact`; the body is rejected if longer than 500 chars, has
     3+ lines, contains fenced code, or starts markdown heading/list
-    lines.
+    lines. A send that continues a thread is exempt.
 
     \b
-    Delivery is binary: the native transport (claude inbox / codex daemon)
-    either accepted the message — its runtime owns it from there — or the
-    command fails with the transport error. Nothing to poll afterwards. A
-    claude member that is mid-turn answers `held: true` instead: hive hands
-    the message over the moment it goes idle, so it lands in front of the
-    member without an interruption banner.
+    Delivery is binary and fire-and-forget: the native transport (claude
+    daemon / codex daemon) either accepted the message — its runtime owns
+    it from there — or the command exits non-zero with the transport
+    error. Success prints nothing; there is nothing to poll afterwards.
 
     \b
     Examples:
@@ -3306,104 +3071,42 @@ def send(
         team_name, t = _resolve_send_target_team(to_agent)
         sender = _resolve_sender(None)
     ws = _resolve_workspace(t, required=True)
-    _validate_root_send_protocol(body, artifact)
+    # Auto-anchor: the latest unanswered inbound from the recipient makes
+    # this send its reply; senders never handle msgIds. Anything else is a
+    # new thread and rides the root protocol. An unreadable bus (guest
+    # sender, fresh workspace) just means no anchor — delivery still goes,
+    # and a truly broken bus fails loudly in the send itself.
+    import sqlite3
+
+    reply_to = ""
+    try:
+        latest = bus.latest_inbound_send_event(ws, sender=sender, target=to_agent)
+    except (OSError, sqlite3.Error):
+        latest = None
+    if latest is not None:
+        candidate = str(latest.get("msgId") or "")
+        if candidate and not bus.has_send_reply_to(
+            ws, msg_id=candidate, sender=sender, target=to_agent
+        ):
+            reply_to = candidate
+    if not reply_to:
+        _validate_root_send_protocol(body, artifact)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
-        payload = _request_send_payload(
+        _request_send_payload(
             workspace=ws,
             team=t,
             sender_agent=sender,
             target_agent=to_agent,
             body=body,
             artifact=resolved_artifact,
-            reply_to="",
+            reply_to=reply_to,
             command_name="send",
         )
     except RuntimeError as exc:
         _fail(str(exc))
-        return
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-@cli.command()
-@click.argument("to_agent", required=False, default="")
-@click.argument("body", required=False, default="")
-@click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option(
-    "--reply-to",
-    "reply_to_override",
-    default="",
-    help="Override the auto-resolved msgId. Required when the latest inbound has already been replied to.",
-)
-@click.option("--to", "to_option", hidden=True, default=None)
-@click.option("--msg", "msg_option", hidden=True, default=None)
-def reply(
-    to_agent: str,
-    body: str,
-    artifact: str,
-    reply_to_override: str,
-    to_option: str | None,
-    msg_option: str | None,
-):
-    """Reply to the latest unanswered inbound message from another agent.
-
-    Without `--reply-to`, hive picks the most recent send event from
-    `to_agent` to you that you have not already replied to. If there
-    is no such message, the command fails and asks you to pass
-    `--reply-to` explicitly; `hive reply` never guesses across
-    competing threads.
-
-    \b
-    Examples:
-      hive reply dodo "fixed"                      # auto-resolve latest inbound
-      hive reply dodo "got it" --reply-to aBc1     # explicit thread anchor
-      hive reply dodo "see v2" --artifact /tmp/v2.md
-    """
-    _reject_legacy_recipient_options(to_option, msg_option, command="reply", to_agent=to_agent)
-    if to_agent.startswith("ccd."):
-        _fail(
-            f"'{to_agent}' is a Claude session, not a team member; answer it with "
-            f"`hive send \"{to_agent}\" \"...\"` (it has no thread to anchor)"
-        )
-    team_name, t = _resolve_send_target_team(to_agent)
-    sender = _resolve_sender(None)
-    ws = _resolve_workspace(t, required=True)
-
-    resolved_reply_to = reply_to_override
-    if not resolved_reply_to:
-        latest = bus.latest_inbound_send_event(ws, sender=sender, target=to_agent)
-        if latest is None:
-            _fail(
-                f"no recent message from '{to_agent}' to '{sender}'; "
-                "pass --reply-to explicitly"
-            )
-        assert latest is not None
-        candidate = str(latest.get("msgId") or "")
-        if bus.has_send_reply_to(ws, msg_id=candidate, sender=sender, target=to_agent):
-            _fail(
-                f"already replied to {candidate} from '{to_agent}'; "
-                "pass --reply-to explicitly to target another thread"
-            )
-        resolved_reply_to = candidate
-
-    resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
-    try:
-        payload = _request_send_payload(
-            workspace=ws,
-            team=t,
-            sender_agent=sender,
-            target_agent=to_agent,
-            body=body,
-            artifact=resolved_artifact,
-            reply_to=resolved_reply_to,
-            command_name="reply",
-        )
-    except RuntimeError as exc:
-        _fail(str(exc))
-        return
-    if not reply_to_override:
-        payload["autoReplyTo"] = resolved_reply_to
-    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+    # Fire-and-forget: success is silent (rule of silence). The bus row
+    # carries the identity; `hive thread` / `hive delivery` read it back.
 
 
 @cli.command()

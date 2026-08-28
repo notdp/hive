@@ -83,10 +83,7 @@ def test_send_ccd_delivers_to_the_named_session_as_the_calling_member(runner, co
         "duo-1.validator",
         "sess-desk",
     )]
-    assert json.loads(result.output) == {
-        "session": "desk", "title": "", "pid": 4242, "cwd": "/w/desk",
-        "from": "duo-1.validator", "accepted": "udsWriteAccepted",
-    }
+    assert result.output == ""  # fire-and-forget: success is silent
 
 
 @pytest.mark.parametrize(
@@ -218,8 +215,7 @@ def test_send_ccd_accepts_the_desktop_title_with_dots_and_spaces(runner, configu
     result = runner.invoke(cli, ["send", "ccd.PR 0.70 审查", "merge when green"])
     assert result.exit_code == 0, result.output
     assert asked == ["PR 0.70 审查"]
-    out = json.loads(result.output)
-    assert (out["session"], out["title"]) == ("nice-almeida-dd", "PR 0.70 审查")
+    assert result.output == ""
     # the envelope address is the session NAME, never the title: spaces would
     # break <HIVE> attribute tokenization
     assert sent == ["<HIVE from=t.w to=ccd.nice-almeida-dd>\nmerge when green\n</HIVE>"]
@@ -279,7 +275,7 @@ def test_guest_send_reaches_a_member_attributed_to_the_session(runner, configure
     assert sent["sender_agent"] == "ccd.nice-dd"
     assert sent["target_agent"] == "validator"
     assert sent["team"] is team_obj
-    assert json.loads(result.output)["msgId"] == "m1"
+    assert result.output == ""
 
 
 def test_guest_send_with_ambiguous_member_lists_dotted_addresses(runner, configure_hive_home, monkeypatch):
@@ -420,11 +416,3 @@ def test_live_member_pids_maps_pid_to_team_dot_agent(runner, configure_hive_home
     assert result.exit_code == 0, result.output
     rows = json.loads(result.output)["sessions"]
     assert rows[0]["member"] == "honey.validator"
-
-
-def test_reply_to_a_session_is_redirected_to_send(runner, configure_hive_home, monkeypatch):
-    # a session is not a team member: no thread to anchor, reply must not bus it
-    configure_hive_home()
-    result = runner.invoke(cli, ["reply", "ccd.PR70 审查", "hi"])
-    assert result.exit_code != 0
-    assert 'hive send "ccd.PR70 审查"' in result.output

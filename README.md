@@ -1,6 +1,6 @@
 # Hive
 
-> tmux-based collaboration runtime for CLI agents — `claude` and `codex` talk to each other via inline `<HIVE>` messages, tracked deliveries, and handoff threads.
+> tmux-based collaboration runtime for CLI agents — `claude` and `codex` talk to each other via inline `<HIVE>` messages, tracked deliveries, and auto-threaded replies.
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
@@ -8,7 +8,7 @@ _This README is maintained in English. Translations may lag behind the canonical
 
 ## What is Hive
 
-Hive is a runtime for agents, not a CLI you drive by hand. Day-to-day work — sending messages, replying on threads, handing off tasks, tracking delivery — happens inside the agent session, and your agent runs the commands. The main day-to-day entry point for humans is `/hive`, which loads the Hive skill into your agent so it can bootstrap the team.
+Hive is a runtime for agents, not a CLI you drive by hand. Day-to-day work — sending messages, tracking delivery — happens inside the agent session, and your agent runs the commands. The main day-to-day entry point for humans is `/hive`, which loads the Hive skill into your agent so it can bootstrap the team.
 
 A small set of commands is still yours: installing plugins, the popup editor (`hive cvim` / `hive vim`), and local dev setup.
 
@@ -84,7 +84,7 @@ keybind = cmd+shift+f=text:\x1bf
 bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 ```
 
-Everything else — `hive send`, `hive reply`, `hive team`, `hive doctor <agent>`, `hive handoff`, etc. — is designed for the agent to invoke. Running them yourself works, but that is the debugging / advanced path, not the happy path.
+Everything else — `hive send`, `hive team`, `hive doctor <agent>`, etc. — is designed for the agent to invoke. Running them yourself works, but that is the debugging / advanced path, not the happy path.
 
 ## Upgrade
 
