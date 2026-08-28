@@ -62,7 +62,6 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
         lead_session_id="sess-1",
         tmux_session="dev",
         tmux_window="dev:0",
-        peer_map={"orch": "claude", "claude": "orch"},
     )
     team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1", cwd="/tmp")
 
@@ -81,7 +80,6 @@ def test_team_save_and_load_round_trip(configure_hive_home, monkeypatch):
     assert loaded.tmux_window_id == "@0"
     assert loaded.agents["orch"].pane_id == "%0"
     assert loaded.agents["claude"].pane_id == "%1"
-    assert loaded.peer_map == {"orch": "claude", "claude": "orch"}
 
 
 def test_team_load_restores_agent_cwd_from_pane_current_path(configure_hive_home, monkeypatch):
@@ -115,145 +113,6 @@ def test_team_lead_agent_uses_persisted_session_id(configure_hive_home):
     assert lead is not None
     assert lead.name == "orch"
     assert lead.session_id == "sess-1"
-
-
-def test_team_resolve_peer_implicit_for_two_agent_team(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
-    team = Team(name="team-a", lead_pane_id="%0")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
-
-    assert team.peer_mode() == "implicit"
-    assert team.resolve_peer("orch") == "claude"
-    assert team.resolve_peer("claude") == "orch"
-    assert team.peer_pairs() == [("claude", "orch")]
-
-
-def test_team_implicit_pair_returns_two_members_in_implicit_mode(
-    configure_hive_home, monkeypatch
-):
-    """`implicit_pair()` exposes the auto-pair so callers can freeze it into
-    explicit before a 3rd agent joins (otherwise peer_mode flips to `none`
-    and the displayed relationship vanishes)."""
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
-    team = Team(name="team-a", lead_pane_id="%0")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
-
-    pair = team.implicit_pair()
-    assert pair is not None
-    assert set(pair) == {"orch", "claude"}
-
-
-def test_team_implicit_pair_none_when_explicit_or_none_mode(
-    configure_hive_home, monkeypatch
-):
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
-
-    # Solo team → `none` mode.
-    solo = Team(name="solo", lead_pane_id="%0")
-    assert solo.peer_mode() == "none"
-    assert solo.implicit_pair() is None
-
-    # 3-agent team with no explicit → `none` mode.
-    triad = Team(name="triad", lead_pane_id="%0")
-    triad.agents["alice"] = Agent(name="alice", team_name="triad", pane_id="%1")
-    triad.agents["bob"] = Agent(name="bob", team_name="triad", pane_id="%2")
-    assert triad.peer_mode() == "none"
-    assert triad.implicit_pair() is None
-
-    # 2-agent team with explicit pair → `explicit` mode.
-    explicit = Team(name="explicit", lead_pane_id="%0")
-    explicit.agents["claude"] = Agent(name="claude", team_name="explicit", pane_id="%1")
-    explicit.set_peer("orch", "claude")
-    assert explicit.peer_mode() == "explicit"
-    assert explicit.implicit_pair() is None
-
-
-def test_team_set_peer_is_symmetric_and_clears_previous_mapping(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
-    team = Team(name="team-a", lead_pane_id="%0", tmux_window="dev:0")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
-    team.agents["gpt"] = Agent(name="gpt", team_name="team-a", pane_id="%2")
-
-    team.set_peer("orch", "claude")
-    assert team.peer_map == {"orch": "claude", "claude": "orch"}
-
-    team.set_peer("orch", "gpt")
-    assert team.peer_map == {"orch": "gpt", "gpt": "orch"}
-    assert team.resolve_peer("claude") is None
-    assert team.resolve_peer("gpt") == "orch"
-
-
-def test_resolve_peer_prefers_anti_family_cli_among_no_peer_candidates(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    from hive.agent import Agent
-
-    team = Team(name="team-a", lead_pane_id="", tmux_window="dev:0")
-    team.agents = {
-        "alpha": Agent(name="alpha", team_name="team-a", pane_id="%1", cli="claude"),
-        "bravo": Agent(name="bravo", team_name="team-a", pane_id="%2", cli="codex"),
-        "charlie": Agent(name="charlie", team_name="team-a", pane_id="%3", cli="claude"),
-    }
-
-    # alpha (claude) wants anti=codex → bravo
-    assert team.resolve_peer("alpha") == "bravo"
-    # bravo (codex) wants anti=claude → alpha or charlie; sorted → alpha
-    assert team.resolve_peer("bravo") == "alpha"
-    # charlie (claude) wants anti=codex → bravo
-    assert team.resolve_peer("charlie") == "bravo"
-
-
-def test_resolve_peer_falls_back_to_any_no_peer_when_no_anti_family(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    from hive.agent import Agent
-
-    team = Team(name="team-a", lead_pane_id="", tmux_window="dev:0")
-    team.agents = {
-        "alpha": Agent(name="alpha", team_name="team-a", pane_id="%1", cli="claude"),
-        "bravo": Agent(name="bravo", team_name="team-a", pane_id="%2", cli="claude"),
-    }
-
-    # alpha (claude) wants codex, none available → fall back to sorted candidate = bravo
-    assert team.resolve_peer("alpha") == "bravo"
-    assert team.resolve_peer("bravo") == "alpha"
-
-
-def test_resolve_peer_skips_members_already_in_explicit_peer_map(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    from hive.agent import Agent
-
-    team = Team(
-        name="team-a",
-        lead_pane_id="",
-        tmux_window="dev:0",
-        peer_map={"bravo": "charlie", "charlie": "bravo"},
-    )
-    team.agents = {
-        "alpha": Agent(name="alpha", team_name="team-a", pane_id="%1", cli="claude"),
-        "bravo": Agent(name="bravo", team_name="team-a", pane_id="%2", cli="codex"),
-        "charlie": Agent(name="charlie", team_name="team-a", pane_id="%3", cli="codex"),
-    }
-
-    # bravo / charlie bound explicitly
-    assert team.resolve_peer("bravo") == "charlie"
-    assert team.resolve_peer("charlie") == "bravo"
-    # alpha's candidates filter out bravo & charlie (both in explicit peer_map) → None
-    assert team.resolve_peer("alpha") is None
-
-
-def test_team_clear_peer_only_removes_explicit_mapping(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.member_role_for_pane", lambda _pane_id: "agent")
-    team = Team(name="team-a", lead_pane_id="%0", tmux_window="dev:0", peer_map={"orch": "claude", "claude": "orch"})
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1")
-    team.agents["gpt"] = Agent(name="gpt", team_name="team-a", pane_id="%2")
-
-    assert team.clear_peer("orch") == "claude"
-    assert team.peer_map == {}
-    assert team.peer_mode() == "none"
 
 
 def test_team_spawn_tags_agent_and_passes_skill(configure_hive_home, monkeypatch):
@@ -339,24 +198,16 @@ def test_team_spawn_second_agent_splits_from_last_agent(configure_hive_home, mon
     assert calls[0]["skill"] == "hive"
 
 
-def test_team_get_and_broadcast(configure_hive_home, monkeypatch):
+def test_team_get_resolves_lead_and_members(configure_hive_home, monkeypatch):
     configure_hive_home()
-    sent = []
     monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda _pane: True)
     alive = Agent(name="claude", team_name="team-a", pane_id="%1")
-    dead = Agent(name="gpt", team_name="team-a", pane_id="%2")
-    monkeypatch.setattr(alive, "is_alive", lambda: True)
-    monkeypatch.setattr(dead, "is_alive", lambda: False)
-    monkeypatch.setattr(alive, "send", lambda text: sent.append(("claude", text)))
-    monkeypatch.setattr(dead, "send", lambda text: sent.append(("gpt", text)))
 
     team = Team(name="team-a", lead_pane_id="%0")
-    team.agents = {"claude": alive, "gpt": dead}
+    team.agents = {"claude": alive}
 
     assert team.get("orch").pane_id == "%0"
     assert team.get("claude") is alive
-    team.broadcast("hello", exclude="gpt")
-    assert sent == [("claude", "hello")]
 
 
 def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):

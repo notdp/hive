@@ -49,7 +49,7 @@ $ hclaude      # or: hcodex
 /hive
 ```
 
-The skill loads, the agent runs `hive init` to bind the current tmux window as a team, and auto-pairs with an idle peer of a different model family — attaching an existing one if found, otherwise spawning a new pane. From here on you talk to the agent; the agent talks to its peer.
+The skill loads and the agent runs `hive init` to bind the current tmux window as a team, then spawns members as tasks call for them. From here on you talk to the agent; the agent runs the team.
 
 ## Operator commands
 

@@ -698,17 +698,3 @@ class Agent:
         tmux.kill_pane(self.pane_id)
 
     # --- Serialization ---
-
-    def to_dict(self) -> dict:
-        return {
-            "agentId": f"{self.name}@{self.team_name}",
-            "name": self.name,
-            "model": self.model,
-            "prompt": self.prompt,
-            "cwd": self.cwd,
-            "tmuxPaneId": self.pane_id,
-            "sessionId": self.session_id,
-            "spawnedAt": self.spawned_at,
-            "isActive": self.is_alive(),
-            "cli": self.cli,
-        }

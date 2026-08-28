@@ -319,17 +319,6 @@ def archive_stale_snapshot(handle: str) -> bool:
     return True
 
 
-def delete_snapshot(handle: str) -> bool:
-    path = snapshot_path(handle)
-    if path is None:
-        return False
-    try:
-        path.unlink()
-        return True
-    except OSError:
-        return False
-
-
 def _write_atomic(path: Path, snap: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".snap.", suffix=".tmp", dir=str(path.parent))

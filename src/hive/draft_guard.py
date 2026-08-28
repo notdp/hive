@@ -174,19 +174,6 @@ def _drop_visible_prefix(cells: list[_StyledChar], prefix: str) -> list[_StyledC
     return cells
 
 
-def _drop_visible_suffix(cells: list[_StyledChar], suffix: str) -> list[_StyledChar]:
-    if suffix and "".join(cell.value for cell in cells[-len(suffix):]) == suffix:
-        return cells[:-len(suffix)]
-    return cells
-
-
-def _rstrip_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
-    end = len(cells)
-    while end > 0 and cells[end - 1].value == " ":
-        end -= 1
-    return cells[:end]
-
-
 def _drop_autocomplete_hint_cells(cells: list[_StyledChar]) -> list[_StyledChar]:
     first_dim = next((idx for idx, cell in enumerate(cells) if cell.dim), None)
     if first_dim is None:

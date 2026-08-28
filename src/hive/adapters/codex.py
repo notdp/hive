@@ -357,11 +357,3 @@ def _extract_reasoning_text(body: dict[str, Any]) -> str | None:
     if isinstance(text, str) and text:
         return text
     return None
-
-
-def session_id_from_open_file(fpath: str) -> str | None:
-    sessions_prefix = str(_codex_home() / "sessions") + "/"
-    if not fpath.startswith(sessions_prefix) or not fpath.endswith(".jsonl"):
-        return None
-    match = _CODEX_SESSION_UUID_RE.search(fpath)
-    return match.group(1) if match else None

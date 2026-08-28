@@ -394,7 +394,7 @@ def test_codex_degraded_gate_fails_user_commands_from_cli(runner, monkeypatch, t
 def test_codex_degraded_gate_skips_bypass_and_recorded_thread(monkeypatch, tmp_path, capsys):
     _isolate_codex_home(monkeypatch, tmp_path)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-2")
-    cli_mod._require_codex_native("wait-status")
+    cli_mod._require_codex_native("doctor")
     assert capsys.readouterr().err == ""
 
     # a resolvable thread record makes this codex native — no gate
@@ -409,10 +409,9 @@ def test_codex_degraded_gate_skips_bypass_and_recorded_thread(monkeypatch, tmp_p
 def test_codex_degraded_bypass_command_reaches_own_error(runner, monkeypatch, tmp_path):
     _isolate_codex_home(monkeypatch, tmp_path)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-3")
-    result = runner.invoke(cli, ["statuses"])
+    result = runner.invoke(cli, ["doctor", "nobody"])
     assert result.exit_code == 1
     assert "hive codex resume" not in result.stderr
-    assert "was removed" in result.stderr
 
 
 # --- resume-hint (codex) -----------------------------------------------------
