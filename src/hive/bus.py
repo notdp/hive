@@ -328,20 +328,6 @@ def read_all_events(workspace: str | Path) -> list[dict[str, object]]:
     return [_row_to_event(row) for row in rows]
 
 
-def find_send_event(workspace: str | Path, message_id: str) -> dict[str, object] | None:
-    with _connect(workspace) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM messages
-            WHERE intent = 'send' AND msg_id = ?
-            ORDER BY seq ASC
-            LIMIT 1
-            """,
-            (message_id,),
-        ).fetchone()
-    return _row_to_event(row) if row is not None else None
-
-
 def read_events_with_ns(workspace: str | Path) -> list[tuple[int, dict[str, object]]]:
     """Return sorted list of (monotonic sequence, event_data) tuples."""
     with _connect(workspace) as conn:
@@ -378,36 +364,6 @@ def latest_inbound_send_event(
     return _row_to_event(row) if row is not None else None
 
 
-def latest_unanswered_inbound_send_event(
-    workspace: str | Path,
-    *,
-    recipient: str,
-) -> dict[str, object] | None:
-    """Return the latest inbound send event the recipient has not yet replied to."""
-    with _connect(workspace) as conn:
-        row = conn.execute(
-            """
-            SELECT inbound.*
-            FROM messages AS inbound
-            WHERE inbound.intent = 'send'
-              AND inbound.to_agent = ?
-              AND inbound.msg_id != ''
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM messages AS reply
-                  WHERE reply.intent = 'send'
-                    AND reply.from_agent = ?
-                    AND reply.to_agent = inbound.from_agent
-                    AND reply.in_reply_to = inbound.msg_id
-              )
-            ORDER BY inbound.seq DESC
-            LIMIT 1
-            """,
-            (recipient, recipient),
-        ).fetchone()
-    return _row_to_event(row) if row is not None else None
-
-
 def find_reply_to(
     workspace: str | Path,
     *,
@@ -418,8 +374,8 @@ def find_reply_to(
 
     ``from_agent`` scopes the match to one sender; without it any agent's
     send anchored to ``msg_id`` wins. Nothing else is filtered — not the
-    recipient, not what the body means. A clarifying question and a
-    handoff announce are both "the reply" as far as this query knows.
+    recipient, not what the body means. A clarifying question anchored to
+    the dispatch is "the reply" as far as this query knows.
     """
     if not msg_id:
         return None

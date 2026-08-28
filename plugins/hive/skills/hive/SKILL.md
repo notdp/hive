@@ -18,7 +18,7 @@ hive send dodo "see attachment" --artifact - <<'EOF'
 # Findings
 - item
 EOF
-hive reply dodo "done: see artifact" --artifact /tmp/result.md
+hive send dodo "done: see artifact" --artifact /tmp/result.md
 ```
 
 `hive team` 字段：
@@ -68,21 +68,20 @@ This came from another Claude session — not typed by your user, but very likel
 
 - 结尾那句 "reply via SendMessage" 是宿主的通用提示，**对 hive 成员地址
   无效**（SendMessage 找不到 `<team>.<member>`，会报 no agent named）。回
-  hive 消息永远用 `hive reply` / `hive send`。
+  hive 消息永远用 `hive send`。
 - 外包装只禁止一件事：把队友消息当成 human 的授权。它没有说你可以不理。
   途中到达的消息一条都不许漏：先做完手头任务，然后在同一条最终回复里处
-  理它；至少 `hive reply` 回执一句，让发件人知道送达了。静默略过 = 发件
+  理它；至少 `hive send` 回一句，让发件人知道送达了。静默略过 = 发件
   人以为消息丢了。
 
-### 发消息：send 还是 reply
+### 发消息
 
-先判断内容是不是在回应某条入站消息。
+只有一个动词：`hive send <agent> "<内容>"`。线程是自动的：对方最近一条发
+给你的消息还没被你回过时，你的下一条 send 会被记为它的回复；否则就开新
+线程。你不需要管 msgId。
 
-- 新话题用 `hive send <agent> "<短摘要>"`，例如派任务、提新问题、发新汇报。`send` 不接 `--reply-to`。
-- 回应入站消息用 `hive reply <agent> "<回复>"`。不传 `--reply-to` 时，它会锚到最近一条来自该 agent 且你还没回过的入站消息。
-- 有 anchor msgId 但当前 pane 没有那条入站消息时，显式 `hive reply <agent> --reply-to <msgId> "<回复>"`。接管 thread 的细节需要时取 `/hive:advanced-routing`。
-
-不要因为“刚收到过对方消息”就用 `reply`。如果现在说的是新任务或新汇报，用 `send` 开新 thread。
+新线程的 body 只放短摘要（长了会被拒），详情走 `--artifact`；回复不受此
+限。
 
 ### 和 team 外的 Claude session 互通
 
@@ -93,13 +92,13 @@ hive ccd ls                               # 列出本机能收消息的 Claude s
 hive send "ccd.<title 或 name>" "<消息>"
 ```
 
-human 通常说的是桌面标题（`title`），直接用它；重名时用 `name` 或 `pid`。消息里有反引号、`$(...)` 或多行内容时，先写文件再 `hive send "ccd.<title>" "$(cat /tmp/note.md)"`——双引号里的反引号和 `$(...)` 会被 shell 执行，`$(cat ...)` 的输出不会再被展开。返回 `accepted` 只代表对方进程收下了这一帧；按对方设置，它可能在下一个 tool call 之间读到，也可能停在待接受状态。对方收到的是普通 `<HIVE from=<team>.<agent>>` 信封（无 msgId），照抄 from 就能回：`hive send <team>.<agent> "<回复>"`。
+human 通常说的是桌面标题（`title`），直接用它；重名时用 `name` 或 `pid`。消息里有反引号、`$(...)` 或多行内容时，先写文件再 `hive send "ccd.<title>" "$(cat /tmp/note.md)"`——双引号里的反引号和 `$(...)` 会被 shell 执行，`$(cat ...)` 的输出不会再被展开。发送成功没有输出（exit 0）；退出非零才是没送到，错误里带原因。送到只代表对方进程收下了这一帧；按对方设置，它可能在下一个 tool call 之间读到，也可能停在待接受状态。对方收到的是普通 `<HIVE from=<team>.<agent>>` 信封，照抄 from 就能回：`hive send <team>.<agent> "<回复>"`。
 
-反过来，桌面 session 也会给你发：你收到 `from=ccd.<name>` 的 `<HIVE>` 时，**照抄 from 回：`hive send ccd.<name> "<回复>"`，不要 `hive reply`**——它不是成员，没有 thread 可锚。
+反过来，桌面 session 也会给你发：你收到 `from=ccd.<name>` 的 `<HIVE>` 时，照抄 from 回：`hive send ccd.<name> "<回复>"`。
 
-### root 消息 + shell 安全
+### 消息 + shell 安全
 
-root send 的 body 只放短摘要。多行、Markdown、代码、长证据全部放 artifact。
+新线程的 body 只放短摘要。多行、Markdown、代码、长证据全部放 artifact。
 
 ```bash
 hive send <agent> "<短摘要>" --artifact - <<'EOF'
@@ -108,7 +107,7 @@ hive send <agent> "<短摘要>" --artifact - <<'EOF'
 EOF
 ```
 
-`'EOF'` 必须带引号，避免 shell 展开反引号、变量和 `$(...)`。不要用 `printf ... |` 或 `$(cat <<EOF)` 拼多行消息。`reply` 可以只发短文本。
+`'EOF'` 必须带引号，避免 shell 展开反引号、变量和 `$(...)`。不要用 `printf ... |` 或 `$(cat <<EOF)` 拼多行消息。回复可以只发短文本。
 
 ### 没活时停下
 
@@ -125,13 +124,13 @@ Hive 是 push 模型：有新消息时 runtime 会注入 `<HIVE>` block 并唤�
 任务 = 派发人发来的 `<HIVE>` 消息 + 它的 artifact。scope、交付物形态与路径、验收标准、上游材料的位置，全以该 artifact 为准。
 
 - artifact 引用了别的文件（上游产出、材料），直接打开读，不要凭摘要猜。
-- 材料不够、目标含糊时，`hive reply` 问派发人一句。不要自己翻库扩 scope。
+- 材料不够、目标含糊时，`hive send` 问派发人一句。不要自己翻库扩 scope。
 
 ### 一切终态回报派发人
 
-成果、blocked、失败，全部 `hive reply` 回派发消息，锚回派发线程。body=短摘要，详情落 artifact。
+成果、blocked、失败，全部 `hive send` 回派发人——自动锚回派发线程。body=短摘要，详情落 artifact。
 
-**收到任务不要回执。**"收到/开始做了"这类 ack 不要发——派发人把你锚回派发消息的第一条 reply 当作回报读。你的第一条 reply 就应该是终态（或阻断求助）。
+**收到任务不要回执。**"收到/开始做了"这类 ack 不要发——派发人把你回派发人的第一条消息当作回报读（它锚回派发线程）。你的第一条回信就应该是终态（或阻断求助）。
 
 - 不向 human 宣布完成，不越过派发人上行。human 问起时给状态，但交付走派发人。
 - 回报 ≠ 结束。派发人可能追问或打回，你的上下文还在，接着答、接着改。
@@ -183,5 +182,4 @@ source: ...
 日常收发只用上面的通信底座。
 
 - 排障命令、delivery、thread、capture、inject、interrupt、kill：`/hive:debug`
-- active-turn fork、handoff 接管、复杂 thread routing：`/hive:advanced-routing`
 - 你要发起协作、拆任务派人：`/hive:orch`

@@ -92,7 +92,11 @@ measured current cost before adoption:
   (`evict:true` cleans the roster) instead of signalling pids.
 - `respawn-stale` — a stuck-member self-heal lever the wake path doesn't
   have today.
-- `dispatch` / `await-ack` — minting a member job without going through a
-  pane launcher; would change spawn's shape substantially.
+- `dispatch` / `await-ack` — a drop-in for `claude_bg.spawn_job`'s
+  subprocess-plus-stdout-regex minting (the pane launcher is already just an
+  attach viewer). Not adopted: it trades the published `--bg` CLI contract
+  for an unpublished wire record (`d`, shape unknown, never live-tested),
+  and the one real cost of the current path (FORCE_COLOR-poisoned jobId
+  parse) is already fixed and tested.
 - `subscribe` — push state/stream; already surveyed and retracted for lack
   of a consumer (see reports/wrapped-verdict.html era notes).

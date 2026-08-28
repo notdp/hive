@@ -510,10 +510,10 @@ session warms up.
 
 ## Root Send Protocol
 
-Root sends are every `hive send`; the command no longer accepts
-`--reply-to`. Continuing an existing thread is done via `hive reply`
-(which always carries a `replyTo` and is therefore not subject to the
-root protocol).
+`hive send` is the only message verb; threading is automatic. When the
+latest inbound message from the recipient is still unanswered, the send
+is recorded as its reply (carries `replyTo`, exempt from the root
+protocol). Otherwise it is a root send opening a new thread.
 
 Hive enforces a two-layer protocol for root sends:
 

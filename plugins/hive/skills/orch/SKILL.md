@@ -39,7 +39,7 @@ hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 
 `--task` 会把任务作为首条 `<HIVE>` 消息原子投递（claude 成员注册即投递，inbox 自动排队；其他 CLI 等就绪后投）——成员不会空 inbox 出生。CLI 每次显式传；**model 不确定就别传**，默认就是对的（不要照抄状态栏之类的显示串）。要传 model 时：claude 用别名 `fable` / `opus` / `sonnet`（别名永远指向该档当前最新，不会过期；典型分工：`fable` 做终验/裁决，`opus` 做执行主力）；codex/grok 传具体 id，spawn 会按该 CLI 自己的 catalog 校验，打错会带 did-you-mean 拒收。
 
-成员完工会 `hive reply` 锚回派发线程。收到回报后：读摘要，必要时读它的 artifact。
+成员完工会 `hive send` 回报你——自动锚回派发线程。收到回报后：读摘要，必要时读它的 artifact。
 
 ### 进度只来自回信
 
@@ -47,7 +47,7 @@ hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 
 ### 成员生命周期
 
-- **验收前不 kill**。回报 ≠ 验收：不满意就 `hive reply` 打回追问——活成员带全部上下文，杀了重生是失忆的。
+- **验收前不 kill**。回报 ≠ 验收：不满意就 `hive send` 打回追问——活成员带全部上下文，杀了重生是失忆的。
 - 验收通过、下游任务的 artifact 写好之后，`hive kill <member>`，再 spawn 下一环节。
 - 例外：产出还会被下游打回的成员（见 fix 循环）留到下游 pass 再 kill。
 - 布局拖乱了跑 `hive layout`。
@@ -87,7 +87,7 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 impl 回报后 **不 kill**，spawn verify（task 带验收标准 + branch + impl 报告路径）：
 
-- verify fail → `hive reply` 把 required-changes 打回给 impl（同成员带上下文修，比新成员快）；verify 也留着，复验时它记得上次挂在哪。
+- verify fail → `hive send` 把 required-changes 打回给 impl（同成员带上下文修，比新成员快）；verify 也留着，复验时它记得上次挂在哪。
 - verify pass → kill impl + verify。
 - 建议 5 轮上限，到限升级 human。
 
@@ -120,7 +120,7 @@ if "fail" in v.summary:
   - `member.ask(prompt) -> Member`——追问/打回,阻塞等回答,更新 `.summary`/`.artifact`。
   - `member.kill()`——验收后退场,窗口自动重排。
   - `parallel(*thunks) -> list`——并发跑,按调用顺序返回;任一失败等全员结束后抛 FlowError。
-- 成员回报走 `hive reply flow`(保留地址,runtime 已处理)。
+- 成员回报走 `hive send flow`(保留地址,runtime 已处理)。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
 ---

@@ -132,20 +132,12 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     )
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert "from" not in payload
-    assert payload["to"] == "gpt"
-    assert payload["artifact"] == artifact
-    assert "summary" not in payload
-    assert "delivery" not in payload
-    assert "injectStatus" not in payload
-    assert "turnObserved" not in payload
-    assert "followUp" not in payload
+    assert result.output == ""  # fire-and-forget: success is silent
     assert len(sent) == 1
-    assert payload["msgId"] == FIXED_ID
     assert sent == [f"<HIVE from=claude to=gpt msgId={FIXED_ID} artifact={artifact}>\nplease review this\n</HIVE>"]
     events = bus.read_all_events(workspace)
     assert [e["intent"] for e in events] == ["send"]
+    assert events[0]["msgId"] == FIXED_ID
 
 
 
@@ -190,8 +182,7 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
     result = runner.invoke(cli, ["send", "gpt", "please review this", "--artifact", artifact])
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["msgId"]
+    assert result.output == ""
     assert len(sent) == 1
     assert sent[0].startswith("<HIVE from=claude to=gpt ")
 
@@ -241,9 +232,7 @@ def test_send_to_a_busy_claude_member_delivers_now(runner, configure_hive_home, 
     result = runner.invoke(cli, ["send", "gpt", "please review this"])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert "held" not in payload
-    assert payload["msgId"] == FIXED_ID
+    assert result.output == ""
     assert len(sent) == 1 and "please review this" in sent[0]
 
 
@@ -257,8 +246,7 @@ def test_send_to_an_idle_claude_member_delivers_now(runner, configure_hive_home,
     result = runner.invoke(cli, ["send", "gpt", "please review this"])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert "held" not in payload
+    assert result.output == ""
     assert len(sent) == 1
 
 
@@ -285,7 +273,7 @@ def _reply_fake_team(workspace, *, sent_transcript):
     return _FakeTeam()
 
 
-def test_reply_auto_fills_reply_to_from_latest_inbound(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_auto_anchors_to_latest_unanswered_inbound(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -298,20 +286,17 @@ def test_reply_auto_fills_reply_to_from_latest_inbound(runner, configure_hive_ho
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["reply", "dodo", "ack, looking"])
+    result = runner.invoke(cli, ["send", "dodo", "ack, looking"])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert "from" not in payload
-    assert payload["to"] == "dodo"
-    assert payload["autoReplyTo"] == inbound.msg_id
+    assert result.output == ""
     events = bus.read_all_events(workspace)
     outbound = [event for event in events if event.get("from") == "orch" and event.get("to") == "dodo"]
     assert len(outbound) == 1
     assert outbound[0].get("inReplyTo") == inbound.msg_id
 
 
-def test_reply_fails_when_no_inbound_from_agent(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_opens_root_thread_when_no_inbound(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -322,14 +307,15 @@ def test_reply_fails_when_no_inbound_from_agent(runner, configure_hive_home, mon
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["reply", "dodo", "late answer"])
+    result = runner.invoke(cli, ["send", "dodo", "fresh topic"])
 
-    assert result.exit_code != 0
-    assert "no recent message from 'dodo'" in result.output
-    assert sent == []
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+    events = bus.read_all_events(workspace)
+    assert events[-1].get("inReplyTo") is None or events[-1].get("inReplyTo") == ""
 
 
-def test_reply_fails_when_latest_inbound_already_replied(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_opens_root_thread_when_latest_inbound_already_answered(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -349,27 +335,24 @@ def test_reply_fails_when_latest_inbound_already_replied(runner, configure_hive_
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["reply", "dodo", "one more thing"])
+    result = runner.invoke(cli, ["send", "dodo", "one more thing"])
 
-    assert result.exit_code != 0
-    assert "already replied to" in result.output
-    assert "pass --reply-to explicitly" in result.output
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+    latest_outbound = [
+        event for event in bus.read_all_events(workspace)
+        if event.get("from") == "orch" and event.get("to") == "dodo"
+    ][-1]
+    assert not latest_outbound.get("inReplyTo")
 
 
-def test_reply_honors_explicit_reply_to_override(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_root_protocol_skipped_for_anchored_continuation(runner, configure_hive_home, monkeypatch, tmp_path):
+    """A thread continuation may carry a long body; a root send may not."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
-    first = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="older msg")
-    second = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="newer msg")
-    bus.write_send_event(
-        workspace,
-        from_agent="orch",
-        to_agent="dodo",
-        body="auto",
-        reply_to=second.msg_id,
-    )
+    long_body = "x" * 600
 
     sent: list[str] = []
     team = _reply_fake_team(workspace, sent_transcript=sent)
@@ -377,16 +360,19 @@ def test_reply_honors_explicit_reply_to_override(runner, configure_hive_home, mo
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
     _patch_sidecar_requests(monkeypatch, team)
 
-    result = runner.invoke(cli, ["reply", "dodo", "on older thread", "--reply-to", first.msg_id])
+    root = runner.invoke(cli, ["send", "dodo", long_body])
+    assert root.exit_code != 0
+    assert "must stay short and unstructured" in root.output
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert "autoReplyTo" not in payload
-    events = bus.read_all_events(workspace)
+    inbound = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="see patch")
+    anchored = runner.invoke(cli, ["send", "dodo", long_body])
+    assert anchored.exit_code == 0, anchored.output
+    assert anchored.stdout == ""  # silent even when anchored; the bus row carries the link
     latest_outbound = [
-        event for event in events if event.get("from") == "orch" and event.get("to") == "dodo"
+        event for event in bus.read_all_events(workspace)
+        if event.get("from") == "orch" and event.get("to") == "dodo"
     ][-1]
-    assert latest_outbound.get("inReplyTo") == first.msg_id
+    assert latest_outbound.get("inReplyTo") == inbound.msg_id
 
 
 def test_send_rejects_legacy_to_option_with_positional_hint(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -427,26 +413,6 @@ def test_send_without_agent_surfaces_usage_hint(runner, configure_hive_home, mon
     assert "for help" in result.output  # Click's Try-help hint line
     assert "hive send requires <agent>" in result.output
     assert "Drop --to/--msg" not in result.output
-    assert called == []
-
-
-def test_reply_rejects_legacy_msg_option_with_positional_hint(runner, configure_hive_home, monkeypatch, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-
-    called = []
-    monkeypatch.setattr(
-        "hive.cli._resolve_scoped_team",
-        lambda _team, required=True: called.append("resolved") or ("team-x", object()),
-    )
-
-    result = runner.invoke(cli, ["reply", "dodo", "--msg", "hello"])
-
-    assert result.exit_code == 2
-    assert "Usage: " in result.output
-    assert "hive reply takes positional args" in result.output
-    assert "Drop --to/--msg" in result.output
     assert called == []
 
 
@@ -1167,9 +1133,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert "delivery" not in payload
-    assert "followUp" not in payload
+    assert result.output == ""
 
 
 def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -1329,11 +1293,8 @@ def test_gate_unknown_runtime_state_does_not_block(runner, configure_hive_home, 
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert "delivery" not in payload
     # only a proven waiting_user blocks — unknown does not veto the send.
-    assert "gate" not in payload
-    assert "injectStatus" not in payload
+    assert result.output == ""
 
 
 def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -1349,9 +1310,8 @@ def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, mon
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
 
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    # gate=clear is the default noise-free case and is omitted from output.
-    assert "gate" not in payload
+    # a ready member is the noise-free default: silent success.
+    assert result.output == ""
 
 
 def _patch_send_failed(monkeypatch, workspace):
@@ -1394,21 +1354,8 @@ def test_send_exits_nonzero_when_transport_refuses(runner, configure_hive_home, 
     assert "transport refused" in result.output
 
 
-def test_reply_exits_nonzero_when_transport_refuses(runner, configure_hive_home, monkeypatch, tmp_path):
-    """`hive reply` must mirror `send` and exit non-zero on transport refusal."""
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    _patch_send_failed(monkeypatch, workspace)
-    # reply needs an anchor msgId; pass one explicitly so auto-resolution isn't required
-    result = runner.invoke(cli, ["reply", "gpt", "ack", "--reply-to", FIXED_ID])
-
-    assert result.exit_code == 1, f"expected exit 1 on transport refusal, got {result.exit_code}: {result.output}"
-    assert "transport refused" in result.output
-
-
 def test_send_exits_zero_on_accepted(runner, configure_hive_home, monkeypatch, tmp_path):
-    """An accepted send exits 0 with just the message identity."""
+    """An accepted send exits 0 and prints nothing."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1434,5 +1381,4 @@ def test_send_exits_zero_on_accepted(runner, configure_hive_home, monkeypatch, t
 
     result = runner.invoke(cli, ["send", "gpt", "hi"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert "delivery" not in payload
+    assert result.output == ""

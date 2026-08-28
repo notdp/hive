@@ -278,33 +278,6 @@ def test_latest_inbound_send_event_picks_most_recent_matching(tmp_path, monkeypa
     assert event["body"] == "second"
 
 
-def test_latest_unanswered_inbound_send_event_skips_threads_with_reply(tmp_path, monkeypatch):
-    times = iter(f"2026-03-17T10:00:0{i}Z" for i in range(9))
-    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
-    workspace = bus.init_workspace(tmp_path / "ws")
-
-    first = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="first")
-    second = bus.write_send_event(workspace, from_agent="claude", to_agent="orch", body="second")
-    bus.write_send_event(workspace, from_agent="orch", to_agent="claude", body="delegating", reply_to=second.msg_id)
-
-    event = bus.latest_unanswered_inbound_send_event(workspace, recipient="orch")
-
-    assert event is not None
-    assert event["msgId"] == first.msg_id
-    assert event["from"] == "dodo"
-
-
-def test_latest_unanswered_inbound_send_event_returns_none_when_everything_is_answered(tmp_path, monkeypatch):
-    times = iter(f"2026-03-17T10:00:0{i}Z" for i in range(9))
-    monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))
-    workspace = bus.init_workspace(tmp_path / "ws")
-
-    inbound = bus.write_send_event(workspace, from_agent="dodo", to_agent="orch", body="first")
-    bus.write_send_event(workspace, from_agent="orch", to_agent="dodo", body="ack", reply_to=inbound.msg_id)
-
-    assert bus.latest_unanswered_inbound_send_event(workspace, recipient="orch") is None
-
-
 def test_has_send_reply_to_detects_prior_reply(tmp_path, monkeypatch):
     times = iter(f"2026-03-17T10:00:0{i}Z" for i in range(9))
     monkeypatch.setattr("hive.bus._now_iso", lambda: next(times))

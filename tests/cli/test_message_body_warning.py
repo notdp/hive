@@ -107,7 +107,7 @@ def test_send_rejects_structured_body_for_new_root(runner, configure_hive_home, 
     assert sent == []
 
 
-def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_anchored_send_warns_for_fenced_block_body_but_still_delivers(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -121,13 +121,17 @@ def test_reply_warns_for_fenced_block_body_but_still_replies(runner, configure_h
     _patch_sidecar_requests(monkeypatch, team)
 
     body = "```diff\n+ one line\n```"
-    result = runner.invoke(cli, ["reply", "dodo", body])
+    result = runner.invoke(cli, ["send", "dodo", body])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["autoReplyTo"] == inbound.msg_id
+    assert result.stdout == ""
+    (outbound,) = [
+        event for event in bus.read_all_events(workspace)
+        if event.get("from") == "orch" and event.get("to") == "dodo"
+    ]
+    assert outbound.get("inReplyTo") == inbound.msg_id
     assert "warning: body looks long or structured" in result.stderr
-    assert 'hive reply <agent> "<short summary>" --artifact - <<\'EOF\'' in result.stderr
+    assert 'hive send <agent> "<short summary>" --artifact - <<\'EOF\'' in result.stderr
 
 
 def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -162,6 +166,7 @@ def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_ho
     result = runner.invoke(cli, ["send", "dodo", "ack: see #1234", "--artifact", artifact])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["msgId"] == FIXED_ID
+    assert result.stdout == ""
     assert result.stderr == ""
+    events = bus.read_all_events(workspace)
+    assert events[0]["msgId"] == FIXED_ID

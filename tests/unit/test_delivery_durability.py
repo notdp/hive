@@ -114,7 +114,7 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
 def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeypatch):
     """The reserved `flow` address is a mailbox: the durable bus row IS the
     delivery. No member resolution, no gate, no transport — a member's
-    `hive reply flow` must succeed with no flow-runner pane anywhere."""
+    `hive send flow` must succeed with no flow-runner pane anywhere."""
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
