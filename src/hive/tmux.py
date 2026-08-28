@@ -332,20 +332,6 @@ def break_pane(pane_id: str, *, name: str = "", detach: bool = True) -> tuple[st
     return target, new_pane_id or pane_id
 
 
-def join_pane(source_pane: str, target_pane: str, *, horizontal: bool = True, size: str | None = None) -> str:
-    """Move *source_pane* into the window owning *target_pane* via tmux join-pane.
-
-    The moved pane keeps its process and pane_id; only its window parent
-    changes. Returns the (unchanged) source pane_id.
-    """
-    args = ["join-pane", "-s", source_pane, "-t", target_pane]
-    args.append("-h" if horizontal else "-v")
-    if size:
-        args.extend(["-l", size])
-    _run(args, check=False)
-    return source_pane
-
-
 def window_size(window_target: str) -> tuple[int, int]:
     """Return (width, height) for *window_target*, or (0, 0) on error."""
     r = _run(
@@ -430,14 +416,6 @@ def send_keys_batch(pane_id: str, *keys: str) -> None:
     if not keys:
         return
     _run(["send-keys", "-t", pane_id, *keys])
-
-
-def get_cursor_x(pane_id: str) -> int | None:
-    value = display_value(pane_id, "#{cursor_x}")
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def load_buffer(name: str, data: str) -> None:
@@ -590,15 +568,6 @@ def get_global_window_option(option: str) -> str | None:
 
 def clear_window_option(target: str, option: str) -> None:
     _run(["set-window-option", "-t", target, "-u", option], check=False)
-
-
-def resize_pane(pane_id: str, width: str | None = None, height: str | None = None) -> None:
-    args = ["resize-pane", "-t", pane_id]
-    if width:
-        args.extend(["-x", width])
-    if height:
-        args.extend(["-y", height])
-    _run(args, check=False)
 
 
 def list_panes(target: str) -> list[str]:

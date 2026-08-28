@@ -115,27 +115,6 @@ def list_plugins() -> list[dict[str, object]]:
     return rows
 
 
-def _link_path(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _remove_path(dst)
-    dst.symlink_to(src, target_is_directory=src.is_dir())
-
-
-def _copy_path(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _remove_path(dst)
-    shutil.copy2(src, dst)
-    _ensure_executable_if_script(dst)
-
-
-def _copy_text_with_plugin_root(src: Path, dst: Path, *, install_dir: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _remove_path(dst)
-    content = src.read_text()
-    dst.write_text(_render_plugin_text(content, install_dir=install_dir))
-    _ensure_executable_if_script(dst)
-
-
 def _render_plugin_text(content: str, *, install_dir: Path) -> str:
     return content.replace("${HIVE_PLUGIN_ROOT}", str(install_dir))
 

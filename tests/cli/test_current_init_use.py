@@ -710,8 +710,8 @@ def test_root_help_groups_commands_by_area(runner):
 
     # init binds the orch.
     assert "Make the current pane the orch of a fresh team." in output
-    # pr / worktree live under Workflow; register / peer / layout under Team.
-    for command in ("pr", "worktree", "register", "peer", "layout"):
+    # pr / worktree live under Workflow; register / layout under Team.
+    for command in ("pr", "worktree", "register", "layout"):
         assert f"  {command} " in output
     # topology commands are gone for good.
     for removed in ("duo", "squad"):

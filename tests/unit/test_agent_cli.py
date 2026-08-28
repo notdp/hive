@@ -276,36 +276,11 @@ def test_claude_pid_for_pane_ignores_non_claude_processes(monkeypatch):
     assert agent_cli.claude_pid_for_pane("%1") is None
 
 
-# --- peer diversity: grok is its own family, paired against claude ---
-
-
-def test_grok_pairs_against_claude_without_disturbing_claude_codex():
-    assert agent_cli.anti_peer_cli("grok") == "claude"
-    assert agent_cli.anti_peer_cli("claude") == "codex"
-    assert agent_cli.anti_peer_cli("codex") == "claude"
-    assert agent_cli.peer_cli_for_family("xai") == "claude"
-    assert agent_cli.peer_cli_for_family("anthropic") == "codex"
-    assert agent_cli.peer_cli_for_family("openai") == "claude"
-
-
 def test_classify_model_family_reads_grok_models_as_xai():
     assert agent_cli.classify_model_family("grok-4.6") == "xai"
     assert agent_cli.classify_model_family("grok-build") == "xai"
     assert agent_cli.classify_model_family("claude-opus-4-8") == "anthropic"
     assert agent_cli.classify_model_family("gpt-5.5") == "openai"
-
-
-def test_family_for_pane_uses_grok_identity_when_the_model_is_unknown(monkeypatch):
-    monkeypatch.setattr(
-        "hive.agent_cli.detect_profile_for_pane", lambda _pane: agent_cli.PROFILES["grok"]
-    )
-    models = iter(["", "grok-4.6"])
-    monkeypatch.setattr(
-        "hive.agent_cli.resolve_model_for_pane", lambda *_a, **_kw: next(models)
-    )
-
-    assert agent_cli.family_for_pane("%19") == "xai"  # CLI identity fallback
-    assert agent_cli.family_for_pane("%19") == "xai"  # and via the resolved model
 
 
 # --- spawn model validation --------------------------------------------------

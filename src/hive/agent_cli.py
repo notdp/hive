@@ -83,18 +83,6 @@ CLI_ALIASES = {
     "claude.exe": "claude",
 }
 
-# Anti-homogeneous peer CLI mapping. Peers across model families (Anthropic vs
-# OpenAI vs xAI) produce more diverse viewpoints than same-family pairs. Used by:
-# - anti-family spawn suggestions (heterogeneous review)
-# - `hive init` peer discovery / spawn fallback
-_ANTI_PEER_CLI = {"claude": "codex", "codex": "claude", "grok": "claude"}
-
-
-def anti_peer_cli(current_cli: str) -> str:
-    """Return the anti-family peer CLI for *current_cli* (claude↔codex, grok→claude)."""
-    return _ANTI_PEER_CLI.get(current_cli, "claude")
-
-
 def classify_model_family(model: str) -> str:
     """Classify a model identifier into a coarse family for peer diversity.
 
@@ -111,31 +99,6 @@ def classify_model_family(model: str) -> str:
     if "grok" in m:
         return "xai"
     return "unknown"
-
-
-def family_for_pane(pane_id: str) -> str:
-    """Best-effort classify the agent pane's model family.
-
-    Reads model via resolve_model_for_pane; falls back to CLI identity when
-    the model is unavailable (claude→anthropic, codex→openai, grok→xai).
-    """
-    profile = detect_profile_for_pane(pane_id)
-    if not profile:
-        return "unknown"
-    model = resolve_model_for_pane(pane_id, cli_name=profile.name)
-    family = classify_model_family(model)
-    if family != "unknown":
-        return family
-    return _CLI_FAMILY.get(profile.name, "unknown")
-
-
-def peer_cli_for_family(my_family: str) -> str:
-    """CLI to spawn as an anti-family peer when my family is *my_family*."""
-    if my_family == "anthropic":
-        return "codex"
-    if my_family in ("openai", "xai"):
-        return "claude"
-    return "claude"
 
 
 def normalize_command(command: str) -> str:

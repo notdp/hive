@@ -79,34 +79,6 @@ def test_team_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, 
     assert calls == [(str(workspace), "team-status", "dev:0", "@0")]
 
 
-def test_legacy_status_commands_show_migration_error(runner, configure_hive_home, tmp_path):
-    configure_hive_home()
-    workspace = tmp_path / "ws"
-    assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
-
-    status_set_result = runner.invoke(cli, ["status-set", "busy", "working", "--agent", "claude"])
-    assert status_set_result.exit_code != 0
-    assert "`hive status-set` was removed" in status_set_result.output
-    assert "hive send" in status_set_result.output
-
-    wait_result = runner.invoke(cli, ["wait-status", "claude", "--state", "done"])
-    assert wait_result.exit_code != 0
-    assert "`hive wait-status` was removed" in wait_result.output
-
-    status_result = runner.invoke(cli, ["status", "--agent", "claude"])
-    assert status_result.exit_code != 0
-    assert "`hive status` was removed" in status_result.output
-    assert "hive team" in status_result.output
-
-    statuses_result = runner.invoke(cli, ["statuses"])
-    assert statuses_result.exit_code != 0
-    assert "`hive statuses` was removed" in statuses_result.output
-
-    status_show_result = runner.invoke(cli, ["status-show"])
-    assert status_show_result.exit_code != 0
-    assert "`hive status-show` was removed" in status_show_result.output
-
-
 def test_team_includes_needs_answer_from_daemon(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
@@ -355,13 +327,3 @@ def test_team_unbound_returns_bootstrap(runner, configure_hive_home, monkeypatch
     assert payload["team"] is None
     assert payload["tmux"]["paneCount"] == 2
     assert "hive init" in payload["hint"]
-
-
-def test_current_migration_stub(runner, configure_hive_home):
-    configure_hive_home()
-
-    result = runner.invoke(cli, ["current"])
-
-    assert result.exit_code != 0
-    assert "was removed" in result.output
-    assert "hive team" in result.output

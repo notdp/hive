@@ -28,7 +28,6 @@ class Team:
     tmux_session: str = ""
     tmux_window: str = ""
     tmux_window_id: str = ""
-    peer_map: dict[str, str] = field(default_factory=dict)
     member_groups: dict[str, str] = field(default_factory=dict)
 
     # --- Window-level tmux options ---
@@ -43,15 +42,6 @@ class Team:
         if self.description:
             tmux.set_window_option(target, "@hive-desc", self.description)
         tmux.set_window_option(target, "@hive-created", str(self.created_at))
-        if self.peer_map:
-            tmux.set_window_option(
-                target,
-                "@hive-peers",
-                json.dumps(self._canonical_peer_map(self.peer_map), sort_keys=True, separators=(",", ":")),
-            )
-        else:
-            tmux.clear_window_option(target, "@hive-peers")
-
     # --- Lifecycle ---
 
     @classmethod
@@ -160,9 +150,6 @@ class Team:
             tmux_session=window_target.split(":")[0] if ":" in window_target else "",
             tmux_window=window_target,
             tmux_window_id=window_data.get("window_id", ""),
-            peer_map=cls._parse_peer_map(
-                window_data.get("peers", "") or tmux.get_window_option(window_target, "hive-peers") or "",
-            ),
         )
 
         panes = tmux.list_panes_full(window_target)
@@ -199,7 +186,6 @@ class Team:
                     agent.session_id = job_id_for_pane(pane.pane_id)
                 team.agents[pane.agent] = agent
 
-        team.peer_map = team._canonical_peer_map(team.peer_map)
         return team
 
     def is_tmux_alive(self) -> bool:
@@ -213,7 +199,6 @@ class Team:
 
     def save(self) -> None:
         """Write team state to tmux options (window + pane level)."""
-        self.peer_map = self._canonical_peer_map(self.peer_map)
         self._write_window_options()
 
     def lead_agent(self) -> Agent | None:
@@ -297,21 +282,8 @@ class Team:
             raise KeyError(f"Agent '{name}' not found")
         return self.agents[name]
 
-    def broadcast(self, text: str, exclude: str | None = None) -> None:
-        """Send text to all agents."""
-        for name, agent in self.agents.items():
-            if name != exclude and agent.is_alive():
-                agent.send(text)
-
     def status(self) -> dict:
         """Get team status."""
-        # Only surface `peer` in rendering for agents that are actually paired:
-        # explicit `hive peer set` mappings or the 2-agent implicit auto-pair.
-        # In `none` mode (3+ agents, no explicit mapping) `resolve_peer` would
-        # fall back to a "no-peer candidate" suggestion, which is useful to
-        # callers picking partners but misleading when echoed as if it were a
-        # real peer. Gate on `peer_mode` to keep the field meaning stable.
-        render_peer = self.peer_mode() != "none"
         members: list[dict[str, object]] = []
         lead = self.lead_agent()
         if lead is not None:
@@ -323,10 +295,6 @@ class Team:
             group = self.member_groups.get(lead.name, "")
             if group:
                 row["group"] = group
-            if render_peer:
-                peer_name = self.resolve_peer(lead.name)
-                if peer_name:
-                    row["peer"] = peer_name
             members.append(row)
         for name in sorted(self.agents):
             row = {
@@ -337,10 +305,6 @@ class Team:
             group = self.member_groups.get(name, "")
             if group:
                 row["group"] = group
-            if render_peer:
-                peer_name = self.resolve_peer(name)
-                if peer_name:
-                    row["peer"] = peer_name
             members.append(row)
         return {
             "name": self.name,
@@ -350,168 +314,6 @@ class Team:
             "tmuxWindow": self.tmux_window,
             "members": members,
         }
-
-    # --- Peer mapping ---
-
-    @staticmethod
-    def _parse_peer_map(raw: str) -> dict[str, str]:
-        if not raw:
-            return {}
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        parsed: dict[str, str] = {}
-        for name, peer in payload.items():
-            if not isinstance(name, str) or not isinstance(peer, str):
-                continue
-            name = name.strip()
-            peer = peer.strip()
-            if not name or not peer or name == peer:
-                continue
-            parsed[name] = peer
-        return parsed
-
-    @staticmethod
-    def _canonical_pairs(peer_map: dict[str, str], valid_names: set[str]) -> list[tuple[str, str]]:
-        pairs: list[tuple[str, str]] = []
-        for name in sorted(peer_map):
-            peer = peer_map.get(name, "")
-            if (
-                not peer
-                or name not in valid_names
-                or peer not in valid_names
-                or name >= peer
-                or peer_map.get(peer) != name
-            ):
-                continue
-            pairs.append((name, peer))
-        return pairs
-
-    def _peer_member_names(self) -> list[str]:
-        names: list[str] = []
-        lead = self.lead_agent()
-        if lead is not None:
-            names.append(lead.name)
-        names.extend(sorted(self.agents))
-        return list(dict.fromkeys(names))
-
-    def _canonical_peer_map(self, peer_map: dict[str, str]) -> dict[str, str]:
-        valid_names = set(self._peer_member_names())
-        cleaned: dict[str, str] = {}
-        for left, right in self._canonical_pairs(peer_map, valid_names):
-            cleaned[left] = right
-            cleaned[right] = left
-        return cleaned
-
-    def peer_mode(self) -> str:
-        if self._canonical_peer_map(self.peer_map):
-            return "explicit"
-        return "implicit" if len(self._peer_member_names()) == 2 else "none"
-
-    def implicit_pair(self) -> tuple[str, str] | None:
-        """If in `implicit` mode (2 peer members, no explicit map), return
-        the pair as a (left, right) tuple. Otherwise None.
-
-        Callers use this to freeze the auto-pair into an explicit mapping
-        before adding a third member (which would otherwise flip mode to
-        `none` and silently drop the existing peer display).
-        """
-        if self._canonical_peer_map(self.peer_map):
-            return None
-        members = self._peer_member_names()
-        if len(members) != 2:
-            return None
-        return members[0], members[1]
-
-    def resolve_peer(self, name: str) -> str | None:
-        """Find *name*'s peer, preferring no-peer + anti-family CLI candidates.
-
-        Rule (anti-family philosophy — heterogeneous review):
-          1. explicit peer from peer_map (set by `hive peer set`)
-          2. otherwise: pick a member that has no explicit peer yet
-             (`no-peer`), preferring one whose CLI is anti-family of *name*'s
-             CLI (claude↔codex)
-          3. fall back to any no-peer member (deterministic sort) if no
-             anti-family candidate exists
-          4. return None if nobody is available
-        """
-        if name not in self._peer_member_names():
-            return None
-        explicit = self._canonical_peer_map(self.peer_map).get(name)
-        if explicit:
-            return explicit
-
-        members = self._peer_member_names()
-        peered = set(self._canonical_peer_map(self.peer_map).keys())
-        candidates = [m for m in members if m != name and m not in peered]
-        if not candidates:
-            return None
-
-        from .agent_cli import anti_peer_cli
-
-        my_cli = self._member_cli(name)
-        if my_cli:
-            desired = anti_peer_cli(my_cli)
-            anti = [c for c in candidates if self._member_cli(c) == desired]
-            if anti:
-                return sorted(anti)[0]
-        return sorted(candidates)[0]
-
-    def _member_cli(self, name: str) -> str:
-        """Return the CLI (claude/codex) for *name*, or '' if unknown."""
-        agent = self.agents.get(name)
-        if agent:
-            return getattr(agent, "cli", "") or ""
-        return ""
-
-    def peer_pairs(self) -> list[tuple[str, str]]:
-        explicit = self._canonical_peer_map(self.peer_map)
-        if explicit:
-            return self._canonical_pairs(explicit, set(self._peer_member_names()))
-        members = self._peer_member_names()
-        if len(members) == 2:
-            left, right = sorted(members)
-            return [(left, right)]
-        return []
-
-    def set_peer(self, left: str, right: str) -> tuple[str, str]:
-        if left == right:
-            raise ValueError("peer must reference two distinct agents")
-        valid_names = set(self._peer_member_names())
-        if left not in valid_names:
-            raise KeyError(f"agent '{left}' not found")
-        if right not in valid_names:
-            raise KeyError(f"agent '{right}' not found")
-        updated = dict(self._canonical_peer_map(self.peer_map))
-        self._clear_explicit_peer_from(updated, left)
-        self._clear_explicit_peer_from(updated, right)
-        updated[left] = right
-        updated[right] = left
-        self.peer_map = updated
-        self.save()
-        return left, right
-
-    def clear_peer(self, name: str) -> str | None:
-        valid_names = set(self._peer_member_names())
-        if name not in valid_names:
-            raise KeyError(f"agent '{name}' not found")
-        updated = dict(self._canonical_peer_map(self.peer_map))
-        peer = updated.get(name)
-        if not peer:
-            return None
-        self._clear_explicit_peer_from(updated, name)
-        self.peer_map = updated
-        self.save()
-        return peer
-
-    @staticmethod
-    def _clear_explicit_peer_from(peer_map: dict[str, str], name: str) -> None:
-        peer = peer_map.pop(name, "")
-        if peer_map.get(peer) == name:
-            peer_map.pop(peer, None)
 
     def cleanup(self) -> None:
         """Kill all agent panes (not the session itself if in-place)."""
@@ -549,7 +351,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
     """
     r = tmux._run([
         "list-windows", "-a", "-F",
-        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}\t#{@hive-peers}",
+        "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
     ], check=False)
 
     candidates: list[tuple[str, dict[str, str]]] = []
@@ -559,7 +361,7 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
         parts = line.split("\t")
         if len(parts) == 5:
             parts.insert(1, "")
-        while len(parts) < 7:
+        while len(parts) < 6:
             parts.append("")
         if parts[2] == name:
             candidates.append((parts[0], {
@@ -567,7 +369,6 @@ def _find_team_window(name: str, *, prefer_pane: str = "") -> tuple[str, dict[st
                 "workspace": parts[3],
                 "desc": parts[4],
                 "created": parts[5],
-                "peers": parts[6],
             }))
 
     if not candidates:

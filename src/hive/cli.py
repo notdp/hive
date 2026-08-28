@@ -50,7 +50,6 @@ _COMMAND_HELP_SECTIONS = {
     "create": "Team",
     "delete": "Team",
     "register": "Team",
-    "peer": "Team",
     "layout": "Team",
     # Human Helpers — human-only popup + split helpers.
     "cvim": "Human Helpers",
@@ -187,14 +186,6 @@ def _default_team() -> str | None:
 def _default_agent() -> str | None:
     return _discover_tmux_binding().get("agent")
 
-
-def _require_team(team: str | None) -> str:
-    if team:
-        return team
-    click.echo("Error: --team/-t required (or bind this tmux window with `hive init` / `hive create`)", err=True)
-    sys.exit(1)
-
-
 def _resolve_sender(agent_name: str | None) -> str:
     return agent_name or _default_agent() or LEAD_AGENT_NAME
 
@@ -205,20 +196,6 @@ def _load_team(team: str, *, prefer_pane: str = "") -> Team:
     except FileNotFoundError:
         click.echo(f"Error: team '{team}' not found", err=True)
         sys.exit(1)
-
-
-def _resolve_member_cli_name(team: Team, member_name: str) -> str:
-    member = team.get(member_name)
-    cli_name = normalize_command(getattr(member, "cli", "") or "")
-    if cli_name in AGENT_CLI_NAMES:
-        return cli_name
-    pane_id = getattr(member, "pane_id", "") or ""
-    option_cli = normalize_command(tmux.get_pane_option(pane_id, "hive-cli") or "")
-    if option_cli in AGENT_CLI_NAMES:
-        return option_cli
-    profile = detect_profile_for_pane(pane_id) if pane_id else None
-    return profile.name if profile else "claude"
-
 
 def _ensure_team_matches_current_window(t: Team) -> None:
     if not tmux.is_inside_tmux():
@@ -310,32 +287,6 @@ def _ensure_pane_in_scope(t: Team, pane_id: str) -> None:
     pane_team = tmux.get_pane_option(pane_id, "hive-team")
     if pane_team and pane_team != t.name:
         _fail(f"pane '{pane_id}' already belongs to team '{pane_team}'")
-
-
-def _reject_legacy_recipient_options(
-    to_option: str | None,
-    msg_option: str | None,
-    *,
-    command: str,
-    to_agent: str,
-) -> None:
-    """Reject --to/--msg misuse and require a positional target agent.
-
-    Raises UsageError so these argument-shape failures exit 2 with usage,
-    matching Click's own parser errors; business validation stays exit 1.
-    """
-    if to_option is None and msg_option is None:
-        if to_agent:
-            return
-        raise click.UsageError(
-            f"hive {command} requires <agent>. Usage: hive {command} <agent> \"<body>\".",
-            ctx=click.get_current_context(silent=True),
-        )
-    raise click.UsageError(
-        f"hive {command} takes positional args: hive {command} <agent> \"<body>\". "
-        "Drop --to/--msg.",
-        ctx=click.get_current_context(silent=True),
-    )
 
 
 def _maybe_warn_long_body(body: str, *, command: str) -> None:
@@ -494,14 +445,6 @@ def _team_default_auto_workspace_path(team: Team) -> Path | None:
         return None
     return _default_auto_workspace_path(team.tmux_session, window_id)
 
-
-def _team_uses_default_auto_workspace(team: Team) -> bool:
-    expected = _team_default_auto_workspace_path(team)
-    if expected is None or not team.workspace:
-        return False
-    return Path(team.workspace).expanduser() == expected
-
-
 def _remember_context(*, team: str = "", workspace: str = "", agent: str = "") -> None:
     current = hive_context.load_current_context()
     hive_context.save_current_context(
@@ -517,16 +460,6 @@ def _parse_entries(entries: tuple[str, ...]) -> dict[str, str]:
     except ValueError as e:
         _fail(str(e))
     return {}
-
-
-def _read_state(workspace: str, key: str, required: bool = True) -> str:
-    path = Path(workspace) / "state" / key
-    if not path.exists():
-        if required:
-            _fail(f"missing state file: {path}")
-        return ""
-    return path.read_text().strip()
-
 
 def _team_window_identity(t: Team) -> tuple[str, str]:
     window_target = getattr(t, "tmux_window", "") or tmux.get_current_window_target() or ""
@@ -668,13 +601,6 @@ def _resolve_artifact_path(artifact: str, workspace: str | Path = "") -> str:
     return resolved_artifact
 
 
-def _status_migration_failure(command_name: str) -> None:
-    _fail(
-        f"`hive {command_name}` was removed; use `hive send` to send messages "
-        "and `hive team` to inspect runtime input state"
-    )
-
-
 def _resolve_spawn_cli_name(cli_name: str | None) -> str:
     if cli_name in AGENT_CLI_NAMES:
         return cli_name
@@ -722,15 +648,10 @@ def _request_send_payload(
     return normalized
 
 
-def _stderr_is_interactive() -> bool:
-    return sys.stderr.isatty()
-
-
 _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "claude",
     "codex",
     "config",
-    "current",
     "doctor",
     "grok",
     "inject",
@@ -738,11 +659,6 @@ _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS = {
     "resume-hint",
     "shell-init",
     "skills",
-    "status",
-    "status-set",
-    "status-show",
-    "statuses",
-    "wait-status",
 }
 
 
@@ -929,11 +845,6 @@ def fork_cmd(pane_id: str, split: str, join_as: str, prompt: str):
         "registered": join_as,
         "team": target_team.name,
     }, indent=2, ensure_ascii=False))
-
-
-@cli.command("current", hidden=True)
-def current_cmd():
-    _fail("`hive current` was removed; use `hive team` to inspect team overview + self")
 
 
 _RANDOM_AGENT_NAMES = (
@@ -1960,14 +1871,6 @@ def config_unset(key: str):
 _SENTINEL_CONFIG = object()
 
 
-@cli.command("wait-status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
-@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
-def wait_status(legacy_args: tuple[str, ...]):
-    """Removed legacy status polling command."""
-    del legacy_args
-    _status_migration_failure("wait-status")
-
-
 @cli.command("inject")
 @click.argument("agent_name")
 @click.argument("text")
@@ -2132,12 +2035,6 @@ def team_cmd():
     if session_name and window_id:
         result["runtimeWorkspace"] = str(_default_auto_workspace_path(session_name, window_id))
     click.echo(json.dumps(_add_runtime_location_fields(result), indent=2, ensure_ascii=False))
-
-
-@cli.command(hidden=True)
-def who():
-    """Backward-compatible alias for `hive team`."""
-    team_cmd.callback()  # type: ignore[attr-defined]
 
 
 _LAYOUT_PRESETS = ("auto", "main-vertical", "main-horizontal", "tiled", "even-horizontal", "even-vertical")
@@ -2953,51 +2850,11 @@ def _wait_for_peer_ready(
     return waiting
 
 
-@cli.command("status-set", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
-@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
-def status_set(legacy_args: tuple[str, ...]):
-    """Removed legacy status publishing command."""
-    del legacy_args
-    _status_migration_failure("status-set")
-
-
-@cli.command("status", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
-@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
-def status_cmd(legacy_args: tuple[str, ...]):
-    """Removed projected-status command."""
-    del legacy_args
-    _status_migration_failure("status")
-
-
-@cli.command("statuses", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
-@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
-def statuses_cmd(legacy_args: tuple[str, ...]):
-    """Backward-compatible alias for removed `hive status`."""
-    del legacy_args
-    _status_migration_failure("statuses")
-
-
-@cli.command("status-show", hidden=True, context_settings={"ignore_unknown_options": True, "allow_extra_args": True, "help_option_names": ["--help"]})
-@click.argument("legacy_args", nargs=-1, type=click.UNPROCESSED)
-def status_show(legacy_args: tuple[str, ...]):
-    """Backward-compatible alias for removed `hive status`."""
-    del legacy_args
-    _status_migration_failure("status-show")
-
-
 @cli.command()
-@click.argument("to_agent", required=False, default="")
+@click.argument("to_agent")
 @click.argument("body", required=False, default="")
 @click.option("--artifact", default="", help="Artifact path for large payloads")
-@click.option("--to", "to_option", hidden=True, default=None)
-@click.option("--msg", "msg_option", hidden=True, default=None)
-def send(
-    to_agent: str,
-    body: str,
-    artifact: str,
-    to_option: str | None,
-    msg_option: str | None,
-):
+def send(to_agent: str, body: str, artifact: str):
     """Send a message to another agent — the only message verb.
 
     Threading is automatic: when the latest inbound message from the
@@ -3032,7 +2889,6 @@ def send(
       - item
       EOF
     """
-    _reject_legacy_recipient_options(to_option, msg_option, command="send", to_agent=to_agent)
     if to_agent.startswith("ccd."):
         _send_to_ccd_session(to_agent[4:], body, artifact)
         return
@@ -3106,7 +2962,7 @@ def send(
     except RuntimeError as exc:
         _fail(str(exc))
     # Fire-and-forget: success is silent (rule of silence). The bus row
-    # carries the identity; `hive thread` / `hive delivery` read it back.
+    # carries the identity; `hive thread` reads it back.
 
 
 @cli.command()
@@ -3494,12 +3350,6 @@ def _codex_subcommand_index(args: list[str]) -> int | None:
             continue
         return i
     return None
-
-
-def _codex_subcommand(args: list[str]) -> str | None:
-    idx = _codex_subcommand_index(args)
-    return args[idx] if idx is not None else None
-
 
 def _codex_positional_after(args: list[str], sub_index: int) -> str | None:
     """First positional token after the subcommand (e.g. resume's SESSION_ID)."""
@@ -4224,48 +4074,6 @@ def shell_init_cmd(shell: str):
         # bypasses alias expansion of the name in BOTH shells, so a stray
         # alias cannot break the parse.
         click.echo(_SHELL_INIT_POSIX, nl=False)
-
-
-@cli.group()
-def peer():
-    """Manage default peer mapping inside the team."""
-    pass
-
-
-@peer.command("set")
-@click.argument("left")
-@click.argument("right")
-def peer_set(left: str, right: str):
-    """Persist a symmetric default peer pair."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    try:
-        left_name, right_name = t.set_peer(left, right)
-    except (KeyError, ValueError) as exc:
-        _fail(str(exc))
-    click.echo(f"Peer set: {left_name} <-> {right_name}.")
-
-
-@peer.command("clear")
-@click.argument("agent_name")
-def peer_clear(agent_name: str):
-    """Clear an explicit peer mapping for one agent."""
-    _, t = _resolve_scoped_team(None, required=True)
-    assert t is not None
-    try:
-        peer_name = t.clear_peer(agent_name)
-    except KeyError as exc:
-        _fail(str(exc))
-    if not peer_name:
-        click.echo(f"No explicit peer mapping to clear for '{agent_name}'.")
-        return
-    if t.peer_mode() == "implicit":
-        click.echo(
-            f"Explicit peer mapping cleared for '{agent_name}' and '{peer_name}'. "
-            "Two-agent implicit peer resolution still applies."
-        )
-        return
-    click.echo(f"Peer cleared: {agent_name} <-> {peer_name}.")
 
 
 # --- worktree pool ----------------------------------------------------------

@@ -145,12 +145,6 @@ def test_dash_h_still_lands_in_raw_args_for_launchers():
     assert claude_ctx.args == ["--help"]
 
 
-def test_dash_h_still_reaches_status_tombstone(runner):
-    result = runner.invoke(cli, ["status", "-h"])
-    assert result.exit_code == 1  # removal shim, not a help page
-    assert "was removed" in result.output
-
-
 # --- B5: ls aliases ---
 
 

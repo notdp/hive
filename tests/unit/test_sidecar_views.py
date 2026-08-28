@@ -21,13 +21,8 @@ class _FakeTeam:
             "peer": _FakeAgent("peer", "%3", "codex"),
             "offline": _FakeAgent("offline", "%4", "claude"),
         }
-        self._peer_map = {"momo": "peer", "peer": "momo"}
-
     def lead_agent(self):
         return None
-
-    def resolve_peer(self, name: str):
-        return self._peer_map.get(name)
 
 
 def test_thread_payload_projects_pure_send_chain(tmp_path):
