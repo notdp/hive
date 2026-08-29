@@ -1032,6 +1032,131 @@ def _registry_record_member(t: Team, agent: Agent) -> None:
         )
 
 
+def _spawn_headless_member(
+    t: Team,
+    *,
+    team_name: str,
+    agent_name: str,
+    model: str = "",
+    prompt: str = "",
+    cwd: str = "",
+    skill: str = "hive",
+    env_entries: tuple[str, ...] = (),
+    cli_name: str | None = None,
+) -> Agent:
+    """Spawn a member with no pane: engine first, registry as its existence.
+
+    The engine lanes are the spike-verified headless primitives — claude bg
+    spawn (always was pane-free), codex thread/start + turn/start bootstrap,
+    grok member leader + session/new + session/prompt. A display pane, when
+    the team is ever attached, is a later rendering of this engine.
+    """
+    from .agent_cli import PROFILES, validate_spawn_model
+
+    resolved_cli = cli_name if cli_name in AGENT_CLI_NAMES else "claude"
+    model_error = validate_spawn_model(resolved_cli, model)
+    if model_error:
+        raise ValueError(model_error)
+    if agent_name == "flow":
+        raise ValueError("'flow' is the flow runner's reserved mailbox address, not a member name")
+    if agent_name in t.agents:
+        raise ValueError(f"Agent '{agent_name}' already exists in team '{t.name}'")
+    resolved_cwd = str(Path(cwd).expanduser()) if cwd else os.getcwd()
+    extra_env = _parse_entries(env_entries) if env_entries else {}
+
+    profile = PROFILES.get(resolved_cli)
+    initial_prompt = ""
+    if skill and skill != "none":
+        skill_ref = skill if resolved_cli == "claude" else skill.rsplit(":", 1)[-1]
+        initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
+    if prompt:
+        initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
+
+    session_id = ""
+    if resolved_cli == "claude":
+        from .adapters import claude_bg
+
+        extra_args: list[str] = []
+        if model:
+            extra_args.extend(["--model", model])
+        job_id = claude_bg.spawn_job(
+            cwd=resolved_cwd,
+            name=f"{team_name}.{agent_name}",
+            prompt=initial_prompt,
+            extra_args=extra_args,
+            extra_env={"HIVE_TEAM": team_name, "HIVE_MEMBER": agent_name, **extra_env},
+        )
+        if not job_id:
+            raise ValueError(
+                f"`claude --bg` returned no usable job id for '{agent_name}'; "
+                "refusing to register a member without a job identity"
+            )
+        engine = claude_bg.wait_engine_entry(job_id, timeout=AGENT_STARTUP_TIMEOUT)
+        if engine is None:
+            claude_bg.stop_job(job_id)
+            raise ValueError(
+                f"claude job '{job_id}' started but its engine never "
+                "registered an inbox; refusing an undeliverable member"
+            )
+        session_id = job_id
+    elif resolved_cli == "codex":
+        from .adapters import codex_app_server
+
+        if not codex_app_server.spawn_daemon():
+            raise ValueError("codex shared app-server daemon failed to start")
+        codex_app_server.ensure_dir_trusted(resolved_cwd)
+        thread_id = codex_app_server.start_member_thread(
+            resolved_cwd, name=f"{team_name}.{agent_name}", model=model
+        )
+        if not thread_id:
+            raise ValueError(
+                f"codex app-server refused to mint a thread for '{agent_name}'"
+            )
+        if initial_prompt and codex_app_server.send_to_thread(thread_id, initial_prompt) is None:
+            raise ValueError(
+                f"codex thread '{thread_id}' refused the bootstrap turn"
+            )
+        session_id = thread_id
+    elif resolved_cli == "grok":
+        if model:
+            raise ValueError(
+                "headless grok spawn cannot pick a model yet (the TUI flag "
+                "has no verified ACP equivalent); omit --model"
+            )
+        from .adapters import grok_leader
+
+        session_id = str(uuid.uuid4())
+        if not grok_leader.create_member_session(
+            team_name, agent_name, session_id, resolved_cwd
+        ):
+            raise ValueError(
+                f"grok leader for '{agent_name}' did not materialize the session"
+            )
+        if initial_prompt and grok_leader.send_to_key(
+            grok_leader.member_key(team_name, agent_name), initial_prompt
+        ) is None:
+            grok_leader.kill_daemon_key(grok_leader.member_key(team_name, agent_name))
+            raise ValueError(
+                f"grok member '{agent_name}' refused the bootstrap prompt"
+            )
+
+    agent = Agent(
+        name=agent_name,
+        team_name=team_name,
+        pane_id="",
+        model=model,
+        cwd=resolved_cwd,
+        session_id=session_id or None,
+        cli=resolved_cli,
+    )
+    t.agents[agent_name] = agent
+    _remember_context(
+        team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME
+    )
+    _registry_record_member(t, agent)
+    return agent
+
+
 def _spawn_team_agent(
     t: Team,
     *,
@@ -1891,8 +2016,12 @@ def spawn(agent_name: str, model: str, prompt: str,
         _fail("--task and --prompt are mutually exclusive (the task rides the message, not the birth prompt)")
     team_name, t = _resolve_scoped_team(team_arg or None, required=True)
     assert team_name is not None and t is not None
+    # A live display and a tmux-resident caller get a pane; anything else —
+    # a ccd orch outside tmux, a team with no window — spawns engine-only.
+    headless = not (t.tmux_window and tmux.is_inside_tmux())
     try:
-        agent = _spawn_team_agent(
+        spawner = _spawn_headless_member if headless else _spawn_team_agent
+        agent = spawner(
             t,
             team_name=team_name,
             agent_name=agent_name,
@@ -1907,7 +2036,10 @@ def spawn(agent_name: str, model: str, prompt: str,
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     if not task_artifact:
-        click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
+        if agent.pane_id:
+            click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
+        else:
+            click.echo(f"Agent '{agent_name}' spawned headless (engine only — `hive attach {team_name}` renders it)")
         return
 
     workspace = _resolve_workspace(t, required=True)
