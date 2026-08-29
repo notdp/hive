@@ -2624,6 +2624,8 @@ def _materialize_team_display(entry: dict) -> tuple[str, list[str], list[str]]:
         _fail(f"team '{team}' has no attachable members (no recorded engine identity)")
 
     session_name = tmux.get_current_session_name() or "hive"
+    if not tmux.has_session(session_name):
+        tmux.new_session(session_name)
     anchor_cwd = str(attachable[0].get("cwd") or "") or os.getcwd()
     window, first_pane = tmux.new_window(
         session_name, name=team, cwd=anchor_cwd, detach=True
