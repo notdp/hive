@@ -14,10 +14,10 @@ def hive_home(monkeypatch, tmp_path):
 
 
 def test_env_binding_resolves_identity_and_workspace(hive_home, monkeypatch):
-    from hive import resume
+    from hive import registry
 
-    assert resume.record_team(
-        handle="honey", workspace="/tmp/ws-h", created_at="1.0", now="t0",
+    assert registry.record_team(
+        team="honey", workspace="/tmp/ws-h", created_at="1.0",
         members=[{"name": "rex", "cli": "grok"}],
     ) == "written"
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
