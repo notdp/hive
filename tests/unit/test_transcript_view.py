@@ -58,3 +58,18 @@ def test_non_message_rows_render_nothing():
     r = tv._Renderer()
     assert r.render(json.dumps({"type": "system"})) is None
     assert r.render("not json") is None
+
+
+def test_external_viewer_prefers_path_then_go_bin(monkeypatch, tmp_path):
+    monkeypatch.setattr(tv.shutil, "which", lambda _: "/opt/bin/tail-claude")
+    assert tv.external_viewer() == "/opt/bin/tail-claude"
+
+    monkeypatch.setattr(tv.shutil, "which", lambda _: None)
+    monkeypatch.setattr(tv.Path, "home", classmethod(lambda cls: tmp_path))
+    assert tv.external_viewer() is None
+    gobin = tmp_path / "go" / "bin"
+    gobin.mkdir(parents=True)
+    exe = gobin / "tail-claude"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    assert tv.external_viewer() == str(exe)
