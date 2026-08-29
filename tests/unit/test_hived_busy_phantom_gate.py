@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-import hive.sidecar as sidecar
+import hive.hived as hived
 
 
 class _Monitor:
@@ -35,15 +35,15 @@ class _Monitor:
 
 @pytest.fixture(autouse=True)
 def _reset_path_cache(monkeypatch):
-    sidecar._TRANSCRIPT_PATH_CACHE.clear()
-    monkeypatch.setattr(sidecar, "_native_daemon_busy", lambda _pane_id: None)
+    hived._TRANSCRIPT_PATH_CACHE.clear()
+    monkeypatch.setattr(hived, "_native_daemon_busy", lambda _pane_id: None)
     yield
-    sidecar._TRANSCRIPT_PATH_CACHE.clear()
+    hived._TRANSCRIPT_PATH_CACHE.clear()
 
 
 def _stub_path(monkeypatch, path_str: str | None) -> None:
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "_resolve_transcript_path_cached",
         lambda _pane_id, *, force=False: path_str,
     )
@@ -53,7 +53,7 @@ def _stub_path_with_force(monkeypatch, *, cached: str | None, fresh: str | None)
     def _fake(_pane_id, *, force: bool = False) -> str | None:
         return fresh if force else cached
 
-    monkeypatch.setattr(sidecar, "_resolve_transcript_path_cached", _fake)
+    monkeypatch.setattr(hived, "_resolve_transcript_path_cached", _fake)
 
 
 def _backdate(path: str, age_seconds: float) -> None:
@@ -66,20 +66,20 @@ def _backdate(path: str, age_seconds: float) -> None:
 
 def test_progressed_returns_none_when_path_unknown(monkeypatch):
     _stub_path(monkeypatch, None)
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is None
+    assert hived._transcript_progressed_recently("%1", 3.0) is None
 
 
 def test_progressed_returns_none_when_stat_fails(monkeypatch, tmp_path):
     ghost = tmp_path / "missing.jsonl"
     _stub_path(monkeypatch, str(ghost))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is None
+    assert hived._transcript_progressed_recently("%1", 3.0) is None
 
 
 def test_progressed_returns_true_when_mtime_fresh(monkeypatch, tmp_path):
     fresh = tmp_path / "fresh.jsonl"
     fresh.write_text("x")
     _stub_path(monkeypatch, str(fresh))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is True
+    assert hived._transcript_progressed_recently("%1", 3.0) is True
 
 
 def test_progressed_returns_false_when_mtime_stale(monkeypatch, tmp_path):
@@ -87,7 +87,7 @@ def test_progressed_returns_false_when_mtime_stale(monkeypatch, tmp_path):
     stale.write_text("x")
     _backdate(str(stale), 60.0)
     _stub_path(monkeypatch, str(stale))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is False
+    assert hived._transcript_progressed_recently("%1", 3.0) is False
 
 
 # --- session-switch stale-bypass (Claude /new) ------------------------------
@@ -104,7 +104,7 @@ def test_progressed_recovers_from_session_switch(monkeypatch, tmp_path):
     new.write_text("y")  # mtime = now
 
     _stub_path_with_force(monkeypatch, cached=str(old), fresh=str(new))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is True
+    assert hived._transcript_progressed_recently("%1", 3.0) is True
 
 
 def test_progressed_returns_false_when_re_resolve_yields_same_path(monkeypatch, tmp_path):
@@ -115,7 +115,7 @@ def test_progressed_returns_false_when_re_resolve_yields_same_path(monkeypatch, 
     _backdate(str(stale), 60.0)
 
     _stub_path_with_force(monkeypatch, cached=str(stale), fresh=str(stale))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is False
+    assert hived._transcript_progressed_recently("%1", 3.0) is False
 
 
 def test_progressed_returns_false_when_new_session_also_stale(monkeypatch, tmp_path):
@@ -128,7 +128,7 @@ def test_progressed_returns_false_when_new_session_also_stale(monkeypatch, tmp_p
     _backdate(str(new), 30.0)
 
     _stub_path_with_force(monkeypatch, cached=str(old), fresh=str(new))
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is False
+    assert hived._transcript_progressed_recently("%1", 3.0) is False
 
 
 def test_progressed_returns_false_when_fresh_resolve_yields_no_path(monkeypatch, tmp_path):
@@ -138,20 +138,20 @@ def test_progressed_returns_false_when_fresh_resolve_yields_no_path(monkeypatch,
     _backdate(str(stale), 60.0)
 
     _stub_path_with_force(monkeypatch, cached=str(stale), fresh=None)
-    assert sidecar._transcript_progressed_recently("%1", 3.0) is False
+    assert hived._transcript_progressed_recently("%1", 3.0) is False
 
 
 # --- Native daemon (codex app-server / grok leader) authoritative override ---
 
 
 def _stub_app_server_busy(monkeypatch, value: bool | None) -> None:
-    monkeypatch.setattr(sidecar, "_native_daemon_busy", lambda _pane_id: value)
+    monkeypatch.setattr(hived, "_native_daemon_busy", lambda _pane_id: value)
 
 
 def test_truly_busy_true_when_app_server_busy(monkeypatch):
     _stub_path(monkeypatch, None)
     _stub_app_server_busy(monkeypatch, True)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=False)) is True
 
 
 def test_truly_busy_false_when_app_server_idle(monkeypatch, tmp_path):
@@ -160,7 +160,7 @@ def test_truly_busy_false_when_app_server_idle(monkeypatch, tmp_path):
     fresh.write_text("x")
     _stub_path(monkeypatch, str(fresh))
     _stub_app_server_busy(monkeypatch, False)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is False
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=True)) is False
 
 
 def test_truly_busy_falls_through_when_no_app_server(monkeypatch, tmp_path):
@@ -169,20 +169,20 @@ def test_truly_busy_falls_through_when_no_app_server(monkeypatch, tmp_path):
     fresh.write_text("x")
     _stub_path(monkeypatch, str(fresh))
     _stub_app_server_busy(monkeypatch, None)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
 
 
 def test_is_output_busy_true_when_app_server_busy(monkeypatch):
     _stub_path(monkeypatch, None)
     _stub_app_server_busy(monkeypatch, True)
-    assert sidecar._is_output_busy("%1", _Monitor(busy=False)) is True
+    assert hived._is_output_busy("%1", _Monitor(busy=False)) is True
 
 
 def test_is_output_busy_false_when_app_server_idle(monkeypatch):
     """App server idle → authoritative for idle-notify, prevents false rearm."""
     _stub_path(monkeypatch, None)
     _stub_app_server_busy(monkeypatch, False)
-    assert sidecar._is_output_busy("%1", _Monitor(busy=True)) is False
+    assert hived._is_output_busy("%1", _Monitor(busy=True)) is False
 
 
 # --- _pane_is_truly_busy ----------------------------------------------------
@@ -190,21 +190,21 @@ def test_is_output_busy_false_when_app_server_idle(monkeypatch):
 
 def test_truly_busy_false_when_monitor_idle(monkeypatch):
     _stub_path(monkeypatch, None)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=False)) is False
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=False)) is False
 
 
 def test_truly_busy_falls_back_to_monitor_when_path_unknown(monkeypatch):
     """Fallback contract: never silently disable notify for panes the gate
     can't introspect (kiki's review point)."""
     _stub_path(monkeypatch, None)
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
 
 
 def test_truly_busy_true_when_monitor_busy_and_transcript_fresh(monkeypatch, tmp_path):
     fresh = tmp_path / "fresh.jsonl"
     fresh.write_text("x")
     _stub_path(monkeypatch, str(fresh))
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=True)) is True
 
 
 def test_truly_busy_false_when_monitor_busy_but_transcript_stale(monkeypatch, tmp_path):
@@ -214,16 +214,16 @@ def test_truly_busy_false_when_monitor_busy_but_transcript_stale(monkeypatch, tm
     stale.write_text("x")
     _backdate(str(stale), 60.0)
     _stub_path(monkeypatch, str(stale))
-    assert sidecar._pane_is_truly_busy("%1", _Monitor(busy=True)) is False
+    assert hived._pane_is_truly_busy("%1", _Monitor(busy=True)) is False
 
 
 def test_truly_busy_false_when_monitor_none():
-    assert sidecar._pane_is_truly_busy("%1", None) is False
+    assert hived._pane_is_truly_busy("%1", None) is False
 
 
 def test_truly_busy_false_when_pane_id_empty(monkeypatch):
     _stub_path(monkeypatch, None)
-    assert sidecar._pane_is_truly_busy("", _Monitor(busy=True)) is False
+    assert hived._pane_is_truly_busy("", _Monitor(busy=True)) is False
 
 
 # --- _is_output_busy keeps inactive_age semantics ---------------------------
@@ -235,8 +235,8 @@ def test_is_output_busy_respects_inactive_age_when_truly_busy(monkeypatch, tmp_p
     _stub_path(monkeypatch, str(fresh))
 
     monitor = _Monitor(busy=True, last_output_age=2.0)
-    assert sidecar._is_output_busy("%1", monitor, inactive_age=5.0) is True
-    assert sidecar._is_output_busy("%1", monitor, inactive_age=1.0) is False
+    assert hived._is_output_busy("%1", monitor, inactive_age=5.0) is True
+    assert hived._is_output_busy("%1", monitor, inactive_age=1.0) is False
 
 
 def test_is_output_busy_native_busy_bypasses_inactive_age(monkeypatch):
@@ -247,7 +247,7 @@ def test_is_output_busy_native_busy_bypasses_inactive_age(monkeypatch):
     _stub_path(monkeypatch, None)
     _stub_app_server_busy(monkeypatch, True)
     monitor = _Monitor(busy=False, last_output_age=20.0)
-    assert sidecar._is_output_busy("%1", monitor, inactive_age=5.0) is True
+    assert hived._is_output_busy("%1", monitor, inactive_age=5.0) is True
 
 
 def test_is_output_busy_skips_inactive_age_when_phantom(monkeypatch, tmp_path):
@@ -257,7 +257,7 @@ def test_is_output_busy_skips_inactive_age_when_phantom(monkeypatch, tmp_path):
     _stub_path(monkeypatch, str(stale))
 
     monitor = _Monitor(busy=True, last_output_age=0.5)
-    assert sidecar._is_output_busy("%1", monitor, inactive_age=5.0) is False
+    assert hived._is_output_busy("%1", monitor, inactive_age=5.0) is False
 
 
 # --- _resolve_transcript_path_cached TTL ------------------------------------
@@ -272,8 +272,8 @@ def test_path_cache_hits_within_ttl(monkeypatch):
 
     monkeypatch.setattr("hive.tmux.is_pane_alive", _fake_alive)
 
-    assert sidecar._resolve_transcript_path_cached("%1") is None
-    assert sidecar._resolve_transcript_path_cached("%1") is None
+    assert hived._resolve_transcript_path_cached("%1") is None
+    assert hived._resolve_transcript_path_cached("%1") is None
     assert calls == ["%1"]
 
 
@@ -286,9 +286,9 @@ def test_path_cache_refreshes_after_ttl(monkeypatch):
 
     monkeypatch.setattr("hive.tmux.is_pane_alive", _fake_alive)
 
-    sidecar._resolve_transcript_path_cached("%1")
+    hived._resolve_transcript_path_cached("%1")
     assert len(calls) == 1
 
-    sidecar._TRANSCRIPT_PATH_CACHE["%1"] = ("", time.monotonic() - 1.0, "")
-    sidecar._resolve_transcript_path_cached("%1")
+    hived._TRANSCRIPT_PATH_CACHE["%1"] = ("", time.monotonic() - 1.0, "")
+    hived._resolve_transcript_path_cached("%1")
     assert len(calls) == 2

@@ -36,7 +36,7 @@ def _setup(runner, configure_hive_home, monkeypatch, tmp_path, *, ready=True, di
     workspace.mkdir(exist_ok=True)
     team = _FakeTeam(str(workspace))
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _t, required=True: ("team-x", team))
-    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda t, ws: 1)
+    monkeypatch.setattr("hive.cli._ensure_team_hived", lambda t, ws: 1)
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _n: "orch")
 
     waits: list[dict] = []

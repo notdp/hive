@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from hive import bus, sidecar
+from hive import bus, hived
 
 pytestmark = pytest.mark.unit
 
@@ -23,8 +23,8 @@ def _wire(monkeypatch, workspace, agent):
         tmux_window = "dev:0"
 
     _Team.workspace = str(workspace)
-    monkeypatch.setattr("hive.sidecar._resolve_live_agent", lambda _t, _a: (_Team(), agent))
-    monkeypatch.setattr("hive.sidecar._check_send_gate", lambda _t: None)
+    monkeypatch.setattr("hive.hived._resolve_live_agent", lambda _t, _a: (_Team(), agent))
+    monkeypatch.setattr("hive.hived._check_send_gate", lambda _t: None)
 
 
 def test_accepted_send_returns_identity_only(tmp_path, monkeypatch):
@@ -41,7 +41,7 @@ def test_accepted_send_returns_identity_only(tmp_path, monkeypatch):
             return "udsWriteAccepted"
 
     _wire(monkeypatch, workspace, _Agent())
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="a",
         sender_pane="%1", target_agent="b", body="hi", artifact="", reply_to="",
     )
@@ -67,7 +67,7 @@ def test_refused_send_fails_synchronously(tmp_path, monkeypatch):
             raise RuntimeError("no channel")
 
     _wire(monkeypatch, workspace, _Agent())
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="a",
         sender_pane="%1", target_agent="b", body="hi", artifact="", reply_to="",
     )
@@ -98,7 +98,7 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
     _wire(monkeypatch, workspace, _BusyAgent())
     results = []
     for body in ("first", "second", "third"):
-        results.append(sidecar._send_payload(
+        results.append(hived._send_payload(
             workspace=str(workspace), team_name="team-x", sender_agent="validator",
             sender_pane="%1", target_agent="worker", body=body, artifact="", reply_to="",
         ))
@@ -108,7 +108,7 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
     assert len(delivered) == 3  # no duplicate submissions, ever
     assert len({r["msgId"] for r in results}) == 3
     # the exception injector stays dead: nothing ever disturbs the sender pane
-    assert not hasattr(sidecar, "_inject_exception")
+    assert not hasattr(hived, "_inject_exception")
 
 
 def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeypatch):
@@ -121,9 +121,9 @@ def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeyp
     def boom(_t, _a):
         raise AssertionError("mailbox send must not resolve a live agent")
 
-    monkeypatch.setattr("hive.sidecar._resolve_live_agent", boom)
+    monkeypatch.setattr("hive.hived._resolve_live_agent", boom)
 
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="impl",
         sender_pane="%1", target_agent="flow", body="done", artifact="/tmp/a.md",
         reply_to="m1",

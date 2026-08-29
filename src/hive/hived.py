@@ -1,4 +1,4 @@
-"""Team-scoped sidecar: message transport, runtime signals, notify watcher.
+"""Team-scoped hived: message transport, runtime signals, notify watcher.
 
 Delivery has exactly one state: the native transport (claude inbox /
 codex daemon / grok leader) either accepted the message or refused it.
@@ -37,13 +37,13 @@ IDLE_NOTIFY_THRESHOLD_SECONDS = 5.0
 IDLE_NOTIFY_MESSAGE = "Window idle 5s+ (all agents stopped). Return to review."
 IDLE_NOTIFY_MISSING_PRUNE_TICKS = 5
 NOTIFY_DEBUG_HEARTBEAT_SECONDS = 30.0
-SIDECAR_CODE_CHECK_SECONDS = 5.0
-SIDECAR_OWNER_CHECK_SECONDS = 5.0
-_SIDECAR_REEXEC_LOCK_ENV = "HIVE_SIDECAR_REEXEC_LOCK_FD"
+HIVED_CODE_CHECK_SECONDS = 5.0
+HIVED_OWNER_CHECK_SECONDS = 5.0
+_HIVED_REEXEC_LOCK_ENV = "HIVE_HIVED_REEXEC_LOCK_FD"
 SOCKET_READY_TIMEOUT = 2.0
 SOCKET_RETRY_INTERVAL = 0.1
 # The CLI's socket budget must be strictly longer than the work it asks the
-# sidecar to perform: worst-case native transport submission (claude inbox
+# hived to perform: worst-case native transport submission (claude inbox
 # connect+write / codex daemon RPC / grok leader prompt+ack) plus slack for
 # scheduling and payload plumbing.
 # A send blocks on nothing else — it returns queued the moment the transport
@@ -66,10 +66,10 @@ def _native_submit_timeout() -> float:
 
 def _send_request_timeout() -> float:
     return _native_submit_timeout() + REQUEST_SLACK
-SIDECAR_API_VERSION = 5
+HIVED_API_VERSION = 5
 BUSY_OUTPUT_THRESHOLD_SECONDS = 3.0
 # A probed session id only speaks for the session it saw: nothing tells the
-# sidecar that the human typed `/new` in an unmanaged pane, so the snapshot
+# hived that the human typed `/new` in an unmanaged pane, so the snapshot
 # ages out and the adapter re-probes instead of pinning a dead id forever.
 _SESSION_SNAPSHOT_FRESHNESS_S = 600.0
 _TRANSCRIPT_PATH_CACHE_TTL = 60.0
@@ -78,7 +78,7 @@ _TRANSCRIPT_PATH_CACHE: dict[str, tuple[str, float, str]] = {}
 _AGENT_NOTIFY_ROLES = {"agent"}
 _RUNTIME_SNAPSHOTS = RuntimeSnapshotStore()
 # Requests run on their own threads (see _serve_requests). This guards the
-# sidecar's own short in-memory mutations — never held across transport,
+# hived's own short in-memory mutations — never held across transport,
 # subprocess or socket work, which is the starvation this threading exists to
 # end. The read caches (_TRANSCRIPT_PATH_CACHE, _CLAUDE_JOBS_CACHE) stay
 # unguarded: a lost race there costs a duplicate probe, not correctness.
@@ -100,15 +100,15 @@ def _compute_build_hash() -> str:
         return "unknown"
 
 
-SIDECAR_BUILD_HASH = _compute_build_hash()
+HIVED_BUILD_HASH = _compute_build_hash()
 
 
-def _sidecar_reexec_argv(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> list[str]:
+def _hived_reexec_argv(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "hive.sidecar",
-        "--sidecar",
+        "hive.hived",
+        "--hived",
         workspace,
         team,
         tmux_window,
@@ -121,14 +121,14 @@ def _stale_disk_build_hash_for_reexec(
     *,
     now: float,
 ) -> str | None:
-    """Return a stable changed build hash that should trigger sidecar reexec."""
+    """Return a stable changed build hash that should trigger hived reexec."""
     last_check = float(state.get("last_code_check_at", 0.0))
-    if now - last_check < SIDECAR_CODE_CHECK_SECONDS:
+    if now - last_check < HIVED_CODE_CHECK_SECONDS:
         return None
     state["last_code_check_at"] = now
 
     disk_hash = _compute_build_hash()
-    if disk_hash == "unknown" or disk_hash == SIDECAR_BUILD_HASH:
+    if disk_hash == "unknown" or disk_hash == HIVED_BUILD_HASH:
         state.pop("candidate_hash", None)
         return None
 
@@ -173,7 +173,7 @@ def _try_acquire_reexec_lock(workspace: str) -> int | None:
 
 
 def _take_reexec_lock_fd_from_env() -> int | None:
-    raw_fd = os.environ.pop(_SIDECAR_REEXEC_LOCK_ENV, "")
+    raw_fd = os.environ.pop(_HIVED_REEXEC_LOCK_ENV, "")
     if not raw_fd:
         return None
     try:
@@ -182,7 +182,7 @@ def _take_reexec_lock_fd_from_env() -> int | None:
         return None
 
 
-def _reexec_sidecar(
+def _reexec_hived(
     *,
     workspace: str,
     team: str,
@@ -194,19 +194,19 @@ def _reexec_sidecar(
 ) -> socket.socket | None:
     """Replace this process with the on-disk build.
 
-    Returns None when nothing was torn down (another sidecar holds the reexec
+    Returns None when nothing was torn down (another hived holds the reexec
     lock) — the caller keeps serving on its own socket. When ``execv`` itself
     fails, the old build has to keep serving rather than leave the window with
-    a dead sidecar and no socket: the listener is rebound, the output monitor
+    a dead hived and no socket: the listener is rebound, the output monitor
     restarted, and the replacement socket returned for the caller to serve on.
     """
     lock_fd = _try_acquire_reexec_lock(workspace)
     if lock_fd is None:
         return None
 
-    previous_lock_env = os.environ.get(_SIDECAR_REEXEC_LOCK_ENV)
+    previous_lock_env = os.environ.get(_HIVED_REEXEC_LOCK_ENV)
     try:
-        os.environ[_SIDECAR_REEXEC_LOCK_ENV] = str(lock_fd)
+        os.environ[_HIVED_REEXEC_LOCK_ENV] = str(lock_fd)
         if busy_monitor is not None:
             busy_monitor.stop()
         _set_output_busy_monitor(None)
@@ -214,21 +214,21 @@ def _reexec_sidecar(
         _cleanup_socket(workspace)
         if on_reexec is not None:
             on_reexec()
-        argv = _sidecar_reexec_argv(workspace, team, tmux_window, tmux_window_id)
+        argv = _hived_reexec_argv(workspace, team, tmux_window, tmux_window_id)
         try:
             os.execv(sys.executable, argv)
         except OSError as exc:
             print(
-                f"hive sidecar: reexec failed ({exc}); staying on build "
-                f"{SIDECAR_BUILD_HASH[:12]}",
+                f"hived: reexec failed ({exc}); staying on build "
+                f"{HIVED_BUILD_HASH[:12]}",
                 file=sys.stderr,
                 flush=True,
             )
     finally:
         if previous_lock_env is None:
-            os.environ.pop(_SIDECAR_REEXEC_LOCK_ENV, None)
+            os.environ.pop(_HIVED_REEXEC_LOCK_ENV, None)
         else:
-            os.environ[_SIDECAR_REEXEC_LOCK_ENV] = previous_lock_env
+            os.environ[_HIVED_REEXEC_LOCK_ENV] = previous_lock_env
         _release_reexec_lock_fd(lock_fd)
 
     # Only reached when execv failed. Rebinding is the recovery; if it too
@@ -247,11 +247,11 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _sidecar_metadata(started_at: str) -> dict[str, Any]:
+def _hived_metadata(started_at: str) -> dict[str, Any]:
     return {
         "pid": os.getpid(),
         "started_at": started_at,
-        "code_hash": SIDECAR_BUILD_HASH,
+        "code_hash": HIVED_BUILD_HASH,
     }
 
 
@@ -505,18 +505,18 @@ def _run_dir(workspace: str) -> Path:
 
 
 def _socket_path(workspace: str) -> Path:
-    return _run_dir(workspace) / "sidecar.sock"
+    return _run_dir(workspace) / "hived.sock"
 
 
 def _lock_path(workspace: str) -> Path:
-    return _run_dir(workspace) / "sidecar.lock"
+    return _run_dir(workspace) / "hived.lock"
 
 
 def _owner_path(workspace: str) -> Path:
-    return _run_dir(workspace) / "sidecar.owner.json"
+    return _run_dir(workspace) / "hived.owner.json"
 
 
-def _write_sidecar_owner(
+def _write_hived_owner(
     workspace: str,
     *,
     pid: int,
@@ -541,7 +541,7 @@ def _write_sidecar_owner(
             pass
 
 
-def _read_sidecar_owner(workspace: str) -> dict[str, Any] | None:
+def _read_hived_owner(workspace: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(_owner_path(workspace).read_text())
     except (OSError, json.JSONDecodeError):
@@ -560,7 +560,7 @@ def _owner_matches_current_process(owner: dict[str, Any] | None, owner_token: st
 
 
 def _foreign_owner_pid(workspace: str, owner_token: str) -> int | None:
-    owner = _read_sidecar_owner(workspace)
+    owner = _read_hived_owner(workspace)
     if _owner_matches_current_process(owner, owner_token):
         return None
     try:
@@ -570,7 +570,7 @@ def _foreign_owner_pid(workspace: str, owner_token: str) -> int | None:
 
 
 def _cleanup_owner_if_current(workspace: str, owner_token: str) -> None:
-    owner = _read_sidecar_owner(workspace)
+    owner = _read_hived_owner(workspace)
     if not owner or not _owner_matches_current_process(owner, owner_token):
         return
     try:
@@ -580,7 +580,7 @@ def _cleanup_owner_if_current(workspace: str, owner_token: str) -> None:
 
 
 def _cleanup_socket_if_owner(workspace: str, owner_token: str) -> None:
-    owner = _read_sidecar_owner(workspace)
+    owner = _read_hived_owner(workspace)
     if owner and not _owner_matches_current_process(owner, owner_token):
         return
     _cleanup_socket(workspace)
@@ -592,52 +592,52 @@ def _socket_alive(workspace: str) -> bool:
     return bool(
         response
         and response.get("ok") is True
-        and response.get("apiVersion") == SIDECAR_API_VERSION
+        and response.get("apiVersion") == HIVED_API_VERSION
     )
 
 
 def request_ping(workspace: str) -> dict[str, Any] | None:
-    return _request_sidecar(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
+    return _request_hived(workspace, {"action": "ping"}, timeout=SOCKET_RETRY_INTERVAL)
 
 
 def request_connect_codex(workspace: str) -> dict[str, Any] | None:
-    """Ask the sidecar to bring its shared-daemon codex client online now.
+    """Ask the hived to bring its shared-daemon codex client online now.
 
     Called at spawn time so the client holds the broadcast stream before the
-    member's first turn. Best-effort: returns None when the sidecar is down,
+    member's first turn. Best-effort: returns None when the hived is down,
     and the lazy connect on the next runtime tick covers that case.
     """
-    return _request_sidecar(workspace, {"action": "connect-codex"}, timeout=3.0)
+    return _request_hived(workspace, {"action": "connect-codex"}, timeout=3.0)
 
 
 def request_connect_grok(workspace: str, pane: str) -> dict[str, Any] | None:
-    """Ask the sidecar to bring a per-pane grok 2nd client online now.
+    """Ask the hived to bring a per-pane grok 2nd client online now.
 
     Called at spawn time so the stdio client has loaded the pane's session
     before its first turn: ``session/load`` replays past updates, and a replay
     is not evidence — only a live-attached client sees the first real turn.
-    Best-effort: returns None when the sidecar is down, and the lazy connect on
+    Best-effort: returns None when the hived is down, and the lazy connect on
     the next runtime tick covers that case.
     """
-    return _request_sidecar(workspace, {"action": "connect-grok", "pane": pane}, timeout=3.0)
+    return _request_hived(workspace, {"action": "connect-grok", "pane": pane}, timeout=3.0)
 
 
-def _sidecar_identity_matches(
+def _hived_identity_matches(
     response: dict[str, Any] | None,
     *,
     team: str,
 ) -> bool:
-    """Sidecar identity is (workspace socket, team) — never the window.
+    """Hived identity is (workspace socket, team) — never the window.
 
     The window is display: it can die, move, or be recreated by attach
     without the team changing, so a window mismatch must not bounce a
-    healthy sidecar (and with it every live delivery client it holds).
+    healthy hived (and with it every live delivery client it holds).
     """
     return bool(
         response
         and response.get("ok") is True
-        and response.get("apiVersion") == SIDECAR_API_VERSION
-        and response.get("buildHash") == SIDECAR_BUILD_HASH
+        and response.get("apiVersion") == HIVED_API_VERSION
+        and response.get("buildHash") == HIVED_BUILD_HASH
         and response.get("team") == team
     )
 
@@ -650,7 +650,7 @@ def _cleanup_socket(workspace: str) -> None:
         pass
 
 
-def _request_sidecar(workspace: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
+def _request_hived(workspace: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
     path = _socket_path(workspace)
     if not path.exists():
         return None
@@ -689,7 +689,7 @@ def request_send(
     reply_to: str = "",
 ) -> dict[str, Any] | None:
     timeout = _send_request_timeout()
-    return _request_sidecar(
+    return _request_hived(
         workspace,
         {
             "action": "send",
@@ -712,7 +712,7 @@ def request_doctor(
     target_agent: str,
     verbose: bool = False,
 ) -> dict[str, Any] | None:
-    return _request_sidecar(
+    return _request_hived(
         workspace,
         {"action": "doctor", "team": team, "agent": target_agent, "verbose": verbose},
         timeout=SOCKET_READY_TIMEOUT,
@@ -724,7 +724,7 @@ def request_team_runtime(
     *,
     team: str,
 ) -> dict[str, Any] | None:
-    return _request_sidecar(
+    return _request_hived(
         workspace,
         {"action": "team-runtime", "team": team},
         timeout=SOCKET_READY_TIMEOUT,
@@ -736,7 +736,7 @@ def request_runtime_snapshot(
     *,
     pane_id: str,
 ) -> dict[str, Any] | None:
-    return _request_sidecar(
+    return _request_hived(
         workspace,
         {"action": "runtime-snapshot", "pane": pane_id},
         timeout=SOCKET_READY_TIMEOUT,
@@ -744,7 +744,7 @@ def request_runtime_snapshot(
 
 
 def request_thread(workspace: str, message_id: str) -> dict[str, Any] | None:
-    return _request_sidecar(
+    return _request_hived(
         workspace,
         {"action": "thread", "msgId": message_id},
         timeout=SOCKET_READY_TIMEOUT,
@@ -851,7 +851,7 @@ def _send_payload(
     # own contract queues and processes it) or refused it — there is no
     # tracked in-between, no confirmation oracle, and nothing to poll. A
     # claude member mid-turn queues the message itself (`priority: next`
-    # folds it in at the next tool boundary) — no sidecar hold on top.
+    # folds it in at the next tool boundary) — no hived hold on top.
     try:
         target.send(envelope)
     except Exception as exc:
@@ -868,7 +868,7 @@ def _doctor_payload(
     target_agent: str,
     *,
     verbose: bool = False,
-    sidecar: dict[str, Any] | None = None,
+    hived: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .team import Team
 
@@ -884,8 +884,8 @@ def _doctor_payload(
         "agent": target_agent,
         "team": team.name,
     }
-    if sidecar:
-        diag["sidecar"] = sidecar
+    if hived:
+        diag["hived"] = hived
     runtime = _member_runtime_payload(target.pane_id, role="agent")
     diag["alive"] = bool(runtime.get("alive", alive))
     if "cliAlive" in runtime:
@@ -1521,7 +1521,7 @@ def _idle_notify_tick(
                 sorted(windows[active_window]),
                 token=token,
                 remove_attention=False,
-                source="sidecar.active_window",
+                source="hived.active_window",
                 workspace=workspace,
             )
 
@@ -1800,8 +1800,8 @@ def _is_tmux_window_alive(tmux_window_id: str) -> bool:
     return tmux.window_exists(tmux_window_id)
 
 
-def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int | None:
-    """Ensure the team sidecar socket is alive."""
+def ensure_hived(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int | None:
+    """Ensure the team hived socket is alive."""
     lock_path = _lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1811,16 +1811,16 @@ def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: 
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         response = request_ping(workspace)
-        if _sidecar_identity_matches(response, team=team):
+        if _hived_identity_matches(response, team=team):
             return None
         if response:
-            stop_sidecar(workspace)
+            stop_hived(workspace)
         _cleanup_socket(workspace)
-        pid = _start_sidecar(workspace, team, tmux_window, tmux_window_id)
+        pid = _start_hived(workspace, team, tmux_window, tmux_window_id)
         deadline = time.monotonic() + SOCKET_READY_TIMEOUT
         while time.monotonic() < deadline:
             response = request_ping(workspace)
-            if _sidecar_identity_matches(response, team=team):
+            if _hived_identity_matches(response, team=team):
                 return pid
             time.sleep(SOCKET_RETRY_INTERVAL)
         return pid
@@ -1829,18 +1829,18 @@ def ensure_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: 
         os.close(lock_fd)
 
 
-def _start_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int:
+def _start_hived(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> int:
     command = [
         sys.executable,
         "-m",
-        "hive.sidecar",
-        "--sidecar",
+        "hive.hived",
+        "--hived",
         workspace,
         team,
         tmux_window,
         tmux_window_id,
     ]
-    stderr_path = devlog.sidecar_stderr_path(workspace)
+    stderr_path = devlog.hived_stderr_path(workspace)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     with (
         open(os.devnull, "rb") as stdin_devnull,
@@ -1858,12 +1858,12 @@ def _start_sidecar(workspace: str, team: str, tmux_window: str, tmux_window_id: 
     return int(process.pid)
 
 
-def _run_spawned_sidecar(argv: list[str]) -> int:
-    if len(argv) != 5 or argv[0] != "--sidecar":
-        raise SystemExit("usage: python -m hive.sidecar --sidecar <workspace> <team> <tmux_window> <tmux_window_id>")
+def _run_spawned_hived(argv: list[str]) -> int:
+    if len(argv) != 5 or argv[0] != "--hived":
+        raise SystemExit("usage: python -m hive.hived --hived <workspace> <team> <tmux_window> <tmux_window_id>")
     _, workspace, team, tmux_window, tmux_window_id = argv
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _sidecar_loop(workspace, team, tmux_window, tmux_window_id)
+    _hived_loop(workspace, team, tmux_window, tmux_window_id)
     return 0
 
 
@@ -1883,20 +1883,20 @@ def _handle_request(
     team: str,
     tmux_window: str,
     tmux_window_id: str,
-    sidecar_started_at: str,
+    hived_started_at: str,
     request: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
-    sidecar = _sidecar_metadata(sidecar_started_at)
+    hived = _hived_metadata(hived_started_at)
     action = request.get("action")
     if action == "ping":
         return {
             "ok": True,
-            "apiVersion": SIDECAR_API_VERSION,
-            "buildHash": SIDECAR_BUILD_HASH,
+            "apiVersion": HIVED_API_VERSION,
+            "buildHash": HIVED_BUILD_HASH,
             "team": team,
             "tmuxWindow": tmux_window,
             "tmuxWindowId": tmux_window_id,
-            "sidecar": sidecar,
+            "hived": hived,
         }, True
     if action == "send":
         try:
@@ -1920,7 +1920,7 @@ def _handle_request(
                 str(request.get("team") or team),
                 str(request.get("agent", "")),
                 verbose=bool(request.get("verbose", False)),
-                sidecar=sidecar,
+                hived=hived,
             )
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
@@ -1976,7 +1976,7 @@ def _serve_connection(
     team: str,
     tmux_window: str,
     tmux_window_id: str,
-    sidecar_started_at: str,
+    hived_started_at: str,
     read_timeout: float,
 ) -> None:
     global _INFLIGHT_REQUESTS
@@ -2005,7 +2005,7 @@ def _serve_connection(
                 team=team,
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
-                sidecar_started_at=sidecar_started_at,
+                hived_started_at=hived_started_at,
                 request=request if isinstance(request, dict) else {},
             )
             try:
@@ -2028,7 +2028,7 @@ def _serve_requests(
     team: str,
     tmux_window: str,
     tmux_window_id: str,
-    sidecar_started_at: str,
+    hived_started_at: str,
     timeout: float,
 ) -> bool:
     """Accept for up to ``timeout`` seconds, handling each request off-loop.
@@ -2036,8 +2036,8 @@ def _serve_requests(
     Handlers run on their own thread because their budgets differ by an order
     of magnitude: a delivery may hold the native transport for
     ``_send_request_timeout()`` while ``hive team`` / ``hive doctor`` give up
-    after ``SOCKET_READY_TIMEOUT`` and report a missing sidecar. Serving them
-    in accept order made one slow send fake the sidecar's death for every
+    after ``SOCKET_READY_TIMEOUT`` and report a missing hived. Serving them
+    in accept order made one slow send fake the hived's death for every
     short read behind it.
     """
     end = time.monotonic() + timeout
@@ -2061,10 +2061,10 @@ def _serve_requests(
                 "team": team,
                 "tmux_window": tmux_window,
                 "tmux_window_id": tmux_window_id,
-                "sidecar_started_at": sidecar_started_at,
+                "hived_started_at": hived_started_at,
                 "read_timeout": timeout,
             },
-            name="hive-sidecar-request",
+            name="hived-request",
             daemon=True,
         ).start()
     return not _SHUTDOWN.is_set()
@@ -2389,13 +2389,13 @@ def _write_registry_backfill(workspace: str, team: str) -> None:
     )
 
 
-def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
+def _hived_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
     from . import tmux
 
     from . import notify_debug
 
     _SHUTDOWN.clear()
-    sidecar_started_at = _now_iso()
+    hived_started_at = _now_iso()
     idle_notify: dict[str, dict[str, Any]] = {}
     notify_debug_state: dict[str, Any] = {}
     code_reexec_state: dict[str, Any] = {}
@@ -2406,18 +2406,18 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
     owner_token = f"{os.getpid()}:{time.monotonic_ns()}"
     notify_debug.emit(
         workspace,
-        "sidecar.start",
+        "hived.start",
         team=team,
         tmux_window=tmux_window,
         tmux_window_id=tmux_window_id,
-        startedAt=sidecar_started_at,
+        startedAt=hived_started_at,
     )
     inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env()
     server = _open_server_socket(workspace)
-    _write_sidecar_owner(
+    _write_hived_owner(
         workspace,
         pid=os.getpid(),
-        started_at=sidecar_started_at,
+        started_at=hived_started_at,
         token=owner_token,
     )
     _release_reexec_lock_fd(inherited_reexec_lock_fd)
@@ -2437,7 +2437,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 last_window_check = now
                 # The registry entry is the team's existence; the tmux window
                 # is only its display. A dead window no longer retires the
-                # sidecar (engines keep running headless) — a *missing*
+                # hived (engines keep running headless) — a *missing*
                 # registry file does (`hive delete` archives it). Corrupt or
                 # foreign-instance entries are not "missing": never retire on
                 # a read that might be wrong.
@@ -2454,7 +2454,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 try:
                     _codex_supervisor_tick(workspace, team)
                 except Exception:
-                    # Supervision must never take the sidecar down.
+                    # Supervision must never take the hived down.
                     pass
                 try:
                     _claude_supervisor_tick(workspace)
@@ -2463,16 +2463,16 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 try:
                     _write_registry_backfill(workspace, team)
                 except Exception:
-                    # Snapshot persistence must never take the sidecar down.
+                    # Snapshot persistence must never take the hived down.
                     pass
 
-            if now - last_owner_check >= SIDECAR_OWNER_CHECK_SECONDS:
+            if now - last_owner_check >= HIVED_OWNER_CHECK_SECONDS:
                 last_owner_check = now
                 foreign_pid = _foreign_owner_pid(workspace, owner_token)
                 if foreign_pid is not None:
                     notify_debug.emit(
                         workspace,
-                        "sidecar.retire_orphan",
+                        "hived.retire_orphan",
                         team=team,
                         tmux_window=tmux_window,
                         tmux_window_id=tmux_window_id,
@@ -2492,15 +2492,15 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 def _emit_reexec() -> None:
                     notify_debug.emit(
                         workspace,
-                        "sidecar.reexec",
+                        "hived.reexec",
                         team=team,
                         tmux_window=tmux_window,
                         tmux_window_id=tmux_window_id,
-                        oldHash=SIDECAR_BUILD_HASH,
+                        oldHash=HIVED_BUILD_HASH,
                         newHash=stale_hash,
                     )
 
-                replacement = _reexec_sidecar(
+                replacement = _reexec_hived(
                     workspace=workspace,
                     team=team,
                     tmux_window=tmux_window,
@@ -2525,7 +2525,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                     state=claude_view_state,
                 )
             except Exception:
-                # Border cosmetics must never take the sidecar down.
+                # Border cosmetics must never take the hived down.
                 pass
 
             if not _serve_requests(
@@ -2534,7 +2534,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 team=team,
                 tmux_window=tmux_window,
                 tmux_window_id=tmux_window_id,
-                sidecar_started_at=sidecar_started_at,
+                hived_started_at=hived_started_at,
                 timeout=IDLE_NOTIFY_TICK_SECONDS,
             ):
                 return
@@ -2562,8 +2562,8 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
         _cleanup_socket_if_owner(workspace, owner_token)
 
 
-def stop_sidecar(workspace: str) -> None:
-    _request_sidecar(workspace, {"action": "shutdown"}, timeout=SOCKET_READY_TIMEOUT)
+def stop_hived(workspace: str) -> None:
+    _request_hived(workspace, {"action": "shutdown"}, timeout=SOCKET_READY_TIMEOUT)
     deadline = time.monotonic() + SOCKET_READY_TIMEOUT
     while time.monotonic() < deadline:
         if not _socket_path(workspace).exists():
@@ -2573,4 +2573,4 @@ def stop_sidecar(workspace: str) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(_run_spawned_sidecar(sys.argv[1:]))
+    raise SystemExit(_run_spawned_hived(sys.argv[1:]))

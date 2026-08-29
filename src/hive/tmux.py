@@ -194,7 +194,7 @@ class ControlModeOutputMonitor:
             try:
                 self._run_once()
             except Exception:
-                # Best-effort monitor: fall back to retry rather than crashing sidecar.
+                # Best-effort monitor: fall back to retry rather than crashing hived.
                 pass
             if self._stop.is_set():
                 break
@@ -518,7 +518,7 @@ def set_pane_title(pane_id: str, title: str) -> None:
 
 
 # A claude member pane is an attach *viewer*: the human can switch it to
-# another bg session while the pane keeps its member tags. The sidecar's view
+# another bg session while the pane keeps its member tags. The hived's view
 # probe writes what is really on screen into `@hive-view` (empty while the
 # pane shows its own member), so the border reads "name -> what you are
 # actually looking at" without the format having to guess from the title.

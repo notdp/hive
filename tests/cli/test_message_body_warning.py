@@ -12,11 +12,11 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
     return str(path)
 
 
-def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
+def _patch_hived_requests(monkeypatch, team_obj, *, pending=None):
     if pending is None:
         pending = {}
 
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     def _resolve_live_agent(_team_name: str, agent_name: str):
         agent = team_obj.get(agent_name)
@@ -24,9 +24,9 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
             raise RuntimeError(f"agent '{agent_name}' is not alive")
         return team_obj, agent
 
-    monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
+    monkeypatch.setattr("hive.hived._resolve_live_agent", _resolve_live_agent)
     monkeypatch.setattr(
-        "hive.sidecar._agent_runtime_payload",
+        "hive.hived._agent_runtime_payload",
         lambda _pane_id, **_kw: {
             "alive": True,
             "turnPhase": "turn_closed",
@@ -44,7 +44,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         artifact: str = "",
         reply_to: str = "",
     ):
-        from hive.sidecar import _send_payload
+        from hive.hived import _send_payload
 
         try:
             return _send_payload(
@@ -60,7 +60,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None):
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    monkeypatch.setattr("hive.sidecar.request_send", _request_send)
+    monkeypatch.setattr("hive.hived.request_send", _request_send)
     return pending
 
 
@@ -97,7 +97,7 @@ def test_send_rejects_structured_body_for_new_root(runner, configure_hive_home, 
     team = _fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     body = "# Findings\n- item one\n- item two"
     result = runner.invoke(cli, ["send", "dodo", body, "--artifact", artifact])
@@ -118,7 +118,7 @@ def test_anchored_send_warns_for_fenced_block_body_but_still_delivers(runner, co
     team = _fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     body = "```diff\n+ one line\n```"
     result = runner.invoke(cli, ["send", "dodo", body])
@@ -143,7 +143,7 @@ def test_send_accepts_short_root_without_artifact(runner, configure_hive_home, m
     team = _fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "dodo", "ack: see #1234"])
 
@@ -161,7 +161,7 @@ def test_send_accepts_short_root_summary_with_artifact(runner, configure_hive_ho
     team = _fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "dodo", "ack: see #1234", "--artifact", artifact])
 

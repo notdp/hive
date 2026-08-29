@@ -9,7 +9,7 @@ description: Hive 编排协议。human 要发起多 agent 协作时手动调用�
 
 启动顺序：
 
-1. 当前窗口没绑 team 就先跑 `hive init`（把当前 pane 立为 orch、绑队、起 sidecar；不 spawn 任何人）。
+1. 当前窗口没绑 team 就先跑 `hive init`（把当前 pane 立为 orch、绑队、起 hived；不 spawn 任何人）。
 2. 跑 `/hive:hive` 取通信底座——收发消息、shell 安全、humanDirective 全按它走。本文件只写编排。
 3. `hive team` 确认 `self`；成员寻址一律 `<team>.<member>`。然后按需求开始拆解。
 

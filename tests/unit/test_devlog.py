@@ -28,6 +28,6 @@ def test_log_paths_are_workspace_run_paths(tmp_path):
     assert devlog.run_dir(workspace) == workspace / "run"
     assert devlog.log_paths(workspace) == {
         "notify": str(workspace / "run" / "notify.jsonl"),
-        "sidecar_stderr": str(workspace / "run" / "sidecar.stderr"),
+        "hived_stderr": str(workspace / "run" / "hived.stderr"),
         "cvim_dir": str(workspace / "run" / "cvim"),
     }

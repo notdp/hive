@@ -53,7 +53,7 @@ _HANDSHAKE_TIMEOUT = 5.0
 _CALL_TIMEOUT = 10.0
 
 # Worst-case local submission budget for one send_to_pane call (fresh daemon
-# handshake plus the turn/start RPC). The sidecar derives its request budgets
+# handshake plus the turn/start RPC). The hived derives its request budgets
 # from this so a valid slow acceptance can never outlive the caller's timeout.
 SUBMIT_TIMEOUT = _HANDSHAKE_TIMEOUT + _CALL_TIMEOUT
 _DAEMON_START_TIMEOUT = 8.0
@@ -654,7 +654,7 @@ def spawn_daemon(*, codex_bin: str = "codex", timeout: float = _DAEMON_START_TIM
     Shares the real CODEX_HOME (auth/model/permission defaults stay correct).
     ``start_new_session`` detaches it from the short-lived caller. The daemon
     is machine-level state: nothing in hive kills it when panes or teams go
-    away, and the sidecar re-spawns it if it dies while codex members live.
+    away, and the hived re-spawns it if it dies while codex members live.
     Returns False if the daemon fails to bind or dies before becoming ready.
     """
     sock = shared_socket_path()
@@ -741,7 +741,7 @@ def _set_cooldown() -> None:
 
 
 def connect() -> bool:
-    """Eagerly bring hive's client online (spawn time / sidecar request)."""
+    """Eagerly bring hive's client online (spawn time / hived request)."""
     return _shared_client() is not None
 
 

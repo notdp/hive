@@ -76,7 +76,7 @@ def test_plugin_enable_notify_is_pure_toggle_without_files_or_hooks(runner, conf
 
     assert enabled.exit_code == 0
     assert "Plugin 'notify' enabled." in enabled.output
-    # notify plugin is a pure toggle: the sidecar idle watcher reads its
+    # notify plugin is a pure toggle: the hived idle watcher reads its
     # enabled state. Enable installs no commands, skills, or hooks.
     assert "commands:" not in enabled.output
     assert "skills:" not in enabled.output

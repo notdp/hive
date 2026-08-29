@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-import hive.sidecar as sidecar
+import hive.hived as hived
 
 
 @pytest.fixture
 def short_workspace():
-    # AF_UNIX sun_path caps near 104 bytes: the sidecar socket cannot live
+    # AF_UNIX sun_path caps near 104 bytes: the hived socket cannot live
     # under pytest's long tmp_path.
     base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
     d = Path(tempfile.mkdtemp(prefix="hive-sq-", dir=base))
@@ -25,13 +25,13 @@ def _serve_in_background(server, workspace: str, *, timeout: float) -> tuple[thr
     served: dict = {}
 
     def _serve() -> None:
-        served["keep_running"] = sidecar._serve_requests(
+        served["keep_running"] = hived._serve_requests(
             server=server,
             workspace=workspace,
             team="team-a",
             tmux_window="dev:3",
             tmux_window_id="@99",
-            sidecar_started_at="2026-01-01T00:00:00Z",
+            hived_started_at="2026-01-01T00:00:00Z",
             timeout=timeout,
         )
 
@@ -42,7 +42,7 @@ def _serve_in_background(server, workspace: str, *, timeout: float) -> tuple[thr
 
 def test_serve_requests_answers_a_read_while_a_send_holds_the_transport(monkeypatch, short_workspace):
     # C1: delivery may hold the native transport for ~52s while `hive team`
-    # gives up after 2s and reports "no sidecar". Handlers run off the accept
+    # gives up after 2s and reports "no hived". Handlers run off the accept
     # loop so the short read is answered immediately.
     started = threading.Event()
     release = threading.Event()
@@ -54,11 +54,11 @@ def test_serve_requests_answers_a_read_while_a_send_holds_the_transport(monkeypa
             return {"ok": True, "slow": True}, True
         return {"ok": True, "fast": True}, True
 
-    monkeypatch.setattr(sidecar, "_handle_request", _handle)
+    monkeypatch.setattr(hived, "_handle_request", _handle)
     workspace = short_workspace
-    server = sidecar._open_server_socket(workspace)
+    server = hived._open_server_socket(workspace)
     slow_client = threading.Thread(
-        target=lambda: sidecar._request_sidecar(workspace, {"action": "send"}, timeout=10.0),
+        target=lambda: hived._request_hived(workspace, {"action": "send"}, timeout=10.0),
         daemon=True,
     )
     serve_thread, served = _serve_in_background(server, workspace, timeout=2.0)
@@ -67,10 +67,10 @@ def test_serve_requests_answers_a_read_while_a_send_holds_the_transport(monkeypa
         assert started.wait(2.0)
 
         began = time.monotonic()
-        response = sidecar._request_sidecar(
+        response = hived._request_hived(
             workspace,
             {"action": "team-runtime"},
-            timeout=sidecar.SOCKET_READY_TIMEOUT,
+            timeout=hived.SOCKET_READY_TIMEOUT,
         )
         elapsed = time.monotonic() - began
 
@@ -81,108 +81,108 @@ def test_serve_requests_answers_a_read_while_a_send_holds_the_transport(monkeypa
         slow_client.join(timeout=5.0)
         serve_thread.join(timeout=5.0)
         server.close()
-        sidecar._cleanup_socket(workspace)
+        hived._cleanup_socket(workspace)
 
     assert served["keep_running"] is True
-    assert sidecar._requests_in_flight() is False
+    assert hived._requests_in_flight() is False
 
 
 def test_serve_requests_still_retires_the_loop_on_shutdown(monkeypatch, short_workspace):
-    monkeypatch.setattr(sidecar, "_handle_request", lambda **_kwargs: ({"ok": True}, False))
+    monkeypatch.setattr(hived, "_handle_request", lambda **_kwargs: ({"ok": True}, False))
     workspace = short_workspace
-    server = sidecar._open_server_socket(workspace)
+    server = hived._open_server_socket(workspace)
     serve_thread, served = _serve_in_background(server, workspace, timeout=1.0)
     try:
-        response = sidecar._request_sidecar(workspace, {"action": "shutdown"}, timeout=2.0)
+        response = hived._request_hived(workspace, {"action": "shutdown"}, timeout=2.0)
         serve_thread.join(timeout=5.0)
 
         assert response == {"ok": True}
         assert served["keep_running"] is False
     finally:
-        sidecar._SHUTDOWN.clear()
+        hived._SHUTDOWN.clear()
         server.close()
-        sidecar._cleanup_socket(workspace)
+        hived._cleanup_socket(workspace)
 
 
 def test_socket_alive_requires_matching_api_version(monkeypatch):
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "request_ping",
         lambda *_args, **_kwargs: {"ok": True},
     )
-    assert sidecar._socket_alive("/tmp/ws") is False
+    assert hived._socket_alive("/tmp/ws") is False
 
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "request_ping",
-        lambda *_args, **_kwargs: {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
+        lambda *_args, **_kwargs: {"ok": True, "apiVersion": hived.HIVED_API_VERSION},
     )
-    assert sidecar._socket_alive("/tmp/ws") is True
+    assert hived._socket_alive("/tmp/ws") is True
 
 
-def test_sidecar_identity_matches_team_and_ignores_window():
-    assert sidecar._sidecar_identity_matches(
-        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
+def test_hived_identity_matches_team_and_ignores_window():
+    assert hived._hived_identity_matches(
+        {"ok": True, "apiVersion": hived.HIVED_API_VERSION},
         team="team-a",
     ) is False
-    assert sidecar._sidecar_identity_matches(
-        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-b"},
+    assert hived._hived_identity_matches(
+        {"ok": True, "apiVersion": hived.HIVED_API_VERSION, "team": "team-b"},
         team="team-a",
     ) is False
-    assert sidecar._sidecar_identity_matches(
+    assert hived._hived_identity_matches(
         {
             "ok": True,
-            "apiVersion": sidecar.SIDECAR_API_VERSION,
+            "apiVersion": hived.HIVED_API_VERSION,
             "buildHash": "stale",
             "team": "team-a",
         },
         team="team-a",
     ) is False
     # The window is display, not identity: a moved/killed/recreated window
-    # must not bounce a healthy sidecar.
-    assert sidecar._sidecar_identity_matches(
+    # must not bounce a healthy hived.
+    assert hived._hived_identity_matches(
         {
             "ok": True,
-            "apiVersion": sidecar.SIDECAR_API_VERSION,
-            "buildHash": sidecar.SIDECAR_BUILD_HASH,
+            "apiVersion": hived.HIVED_API_VERSION,
+            "buildHash": hived.HIVED_BUILD_HASH,
             "team": "team-a",
             "tmuxWindowId": "@9",
         },
         team="team-a",
     ) is True
-    assert sidecar._sidecar_identity_matches(
+    assert hived._hived_identity_matches(
         {
             "ok": True,
-            "apiVersion": sidecar.SIDECAR_API_VERSION,
-            "buildHash": sidecar.SIDECAR_BUILD_HASH,
+            "apiVersion": hived.HIVED_API_VERSION,
+            "buildHash": hived.HIVED_BUILD_HASH,
             "team": "team-a",
         },
         team="team-a",
     ) is True
 
 
-def test_handle_request_ping_returns_sidecar_identity():
-    response, keep_running = sidecar._handle_request(
+def test_handle_request_ping_returns_hived_identity():
+    response, keep_running = hived._handle_request(
         workspace="/tmp/ws",
         team="team-a",
         tmux_window="dev:3",
         tmux_window_id="@99",
-        sidecar_started_at="2026-04-17T00:00:00Z",
+        hived_started_at="2026-04-17T00:00:00Z",
         request={"action": "ping"},
     )
 
     assert keep_running is True
     assert response == {
         "ok": True,
-        "apiVersion": sidecar.SIDECAR_API_VERSION,
-        "buildHash": sidecar.SIDECAR_BUILD_HASH,
+        "apiVersion": hived.HIVED_API_VERSION,
+        "buildHash": hived.HIVED_BUILD_HASH,
         "team": "team-a",
         "tmuxWindow": "dev:3",
         "tmuxWindowId": "@99",
-        "sidecar": {
-            "pid": response["sidecar"]["pid"],
+        "hived": {
+            "pid": response["hived"]["pid"],
             "started_at": "2026-04-17T00:00:00Z",
-            "code_hash": sidecar.SIDECAR_BUILD_HASH,
+            "code_hash": hived.HIVED_BUILD_HASH,
         },
     }
 
@@ -192,12 +192,12 @@ def test_handle_request_connect_codex_brings_2nd_client_online(monkeypatch):
     connected: list[bool] = []
     monkeypatch.setattr(cas, "connect", lambda: connected.append(True) or True)
 
-    response, keep_running = sidecar._handle_request(
+    response, keep_running = hived._handle_request(
         workspace="/tmp/ws",
         team="team-a",
         tmux_window="dev:3",
         tmux_window_id="@99",
-        sidecar_started_at="2026-04-17T00:00:00Z",
+        hived_started_at="2026-04-17T00:00:00Z",
         request={"action": "connect-codex"},
     )
 
@@ -211,12 +211,12 @@ def test_handle_request_connect_grok_brings_2nd_client_online(monkeypatch):
     connected: list[str] = []
     monkeypatch.setattr(grok_leader, "connect_pane", lambda pane: connected.append(pane) or True)
 
-    response, keep_running = sidecar._handle_request(
+    response, keep_running = hived._handle_request(
         workspace="/tmp/ws",
         team="team-a",
         tmux_window="dev:3",
         tmux_window_id="@99",
-        sidecar_started_at="2026-04-17T00:00:00Z",
+        hived_started_at="2026-04-17T00:00:00Z",
         request={"action": "connect-grok", "pane": "%5"},
     )
 
@@ -225,7 +225,7 @@ def test_handle_request_connect_grok_brings_2nd_client_online(monkeypatch):
     assert connected == ["%5"]
 
 
-def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
+def test_start_hived_spawns_fresh_python_process(monkeypatch):
     captured: dict[str, object] = {}
     workspace = "/tmp/ws"
 
@@ -241,30 +241,30 @@ def test_start_sidecar_spawns_fresh_python_process(monkeypatch):
         captured["close_fds"] = kwargs.get("close_fds")
         return _FakeProcess()
 
-    monkeypatch.setattr(sidecar.sys, "executable", "/tmp/fake-python")
-    monkeypatch.setattr(sidecar.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(hived.sys, "executable", "/tmp/fake-python")
+    monkeypatch.setattr(hived.subprocess, "Popen", _fake_popen)
 
-    pid = sidecar._start_sidecar(workspace, "team-a", "dev:3", "@99")
+    pid = hived._start_hived(workspace, "team-a", "dev:3", "@99")
 
     assert pid == 4321
     assert captured["command"] == [
         "/tmp/fake-python",
         "-m",
-        "hive.sidecar",
-        "--sidecar",
+        "hive.hived",
+        "--hived",
         workspace,
         "team-a",
         "dev:3",
         "@99",
     ]
-    assert captured["stdin_name"] == sidecar.os.devnull
-    assert captured["stdout_name"] == sidecar.os.devnull
-    assert captured["stderr_name"] == str(sidecar.devlog.sidecar_stderr_path(workspace))
+    assert captured["stdin_name"] == hived.os.devnull
+    assert captured["stdout_name"] == hived.os.devnull
+    assert captured["stderr_name"] == str(hived.devlog.hived_stderr_path(workspace))
     assert captured["start_new_session"] is True
     assert captured["close_fds"] is True
 
 
-def test_run_spawned_sidecar_ignores_sigint_and_runs_loop(monkeypatch):
+def test_run_spawned_hived_ignores_sigint_and_runs_loop(monkeypatch):
     captured: dict[str, object] = {}
 
     def _fake_signal(sig, handler):
@@ -273,57 +273,57 @@ def test_run_spawned_sidecar_ignores_sigint_and_runs_loop(monkeypatch):
     def _fake_loop(workspace, team, tmux_window, tmux_window_id):
         captured["loop_args"] = (workspace, team, tmux_window, tmux_window_id)
 
-    monkeypatch.setattr(sidecar.signal, "signal", _fake_signal)
-    monkeypatch.setattr(sidecar, "_sidecar_loop", _fake_loop)
+    monkeypatch.setattr(hived.signal, "signal", _fake_signal)
+    monkeypatch.setattr(hived, "_hived_loop", _fake_loop)
 
-    exit_code = sidecar._run_spawned_sidecar(["--sidecar", "/tmp/ws", "team-a", "dev:3", "@99"])
+    exit_code = hived._run_spawned_hived(["--hived", "/tmp/ws", "team-a", "dev:3", "@99"])
 
     assert exit_code == 0
-    assert captured["signal"] == (sidecar.signal.SIGINT, sidecar.signal.SIG_IGN)
+    assert captured["signal"] == (hived.signal.SIGINT, hived.signal.SIG_IGN)
     assert captured["loop_args"] == ("/tmp/ws", "team-a", "dev:3", "@99")
 
 
 def test_stale_disk_build_hash_requires_stable_changed_hash(monkeypatch):
     values = iter(["new-hash", "new-hash"])
-    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: next(values))
+    monkeypatch.setattr(hived, "_compute_build_hash", lambda: next(values))
     state: dict[str, object] = {}
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
+    assert hived._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert state["candidate_hash"] == "new-hash"
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=14.9) is None
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=15.0) == "new-hash"
+    assert hived._stale_disk_build_hash_for_reexec(state, now=14.9) is None
+    assert hived._stale_disk_build_hash_for_reexec(state, now=15.0) == "new-hash"
 
 
 def test_stale_disk_build_hash_clears_candidate_when_code_matches(monkeypatch):
     state: dict[str, object] = {"candidate_hash": "new-hash"}
-    monkeypatch.setattr(sidecar, "_compute_build_hash", lambda: sidecar.SIDECAR_BUILD_HASH)
+    monkeypatch.setattr(hived, "_compute_build_hash", lambda: hived.HIVED_BUILD_HASH)
 
-    assert sidecar._stale_disk_build_hash_for_reexec(state, now=10.0) is None
+    assert hived._stale_disk_build_hash_for_reexec(state, now=10.0) is None
     assert "candidate_hash" not in state
 
 
 def test_try_acquire_reexec_lock_returns_inheritable_lock_fd(tmp_path):
-    lock_fd = sidecar._try_acquire_reexec_lock(str(tmp_path))
+    lock_fd = hived._try_acquire_reexec_lock(str(tmp_path))
     try:
         assert lock_fd is not None
         assert os.get_inheritable(lock_fd) is True
     finally:
-        sidecar._release_reexec_lock_fd(lock_fd)
+        hived._release_reexec_lock_fd(lock_fd)
 
 
 def test_try_acquire_reexec_lock_returns_none_when_lock_is_busy(tmp_path):
-    lock_path = sidecar._lock_path(str(tmp_path))
+    lock_path = hived._lock_path(str(tmp_path))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(held_fd, fcntl.LOCK_EX)
-        assert sidecar._try_acquire_reexec_lock(str(tmp_path)) is None
+        assert hived._try_acquire_reexec_lock(str(tmp_path)) is None
     finally:
         fcntl.flock(held_fd, fcntl.LOCK_UN)
         os.close(held_fd)
 
 
-def test_reexec_sidecar_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_path):
+def test_reexec_hived_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_path):
     calls: list[tuple] = []
 
     class _Server:
@@ -335,22 +335,22 @@ def test_reexec_sidecar_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_p
             calls.append(("monitor.stop",))
 
     def _execv(executable, argv):
-        calls.append(("execv", executable, argv, sidecar.os.environ.get(sidecar._SIDECAR_REEXEC_LOCK_ENV)))
+        calls.append(("execv", executable, argv, hived.os.environ.get(hived._HIVED_REEXEC_LOCK_ENV)))
         raise SystemExit(0)
 
-    monkeypatch.delenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, raising=False)
-    monkeypatch.setattr(sidecar.sys, "executable", "/tmp/fake-python")
-    monkeypatch.setattr(sidecar.os, "execv", _execv)
+    monkeypatch.delenv(hived._HIVED_REEXEC_LOCK_ENV, raising=False)
+    monkeypatch.setattr(hived.sys, "executable", "/tmp/fake-python")
+    monkeypatch.setattr(hived.os, "execv", _execv)
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "_try_acquire_reexec_lock",
         lambda workspace: calls.append(("lock", workspace)) or 42,
     )
-    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
-    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(hived, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(hived, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
 
     with pytest.raises(SystemExit):
-        sidecar._reexec_sidecar(
+        hived._reexec_hived(
             workspace=str(tmp_path),
             team="team-a",
             tmux_window="dev:3",
@@ -370,8 +370,8 @@ def test_reexec_sidecar_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_p
             [
                 "/tmp/fake-python",
                 "-m",
-                "hive.sidecar",
-                "--sidecar",
+                "hive.hived",
+                "--hived",
                 str(tmp_path),
                 "team-a",
                 "dev:3",
@@ -381,10 +381,10 @@ def test_reexec_sidecar_stops_monitor_closes_socket_and_execs(monkeypatch, tmp_p
         ),
         ("release", 42),
     ]
-    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+    assert hived._HIVED_REEXEC_LOCK_ENV not in hived.os.environ
 
 
-def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
+def test_reexec_hived_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
     calls: list[str] = []
 
     class _Server:
@@ -395,10 +395,10 @@ def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
         def stop(self):
             calls.append("monitor.stop")
 
-    monkeypatch.setattr(sidecar, "_try_acquire_reexec_lock", lambda _workspace: None)
-    monkeypatch.setattr(sidecar.os, "execv", lambda *_args: calls.append("execv"))
+    monkeypatch.setattr(hived, "_try_acquire_reexec_lock", lambda _workspace: None)
+    monkeypatch.setattr(hived.os, "execv", lambda *_args: calls.append("execv"))
 
-    replacement = sidecar._reexec_sidecar(
+    replacement = hived._reexec_hived(
         workspace=str(tmp_path),
         team="team-a",
         tmux_window="dev:3",
@@ -411,9 +411,9 @@ def test_reexec_sidecar_skips_when_reexec_lock_is_busy(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_reexec_sidecar_rebinds_and_keeps_serving_when_execv_fails(monkeypatch, tmp_path):
+def test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails(monkeypatch, tmp_path):
     # execv failing after the teardown used to punch through the loop and
-    # leave the window with no sidecar *and* no socket.
+    # leave the window with no hived *and* no socket.
     calls: list[tuple] = []
 
     class _Server:
@@ -432,18 +432,18 @@ def test_reexec_sidecar_rebinds_and_keeps_serving_when_execv_fails(monkeypatch, 
 
     rebound = object()
     monitor = _Monitor()
-    monkeypatch.delenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, raising=False)
-    monkeypatch.setattr(sidecar.os, "execv", _execv)
-    monkeypatch.setattr(sidecar, "_try_acquire_reexec_lock", lambda _workspace: 42)
-    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
-    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.delenv(hived._HIVED_REEXEC_LOCK_ENV, raising=False)
+    monkeypatch.setattr(hived.os, "execv", _execv)
+    monkeypatch.setattr(hived, "_try_acquire_reexec_lock", lambda _workspace: 42)
+    monkeypatch.setattr(hived, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(hived, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "_open_server_socket",
         lambda workspace: calls.append(("open", workspace)) or rebound,
     )
 
-    replacement = sidecar._reexec_sidecar(
+    replacement = hived._reexec_hived(
         workspace=str(tmp_path),
         team="team-a",
         tmux_window="dev:3",
@@ -455,29 +455,29 @@ def test_reexec_sidecar_rebinds_and_keeps_serving_when_execv_fails(monkeypatch, 
     assert replacement is rebound
     assert ("open", str(tmp_path)) in calls
     assert ("monitor.start",) in calls
-    assert sidecar._OUTPUT_BUSY_MONITOR is monitor
-    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
-    sidecar._set_output_busy_monitor(None)
+    assert hived._OUTPUT_BUSY_MONITOR is monitor
+    assert hived._HIVED_REEXEC_LOCK_ENV not in hived.os.environ
+    hived._set_output_busy_monitor(None)
 
 
 def test_cleanup_socket_if_owner_skips_foreign_owner(monkeypatch, tmp_path):
     calls: list[tuple] = []
-    sidecar._write_sidecar_owner(
+    hived._write_hived_owner(
         str(tmp_path),
         pid=os.getpid() + 1000,
         started_at="2026-04-28T00:00:00Z",
         token="foreign",
     )
-    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(hived, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
 
-    sidecar._cleanup_socket_if_owner(str(tmp_path), "mine")
+    hived._cleanup_socket_if_owner(str(tmp_path), "mine")
 
     assert calls == []
 
 
-def test_sidecar_loop_retires_orphan_before_idle_tick(monkeypatch, tmp_path):
+def test_hived_loop_retires_orphan_before_idle_tick(monkeypatch, tmp_path):
     calls: list[tuple] = []
-    real_write_owner = sidecar._write_sidecar_owner
+    real_write_owner = hived._write_hived_owner
 
     class _Server:
         def close(self):
@@ -490,19 +490,19 @@ def test_sidecar_loop_retires_orphan_before_idle_tick(monkeypatch, tmp_path):
     def _emit(_workspace, event, **kwargs):
         calls.append(("emit", event, kwargs))
 
-    monkeypatch.setattr(sidecar, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
-    monkeypatch.setattr(sidecar, "_write_sidecar_owner", _write_then_steal)
-    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
-    monkeypatch.setattr(sidecar, "_is_tmux_window_alive", lambda _tmux_window_id: True)
-    monkeypatch.setattr(sidecar, "_stale_disk_build_hash_for_reexec", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(sidecar, "_serve_requests", lambda **_kwargs: calls.append(("serve",)) or True)
-    monkeypatch.setattr(sidecar, "_idle_notify_tick", lambda **_kwargs: calls.append(("idle",)))
-    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(hived, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
+    monkeypatch.setattr(hived, "_write_hived_owner", _write_then_steal)
+    monkeypatch.setattr(hived, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(hived, "_is_tmux_window_alive", lambda _tmux_window_id: True)
+    monkeypatch.setattr(hived, "_stale_disk_build_hash_for_reexec", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hived, "_serve_requests", lambda **_kwargs: calls.append(("serve",)) or True)
+    monkeypatch.setattr(hived, "_idle_notify_tick", lambda **_kwargs: calls.append(("idle",)))
+    monkeypatch.setattr(hived, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
     monkeypatch.setattr("hive.notify_debug.emit", _emit)
 
-    sidecar._sidecar_loop(str(tmp_path), "team-a", "dev:3", "@99")
+    hived._hived_loop(str(tmp_path), "team-a", "dev:3", "@99")
 
-    retire_events = [call for call in calls if call[0] == "emit" and call[1] == "sidecar.retire_orphan"]
+    retire_events = [call for call in calls if call[0] == "emit" and call[1] == "hived.retire_orphan"]
     assert retire_events
     assert retire_events[0][2]["currentPid"] == os.getpid()
     assert retire_events[0][2]["socketPid"] == os.getpid() + 1
@@ -512,20 +512,20 @@ def test_sidecar_loop_retires_orphan_before_idle_tick(monkeypatch, tmp_path):
     assert ("server.close",) in calls
 
 
-def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypatch, tmp_path):
+def test_hived_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypatch, tmp_path):
     calls: list[tuple] = []
 
     class _Server:
         def close(self):
             calls.append(("server.close",))
 
-    monkeypatch.setenv(sidecar._SIDECAR_REEXEC_LOCK_ENV, "77")
-    monkeypatch.setattr(sidecar, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
-    monkeypatch.setattr(sidecar, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
-    monkeypatch.setattr(sidecar, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
-    monkeypatch.setattr(sidecar, "_is_tmux_window_alive", lambda _tmux_window_id: False)
+    monkeypatch.setenv(hived._HIVED_REEXEC_LOCK_ENV, "77")
+    monkeypatch.setattr(hived, "_open_server_socket", lambda workspace: calls.append(("open", workspace)) or _Server())
+    monkeypatch.setattr(hived, "_release_reexec_lock_fd", lambda fd: calls.append(("release", fd)))
+    monkeypatch.setattr(hived, "_cleanup_socket", lambda workspace: calls.append(("cleanup", workspace)))
+    monkeypatch.setattr(hived, "_is_tmux_window_alive", lambda _tmux_window_id: False)
 
-    sidecar._sidecar_loop(str(tmp_path), "team-a", "", "")
+    hived._hived_loop(str(tmp_path), "team-a", "", "")
 
     assert calls == [
         ("open", str(tmp_path)),
@@ -534,7 +534,7 @@ def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypa
         ("server.close",),
         ("cleanup", str(tmp_path)),
     ]
-    assert sidecar._SIDECAR_REEXEC_LOCK_ENV not in sidecar.os.environ
+    assert hived._HIVED_REEXEC_LOCK_ENV not in hived.os.environ
 
 
 # --- request budgets (VAL fail-r1 finding 1) ---
@@ -543,7 +543,7 @@ def test_sidecar_loop_releases_inherited_reexec_lock_after_socket_ready(monkeypa
 def test_send_request_budget_covers_native_submission():
     """The CLI socket budget is strictly longer than the worst-case native
     transport submission: a valid slow acceptance must never surface as
-    `sidecar unavailable`."""
+    `hived unavailable`."""
     from hive.adapters import claude_sessions, codex_app_server, grok_leader
 
     native = max(
@@ -551,11 +551,11 @@ def test_send_request_budget_covers_native_submission():
         codex_app_server.SUBMIT_TIMEOUT,
         grok_leader.SUBMIT_TIMEOUT,
     )
-    assert sidecar._send_request_timeout() > native
+    assert hived._send_request_timeout() > native
 
 
 def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatch):
-    """A sidecar that answers after a native-budget-scale delay still gets its
+    """A hived that answers after a native-budget-scale delay still gets its
     truthful queued response back to the CLI (no duplicate-inviting None)."""
     import os
     import shutil
@@ -570,17 +570,17 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
     base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
     run_dir = Path(tempfile.mkdtemp(prefix="hsq", dir=base))
     workspace = tmp_path / "ws"
-    monkeypatch.setattr(sidecar, "_run_dir", lambda _ws: run_dir)
+    monkeypatch.setattr(hived, "_run_dir", lambda _ws: run_dir)
 
     # shrink every budget component so the test runs in <1s while keeping the
     # invariant shape: delay < derived budget
     monkeypatch.setattr("hive.adapters.claude_sessions.SUBMIT_TIMEOUT", 0.6)
     monkeypatch.setattr("hive.adapters.codex_app_server.SUBMIT_TIMEOUT", 0.1)
     monkeypatch.setattr("hive.adapters.grok_leader.SUBMIT_TIMEOUT", 0.2)
-    monkeypatch.setattr(sidecar, "REQUEST_SLACK", 0.5)
+    monkeypatch.setattr(hived, "REQUEST_SLACK", 0.5)
 
     srv = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
-    srv.bind(str(run_dir / "sidecar.sock"))
+    srv.bind(str(run_dir / "hived.sock"))
     srv.listen(1)
 
     def _slow_reply():
@@ -593,7 +593,7 @@ def test_request_send_survives_delayed_but_valid_acceptance(tmp_path, monkeypatc
 
     threading.Thread(target=_slow_reply, daemon=True).start()
     try:
-        response = sidecar.request_send(
+        response = hived.request_send(
             str(workspace),
             team="t",
             sender_agent="a",

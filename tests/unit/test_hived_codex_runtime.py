@@ -1,4 +1,4 @@
-"""Unit tests for the codex app-server runtime path in the sidecar.
+"""Unit tests for the codex app-server runtime path in the hived.
 
 Covers the field mapping from a daemon ThreadRuntime to the team-runtime
 payload, and the session-id best-effort resolver. The socket/daemon themselves
@@ -6,7 +6,7 @@ are mocked — live behavior is the real-machine smoke's job.
 """
 import pytest
 
-import hive.sidecar as sidecar
+import hive.hived as hived
 from hive.adapters.codex_app_server import ThreadRuntime
 
 pytestmark = pytest.mark.unit
@@ -17,7 +17,7 @@ def test_codex_app_server_runtime_maps_fields(monkeypatch):
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: rt
     )
-    out = sidecar._codex_app_server_runtime("%5")
+    out = hived._codex_app_server_runtime("%5")
     assert out["busy"] is True
     assert out["turnPhase"] == "tool_open"
     assert out["inputState"] == "ready"
@@ -28,7 +28,7 @@ def test_codex_app_server_runtime_none_without_daemon(monkeypatch):
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: None
     )
-    assert sidecar._codex_app_server_runtime("%5") is None
+    assert hived._codex_app_server_runtime("%5") is None
 
 
 def test_codex_app_server_runtime_waiting_user(monkeypatch):
@@ -36,7 +36,7 @@ def test_codex_app_server_runtime_waiting_user(monkeypatch):
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.runtime_for_pane", lambda _p: rt
     )
-    out = sidecar._codex_app_server_runtime("%5")
+    out = hived._codex_app_server_runtime("%5")
     assert out["inputState"] == "waiting_user"
     assert out["inputReason"] == "app_server_active_flag"
 
@@ -54,7 +54,7 @@ def test_doctor_verbose_reports_codex_daemon(monkeypatch, tmp_path):
         )),
     )
     monkeypatch.setattr(
-        sidecar, "_member_runtime_payload",
+        hived, "_member_runtime_payload",
         lambda pane_id, role: {"alive": True, "_cli": "codex"},
     )
     monkeypatch.setattr(
@@ -65,7 +65,7 @@ def test_doctor_verbose_reports_codex_daemon(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.thread_id_for_pane", lambda _p: "tid-5"
     )
-    diag = sidecar._doctor_payload(str(tmp_path), "t", "a", verbose=True)
+    diag = hived._doctor_payload(str(tmp_path), "t", "a", verbose=True)
     assert diag["codexDaemon"] == {
         "socket": "/x/hive-shared.sock",
         "alive": True,

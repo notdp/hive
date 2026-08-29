@@ -5,14 +5,14 @@ from types import SimpleNamespace
 from hive.adapters.base import GateResult
 from hive import bus
 from hive.cli import cli
-import hive.sidecar as sidecar
+import hive.hived as hived
 from hive import tmux
 
 
 def _patch_runtime(monkeypatch, runtime_payload):
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
     monkeypatch.setattr(
-        "hive.sidecar.request_team_runtime",
+        "hive.hived.request_team_runtime",
         lambda _ws, *, team: {"ok": True, "team": team, **runtime_payload},
     )
 
@@ -56,20 +56,20 @@ def test_status_exposes_lead_session_id_via_daemon(runner, configure_hive_home, 
     assert orch["turnPhase"] == "turn_closed"
 
 
-def test_team_starts_sidecar_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_team_starts_hived_before_runtime_lookup(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     assert runner.invoke(cli, ["create", "team-status", "--workspace", str(workspace)]).exit_code == 0
 
     calls: list[tuple[str, str, str, str]] = []
 
-    def _fake_ensure_sidecar(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
+    def _fake_ensure_hived(workspace_arg: str, team: str, tmux_window: str, tmux_window_id: str):
         calls.append((workspace_arg, team, tmux_window, tmux_window_id))
         return 4321
 
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", _fake_ensure_sidecar)
+    monkeypatch.setattr("hive.hived.ensure_hived", _fake_ensure_hived)
     monkeypatch.setattr(
-        "hive.sidecar.request_team_runtime",
+        "hive.hived.request_team_runtime",
         lambda _ws, *, team: {"ok": True, "team": team, "members": {"orch": {"alive": True}}},
     )
 
@@ -111,7 +111,7 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     configure_hive_home()
-    sidecar._RUNTIME_SNAPSHOTS.clear()
+    hived._RUNTIME_SNAPSHOTS.clear()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -175,12 +175,12 @@ def test_team_runtime_keeps_distinct_claude_sessions_for_same_window(
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", fake_team))
     monkeypatch.setattr("hive.cli._discover_tmux_binding", lambda: {"team": "team-x", "agent": "orch"})
     monkeypatch.setattr("hive.team.Team.load", lambda _team_name: fake_team)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
     monkeypatch.setattr(
-        "hive.sidecar.request_team_runtime",
-        lambda _ws, *, team: sidecar._team_runtime_payload(team),
+        "hive.hived.request_team_runtime",
+        lambda _ws, *, team: hived._team_runtime_payload(team),
     )
-    monkeypatch.setattr("hive.sidecar.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
+    monkeypatch.setattr("hive.hived.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_kw: "")
     monkeypatch.setattr("hive.adapters.base.check_input_gate", lambda _path: GateResult("clear", ""))
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _pane_id: True)

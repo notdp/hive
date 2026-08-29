@@ -16,13 +16,13 @@ def _write_artifact(tmp_path, name: str = "details.md", content: str = "details"
     return str(path)
 
 
-def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None, runtime=None):
+def _patch_hived_requests(monkeypatch, team_obj, *, pending=None, runtime=None):
     if pending is None:
         pending = {}
     if runtime is None:
         runtime = {"alive": True, "turnPhase": "turn_closed"}
 
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     def _resolve_live_agent(_team_name: str, agent_name: str):
         agent = team_obj.get(agent_name)
@@ -30,14 +30,14 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None, runtime=None
             raise RuntimeError(f"agent '{agent_name}' is not alive")
         return team_obj, agent
 
-    monkeypatch.setattr("hive.sidecar._resolve_live_agent", _resolve_live_agent)
+    monkeypatch.setattr("hive.hived._resolve_live_agent", _resolve_live_agent)
     monkeypatch.setattr(
-        "hive.sidecar._agent_runtime_payload",
+        "hive.hived._agent_runtime_payload",
         lambda _pane_id, **_kw: dict(runtime),
     )
 
     def _request_team_runtime(_workspace: str, *, team: str):
-        from hive.sidecar import _agent_runtime_payload
+        from hive.hived import _agent_runtime_payload
 
         members_payload = {}
         member_map = getattr(team_obj, "members", None)
@@ -62,7 +62,7 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None, runtime=None
         artifact: str = "",
         reply_to: str = "",
     ):
-        from hive.sidecar import _send_payload
+        from hive.hived import _send_payload
 
         try:
             return _send_payload(
@@ -78,8 +78,8 @@ def _patch_sidecar_requests(monkeypatch, team_obj, *, pending=None, runtime=None
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    monkeypatch.setattr("hive.sidecar.request_send", _request_send)
-    monkeypatch.setattr("hive.sidecar.request_team_runtime", _request_team_runtime)
+    monkeypatch.setattr("hive.hived.request_send", _request_send)
+    monkeypatch.setattr("hive.hived.request_team_runtime", _request_team_runtime)
     return pending
 
 
@@ -118,7 +118,7 @@ def test_send_injects_hive_envelope_into_target_pane(runner, configure_hive_home
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(
         cli,
@@ -175,7 +175,7 @@ def test_send_does_not_defer_root_send_when_turn_phase_is_unknown(runner, config
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
-    _patch_sidecar_requests(
+    _patch_hived_requests(
         monkeypatch, team, runtime={"alive": True, "turnPhase": "assistant_text_idle"}
     )
 
@@ -217,12 +217,12 @@ def _wire_claude_send(monkeypatch, team, *, busy):
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
     monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: SimpleNamespace(name="claude"))
     monkeypatch.setattr("hive.cli.resolve_session_id_for_pane", lambda _pane_id, profile=None: "sess-1")
-    monkeypatch.setattr("hive.sidecar._claude_registry_busy", lambda _pane_id: busy)
-    _patch_sidecar_requests(monkeypatch, team)
+    monkeypatch.setattr("hive.hived._claude_registry_busy", lambda _pane_id: busy)
+    _patch_hived_requests(monkeypatch, team)
 
 
 def test_send_to_a_busy_claude_member_delivers_now(runner, configure_hive_home, monkeypatch, tmp_path):
-    """No sidecar hold: `priority: next` rides the receiver's own queue."""
+    """No hived hold: `priority: next` rides the receiver's own queue."""
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -284,7 +284,7 @@ def test_send_auto_anchors_to_latest_unanswered_inbound(runner, configure_hive_h
     team = _reply_fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "dodo", "ack, looking"])
 
@@ -305,7 +305,7 @@ def test_send_opens_root_thread_when_no_inbound(runner, configure_hive_home, mon
     team = _reply_fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "dodo", "fresh topic"])
 
@@ -333,7 +333,7 @@ def test_send_opens_root_thread_when_latest_inbound_already_answered(runner, con
     team = _reply_fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "dodo", "one more thing"])
 
@@ -358,7 +358,7 @@ def test_send_root_protocol_skipped_for_anchored_continuation(runner, configure_
     team = _reply_fake_team(workspace, sent_transcript=sent)
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "orch")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     root = runner.invoke(cli, ["send", "dodo", long_body])
     assert root.exit_code != 0
@@ -431,7 +431,7 @@ def test_send_requires_live_registered_agent(runner, configure_hive_home, monkey
 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "hello", "--artifact", artifact])
     assert result.exit_code != 0
@@ -1106,7 +1106,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
@@ -1114,7 +1114,7 @@ def test_send_ack_skipped_when_transcript_unresolvable(runner, configure_hive_ho
     assert result.output == ""
 
 
-def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_send_inject_failure_no_hived(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
@@ -1145,7 +1145,7 @@ def test_send_inject_failure_no_sidecar(runner, configure_hive_home, monkeypatch
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team)
+    _patch_hived_requests(monkeypatch, team)
 
     result = runner.invoke(cli, ["send", "gpt", "test", "--artifact", artifact])
 
@@ -1198,7 +1198,7 @@ def _gate_test_setup(monkeypatch, tmp_path, runtime=None):
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team, runtime=runtime)
+    _patch_hived_requests(monkeypatch, team, runtime=runtime)
 
     return workspace, sent
 
@@ -1262,7 +1262,7 @@ def test_gate_unknown_runtime_state_does_not_block(runner, configure_hive_home, 
     team = _FakeTeam()
     monkeypatch.setattr("hive.cli._resolve_scoped_team", lambda _team, required=True: ("team-x", team))
     monkeypatch.setattr("hive.cli._resolve_sender", lambda _from_agent=None: "claude")
-    _patch_sidecar_requests(monkeypatch, team, runtime={
+    _patch_hived_requests(monkeypatch, team, runtime={
         "alive": True,
         "inputState": "unknown",
         "inputReason": "no_session",
@@ -1293,7 +1293,7 @@ def test_gate_clear_is_omitted_from_send_output(runner, configure_hive_home, mon
 
 
 def _patch_send_failed(monkeypatch, workspace):
-    """Make _request_send_payload return a delivery=failed payload without touching the sidecar."""
+    """Make _request_send_payload return a delivery=failed payload without touching the hived."""
 
     class _FakeTeam:
         def __init__(self):

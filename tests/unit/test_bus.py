@@ -26,7 +26,7 @@ def test_bus_operations_do_not_leak_sqlite_connections(tmp_path, monkeypatch):
 
     Before this fix, every `with _connect(ws) as conn:` left the connection
     open (Python's sqlite3 `__exit__` only commits/rolls back, doesn't close).
-    Long-running sidecar accumulated FDs and eventually hit SQLITE_CANTOPEN
+    Long-running hived accumulated FDs and eventually hit SQLITE_CANTOPEN
     or SQLITE_IOERR in fork-inherited state.
     """
     workspace = tmp_path / "ws"

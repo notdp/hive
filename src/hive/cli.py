@@ -501,20 +501,20 @@ def _team_window_identity(t: Team) -> tuple[str, str]:
     return window_target, window_id
 
 
-def _ensure_team_sidecar(t: Team, workspace: str | Path) -> int | None:
-    from .sidecar import ensure_sidecar
+def _ensure_team_hived(t: Team, workspace: str | Path) -> int | None:
+    from .hived import ensure_hived
 
     window_target, window_id = _team_window_identity(t)
-    return ensure_sidecar(str(workspace), t.name, window_target, window_id)
+    return ensure_hived(str(workspace), t.name, window_target, window_id)
 
 
 def _augment_team_payload_with_runtime(t: Team, payload: dict[str, object]) -> dict[str, object]:
-    from .sidecar import request_team_runtime
+    from .hived import request_team_runtime
 
     ws = _resolve_workspace(t, required=False)
     if not ws:
         return payload
-    _ensure_team_sidecar(t, ws)
+    _ensure_team_hived(t, ws)
     runtime = request_team_runtime(str(ws), team=t.name)
     if not runtime or runtime.get("ok") is False:
         return payload
@@ -650,11 +650,11 @@ def _request_send_payload(
     command_name: str = "send",
     warn_on_long_body: bool = True,
 ) -> dict[str, object]:
-    from .sidecar import request_send
+    from .hived import request_send
 
     if warn_on_long_body:
         _maybe_warn_long_body(body, command=command_name)
-    _ensure_team_sidecar(team, workspace)
+    _ensure_team_hived(team, workspace)
     payload = request_send(
         str(workspace),
         team=team.name,
@@ -666,7 +666,7 @@ def _request_send_payload(
         reply_to=reply_to,
     )
     if not payload:
-        raise RuntimeError("sidecar unavailable")
+        raise RuntimeError("hived unavailable")
     if payload.get("ok") is False:
         raise RuntimeError(str(payload.get("error", f"{command_name} failed")))
     normalized = dict(payload)
@@ -1226,7 +1226,7 @@ def _fork_source_details(pane_id: str, split: str, *, workspace: str = "") -> tu
 
     session_id: str | None = None
     if workspace:
-        from .sidecar import request_runtime_snapshot
+        from .hived import request_runtime_snapshot
         payload = request_runtime_snapshot(workspace, pane_id=current_pane) or {}
         snapshot = payload.get("snapshot")
         if isinstance(snapshot, dict) and snapshot.get("_sessionIdFresh", True):
@@ -1731,9 +1731,9 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
     ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
     # A fresh team on a reused window must not inherit the previous team's
     # event log or artifacts from the default auto workspace.
-    from .sidecar import stop_sidecar
+    from .hived import stop_hived
 
-    stop_sidecar(str(ws_path))
+    stop_hived(str(ws_path))
     bus.reset_workspace(ws_path)
 
     try:
@@ -1775,7 +1775,7 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         }],
         display=t.tmux_window_id,
     )
-    _ensure_team_sidecar(t, ws_path)
+    _ensure_team_hived(t, ws_path)
     tmux.select_window(window)
 
     return {
@@ -1791,7 +1791,7 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
 def init_cmd():
     """Make the current pane the orch of a fresh team.
 
-    Binds the window, names the team, starts the sidecar — and spawns
+    Binds the window, names the team, starts the hived — and spawns
     nobody. Members are created on demand with `hive spawn <name> --task`.
     Team name and workspace derive from the final window. Idempotent:
     re-running in a bound window reports the existing binding.
@@ -1987,10 +1987,10 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
 
     resolved_workspace = workspace or team_workspace or os.environ.get("HIVE_WORKSPACE", "") or os.environ.get("CR_WORKSPACE", "")
 
-    # Stop sidecar before workspace cleanup.
+    # Stop hived before workspace cleanup.
     if resolved_workspace:
-        from .sidecar import stop_sidecar
-        stop_sidecar(resolved_workspace)
+        from .hived import stop_hived
+        stop_hived(resolved_workspace)
 
     if resolved_workspace and delete_workspace:
         ws = Path(resolved_workspace).expanduser()
@@ -2003,7 +2003,7 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
         hive_context.clear_current_context()
 
     # The registry entry is the team's authoritative existence: removing it
-    # is what makes the team deleted (readers and the sidecar's registry-gone
+    # is what makes the team deleted (readers and the hived's registry-gone
     # exit key on it).
     from . import registry
 
@@ -2080,7 +2080,7 @@ def spawn(agent_name: str, model: str, prompt: str,
         return
 
     workspace = _resolve_workspace(t, required=True)
-    _ensure_team_sidecar(t, Path(workspace))
+    _ensure_team_hived(t, Path(workspace))
     if agent.cli != "claude":
         # A claude member's inbox is a queue: the task can land while the
         # bootstrap turn is still running and waits its turn. Only CLIs
@@ -2699,7 +2699,7 @@ def attach_cmd(team_name: str):
     if ws:
         try:
             t = Team.load(team_name)
-            _ensure_team_sidecar(t, ws)
+            _ensure_team_hived(t, ws)
         except (FileNotFoundError, OSError):
             pass
 
@@ -2871,16 +2871,16 @@ def _wait_for_peer_ready(
     timeout_seconds: float = 30.0,
     poll_interval: float = 0.5,
 ) -> set[str]:
-    """Poll sidecar team-runtime until every agent's first skill turn completes.
+    """Poll hived team-runtime until every agent's first skill turn completes.
 
     An agent is considered ready when ``inputState == 'ready'`` — i.e. the
-    sidecar's input gate sees the transcript in a "clear" state, which
+    hived's input gate sees the transcript in a "clear" state, which
     happens after the dispatched skill has finished its bootstrap turn (the
     `hive team` self-identification call returns + assistant replies + CLI
     waits for next input). Returns the set of agents still not ready when
     the deadline expires (empty set = all ready).
     """
-    from .sidecar import request_team_runtime
+    from .hived import request_team_runtime
 
     deadline = time.monotonic() + timeout_seconds
     waiting = set(agents)
@@ -3024,12 +3024,12 @@ def thread(message_id: str):
     _, t = _resolve_scoped_team(None, required=True)
     assert t is not None
     ws = _resolve_workspace(t, required=True)
-    from .sidecar import request_thread
+    from .hived import request_thread
 
-    _ensure_team_sidecar(t, ws)
+    _ensure_team_hived(t, ws)
     payload = request_thread(str(ws), message_id)
     if not payload:
-        _fail("sidecar unavailable")
+        _fail("hived unavailable")
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "thread lookup failed")))
     payload.pop("ok", None)
@@ -3042,7 +3042,7 @@ def doctor(agent_name: str):
     """Diagnose agent connectivity and session state.
 
     With no argument, probes yourself. With an agent name, probes that
-    peer — pane liveness, transcript readability, sidecar heartbeat,
+    peer — pane liveness, transcript readability, hived heartbeat,
     runtime input state.
 
     \b
@@ -3056,12 +3056,12 @@ def doctor(agent_name: str):
     self_name = _resolve_sender(None)
 
     target_name = agent_name or self_name
-    from .sidecar import request_doctor
+    from .hived import request_doctor
 
-    _ensure_team_sidecar(t, ws)
+    _ensure_team_hived(t, ws)
     payload = request_doctor(str(ws), team=t.name, target_agent=target_name, verbose=True)
     if not payload:
-        _fail("sidecar unavailable")
+        _fail("hived unavailable")
     if payload.get("ok") is False:
         _fail(str(payload.get("error", "doctor failed")))
     payload.pop("ok", None)
@@ -3978,7 +3978,7 @@ def _pane_codex_session_id(pane: str) -> str | None:
 
     The pane's thread record (threadId == sessionId) is written at launch time
     and outlives the TUI — the same ``codex_app_server.session_id_for_pane``
-    the sidecar uses. No record → None: no answer means no hint.
+    the hived uses. No record → None: no answer means no hint.
     """
     from .adapters import codex_app_server
 

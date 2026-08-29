@@ -1,4 +1,4 @@
-"""The team registry: write-lane authority, instance guards, sidecar backfill."""
+"""The team registry: write-lane authority, instance guards, hived backfill."""
 import json
 
 import pytest
@@ -131,7 +131,7 @@ def test_backfill_observation_never_resurrects_a_killed_member(store):
     assert {m["name"] for m in registry.load("honey")["members"]} == {"worker"}
 
 
-# --- sidecar writer over the registry ---------------------------------------
+# --- hived writer over the registry ---------------------------------------
 
 
 def _fake_team(agents):
@@ -153,15 +153,15 @@ def _fake_agent(pane, cli):
 
 
 def _writer_mocks(monkeypatch, team, sessions):
-    from hive import sidecar
+    from hive import hived
 
     monkeypatch.setattr("hive.team.Team.load", staticmethod(lambda name, prefer_pane="": team))
-    monkeypatch.setattr("hive.sidecar._fresh_snapshot_session_id", lambda pane: sessions.get(pane, ""))
+    monkeypatch.setattr("hive.hived._fresh_snapshot_session_id", lambda pane: sessions.get(pane, ""))
     monkeypatch.setattr(
         "hive.agent_cli.resolve_model_for_pane",
         lambda pane, cli_name="", current_model="": f"m-{cli_name}",
     )
-    return sidecar
+    return hived
 
 
 def test_writer_backfills_roster_and_display(store, monkeypatch):
@@ -169,13 +169,13 @@ def test_writer_backfills_roster_and_display(store, monkeypatch):
         team="honey", workspace="/ws", created_at="123.0",
         members=[{"name": "worker"}, {"name": "validator"}],
     ) == "written"
-    sidecar = _writer_mocks(
+    hived = _writer_mocks(
         monkeypatch,
         _fake_team({"worker": _fake_agent("%1", "claude"), "validator": _fake_agent("%2", "codex")}),
         {"%1": "sid-w", "%2": "sid-v"},
     )
 
-    sidecar._write_registry_backfill("/ws", "honey")
+    hived._write_registry_backfill("/ws", "honey")
 
     entry = registry.load("honey")
     by_name = {m["name"]: m for m in entry["members"]}
@@ -185,8 +185,8 @@ def test_writer_backfills_roster_and_display(store, monkeypatch):
     assert entry["display"] == "@0"
 
     # validator pane dies: only the worker observed, session rotated
-    sidecar2 = _writer_mocks(monkeypatch, _fake_team({"worker": _fake_agent("%1", "claude")}), {"%1": "sid-w2"})
-    sidecar2._write_registry_backfill("/ws", "honey")
+    hived2 = _writer_mocks(monkeypatch, _fake_team({"worker": _fake_agent("%1", "claude")}), {"%1": "sid-w2"})
+    hived2._write_registry_backfill("/ws", "honey")
     by_name2 = {m["name"]: m for m in registry.load("honey")["members"]}
     assert by_name2["validator"]["sessionId"] == "sid-v"  # dead member survives
     assert by_name2["worker"]["sessionId"] == "sid-w2"
@@ -194,8 +194,8 @@ def test_writer_backfills_roster_and_display(store, monkeypatch):
 
 def test_writer_without_registry_entry_writes_nothing(store, monkeypatch):
     """Observation never creates a roster: membership belongs to the CLI."""
-    sidecar = _writer_mocks(
+    hived = _writer_mocks(
         monkeypatch, _fake_team({"worker": _fake_agent("%1", "claude")}), {"%1": "sid-w"}
     )
-    sidecar._write_registry_backfill("/ws", "honey")
+    hived._write_registry_backfill("/ws", "honey")
     assert registry.load("honey") is None

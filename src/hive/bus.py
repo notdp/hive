@@ -71,7 +71,7 @@ def _connect(workspace: str | Path) -> Iterator[sqlite3.Connection]:
 
     Python's default `with sqlite3.Connection` is a transaction context
     manager — it commits/rolls back but does NOT close the connection.
-    Long-running processes (sidecar) therefore leak FDs, eventually
+    Long-running processes (hived) therefore leak FDs, eventually
     triggering SQLITE_CANTOPEN under ulimit pressure and SQLITE_IOERR
     when an unclosed connection is inherited across os.fork().
     Using an explicit contextmanager here closes on exit without

@@ -60,7 +60,7 @@ _WAKE_ENTRY_TIMEOUT = 5.0  # the wake is synchronous; the entry follows fast
 _ENTRY_POLL_INTERVAL = 0.3
 # Worst-case extra submission budget when delivery must wake a parked engine
 # first: one ledger read, the tty-less attach that revives it, and the short
-# entry re-read. The sidecar folds this into its request budgets.
+# entry re-read. The hived folds this into its request budgets.
 WAKE_SUBMIT_BUDGET = _AGENTS_TIMEOUT + _WAKE_TIMEOUT + _WAKE_ENTRY_TIMEOUT
 
 # Job ids observed are 8 lowercase hex chars (the sessionId prefix); accept a

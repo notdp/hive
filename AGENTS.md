@@ -36,7 +36,7 @@ Tests live under `tests/` and are split by level:
 - `PYTHONPATH=src python -m pytest tests/ -m e2e -q` — end-to-end tmux tests.
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok PYTHONPATH=src python -m pytest tests/acceptance -q` — post-install live acceptance: spawns one real member per CLI through the installed `hive` and asserts the oracles unit suites cannot see (reply identity, no acks, pane color via `capture-pane -e`, no picker residue, nonce causality) plus a headless-claude semantic coroner. Run it after every live install; it is skipped everywhere else.
 - `PYTHONPATH=src python -m pytest tests/unit/test_cvim_command.py tests/unit/test_cvim_payload.py -q` — focused `/cvim` and `/vim` sendback coverage.
-- Plugin/skill materialization and sidecar behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's sidecar onto checkout code; the live sidecar stays on the stable install until an intentional upgrade.
+- Plugin/skill materialization and hived behavior that must exercise new source code need an isolated dev lane: disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the current live team's hived onto checkout code; the live hived stays on the stable install until an intentional upgrade.
 
 ## Coding Style & Naming Conventions
 
@@ -76,17 +76,17 @@ When bumping, scan all commits since the last version bump commit and determine 
 ## Security & Runtime Notes
 
 Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux`; e2e tests assume tmux is available and cover the CLI-only surfaces (agent spawn/delivery flows are cli-layer tests with mocks).
-The sidecar is a long-lived workspace process. When validating sidecar-related runtime changes manually, restart it from the current workspace before trusting `doctor`, delivery, or activity output.
+The hived is a long-lived workspace process. When validating hived-related runtime changes manually, restart it from the current workspace before trusting `doctor`, delivery, or activity output.
 
 ## Debug Log Locations
 
 `hive doctor` includes the current workspace `runDir` and `logs` map. Prefer those paths when debugging a specific team:
 - `<workspace>/run/notify.jsonl` — notify UI and idle watcher state-machine events.
-- `<workspace>/run/sidecar.stderr` — sidecar stderr and uncaught process-level failures.
+- `<workspace>/run/hived.stderr` — hived stderr and uncaught process-level failures.
 - `<workspace>/run/cvim/` — per-run JSONL logs for `hive cvim` / `hive vim`; `latest` points to the newest run.
 
 When no workspace can be resolved, logs fall back under `${XDG_CACHE_HOME:-~/.cache}/hive/`:
 - `notify.jsonl`
 - `cvim/`
 
-Log verbosity defaults from install mode: source checkout/editable installs use `dev`, while `site-packages` / `dist-packages` installs use `normal`. `normal` only filters low-information sidecar heartbeat events; business-path notify and cvim events are still recorded. Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging escape hatch.
+Log verbosity defaults from install mode: source checkout/editable installs use `dev`, while `site-packages` / `dist-packages` installs use `normal`. `normal` only filters low-information hived heartbeat events; business-path notify and cvim events are still recorded. Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging escape hatch.

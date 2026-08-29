@@ -30,7 +30,7 @@ def _detect_profile_for_pane(pane_id: str):
 def _resolve_hive_runtime_session_id(pane_id: str, cli_name: str = "") -> tuple[bool, str | None]:
     try:
         from hive import tmux
-        from hive.sidecar import request_runtime_snapshot
+        from hive.hived import request_runtime_snapshot
     except Exception:
         return False, None
 
@@ -47,7 +47,7 @@ def _resolve_hive_runtime_session_id(pane_id: str, cli_name: str = "") -> tuple[
             return False, None
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
-            # No sidecar snapshot for this pane: not sidecar-managed truth.
+            # No hived snapshot for this pane: not hived-managed truth.
             # The adapter is the authority (claude resolves through its bg
             # job record / session registry, codex through its thread
             # record), so fall through to it.

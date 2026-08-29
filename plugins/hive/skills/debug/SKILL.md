@@ -19,10 +19,10 @@ description: Hive 排障命令清单与协议硬边界。doctor/thread/capture/i
 
 - `runDir` — workspace 的运行时目录
 - `logs.notify` — notify / idle watcher JSONL
-- `logs.sidecar_stderr` — sidecar 未捕获异常和 stderr 兜底
+- `logs.hived_stderr` — hived 未捕获异常和 stderr 兜底
 - `logs.cvim_dir` — `hive cvim` / `hive vim` 每次调用的 per-run JSONL
 
-`normal` 只过滤 sidecar 心跳类事件,notify / cvim 的业务关键路径仍全量记录。复现日志问题时用逃生口 `HIVE_LOG_VERBOSITY=dev|normal` 临时切换。
+`normal` 只过滤 hived 心跳类事件,notify / cvim 的业务关键路径仍全量记录。复现日志问题时用逃生口 `HIVE_LOG_VERBOSITY=dev|normal` 临时切换。
 
 ## 协议边界
 

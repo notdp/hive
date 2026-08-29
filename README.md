@@ -57,7 +57,7 @@ Commands commonly run by humans:
 
 ```bash
 # Plugins
-hive plugin enable notify --plain # sidecar idle watcher toggle (manual `hive notify` stays available either way)
+hive plugin enable notify --plain # hived idle watcher toggle (manual `hive notify` stays available either way)
 hive plugin list --plain          # human-readable listing (default output is JSON)
 
 # Diagnostics
@@ -106,7 +106,7 @@ For local checkout development, keep source-under-test separate from the live in
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-The global `hive` binary is live agent transport. Keep it on the stable install while developing Hive itself; tests should import the checkout explicitly with `PYTHONPATH=src`. Manual verification that needs plugin materialization or sidecar behavior should use disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window rather than the live team. Repository conventions live in [AGENTS.md](AGENTS.md).
+The global `hive` binary is live agent transport. Keep it on the stable install while developing Hive itself; tests should import the checkout explicitly with `PYTHONPATH=src`. Manual verification that needs plugin materialization or hived behavior should use disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window rather than the live team. Repository conventions live in [AGENTS.md](AGENTS.md).
 
 ## Docs
 

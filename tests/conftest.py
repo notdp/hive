@@ -254,9 +254,9 @@ def configure_hive_home(monkeypatch, tmp_path):
         # No other live windows by default → window names don't collide.
         monkeypatch.setattr("hive.cli.tmux.list_window_names", lambda: [])
         monkeypatch.delenv("TMUX_PANE", raising=False)
-        # Default: skip the real sidecar fork + 2s socket-ready wait. Tests
-        # that want to observe sidecar startup patch this themselves.
-        monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *args, **kwargs: None, raising=False)
+        # Default: skip the real hived fork + 2s socket-ready wait. Tests
+        # that want to observe hived startup patch this themselves.
+        monkeypatch.setattr("hive.hived.ensure_hived", lambda *args, **kwargs: None, raising=False)
         # The fixture's default panes run claude, and post-cutover a claude
         # member must be bg-job-backed to join: treat fixture panes as
         # job-backed at the gate (tests exercising the unmanaged-claude

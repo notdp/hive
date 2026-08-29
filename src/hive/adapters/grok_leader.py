@@ -42,7 +42,7 @@ _DAEMON_START_TIMEOUT = 8.0
 _CONNECT_COOLDOWN = 5.0
 
 # Worst-case local submission budget for one send_to_pane call: a cold client
-# (initialize + session/load) plus the ack wait. The sidecar derives its request
+# (initialize + session/load) plus the ack wait. The hived derives its request
 # budgets from this so a valid slow acceptance can never outlive its caller.
 SUBMIT_TIMEOUT = _HANDSHAKE_TIMEOUT + _ACK_TIMEOUT
 
@@ -129,7 +129,7 @@ def pane_socket_path(pane: str) -> Path:
 def pane_pidfile_path(pane: str) -> Path:
     """Sibling pidfile of the leader socket.
 
-    Written once the socket appears so the sidecar (which does not start the
+    Written once the socket appears so the hived (which does not start the
     daemon) can prove liveness and reap orphans.
     """
     return pane_socket_path(pane).with_suffix(".pid")
@@ -624,7 +624,7 @@ def _spawn_daemon_key(
 ) -> bool:
     """Start (or reuse) the leader daemon on *key*'s socket.
 
-    ``start_new_session`` detaches it from the short-lived CLI; the sidecar
+    ``start_new_session`` detaches it from the short-lived CLI; the hived
     reaps member daemons the registry no longer lists, and pane-keyed ones
     when their pane dies.
     """
@@ -726,12 +726,12 @@ def kill_pane_daemon(pane: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# per-pane client pool (sidecar-side)
+# per-pane client pool (hived-side)
 # --------------------------------------------------------------------------
 class GrokClientPool:
     """One persistent stdio client per daemon key.
 
-    The sidecar reads runtime every tick; each client's reader thread keeps
+    The hived reads runtime every tick; each client's reader thread keeps
     its session state current between calls. Clients are created lazily the
     first time a read finds both a socket and a session record, and a dead
     one is dropped and retried after a cooldown so a missing daemon does not
