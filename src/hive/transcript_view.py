@@ -38,6 +38,23 @@ def _clip(text: str, limit: int = _BODY_WIDTH) -> str:
     return text if len(text) <= limit else text[:limit] + " …"
 
 
+GREEN = "\x1b[32m"
+
+
+def _tool_line(block: dict) -> str:
+    name = block.get("name", "?")
+    inp = block.get("input", {}) or {}
+    # Prefer the human-readable slot each tool carries over raw JSON.
+    hint = (
+        inp.get("description")
+        or inp.get("file_path")
+        or inp.get("command")
+        or inp.get("prompt")
+        or json.dumps(inp, ensure_ascii=False)
+    )
+    return f"{GREEN}⏺{RESET} {BOLD}{name}{RESET}({CYAN}{_clip(str(hint), 160)}{RESET})"
+
+
 def _render_event(raw: str) -> str | None:
     try:
         row = json.loads(raw)
@@ -48,27 +65,30 @@ def _render_event(raw: str) -> str | None:
     message = row.get("message") or {}
     content = message.get("content")
     if isinstance(content, str):
-        return f"{BOLD}❯{RESET} {_clip(content)}" if row["type"] == "user" else f"⏺ {_clip(content)}"
+        text = _clip(content)
+        return f"\n{BOLD}❯ {text}{RESET}" if row["type"] == "user" else f"\n⏺ {text}"
     if not isinstance(content, list):
         return None
-    parts: list[str] = []
+    lines: list[str] = []
     for block in content:
         if not isinstance(block, dict):
             continue
         kind = block.get("type")
         if kind == "text" and block.get("text", "").strip():
-            parts.append(_clip(block["text"]))
+            body = _clip(block["text"])
+            if row["type"] == "user":
+                lines.append(f"\n{BOLD}❯ {body}{RESET}")
+            else:
+                lines.append(f"\n⏺ {body}")
         elif kind == "tool_use":
-            args = json.dumps(block.get("input", {}), ensure_ascii=False)
-            parts.append(f"{CYAN}{block.get('name')}{RESET}({_clip(args, 200)})")
+            lines.append("\n" + _tool_line(block))
         elif kind == "tool_result":
             body = block.get("content")
             text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
-            parts.append(f"{DIM}⎿ {_clip(text, 300)}{RESET}")
-    if not parts:
-        return None
-    marker = f"{BOLD}❯{RESET}" if row["type"] == "user" else "⏺"
-    return f"{marker} " + f"\n{DIM}·{RESET} ".join(parts)
+            first = _clip(text, 200).splitlines()[0] if text.strip() else ""
+            if first:
+                lines.append(f"  {DIM}⎿  {first}{RESET}")
+    return "".join(lines) if lines else None
 
 
 def follow(session_id: str) -> int:

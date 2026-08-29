@@ -2715,9 +2715,14 @@ def _member_attach_command(cli_name: str, session_id: str, cwd: str) -> str:
 
         if claude_bg.job_row(session_id) is None:
             # An interactive session (desktop ccd, joined session) must NOT
-            # be resumed — `claude -r` forks a second engine that steals the
-            # member's deliveries. Render its transcript read-only instead.
-            launch = f"hive view {shlex.quote(session_id)}"
+            # be resumed — the launcher's resume lane would mint a forked bg
+            # job that steals the member's deliveries. Render the transcript
+            # read-only instead — and without the resume-hint tail, which
+            # would otherwise re-adopt any same-named job on viewer exit.
+            return (
+                f"cd {shlex.quote(cwd or os.getcwd())} && "
+                f"hive view {shlex.quote(session_id)}"
+            )
     return (
         f"cd {shlex.quote(cwd or os.getcwd())} && {launch}; "
         f"hive resume-hint {cli_name} 2>/dev/null || true"
