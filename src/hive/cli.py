@@ -1963,19 +1963,20 @@ def _create_headless_team(
 def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_entries: tuple[str, ...]):
     """Create a team.
 
-    Outside tmux: a headless team (NAME required) — `hive attach` renders it.
-    Inside tmux on an agent pane: that pane becomes the orch (NAME optional,
-    pool-picked by default). Inside tmux on a shell pane: the window binds
-    the team without an orch.
+    NAME is optional everywhere (pool-picked by default). Outside tmux:
+    a headless team — `hive attach` renders it. Inside tmux on an agent
+    pane: that pane becomes the orch. Inside tmux on a shell pane: the
+    window binds the team without an orch.
     """
     if state_entries and not workspace:
         _fail("--state requires --workspace")
     if reset_workspace and not workspace:
         _fail("--reset-workspace requires --workspace")
     if not tmux.is_inside_tmux():
-        if not name:
-            _fail("a headless team needs a name: hive create <name>")
-        _create_headless_team(name, workspace, reset_workspace, state_entries)
+        _create_headless_team(
+            name or _pick_team_name("", "", "0"),
+            workspace, reset_workspace, state_entries,
+        )
         return
     current_pane = tmux.get_current_pane_id() or ""
     if current_pane and detect_profile_for_pane(current_pane) is not None:
@@ -1987,7 +1988,12 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
     if not name:
-        _fail("a shell-pane create needs a name: hive create <name>")
+        window = tmux.get_current_window_target() or ""
+        name = _pick_team_name(
+            tmux.get_current_session_name() or "",
+            tmux.get_window_id(window) or "" if window else "",
+            window.rsplit(":", 1)[-1] if ":" in window else "0",
+        )
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)
