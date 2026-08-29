@@ -42,13 +42,20 @@ def wait_for(predicate, *, timeout: float = 10.0, interval: float = 0.05) -> Non
     raise AssertionError("timed out waiting for condition")
 
 
+def hive_binary_argv() -> list[str]:
+    """How the suite invokes hive: the Rust binary when HIVE_E2E_BIN is set,
+    else the Python CLI from this checkout."""
+    override = os.environ.get("HIVE_E2E_BIN")
+    if override:
+        return [override]
+    return [sys.executable, "-c", CLI_CODE]
+
+
 def hive_shell_command(args: list[str], *, env: dict[str, str], cwd: Path, stdout_path: Path) -> str:
     env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     cmd = " ".join([
         env_prefix,
-        shlex.quote(sys.executable),
-        "-c",
-        shlex.quote(CLI_CODE),
+        *(shlex.quote(part) for part in hive_binary_argv()),
         *(shlex.quote(arg) for arg in args),
     ])
     return f"cd {shlex.quote(str(cwd))} && {cmd} > {shlex.quote(str(stdout_path))} 2>&1"
