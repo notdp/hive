@@ -18,11 +18,16 @@ def _entry(monkeypatch, members=None):
 
 
 def _display_mocks(monkeypatch):
-    calls = {"windows": [], "splits": [], "keys": [], "tags": [], "opts": [], "selected": []}
+    calls = {"windows": [], "splits": [], "keys": [], "tags": [], "opts": [], "selected": [], "sessions": []}
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
+    monkeypatch.setattr("hive.cli.tmux.has_session", lambda name: name == "dev")
+    monkeypatch.setattr(
+        "hive.cli.tmux.new_session",
+        lambda name, **kw: calls["sessions"].append(name) or "%49",
+    )
     monkeypatch.setattr(
         "hive.cli.tmux.new_window",
-        lambda session, name, cwd, detach: calls["windows"].append((session, name, cwd)) or ("dev:9", "%50"),
+        lambda session, name, cwd, detach: calls["windows"].append((session, name, cwd)) or (f"{session}:9", "%50"),
     )
     panes = iter(["%51", "%52", "%53"])
     monkeypatch.setattr(
@@ -119,3 +124,24 @@ def test_attach_skips_members_without_engine_identity(runner, configure_hive_hom
     assert result.exit_code == 0, result.output
     assert "ghost" in result.output  # warned on stderr
     assert {a for _p, a, _c in calls["tags"]} == {"orch"}
+
+
+def test_attach_outside_tmux_creates_fallback_session(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    _entry(monkeypatch)
+    monkeypatch.setattr("hive.team._find_team_window", lambda name, prefer_pane="": ("", {}))
+    calls = _display_mocks(monkeypatch)
+    monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: None)
+    monkeypatch.setattr("hive.cli.tmux.has_session", lambda name: False)
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    attached = []
+    monkeypatch.setattr(
+        "hive.cli.tmux.exec_attach", lambda session, window: attached.append((session, window))
+    )
+
+    result = runner.invoke(cli, ["attach", "honey"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["sessions"] == ["hive"]
+    assert calls["windows"] == [("hive", "honey", "/repo")]
+    assert attached == [("hive", "hive:9")]
