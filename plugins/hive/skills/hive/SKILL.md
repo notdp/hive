@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive team 协作协议。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、或要发起多 agent 协作/建团派活时必读；covers 成员全生命周期（找到自己、收活、干活、回报、被打回/打断、退场）与编排（拆任务、spawn、派发、fix 循环、git 集成、终验汇报）。
+description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=按处境创建或加入,带 team 名=加入该队(不存在则创建)。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、或要发起多 agent 协作/建团派活时必读;covers 成员全生命周期(找到自己、收活、干活、回报、被打回/打断、退场)与编排(拆任务、spawn、派发、fix 循环、git 集成、终验汇报)。
 ---
 
 # Hive 协作协议
@@ -21,10 +21,17 @@ hive delete <team>   # 团的终点：注销名册、释放团名。关掉窗口
 hive ls              # 全部 team（含没有窗口的）
 ```
 
-你在协议里只有两种处境：
+## 入口分派：`/hive:hive [team]`
 
-- **被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）——最常见。读「你是成员」一章，从「出生」开始。
-- **要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）——成员章就是你的底座，再读「你要当派发人时」。
+本协议由 `/hive:hive <team>` 载入——spawn bootstrap 和 human 手打用的是同一个形式，参数就是你的队。先判处境，再看参数：
+
+1. **你已经在队里**（`hive team` 返回的 `self` 有值，或你出生时就带着队籍）：参数就是对你队籍的确认，直接进「你是成员」一章，从「出生」开始。参数与所在队不符时，回一句说明即可，不换队。
+2. **你不在任何队，参数给了 team 名**（`/hive:hive wasp`）：`hive join wasp` 入队；报 not found 就 `hive create wasp` 建团——同一个入口幂等，建完你就是发起人，读「你要当派发人时」。
+3. **你不在任何队，无参数**：
+   - tmux 内 agent pane：`hive create`（当前 pane 立为 orch），然后按 human 的需求开始编排。
+   - tmux 外：`hive ls` 看现有团，用阻塞式提问（claude `AskUserQuestion`）问 human 是建新团还是加入哪个，再走 create / join。
+
+处境只有两种，全文按此分章：**被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）读「你是成员」；**要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）成员章就是你的底座，再读「你要当派发人时」。
 
 ---
 

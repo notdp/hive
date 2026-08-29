@@ -931,7 +931,7 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Run `/hive:hive` first and follow "
+        f"Context is pre-bound. Run `/hive:hive {team_name}` first and follow "
         "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; message any peer with "
@@ -1077,6 +1077,9 @@ def _spawn_headless_member(
     if skill and skill != "none":
         skill_ref = skill if resolved_cli == "claude" else skill.rsplit(":", 1)[-1]
         initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
+        # The skill takes the team as its argument — one entry form for
+        # spawn bootstrap and manual joins alike.
+        initial_prompt = f"{initial_prompt} {team_name}"
     if prompt:
         initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
 
