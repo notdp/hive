@@ -120,31 +120,14 @@ def test_socket_alive_requires_matching_api_version(monkeypatch):
     assert sidecar._socket_alive("/tmp/ws") is True
 
 
-def test_sidecar_identity_requires_matching_team_and_window_id():
+def test_sidecar_identity_matches_team_and_ignores_window():
     assert sidecar._sidecar_identity_matches(
         {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION},
         team="team-a",
-        tmux_window_id="@7",
     ) is False
     assert sidecar._sidecar_identity_matches(
-        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-b", "tmuxWindowId": "@7"},
+        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-b"},
         team="team-a",
-        tmux_window_id="@7",
-    ) is False
-    assert sidecar._sidecar_identity_matches(
-        {"ok": True, "apiVersion": sidecar.SIDECAR_API_VERSION, "team": "team-a", "tmuxWindowId": "@9"},
-        team="team-a",
-        tmux_window_id="@7",
-    ) is False
-    assert sidecar._sidecar_identity_matches(
-        {
-            "ok": True,
-            "apiVersion": sidecar.SIDECAR_API_VERSION,
-            "team": "team-a",
-            "tmuxWindowId": "@7",
-        },
-        team="team-a",
-        tmux_window_id="@7",
     ) is False
     assert sidecar._sidecar_identity_matches(
         {
@@ -152,21 +135,29 @@ def test_sidecar_identity_requires_matching_team_and_window_id():
             "apiVersion": sidecar.SIDECAR_API_VERSION,
             "buildHash": "stale",
             "team": "team-a",
-            "tmuxWindowId": "@7",
         },
         team="team-a",
-        tmux_window_id="@7",
     ) is False
+    # The window is display, not identity: a moved/killed/recreated window
+    # must not bounce a healthy sidecar.
     assert sidecar._sidecar_identity_matches(
         {
             "ok": True,
             "apiVersion": sidecar.SIDECAR_API_VERSION,
             "buildHash": sidecar.SIDECAR_BUILD_HASH,
             "team": "team-a",
-            "tmuxWindowId": "@7",
+            "tmuxWindowId": "@9",
         },
         team="team-a",
-        tmux_window_id="@7",
+    ) is True
+    assert sidecar._sidecar_identity_matches(
+        {
+            "ok": True,
+            "apiVersion": sidecar.SIDECAR_API_VERSION,
+            "buildHash": sidecar.SIDECAR_BUILD_HASH,
+            "team": "team-a",
+        },
+        team="team-a",
     ) is True
 
 

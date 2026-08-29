@@ -69,13 +69,6 @@ class Team:
         """
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-        from .resume import is_archive_handle
-
-        if is_archive_handle(name):
-            raise ValueError(
-                f"team name '{name}' is invalid: the '.prev' suffix is reserved "
-                "for resume snapshot archives"
-            )
         if name == "ccd":
             raise ValueError(
                 f"team name '{name}' is invalid: 'ccd' is the reserved send "
@@ -131,28 +124,56 @@ class Team:
 
     @classmethod
     def load(cls, name: str, *, prefer_pane: str = "") -> Team:
-        """Load a team by scanning tmux window options and pane tags.
+        """Load a team: registry entry for identity and roster, tmux for display.
 
-        Searches all windows in all sessions for a window with @hive-team == name.
+        The registry is the authoritative record — a team with an entry loads
+        even when no tmux window renders it (members then have no pane
+        binding). The tmux window, when one claims the team, binds panes onto
+        roster members and contributes display-only metadata; a pane-tagged
+        member missing from the registry still loads (union), so a team
+        predating the registry writers keeps working.
         When *prefer_pane* is given, its window is preferred when multiple
         windows claim the same team name.
         """
+        from . import registry
+
+        snap = registry.load(name)
         hint = prefer_pane or tmux.get_current_pane_id() or ""
         window_target, window_data = _find_team_window(name, prefer_pane=hint)
-        if not window_target:
+        if snap is None and not window_target:
             raise FileNotFoundError(f"Team '{name}' not found")
 
         team = cls(
             name=name,
             description=window_data.get("desc", ""),
-            workspace=window_data.get("workspace", ""),
-            created_at=float(window_data.get("created") or 0),
+            workspace=(str(snap.get("workspace") or "") if snap else "")
+            or window_data.get("workspace", ""),
+            created_at=float(
+                (str(snap.get("createdAt")) if snap and snap.get("createdAt") else "")
+                or window_data.get("created")
+                or 0
+            ),
             tmux_session=window_target.split(":")[0] if ":" in window_target else "",
             tmux_window=window_target,
             tmux_window_id=window_data.get("window_id", ""),
         )
 
-        panes = tmux.list_panes_full(window_target)
+        if snap is not None:
+            for row in snap.get("members", []):
+                member = str(row.get("name") or "")
+                if not member:
+                    continue
+                team.agents[member] = Agent(
+                    name=member,
+                    team_name=name,
+                    pane_id="",
+                    cli=str(row.get("cli") or "") or "claude",
+                    cwd=str(row.get("cwd") or ""),
+                    model=str(row.get("model") or ""),
+                    session_id=str(row.get("sessionId") or "") or None,
+                )
+
+        panes = tmux.list_panes_full(window_target) if window_target else []
         for pane in panes:
             if pane.team != name:
                 continue
@@ -184,6 +205,13 @@ class Team:
                     # resume flows carry.
                     from .adapters.claude_bg import job_id_for_pane
                     agent.session_id = job_id_for_pane(pane.pane_id)
+                registered = team.agents.get(pane.agent)
+                if registered is not None:
+                    # A live pane is fresher than the registry row for
+                    # display-derived fields, but the recorded engine
+                    # identity survives a pane whose records were wiped.
+                    agent.session_id = agent.session_id or registered.session_id
+                    agent.model = agent.model or registered.model
                 team.agents[pane.agent] = agent
 
         return team
@@ -462,12 +490,29 @@ def duplicate_team_bindings() -> list[dict[str, object]]:
 
 
 def list_teams() -> list[dict[str, str]]:
-    """List all teams by scanning tmux window options."""
+    """List all teams: registry entries unioned with tmux-tagged windows.
+
+    A registry entry lists its team whether or not a window renders it; a
+    window row fills in (or contributes teams predating the registry).
+    """
+    from . import registry
+
+    by_name: dict[str, dict[str, str]] = {}
+    for entry in registry.list_entries():
+        team = str(entry.get("team") or "")
+        if entry.get("corrupt") or not team:
+            continue
+        by_name[team] = {
+            "name": team,
+            "tmuxWindow": "",
+            "tmuxSession": "",
+            "workspace": str(entry.get("workspace") or ""),
+        }
+
     r = tmux._run([
         "list-windows", "-a", "-F",
         "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}",
     ], check=False)
-    teams = []
     for line in r.stdout.strip().split("\n"):
         if not line:
             continue
@@ -475,10 +520,11 @@ def list_teams() -> list[dict[str, str]]:
         while len(parts) < 3:
             parts.append("")
         if parts[1]:
-            teams.append({
-                "name": parts[1],
-                "tmuxWindow": parts[0],
-                "tmuxSession": parts[0].split(":")[0] if ":" in parts[0] else "",
-                "workspace": parts[2],
-            })
-    return teams
+            entry = by_name.setdefault(parts[1], {"name": parts[1], "workspace": ""})
+            entry["tmuxWindow"] = parts[0]
+            entry["tmuxSession"] = parts[0].split(":")[0] if ":" in parts[0] else ""
+            entry["workspace"] = entry.get("workspace") or parts[2]
+    for entry in by_name.values():
+        entry.setdefault("tmuxWindow", "")
+        entry.setdefault("tmuxSession", "")
+    return list(by_name.values())

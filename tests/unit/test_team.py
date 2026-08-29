@@ -2,7 +2,7 @@ import pytest
 
 from hive import tmux as _tmux
 from hive.agent import Agent
-from hive.team import Team, _find_team_window, _gc_stale_team_windows, duplicate_team_bindings
+from hive.team import Team, _find_team_window, _gc_stale_team_windows, duplicate_team_bindings, list_teams
 
 
 def test_team_create_inside_tmux_tags_lead_and_detects_session(configure_hive_home, monkeypatch):
@@ -423,3 +423,101 @@ def test_duplicate_team_bindings_reports_only_collisions(configure_hive_home, mo
     assert {w["windowId"] for w in windows} == {"@2", "@3"}
     assert windows[0]["liveMembers"][0]["name"] == "worker"
     assert "manual" in dupes[0]["repair"]
+
+
+# --- registry-first load (tmux is display, not truth) ---
+
+
+def test_team_load_registry_only_team_loads_without_any_window(configure_hive_home, monkeypatch):
+    """A team with a registry entry and no tmux window is loadable: members
+    come back pane-less with their recorded engine identity (was
+    FileNotFoundError when tmux was the truth layer)."""
+    configure_hive_home()
+    from hive import registry
+
+    assert registry.record_team(
+        team="ghostteam", workspace="/tmp/ws-g", created_at="111.0",
+        members=[
+            {"name": "worker", "cli": "grok", "model": "grok-4.6", "sessionId": "sid-g", "cwd": "/repo"},
+        ],
+    ) == "written"
+    monkeypatch.setattr("hive.team._find_team_window", lambda name, prefer_pane="": ("", {}))
+
+    loaded = Team.load("ghostteam")
+
+    assert loaded.workspace == "/tmp/ws-g"
+    assert loaded.created_at == 111.0
+    assert loaded.tmux_window == ""
+    worker = loaded.agents["worker"]
+    assert worker.pane_id == ""
+    assert worker.cli == "grok"
+    assert worker.session_id == "sid-g"
+    assert worker.cwd == "/repo"
+
+
+def test_team_load_unknown_everywhere_still_raises(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.team._find_team_window", lambda name, prefer_pane="": ("", {}))
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        Team.load("nosuchteam")
+
+
+def test_team_load_pane_binds_onto_registry_roster(configure_hive_home, monkeypatch):
+    """Union semantics: a live pane binds onto its registry row (display wins
+    for pane-derived fields, the recorded engine identity survives a wiped
+    pane record), and a registry row without a pane stays as a member."""
+    configure_hive_home()
+    from hive import registry
+    from hive.tmux import PaneInfo
+
+    assert registry.record_team(
+        team="team-u", workspace="/tmp/ws-u", created_at="5.0",
+        members=[
+            {"name": "alive", "cli": "codex", "model": "m0", "sessionId": "sid-a", "cwd": "/old"},
+            {"name": "headless", "cli": "claude", "sessionId": "sid-h", "cwd": "/repo"},
+        ],
+    ) == "written"
+    monkeypatch.setattr(
+        "hive.team._find_team_window",
+        lambda name, prefer_pane="": ("dev:0", {"desc": "", "workspace": "", "created": "5.0", "window_id": "@0"}),
+    )
+    monkeypatch.setattr(
+        "hive.team.tmux.list_panes_full",
+        lambda _target: [PaneInfo("%1", "", "codex", role="agent", agent="alive", team="team-u", cli="codex")],
+    )
+    monkeypatch.setattr("hive.team.tmux.display_value", lambda pane_id, fmt: "/fresh")
+    monkeypatch.setattr(
+        "hive.adapters.codex_app_server.thread_id_for_pane", lambda pane: None
+    )
+
+    loaded = Team.load("team-u")
+
+    assert set(loaded.agents) == {"alive", "headless"}
+    alive = loaded.agents["alive"]
+    assert alive.pane_id == "%1"
+    assert alive.cwd == "/fresh"  # live pane is fresher than the registry row
+    assert alive.session_id == "sid-a"  # wiped pane record falls back to registry
+    assert loaded.agents["headless"].pane_id == ""
+
+
+def test_list_teams_unions_registry_and_windows(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    from hive import registry
+    from types import SimpleNamespace
+
+    assert registry.record_team(
+        team="headlessteam", workspace="/tmp/ws-h", created_at="1.0",
+    ) == "written"
+    monkeypatch.setattr(
+        "hive.team.tmux._run",
+        lambda *_a, **_k: SimpleNamespace(stdout="dev:0\twindowed\t/tmp/ws-w\n"),
+    )
+
+    teams = {t["name"]: t for t in list_teams()}
+
+    assert teams["headlessteam"]["tmuxWindow"] == ""
+    assert teams["headlessteam"]["workspace"] == "/tmp/ws-h"
+    assert teams["windowed"]["tmuxWindow"] == "dev:0"
+    assert teams["windowed"]["workspace"] == "/tmp/ws-w"

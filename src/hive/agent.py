@@ -685,8 +685,8 @@ class Agent:
 
         The engine lives on claude's supervisor, not in the pane, so killing
         the pane alone would leave an orphan job running headless. ``claude
-        stop`` parks it: the job stays in the ledger and ``hive resume``
-        can still wake it.
+        stop`` parks it: the job stays in the ledger and a managed
+        ``hive claude --resume <jobId>`` launch can still wake it.
         """
         if self.cli == "claude":
             from .adapters import claude_bg

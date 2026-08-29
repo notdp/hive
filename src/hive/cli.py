@@ -45,7 +45,6 @@ _COMMAND_HELP_SECTIONS = {
     "worktree": "Workflow",
     "pr": "Workflow",
     "ls": "Workflow",
-    "resume": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -955,7 +954,63 @@ def _register_agent_member(
                 "nothing was registered. Fix the inbox/daemon and retry, "
                 "or use --no-notify to register without a reachability check."
             )
+    _registry_record_member(t, agent)
     return agent
+
+
+def _member_registry_row(agent: Agent) -> dict[str, str]:
+    """Registry roster row for *agent*, resolving its engine identity.
+
+    An Agent object fresh from spawn carries session_id only on resume/fork
+    paths; a fresh member's engine identity (claude jobId / codex threadId /
+    grok session id) lives in the pane record its spawn just wrote.
+    """
+    session_id = getattr(agent, "session_id", "") or ""
+    pane_id = getattr(agent, "pane_id", "") or ""
+    cli_name = getattr(agent, "cli", "") or ""
+    if not session_id and pane_id:
+        if cli_name == "claude":
+            from .adapters.claude_bg import job_id_for_pane
+            session_id = job_id_for_pane(pane_id) or ""
+        elif cli_name == "codex":
+            from .adapters.codex_app_server import thread_id_for_pane
+            session_id = thread_id_for_pane(pane_id) or ""
+        elif cli_name == "grok":
+            from .adapters.grok_leader import session_id_for_pane
+            session_id = session_id_for_pane(pane_id) or ""
+    return {
+        "name": getattr(agent, "name", "") or "",
+        "cli": cli_name,
+        "model": getattr(agent, "model", "") or "",
+        "sessionId": session_id,
+        "cwd": getattr(agent, "cwd", "") or "",
+    }
+
+
+def _registry_record_member(t: Team, agent: Agent) -> None:
+    """Register *agent* in the team registry; seed the team entry if absent.
+
+    Seeding covers a team whose entry predates the registry writers (or was
+    never written): record_member refuses a missing/foreign-instance entry,
+    and record_team then creates the entry for this instance — archiving a
+    recycled name's predecessor along the way.
+    """
+    from . import registry
+
+    team_name = getattr(t, "name", "") or ""
+    if not team_name:
+        return
+    row = _member_registry_row(agent)
+    created_at = str(getattr(t, "created_at", "") or "")
+    verdict = registry.record_member(team_name, row, created_at=created_at)
+    if verdict == "missing":
+        registry.record_team(
+            team=team_name,
+            workspace=getattr(t, "workspace", "") or "",
+            created_at=created_at,
+            members=[row],
+            display=getattr(t, "tmux_window_id", "") or "",
+        )
 
 
 def _spawn_team_agent(
@@ -993,6 +1048,7 @@ def _spawn_team_agent(
         agent=agent_name,
     )
     _remember_context(team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME)
+    _registry_record_member(t, agent)
     return agent
 
 
@@ -1489,11 +1545,7 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
     team_name = _pick_team_name(session_name, final_window_id, final_index)
     _prepare_window_for_new_team(window, current_pane=orch_pane)
     _claim_team_name(team_name, this_window=window, explicit=False)
-    from . import resume as resume_store
 
-    # A recycled pool name must not inherit the dead predecessor's
-    # snapshot (resume-hint would hand out a foreign sessionId).
-    resume_store.archive_stale_snapshot(team_name)
 
     ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
     # A fresh team on a reused window must not inherit the previous team's
@@ -1527,6 +1579,21 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         orch_pane, team=t.name, workspace=str(ws_path), agent=LEAD_AGENT_NAME
     )
     _remember_context(team=t.name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
+    from . import registry
+
+    registry.record_team(
+        team=t.name,
+        workspace=str(ws_path),
+        created_at=str(t.created_at),
+        members=[{
+            "name": LEAD_AGENT_NAME,
+            "cli": orch_cli,
+            "model": "",
+            "sessionId": t.lead_session_id or "",
+            "cwd": os.getcwd(),
+        }],
+        display=t.tmux_window_id,
+    )
     _ensure_team_sidecar(t, ws_path)
     tmux.select_window(window)
 
@@ -1636,6 +1703,23 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)
+        from . import registry
+        from .agent_cli import member_role_for_pane
+
+        # The lead joins the roster only when its pane actually runs an
+        # agent — a shell-pane create has no engine to register (same
+        # authority the pane tagging uses).
+        lead = t.lead_agent()
+        lead_is_agent = (
+            lead is not None and member_role_for_pane(lead.pane_id) == "agent"
+        )
+        registry.record_team(
+            team=t.name,
+            workspace=ws_str,
+            created_at=str(t.created_at),
+            members=[_member_registry_row(lead)] if lead_is_agent else [],
+            display=t.tmux_window_id,
+        )
         if workspace:
             ws = Path(workspace).expanduser()
             if ws.exists() and reset_workspace:
@@ -1698,6 +1782,13 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
     current = hive_context.load_current_context()
     if current.get("team") == name:
         hive_context.clear_current_context()
+
+    # The registry entry is the team's authoritative existence: removing it
+    # is what makes the team deleted (readers and the sidecar's registry-gone
+    # exit key on it).
+    from . import registry
+
+    registry.delete_team(name)
 
     click.echo(f"Team '{name}' deleted.")
 
@@ -2265,26 +2356,7 @@ def pr_clear_cmd(plain: bool):
         click.echo(f"window {window} had no @hive-pr stamp to clear")
 
 
-# --- hive ls / hive resume: durable team snapshots ---
-
-
-def _live_anchor_pane(members: dict[str, tmux.PaneInfo]) -> tmux.PaneInfo:
-    """The pane whose cwd best represents what a live team is working on."""
-    if LEAD_AGENT_NAME in members:
-        return members[LEAD_AGENT_NAME]
-    return members[sorted(members)[0]]
-
-
-def _live_team_context(members: dict[str, tmux.PaneInfo]) -> dict[str, str]:
-    """repo/branch context for a live team, resolved once from its anchor pane."""
-    from . import resume as resume_store
-
-    cwd = tmux.display_value(_live_anchor_pane(members).pane_id, "#{pane_current_path}") or ""
-    return {
-        "repoCwd": cwd,
-        "repo": resume_store.repo_label(cwd),
-        "branch": resume_store.git_branch(cwd),
-    }
+# --- hive ls: the team registry, with display state ---
 
 
 def _sorted_member_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2292,10 +2364,9 @@ def _sorted_member_rows(rows: list[dict[str, object]]) -> list[dict[str, object]
 
 
 def _build_ls_payload() -> dict[str, object]:
-    """Merged view of live team windows and persisted resume snapshots."""
-    from . import resume as resume_store
+    """Registry entries with their current display state."""
+    from . import registry
 
-    snapshots = resume_store.list_snapshots()
     panes, pane_status = tmux.list_panes_all_status()
     windows, win_status = tmux.list_team_windows_status()
     statuses = {pane_status, win_status}
@@ -2316,23 +2387,16 @@ def _build_ls_payload() -> dict[str, object]:
             win_by_team.setdefault(w["team"], w)
 
     teams: list[dict[str, object]] = []
-    consumed_live: set[str] = set()
-    for snap in snapshots:
-        handle = str(snap.get("handle", ""))
-        if snap.get("corrupt"):
-            teams.append({"handle": handle, "state": "corrupt"})
+    seen: set[str] = set()
+    for entry in registry.list_entries():
+        team_name = str(entry.get("team", ""))
+        seen.add(team_name)
+        if entry.get("corrupt"):
+            teams.append({"team": team_name, "state": "corrupt"})
             continue
-        team_name = str(snap.get("team", ""))
-        entry: dict[str, object] = {
-            "handle": handle,
-            "shortId": resume_store.short_id(snap),
+        row: dict[str, object] = {
             "team": team_name,
-            "savedAt": snap.get("savedAt", ""),
-            "branch": snap.get("branch", ""),
-            "repoCwd": snap.get("repoCwd", ""),
-            "repo": snap.get("repo", "") or resume_store.repo_label(str(snap.get("repoCwd", ""))),
-            "pr": snap.get("pr", ""),
-            "windowName": snap.get("windowName", ""),
+            "workspace": entry.get("workspace", ""),
             "members": _sorted_member_rows([
                 {
                     "name": m.get("name", ""),
@@ -2340,61 +2404,45 @@ def _build_ls_payload() -> dict[str, object]:
                     "model": m.get("model", ""),
                     "session": bool(m.get("sessionId")),
                 }
-                for m in snap.get("members", [])
+                for m in entry.get("members", [])
             ]),
         }
         if tmux_status == "unknown":
-            # A failed listing can't distinguish live from dead — never
-            # report a possibly-live team as restorable.
-            entry["state"] = "unknown"
+            row["state"] = "unknown"
         else:
             live = live_members.get(team_name, {})
             win = win_by_team.get(team_name, {})
-            same_instance = not win.get("created") or not snap.get("createdAt") or str(
-                win.get("created")
-            ) == str(snap.get("createdAt"))
-            if live and same_instance:
-                for m in entry["members"]:  # type: ignore[union-attr]
+            if live:
+                for m in row["members"]:  # type: ignore[union-attr]
                     m["live"] = m["name"] in live
-                missing = [m.get("name") for m in snap.get("members", []) if m.get("name") not in live]
-                entry["window"] = win.get("window", "")
-                entry["state"] = "live-incomplete" if missing else "live-complete"
-                # Live truth beats whatever the snapshot recorded back then.
-                # For pr, present-and-empty IS the truth (hive pr clear);
-                # only a row lacking the key (old fixture/data) keeps the
-                # snapshot value.
-                entry["windowName"] = win.get("windowName", "") or entry["windowName"]
-                if "pr" in win:
-                    entry["pr"] = win["pr"]
-                entry.update(_live_team_context(live))
-                consumed_live.add(team_name)
-            elif live:
-                # A different live instance owns the name: the old snapshot is
-                # superseded, but the live team itself still gets its own row.
-                entry["state"] = "superseded"
+                missing = [
+                    m.get("name")
+                    for m in entry.get("members", [])
+                    if m.get("name") not in live
+                ]
+                row["window"] = win.get("window", "")
+                row["state"] = "live-incomplete" if missing else "live-complete"
             else:
-                entry["state"] = "restorable"
-        teams.append(entry)
+                # The display is gone; engines may still be running headless.
+                row["state"] = "detached"
+        teams.append(row)
 
     if tmux_status == "ok":
+        # Teams alive only in tmux (predating the registry writers).
         for team_name, members in sorted(live_members.items()):
-            if team_name in consumed_live:
+            if team_name in seen:
                 continue
             win = win_by_team.get(team_name, {})
-            row: dict[str, object] = {
-                "handle": "",
+            teams.append({
                 "team": team_name,
                 "state": "live-complete",
                 "window": win.get("window", ""),
-                "windowName": win.get("windowName", ""),
-                "pr": win.get("pr", ""),
+                "workspace": win.get("workspace", ""),
                 "members": _sorted_member_rows([
                     {"name": n, "cli": p.cli, "live": True}
                     for n, p in members.items()
                 ]),
-            }
-            row.update(_live_team_context(members))
-            teams.append(row)
+            })
 
     return {"tmux": tmux_status, "teams": teams}
 
@@ -2402,11 +2450,10 @@ def _build_ls_payload() -> dict[str, object]:
 @cli.command("ls")
 @_json_default_options
 def ls_cmd(plain: bool):
-    """List hive teams: live windows plus resumable snapshots.
+    """List hive teams from the registry, with their display state.
 
-    Live teams show their window; dead ones show the handle to pass to
-    ``hive resume``. Works outside tmux too (everything persisted is
-    listed; nothing can be live without a server).
+    Works outside tmux too — the registry is the truth layer; without a
+    server every team simply shows as detached.
     """
     payload = _build_ls_payload()
     if not plain:
@@ -2416,22 +2463,6 @@ def ls_cmd(plain: bool):
         click.echo(line)
 
 
-def _ls_row_label(entry: dict[str, object]) -> str:
-    """`repo @ branch` as the row's identity, degrading to what exists."""
-    repo = str(entry.get("repo") or "")
-    branch = str(entry.get("branch") or "")
-    if repo and branch:
-        label = f"{repo} @ {branch}"
-    else:
-        label = repo or branch or str(entry.get("team") or entry.get("handle") or "?")
-    window_name = str(entry.get("windowName") or "")
-    if window_name and window_name != repo:
-        label = f"{label} ({window_name})"
-    if entry.get("pr"):
-        label = f"{label}  PR#{entry['pr']}"
-    return label
-
-
 def _ls_roster(entry: dict[str, object]) -> str:
     members = entry.get("members") or []
     return "+".join(
@@ -2439,378 +2470,42 @@ def _ls_roster(entry: dict[str, object]) -> str:
     )
 
 
-def _resume_ref_hint(entry: dict[str, object], teams: list[dict[str, object]]) -> str:
-    """The copyable resume command for a row — short id only when it resolves.
-
-    The short id is shown only if it is unique among valid snapshots and does
-    not collide with another row's exact handle (exact handles win in the
-    resolver, so such a command would resume something else).
-    """
-    handle = str(entry.get("handle") or "")
-    sid = str(entry.get("shortId") or "")
-    if sid:
-        others = [e for e in teams if e is not entry]
-        unique = all(str(e.get("shortId") or "") != sid for e in others)
-        shadowed = any(str(e.get("handle") or "") == sid for e in others)
-        if unique and not shadowed:
-            return f"hive resume {sid}"
-    return f"hive resume {handle}"
-
-
-def _resolve_short_resume_ref(ref: str) -> dict[str, object] | None:
-    """Snapshot whose short id is *ref*, or None; ambiguity fails loudly."""
-    from . import resume as resume_store
-
-    matches = [
-        s for s in resume_store.list_snapshots()
-        if not s.get("corrupt") and resume_store.short_id(s) == ref
-    ]
-    if len(matches) > 1:
-        cmds = "; ".join(f"hive resume {s['handle']}" for s in matches)
-        _fail(f"short id '{ref}' is ambiguous — use a full handle: {cmds}")
-    return matches[0] if matches else None
-
-
 def _format_ls_human(payload: dict[str, object]) -> list[str]:
     teams = list(payload.get("teams") or [])
     if not teams:
-        return ["no hive teams (live or resumable)"]
+        return ["no hive teams"]
     lines: list[str] = []
     if payload.get("tmux") == "unknown":
-        lines.append("! tmux did not answer — live/dead state unknown this pass")
+        lines.append("! tmux did not answer — live/detached state unknown this pass")
 
     live = [e for e in teams if e.get("state") in ("live-complete", "live-incomplete")]
-    restorable = [e for e in teams if e.get("state") == "restorable"]
-    other = [e for e in teams if e not in live and e not in restorable]
-
-    from . import resume as resume_store
+    detached = [e for e in teams if e.get("state") == "detached"]
+    other = [e for e in teams if e not in live and e not in detached]
 
     if live:
         lines.append("LIVE")
         for e in sorted(live, key=lambda e: str(e.get("window", ""))):
-            row = f"  {e.get('window') or '?'}  {_ls_row_label(e)}  {e.get('team')} · {_ls_roster(e)}"
+            row = f"  {e.get('window') or '?'}  {e.get('team')} · {_ls_roster(e)}"
             if e.get("state") == "live-incomplete":
                 missing = [
                     str(m.get("name")) for m in e.get("members", []) if not m.get("live")
                 ]
-                row += f"  ! missing {'+'.join(missing)} → {_resume_ref_hint(e, teams)}"
+                row += f"  ! missing {'+'.join(missing)}"
             lines.append(row)
-    if restorable:
+    if detached:
         if lines and lines[-1] != "":
             lines.append("")
-        lines.append("RESTORABLE  — hive resume <handle>")
-        for e in sorted(restorable, key=lambda e: str(e.get("savedAt", "")), reverse=True):
-            lines.append(
-                f"  {e.get('handle')}  {_ls_row_label(e)}  "
-                f"saved {resume_store.age(str(e.get('savedAt') or ''))} · {_ls_roster(e)}"
-                f"  → {_resume_ref_hint(e, teams)}"
-            )
+        lines.append("DETACHED  — no tmux display")
+        for e in detached:
+            lines.append(f"  {e.get('team')} · {_ls_roster(e)}")
     if other:
         if lines and lines[-1] != "":
             lines.append("")
         lines.append("OTHER")
         for e in other:
-            what = "unreadable snapshot" if e.get("state") == "corrupt" else str(e.get("state"))
-            lines.append(f"  {e.get('handle') or e.get('team')}  {what}  {_ls_roster(e)}")
+            what = "unreadable registry entry" if e.get("state") == "corrupt" else str(e.get("state"))
+            lines.append(f"  {e.get('team')}  {what}  {_ls_roster(e)}")
     return lines
-
-
-def _resume_progress(message: str) -> None:
-    """Stage feedback for `hive resume` on stderr — stdout stays JSON-only.
-
-    Resuming replays whole agent sessions (a long claude transcript alone can
-    take tens of seconds, members start serially), so a silent prompt reads
-    as a hang.
-    """
-    click.echo(message, err=True)
-
-
-def _resume_member_order(members: list[dict[str, str]]) -> list[dict[str, str]]:
-    return sorted(members, key=lambda m: (m.get("name") != LEAD_AGENT_NAME, str(m.get("name"))))
-
-
-def _resume_members_into_live_team(
-    snap: dict[str, object],
-    win: dict[str, str],
-    live: dict[str, tmux.PaneInfo],
-    missing: list[dict[str, str]],
-    fresh_members: frozenset[str] = frozenset(),
-) -> dict[str, object]:
-    """Spawn *missing* members back into a live team.
-
-    Members with a saved session resume it; a member in *fresh_members*
-    (no saved sessionId) is spawned fresh with the member bootstrap,
-    following the live anchor's current cwd.
-    """
-    from . import layout as layout_mod
-
-    team_name = str(snap["team"])
-    window = win["window"]
-    ws = win.get("workspace") or ""
-    if not ws:
-        _fail(f"live team window {window} has no workspace binding; not guessing")
-    anchor_pane = _live_anchor_pane(live).pane_id
-    snap_members = list(snap.get("members", []))  # type: ignore[arg-type]
-    ordered = _resume_member_order(snap_members)
-    snap_anchor_cwd = next(
-        (str(m.get("cwd") or "") for m in ordered if m.get("sessionId") and m.get("cwd")),
-        next((str(m.get("cwd") or "") for m in ordered if m.get("cwd")), ""),
-    )
-    spawned: list[tuple[str, str]] = []
-    try:
-        # Same reason as the full restore: revive happens where the team
-        # lives, so put the human in front of it.
-        tmux.select_window(window)
-        count = len(live)
-        for m in _resume_member_order(missing):
-            count += 1
-            name = str(m["name"])
-            fresh = name in fresh_members
-            if fresh:
-                _resume_progress(
-                    f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
-                )
-                live_cwd = tmux.display_value(anchor_pane, "#{pane_current_path}") or ""
-                cwd = live_cwd or snap_anchor_cwd
-                session_kwargs: dict[str, str] = {"skill": "hive:hive"}
-            else:
-                _resume_progress(
-                    f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
-                )
-                cwd = str(m["cwd"])
-                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume", "skill": "none"}
-            agent = Agent.spawn(
-                name=name,
-                team_name=team_name,
-                target_pane=anchor_pane,
-                cwd=cwd,
-                split_horizontal=layout_mod.split_horizontal(window, count),
-                split_size="50%",
-                cli=str(m["cli"]),
-                model=str(m.get("model", "")),
-                workspace=ws,
-                **session_kwargs,
-            )
-            # Track the pane the moment it exists: every later failure —
-            # tagging, context, layout — must be able to kill it.
-            spawned.append((str(m["name"]), agent.pane_id))
-            _resume_progress(f"{m['name']} ready in {agent.pane_id}")
-            hive_context.save_context_for_pane(
-                agent.pane_id, team=team_name, workspace=ws, agent=str(m["name"])
-            )
-        layout_mod.apply_adaptive(window)
-    except Exception as e:  # noqa: BLE001 — any failure must clean up the new panes only
-        for _name, pane in spawned:
-            tmux.kill_pane(pane)
-        _fail(f"resume failed while reviving members: {e} (survivors untouched, snapshot kept)")
-    return {
-        "resumed": "members",
-        "team": team_name,
-        "window": window,
-        "members": [
-            {"name": name, "pane": pane, "session": "fresh" if name in fresh_members else "resumed"}
-            for name, pane in spawned
-        ],
-    }
-
-
-def _resume_full_team(
-    handle: str, snap: dict[str, object], fresh_members: frozenset[str] = frozenset()
-) -> dict[str, object]:
-    """Rebuild a dead team in a fresh window; transactional.
-
-    Members with a saved session resume it; a member in *fresh_members*
-    (no saved sessionId) is spawned fresh with the member bootstrap in the
-    snapshot anchor's cwd.
-    """
-    from . import layout as layout_mod
-    from . import resume as resume_store
-
-    team_name = str(snap["team"])
-    ws = str(snap.get("workspace") or "")
-    if not ws:
-        _fail("snapshot has no workspace; cannot resume")
-    members = _resume_member_order(list(snap.get("members", [])))  # type: ignore[arg-type]
-    # Anchor on a member whose session (and thus cwd) survived preflight —
-    # a fresh member's recorded cwd may be a deleted worktree.
-    anchor_cwd = next(
-        (str(m.get("cwd") or "") for m in members if m.get("sessionId") and m.get("cwd")),
-        next((str(m.get("cwd") or "") for m in members if m.get("cwd")), ""),
-    )
-    session_name = tmux.get_current_session_name() or "hive"
-    window_name = team_name
-
-    window, first_pane = tmux.new_window(session_name, name=window_name, cwd=anchor_cwd, detach=True)
-    if not window or not first_pane:
-        _fail("failed to create a window for the resumed team")
-    _resume_progress(f"window {window} created — switching there")
-    try:
-        # The human asked for this team: take them to it and let them watch
-        # the members come up instead of staring at a silent prompt.
-        tmux.select_window(window)
-        _prepare_window_for_new_team(window, current_pane=first_pane)
-        _claim_team_name(team_name, this_window=window, explicit=True)
-        bus.init_workspace(Path(ws))
-        t = Team.create_for_window(
-            team_name,
-            window_target=window,
-            lead_pane_id=first_pane,
-            lead_name=str(members[0]["name"]),
-            description=f"resumed from snapshot {handle}",
-            workspace=ws,
-            tag_lead=False,
-        )
-        results: list[tuple[str, str]] = []
-        for i, m in enumerate(members):
-            name = str(m["name"])
-            fresh = name in fresh_members
-            if fresh:
-                _resume_progress(
-                    f"spawning fresh {name} ({m['cli']}) — no saved session, starting clean…"
-                )
-                session_kwargs: dict[str, str] = {"skill": "hive:hive"}
-            else:
-                _resume_progress(
-                    f"resuming {name} ({m['cli']}) — replaying its session, this can take a while…"
-                )
-                session_kwargs = {"session_id": str(m["sessionId"]), "session_mode": "resume", "skill": "none"}
-            agent = Agent.spawn(
-                name=name,
-                team_name=team_name,
-                target_pane=first_pane,
-                cwd=(anchor_cwd if fresh else str(m["cwd"])),
-                split_window=i > 0,
-                split_horizontal=layout_mod.split_horizontal(window, i + 1),
-                split_size="50%",
-                cli=str(m["cli"]),
-                model=str(m.get("model", "")),
-                workspace=ws,
-                **session_kwargs,
-            )
-            hive_context.save_context_for_pane(
-                agent.pane_id, team=team_name, workspace=ws, agent=name
-            )
-            results.append((name, agent.pane_id))
-            _resume_progress(f"{name} ready in {agent.pane_id}")
-        layout_mod.apply_adaptive(window)
-        # Commit the continuation identity BEFORE the sidecar starts: its
-        # writer fires immediately and would otherwise see the old createdAt
-        # and archive the very snapshot being continued.
-        continued = dict(snap)
-        continued["createdAt"] = str(t.created_at)
-        continued["windowName"] = window_name
-        saved = resume_store.save_snapshot(continued, now=_utc_now_iso(), archive_on_new_instance=False)
-        if saved == "rejected":
-            raise RuntimeError("continuation snapshot rejected by the store")
-        _ensure_team_sidecar(t, Path(ws))
-    except Exception as e:  # noqa: BLE001 — roll the whole window back, keep the snapshot
-        tmux.kill_window(window)
-        _fail(f"resume failed: {e} — new window removed, snapshot kept for retry")
-    return {
-        "resumed": "full",
-        "team": team_name,
-        "window": window,
-        "workspace": ws,
-        "members": [
-            {"name": name, "pane": pane, "session": "fresh" if name in fresh_members else "resumed"}
-            for name, pane in results
-        ],
-    }
-
-
-def _utc_now_iso() -> str:
-    import datetime as _dt
-
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-@cli.command("resume")
-@click.argument("handle", required=False, default="")
-def resume_cmd(handle: str):
-    """Rebuild a dead team — or revive its missing members — from a snapshot.
-
-    Members with a saved agent session come back with it (claude ``-r``,
-    codex ``resume``) in their original working directory; members whose
-    snapshot has no saved session are respawned fresh with the member
-    bootstrap, following the anchor's cwd. Run ``hive ls`` to see
-    resumable handles.
-    """
-    if not handle:
-        _fail("missing handle — run `hive ls` to see resumable teams")
-    if not tmux.is_inside_tmux():
-        _fail("hive resume requires a tmux session")
-    from . import resume as resume_store
-    from .agent import SUPPORTED_CLIS
-
-    snap = resume_store.load_snapshot(handle)
-    if snap is None:
-        # Not an exact handle: try the 4-char short id shown by `hive ls`.
-        snap = _resolve_short_resume_ref(handle)
-    if snap is None:
-        _fail(f"no usable snapshot for '{handle}' — run `hive ls` (missing or corrupt)")
-    handle = str(snap["handle"])
-    members = list(snap.get("members", []))
-    names = [str(m.get("name") or "") for m in members]
-    if not names or any(not n for n in names):
-        _fail("snapshot roster is empty or has unnamed members — nothing to resume")
-    roster = dict(zip(names, members))
-    # A member without a saved session cannot be resumed, but the saved
-    # context of the others is the whole point: bring it back fresh.
-    fresh_members = frozenset(n for n, m in zip(names, members) if not m.get("sessionId"))
-    if len(fresh_members) == len(names):
-        _fail(
-            "no member has a saved sessionId — nothing to resume with original "
-            "context; start a fresh team instead (hive init)"
-        )
-    bad_cli = [n for n, m in zip(names, members) if m.get("cli") not in SUPPORTED_CLIS]
-    if bad_cli:
-        _fail(f"unsupported cli for member(s): {', '.join(bad_cli)}")
-    gone_cwd = [
-        n
-        for n, m in zip(names, members)
-        if n not in fresh_members and not os.path.isdir(str(m.get("cwd") or ""))
-    ]
-    if gone_cwd:
-        _fail(
-            f"working directory missing on disk for: {', '.join(gone_cwd)} "
-            "— restore it first (deleted worktree?)"
-        )
-
-    panes, pane_status = tmux.list_panes_all_status()
-    windows, win_status = tmux.list_team_windows_status()
-    if pane_status != "ok" or win_status != "ok":
-        _fail("tmux did not answer the pane/window listing; rerun hive resume")
-
-    team_name = str(snap["team"])
-    live = {p.agent: p for p in panes or [] if p.team == team_name and p.agent}
-    win = next((w for w in windows or [] if w["team"] == team_name), None)
-
-    if live:
-        if win is None:
-            _fail(f"live members of '{team_name}' found but no team window — inconsistent tmux state; not guessing")
-        if (
-            win.get("created")
-            and snap.get("createdAt")
-            and str(win["created"]) != str(snap["createdAt"])
-        ):
-            _fail(
-                f"a different live team already owns '{team_name}' — this snapshot is superseded; nothing to resume"
-            )
-        extras = sorted(n for n in live if n not in roster)
-        if extras:
-            _fail(f"live team has members not in the snapshot ({', '.join(extras)}); not guessing")
-        cli_mismatch = sorted(
-            n for n, p in live.items() if p.cli and roster[n].get("cli") and p.cli != roster[n]["cli"]
-        )
-        if cli_mismatch:
-            _fail(f"live member cli differs from snapshot for: {', '.join(cli_mismatch)}; not guessing")
-        missing = [roster[n] for n in roster if n not in live]
-        if not missing:
-            _fail(f"team '{team_name}' is live and complete — nothing to resume")
-        result = _resume_members_into_live_team(snap, win, live, missing, fresh_members)
-    else:
-        result = _resume_full_team(handle, snap, fresh_members)
-    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _wait_for_peer_ready(
@@ -3107,6 +2802,15 @@ def kill(agent_name: str):
     agent.kill()
     if removed_from_team:
         del t.agents[agent_name]
+        from . import registry
+
+        team_name = getattr(t, "name", "") or ""
+        if team_name:
+            registry.remove_member(
+                team_name,
+                agent_name,
+                created_at=str(getattr(t, "created_at", "") or ""),
+            )
     layout_window = getattr(t, "tmux_window", "") or tmux.get_current_window_target() or ""
     if layout_window:
         from . import layout as layout_mod

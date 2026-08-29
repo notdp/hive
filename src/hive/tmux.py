@@ -1045,7 +1045,7 @@ def list_team_windows_status() -> tuple[list[dict[str, str]] | None, str]:
 
     Same (value, status) contract as :func:`list_panes_all_status`. Each
     entry: window target/name/id plus the team, workspace, and created
-    options — everything `hive ls` / `hive resume` need to match a live
+    options — everything `hive ls` needs to match a live
     team instance against a snapshot.
     """
     r = _run(["list-windows", "-a", "-F", _TEAM_WINDOW_FMT], check=False)
