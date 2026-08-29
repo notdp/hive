@@ -931,7 +931,7 @@ def _classify_pane(pane: tmux.PaneInfo) -> tuple[str, str]:
 def _hive_join_message(agent_name: str, team_name: str) -> str:
     return (
         f"You are '{agent_name}' in hive team '{team_name}'. "
-        "Context is pre-bound. Run `/hive:hive` first and follow "
+        f"Context is pre-bound. Run `/hive:hive {team_name}` first and follow "
         "that protocol. Hive messages will arrive inline as "
         "<HIVE ...> ... </HIVE> blocks. "
         "Use `hive team` to inspect the team; message any peer with "
@@ -1077,6 +1077,9 @@ def _spawn_headless_member(
     if skill and skill != "none":
         skill_ref = skill if resolved_cli == "claude" else skill.rsplit(":", 1)[-1]
         initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
+        # The skill takes the team as its argument — one entry form for
+        # spawn bootstrap and manual joins alike.
+        initial_prompt = f"{initial_prompt} {team_name}"
     if prompt:
         initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
 
@@ -1933,10 +1936,27 @@ def _create_headless_team(
     if registry.load(name) is not None:
         _fail(f"team '{name}' already exists (hive delete removes it)")
     ws_str = str(Path(workspace).expanduser()) if workspace else ""
+    # The creator is the orch when it is an agent: a Claude session outside
+    # tmux joins its own roster, same as an agent pane does inside tmux.
+    # A session already on another team's roster stays a guest here.
+    orch_member = None
+    from .adapters import claude_sessions
+
+    creator = claude_sessions.self_session()
+    if creator is not None and creator.session_id:
+        if _registry_member_for_session(creator.session_id) is None:
+            orch_member = {
+                "name": LEAD_AGENT_NAME,
+                "cli": "claude",
+                "model": "",
+                "sessionId": creator.session_id,
+                "cwd": os.getcwd(),
+            }
     registry.record_team(
         team=name,
         workspace=ws_str,
         created_at=str(time.time()),
+        members=[orch_member] if orch_member else [],
     )
     if ws_str:
         ws = Path(ws_str)
@@ -1947,6 +1967,15 @@ def _create_headless_team(
             (ws / "state" / key).write_text(value)
     _remember_context(team=name, workspace=ws_str, agent=LEAD_AGENT_NAME)
     click.echo(f"Team '{name}' created (headless — `hive attach {name}` renders it).")
+    if orch_member is not None:
+        click.echo(f"You are {name}.{LEAD_AGENT_NAME}.")
+    elif creator is not None and creator.session_id:
+        existing = _registry_member_for_session(creator.session_id)
+        if existing is not None:
+            click.echo(
+                f"You are already {existing[0]}.{existing[1]} — orchestrating "
+                f"'{name}' as a guest."
+            )
     if ws_str:
         click.echo(f"Workspace initialized: {ws_str}")
 
@@ -1960,19 +1989,20 @@ def _create_headless_team(
 def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_entries: tuple[str, ...]):
     """Create a team.
 
-    Outside tmux: a headless team (NAME required) — `hive attach` renders it.
-    Inside tmux on an agent pane: that pane becomes the orch (NAME optional,
-    pool-picked by default). Inside tmux on a shell pane: the window binds
-    the team without an orch.
+    NAME is optional everywhere (pool-picked by default). Outside tmux:
+    a headless team — `hive attach` renders it. Inside tmux on an agent
+    pane: that pane becomes the orch. Inside tmux on a shell pane: the
+    window binds the team without an orch.
     """
     if state_entries and not workspace:
         _fail("--state requires --workspace")
     if reset_workspace and not workspace:
         _fail("--reset-workspace requires --workspace")
     if not tmux.is_inside_tmux():
-        if not name:
-            _fail("a headless team needs a name: hive create <name>")
-        _create_headless_team(name, workspace, reset_workspace, state_entries)
+        _create_headless_team(
+            name or _pick_team_name("", "", "0"),
+            workspace, reset_workspace, state_entries,
+        )
         return
     current_pane = tmux.get_current_pane_id() or ""
     if current_pane and detect_profile_for_pane(current_pane) is not None:
@@ -1984,7 +2014,12 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
     if not name:
-        _fail("a shell-pane create needs a name: hive create <name>")
+        window = tmux.get_current_window_target() or ""
+        name = _pick_team_name(
+            tmux.get_current_session_name() or "",
+            tmux.get_window_id(window) or "" if window else "",
+            window.rsplit(":", 1)[-1] if ":" in window else "0",
+        )
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)

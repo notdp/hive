@@ -289,6 +289,9 @@ class Agent:
             # codex and grok register them by bare skill name ($hive, /hive).
             skill_ref = skill if cli == "claude" else skill.rsplit(":", 1)[-1]
             initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
+            # The skill takes the team as its argument — one entry form for
+            # spawn bootstrap and manual joins alike.
+            initial_prompt = f"{initial_prompt} {team_name}"
         if prompt:
             initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
         # The launch goes through `hive <cli>`, whose parser strips any `--`

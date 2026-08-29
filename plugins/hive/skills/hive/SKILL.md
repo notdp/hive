@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive team 协作协议。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、或要发起多 agent 协作/建团派活时必读；covers 成员全生命周期（找到自己、收活、干活、回报、被打回/打断、退场）与编排（拆任务、spawn、派发、fix 循环、git 集成、终验汇报）。
+description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=按处境创建或加入,带 team 名=加入该队(不存在则创建)。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、或要发起多 agent 协作/建团派活时必读;covers 成员全生命周期(找到自己、收活、干活、回报、被打回/打断、退场)与编排(拆任务、spawn、派发、fix 循环、git 集成、终验汇报)。
 ---
 
 # Hive 协作协议
@@ -12,7 +12,7 @@ description: Hive team 协作协议。被 hive spawn 进 team、被 hive join �
 ```bash
 hive team            # 名册 + runtime：你是谁、队里有谁、各自什么状态
 hive send <addr> "<内容>"   # 唯一投递动词。成功零输出，自动锚线程
-hive create [name]   # 建团。tmux 外：headless 团（name 必填）；tmux 内 agent pane：当前 pane 立为 orch（name 缺省池名）；tmux 内 shell pane：当前窗口绑上新团（无 orch）
+hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外：headless 团（你以 <team>.orch 入册）；tmux 内 agent pane：当前 pane 立为 orch；shell 建的团无 orch
 hive join <team>     # 入队。tmux 外：当前 Claude session 进名册成为正式成员；tmux 内：当前 pane 注册进窗口的 team
 hive spawn <name>    # 造新成员。tmux 外（或团没有窗口）spawn 出 headless 成员：引擎直起、无 pane，投递、回报、kill 全都照常
 hive attach <team>   # 渲染。没有窗口的团长出布局完好的窗口；有窗口就跳过去
@@ -21,10 +21,15 @@ hive delete <team>   # 团的终点：注销名册、释放团名。关掉窗口
 hive ls              # 全部 team（含没有窗口的）
 ```
 
-你在协议里只有两种处境：
+## 入口分派：`/hive:hive [team]`
 
-- **被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）——最常见。读「你是成员」一章，从「出生」开始。
-- **要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）——成员章就是你的底座，再读「你要当派发人时」。
+本协议由 `/hive:hive <team>` 载入——spawn bootstrap 和 human 手打用的是同一个形式，参数就是你的队。先判处境，再看参数：
+
+1. **你已经在队里**（`hive team` 返回的 `self` 有值，或你出生时就带着队籍）：参数就是对你队籍的确认，直接进「你是成员」一章，从「出生」开始。参数与所在队不符时，回一句说明即可，不换队。
+2. **你不在任何队，参数给了 team 名**（`/hive:hive wasp`）：`hive join wasp` 入队；报 not found 就 `hive create wasp` 建团——同一个入口幂等，建完你就是发起人，读「你要当派发人时」。
+3. **你不在任何队，无参数**：`hive create` 建新团（名字自动从池里挑）——tmux 内当前 pane 立为 orch，tmux 外是 headless 团，语义同一个。想加入已有团就带参数说队名，无参永远是要新团。
+
+处境只有两种，全文按此分章：**被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）读「你是成员」；**要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）成员章就是你的底座，再读「你要当派发人时」。
 
 ---
 
@@ -160,7 +165,7 @@ kill 是派发人的动词，你不用自己退场：验收通过后派发人会
 
 你要发起协作，你就是这个 team 的 **orch**：拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。没有仪式：orch 只是先开始派活的那个参与者。
 
-启动：还没有 team 就按开头动词表 `hive create`。tmux 外建的是 headless 团，此时你自己不在名册里，以 guest 身份照常和成员收发——你的回信地址就是 `ccd.<你的 session name>`，成员照抄你消息的 from 就能回到你；想进名册（被寻址、被派活）就 `hive join <name>`。成员的回信会注入你的对话并唤醒你，spawn/派发之后照常结束 turn 等推送。然后 `hive team` 确认 `self`，开始拆解。
+启动：还没有 team 就按开头动词表 `hive create`——建团者就是 orch，tmux 内外一样：你以 `<team>.orch` 进名册，成员回你直接寻址 orch（唯一例外：你已是别团成员时，本团以 guest 身份编排，回信地址是 `ccd.<你的 session name>`，成员照抄 from 就能回到你）。成员的回信会注入你的对话并唤醒你，spawn/派发之后照常结束 turn 等推送。然后 `hive team` 确认 `self`，开始拆解。
 
 ### 成员名就是任务标签
 
