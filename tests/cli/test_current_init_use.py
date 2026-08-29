@@ -83,13 +83,34 @@ def test_current_ignores_window_only_team_binding_without_pane_registration(runn
 
 
 def test_team_no_tmux_no_team(runner, configure_hive_home, monkeypatch):
+    """Outside tmux with nothing in scope, team asks for -t instead of a tmux."""
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 
     result = runner.invoke(cli, ["team"])
 
     assert result.exit_code != 0
-    assert "requires tmux" in result.output
+    assert "-t <team>" in result.output
+
+
+def test_team_explicit_t_works_outside_tmux(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    from hive import registry
+
+    assert registry.record_team(
+        team="honey", workspace="/tmp/ws-h", created_at="1.0",
+        members=[{"name": "rex", "cli": "grok", "sessionId": "sid-g", "cwd": "/repo"}],
+    ) == "written"
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setattr("hive.team.tmux.is_inside_tmux", lambda: False)
+
+    result = runner.invoke(cli, ["team", "-t", "honey"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["name"] == "honey"
+    rex = next(m for m in payload["members"] if m["name"] == "rex")
+    assert rex["pane"] == ""
 
 
 def test_current_discovers_registered_agent_from_tmux_pane(runner, configure_hive_home, monkeypatch, tmp_path):
@@ -523,11 +544,12 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
     assert not team_dir.exists()
 
 
-def test_init_reusing_a_pool_name_registers_fresh_without_inherited_sessions(
+def test_init_never_picks_a_registry_claimed_pool_name(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
-    # a fresh team that picks a recycled pool name must not inherit the dead
-    # predecessor's roster or sessions
+    # The registry is the name authority: a headless/detached team owns its
+    # name until `hive delete` — init's pool pick must skip it, and the
+    # existing entry (engines may still run behind it) stays untouched.
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -546,22 +568,21 @@ def test_init_reusing_a_pool_name_registers_fresh_without_inherited_sessions(
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws")
 
     from hive import registry
+    from hive.cli import TEAM_NAME_POOL
 
+    first_pool_name = TEAM_NAME_POOL[0]
     assert registry.record_team(
-        team="honey", workspace="/tmp/hive-dev-w9", created_at="100.0",
-        members=[{"name": "worker", "cli": "claude", "model": "m", "sessionId": "DEAD-SID", "cwd": "/repo"}],
+        team=first_pool_name, workspace="/tmp/hive-old", created_at="100.0",
+        members=[{"name": "worker", "cli": "grok", "sessionId": "LIVE-SID", "cwd": "/repo"}],
     ) == "written"
+    before = registry.load(first_pool_name)
 
     result = runner.invoke(cli, ["init"])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["team"] == "honey"
-    # the new instance registers fresh: its own createdAt, no inherited session
-    cur = registry.load("honey")
-    assert cur is not None and cur["createdAt"] != "100.0"
-    assert "DEAD-SID" not in {m.get("sessionId") for m in cur["members"]}
-    assert {m["name"] for m in cur["members"]} == {"orch"}
-
+    picked = json.loads(result.output)["team"]
+    assert picked != first_pool_name
+    assert registry.load(first_pool_name) == before  # untouched
 
 def test_init_skips_pool_names_claimed_by_live_teams_and_squads(
     runner, configure_hive_home, monkeypatch, tmp_path,
@@ -845,3 +866,33 @@ def test_register_no_notify_registers_without_reachability_proof(
         notify=False,
     )
     assert t.agents["loner"] is agent
+
+
+def test_create_outside_tmux_registers_headless_team(runner, configure_hive_home, monkeypatch, tmp_path):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    ws = tmp_path / "ws-headless"
+
+    result = runner.invoke(cli, ["create", "honey", "--workspace", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "headless" in result.output
+    from hive import registry
+
+    entry = registry.load("honey")
+    assert entry is not None
+    assert entry["workspace"] == str(ws)
+    assert entry["members"] == []
+    assert (ws / "state").is_dir()  # workspace initialized
+
+    # a second create of the same name refuses instead of clobbering
+    again = runner.invoke(cli, ["create", "honey"])
+    assert again.exit_code != 0
+    assert "already exists" in again.output
+
+
+def test_create_outside_tmux_rejects_reserved_names(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    assert runner.invoke(cli, ["create", "ccd"]).exit_code != 0
+    assert runner.invoke(cli, ["create", "a.b"]).exit_code != 0

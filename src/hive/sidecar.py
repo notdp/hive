@@ -775,7 +775,10 @@ def _check_send_gate(target) -> None:
     re-deriving it — one judgement for every CLI, and no silent skip when a
     transcript cannot be resolved.
     """
-    runtime = _member_runtime_payload(target.pane_id, role="agent")
+    if target.pane_id:
+        runtime = _member_runtime_payload(target.pane_id, role="agent")
+    else:
+        runtime = _headless_member_runtime(target)
     if runtime.get("inputState") != "waiting_user":
         return
     if str(runtime.get("inputReason") or "") in _SEND_GATE_WAIVED_REASONS:
@@ -1002,7 +1005,18 @@ def _grok_leader_runtime(pane_id: str) -> dict[str, Any] | None:
 
 
 def _claude_bg_runtime(pane_id: str) -> dict[str, Any] | None:
-    """Native claude runtime from the pane's bg job, or None if unmanaged.
+    """Native claude runtime from the pane's bg job, or None if unmanaged."""
+    from .adapters import claude_bg
+
+    record = claude_bg.read_pane_job(pane_id)
+    if record is None:
+        return None
+    job_id, record_session, _cwd = record
+    return _claude_job_runtime(job_id, record_session)
+
+
+def _claude_job_runtime(job_id: str, record_session: str = "") -> dict[str, Any]:
+    """Native claude runtime keyed by the job itself (pane optional).
 
     Liveness is three-tier: a live engine entry (alive — its ``status`` is
     the truth); a ledger row without a live engine (asleep — the supervisor
@@ -1013,10 +1027,6 @@ def _claude_bg_runtime(pane_id: str) -> dict[str, Any] | None:
     """
     from .adapters import claude_bg
 
-    record = claude_bg.read_pane_job(pane_id)
-    if record is None:
-        return None
-    job_id, record_session, _cwd = record
     engine = claude_bg.engine_session_for_job(job_id)
     if engine is not None:
         fields = claude_bg.runtime_from_engine(engine)
@@ -1260,6 +1270,60 @@ def _agent_runtime_payload(
     return runtime
 
 
+def _headless_member_runtime(agent) -> dict[str, Any]:
+    """Runtime for a registry member with no pane: the engine IS the member.
+
+    ``alive`` mirrors engine liveness (there is no pane to be alive), and
+    ``headless`` marks the row so consumers can tell a closed display from a
+    dead member.
+    """
+    runtime: dict[str, Any] = {"alive": False, "headless": True, "busy": False}
+    sid = str(getattr(agent, "session_id", "") or "")
+    cli = getattr(agent, "cli", "") or ""
+    if cli == "claude" and sid:
+        runtime.update(_claude_job_runtime(sid))
+    elif cli == "codex" and sid:
+        from .adapters import codex_app_server
+
+        rt = codex_app_server.runtime_for_thread(sid)
+        if rt is None:
+            runtime.update(cliAlive=False, inputState="unknown", inputReason="no_daemon_runtime")
+        else:
+            input_state = rt.input_state or "ready"
+            runtime.update(
+                cliAlive=True,
+                busy=rt.busy,
+                turnPhase=rt.turn_phase,
+                inputState=input_state,
+                inputReason="" if input_state != "waiting_user" else "app_server_active_flag",
+                _runtimeSource="codex_app_server",
+            )
+        runtime["sessionId"] = sid
+    elif cli == "grok":
+        from .adapters import grok_leader
+
+        key = grok_leader.member_key(getattr(agent, "team_name", "") or "", getattr(agent, "name", "") or "")
+        rt = grok_leader.runtime_for_key(key)
+        if rt is None:
+            runtime.update(cliAlive=False, inputState="unknown", inputReason="no_leader_runtime")
+        else:
+            input_state = rt.input_state or "ready"
+            runtime.update(
+                cliAlive=True,
+                busy=rt.busy,
+                turnPhase=rt.turn_phase,
+                inputState=input_state,
+                inputReason="" if input_state != "waiting_user" else "leader_permission_request",
+                _runtimeSource="grok-leader",
+            )
+        record = grok_leader.read_session_key(key)
+        runtime["sessionId"] = (record[0] if record else "") or sid or "unresolved"
+    else:
+        runtime.update(cliAlive=False, inputState="unknown", inputReason="no_engine_identity")
+    runtime["alive"] = bool(runtime.get("cliAlive"))
+    return runtime
+
+
 def _member_runtime_payload(pane_id: str, *, role: str) -> dict[str, Any]:
     from . import tmux
 
@@ -1291,7 +1355,10 @@ def _team_runtime_payload(team_name: str) -> dict[str, Any]:
 
     for name in sorted(team.agents):
         agent = team.agents[name]
-        runtime = _member_runtime_payload(agent.pane_id, role="agent")
+        if agent.pane_id:
+            runtime = _member_runtime_payload(agent.pane_id, role="agent")
+        else:
+            runtime = _headless_member_runtime(agent)
         members[name] = runtime
         if runtime.get("inputState") == "waiting_user":
             needs_answer.append(name)

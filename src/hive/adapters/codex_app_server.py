@@ -762,10 +762,14 @@ def runtime_for_pane(pane: str) -> ThreadRuntime | None:
     tid = thread_id_for_pane(pane)
     if not tid:
         return None
+    return runtime_for_thread(tid)
+
+
+def runtime_for_thread(thread_id: str) -> ThreadRuntime | None:
     client = _shared_client()
     if client is None:
         return None
-    return client.runtime_or_backfill(tid)
+    return client.runtime_or_backfill(thread_id)
 
 
 def send_to_pane(pane: str, text: str) -> str | None:
@@ -785,11 +789,20 @@ def send_to_pane(pane: str, text: str) -> str | None:
     tid = thread_id_for_pane(pane)
     if not tid:
         return None
+    return send_to_thread(tid, text)
+
+
+def send_to_thread(thread_id: str, text: str) -> str | None:
+    """Deliver text as a new turn on *thread_id* — the engine-keyed core.
+
+    Same transport contract as :func:`send_to_pane`; a pane-less member is
+    addressed by the thread id its registry row carries.
+    """
     client = _shared_client()
     if client is None:
         return None
     try:
-        response = client.turn_start(tid, text)
+        response = client.turn_start(thread_id, text)
     except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
         return None
     return TURN_START_ACCEPTED if "result" in response else None
@@ -808,14 +821,19 @@ def interrupt_pane(pane: str) -> str | None:
     tid = thread_id_for_pane(pane)
     if not tid:
         return None
+    return interrupt_thread(tid)
+
+
+def interrupt_thread(thread_id: str) -> str | None:
+    """Abort the running turn on *thread_id* — the engine-keyed core."""
     client = _shared_client()
     if client is None:
         return None
     try:
-        turn_id = client.active_turn_id(tid)
+        turn_id = client.active_turn_id(thread_id)
         if not turn_id:
             return NO_RUNNING_TURN
-        response = client.turn_interrupt(tid, turn_id)
+        response = client.turn_interrupt(thread_id, turn_id)
     except Exception:  # noqa: BLE001 — RPC/socket failure is a transport failure
         return None
     return TURN_INTERRUPT_ACCEPTED if "result" in response else None

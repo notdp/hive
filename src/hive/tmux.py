@@ -357,6 +357,18 @@ def window_zoomed(window_target: str) -> bool:
     return r.stdout.strip() == "1"
 
 
+def exec_attach(session: str, window_target: str) -> None:
+    """Replace this process with `tmux attach` focused on *window_target*.
+
+    The outside-tmux tail of `hive attach`: attach to the session and select
+    the team's window in one tmux command chain.
+    """
+    os.execvp(
+        "tmux",
+        ["tmux", "attach", "-t", session, ";", "select-window", "-t", window_target],
+    )
+
+
 def select_window(window_target: str) -> None:
     _run(["select-window", "-t", window_target], check=False)
 

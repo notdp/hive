@@ -135,20 +135,28 @@ def pane_pidfile_path(pane: str) -> Path:
     return pane_socket_path(pane).with_suffix(".pid")
 
 
-def pane_session_path(pane: str) -> Path:
+def session_path_for_key(key: str) -> Path:
     """Sibling record of the session id hive minted for this daemon."""
-    return pane_socket_path(pane).with_suffix(".session")
+    return socket_path_for_key(key).with_suffix(".session")
 
 
-def write_pane_session(pane: str, session_id: str, cwd: str) -> None:
-    path = pane_session_path(pane)
+def pane_session_path(pane: str) -> Path:
+    return session_path_for_key(resolve_pane_key(pane))
+
+
+def write_session_key(key: str, session_id: str, cwd: str) -> None:
+    path = session_path_for_key(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"sessionId": session_id, "cwd": cwd}))
 
 
-def read_pane_session(pane: str) -> tuple[str, str] | None:
+def write_pane_session(pane: str, session_id: str, cwd: str) -> None:
+    write_session_key(resolve_pane_key(pane), session_id, cwd)
+
+
+def read_session_key(key: str) -> tuple[str, str] | None:
     try:
-        data = json.loads(pane_session_path(pane).read_text())
+        data = json.loads(session_path_for_key(key).read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -157,6 +165,10 @@ def read_pane_session(pane: str) -> tuple[str, str] | None:
     if not session_id or not cwd:
         return None
     return str(session_id), str(cwd)
+
+
+def read_pane_session(pane: str) -> tuple[str, str] | None:
+    return read_session_key(resolve_pane_key(pane))
 
 
 def _daemon_env_for_pane(pane: str) -> dict[str, str]:
@@ -211,11 +223,11 @@ class SessionRuntime:
 # one stdio client attached to one pane's leader
 # --------------------------------------------------------------------------
 class GrokStdioClient:
-    """``grok agent --leader stdio`` subprocess bound to one pane's session."""
+    """``grok agent --leader stdio`` subprocess bound to one daemon key's session."""
 
-    def __init__(self, pane: str):
-        self.pane = pane
-        self.socket_path = str(pane_socket_path(pane))
+    def __init__(self, key: str):
+        self.key = key
+        self.socket_path = str(socket_path_for_key(key))
         self._proc = subprocess.Popen(
             ["grok", "agent", "--leader", "stdio", "--leader-socket", self.socket_path],
             stdin=subprocess.PIPE,
@@ -412,12 +424,12 @@ class GrokStdioClient:
 
     # ---- protocol ----
     def handshake(self) -> bool:
-        """``initialize`` then ``session/load`` of the pane's minted session.
+        """``initialize`` then ``session/load`` of the key's minted session.
 
-        Both values come from the pane session file — the pane's cwd is recorded
-        at spawn time, so no tmux query is needed here.
+        Both values come from the key's session file — cwd is recorded at
+        spawn time, so no tmux query is needed here.
         """
-        session = read_pane_session(self.pane)
+        session = read_session_key(self.key)
         if session is None:
             return False
         initialized = self.call("initialize", {
@@ -434,6 +446,29 @@ class GrokStdioClient:
             "mcpServers": [],
         }, timeout=_LOAD_TIMEOUT, loads=session_id)
         return "result" in loaded
+
+    def new_session(self, session_id: str, cwd: str) -> bool:
+        """``initialize`` then ``session/new`` with hive's minted id.
+
+        The headless spawn primitive: the leader materializes the session
+        (spike-verified: the id must ride ``_meta.sessionId`` — a top-level
+        ``sessionId`` is silently ignored and the server mints its own).
+        Binds this client to the new session on success.
+        """
+        initialized = self.call("initialize", {
+            "protocolVersion": 1,
+            "clientInfo": {"name": "hive", "version": "1"},
+            "clientCapabilities": {},
+        }, timeout=_INIT_TIMEOUT)
+        if "result" not in initialized:
+            return False
+        created = self.call("session/new", {
+            "cwd": cwd,
+            "mcpServers": [],
+            "_meta": {"sessionId": session_id},
+        }, timeout=_LOAD_TIMEOUT, loads=session_id)
+        result = created.get("result") if isinstance(created, dict) else None
+        return isinstance(result, dict) and result.get("sessionId") == session_id
 
     def prompt(self, text: str) -> bool:
         """Queue one prompt; True once the leader echoes it back.
@@ -552,15 +587,48 @@ def spawn_daemon(pane: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_
     """Ensure the leader daemon the pane addresses is listening.
 
     Idempotent: a live daemon on the resolved key's socket is reused (a tagged
-    member pane and its spawner reach the same member daemon). Otherwise one
-    is started with ``TMUX_PANE=<pane>`` (shell tools report the right pane)
-    and ``HIVE_TEAM``/``HIVE_MEMBER`` pinned for a member key, sharing the
-    real GROK_HOME (auth/model/session layout stay correct).
+    member pane and its spawner reach the same member daemon). The daemon env
+    carries ``TMUX_PANE`` (shell tools report the right pane) and, for a
+    member key, ``HIVE_TEAM``/``HIVE_MEMBER``.
+    """
+    return _spawn_daemon_key(
+        resolve_pane_key(pane), _daemon_env_for_pane(pane),
+        grok_bin=grok_bin, timeout=timeout,
+    )
+
+
+def spawn_member_daemon(
+    team: str, member: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_START_TIMEOUT
+) -> bool:
+    """Ensure the member's leader daemon is listening — no pane involved.
+
+    The headless spawn lane: env carries the member identity only (no
+    ``TMUX_PANE`` — there is no pane to report).
+    """
+    env = {
+        k: v for k, v in os.environ.items()
+        if not (
+            k.startswith("CLAUDE")
+            or k.startswith("ANTHROPIC")
+            or k in ("CODEX_THREAD_ID", "HIVE_TEAM", "HIVE_MEMBER", "TMUX_PANE", "TMUX")
+        )
+    }
+    env["HIVE_TEAM"], env["HIVE_MEMBER"] = team, member
+    return _spawn_daemon_key(
+        member_key(team, member), env, grok_bin=grok_bin, timeout=timeout
+    )
+
+
+def _spawn_daemon_key(
+    key: str, env: dict[str, str], *, grok_bin: str, timeout: float
+) -> bool:
+    """Start (or reuse) the leader daemon on *key*'s socket.
+
     ``start_new_session`` detaches it from the short-lived CLI; the sidecar
     reaps member daemons the registry no longer lists, and pane-keyed ones
     when their pane dies.
     """
-    sock = pane_socket_path(pane)
+    sock = socket_path_for_key(key)
     sock.parent.mkdir(parents=True, exist_ok=True)
     if sock.exists():
         if probe_socket(str(sock)):
@@ -577,7 +645,7 @@ def spawn_daemon(pane: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_
                 "--no-auto-update",
                 "--no-exit-on-disconnect",
             ],
-            env=_daemon_env_for_pane(pane),
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -591,7 +659,7 @@ def spawn_daemon(pane: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_
             return False  # died before binding
         if sock.exists():
             try:
-                pane_pidfile_path(pane).write_text(str(proc.pid))
+                sock.with_suffix(".pid").write_text(str(proc.pid))
             except OSError:
                 pass
             return True
@@ -661,12 +729,12 @@ def kill_pane_daemon(pane: str) -> None:
 # per-pane client pool (sidecar-side)
 # --------------------------------------------------------------------------
 class GrokClientPool:
-    """One persistent stdio client per pane.
+    """One persistent stdio client per daemon key.
 
-    The sidecar calls :meth:`runtime_for_pane` every tick; each client's reader
-    thread keeps its session state current between calls. Clients are created
-    lazily the first time a read finds both a socket and a session record, and a
-    dead one is dropped and retried after a cooldown so a missing daemon does not
+    The sidecar reads runtime every tick; each client's reader thread keeps
+    its session state current between calls. Clients are created lazily the
+    first time a read finds both a socket and a session record, and a dead
+    one is dropped and retried after a cooldown so a missing daemon does not
     storm subprocess spawns.
     """
 
@@ -675,23 +743,23 @@ class GrokClientPool:
         self._clients: dict[str, GrokStdioClient] = {}
         self._cooldown: dict[str, float] = {}
 
-    def runtime_for_pane(self, pane: str) -> SessionRuntime | None:
-        client = self._client_for(pane)
+    def runtime_for_key(self, key: str) -> SessionRuntime | None:
+        client = self._client_for_key(key)
         return client.runtime() if client is not None else None
 
-    def connect(self, pane: str) -> bool:
-        """Bring the stdio client online for a pane (called at spawn time)."""
-        return self._client_for(pane) is not None
+    def connect_key(self, key: str) -> bool:
+        """Bring the stdio client online for a key (called at spawn time)."""
+        return self._client_for_key(key) is not None
 
-    def send_to_pane(self, pane: str, text: str) -> str | None:
-        """Deliver text as a prompt over the pane's leader.
+    def send_to_key(self, key: str, text: str) -> str | None:
+        """Deliver text as a prompt over the key's leader.
 
         Returns ``PROMPT_QUEUED`` when the leader echoed the prompt back, else
         None: no daemon, no session record, an rpc error, or an ack timeout.
         A busy session is not bounced — the leader queues the prompt FIFO and
         runs it when the current turn ends, the same as typing into the TUI.
         """
-        client = self._client_for(pane)
+        client = self._client_for_key(key)
         if client is None:
             return None
         try:
@@ -699,13 +767,13 @@ class GrokClientPool:
         except Exception:  # noqa: BLE001 — any client failure is a transport failure
             return None
 
-    def interrupt_pane(self, pane: str) -> str | None:
-        """Cancel the running turn over the pane's leader.
+    def interrupt_key(self, key: str) -> str | None:
+        """Cancel the running turn over the key's leader.
 
         Returns ``CANCEL_SENT`` when the notification went out on a loaded
         session, else None: no daemon, no session record, or a dead pipe.
         """
-        client = self._client_for(pane)
+        client = self._client_for_key(key)
         if client is None:
             return None
         try:
@@ -713,58 +781,55 @@ class GrokClientPool:
         except Exception:  # noqa: BLE001 — any client failure is a transport failure
             return None
 
-    def compact_pane(self, pane: str) -> str:
-        client = self._client_for(pane)
+    def compact_key(self, key: str) -> str:
+        client = self._client_for_key(key)
         return client.compact() if client is not None else "unavailable"
 
-    def _client_for(self, pane: str) -> GrokStdioClient | None:
-        # A relaunched grok in the same pane mints a new session id, so the
+    def _client_for_key(self, key: str) -> GrokStdioClient | None:
+        # A relaunched grok on the same key mints a new session id, so the
         # record — not just the client's liveness — decides whether the bound
-        # client is still the pane's.
-        record = read_pane_session(pane)
+        # client is still the key's.
+        record = read_session_key(key)
         with self._lock:
-            client = self._clients.get(pane)
+            client = self._clients.get(key)
             if client is not None:
                 if client.is_alive() and record is not None and client.session_id == record[0]:
                     return client
                 client.close()
-                self._clients.pop(pane, None)
-            if time.monotonic() < self._cooldown.get(pane, 0.0):
+                self._clients.pop(key, None)
+            if time.monotonic() < self._cooldown.get(key, 0.0):
                 return None
 
-        if record is None or not probe_socket(str(pane_socket_path(pane))):
-            self._set_cooldown(pane)
+        if record is None or not probe_socket(str(socket_path_for_key(key))):
+            self._set_cooldown(key)
             return None
         new_client: GrokStdioClient | None = None
         try:
-            new_client = GrokStdioClient(pane)
+            new_client = GrokStdioClient(key)
             if not new_client.handshake():
                 raise ConnectionError("handshake failed")
         except (OSError, ValueError, ConnectionError):
             if new_client is not None:
                 new_client.close()
-            self._set_cooldown(pane)
+            self._set_cooldown(key)
             return None
         with self._lock:
-            self._clients[pane] = new_client
+            self._clients[key] = new_client
         return new_client
 
-    def _set_cooldown(self, pane: str) -> None:
+    def _set_cooldown(self, key: str) -> None:
         with self._lock:
-            self._cooldown[pane] = time.monotonic() + _CONNECT_COOLDOWN
+            self._cooldown[key] = time.monotonic() + _CONNECT_COOLDOWN
 
     def drop(self, pane: str) -> None:
-        with self._lock:
-            client = self._clients.pop(pane, None)
-        if client is not None:
-            client.close()
+        self.drop_key(resolve_pane_key(pane))
 
     def drop_key(self, key: str) -> None:
         """Drop every client attached to *key*'s socket (reap path)."""
         sock = str(socket_path_for_key(key))
         with self._lock:
-            doomed = [p for p, c in self._clients.items() if c.socket_path == sock]
-            clients = [self._clients.pop(p) for p in doomed]
+            doomed = [k for k, c in self._clients.items() if c.socket_path == sock]
+            clients = [self._clients.pop(k) for k in doomed]
         for client in clients:
             client.close()
 
@@ -782,26 +847,74 @@ def pool() -> GrokClientPool:
 
 
 def runtime_for_pane(pane: str) -> SessionRuntime | None:
-    return pool().runtime_for_pane(pane)
+    return pool().runtime_for_key(resolve_pane_key(pane))
+
+
+def runtime_for_key(key: str) -> SessionRuntime | None:
+    return pool().runtime_for_key(key)
 
 
 def connect_pane(pane: str) -> bool:
-    return pool().connect(pane)
+    return pool().connect_key(resolve_pane_key(pane))
+
+
+def connect_key(key: str) -> bool:
+    return pool().connect_key(key)
 
 
 def send_to_pane(pane: str, text: str) -> str | None:
-    return pool().send_to_pane(pane, text)
+    return pool().send_to_key(resolve_pane_key(pane), text)
+
+
+def send_to_key(key: str, text: str) -> str | None:
+    return pool().send_to_key(key, text)
 
 
 def interrupt_pane(pane: str) -> str | None:
-    return pool().interrupt_pane(pane)
+    return pool().interrupt_key(resolve_pane_key(pane))
+
+
+def interrupt_key(key: str) -> str | None:
+    return pool().interrupt_key(key)
 
 
 def compact_pane(pane: str) -> str:
-    return pool().compact_pane(pane)
+    return pool().compact_key(resolve_pane_key(pane))
 
 
 def session_id_for_pane(pane: str) -> str | None:
     """Session id hive minted for this pane, from its session record."""
     session = read_pane_session(pane)
     return session[0] if session else None
+
+
+def create_member_session(
+    team: str, member: str, session_id: str, cwd: str
+) -> bool:
+    """Materialize the member's session on its leader — the headless spawn.
+
+    Ensures the member daemon, asks it for ``session/new`` with hive's
+    minted id, and records the session beside the socket on success. The
+    creating client stays in the pool, already bound and folding the
+    session's notifications.
+    """
+    if not spawn_member_daemon(team, member):
+        return False
+    key = member_key(team, member)
+    client: GrokStdioClient | None = None
+    try:
+        client = GrokStdioClient(key)
+        if not client.new_session(session_id, cwd):
+            client.close()
+            return False
+    except (OSError, ValueError):
+        if client is not None:
+            client.close()
+        return False
+    write_session_key(key, session_id, cwd)
+    with pool()._lock:
+        existing = pool()._clients.pop(key, None)
+        pool()._clients[key] = client
+    if existing is not None:
+        existing.close()
+    return True

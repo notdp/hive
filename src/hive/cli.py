@@ -45,6 +45,7 @@ _COMMAND_HELP_SECTIONS = {
     "worktree": "Workflow",
     "pr": "Workflow",
     "ls": "Workflow",
+    "attach": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -116,7 +117,13 @@ hive spawn claude                            # bring up a new agent pane
 hive doctor dodo                             # probe a peer's connectivity'''
 
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
-_TMUX_OPTIONAL_ROOT_COMMANDS = {"plugin", "config", "shell-init", "codex", "claude", "grok", "resume-hint", "skills", "worktree", "ls", "ccd"}
+# Verbs that never need a tmux context — plus the team verbs, which read the
+# registry (the truth layer) and only touch tmux when a display exists.
+_TMUX_OPTIONAL_ROOT_COMMANDS = {
+    "plugin", "config", "shell-init", "codex", "claude", "grok",
+    "resume-hint", "skills", "worktree", "ls", "ccd",
+    "create", "spawn", "team", "kill", "delete", "attach",
+}
 
 
 class SectionedHelpGroup(click.Group):
@@ -222,33 +229,20 @@ def _load_team(team: str, *, prefer_pane: str = "") -> Team:
         click.echo(f"Error: team '{team}' not found", err=True)
         sys.exit(1)
 
-def _ensure_team_matches_current_window(t: Team) -> None:
-    if not tmux.is_inside_tmux():
-        return
-    current_session = tmux.get_current_session_name() or ""
-    current_window = tmux.get_current_window_target() or ""
-    team_window = getattr(t, "tmux_window", "") or ""
-    team_session = getattr(t, "tmux_session", "") or ""
-    if not team_window:
-        _fail(f"team '{t.name}' is not bound to a tmux window")
-    if team_session and current_session and team_session != current_session:
-        _fail(
-            f"team '{t.name}' belongs to tmux session '{team_session}', not the current session '{current_session}'"
-        )
-    if current_window and team_window != current_window:
-        _fail(f"team '{t.name}' belongs to tmux window '{team_window}', not the current window '{current_window}'")
-
-
 def _resolve_scoped_team(team: str | None, *, required: bool = True) -> tuple[str | None, Team | None]:
+    """Addressing order: explicit team -> binding discovery (pane tags, then
+    engine env identity). An explicit team is the caller's intent — it loads
+    from the registry wherever the caller happens to be."""
     if team:
-        loaded = _load_team(team)
-        _ensure_team_matches_current_window(loaded)
-        return team, loaded
+        return team, _load_team(team)
     discovered_team = _default_team()
     if discovered_team:
         return discovered_team, _load_team(discovered_team, prefer_pane=tmux.get_current_pane_id() or "")
     if required:
-        _fail("no Hive team is bound to this tmux window (run `hive init` in this window)")
+        _fail(
+            "no Hive team in scope — pass -t <team> (see `hive ls`), or run "
+            "from a bound pane (`hive init` binds one)"
+        )
     return None, None
 
 
@@ -452,8 +446,15 @@ def _pick_team_name(session_name: str, window_id: str, window_index: str = "0") 
     lookup). `_claim_team_name` stays the final anti-clobber; identity
     itself binds to the window via tags, never to the name's shape.
     """
+    from . import registry
+
     used = {p.team for p in tmux.list_panes_all() if p.team}
     used |= _claimed_group_namespaces()
+    # The registry is the name authority: a headless or detached team owns
+    # its name until `hive delete` — a pool pick must never clobber it.
+    used |= {
+        str(e.get("team")) for e in registry.list_entries() if e.get("team")
+    }
     for candidate in TEAM_NAME_POOL:
         if candidate not in used:
             return candidate
@@ -763,10 +764,11 @@ def cli(ctx: click.Context):
 
 
 def _gc_dead_teams() -> None:
-    """Clean up workspaces for teams whose tmux window no longer exists.
+    """Clean up legacy per-team dirs and stale contexts for unknown teams.
 
-    With tmux-only storage, team state dies with the window. This only
-    handles leftover workspace directories and persisted context files.
+    "Known" is the registry union with live windows, so a headless team is
+    never treated as dead. Only leftover legacy directories and persisted
+    context files are touched.
     """
     from .team import list_teams
     live_names = {t["name"] for t in list_teams()}
@@ -1039,6 +1041,131 @@ def _registry_record_member(t: Team, agent: Agent) -> None:
         )
 
 
+def _spawn_headless_member(
+    t: Team,
+    *,
+    team_name: str,
+    agent_name: str,
+    model: str = "",
+    prompt: str = "",
+    cwd: str = "",
+    skill: str = "hive",
+    env_entries: tuple[str, ...] = (),
+    cli_name: str | None = None,
+) -> Agent:
+    """Spawn a member with no pane: engine first, registry as its existence.
+
+    The engine lanes are the spike-verified headless primitives — claude bg
+    spawn (always was pane-free), codex thread/start + turn/start bootstrap,
+    grok member leader + session/new + session/prompt. A display pane, when
+    the team is ever attached, is a later rendering of this engine.
+    """
+    from .agent_cli import PROFILES, validate_spawn_model
+
+    resolved_cli = cli_name if cli_name in AGENT_CLI_NAMES else "claude"
+    model_error = validate_spawn_model(resolved_cli, model)
+    if model_error:
+        raise ValueError(model_error)
+    if agent_name == "flow":
+        raise ValueError("'flow' is the flow runner's reserved mailbox address, not a member name")
+    if agent_name in t.agents:
+        raise ValueError(f"Agent '{agent_name}' already exists in team '{t.name}'")
+    resolved_cwd = str(Path(cwd).expanduser()) if cwd else os.getcwd()
+    extra_env = _parse_entries(env_entries) if env_entries else {}
+
+    profile = PROFILES.get(resolved_cli)
+    initial_prompt = ""
+    if skill and skill != "none":
+        skill_ref = skill if resolved_cli == "claude" else skill.rsplit(":", 1)[-1]
+        initial_prompt = profile.skill_cmd.format(name=skill_ref) if profile else f"/{skill_ref}"
+    if prompt:
+        initial_prompt = f"{initial_prompt}\n\n{prompt}" if initial_prompt else prompt
+
+    session_id = ""
+    if resolved_cli == "claude":
+        from .adapters import claude_bg
+
+        extra_args: list[str] = []
+        if model:
+            extra_args.extend(["--model", model])
+        job_id = claude_bg.spawn_job(
+            cwd=resolved_cwd,
+            name=f"{team_name}.{agent_name}",
+            prompt=initial_prompt,
+            extra_args=extra_args,
+            extra_env={"HIVE_TEAM": team_name, "HIVE_MEMBER": agent_name, **extra_env},
+        )
+        if not job_id:
+            raise ValueError(
+                f"`claude --bg` returned no usable job id for '{agent_name}'; "
+                "refusing to register a member without a job identity"
+            )
+        engine = claude_bg.wait_engine_entry(job_id, timeout=AGENT_STARTUP_TIMEOUT)
+        if engine is None:
+            claude_bg.stop_job(job_id)
+            raise ValueError(
+                f"claude job '{job_id}' started but its engine never "
+                "registered an inbox; refusing an undeliverable member"
+            )
+        session_id = job_id
+    elif resolved_cli == "codex":
+        from .adapters import codex_app_server
+
+        if not codex_app_server.spawn_daemon():
+            raise ValueError("codex shared app-server daemon failed to start")
+        codex_app_server.ensure_dir_trusted(resolved_cwd)
+        thread_id = codex_app_server.start_member_thread(
+            resolved_cwd, name=f"{team_name}.{agent_name}", model=model
+        )
+        if not thread_id:
+            raise ValueError(
+                f"codex app-server refused to mint a thread for '{agent_name}'"
+            )
+        if initial_prompt and codex_app_server.send_to_thread(thread_id, initial_prompt) is None:
+            raise ValueError(
+                f"codex thread '{thread_id}' refused the bootstrap turn"
+            )
+        session_id = thread_id
+    elif resolved_cli == "grok":
+        if model:
+            raise ValueError(
+                "headless grok spawn cannot pick a model yet (the TUI flag "
+                "has no verified ACP equivalent); omit --model"
+            )
+        from .adapters import grok_leader
+
+        session_id = str(uuid.uuid4())
+        if not grok_leader.create_member_session(
+            team_name, agent_name, session_id, resolved_cwd
+        ):
+            raise ValueError(
+                f"grok leader for '{agent_name}' did not materialize the session"
+            )
+        if initial_prompt and grok_leader.send_to_key(
+            grok_leader.member_key(team_name, agent_name), initial_prompt
+        ) is None:
+            grok_leader.kill_daemon_key(grok_leader.member_key(team_name, agent_name))
+            raise ValueError(
+                f"grok member '{agent_name}' refused the bootstrap prompt"
+            )
+
+    agent = Agent(
+        name=agent_name,
+        team_name=team_name,
+        pane_id="",
+        model=model,
+        cwd=resolved_cwd,
+        session_id=session_id or None,
+        cli=resolved_cli,
+    )
+    t.agents[agent_name] = agent
+    _remember_context(
+        team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME
+    )
+    _registry_record_member(t, agent)
+    return agent
+
+
 def _spawn_team_agent(
     t: Team,
     *,
@@ -1290,6 +1417,26 @@ def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
     return candidates[0].team, candidates[0].agent
 
 
+def _split_team_address(addr: str) -> tuple[str, str]:
+    """Split ``<team>.<member>`` when the prefix names an existing team.
+
+    Team existence is the registry first (a headless team has no window),
+    the window scan second (a live pre-registry team). Returns
+    ``(team, member)`` or ``("", addr)`` when the prefix names no team.
+    """
+    if "." not in addr:
+        return "", addr
+    prefix, rest = addr.split(".", 1)
+    if not prefix or not rest:
+        return "", addr
+    from . import registry
+    from .team import _find_team_window
+
+    if registry.load(prefix) is not None or _find_team_window(prefix)[0]:
+        return prefix, rest
+    return "", addr
+
+
 def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
     """Resolve the team that owns *to_agent* for a send.
 
@@ -1329,10 +1476,18 @@ def _resolve_guest_send_target(to_agent: str, team: str) -> tuple[str, Team]:
         if _existing_team_agent(t, to_agent) is None:
             _fail(f"agent '{to_agent}' not found in team '{team}'")
         return t.name, t
+    from . import registry
+
     candidates = [p for p in tmux.list_panes_all() if p.agent == to_agent and p.team]
-    teams = sorted({p.team for p in candidates})
+    registry_teams = {
+        str(e.get("team"))
+        for e in registry.list_entries()
+        if not e.get("corrupt")
+        and any(m.get("name") == to_agent for m in e.get("members", []))
+    }
+    teams = sorted({p.team for p in candidates} | registry_teams)
     if not teams:
-        _fail(f"agent '{to_agent}' not found in any live team (see `hive ls`)")
+        _fail(f"agent '{to_agent}' not found in any team (see `hive ls`)")
     if len(teams) > 1:
         addresses = ", ".join(f"{name}.{to_agent}" for name in teams)
         _fail(f"agent '{to_agent}' exists in {len(teams)} teams; address one of: {addresses}")
@@ -1714,6 +1869,41 @@ def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str
     click.echo(json.dumps(result_payload, indent=2, ensure_ascii=False))
 
 
+def _create_headless_team(
+    name: str, workspace: str, reset_workspace: bool, state_entries: tuple[str, ...]
+) -> None:
+    """Create a team with no display: a registry entry plus its workspace.
+
+    The registry is the team's existence; a tmux window is a later, optional
+    rendering (`hive attach`). Members join through headless spawn.
+    """
+    from . import registry
+    from .team import validate_team_name
+
+    error = validate_team_name(name)
+    if error:
+        _fail(error)
+    if registry.load(name) is not None:
+        _fail(f"team '{name}' already exists (hive delete removes it)")
+    ws_str = str(Path(workspace).expanduser()) if workspace else ""
+    registry.record_team(
+        team=name,
+        workspace=ws_str,
+        created_at=str(time.time()),
+    )
+    if ws_str:
+        ws = Path(ws_str)
+        if ws.exists() and reset_workspace:
+            shutil.rmtree(ws)
+        bus.init_workspace(ws)
+        for key, value in _parse_entries(state_entries).items():
+            (ws / "state" / key).write_text(value)
+    _remember_context(team=name, workspace=ws_str, agent=LEAD_AGENT_NAME)
+    click.echo(f"Team '{name}' created (headless — `hive attach {name}` renders it).")
+    if ws_str:
+        click.echo(f"Workspace initialized: {ws_str}")
+
+
 @cli.command()
 @click.argument("name")
 @click.option("--desc", "-d", default="", help="Team description")
@@ -1726,6 +1916,9 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
         _fail("--state requires --workspace")
     if reset_workspace and not workspace:
         _fail("--reset-workspace requires --workspace")
+    if not tmux.is_inside_tmux():
+        _create_headless_team(name, workspace, reset_workspace, state_entries)
+        return
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)
@@ -1834,9 +2027,10 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
     type=click.Path(exists=True, dir_okay=False),
     help="Task artifact to dispatch atomically once the member is ready (member never boots into an empty inbox)",
 )
+@click.option("--team", "-t", "team_arg", default="", help="Explicit team (default: the pane's binding)")
 def spawn(agent_name: str, model: str, prompt: str,
           cwd: str, skill: str, env: tuple[str, ...], cli_name: str | None,
-          task_artifact: str | None):
+          task_artifact: str | None, team_arg: str):
     """Spawn an agent pane, optionally dispatching a task atomically.
 
     Creates a new tmux pane in the current window and starts the chosen
@@ -1857,10 +2051,14 @@ def spawn(agent_name: str, model: str, prompt: str,
     """
     if task_artifact and prompt:
         _fail("--task and --prompt are mutually exclusive (the task rides the message, not the birth prompt)")
-    team_name, t = _resolve_scoped_team(None, required=True)
+    team_name, t = _resolve_scoped_team(team_arg or None, required=True)
     assert team_name is not None and t is not None
+    # A live display and a tmux-resident caller get a pane; anything else —
+    # a ccd orch outside tmux, a team with no window — spawns engine-only.
+    headless = not (t.tmux_window and tmux.is_inside_tmux())
     try:
-        agent = _spawn_team_agent(
+        spawner = _spawn_headless_member if headless else _spawn_team_agent
+        agent = spawner(
             t,
             team_name=team_name,
             agent_name=agent_name,
@@ -1875,7 +2073,10 @@ def spawn(agent_name: str, model: str, prompt: str,
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     if not task_artifact:
-        click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
+        if agent.pane_id:
+            click.echo(f"Agent '{agent_name}' spawned in pane {agent.pane_id}")
+        else:
+            click.echo(f"Agent '{agent_name}' spawned headless (engine only — `hive attach {team_name}` renders it)")
         return
 
     workspace = _resolve_workspace(t, required=True)
@@ -2100,7 +2301,8 @@ def compact_cmd(pane_id: str):
 
 
 @cli.command("team")
-def team_cmd():
+@click.option("--team", "-t", "team_arg", default="", help="Explicit team (default: the pane's binding)")
+def team_cmd(team_arg: str):
     """Show team overview.
 
     Returns a JSON payload with `members[]`, `self` (your own name), the
@@ -2121,11 +2323,14 @@ def team_cmd():
     """
     _gc_dead_teams()
     discovered = _discover_tmux_binding()
-    if discovered.get("team"):
-        _, t = _resolve_scoped_team(str(discovered.get("team")), required=False)
+    scoped = team_arg or str(discovered.get("team") or "")
+    if scoped:
+        _, t = _resolve_scoped_team(scoped, required=False)
         if t is not None:
             click.echo(json.dumps(_team_status_payload(t), indent=2, ensure_ascii=False))
             return
+    if not tmux.is_inside_tmux():
+        _fail("no team in scope — pass -t <team> (see `hive ls`)")
     result: dict[str, object] = {"team": None}
     session_name = tmux.get_current_session_name()
     window_target = tmux.get_current_window_target()
@@ -2382,6 +2587,128 @@ def pr_clear_cmd(plain: bool):
         click.echo(f"window {window} had no @hive-pr stamp to clear")
 
 
+# --- hive attach: materialize a team's display ---
+
+
+_ATTACH_LAUNCHERS = {
+    "claude": "hive claude --resume {sid}",
+    "codex": "hive codex resume {sid}",
+    "grok": "hive grok --resume {sid}",
+}
+
+
+def _member_attach_command(cli_name: str, session_id: str, cwd: str) -> str:
+    launch = _ATTACH_LAUNCHERS[cli_name].format(sid=shlex.quote(session_id))
+    return (
+        f"cd {shlex.quote(cwd or os.getcwd())} && {launch}; "
+        f"hive resume-hint {cli_name} 2>/dev/null || true"
+    )
+
+
+def _materialize_team_display(entry: dict) -> tuple[str, list[str], list[str]]:
+    """Build a window for the team: one attach pane per member, tiled.
+
+    Returns (window_target, attached_member_names, skipped_member_names).
+    Panes are tagged before their launcher runs, so `hive grok` inside the
+    pane resolves the member's daemon key instead of minting a pane one.
+    """
+    from . import layout as layout_mod
+    from . import registry
+
+    team = str(entry["team"])
+    ws = str(entry.get("workspace") or "")
+    members = _sorted_member_rows(list(entry.get("members", [])))
+    attachable = [m for m in members if m.get("sessionId") and m.get("cli") in _ATTACH_LAUNCHERS]
+    skipped = [str(m.get("name")) for m in members if m not in attachable]
+    if not attachable:
+        _fail(f"team '{team}' has no attachable members (no recorded engine identity)")
+
+    session_name = tmux.get_current_session_name() or "hive"
+    anchor_cwd = str(attachable[0].get("cwd") or "") or os.getcwd()
+    window, first_pane = tmux.new_window(
+        session_name, name=team, cwd=anchor_cwd, detach=True
+    )
+    if not window or not first_pane:
+        _fail("failed to create a window for the team")
+
+    tmux.configure_hive_window(window)
+    tmux.set_window_option(window, "@hive-team", team)
+    tmux.set_window_option(window, "@hive-workspace", ws)
+    tmux.set_window_option(window, "@hive-created", str(entry.get("createdAt") or ""))
+
+    attached: list[str] = []
+    prev_pane = first_pane
+    for i, m in enumerate(attachable):
+        name = str(m.get("name"))
+        cli_name = str(m.get("cli"))
+        cwd = str(m.get("cwd") or "")
+        if i == 0:
+            pane = first_pane
+        else:
+            pane = tmux.split_window(
+                prev_pane,
+                horizontal=layout_mod.split_horizontal(window, i + 1),
+                cwd=cwd or None,
+                detach=True,
+            )
+            if not pane:
+                skipped.append(name)
+                continue
+        tmux.set_pane_title(pane, f"[{name}]")
+        tmux.tag_pane(pane, "agent", name, team, cli=cli_name)
+        if ws:
+            hive_context.save_context_for_pane(pane, team=team, workspace=ws, agent=name)
+        tmux.send_keys(
+            pane, _member_attach_command(cli_name, str(m["sessionId"]), cwd)
+        )
+        attached.append(name)
+        prev_pane = pane
+
+    layout_mod.apply_adaptive(window)
+    registry.set_display(team, tmux.get_window_id(window) or "")
+    return window, attached, skipped
+
+
+@cli.command("attach")
+@click.argument("team_name")
+def attach_cmd(team_name: str):
+    """Render a team's display: jump to its window, or build one.
+
+    The registry is the team's existence; this materializes (or finds) its
+    tmux window — one attach pane per member, each riding its engine's own
+    viewer (claude attach loop / codex thread resume / grok session resume).
+    Run from outside tmux it finishes by exec'ing `tmux attach`.
+    """
+    from . import registry
+    from .team import _find_team_window
+
+    entry = registry.load(team_name)
+    if entry is None:
+        _fail(f"team '{team_name}' not found (see `hive ls`)")
+
+    window, _ = _find_team_window(team_name)
+    built = False
+    if not window:
+        window, attached, skipped = _materialize_team_display(entry)
+        built = True
+        for name in skipped:
+            click.echo(f"! {name}: no attachable engine identity — not rendered", err=True)
+    ws = str(entry.get("workspace") or "")
+    if ws:
+        try:
+            t = Team.load(team_name)
+            _ensure_team_sidecar(t, ws)
+        except (FileNotFoundError, OSError):
+            pass
+
+    if tmux.is_inside_tmux():
+        tmux.select_window(window)
+        click.echo(f"{'built' if built else 'found'} {window}")
+        return
+    session = window.split(":", 1)[0] if ":" in window else window
+    tmux.exec_attach(session, window)
+
+
 # --- hive ls: the team registry, with display state ---
 
 
@@ -2613,16 +2940,10 @@ def send(to_agent: str, body: str, artifact: str):
     if to_agent.startswith("ccd."):
         _send_to_ccd_session(to_agent[4:], body, artifact)
         return
-    explicit_team = ""
-    if "." in to_agent:
-        # A dot splits the address only when the prefix names a live team
-        # (`honey.worker`); otherwise the address stays whole for
-        # qualified-name resolution across pane tags.
-        from .team import _find_team_window
-
-        prefix, rest = to_agent.split(".", 1)
-        if prefix and _find_team_window(prefix)[0]:
-            explicit_team, to_agent = prefix, rest
+    # A dot splits the address only when the prefix names an existing team
+    # (`honey.worker`); otherwise the address stays whole for qualified-name
+    # resolution across pane tags.
+    explicit_team, to_agent = _split_team_address(to_agent)
     guest = None
     if not tmux.is_inside_tmux():
         # The root gate admitted this call because the process runs inside a
@@ -2818,7 +3139,12 @@ def kill(agent_name: str):
     Example:
       hive kill worker1
     """
-    _, t = _resolve_send_target_team(agent_name)
+    explicit_team, bare_name = _split_team_address(agent_name)
+    if explicit_team:
+        t = _load_team(explicit_team)
+        agent_name = bare_name
+    else:
+        _, t = _resolve_send_target_team(agent_name)
     try:
         agent = t.get(agent_name)
     except KeyError:

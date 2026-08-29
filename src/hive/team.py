@@ -15,6 +15,25 @@ HIVE_HOME = __import__("pathlib").Path(os.environ.get("HIVE_HOME", str(__import_
 LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
+
+def validate_team_name(name: str) -> str:
+    """Why *name* cannot be a team name, or "" when it can."""
+    if name == "ccd":
+        return (
+            f"team name '{name}' is invalid: 'ccd' is the reserved send "
+            "address for Claude sessions outside any team"
+        )
+    if "." in name:
+        return (
+            f"team name '{name}' is invalid: dots separate send-address "
+            "segments (`<team>.<member>`), so a team name must be dot-free"
+        )
+    from . import registry
+
+    if registry.entry_path(name) is None:
+        return f"team name '{name}' is invalid: not a safe registry name"
+    return ""
+
 @dataclass
 class Team:
     name: str
@@ -69,15 +88,18 @@ class Team:
         """
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-        if name == "ccd":
+        error = validate_team_name(name)
+        if error:
+            raise ValueError(error)
+        from . import registry
+
+        if registry.load(name) is not None:
+            # The registry is the name authority: a headless or detached
+            # team owns its name (its engines may still be running) until
+            # `hive delete` releases it. Never silently clobbered.
             raise ValueError(
-                f"team name '{name}' is invalid: 'ccd' is the reserved send "
-                "address for Claude sessions outside any team"
-            )
-        if "." in name:
-            raise ValueError(
-                f"team name '{name}' is invalid: dots separate send-address "
-                "segments (`<team>.<member>`), so a team name must be dot-free"
+                f"team '{name}' already exists in the registry "
+                f"(hive delete {name} releases the name)"
             )
 
         existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
@@ -215,15 +237,6 @@ class Team:
                 team.agents[pane.agent] = agent
 
         return team
-
-    def is_tmux_alive(self) -> bool:
-        if not self.tmux_session:
-            return True
-        if not tmux.has_session(self.tmux_session):
-            return False
-        if self.lead_pane_id and not tmux.is_pane_alive(self.lead_pane_id):
-            return False
-        return True
 
     def save(self) -> None:
         """Write team state to tmux options (window + pane level)."""

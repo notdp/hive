@@ -120,7 +120,7 @@ def grok_client(tmp_path, monkeypatch):
             m.write_pane_session(pane, *session)
         proc = FakeProc(respond)
         monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **k: proc)
-        client = m.GrokStdioClient(pane)
+        client = m.GrokStdioClient(m.resolve_pane_key(pane))
         made.append((client, proc))
         return client, proc
 
@@ -541,7 +541,7 @@ def test_stdio_argv_targets_the_pane_socket(tmp_path, monkeypatch):
         return proc
 
     monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
-    client = m.GrokStdioClient("%19")
+    client = m.GrokStdioClient(m.resolve_pane_key("%19"))
     try:
         assert seen["argv"] == [
             "grok", "agent", "--leader", "stdio",
@@ -784,15 +784,15 @@ def test_pool_send_to_pane_returns_prompt_queued(monkeypatch):
             sent.append(text)
             return True
 
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
-    assert grok_pool.send_to_pane("%19", "hi") == m.PROMPT_QUEUED
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: FakeClient())
+    assert grok_pool.send_to_key("p19", "hi") == m.PROMPT_QUEUED
     assert sent == ["hi"]
 
 
 def test_pool_send_to_pane_none_without_client(monkeypatch):
     grok_pool = m.GrokClientPool()
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: None)
-    assert grok_pool.send_to_pane("%19", "hi") is None
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: None)
+    assert grok_pool.send_to_key("p19", "hi") is None
 
 
 def test_pool_send_to_pane_none_when_client_raises(monkeypatch):
@@ -802,8 +802,8 @@ def test_pool_send_to_pane_none_when_client_raises(monkeypatch):
         def prompt(self, _text):
             raise OSError("broken pipe")
 
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
-    assert grok_pool.send_to_pane("%19", "hi") is None
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: FakeClient())
+    assert grok_pool.send_to_key("p19", "hi") is None
 
 
 def test_pool_interrupt_pane_returns_cancel_sent(monkeypatch):
@@ -815,15 +815,15 @@ def test_pool_interrupt_pane_returns_cancel_sent(monkeypatch):
             cancelled.append(True)
             return True
 
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
-    assert grok_pool.interrupt_pane("%19") == m.CANCEL_SENT
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_key("p19") == m.CANCEL_SENT
     assert cancelled == [True]
 
 
 def test_pool_interrupt_pane_none_without_client(monkeypatch):
     grok_pool = m.GrokClientPool()
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: None)
-    assert grok_pool.interrupt_pane("%19") is None
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: None)
+    assert grok_pool.interrupt_key("p19") is None
 
 
 def test_pool_interrupt_pane_none_when_the_write_fails(monkeypatch):
@@ -833,8 +833,8 @@ def test_pool_interrupt_pane_none_when_the_write_fails(monkeypatch):
         def cancel(self):
             return False
 
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
-    assert grok_pool.interrupt_pane("%19") is None
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_key("p19") is None
 
 
 def test_pool_interrupt_pane_none_when_client_raises(monkeypatch):
@@ -844,33 +844,33 @@ def test_pool_interrupt_pane_none_when_client_raises(monkeypatch):
         def cancel(self):
             raise OSError("broken pipe")
 
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: FakeClient())
-    assert grok_pool.interrupt_pane("%19") is None
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: FakeClient())
+    assert grok_pool.interrupt_key("p19") is None
 
 
 def test_pool_compact_pane_unavailable_without_client(monkeypatch):
     grok_pool = m.GrokClientPool()
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: None)
-    assert grok_pool.compact_pane("%19") == "unavailable"
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: None)
+    assert grok_pool.compact_key("p19") == "unavailable"
 
 
 def test_pool_runtime_for_pane_none_without_client(monkeypatch):
     grok_pool = m.GrokClientPool()
-    monkeypatch.setattr(grok_pool, "_client_for", lambda _pane: None)
-    assert grok_pool.runtime_for_pane("%19") is None
-    assert grok_pool.connect("%19") is False
+    monkeypatch.setattr(grok_pool, "_client_for_key", lambda _pane: None)
+    assert grok_pool.runtime_for_key("p19") is None
+    assert grok_pool.connect_key("p19") is False
 
 
 def test_pool_skips_panes_without_socket_or_session(tmp_path, monkeypatch):
     monkeypatch.setenv("GROK_HOME", str(tmp_path))
     monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **k: pytest.fail("no client without a daemon"))
     grok_pool = m.GrokClientPool()
-    assert grok_pool._client_for("%19") is None  # no socket at all
+    assert grok_pool._client_for_key("p19") is None  # no socket at all
     sock = m.pane_socket_path("%19")
     sock.parent.mkdir(parents=True, exist_ok=True)
     sock.touch()
     grok_pool._cooldown.clear()
-    assert grok_pool._client_for("%19") is None  # socket but no session record
+    assert grok_pool._client_for_key("p19") is None  # socket but no session record
 
 
 def test_pool_skips_a_pane_whose_leader_pid_is_dead(tmp_path, monkeypatch):
@@ -882,7 +882,7 @@ def test_pool_skips_a_pane_whose_leader_pid_is_dead(tmp_path, monkeypatch):
     monkeypatch.setattr(
         m.subprocess, "Popen", lambda *a, **k: pytest.fail("no client without a live leader")
     )
-    assert m.GrokClientPool()._client_for("%19") is None
+    assert m.GrokClientPool()._client_for_key("p19") is None
 
 
 def test_pool_rebinds_when_the_pane_session_record_rotates(tmp_path, monkeypatch):
@@ -903,7 +903,7 @@ def test_pool_rebinds_when_the_pane_session_record_rotates(tmp_path, monkeypatch
     clients: list = []
 
     def bind():
-        client = grok_pool._client_for("%19")
+        client = grok_pool._client_for_key("p19")
         if client is not None and client not in clients:
             clients.append(client)
         return client

@@ -210,33 +210,6 @@ def test_team_get_resolves_lead_and_members(configure_hive_home, monkeypatch):
     assert team.get("claude") is alive
 
 
-def test_team_status_and_is_tmux_alive(configure_hive_home, monkeypatch):
-    configure_hive_home()
-    monkeypatch.setattr("hive.team.tmux.has_session", lambda name: name == "dev")
-    monkeypatch.setattr("hive.team.tmux.is_pane_alive", lambda pane: pane != "%dead")
-    monkeypatch.setattr(
-        "hive.team.tmux.get_pane_current_command",
-        lambda pane: {"%0": "python3.12", "%1": "codex", "%2": "zsh"}.get(pane, ""),
-    )
-    monkeypatch.setattr("hive.team.tmux.get_pane_title", lambda _pane: "")
-    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: "")
-    monkeypatch.setattr("hive.team.tmux.list_tty_processes", lambda _tty: [])
-    team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
-    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1")
-
-    payload = team.status()
-
-    assert payload["tmuxSession"] == "dev"
-    assert payload["tmuxWindow"] == ""
-    orch = next(member for member in payload["members"] if member["name"] == "orch")
-    claude = next(member for member in payload["members"] if member["name"] == "claude")
-    assert orch["role"] == "terminal"
-    assert claude["role"] == "agent"
-    assert team.is_tmux_alive() is True
-    team.lead_pane_id = "%dead"
-    assert team.is_tmux_alive() is False
-
-
 def test_team_status_stays_local_only(configure_hive_home, monkeypatch):
     configure_hive_home()
     monkeypatch.setattr("hive.team.tmux.get_pane_current_command", lambda pane: "codex" if pane == "%1" else "zsh")
@@ -521,3 +494,37 @@ def test_list_teams_unions_registry_and_windows(configure_hive_home, monkeypatch
     assert teams["headlessteam"]["workspace"] == "/tmp/ws-h"
     assert teams["windowed"]["tmuxWindow"] == "dev:0"
     assert teams["windowed"]["workspace"] == "/tmp/ws-w"
+
+
+def test_create_refuses_a_registry_claimed_name(configure_hive_home, monkeypatch):
+    """The registry is the name authority: a headless team owns its name."""
+    configure_hive_home()
+    from hive import registry
+
+    assert registry.record_team(
+        team="team-h", workspace="/tmp/ws", created_at="1.0",
+    ) == "written"
+    with pytest.raises(ValueError, match="already exists in the registry"):
+        Team.create_for_window("team-h", window_target="dev:0")
+
+
+def test_team_status_payload_shape(configure_hive_home, monkeypatch):
+    configure_hive_home()
+    monkeypatch.setattr(
+        "hive.team.tmux.get_pane_current_command",
+        lambda pane: {"%0": "python3.12", "%1": "codex", "%2": "zsh"}.get(pane, ""),
+    )
+    monkeypatch.setattr("hive.team.tmux.get_pane_title", lambda _pane: "")
+    monkeypatch.setattr("hive.team.tmux.get_pane_tty", lambda _pane: "")
+    monkeypatch.setattr("hive.team.tmux.list_tty_processes", lambda _tty: [])
+    team = Team(name="team-a", workspace="/tmp/ws", lead_pane_id="%0", lead_session_id="sess-1", tmux_session="dev")
+    team.agents["claude"] = Agent(name="claude", team_name="team-a", pane_id="%1", model="m1")
+
+    payload = team.status()
+
+    assert payload["tmuxSession"] == "dev"
+    assert payload["tmuxWindow"] == ""
+    orch = next(member for member in payload["members"] if member["name"] == "orch")
+    claude = next(member for member in payload["members"] if member["name"] == "claude")
+    assert orch["role"] == "terminal"
+    assert claude["role"] == "agent"
