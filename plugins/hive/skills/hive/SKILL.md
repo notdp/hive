@@ -39,7 +39,7 @@ hive send dodo "done: see artifact" --artifact /tmp/result.md
 
 - 标签里的 `body` 是短摘要。
 - `artifact=<path>` 是正文；需要细节时直接打开这个文件。
-- 以 `<HIVE>` block 为准。`hive thread` 只用于排障；需要时取 `/hive:debug`。
+- 以 `<HIVE>` block 为准。`hive thread` 只用于排障。
 
 `<HIVE>` 消息有两种到达形态，都是正常队内投递。宿主（Claude Code）会在
 `<HIVE>` block 外面再包一层它自己的说明文字，完整长相如下。
@@ -181,5 +181,4 @@ source: ...
 
 日常收发只用上面的通信底座。
 
-- 排障命令、delivery、thread、capture、inject、interrupt、kill：`/hive:debug`
 - 你要发起协作、拆任务派人：`/hive:orch`
