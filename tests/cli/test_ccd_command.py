@@ -416,3 +416,25 @@ def test_live_member_pids_maps_pid_to_team_dot_agent(runner, configure_hive_home
     assert result.exit_code == 0, result.output
     rows = json.loads(result.output)["sessions"]
     assert rows[0]["member"] == "honey.validator"
+
+
+def test_member_send_accepts_its_own_team_prefix(runner, configure_hive_home, monkeypatch):
+    # Copying a teammate's `from=<team>.<member>` verbatim must deliver:
+    # an own-team prefix reads as the bare name.
+    configure_hive_home()
+    _team_exists(monkeypatch, "t2")
+    monkeypatch.setattr("hive.cli._default_team", lambda: "t2")
+    team_obj = type("T", (), {"name": "t2"})()
+    monkeypatch.setattr("hive.cli._resolve_send_target_team", lambda a: ("t2", team_obj))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _p: "rex")
+    monkeypatch.setattr("hive.cli._resolve_workspace", lambda t, required: "/tmp/ws-t2")
+    monkeypatch.setattr("hive.bus.latest_inbound_send_event", lambda *a, **kw: None)
+    sent = {}
+    monkeypatch.setattr(
+        "hive.cli._request_send_payload",
+        lambda **kw: sent.update(kw) or {"ok": True, "msgId": "m1"},
+    )
+    result = runner.invoke(cli, ["send", "t2.worker", "hi"])
+    assert result.exit_code == 0, result.output
+    assert sent["target_agent"] == "worker"
+    assert sent["sender_agent"] == "rex"

@@ -3036,7 +3036,10 @@ def send(to_agent: str, body: str, artifact: str):
             # `hive send ccd.<name>` just the same.
             sender = f"ccd.{guest.name}"
     else:
-        if explicit_team:
+        if explicit_team and explicit_team != (_default_team() or ""):
+            # Copying a teammate's `from=<team>.<member>` verbatim must just
+            # work, so an own-team prefix reads as the bare name; only a
+            # foreign-team prefix is refused.
             _fail(
                 "team members address teammates by bare name; "
                 "`<team>.<member>` is for a Claude session outside tmux"
