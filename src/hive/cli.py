@@ -2710,6 +2710,11 @@ def view_cmd(session_id: str):
     """Read-only viewer for a Claude session transcript (follows live)."""
     from . import transcript_view
 
+    viewer = transcript_view.external_viewer()
+    if viewer:
+        path = transcript_view.transcript_path(session_id)
+        if path is not None:
+            os.execv(viewer, [viewer, str(path)])
     sys.exit(transcript_view.follow(session_id))
 
 

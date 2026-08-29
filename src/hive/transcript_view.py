@@ -10,7 +10,9 @@ mirror: native-looking, keystrokes go nowhere by construction.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -30,6 +32,20 @@ _SPINNER = "✻✼✢✽"
 _HIVE_RE = re.compile(r"<HIVE\s+from=(\S+)[^>]*>\s*(.*?)\s*</HIVE>", re.S)
 _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE = re.compile(r"`([^`\n]+)`")
+
+
+def external_viewer() -> str | None:
+    """Path to tail-claude when installed — the preferred renderer.
+
+    tail-claude (github.com/kylesnowschwartz/tail-claude) live-tails a
+    session JSONL as a full conversation TUI; the built-in renderer below
+    is the dependency-free fallback.
+    """
+    found = shutil.which("tail-claude")
+    if found:
+        return found
+    candidate = Path.home() / "go" / "bin" / "tail-claude"
+    return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
 
 
 def transcript_path(session_id: str) -> Path | None:
