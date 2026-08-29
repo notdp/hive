@@ -48,8 +48,8 @@ def test_current_discovers_tmux_when_no_team(runner, configure_hive_home, monkey
     assert payload["tmux"]["panes"][0]["id"] == "%0"
     assert payload["tmux"]["panes"][0]["role"] == "agent"
     assert payload["tmux"]["panes"][1]["role"] == "agent"
-    # no-team hint points straight at orch init
-    assert "hive init" in payload["hint"]
+    # no-team hint points straight at the orch create
+    assert "hive create" in payload["hint"]
 
 
 def test_current_ignores_persisted_context_inside_tmux_when_window_is_unbound(runner, configure_hive_home, tmp_path):
@@ -182,8 +182,11 @@ def test_current_returns_tagged_role_regardless_of_tty(runner, configure_hive_ho
     assert orch["pane"] == "%0"
 
 
-def test_init_returns_existing_team_for_registered_member(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_returns_existing_team_for_registered_member(runner, configure_hive_home, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
     configure_hive_home(current_pane="%9", session_name="dev")
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude"))
 
     # Set up tmux state directly (no more config.json)
     from hive import tmux
@@ -193,7 +196,7 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
     tmux.tag_pane("%0", "agent", "orch", "dev")
     tmux.tag_pane("%9", "agent", "alpha", "dev")
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload == {
@@ -207,7 +210,7 @@ def test_init_returns_existing_team_for_registered_member(runner, configure_hive
     }
 
 
-def test_init_stops_existing_hived_before_auto_workspace_reset(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_stops_existing_hived_before_auto_workspace_reset(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home(current_pane="%5", session_name="dev")
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -241,7 +244,7 @@ def test_init_stops_existing_hived_before_auto_workspace_reset(runner, configure
     monkeypatch.setattr("hive.hived.stop_hived", _fake_stop)
     monkeypatch.setattr("hive.cli.bus.reset_workspace", _fake_reset)
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     assert calls[:2] == [
@@ -250,11 +253,11 @@ def test_init_stops_existing_hived_before_auto_workspace_reset(runner, configure
     ]
 
 
-def test_init_self_register_never_injects_hive_slash_into_own_input(
+def test_create_self_register_never_injects_hive_slash_into_own_input(
     runner, configure_hive_home, monkeypatch, mock_tmux_send, tmp_path,
 ):
-    """Regression: when an agent (e.g. Claude) runs `hive init` in its own
-    pane and the window is already bound to a team, `hive init` used to call
+    """Regression: when an agent (e.g. Claude) runs `hive create` in its own
+    pane and the window is already bound to a team, the orch create used to call
     `member.load_skill("hive")` + `member.send(join_message)` on the self
     pane. Those `tmux send-keys` calls landed in the pane's own input queue,
     causing the agent to see a phantom second `/hive` trigger plus a stray
@@ -305,17 +308,17 @@ def test_init_self_register_never_injects_hive_slash_into_own_input(
         lambda pane_id: type("P", (), {"name": "claude"})() if pane_id == "%42" else None,
     )
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
     assert result.exit_code == 0
 
     self_sends = [text for pane, text in mock_tmux_send if pane == "%42"]
     assert self_sends == [], (
-        f"hive init must not send anything to the pane that launched it, "
+        f"hive create must not send anything to the pane that launched it, "
         f"but %42 received: {self_sends!r}"
     )
 
 
-def test_init_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_replaces_window_only_team_binding_without_members(runner, configure_hive_home, monkeypatch, tmp_path):
     """A window carrying only a stale `@hive-team` tag (no registered self pane)
     is not treated as a binding: init clears the stale tag and binds a fresh
     orch team named after the current window."""
@@ -336,18 +339,18 @@ def test_init_replaces_window_only_team_binding_without_members(runner, configur
     monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%9", "", command="claude")])
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws")
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     # Stale "ghost" tag cleared; a fresh orch team is bound to this window.
     assert payload["team"] == "honey"
     assert payload["orch"]["name"] == "orch"
-    assert payload["protocol"] == "/hive:orch"
+    assert payload["protocol"] == "/hive:hive"
     assert tmux.get_window_option("dev:0", "hive-team") == "honey"
 
 
-def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_creates_team_and_binds_orch(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -366,7 +369,7 @@ def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypat
 
     workspace = tmp_path / "ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: workspace)
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -374,7 +377,7 @@ def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypat
     assert payload["team"] == "honey"
     assert payload["orch"]["name"] == "orch"
     assert payload["orch"]["pane"] == "%5"
-    assert payload["protocol"] == "/hive:orch"
+    assert payload["protocol"] == "/hive:hive"
 
     # The team is created and the current pane is remembered as the orch.
     from hive.team import Team
@@ -384,7 +387,7 @@ def test_init_creates_team_and_binds_orch(runner, configure_hive_home, monkeypat
     assert current["agent"] == "orch"
 
 
-def test_init_accepts_preopened_codex_orch_pane(
+def test_create_accepts_preopened_codex_orch_pane(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     """A pre-opened codex CLI in the current pane is a valid orch: init
@@ -417,7 +420,7 @@ def test_init_accepts_preopened_codex_orch_pane(
 
     workspace = tmp_path / "ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: workspace)
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -426,31 +429,31 @@ def test_init_accepts_preopened_codex_orch_pane(
     assert payload["orch"]["cli"] == "codex"
 
 
-def test_init_removed_options_are_rejected(runner, configure_hive_home, monkeypatch):
-    """Removed init options are rejected at the Click parser layer and the
-    orch bring-up is never entered."""
+def test_create_command_is_gone(runner, configure_hive_home):
+    """`hive init` retired: create owns the orch bring-up."""
     configure_hive_home()
-    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
+    result = runner.invoke(cli, ["init"])
+    assert result.exit_code == 2
+    assert "No such command" in result.output
 
+
+def test_orch_create_rejects_workspace_options(runner, configure_hive_home, monkeypatch):
+    """The orch lane pins the auto workspace; --workspace belongs to the
+    shell/headless lanes."""
+    from types import SimpleNamespace
+
+    configure_hive_home()
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude"))
     calls: list[object] = []
     monkeypatch.setattr("hive.cli._create_orch_team", lambda **kw: calls.append(kw) or {})
 
-    for argv in (
-        ["init", "--name", "my-team"],
-        ["init", "-n", "my-team"],
-        ["init", "--workspace", "/tmp/x"],
-        ["init", "-w", "/tmp/x"],
-        ["init", "--notify"],
-        ["init", "--no-notify"],
-        ["init", "--validator-cli", "codex"],
-    ):
-        result = runner.invoke(cli, argv)
-        assert result.exit_code == 2, (argv, result.output)
-        assert "No such option" in result.output, (argv, result.output)
+    result = runner.invoke(cli, ["create", "--workspace", "/tmp/x"])
+    assert result.exit_code != 0
+    assert "auto workspace" in result.output
     assert calls == []
 
 
-def test_init_starts_hived_for_new_team(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_starts_hived_for_new_team(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -479,13 +482,13 @@ def test_init_starts_hived_for_new_team(runner, configure_hive_home, monkeypatch
 
     workspace = tmp_path / "ws"
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: workspace)
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     assert calls == [(str(workspace), "honey", "dev:2", "@2")]
 
 
-def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_resets_existing_auto_workspace_by_default(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -515,7 +518,7 @@ def test_init_resets_existing_auto_workspace_by_default(runner, configure_hive_h
     )
     (auto_workspace / "artifacts" / "stale.txt").write_text("stale")
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     # Auto workspace is reset before the new team is created: stale events and
@@ -544,7 +547,7 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
     assert not team_dir.exists()
 
 
-def test_init_never_picks_a_registry_claimed_pool_name(
+def test_create_never_picks_a_registry_claimed_pool_name(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     # The registry is the name authority: a headless/detached team owns its
@@ -577,14 +580,14 @@ def test_init_never_picks_a_registry_claimed_pool_name(
     ) == "written"
     before = registry.load(first_pool_name)
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0, result.output
     picked = json.loads(result.output)["team"]
     assert picked != first_pool_name
     assert registry.load(first_pool_name) == before  # untouched
 
-def test_init_skips_pool_names_claimed_by_live_teams_and_squads(
+def test_create_skips_pool_names_claimed_by_live_teams_and_squads(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     configure_hive_home(current_pane="%8", session_name="dev")
@@ -608,15 +611,18 @@ def test_init_skips_pool_names_claimed_by_live_teams_and_squads(
     )
     monkeypatch.setattr("hive.cli.tmux.list_panes_full", lambda _target: [PaneInfo("%8", "", command="claude")])
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws-1")
+    from types import SimpleNamespace
 
-    result = runner.invoke(cli, ["init"])
+    monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _p: SimpleNamespace(name="claude"))
+
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["team"] == "wasp"
 
 
-def test_init_breakout_names_team_from_final_window(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_breakout_names_team_from_final_window(runner, configure_hive_home, monkeypatch, tmp_path):
     """Bug A: when the worker breaks out of a crowded window, the team name,
     workspace, and hived binding all follow the FINAL window's stable id, not
     the origin window or its (mutable) index."""
@@ -647,7 +653,7 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
         lambda ws, team, win, wid: hived_calls.append((ws, team, win, wid)) or 1,
     )
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -658,7 +664,7 @@ def test_init_breakout_names_team_from_final_window(runner, configure_hive_home,
     assert hived_calls == [("/tmp/hive-dev-w42", "honey", "dev:3", "@42")]
 
 
-def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_create_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_home, monkeypatch, tmp_path):
     """Re-running init from a pane already bound as a worker echoes the existing
     binding without breaking out, clearing window tags, or resetting state."""
     configure_hive_home(current_pane="%5", session_name="dev")
@@ -676,7 +682,7 @@ def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_hom
     monkeypatch.setattr("hive.cli.bus.reset_workspace", lambda ws: resets.append(str(ws)))
     monkeypatch.setattr("hive.cli.tmux.break_pane", lambda p, **k: breaks.append(p) or ("dev:9", "%900"))
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -686,13 +692,13 @@ def test_init_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_hom
     assert breaks == []                   # no break-out
 
 
-def test_init_fails_outside_tmux(runner, configure_hive_home, monkeypatch):
+def test_create_outside_tmux_needs_a_name(runner, configure_hive_home, monkeypatch):
     configure_hive_home(tmux_inside=False)
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
 
-    result = runner.invoke(cli, ["init"])
+    result = runner.invoke(cli, ["create"])
     assert result.exit_code != 0
-    assert "tmux" in result.output.lower()
+    assert "needs a name" in result.output
 
 
 def test_legacy_commands_removed(runner):
@@ -728,10 +734,10 @@ def test_root_help_groups_commands_by_area(runner):
     ):
         assert short_help in output
 
-    # init binds the orch.
-    assert "Make the current pane the orch of a fresh team." in output
-    # pr / worktree live under Workflow; register / layout under Team.
-    for command in ("pr", "worktree", "register", "layout"):
+    # create owns team bring-up (orch, shell, and headless lanes).
+    assert "Create a team." in output
+    # pr / worktree live under Workflow; join / layout under Team.
+    for command in ("pr", "worktree", "join", "layout"):
         assert f"  {command} " in output
     # topology commands are gone for good.
     for removed in ("duo", "squad"):

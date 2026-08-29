@@ -635,6 +635,39 @@ class Agent:
             )
         return accepted
 
+    def _deliver_claude_session(self, session_id: str, text: str) -> str:
+        """Deliver to a joined interactive Claude session (no bg job).
+
+        Same two lanes as a job engine: the supervisor reply channel first,
+        the session's own inbox socket as fallback.
+        """
+        from .adapters import claude_sessions
+
+        accepted = claude_sessions.daemon_reply(session_id, text)
+        if accepted is not None:
+            return accepted
+        live = next(
+            (s for s in claude_sessions.list_sessions() if s.session_id == session_id),
+            None,
+        )
+        if live is None:
+            raise DeliveryError(
+                f"claude member '{self.name}' (session {session_id[:8]}) has no "
+                "live session; the message stays on the bus"
+            )
+        accepted = claude_sessions.send(
+            live.socket_path,
+            text,
+            sender=f"{self.team_name}.{self.name}",
+            session_id=session_id,
+        )
+        if accepted is None or accepted == claude_sessions.WRITE_TIMED_OUT:
+            raise DeliveryError(
+                f"claude member '{self.name}' (session {session_id[:8]}) did not "
+                "accept the frame; the message stays on the bus"
+            )
+        return accepted
+
     def _send_headless(self, text: str) -> str:
         """Deliver to a member with no pane: the engine is the only address.
 
@@ -643,13 +676,17 @@ class Agent:
         against pane-id recycling.
         """
         if self.cli == "claude":
-            job_id = self.session_id or ""
-            if not job_id:
+            sid = self.session_id or ""
+            if not sid:
                 raise DeliveryError(
-                    f"claude member '{self.name}' has no recorded job identity; "
+                    f"claude member '{self.name}' has no recorded engine identity; "
                     "the message stays on the bus"
                 )
-            return self._deliver_claude_job(job_id, text)
+            from .adapters import claude_bg
+
+            if claude_bg.job_row(sid) is not None:
+                return self._deliver_claude_job(sid, text)
+            return self._deliver_claude_session(sid, text)
         if self.cli == "codex":
             from .adapters import codex_app_server
 
@@ -763,9 +800,16 @@ class Agent:
             job_id = self.session_id or ""
             if not job_id:
                 return False
-            return (
+            if (
                 claude_bg.engine_session_for_job(job_id) is not None
                 or claude_bg.job_row(job_id) is not None  # asleep is not dead
+            ):
+                return True
+            from .adapters import claude_sessions
+
+            # A joined interactive session: alive while its channel is live.
+            return any(
+                s.session_id == job_id for s in claude_sessions.list_sessions()
             )
         if self.cli == "codex":
             from .adapters import codex_app_server
@@ -792,7 +836,9 @@ class Agent:
             job_id = (
                 claude_bg.job_id_for_pane(self.pane_id) if self.pane_id else ""
             ) or (self.session_id or "")
-            if job_id:
+            # A joined interactive session is not hive's engine to stop:
+            # kill only removes it from the roster.
+            if job_id and claude_bg.job_row(job_id) is not None:
                 claude_bg.stop_job(job_id)
             if self.pane_id:
                 claude_bg.clear_pane_job(self.pane_id)

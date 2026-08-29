@@ -42,6 +42,10 @@ def test_headless_claude_send_delivers_to_job(monkeypatch):
 
     engine = SimpleNamespace(session_id="sess-9", socket_path="/tmp/x.sock")
     monkeypatch.setattr(
+        "hive.adapters.claude_bg.job_row",
+        lambda job, **kw: {"id": job} if job == "job-1" else None,
+    )
+    monkeypatch.setattr(
         "hive.adapters.claude_bg.engine_session_for_job",
         lambda job: engine if job == "job-1" else None,
     )
@@ -117,3 +121,40 @@ def test_headless_member_runtime_unknown_engine():
     payload = hived._headless_member_runtime(_member("codex", session_id=None))
     assert payload["alive"] is False
     assert payload["inputState"] == "unknown"
+
+
+def test_headless_claude_send_falls_back_to_interactive_session(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("hive.adapters.claude_bg.job_row", lambda job, **kw: None)
+    replied = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.daemon_reply",
+        lambda sid, text: replied.append((sid, text)) or "udsWriteAccepted",
+    )
+    assert _member("claude", session_id="ccd-sid-1").send("hi") == "udsWriteAccepted"
+    assert replied == [("ccd-sid-1", "hi")]
+
+
+def test_headless_claude_session_send_uses_inbox_socket_fallback(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("hive.adapters.claude_bg.job_row", lambda job, **kw: None)
+    monkeypatch.setattr("hive.adapters.claude_sessions.daemon_reply", lambda sid, text: None)
+    live = SimpleNamespace(session_id="ccd-sid-1", socket_path="/tmp/ccd.sock")
+    monkeypatch.setattr("hive.adapters.claude_sessions.list_sessions", lambda: [live])
+    sent = []
+    monkeypatch.setattr(
+        "hive.adapters.claude_sessions.send",
+        lambda sock, text, *, sender, session_id: sent.append((sock, session_id)) or "accepted",
+    )
+    assert _member("claude", session_id="ccd-sid-1").send("hi") == "accepted"
+    assert sent == [("/tmp/ccd.sock", "ccd-sid-1")]
+
+
+def test_headless_claude_kill_never_stops_an_interactive_session(monkeypatch):
+    monkeypatch.setattr("hive.adapters.claude_bg.job_row", lambda job, **kw: None)
+    stopped = []
+    monkeypatch.setattr("hive.adapters.claude_bg.stop_job", lambda job: stopped.append(job))
+    _member("claude", session_id="ccd-sid-1").kill()
+    assert stopped == []
