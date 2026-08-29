@@ -20,6 +20,18 @@ SID = "11111111-2222-3333-4444-555555555555"
 CWD = "/w/project"
 
 
+@pytest.fixture(autouse=True)
+def _untagged_panes(monkeypatch):
+    """Panes resolve to their raw pane key unless a test tags them.
+
+    resolve_pane_key reads tmux pane options; without this pin the read
+    would hit the real tmux binary — and tests that patch the global
+    subprocess.Popen would swallow the tmux call itself.
+    """
+    monkeypatch.setattr("hive.tmux.get_pane_option", lambda pane, key: None)
+    m._key_cache.clear()
+
+
 # --------------------------------------------------------------------------
 # fake subprocess
 # --------------------------------------------------------------------------
@@ -587,27 +599,52 @@ def test_read_pane_session_none_when_missing_or_invalid(tmp_path, monkeypatch):
     assert m.read_pane_session("%19") is None
 
 
-def test_pane_from_socket_name_roundtrip():
-    assert m._pane_from_socket_name("p19.sock") == "%19"
-    assert m._pane_from_socket_name("pdefault.sock") is None
-    assert m._pane_from_socket_name("p19.pid") is None
-    assert m._pane_from_socket_name("leader.sock") is None
+def test_key_from_socket_name_roundtrip():
+    assert m._key_from_socket_name("p19.sock") == "p19"
+    assert m._key_from_socket_name("m-honey.rex.sock") == "m-honey.rex"
+    assert m._key_from_socket_name("m-honey.rex.dot.sock") == "m-honey.rex.dot"
+    assert m._key_from_socket_name("pdefault.sock") is None
+    assert m._key_from_socket_name("m-noseparator.sock") is None
+    assert m._key_from_socket_name("p19.pid") is None
+    assert m._key_from_socket_name("leader.sock") is None
 
 
-def test_list_daemon_panes_filters_to_pane_sockets(tmp_path, monkeypatch):
+def test_member_key_roundtrip():
+    assert m.member_key("honey", "rex") == "m-honey.rex"
+    assert m.member_from_key("m-honey.rex") == ("honey", "rex")
+    # member names may carry dots; team names are dot-free, so the first
+    # dot is the separator.
+    assert m.member_from_key("m-honey.rex.two") == ("honey", "rex.two")
+    assert m.member_from_key("p19") is None
+    assert m.member_from_key("m-") is None
+
+
+def test_resolve_pane_key_uses_member_tags(monkeypatch):
+    tags = {("%9", "hive-team"): "honey", ("%9", "hive-agent"): "rex"}
+    monkeypatch.setattr(
+        "hive.tmux.get_pane_option", lambda pane, key: tags.get((pane, key))
+    )
+    m._key_cache.clear()
+    assert m.resolve_pane_key("%9") == "m-honey.rex"
+    assert m.resolve_pane_key("%7") == "p7"  # untagged: raw pane lifecycle
+    m._key_cache.clear()
+
+
+def test_list_daemon_keys_filters_to_daemon_sockets(tmp_path, monkeypatch):
     monkeypatch.setenv("GROK_HOME", str(tmp_path))
     hive_dir = tmp_path / "hive"
     hive_dir.mkdir()
     (hive_dir / "p19.sock").touch()
     (hive_dir / "p7.sock").touch()
+    (hive_dir / "m-honey.rex.sock").touch()
     (hive_dir / "pdefault.sock").touch()
     (hive_dir / "p19.session").touch()
-    assert sorted(m.list_daemon_panes()) == ["%19", "%7"]
+    assert sorted(m.list_daemon_keys()) == ["m-honey.rex", "p19", "p7"]
 
 
-def test_list_daemon_panes_missing_dir(tmp_path, monkeypatch):
+def test_list_daemon_keys_missing_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("GROK_HOME", str(tmp_path))
-    assert m.list_daemon_panes() == []
+    assert m.list_daemon_keys() == []
 
 
 # --------------------------------------------------------------------------
@@ -909,3 +946,61 @@ def test_daemon_env_washes_inherited_identity_markers(monkeypatch):
     assert "CLAUDE_CODE_MESSAGING_SOCKET" not in env
     assert "CLAUDE_CONFIG_DIR" not in env
     assert "CODEX_THREAD_ID" not in env
+
+
+def test_spawn_daemon_member_pane_gets_member_socket_and_identity_env(tmp_path, monkeypatch):
+    """A tagged member pane spawns a member-keyed daemon whose env carries the
+    member identity — and never the spawner's inherited one."""
+    monkeypatch.setenv("GROK_HOME", str(tmp_path))
+    monkeypatch.setenv("HIVE_TEAM", "spawner-team")
+    monkeypatch.setenv("HIVE_MEMBER", "spawner")
+    tags = {("%19", "hive-team"): "honey", ("%19", "hive-agent"): "rex"}
+    monkeypatch.setattr(
+        "hive.tmux.get_pane_option", lambda pane, key: tags.get((pane, key))
+    )
+    m._key_cache.clear()
+    seen: dict = {}
+
+    class Child:
+        pid = 7777
+
+        def poll(self):
+            return None
+
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        Path(argv[argv.index("--leader-socket") + 1]).touch()
+        return Child()
+
+    monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
+    try:
+        assert m.spawn_daemon("%19") is True
+        sock = argv_sock = seen["argv"][seen["argv"].index("--leader-socket") + 1]
+        assert argv_sock.endswith("m-honey.rex.sock")
+        env = seen["kwargs"]["env"]
+        assert env["HIVE_TEAM"] == "honey"
+        assert env["HIVE_MEMBER"] == "rex"
+        assert env["TMUX_PANE"] == "%19"
+        assert (tmp_path / "hive" / "m-honey.rex.pid").read_text() == "7777"
+        assert sock == str(m.socket_path_for_key("m-honey.rex"))
+    finally:
+        m._key_cache.clear()
+
+
+def test_kill_daemon_key_removes_socket_pid_and_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROK_HOME", str(tmp_path))
+    sock = m.socket_path_for_key("m-honey.rex")
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    sock.touch()
+    sock.with_suffix(".pid").write_text("4321")
+    sock.with_suffix(".session").write_text('{"sessionId": "s", "cwd": "/c"}')
+    killed: list = []
+    monkeypatch.setattr(m, "_terminate_process_group", lambda pid: killed.append(pid))
+
+    m.kill_daemon_key("m-honey.rex")
+
+    assert killed == [4321]
+    assert not sock.exists()
+    assert not sock.with_suffix(".pid").exists()
+    assert not sock.with_suffix(".session").exists()

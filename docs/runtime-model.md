@@ -46,6 +46,17 @@ never *whether it exists*.
   the team. It is a cache: authority checks never read it.
 - Sidecar identity is `(workspace socket, team)`. A dead window no longer
   retires the sidecar; a missing registry entry (plus no window) does.
+- **Engine keys follow the member, not the pane.** A grok member's leader
+  daemon is keyed `m-<team>.<member>` (socket/pidfile/session record under
+  `$GROK_HOME/hive/`); a raw `hive grok` pane outside any team keeps a
+  pane key (`p<slug>`) and pane lifecycle. Pane-facing APIs resolve a pane
+  to its key through the pane's member tags. The sidecar reaps member
+  daemons the registry no longer lists (valid roster without the member, or
+  a missing entry past a newborn grace window — never on an unreadable
+  read); `hive kill` reaps deterministically. Engines carry their member
+  identity in env (`HIVE_TEAM` / `HIVE_MEMBER`; claude bg spawn and the
+  grok leader daemon), so a tool subprocess resolves who it is without a
+  pane — the env lane is the fallback behind a live pane binding.
 
 ## Runtime Field Reference
 

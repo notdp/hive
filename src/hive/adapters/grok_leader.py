@@ -62,28 +62,81 @@ def grok_home() -> Path:
     return Path(os.environ.get("GROK_HOME", str(Path.home() / ".grok")))
 
 
-def pane_socket_path(pane: str) -> Path:
-    """Per-pane leader socket under the real GROK_HOME.
+# --------------------------------------------------------------------------
+# daemon keys: the engine's identity on disk
+#
+# A leader daemon is keyed by WHO it serves, not where it is displayed:
+# ``m-<team>.<member>`` for a team member (the engine survives its pane),
+# ``p<slug>`` for a raw `hive grok` pane outside any team (pane lifecycle).
+# Pane-facing APIs resolve the pane to its key through the pane's member
+# tags, so a tagged member pane and a headless caller reach the same files.
+# --------------------------------------------------------------------------
 
-    Deliberately short (``hive/p19.sock``): AF_UNIX paths cap at 104 bytes and
-    the leader binds this path itself. One socket per tmux pane id keeps
-    daemons isolated; pane ids are unique within a tmux server.
-    """
+_KEY_TTL = 5.0
+_key_cache: dict[str, tuple[float, str]] = {}
+
+
+def member_key(team: str, member: str) -> str:
+    return f"m-{team}.{member}"
+
+
+def pane_key(pane: str) -> str:
     slug = pane.replace("%", "") or "default"
-    return grok_home() / "hive" / f"p{slug}.sock"
+    return f"p{slug}"
+
+
+def member_from_key(key: str) -> tuple[str, str] | None:
+    """``m-<team>.<member>`` -> (team, member); team names are dot-free."""
+    if not key.startswith("m-"):
+        return None
+    team, sep, member = key[2:].partition(".")
+    if not sep or not team or not member:
+        return None
+    return team, member
+
+
+def resolve_pane_key(pane: str) -> str:
+    """The daemon key a pane addresses: its member key when tagged, else its
+    pane key. Cached briefly — tag reads are tmux round-trips on hot paths."""
+    now = time.monotonic()
+    cached = _key_cache.get(pane)
+    if cached is not None and now - cached[0] < _KEY_TTL:
+        return cached[1]
+    key = pane_key(pane)
+    if pane:
+        from .. import tmux
+        team = tmux.get_pane_option(pane, "hive-team") or ""
+        member = tmux.get_pane_option(pane, "hive-agent") or ""
+        if team and member:
+            key = member_key(team, member)
+    _key_cache[pane] = (now, key)
+    return key
+
+
+def socket_path_for_key(key: str) -> Path:
+    """Leader socket under the real GROK_HOME.
+
+    Deliberately short (``hive/p19.sock`` / ``hive/m-honey.rex.sock``):
+    AF_UNIX paths cap at 104 bytes and the leader binds this path itself.
+    """
+    return grok_home() / "hive" / f"{key}.sock"
+
+
+def pane_socket_path(pane: str) -> Path:
+    return socket_path_for_key(resolve_pane_key(pane))
 
 
 def pane_pidfile_path(pane: str) -> Path:
-    """Sibling pidfile of the pane's leader socket.
+    """Sibling pidfile of the leader socket.
 
     Written once the socket appears so the sidecar (which does not start the
-    daemon) can prove liveness and reap it when the pane dies.
+    daemon) can prove liveness and reap orphans.
     """
     return pane_socket_path(pane).with_suffix(".pid")
 
 
 def pane_session_path(pane: str) -> Path:
-    """Sibling record of the session id hive minted for this pane."""
+    """Sibling record of the session id hive minted for this daemon."""
     return pane_socket_path(pane).with_suffix(".session")
 
 
@@ -107,27 +160,39 @@ def read_pane_session(pane: str) -> tuple[str, str] | None:
 
 
 def _daemon_env_for_pane(pane: str) -> dict[str, str]:
-    """Leader env: the member pane's identity, nothing inherited that lies.
+    """Leader env: the member's identity, nothing inherited that lies.
 
     The spawner may itself run inside another member's engine (an orch's
     flow runner), whose env carries that engine's identity markers —
     CLAUDE_CODE_MESSAGING_SOCKET would make every hive call inside this
-    grok member resolve to the *orch's* pane. Wash them; pin our own.
+    grok member resolve to the *orch's* pane, and inherited HIVE_TEAM /
+    HIVE_MEMBER would name the spawner. Wash them; pin our own.
     """
     env = {
         k: v for k, v in os.environ.items()
-        if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC") or k == "CODEX_THREAD_ID")
+        if not (
+            k.startswith("CLAUDE")
+            or k.startswith("ANTHROPIC")
+            or k in ("CODEX_THREAD_ID", "HIVE_TEAM", "HIVE_MEMBER")
+        )
     }
     env["TMUX_PANE"] = pane
+    binding = member_from_key(resolve_pane_key(pane))
+    if binding is not None:
+        env["HIVE_TEAM"], env["HIVE_MEMBER"] = binding
     return env
 
 
-def _pane_from_socket_name(name: str) -> str | None:
-    """Inverse of :func:`pane_socket_path`: ``p19.sock`` -> ``%19``."""
-    if not name.startswith("p") or not name.endswith(".sock"):
+def _key_from_socket_name(name: str) -> str | None:
+    """Inverse of :func:`socket_path_for_key`: ``p19.sock`` -> ``p19``."""
+    if not name.endswith(".sock"):
         return None
-    slug = name[1:-len(".sock")]
-    return "%" + slug if slug.isdigit() else None
+    key = name[: -len(".sock")]
+    if key.startswith("m-"):
+        return key if member_from_key(key) else None
+    if key.startswith("p") and key[1:].isdigit():
+        return key
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -484,13 +549,16 @@ def probe_socket(socket_path: str) -> bool:
 
 
 def spawn_daemon(pane: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_START_TIMEOUT) -> bool:
-    """Ensure a per-pane leader daemon is listening; return True if ready.
+    """Ensure the leader daemon the pane addresses is listening.
 
-    Idempotent: a live daemon on the pane's socket is reused. Otherwise one is
-    started with ``TMUX_PANE=<pane>`` so its shell tools report the right pane,
-    sharing the real GROK_HOME (auth/model/session layout stay correct).
-    ``start_new_session`` detaches it from the short-lived CLI; the sidecar reaps
-    it through the pidfile when the pane dies.
+    Idempotent: a live daemon on the resolved key's socket is reused (a tagged
+    member pane and its spawner reach the same member daemon). Otherwise one
+    is started with ``TMUX_PANE=<pane>`` (shell tools report the right pane)
+    and ``HIVE_TEAM``/``HIVE_MEMBER`` pinned for a member key, sharing the
+    real GROK_HOME (auth/model/session layout stay correct).
+    ``start_new_session`` detaches it from the short-lived CLI; the sidecar
+    reaps member daemons the registry no longer lists, and pane-keyed ones
+    when their pane dies.
     """
     sock = pane_socket_path(pane)
     sock.parent.mkdir(parents=True, exist_ok=True)
@@ -535,13 +603,13 @@ def spawn_daemon(pane: str, *, grok_bin: str = "grok", timeout: float = _DAEMON_
     return False
 
 
-def list_daemon_panes() -> list[str]:
-    """Pane ids that currently have a per-pane leader socket on disk."""
+def list_daemon_keys() -> list[str]:
+    """Daemon keys that currently have a leader socket on disk."""
     root = grok_home() / "hive"
     if not root.is_dir():
         return []
-    panes = [_pane_from_socket_name(entry.name) for entry in root.glob("p*.sock")]
-    return [pane for pane in panes if pane]
+    keys = [_key_from_socket_name(entry.name) for entry in root.glob("*.sock")]
+    return [key for key in keys if key]
 
 
 def _terminate_process_group(pid: int) -> None:
@@ -567,21 +635,26 @@ def _terminate_process_group(pid: int) -> None:
             time.sleep(0.1)
 
 
-def kill_pane_daemon(pane: str) -> None:
-    """Stop a pane's leader and remove its socket, pidfile and session record."""
-    pidfile = pane_pidfile_path(pane)
+def kill_daemon_key(key: str) -> None:
+    """Stop a key's leader and remove its socket, pidfile and session record."""
+    sock = socket_path_for_key(key)
+    pidfile = sock.with_suffix(".pid")
     try:
         pid: int | None = int(pidfile.read_text().strip())
     except (OSError, ValueError):
         pid = None
     if pid is not None:
         _terminate_process_group(pid)
-    sock = pane_socket_path(pane)
-    for path in (sock, sock.with_suffix(".lock"), pidfile, pane_session_path(pane)):
+    for path in (sock, sock.with_suffix(".lock"), pidfile, sock.with_suffix(".session")):
         try:
             path.unlink()
         except OSError:
             pass
+
+
+def kill_pane_daemon(pane: str) -> None:
+    """Stop the leader the pane addresses (member daemon for a tagged pane)."""
+    kill_daemon_key(resolve_pane_key(pane))
 
 
 # --------------------------------------------------------------------------
@@ -684,6 +757,15 @@ class GrokClientPool:
         with self._lock:
             client = self._clients.pop(pane, None)
         if client is not None:
+            client.close()
+
+    def drop_key(self, key: str) -> None:
+        """Drop every client attached to *key*'s socket (reap path)."""
+        sock = str(socket_path_for_key(key))
+        with self._lock:
+            doomed = [p for p, c in self._clients.items() if c.socket_path == sock]
+            clients = [self._clients.pop(p) for p in doomed]
+        for client in clients:
             client.close()
 
 

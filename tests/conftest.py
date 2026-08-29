@@ -29,6 +29,14 @@ def _isolate_codex_tool_env(monkeypatch, tmp_path):
     # CLAUDE_CONFIG_DIR themselves still win.
     monkeypatch.delenv("CLAUDE_HOME", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-env-isolation"))
+    # The test process may run inside a member engine whose env carries the
+    # member identity markers — and the grok key cache is module state that
+    # would leak pane->key resolutions across tests.
+    monkeypatch.delenv("HIVE_TEAM", raising=False)
+    monkeypatch.delenv("HIVE_MEMBER", raising=False)
+    from hive.adapters import grok_leader
+
+    grok_leader._key_cache.clear()
 
 
 @pytest.fixture
