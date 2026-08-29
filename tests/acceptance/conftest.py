@@ -87,6 +87,22 @@ class Rig:
         args = ["capture-pane", "-t", pane, "-p"] + (["-e"] if escapes else [])
         return _tmux(*args, check=False)
 
+    def capture_visible(self, member: str) -> str:
+        """Pane text with the client's ghost predictions dropped.
+
+        The claude TUI pre-renders a predicted next input in dim text (the
+        human sees gray; a plain capture sees ordinary characters). Capture
+        with escapes and drop dim cells so a screen-reading oracle never
+        mistakes a prediction for typed input.
+        """
+        from hive.draft_guard import _styled_chars
+
+        raw = self.capture(member, escapes=True)
+        lines = []
+        for line in raw.splitlines():
+            lines.append("".join(c.value for c in _styled_chars(line) if not c.dim))
+        return "\n".join(lines)
+
 
 @pytest.fixture(scope="session")
 def rig():

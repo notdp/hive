@@ -86,7 +86,7 @@ def test_semantic_coroner(rig):
             for r in rig.bus_rows
         ],
         "flow_log": rig.flow_stdout[-2000:],
-        "panes": {m: rig.capture(m, escapes=False)[-2000:] for m in rig.member_panes},
+        "panes": {m: rig.capture_visible(m)[-2000:] for m in rig.member_panes},
     }
     rubric = (
         "你是 hive 多 agent runtime 的验收验尸官。下面是一次验收跑的材料(bus 消息行/flow 日志/成员 pane 屏幕)。"
