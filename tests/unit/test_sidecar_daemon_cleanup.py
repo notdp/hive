@@ -76,10 +76,10 @@ def test_cleanup_member_daemon_reaped_when_registry_lists_no_such_member(reap_en
     calls, state, tmp_path = reap_env
     state["keys"] = ["m-honey.rex"]
     _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
-    from hive import resume
+    from hive import registry
 
-    assert resume.record_team(
-        handle="honey", workspace="/ws", created_at="1.0", now="t0",
+    assert registry.record_team(
+        team="honey", workspace="/ws", created_at="1.0",
         members=[{"name": "other", "cli": "grok"}],
     ) == "written"
 
@@ -96,10 +96,10 @@ def test_cleanup_member_daemon_kept_while_registry_lists_it(reap_env):
     calls, state, tmp_path = reap_env
     state["keys"] = ["m-honey.rex"]
     _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
-    from hive import resume
+    from hive import registry
 
-    assert resume.record_team(
-        handle="honey", workspace="/ws", created_at="1.0", now="t0",
+    assert registry.record_team(
+        team="honey", workspace="/ws", created_at="1.0",
         members=[{"name": "rex", "cli": "grok"}],
     ) == "written"
 
@@ -113,9 +113,9 @@ def test_cleanup_member_daemon_survives_unreadable_registry(reap_env):
     calls, state, tmp_path = reap_env
     state["keys"] = ["m-honey.rex"]
     _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
-    from hive import resume
+    from hive import registry
 
-    path = resume.snapshot_path("honey")
+    path = registry.entry_path("honey")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
 

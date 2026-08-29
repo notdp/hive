@@ -2025,8 +2025,7 @@ def _cleanup_dead_daemons(workspace: str) -> None:
     logged; ``is_pane_alive`` only reports dead panes from a successful tmux
     listing, never from a transient tmux failure.
     """
-    from . import notify_debug, tmux
-    from . import resume as resume_store
+    from . import notify_debug, registry, tmux
     from .adapters import grok_leader
 
     for key in grok_leader.list_daemon_keys():
@@ -2040,14 +2039,14 @@ def _cleanup_dead_daemons(workspace: str) -> None:
                 continue
         else:
             team, member = binding
-            path = resume_store.snapshot_path(team)
+            path = registry.entry_path(team)
             if path is None:
                 continue
             if path.is_file():
-                snap = resume_store.load_snapshot(team)
-                if snap is None:
+                entry = registry.load(team)
+                if entry is None:
                     continue  # unreadable is not proof of absence
-                if any(m.get("name") == member for m in snap.get("members", [])):
+                if any(m.get("name") == member for m in entry.get("members", [])):
                     continue
             # Missing registry file, or a valid roster without this member:
             # the engine is an orphan — but never a newborn one.

@@ -159,12 +159,12 @@ def _discover_env_binding() -> dict[str, str]:
     agent = os.environ.get("HIVE_MEMBER", "").strip()
     if not team or not agent:
         return {}
-    from . import resume as resume_store
+    from . import registry
 
-    snap = resume_store.load_snapshot(team)
+    entry = registry.load(team)
     return {
         "team": team,
-        "workspace": str(snap.get("workspace") or "") if snap else "",
+        "workspace": str(entry.get("workspace") or "") if entry else "",
         "agent": agent,
         "role": "agent",
         "pane": "",
