@@ -46,6 +46,13 @@ never *whether it exists*.
   the team. It is a cache: authority checks never read it.
 - Sidecar identity is `(workspace socket, team)`. A dead window no longer
   retires the sidecar; a missing registry entry (plus no window) does.
+- **`hive attach` renders; it never defines.** Attach jumps to the team's
+  window or builds one — one pane per member riding its engine's own
+  viewer — writes the display cache and window/pane tags, and (outside
+  tmux) execs `tmux attach`. Deleting the window is closing a screen;
+  `hive delete` is the team's actual end of life. Team names are owned by
+  the registry: no create lane (init pool pick included) reuses a name
+  until `hive delete` releases it.
 - **The verbs work anywhere.** create/spawn/team/kill/delete no longer
   require a tmux context: addressing is explicit team (`-t`, or a
   `<team>.<member>` message address resolved through the registry) →

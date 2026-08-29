@@ -764,10 +764,11 @@ def cli(ctx: click.Context):
 
 
 def _gc_dead_teams() -> None:
-    """Clean up workspaces for teams whose tmux window no longer exists.
+    """Clean up legacy per-team dirs and stale contexts for unknown teams.
 
-    With tmux-only storage, team state dies with the window. This only
-    handles leftover workspace directories and persisted context files.
+    "Known" is the registry union with live windows, so a headless team is
+    never treated as dead. Only leftover legacy directories and persisted
+    context files are touched.
     """
     from .team import list_teams
     live_names = {t["name"] for t in list_teams()}

@@ -238,15 +238,6 @@ class Team:
 
         return team
 
-    def is_tmux_alive(self) -> bool:
-        if not self.tmux_session:
-            return True
-        if not tmux.has_session(self.tmux_session):
-            return False
-        if self.lead_pane_id and not tmux.is_pane_alive(self.lead_pane_id):
-            return False
-        return True
-
     def save(self) -> None:
         """Write team state to tmux options (window + pane level)."""
         self._write_window_options()
