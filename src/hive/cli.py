@@ -2705,7 +2705,7 @@ def attach_cmd(team_name: str):
         click.echo(f"{'built' if built else 'found'} {window}")
         return
     session = window.split(":", 1)[0] if ":" in window else window
-    os.execvp("tmux", ["tmux", "attach", "-t", f"{session}:", ";", "select-window", "-t", window])
+    tmux.exec_attach(session, window)
 
 
 # --- hive ls: the team registry, with display state ---
