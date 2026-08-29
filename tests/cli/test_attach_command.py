@@ -166,3 +166,4 @@ def test_attach_renders_an_interactive_session_as_a_readonly_viewer(runner, conf
     orch_cmd = next(iter(cmds.values()))
     assert "hive view ccd-sid-7" in orch_cmd
     assert "--resume" not in orch_cmd
+    assert "resume-hint" not in orch_cmd  # the hint tail re-adopts same-named jobs
