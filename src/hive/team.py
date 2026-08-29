@@ -15,6 +15,25 @@ HIVE_HOME = __import__("pathlib").Path(os.environ.get("HIVE_HOME", str(__import_
 LEAD_AGENT_NAME = "orch"
 _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session first."
 
+
+def validate_team_name(name: str) -> str:
+    """Why *name* cannot be a team name, or "" when it can."""
+    if name == "ccd":
+        return (
+            f"team name '{name}' is invalid: 'ccd' is the reserved send "
+            "address for Claude sessions outside any team"
+        )
+    if "." in name:
+        return (
+            f"team name '{name}' is invalid: dots separate send-address "
+            "segments (`<team>.<member>`), so a team name must be dot-free"
+        )
+    from . import registry
+
+    if registry.entry_path(name) is None:
+        return f"team name '{name}' is invalid: not a safe registry name"
+    return ""
+
 @dataclass
 class Team:
     name: str
@@ -69,16 +88,9 @@ class Team:
         """
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-        if name == "ccd":
-            raise ValueError(
-                f"team name '{name}' is invalid: 'ccd' is the reserved send "
-                "address for Claude sessions outside any team"
-            )
-        if "." in name:
-            raise ValueError(
-                f"team name '{name}' is invalid: dots separate send-address "
-                "segments (`<team>.<member>`), so a team name must be dot-free"
-            )
+        error = validate_team_name(name)
+        if error:
+            raise ValueError(error)
 
         existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
         if existing_team:

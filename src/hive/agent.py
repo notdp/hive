@@ -694,20 +694,28 @@ class Agent:
         if self.cli == "claude":
             from .adapters import claude_bg
 
-            job_id = claude_bg.job_id_for_pane(self.pane_id)
+            job_id = (
+                claude_bg.job_id_for_pane(self.pane_id) if self.pane_id else ""
+            ) or (self.session_id or "")
             if job_id:
                 claude_bg.stop_job(job_id)
-            claude_bg.clear_pane_job(self.pane_id)
+            if self.pane_id:
+                claude_bg.clear_pane_job(self.pane_id)
         elif self.cli == "grok":
             # The member's leader daemon is the engine; a kill removes the
             # member, so the engine goes with it — deterministically, not on
             # the sidecar's next orphan sweep. Resolve while the pane tags
-            # still exist.
+            # still exist; a pane-less member is addressed by its member key.
             from .adapters import grok_leader
 
-            key = grok_leader.resolve_pane_key(self.pane_id)
+            key = (
+                grok_leader.resolve_pane_key(self.pane_id)
+                if self.pane_id
+                else grok_leader.member_key(self.team_name, self.name)
+            )
             grok_leader.pool().drop_key(key)
             grok_leader.kill_daemon_key(key)
-        tmux.kill_pane(self.pane_id)
+        if self.pane_id:
+            tmux.kill_pane(self.pane_id)
 
     # --- Serialization ---
