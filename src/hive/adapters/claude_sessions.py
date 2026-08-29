@@ -39,13 +39,13 @@ _CONNECT_TIMEOUT = 2.0
 _WRITE_TIMEOUT = 10.0
 # Daemon control-socket lane (op "reply"): retry codes are the daemon's own
 # readiness vocabulary (observed on 2.1.240) — the worker exists but cannot
-# take input this instant. The bound keeps a sidecar RPC from hanging on a
+# take input this instant. The bound keeps a hived RPC from hanging on a
 # worker that never comes up; past it the caller falls back to the inbox lane.
 _DAEMON_PROTO = 1
 _DAEMON_RETRY_CODES = ("ESTARTING", "ENOREPLY", "ERESPAWNING")
 _DAEMON_RETRY_LIMIT = 24
 _DAEMON_RETRY_DELAY = 0.2
-# The sidecar submit budget must cover a daemon_reply retry run plus a full
+# The hived submit budget must cover a daemon_reply retry run plus a full
 # fallback send() worst case.
 SUBMIT_TIMEOUT = (
     _CONNECT_TIMEOUT + _WRITE_TIMEOUT + _DAEMON_RETRY_LIMIT * _DAEMON_RETRY_DELAY + 2.0

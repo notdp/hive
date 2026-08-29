@@ -167,7 +167,7 @@ def rig():
             if str(state.get("name", "")).startswith(f"{r.team}."):
                 subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
                 subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
-        # The registry keeps a headless team alive forever (sidecar won't
+        # The registry keeps a headless team alive forever (hived won't
         # exit, member daemons won't reap) — release the name explicitly.
         for cli in r.clis:
             subprocess.run(["hive", "kill", f"{r.team}.{r.member(cli)}"],

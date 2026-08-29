@@ -38,14 +38,14 @@ never *whether it exists*.
 - Roster **membership is written only by the CLI**: create/init seed the
   entry (overwriting whatever a recycled name left behind), spawn/register/
   fork add a member, kill removes one, delete removes the entry.
-- The **sidecar only backfills** fields of names already in the roster
+- The **hived only backfills** fields of names already in the roster
   (model, cwd, a sessionId learned late) under the store lock; it never adds
   or removes a name, so an observation racing a kill cannot resurrect the
   killed member.
 - The entry's `display` field caches the tmux window id currently rendering
   the team. It is a cache: authority checks never read it.
-- Sidecar identity is `(workspace socket, team)`. A dead window no longer
-  retires the sidecar; a missing registry entry (plus no window) does.
+- Hived identity is `(workspace socket, team)`. A dead window no longer
+  retires the hived; a missing registry entry (plus no window) does.
 - **`hive attach` renders; it never defines.** Attach jumps to the team's
   window or builds one — one pane per member riding its engine's own
   viewer — writes the display cache and window/pane tags, and (outside
@@ -67,7 +67,7 @@ never *whether it exists*.
   daemon is keyed `m-<team>.<member>` (socket/pidfile/session record under
   `$GROK_HOME/hive/`); a raw `hive grok` pane outside any team keeps a
   pane key (`p<slug>`) and pane lifecycle. Pane-facing APIs resolve a pane
-  to its key through the pane's member tags. The sidecar reaps member
+  to its key through the pane's member tags. The hived reaps member
   daemons the registry no longer lists (valid roster without the member, or
   a missing entry past a newborn grace window — never on an unreadable
   read); `hive kill` reaps deterministically. Engines carry their member
@@ -109,7 +109,7 @@ If the transcript path can't be resolved, the fallback returns true on
 monitor activity alone — idle-notify must never silently disappear for panes
 the gate can't introspect.
 
-Combined into ``sidecar._pane_is_truly_busy``.
+Combined into ``hived._pane_is_truly_busy``.
 
 ### `cliAlive`
 
@@ -230,7 +230,7 @@ Signal surfaces:
   `statusUpdatedAt` older than 30 minutes demotes the status to `unknown`
   (`inputReason: stale_status`) without touching liveness.
 - `claude agents --json --all` — the durable job ledger. Consulted only when
-  the engine entry is missing (~270ms per call, cached ~30s in the sidecar);
+  the engine entry is missing (~270ms per call, cached ~30s in the hived);
   the ledger's `state` field lags reality and is never used for liveness.
 - `jobs/<jobId>/state.json` is deliberately **not** read (undocumented
   fields).
@@ -275,7 +275,7 @@ non-zero attach (job removed) ends the loop.
 
 Lifecycle: `hive kill` (and team cleanup) parks the member's job with
 `claude stop` before killing the pane — the job stays in the ledger and
-`hive resume` can wake it. The sidecar's claude supervisor tick prunes job
+`hive resume` can wake it. The hived's claude supervisor tick prunes job
 records whose pane died and parks those orphaned engines the same way; it
 never reattaches viewers (the watch loop self-heals, and a user who left it
 deliberately must not be typed at) and never touches an asleep member with a
@@ -314,7 +314,7 @@ The verdict is `certain` / `likely` / `unknown` plus a kind (`member_view`,
 runtime fields `_viewKind` / `_viewCertainty` / `_viewedJob` /
 `_viewedMember` (`hive doctor -v` shows them as `claudeView`) and the pane's
 `@hive-view` tmux option, which the border renders as `name -> what you are
-really looking at` (the sidecar refreshes it whenever the journal or a pane
+really looking at` (the hived refreshes it whenever the journal or a pane
 title changes). Nothing about typing depends on it.
 
 ### Delivery rides the receiver's own queue
@@ -347,7 +347,7 @@ mechanical guarantee of a response; that obligation is supplied by the
 member skill's receipt duty, which teaches the arrival shapes at birth and
 makes silent skips a protocol violation. The blind-verified evidence for
 this split lives in
-[reports/wrapped-verdict.html](reports/wrapped-verdict.html). The sidecar adds nothing on
+[reports/wrapped-verdict.html](reports/wrapped-verdict.html). The hived adds nothing on
 top: the durable bus row is written, the transport either accepts or
 refuses, and scheduling around a mid-turn target is the receiver's queue's
 job, not hive's.
@@ -471,7 +471,7 @@ runs, but hive reads no state from it — session id stays `unresolved`,
 `turnPhase` stays unknown, and there is no transcript fallback.
 
 The daemon is machine-level shared state: hive never kills it (a dead daemon
-takes every attached TUI down with it within ~5s), and the sidecar supervises
+takes every attached TUI down with it within ~5s), and the hived supervises
 it — a dead daemon is respawned while the team has live codex members, and a
 member pane whose CLI exited but whose thread is recorded gets one `hive codex
 resume <threadId>` typed into its retained shell (guarded by a live-process
@@ -523,7 +523,7 @@ session and ignores notifications for any other.
 
 `session/load` replays the session's past updates before it answers, so
 everything received before the load response is discarded — a replayed turn must
-never mark the pane busy. This is why spawn asks the sidecar to connect
+never mark the pane busy. This is why spawn asks the hived to connect
 (`connect-grok`) once the pane's session exists and its grok is up, rather than
 lazily on the next tick.
 

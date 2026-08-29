@@ -422,12 +422,12 @@ class Agent:
                         )
                 codex_app_server.write_pane_thread(pane_id, codex_thread_id, cwd)
                 cmd_parts.extend(["resume", _shell_escape(codex_thread_id)])
-                # Bring the sidecar's client online now so it holds the
+                # Bring the hived's client online now so it holds the
                 # broadcast stream before the member's first turn.
-                # Best-effort: a down/slow sidecar just falls back to the
+                # Best-effort: a down/slow hived just falls back to the
                 # lazy connect on the next runtime tick.
                 if workspace:
-                    from .sidecar import request_connect_codex
+                    from .hived import request_connect_codex
                     request_connect_codex(workspace)
         elif cli == "grok":
             from .adapters import grok_leader
@@ -507,7 +507,7 @@ class Agent:
             # The 2nd client can only load a session the TUI has opened, so the
             # connect follows readiness instead of racing it.
             if _wait_grok_session_ready(pane_id, grok_session_id) and workspace:
-                from .sidecar import request_connect_grok
+                from .hived import request_connect_grok
                 request_connect_grok(workspace, pane_id)
 
         return agent
@@ -799,7 +799,7 @@ class Agent:
         elif self.cli == "grok":
             # The member's leader daemon is the engine; a kill removes the
             # member, so the engine goes with it — deterministically, not on
-            # the sidecar's next orphan sweep. Resolve while the pane tags
+            # the hived's next orphan sweep. Resolve while the pane tags
             # still exist; a pane-less member is addressed by its member key.
             from .adapters import grok_leader
 

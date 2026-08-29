@@ -36,7 +36,7 @@ def _wire(monkeypatch, *, ready=True, replies=None):
         return SimpleNamespace(pane_id=f"%{len(rec.spawns)}", cli=kw.get("cli_name") or "claude")
 
     monkeypatch.setattr("hive.cli._spawn_team_agent", fake_spawn)
-    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda t, ws: 1)
+    monkeypatch.setattr("hive.cli._ensure_team_hived", lambda t, ws: 1)
     monkeypatch.setattr(
         "hive.cli._wait_for_peer_ready",
         lambda ws, *, team_name, agents, **kw: set() if ready else set(agents),

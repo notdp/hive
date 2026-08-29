@@ -50,7 +50,7 @@ def _display_mocks(monkeypatch):
     monkeypatch.setattr("hive.cli.tmux.get_window_id", lambda w: "@9")
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda w: None)
     monkeypatch.setattr("hive.cli.tmux.select_window", lambda w: calls["selected"].append(w))
-    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda t, ws: None)
+    monkeypatch.setattr("hive.cli._ensure_team_hived", lambda t, ws: None)
     return calls
 
 
@@ -81,7 +81,7 @@ def test_attach_builds_window_with_member_attach_panes(runner, configure_hive_ho
     from hive import registry
 
     assert registry.load("honey")["display"] == "@9"
-    # window carries the display options for the sidecar/border layer
+    # window carries the display options for the hived/border layer
     assert ("@hive-team", "honey") in calls["opts"]
     assert calls["selected"] == ["dev:9"]
 
@@ -94,7 +94,7 @@ def test_attach_jumps_to_an_existing_window(runner, configure_hive_home, monkeyp
     )
     selected = []
     monkeypatch.setattr("hive.cli.tmux.select_window", lambda w: selected.append(w))
-    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda t, ws: None)
+    monkeypatch.setattr("hive.cli._ensure_team_hived", lambda t, ws: None)
 
     result = runner.invoke(cli, ["attach", "honey"])
 

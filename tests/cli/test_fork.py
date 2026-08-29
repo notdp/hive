@@ -79,12 +79,12 @@ def _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path):
 
 
 def test_fork_uses_fresh_runtime_snapshot_without_resolver(runner, configure_hive_home, monkeypatch, tmp_path):
-    """A fresh sidecar snapshot is authoritative: fork must unwrap the nested
+    """A fresh hived snapshot is authoritative: fork must unwrap the nested
     `snapshot` field of the response and never fall back to pidfile/lsof
     guessing via resolve_session_id_for_pane."""
     sent = _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "hive.sidecar.request_runtime_snapshot",
+        "hive.hived.request_runtime_snapshot",
         lambda *a, **k: {
             "ok": True,
             "pane": "%99",
@@ -107,7 +107,7 @@ def test_fork_uses_fresh_runtime_snapshot_without_resolver(runner, configure_hiv
 def test_fork_stale_runtime_snapshot_falls_back_to_resolver(runner, configure_hive_home, monkeypatch, tmp_path):
     sent = _fork_snapshot_team(runner, configure_hive_home, monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "hive.sidecar.request_runtime_snapshot",
+        "hive.hived.request_runtime_snapshot",
         lambda *a, **k: {
             "ok": True,
             "pane": "%99",
@@ -405,7 +405,7 @@ def test_fork_codex_team_bound_launches_through_hive_codex(runner, configure_hiv
         "hive.adapters.codex_app_server.session_id_for_pane",
         lambda pane: "sess-daemon" if pane == "%99" else None,
     )
-    monkeypatch.setattr("hive.sidecar.request_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr("hive.hived.request_runtime_snapshot", lambda *a, **k: None)
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr(
         "hive.cli.tmux.split_window",
@@ -551,7 +551,7 @@ def test_fork_non_team_codex_resolves_session_via_daemon(runner, configure_hive_
         "hive.adapters.codex_app_server.session_id_for_pane",
         lambda pane: "sess-daemon" if pane == "%99" else None,
     )
-    monkeypatch.setattr("hive.sidecar.request_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr("hive.hived.request_runtime_snapshot", lambda *a, **k: None)
     monkeypatch.setattr("hive.cli.tmux.display_value", lambda _pane, _fmt: "/tmp/work")
     monkeypatch.setattr("hive.cli.tmux.split_window", lambda _pane, horizontal=True, cwd=None, detach=False: "%100")
     monkeypatch.setattr("hive.cli.tmux.send_keys", lambda pane, text, enter=True: sent.append((pane, text, enter)))

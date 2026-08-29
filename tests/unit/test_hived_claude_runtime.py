@@ -1,9 +1,9 @@
-"""Sidecar claude runtime: three-tier bg-job liveness and the supervisor tick."""
+"""Hived claude runtime: three-tier bg-job liveness and the supervisor tick."""
 from types import SimpleNamespace
 
 import pytest
 
-import hive.sidecar as sidecar
+import hive.hived as hived
 from hive.adapters.claude_bg import EngineSession
 
 pytestmark = pytest.mark.unit
@@ -21,7 +21,7 @@ def _engine(status="idle", *, waiting_for="", session_id="sess-live"):
 
 @pytest.fixture(autouse=True)
 def _fresh_jobs_cache(monkeypatch):
-    monkeypatch.setattr(sidecar, "_CLAUDE_JOBS_CACHE", None)
+    monkeypatch.setattr(hived, "_CLAUDE_JOBS_CACHE", None)
 
 
 def _pin(monkeypatch, *, record, engine, rows):
@@ -41,7 +41,7 @@ def test_bg_runtime_live_engine_reports_status_and_session(monkeypatch):
     _pin(monkeypatch, record=("cafe1234", "sess-old", "/w"),
          engine=_engine("busy"), rows=[])
 
-    rt = sidecar._claude_bg_runtime("%1")
+    rt = hived._claude_bg_runtime("%1")
 
     assert rt["cliAlive"] is True
     assert rt["busy"] is True
@@ -54,7 +54,7 @@ def test_bg_runtime_waiting_engine_maps_waiting_for(monkeypatch):
     _pin(monkeypatch, record=("cafe1234", "", "/w"),
          engine=_engine("waiting", waiting_for="input needed"), rows=[])
 
-    rt = sidecar._claude_bg_runtime("%1")
+    rt = hived._claude_bg_runtime("%1")
 
     assert rt["busy"] is False
     assert rt["inputState"] == "waiting_user"
@@ -66,7 +66,7 @@ def test_bg_runtime_asleep_is_reachable_not_dead(monkeypatch):
     _pin(monkeypatch, record=("cafe1234", "sess-old", "/w"), engine=None,
          rows=[{"id": "cafe1234", "state": "stopped", "sessionId": "sess-row"}])
 
-    rt = sidecar._claude_bg_runtime("%1")
+    rt = hived._claude_bg_runtime("%1")
 
     assert rt["cliAlive"] is True  # asleep, wake-on-delivery — never reaped
     assert rt["busy"] is False
@@ -78,7 +78,7 @@ def test_bg_runtime_asleep_is_reachable_not_dead(monkeypatch):
 def test_bg_runtime_gone_job_is_offline(monkeypatch):
     _pin(monkeypatch, record=("cafe1234", "sess-old", "/w"), engine=None, rows=[])
 
-    rt = sidecar._claude_bg_runtime("%1")
+    rt = hived._claude_bg_runtime("%1")
 
     assert rt["cliAlive"] is False
     assert rt["inputState"] == "offline"
@@ -89,7 +89,7 @@ def test_bg_runtime_gone_job_is_offline(monkeypatch):
 def test_bg_runtime_ledger_failure_is_unknown_not_dead(monkeypatch):
     _pin(monkeypatch, record=("cafe1234", "", "/w"), engine=None, rows=None)
 
-    rt = sidecar._claude_bg_runtime("%1")
+    rt = hived._claude_bg_runtime("%1")
 
     assert rt["cliAlive"] is True  # benefit of the doubt: never a reap signal
     assert rt["inputState"] == "unknown"
@@ -98,7 +98,7 @@ def test_bg_runtime_ledger_failure_is_unknown_not_dead(monkeypatch):
 
 def test_bg_runtime_none_for_unmanaged_pane(monkeypatch):
     _pin(monkeypatch, record=None, engine=None, rows=[])
-    assert sidecar._claude_bg_runtime("%1") is None
+    assert hived._claude_bg_runtime("%1") is None
 
 
 def test_jobs_ledger_is_cached_between_reads(monkeypatch):
@@ -109,8 +109,8 @@ def test_jobs_ledger_is_cached_between_reads(monkeypatch):
         lambda **_kw: calls.append(1) or [],
     )
 
-    sidecar._claude_bg_runtime("%1")
-    sidecar._claude_bg_runtime("%1")
+    hived._claude_bg_runtime("%1")
+    hived._claude_bg_runtime("%1")
 
     assert len(calls) == 1  # the ~270ms CLI call never runs per tick per pane
 
@@ -122,12 +122,12 @@ def test_agent_runtime_payload_reaches_bg_branch_without_a_viewer(monkeypatch):
     # viewer gap: no process on the tty, but the pane records a live job —
     # the member must not read as cli_exited
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
-    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _p: {"busy": False})
-    monkeypatch.setattr(sidecar, "detect_cli_process_for_pane", lambda _p: None)
+    monkeypatch.setattr(hived, "_busy_output_payload", lambda _p: {"busy": False})
+    monkeypatch.setattr(hived, "detect_cli_process_for_pane", lambda _p: None)
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_k: "")
     _pin(monkeypatch, record=("cafe1234", "", "/w"), engine=_engine("idle"), rows=[])
 
-    rt = sidecar._agent_runtime_payload("%1")
+    rt = hived._agent_runtime_payload("%1")
 
     assert rt["_cli"] == "claude"
     assert rt["cliAlive"] is True
@@ -141,7 +141,7 @@ def test_claude_registry_busy_prefers_job_engine(monkeypatch):
     monkeypatch.setattr(
         "hive.adapters.claude_bg.engine_session_for_job", lambda _j: _engine("busy")
     )
-    assert sidecar._claude_registry_busy("%1") is True
+    assert hived._claude_registry_busy("%1") is True
 
 
 def test_claude_registry_busy_falls_back_to_interactive_entry(monkeypatch):
@@ -151,13 +151,13 @@ def test_claude_registry_busy_falls_back_to_interactive_entry(monkeypatch):
         "hive.adapters.claude_sessions.session_status",
         lambda pid: ("busy", "") if pid == 777 else None,
     )
-    assert sidecar._claude_registry_busy("%1") is True
+    assert hived._claude_registry_busy("%1") is True
 
 
 def test_claude_registry_busy_none_without_any_source(monkeypatch):
     monkeypatch.setattr("hive.adapters.claude_bg.job_id_for_pane", lambda _p: None)
     monkeypatch.setattr("hive.agent_cli.claude_pid_for_pane", lambda _p: None)
-    assert sidecar._claude_registry_busy("%1") is None
+    assert hived._claude_registry_busy("%1") is None
 
 
 # --- interactive claude: the session registry, not the transcript gate --------
@@ -168,9 +168,9 @@ def _interactive_claude_pane(monkeypatch, tmp_path, *, status, transcript=True):
     a resolvable session, and *status* as its registry entry's report."""
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
     monkeypatch.setattr("hive.tmux.display_value", lambda *_a: "/w")
-    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _p: {"busy": False})
+    monkeypatch.setattr(hived, "_busy_output_payload", lambda _p: {"busy": False})
     monkeypatch.setattr(
-        sidecar, "detect_cli_process_for_pane", lambda _p: SimpleNamespace(name="claude")
+        hived, "detect_cli_process_for_pane", lambda _p: SimpleNamespace(name="claude")
     )
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_k: "")
     monkeypatch.setattr("hive.adapters.claude_bg.read_pane_job", lambda _p: None)
@@ -200,7 +200,7 @@ def test_interactive_claude_takes_input_state_from_its_registry_entry(monkeypatc
         lambda *_a, **_k: pytest.fail("the registry answered; the gate must not run"),
     )
 
-    rt = sidecar._agent_runtime_payload("%7")
+    rt = hived._agent_runtime_payload("%7")
 
     assert rt["inputState"] == "waiting_user"
     assert rt["inputReason"] == "registry:input needed"
@@ -221,7 +221,7 @@ def test_interactive_claude_status_maps_like_the_bg_engine(monkeypatch, tmp_path
         lambda *_a, **_k: pytest.fail("the registry answered; the gate must not run"),
     )
 
-    rt = sidecar._agent_runtime_payload("%7")
+    rt = hived._agent_runtime_payload("%7")
 
     assert rt["busy"] is expected
     assert rt["inputState"] == "ready"  # `shell` is neither mid-turn nor a wait
@@ -237,7 +237,7 @@ def test_interactive_claude_without_a_registry_status_falls_back_to_the_gate(mon
         "hive.adapters.base.check_input_gate", lambda _path: GateResult("waiting", "")
     )
 
-    rt = sidecar._agent_runtime_payload("%7")
+    rt = hived._agent_runtime_payload("%7")
 
     assert rt["inputState"] == "waiting_user"
     assert rt["inputReason"] == "ask_pending"
@@ -268,7 +268,7 @@ def test_claude_supervisor_tick_parks_jobs_of_dead_panes(monkeypatch):
         "hive.adapters.claude_bg.stop_job", lambda jid, **_kw: stopped.append(jid)
     )
 
-    sidecar._claude_supervisor_tick("/tmp/ws")
+    hived._claude_supervisor_tick("/tmp/ws")
 
     assert cleared == ["%9"]  # the live pane's record is untouched
     assert stopped == ["dead0001"]
@@ -282,6 +282,6 @@ def test_claude_supervisor_tick_treats_empty_listing_as_tmux_failure(monkeypatch
         "hive.adapters.claude_bg.list_recorded_panes", lambda: ["%9"]
     )
 
-    sidecar._claude_supervisor_tick("/tmp/ws")
+    hived._claude_supervisor_tick("/tmp/ws")
 
     assert cleared == []  # unknown is not dead: nothing pruned, nothing parked

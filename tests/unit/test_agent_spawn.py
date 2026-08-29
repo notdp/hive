@@ -529,13 +529,13 @@ def _mock_grok_leader_up(monkeypatch):
 
 
 def test_spawn_codex_preconnects_2nd_client_with_workspace(monkeypatch):
-    # With a workspace, spawn asks the sidecar to bring its client online
+    # With a workspace, spawn asks the hived to bring its client online
     # before the member's first turn.
     calls, _ = _setup_tmux_mocks(monkeypatch)
     _mock_daemon_up(monkeypatch)
     connects: list[str] = []
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_codex",
+        "hive.hived.request_connect_codex",
         lambda workspace: connects.append(workspace) or {"ok": True},
     )
 
@@ -553,7 +553,7 @@ def test_spawn_codex_skips_preconnect_without_workspace(monkeypatch):
     _mock_daemon_up(monkeypatch)
     connects: list = []
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_codex",
+        "hive.hived.request_connect_codex",
         lambda workspace: connects.append(workspace),
     )
 
@@ -723,7 +723,7 @@ def test_spawn_grok_connects_the_2nd_client_once_the_session_is_ready(monkeypatc
         lambda pane, _sid: order.append(("ready", pane)) or True,
     )
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_grok",
+        "hive.hived.request_connect_grok",
         lambda workspace, pane: order.append(("connect", workspace, pane)) or {"ok": True},
     )
 
@@ -739,7 +739,7 @@ def test_spawn_grok_skips_the_connect_when_readiness_times_out(monkeypatch):
     monkeypatch.setattr("hive.agent._wait_grok_session_ready", lambda _pane, _sid: False)
     connects: list = []
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_grok",
+        "hive.hived.request_connect_grok",
         lambda workspace, pane: connects.append((workspace, pane)),
     )
 
@@ -754,7 +754,7 @@ def test_spawn_grok_skips_preconnect_without_workspace(monkeypatch):
     _mock_grok_leader_up(monkeypatch)
     connects: list = []
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_grok",
+        "hive.hived.request_connect_grok",
         lambda workspace, pane: connects.append((workspace, pane)),
     )
 
@@ -1215,7 +1215,7 @@ def test_spawn_codex_resume_records_thread_and_resumes_it(monkeypatch):
     state = _mock_daemon_up(monkeypatch)
     connects: list[str] = []
     monkeypatch.setattr(
-        "hive.sidecar.request_connect_codex",
+        "hive.hived.request_connect_codex",
         lambda ws: connects.append(ws),
     )
 

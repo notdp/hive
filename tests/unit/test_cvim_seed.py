@@ -300,7 +300,7 @@ def test_resolve_hive_runtime_session_id_rejects_stale_snapshot(monkeypatch):
 
     monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
     monkeypatch.setattr(
-        "hive.sidecar.request_runtime_snapshot",
+        "hive.hived.request_runtime_snapshot",
         lambda workspace, *, pane_id: {
             "ok": True,
             "pane": pane_id,
@@ -319,7 +319,7 @@ def test_resolve_hive_runtime_session_id_allows_codex_adapter_when_snapshot_miss
 
     monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
     monkeypatch.setattr(
-        "hive.sidecar.request_runtime_snapshot",
+        "hive.hived.request_runtime_snapshot",
         lambda workspace, *, pane_id: {
             "ok": True,
             "pane": pane_id,
@@ -330,13 +330,13 @@ def test_resolve_hive_runtime_session_id_allows_codex_adapter_when_snapshot_miss
     assert shared._resolve_hive_runtime_session_id("%42", "codex") == (False, None)
 
 
-def test_resolve_hive_runtime_session_id_allows_fallback_on_sidecar_failure(monkeypatch):
+def test_resolve_hive_runtime_session_id_allows_fallback_on_hived_failure(monkeypatch):
     shared = _import_shared()
 
     monkeypatch.setattr("hive.tmux.display_value", lambda _pane_id, _fmt: "/tmp/ws")
     monkeypatch.setattr(
-        "hive.sidecar.request_runtime_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("sidecar unavailable")),
+        "hive.hived.request_runtime_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("hived unavailable")),
     )
 
     assert shared._resolve_hive_runtime_session_id("%42", "claude") == (False, None)

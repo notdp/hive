@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import hive.sidecar as sidecar
+import hive.hived as hived
 from hive.adapters.claude_view import PaneView
 
 pytestmark = pytest.mark.unit
@@ -53,7 +53,7 @@ def tick(monkeypatch):
 
 
 def _run(env):
-    sidecar._claude_view_tick(
+    hived._claude_view_tick(
         workspace="/tmp/ws", team="probe", members=MEMBERS, state=env["state"]
     )
 
@@ -154,7 +154,7 @@ def _name_wire(monkeypatch, *, jobs, engines):
     monkeypatch.setattr(claude_bg, "job_id_for_pane", lambda pane: jobs.get(pane))
     monkeypatch.setattr(claude_bg, "engine_session_for_job", lambda job: engines.get(job))
     monkeypatch.setattr(
-        sidecar.threading if hasattr(sidecar, "threading") else __import__("threading"),
+        hived.threading if hasattr(hived, "threading") else __import__("threading"),
         "Thread",
         lambda target, args, daemon: type(
             "T", (), {"start": lambda self: started.append((target, args))}
@@ -176,8 +176,8 @@ def test_a_placeholder_named_member_job_is_renamed_once(monkeypatch):
     state = {}
     members = {"worker": {"pane": "%183", "cli": "claude"}}
 
-    sidecar._claude_name_tick(members=members, team="honey", state=state)
-    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    hived._claude_name_tick(members=members, team="honey", state=state)
+    hived._claude_name_tick(members=members, team="honey", state=state)
 
     assert len(started) == 1
     target, args = started[0]
@@ -192,7 +192,7 @@ def test_an_already_named_job_is_left_alone(monkeypatch):
         engines={"485865b2": _engine("485865b2", "honey.worker")},
     )
 
-    sidecar._claude_name_tick(
+    hived._claude_name_tick(
         members={"worker": {"pane": "%183", "cli": "claude"}}, team="honey", state={}
     )
 
@@ -205,19 +205,19 @@ def test_an_asleep_engine_is_retried_on_a_later_tick(monkeypatch):
     state = {}
     members = {"worker": {"pane": "%183", "cli": "claude"}}
 
-    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    hived._claude_name_tick(members=members, team="honey", state=state)
     assert state.get("named", set()) == set()
 
     _name_wire(monkeypatch, jobs={"%183": "485865b2"},
                engines={"485865b2": _engine("485865b2", "hive-183")})
-    sidecar._claude_name_tick(members=members, team="honey", state=state)
+    hived._claude_name_tick(members=members, team="honey", state=state)
     assert state["named"] == {"485865b2"}
 
 
 def test_non_claude_members_are_not_renamed(monkeypatch):
     started = _name_wire(monkeypatch, jobs={"%184": "job"}, engines={})
 
-    sidecar._claude_name_tick(
+    hived._claude_name_tick(
         members={"validator": {"pane": "%184", "cli": "grok"}}, team="honey", state={}
     )
 

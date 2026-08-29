@@ -7,7 +7,7 @@ then blocks until the member replies — the visible counterpart of a
 headless subagent call. ``parallel()`` runs several of those at once.
 
 The runner never owns a pane: it dispatches as the reserved ``flow``
-address, whose delivery is the durable bus row itself (the sidecar's
+address, whose delivery is the durable bus row itself (the hived's
 mailbox branch), and reads replies straight off the bus. Members answer
 with an ordinary ``hive send flow`` — auto-anchoring threads it back to
 the dispatch, no new addressing concepts.
@@ -223,7 +223,7 @@ def agent(prompt: str, *, name: str, cli: str | None = None, model: str = "") ->
         raise FlowError(f"spawn '{name}' failed after {_DISPATCH_ATTEMPTS} attempts: {last}") from last
     _log(f"{name} spawned in {spawned.pane_id}")
 
-    cli_mod._ensure_team_sidecar(ctx.team, Path(ctx.workspace))
+    cli_mod._ensure_team_hived(ctx.team, Path(ctx.workspace))
     if spawned.cli != "claude":
         # claude inboxes queue; only TUI-injected CLIs need the ready gate.
         not_ready = cli_mod._wait_for_peer_ready(

@@ -461,7 +461,7 @@ def duplicate_team_bindings() -> list[dict[str, object]]:
     windows. This scans all windows, groups by team, and returns every group
     with more than one window — including each window's id, workspace, and live
     member panes — so ``hive doctor`` can surface the collision. Detection only:
-    retagging a live team can break sidecar identity / pane context / pending
+    retagging a live team can break hived identity / pane context / pending
     sends, so repair is left to a human.
     """
     r = tmux._run([

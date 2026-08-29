@@ -1,7 +1,7 @@
-"""Runtime snapshot primitives used by the sidecar.
+"""Runtime snapshot primitives used by the hived.
 
 Current scope is sessionId-only. This keeps the owner boundary narrow: the
-sidecar maintains current-session identity, and snapshot-only consumers such
+hived maintains current-session identity, and snapshot-only consumers such
 as cvim read that identity without launching their own live probes.
 
 Stale snapshots may retain the last observed value for diagnostics, but
@@ -14,7 +14,7 @@ Phase 3+ candidates, intentionally postponed until there is measured demand:
 - transcriptPath caching tied atomically to the same session generation
 
 Those fields need explicit invalidation and same-generation semantics before
-they move into this store. Until then, sidecar runtime queries compute them
+they move into this store. Until then, hived runtime queries compute them
 on demand.
 """
 

@@ -1,4 +1,4 @@
-import hive.sidecar as sidecar
+import hive.hived as hived
 from hive import bus
 
 
@@ -68,7 +68,7 @@ def test_thread_payload_projects_pure_send_chain(tmp_path):
         },
     )
 
-    payload = sidecar._thread_payload(str(workspace), "a003")
+    payload = hived._thread_payload(str(workspace), "a003")
 
     assert payload["ok"] is True
     assert payload["rootMsgId"] == "a001"

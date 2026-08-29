@@ -3,13 +3,13 @@
 The pane (and its shell) survive the CLI exiting now, so liveness comes from
 runtime evidence only (`cliAlive` — process table for codex/grok, the bg
 job's registry/ledger state for claude), delivery fails closed before any
-native transport, and the sidecar consumers ignore retained shells.
+native transport, and the hived consumers ignore retained shells.
 """
 from types import SimpleNamespace
 
 import pytest
 
-from hive import bus, sidecar
+from hive import bus, hived
 from hive.agent import Agent
 
 pytestmark = pytest.mark.unit
@@ -27,7 +27,7 @@ def _pane_env(monkeypatch, *, alive=True, command="zsh", title="", procs=()):
     monkeypatch.setattr("hive.tmux.list_tty_processes", lambda _t: list(procs))
     # output-based busy would say True: the contract must force it off for
     # anything that is not a live CLI
-    monkeypatch.setattr(sidecar, "_busy_output_payload", lambda _p: {"busy": True})
+    monkeypatch.setattr(hived, "_busy_output_payload", lambda _p: {"busy": True})
 
 
 def _forbid(monkeypatch, target, message):
@@ -39,7 +39,7 @@ def _forbid(monkeypatch, target, message):
 
 def test_payload_pane_dead_is_fully_offline(monkeypatch):
     _pane_env(monkeypatch, alive=False)
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["alive"] is False
     assert rt["cliAlive"] is False
     assert rt["busy"] is False
@@ -51,9 +51,9 @@ def test_payload_retained_shell_with_stale_codex_title(monkeypatch):
     # deception sample 1: the title still says "OpenAI Codex" but the TTY has
     # only the shell — title text is not liveness evidence
     _pane_env(monkeypatch, command="zsh", title="OpenAI Codex", procs=[_proc("-zsh")])
-    _forbid(monkeypatch, "hive.sidecar._codex_app_server_runtime",
+    _forbid(monkeypatch, "hive.hived._codex_app_server_runtime",
             "daemon runtime must not be consulted for a retained shell")
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["alive"] is True
     assert rt["cliAlive"] is False
     assert rt["busy"] is False
@@ -65,9 +65,9 @@ def test_payload_retained_shell_ignores_surviving_daemon(monkeypatch):
     # deception sample 2: the per-pane daemon (and its thread) outlive the
     # TUI — a reachable daemon must not make the member look alive
     _pane_env(monkeypatch, command="zsh", title="codex", procs=[_proc("-zsh")])
-    _forbid(monkeypatch, "hive.sidecar._codex_app_server_runtime",
+    _forbid(monkeypatch, "hive.hived._codex_app_server_runtime",
             "daemon runtime must not be consulted for a retained shell")
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["cliAlive"] is False
     assert rt["inputState"] == "offline"
     assert rt["inputReason"] == "cli_exited"
@@ -82,13 +82,13 @@ def test_payload_live_codex_process_reaches_daemon_runtime(monkeypatch):
     )
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_k: "")
     monkeypatch.setattr(
-        sidecar, "_codex_app_server_runtime",
+        hived, "_codex_app_server_runtime",
         lambda _p: {"busy": True, "inputState": "ready", "inputReason": ""},
     )
     monkeypatch.setattr(
         "hive.adapters.codex_app_server.session_id_for_pane", lambda _p: "sid-1",
     )
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["cliAlive"] is True
     assert rt["busy"] is True
     assert rt["sessionId"] == "sid-1"
@@ -98,7 +98,7 @@ def test_payload_live_claude_process_is_cli_alive(monkeypatch):
     _pane_env(monkeypatch, command="claude", procs=[])
     monkeypatch.setattr("hive.agent_cli.resolve_model_for_pane", lambda *_a, **_k: "")
     monkeypatch.setattr("hive.adapters.get", lambda _n: None)
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["cliAlive"] is True
     # flow passed the liveness gate and stopped at the adapter, not at offline
     assert rt["inputState"] == "unknown"
@@ -112,8 +112,8 @@ def _wire_send(monkeypatch, workspace, agent):
     team = SimpleNamespace(
         name="team-x", workspace=str(workspace), tmux_session="dev", tmux_window="dev:0"
     )
-    monkeypatch.setattr(sidecar, "_resolve_live_agent", lambda _t, _a: (team, agent))
-    monkeypatch.setattr(sidecar, "_check_send_gate", lambda _t: None)
+    monkeypatch.setattr(hived, "_resolve_live_agent", lambda _t, _a: (team, agent))
+    monkeypatch.setattr(hived, "_check_send_gate", lambda _t: None)
 
 
 def test_send_to_retained_shell_fails_closed_with_durable_bus_event(tmp_path, monkeypatch):
@@ -129,7 +129,7 @@ def test_send_to_retained_shell_fails_closed_with_durable_bus_event(tmp_path, mo
     agent = Agent(name="v", team_name="team-x", pane_id="%9", cli="codex")
     _wire_send(monkeypatch, workspace, agent)
 
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="w",
         sender_pane="%1", target_agent="v", body="hi", artifact="", reply_to="",
     )
@@ -205,7 +205,7 @@ def test_send_with_live_cli_still_uses_native_transport(
     agent = Agent(name="v", team_name="team-x", pane_id="%9", cli=cli_name)
     _wire_send(monkeypatch, workspace, agent)
 
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="w",
         sender_pane="%1", target_agent="v", body="hi", artifact="", reply_to="",
     )
@@ -214,12 +214,12 @@ def test_send_with_live_cli_still_uses_native_transport(
     assert sent and sent[0][0] == "%9"
 
 
-# --- V4: sidecar consumers ignore retained shells -----------------------------
+# --- V4: hived consumers ignore retained shells -----------------------------
 
 
 def test_idle_notify_excludes_retained_shell_pane(monkeypatch):
     monkeypatch.setattr(
-        sidecar, "_team_member_bindings",
+        hived, "_team_member_bindings",
         lambda _t: {
             "w": {"role": "agent", "pane": "%1"},
             "v": {"role": "agent", "pane": "%2"},
@@ -227,10 +227,10 @@ def test_idle_notify_excludes_retained_shell_pane(monkeypatch):
     )
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda _p: True)
     monkeypatch.setattr(
-        sidecar, "detect_cli_process_for_pane",
+        hived, "detect_cli_process_for_pane",
         lambda pane: object() if pane == "%1" else None,
     )
-    assert sidecar._idle_notify_agent_panes("t") == ["%1"]
+    assert hived._idle_notify_agent_panes("t") == ["%1"]
 
 
 def test_doctor_payload_exposes_cli_alive(monkeypatch):
@@ -238,13 +238,13 @@ def test_doctor_payload_exposes_cli_alive(monkeypatch):
     fake_team = SimpleNamespace(name="t", agents={"v": fake_agent}, get=lambda _n: fake_agent)
     monkeypatch.setattr("hive.team.Team.load", lambda _t: fake_team)
     monkeypatch.setattr(
-        sidecar, "_member_runtime_payload",
+        hived, "_member_runtime_payload",
         lambda _p, role: {
             "alive": True, "cliAlive": False, "busy": False,
             "inputState": "offline", "inputReason": "cli_exited",
         },
     )
-    diag = sidecar._doctor_payload("/tmp/ws", "t", "v")
+    diag = hived._doctor_payload("/tmp/ws", "t", "v")
     assert diag["alive"] is True
     assert diag["cliAlive"] is False
 
@@ -254,9 +254,9 @@ def test_team_payload_merge_carries_cli_alive(monkeypatch):
 
     team = SimpleNamespace(name="t", workspace="/tmp/ws", tmux_window="dev:0", tmux_session="dev")
     monkeypatch.setattr("hive.cli._resolve_workspace_for_team", lambda _t: "/tmp/ws", raising=False)
-    monkeypatch.setattr("hive.cli._ensure_team_sidecar", lambda _t, _w: 1)
+    monkeypatch.setattr("hive.cli._ensure_team_hived", lambda _t, _w: 1)
     monkeypatch.setattr(
-        "hive.sidecar.request_team_runtime",
+        "hive.hived.request_team_runtime",
         lambda _ws, team: {
             "ok": True,
             "members": {
@@ -281,9 +281,9 @@ def test_retained_shell_running_rg_codex_is_not_a_cli(monkeypatch, tmp_path):
         command="rg",
         procs=[_proc("rg", "rg codex src tests"), _proc("-zsh")],
     )
-    _forbid(monkeypatch, "hive.sidecar._codex_app_server_runtime",
+    _forbid(monkeypatch, "hive.hived._codex_app_server_runtime",
             "daemon runtime must not be consulted")
-    rt = sidecar._agent_runtime_payload("%9")
+    rt = hived._agent_runtime_payload("%9")
     assert rt["cliAlive"] is False
     assert rt["inputState"] == "offline"
     assert rt["inputReason"] == "cli_exited"
@@ -299,7 +299,7 @@ def test_retained_shell_running_rg_codex_is_not_a_cli(monkeypatch, tmp_path):
             "keystroke fallback is forbidden")
     agent = Agent(name="v", team_name="team-x", pane_id="%9", cli="codex")
     _wire_send(monkeypatch, workspace, agent)
-    payload = sidecar._send_payload(
+    payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="w",
         sender_pane="%1", target_agent="v", body="hi", artifact="", reply_to="",
     )

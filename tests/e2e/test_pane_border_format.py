@@ -3,7 +3,7 @@
 The claude member border contract: the pane is an attach *viewer*, so it
 shows the bare member name while the view matches the member and
 "name -> what is really on screen" once the human switched the viewer
-elsewhere. The switch is detected by the sidecar's view probe and handed to
+elsewhere. The switch is detected by the hived's view probe and handed to
 tmux as the pane's `@hive-view` option; tmux itself evaluates the format, so
 the assertions run the real renderer via `display-message -p`.
 """

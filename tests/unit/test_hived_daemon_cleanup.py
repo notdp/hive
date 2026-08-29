@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hive import sidecar
+from hive import hived
 
 pytestmark = pytest.mark.unit
 
@@ -42,7 +42,7 @@ def test_cleanup_skips_live_pane(monkeypatch, reap_env):
     state["keys"] = ["p4"]
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: True)
 
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == []
 
@@ -52,7 +52,7 @@ def test_cleanup_reaps_dead_pane_and_logs_before_kill(monkeypatch, reap_env):
     state["keys"] = ["p4"]
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: False)
 
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == [
         ("emit", "/tmp/ws", "daemon.reap", {"key": "p4"}),
@@ -83,7 +83,7 @@ def test_cleanup_member_daemon_reaped_when_registry_lists_no_such_member(reap_en
         members=[{"name": "other", "cli": "grok"}],
     ) == "written"
 
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == [
         ("emit", "/tmp/ws", "daemon.reap", {"key": "m-honey.rex"}),
@@ -103,7 +103,7 @@ def test_cleanup_member_daemon_kept_while_registry_lists_it(reap_env):
         members=[{"name": "rex", "cli": "grok"}],
     ) == "written"
 
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == []
 
@@ -119,7 +119,7 @@ def test_cleanup_member_daemon_survives_unreadable_registry(reap_env):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
 
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == []
 
@@ -130,12 +130,12 @@ def test_cleanup_member_daemon_missing_registry_reaps_after_grace(reap_env):
 
     # newborn: inside the grace window, spawn registration may be in flight
     _write_pidfile(tmp_path, "m-honey.rex", age_seconds=5)
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
     assert calls == []
 
     # past the grace window with no registry entry: orphan
     _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
-    sidecar._cleanup_dead_daemons("/tmp/ws")
+    hived._cleanup_dead_daemons("/tmp/ws")
     assert ("kill", "m-honey.rex") in calls
 
 
@@ -187,7 +187,7 @@ def super_env(monkeypatch):
         })),
     )
     monkeypatch.setattr(
-        "hive.sidecar.detect_cli_process_for_pane",
+        "hive.hived.detect_cli_process_for_pane",
         lambda pane: state["cli_process"].get(pane),
     )
     monkeypatch.setattr(
@@ -202,18 +202,18 @@ def super_env(monkeypatch):
         "hive.notify_debug.emit",
         lambda workspace, event, **fields: calls.append(("emit", event, fields)),
     )
-    monkeypatch.setattr(sidecar, "_CODEX_REATTACH_AT", {})
+    monkeypatch.setattr(hived, "_CODEX_REATTACH_AT", {})
     return state
 
 
 def test_supervisor_healthy_world_does_nothing(super_env):
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert super_env["calls"] == []
 
 
 def test_supervisor_prunes_records_of_dead_panes(super_env):
     super_env["recorded"] = ["%1", "%dead"]
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert ("clear", "%dead") in super_env["calls"]
     assert ("clear", "%1") not in super_env["calls"]
 
@@ -224,13 +224,13 @@ def test_supervisor_leaves_daemon_alone_without_codex_members(super_env):
     super_env["panes"] = [_pane("%9", team="t", agent="w", cli="claude")]
     super_env["recorded"] = []
     super_env["daemon_alive"] = False
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert super_env["calls"] == []
 
 
 def test_supervisor_respawns_dead_daemon_with_live_member(super_env):
     super_env["daemon_alive"] = False
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     calls = super_env["calls"]
     assert ("drop_client",) in calls  # stale client must reconnect post-respawn
     assert ("spawn",) in calls
@@ -239,7 +239,7 @@ def test_supervisor_respawns_dead_daemon_with_live_member(super_env):
 
 def test_supervisor_reattaches_retained_shell(super_env):
     super_env["cli_process"] = {}  # CLI exited; pane keeps its shell
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     calls = super_env["calls"]
     assert ("send", "%1", "hive codex resume tid-1") in calls
     assert ("emit", "codex.member.reattach",
@@ -248,26 +248,26 @@ def test_supervisor_reattaches_retained_shell(super_env):
 
 def test_supervisor_reattach_respects_cooldown(super_env):
     super_env["cli_process"] = {}
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     sends = [c for c in super_env["calls"] if c[0] == "send"]
     assert len(sends) == 1  # one attempt per cooldown window
 
 
 def test_supervisor_never_types_over_a_live_cli(super_env):
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert [c for c in super_env["calls"] if c[0] == "send"] == []
 
 
 def test_supervisor_never_types_into_a_non_shell(super_env):
     super_env["cli_process"] = {}
     super_env["pane_command"] = {"%1": "vim"}
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert [c for c in super_env["calls"] if c[0] == "send"] == []
 
 
 def test_supervisor_skips_member_without_record(super_env):
     super_env["cli_process"] = {}
     super_env["threads"] = {}
-    sidecar._codex_supervisor_tick("/tmp/ws", "t")
+    hived._codex_supervisor_tick("/tmp/ws", "t")
     assert [c for c in super_env["calls"] if c[0] == "send"] == []

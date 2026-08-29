@@ -1,21 +1,21 @@
 """Notify debug tracing.
 
 Always-on JSONL log of notify state-machine transitions, covering both the
-sidecar idle watcher and the notify_ui delivery path. Business-path events are
-always recorded; low-information sidecar heartbeat events are only recorded
+hived idle watcher and the notify_ui delivery path. Business-path events are
+always recorded; low-information hived heartbeat events are only recorded
 when Hive is running from a source checkout or ``HIVE_LOG_VERBOSITY=dev``.
 
 Logs go to ``<workspace>/run/notify.jsonl`` when the workspace is known
-(sidecar paths, select-hook cleanup with ``@hive-workspace``) and fall back
+(hived paths, select-hook cleanup with ``@hive-workspace``) and fall back
 to ``~/.cache/hive/notify.jsonl`` (or ``$XDG_CACHE_HOME/hive/...``) when no
 workspace can be resolved.
 
-Sidecar callers already know their workspace and pass it explicitly via
+Hived callers already know their workspace and pass it explicitly via
 ``emit_for_window(..., workspace=...)``; UI helpers without the hint resolve
 ``@hive-workspace`` on the target window. ``workspace_for_window`` failures
 fall back to the global log silently.
 
-Multiple processes (sidecar loop, select-hook cleanup) write to the same log
+Multiple processes (hived loop, select-hook cleanup) write to the same log
 via a single ``os.write`` call on an ``O_APPEND`` fd.
 """
 

@@ -4,7 +4,7 @@ import json
 
 from hive import bus
 from hive.cli import cli
-import hive.sidecar as sidecar
+import hive.hived as hived
 
 FIXED_ID = bus.format_msg_id(1)
 
@@ -47,15 +47,15 @@ def _setup_team(monkeypatch, workspace, sent=None):
     return _FakeTeam()
 
 
-def _patch_sidecar_status_requests(monkeypatch):
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+def _patch_hived_status_requests(monkeypatch):
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     def _request_delivery(workspace: str, message_id: str):
-        from hive.sidecar import _delivery_payload
+        from hive.hived import _delivery_payload
 
         return _delivery_payload(workspace, {}, message_id)
 
-    monkeypatch.setattr("hive.sidecar.request_delivery", _request_delivery)
+    monkeypatch.setattr("hive.hived.request_delivery", _request_delivery)
 
 
 # --- delivery ---
@@ -67,7 +67,7 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr(
-        "hive.sidecar.request_doctor",
+        "hive.hived.request_doctor",
         lambda _ws, *, team, target_agent, verbose=False: {
             "ok": True,
             "agent": target_agent,
@@ -81,7 +81,7 @@ def test_doctor_self(runner, configure_hive_home, monkeypatch, tmp_path):
             "transcriptSize": 1234,
         },
     )
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 0
@@ -104,7 +104,7 @@ def test_doctor_named_agent(runner, configure_hive_home, monkeypatch, tmp_path):
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr(
-        "hive.sidecar.request_doctor",
+        "hive.hived.request_doctor",
         lambda _ws, *, team, target_agent, verbose=False: {
             "ok": True,
             "agent": target_agent,
@@ -113,7 +113,7 @@ def test_doctor_named_agent(runner, configure_hive_home, monkeypatch, tmp_path):
             "busy": True,
         },
     )
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     result = runner.invoke(cli, ["doctor", "gpt"])
     assert result.exit_code == 0
@@ -133,12 +133,12 @@ def test_doctor_reports_duplicate_team_bindings_without_repair(
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr(
-        "hive.sidecar.request_doctor",
+        "hive.hived.request_doctor",
         lambda _ws, *, team, target_agent, verbose=False: {
             "ok": True, "agent": target_agent, "team": team, "alive": True,
         },
     )
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     dupe = {
         "team": "0-2",
@@ -197,8 +197,8 @@ def test_doctor_requests_verbose_detail_by_default(runner, configure_hive_home, 
             "transcriptSize": 1234,
         }
 
-    monkeypatch.setattr("hive.sidecar.request_doctor", _request_doctor)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.request_doctor", _request_doctor)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 0
@@ -230,47 +230,47 @@ def test_doctor_payload_includes_log_paths(configure_hive_home, monkeypatch, tmp
 
     monkeypatch.setattr("hive.team.Team.load", lambda _team_name: _FakeTeam())
     monkeypatch.setattr(
-        sidecar,
+        hived,
         "_member_runtime_payload",
         lambda _pane_id, role="agent": {"alive": True, "inputState": "ready"},
     )
 
-    payload = sidecar._doctor_payload(str(workspace), "team-x", "gpt", verbose=True)
+    payload = hived._doctor_payload(str(workspace), "team-x", "gpt", verbose=True)
 
     assert payload["runDir"] == str(workspace / "run")
     assert payload["logs"] == {
         "notify": str(workspace / "run" / "notify.jsonl"),
-        "sidecar_stderr": str(workspace / "run" / "sidecar.stderr"),
+        "hived_stderr": str(workspace / "run" / "hived.stderr"),
         "cvim_dir": str(workspace / "run" / "cvim"),
     }
 
 
-def test_doctor_includes_sidecar_metadata(runner, configure_hive_home, monkeypatch, tmp_path):
+def test_doctor_includes_hived_metadata(runner, configure_hive_home, monkeypatch, tmp_path):
     configure_hive_home()
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr(
-        "hive.sidecar.request_doctor",
+        "hive.hived.request_doctor",
         lambda _ws, *, team, target_agent, verbose=False: {
             "ok": True,
             "agent": target_agent,
             "team": team,
             "alive": True,
             "busy": False,
-            "sidecar": {
+            "hived": {
                 "pid": 4242,
                 "started_at": "2026-04-17T00:00:00Z",
                 "code_hash": "deadbeef",
             },
         },
     )
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["sidecar"] == {
+    assert payload["hived"] == {
         "pid": 4242,
         "started_at": "2026-04-17T00:00:00Z",
         "code_hash": "deadbeef",
@@ -290,13 +290,13 @@ def test_doctor_unknown_agent(runner, configure_hive_home, monkeypatch, tmp_path
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
     monkeypatch.setattr(
-        "hive.sidecar.request_doctor",
+        "hive.hived.request_doctor",
         lambda _ws, *, team, target_agent, verbose=False: {
             "ok": False,
             "error": f"agent '{target_agent}' not registered",
         },
     )
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
 
     result = runner.invoke(cli, ["doctor", "nobody"])
     assert result.exit_code != 0
@@ -308,9 +308,9 @@ def test_thread_command_outputs_thread_projection(runner, configure_hive_home, m
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
     _setup_team(monkeypatch, workspace)
-    monkeypatch.setattr("hive.sidecar.ensure_sidecar", lambda *a, **kw: 4321)
+    monkeypatch.setattr("hive.hived.ensure_hived", lambda *a, **kw: 4321)
     monkeypatch.setattr(
-        "hive.sidecar.request_thread",
+        "hive.hived.request_thread",
         lambda _ws, message_id: {
             "ok": True,
             "rootMsgId": "a001",

@@ -9,7 +9,7 @@ Write lanes are split by authority:
 - **Roster membership belongs to the CLI**: :func:`record_team`,
   :func:`record_member`, :func:`remove_member` and :func:`delete_team` add
   and remove state at create/spawn/kill/delete time, under the store lock.
-- **The sidecar only backfills**: :func:`backfill_members` refreshes fields
+- **The hived only backfills**: :func:`backfill_members` refreshes fields
   of names already in the roster and never adds one — an observation racing
   a kill must not resurrect the killed member.
 
@@ -94,7 +94,7 @@ def locked() -> Iterator[None]:
     """Exclusive store lock for read-merge-write cycles.
 
     One fcntl lock for the whole store: writers are a handful of CLI calls
-    and one sidecar tick per team every 30s, so contention is nil and a
+    and one hived tick per team every 30s, so contention is nil and a
     single lock keeps the kill-vs-backfill race closed by construction.
     """
     root = store_dir()
@@ -210,7 +210,7 @@ def backfill_members(
 ) -> list[dict[str, str]]:
     """Refresh fields of members already in *existing* from *observed*.
 
-    The sidecar's write lane: observation updates what a known member looks
+    The hived's write lane: observation updates what a known member looks
     like (model switch, cwd change, a sessionId learned late) but never adds
     or removes a name — roster membership belongs to the CLI writers, and an
     observation racing a `hive kill` must not resurrect the killed member.
@@ -238,7 +238,7 @@ def backfill(
     display: str = "",
     workspace: str = "",
 ) -> str:
-    """The sidecar's whole read-merge-write, under the store lock.
+    """The hived's whole read-merge-write, under the store lock.
 
     Refuses a missing entry (the CLI writer owns creation) and a
     foreign-instance entry (a recycled name's predecessor must not be

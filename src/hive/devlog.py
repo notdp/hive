@@ -9,7 +9,7 @@ from pathlib import Path
 
 RUN_DIR_NAME = "run"
 NOTIFY_LOG_NAME = "notify.jsonl"
-SIDECAR_STDERR_NAME = "sidecar.stderr"
+HIVED_STDERR_NAME = "hived.stderr"
 CVIM_DIR_NAME = "cvim"
 GLOBAL_HIVE_DIR = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "hive"
 
@@ -37,8 +37,8 @@ def global_notify_log_path() -> Path:
     return GLOBAL_HIVE_DIR / NOTIFY_LOG_NAME
 
 
-def sidecar_stderr_path(workspace: str | Path) -> Path:
-    return run_dir(workspace) / SIDECAR_STDERR_NAME
+def hived_stderr_path(workspace: str | Path) -> Path:
+    return run_dir(workspace) / HIVED_STDERR_NAME
 
 
 def cvim_log_dir(workspace: str | Path = "") -> Path:
@@ -50,7 +50,7 @@ def cvim_log_dir(workspace: str | Path = "") -> Path:
 def log_paths(workspace: str | Path) -> dict[str, str]:
     return {
         "notify": str(notify_log_path(workspace)),
-        "sidecar_stderr": str(sidecar_stderr_path(workspace)),
+        "hived_stderr": str(hived_stderr_path(workspace)),
         "cvim_dir": str(cvim_log_dir(workspace)),
     }
 

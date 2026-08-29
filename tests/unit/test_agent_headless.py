@@ -93,7 +93,7 @@ def test_headless_is_alive_probes_the_engine(monkeypatch):
 def test_headless_member_runtime_grok(monkeypatch):
     from types import SimpleNamespace
 
-    from hive import sidecar
+    from hive import hived
 
     rt = SimpleNamespace(busy=True, turn_phase="tool_open", input_state="ready")
     monkeypatch.setattr(
@@ -104,7 +104,7 @@ def test_headless_member_runtime_grok(monkeypatch):
         "hive.adapters.grok_leader.read_session_key",
         lambda key: ("sid-g", "/repo"),
     )
-    payload = sidecar._headless_member_runtime(_member("grok"))
+    payload = hived._headless_member_runtime(_member("grok"))
     assert payload["headless"] is True
     assert payload["alive"] is True
     assert payload["busy"] is True
@@ -112,8 +112,8 @@ def test_headless_member_runtime_grok(monkeypatch):
 
 
 def test_headless_member_runtime_unknown_engine():
-    from hive import sidecar
+    from hive import hived
 
-    payload = sidecar._headless_member_runtime(_member("codex", session_id=None))
+    payload = hived._headless_member_runtime(_member("codex", session_id=None))
     assert payload["alive"] is False
     assert payload["inputState"] == "unknown"
