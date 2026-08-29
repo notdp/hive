@@ -45,6 +45,7 @@ _COMMAND_HELP_SECTIONS = {
     "worktree": "Workflow",
     "pr": "Workflow",
     "ls": "Workflow",
+    "attach": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -121,7 +122,7 @@ _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session 
 _TMUX_OPTIONAL_ROOT_COMMANDS = {
     "plugin", "config", "shell-init", "codex", "claude", "grok",
     "resume-hint", "skills", "worktree", "ls", "ccd",
-    "create", "spawn", "team", "kill", "delete",
+    "create", "spawn", "team", "kill", "delete", "attach",
 }
 
 
@@ -2583,6 +2584,128 @@ def pr_clear_cmd(plain: bool):
         click.echo(f"window {window} cleared @hive-pr={previous}")
     else:
         click.echo(f"window {window} had no @hive-pr stamp to clear")
+
+
+# --- hive attach: materialize a team's display ---
+
+
+_ATTACH_LAUNCHERS = {
+    "claude": "hive claude --resume {sid}",
+    "codex": "hive codex resume {sid}",
+    "grok": "hive grok --resume {sid}",
+}
+
+
+def _member_attach_command(cli_name: str, session_id: str, cwd: str) -> str:
+    launch = _ATTACH_LAUNCHERS[cli_name].format(sid=shlex.quote(session_id))
+    return (
+        f"cd {shlex.quote(cwd or os.getcwd())} && {launch}; "
+        f"hive resume-hint {cli_name} 2>/dev/null || true"
+    )
+
+
+def _materialize_team_display(entry: dict) -> tuple[str, list[str], list[str]]:
+    """Build a window for the team: one attach pane per member, tiled.
+
+    Returns (window_target, attached_member_names, skipped_member_names).
+    Panes are tagged before their launcher runs, so `hive grok` inside the
+    pane resolves the member's daemon key instead of minting a pane one.
+    """
+    from . import layout as layout_mod
+    from . import registry
+
+    team = str(entry["team"])
+    ws = str(entry.get("workspace") or "")
+    members = _sorted_member_rows(list(entry.get("members", [])))
+    attachable = [m for m in members if m.get("sessionId") and m.get("cli") in _ATTACH_LAUNCHERS]
+    skipped = [str(m.get("name")) for m in members if m not in attachable]
+    if not attachable:
+        _fail(f"team '{team}' has no attachable members (no recorded engine identity)")
+
+    session_name = tmux.get_current_session_name() or "hive"
+    anchor_cwd = str(attachable[0].get("cwd") or "") or os.getcwd()
+    window, first_pane = tmux.new_window(
+        session_name, name=team, cwd=anchor_cwd, detach=True
+    )
+    if not window or not first_pane:
+        _fail("failed to create a window for the team")
+
+    tmux.configure_hive_window(window)
+    tmux.set_window_option(window, "@hive-team", team)
+    tmux.set_window_option(window, "@hive-workspace", ws)
+    tmux.set_window_option(window, "@hive-created", str(entry.get("createdAt") or ""))
+
+    attached: list[str] = []
+    prev_pane = first_pane
+    for i, m in enumerate(attachable):
+        name = str(m.get("name"))
+        cli_name = str(m.get("cli"))
+        cwd = str(m.get("cwd") or "")
+        if i == 0:
+            pane = first_pane
+        else:
+            pane = tmux.split_window(
+                prev_pane,
+                horizontal=layout_mod.split_horizontal(window, i + 1),
+                cwd=cwd or None,
+                detach=True,
+            )
+            if not pane:
+                skipped.append(name)
+                continue
+        tmux.set_pane_title(pane, f"[{name}]")
+        tmux.tag_pane(pane, "agent", name, team, cli=cli_name)
+        if ws:
+            hive_context.save_context_for_pane(pane, team=team, workspace=ws, agent=name)
+        tmux.send_keys(
+            pane, _member_attach_command(cli_name, str(m["sessionId"]), cwd)
+        )
+        attached.append(name)
+        prev_pane = pane
+
+    layout_mod.apply_adaptive(window)
+    registry.set_display(team, tmux.get_window_id(window) or "")
+    return window, attached, skipped
+
+
+@cli.command("attach")
+@click.argument("team_name")
+def attach_cmd(team_name: str):
+    """Render a team's display: jump to its window, or build one.
+
+    The registry is the team's existence; this materializes (or finds) its
+    tmux window — one attach pane per member, each riding its engine's own
+    viewer (claude attach loop / codex thread resume / grok session resume).
+    Run from outside tmux it finishes by exec'ing `tmux attach`.
+    """
+    from . import registry
+    from .team import _find_team_window
+
+    entry = registry.load(team_name)
+    if entry is None:
+        _fail(f"team '{team_name}' not found (see `hive ls`)")
+
+    window, _ = _find_team_window(team_name)
+    built = False
+    if not window:
+        window, attached, skipped = _materialize_team_display(entry)
+        built = True
+        for name in skipped:
+            click.echo(f"! {name}: no attachable engine identity — not rendered", err=True)
+    ws = str(entry.get("workspace") or "")
+    if ws:
+        try:
+            t = Team.load(team_name)
+            _ensure_team_sidecar(t, ws)
+        except (FileNotFoundError, OSError):
+            pass
+
+    if tmux.is_inside_tmux():
+        tmux.select_window(window)
+        click.echo(f"{'built' if built else 'found'} {window}")
+        return
+    session = window.split(":", 1)[0] if ":" in window else window
+    os.execvp("tmux", ["tmux", "attach", "-t", f"{session}:", ";", "select-window", "-t", window])
 
 
 # --- hive ls: the team registry, with display state ---

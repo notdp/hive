@@ -177,6 +177,22 @@ def remove_member(team: str, name: str, *, created_at: str = "") -> str:
     return "written"
 
 
+def set_display(team: str, display: str) -> str:
+    """Update the display cache (the tmux window id rendering the team)."""
+    path = entry_path(team)
+    if path is None:
+        return "rejected"
+    with locked():
+        entry = load(team)
+        if entry is None:
+            return "missing"
+        if entry.get("display") == display:
+            return "unchanged"
+        entry["display"] = display
+        _write_atomic(path, entry)
+    return "written"
+
+
 def delete_team(team: str) -> None:
     """Remove the team's registry entry (delete is the team's end of life)."""
     path = entry_path(team)
