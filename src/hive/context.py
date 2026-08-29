@@ -65,7 +65,7 @@ def save_current_context(*, team: str = "", workspace: str = "", agent: str = ""
 
 
 def save_context_for_pane(pane_id: str, *, team: str = "", workspace: str = "", agent: str = "") -> Path:
-    """Write context for an arbitrary pane (used by hive init to pre-bind agents)."""
+    """Write context for an arbitrary pane (used by hive create to pre-bind agents)."""
     slug = pane_id.replace("%", "pane-") if pane_id else "default"
     path = CONTEXT_DIR / f"{slug}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

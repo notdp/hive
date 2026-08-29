@@ -431,7 +431,7 @@ record went missing fails loudly instead of quietly typing into a stranger's
 turn.
 
 An unmanaged claude — a bare interactive TUI with no job record — is
-deliberately unsupported **as a Hive team member**: `hive init` / `hive spawn`
+deliberately unsupported **as a Hive team member**: `hive create` / `hive spawn`
 reject it at team entry, and delivery to a recorded-less claude pane fails
 loudly. It still works as a `ccd.<name>` guest session over its own inbox.
 
@@ -466,7 +466,7 @@ config.toml on disk, so every new cwd gets `[projects."<dir>"] trust_level =
 This path is taken only when the pane has a recorded thread and the shared
 daemon answers. An unmanaged codex — embedded, or a `resume` picker launch
 whose chosen thread hive cannot know — is deliberately unsupported **as a Hive
-team member**: `hive init` / `hive spawn` reject it at team entry. It still
+team member**: `hive create` / `hive spawn` reject it at team entry. It still
 runs, but hive reads no state from it — session id stays `unresolved`,
 `turnPhase` stays unknown, and there is no transcript fallback.
 

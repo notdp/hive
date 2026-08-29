@@ -30,7 +30,6 @@ from .team import HIVE_HOME, LEAD_AGENT_NAME, Team
 
 _COMMAND_HELP_SECTIONS = {
     # Daily — per-turn agent collaboration loop.
-    "init": "Daily",
     "team": "Daily",
     "send": "Daily",
     "ccd": "Daily",
@@ -49,7 +48,7 @@ _COMMAND_HELP_SECTIONS = {
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
-    "register": "Team",
+    "join": "Team",
     "layout": "Team",
     # Human Helpers — human-only popup + split helpers.
     "cvim": "Human Helpers",
@@ -98,7 +97,7 @@ _COMMAND_HELP_SECTION_DESCRIPTIONS = {
     ),
 }
 _ROOT_HELP_EXAMPLES = '''# Team lifecycle
-hive init                                    # make this pane the orch of a new team
+hive create                                  # make this pane the orch of a new team
 hive spawn explore --task /tmp/task.md       # spawn a member and dispatch its task atomically
 hive team                                    # members + runtime state (busy / inputState / turnPhase)
 
@@ -122,7 +121,7 @@ _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session 
 _TMUX_OPTIONAL_ROOT_COMMANDS = {
     "plugin", "config", "shell-init", "codex", "claude", "grok",
     "resume-hint", "skills", "worktree", "ls", "ccd",
-    "create", "spawn", "team", "kill", "delete", "attach",
+    "create", "join", "spawn", "team", "kill", "delete", "attach",
 }
 
 
@@ -241,7 +240,7 @@ def _resolve_scoped_team(team: str | None, *, required: bool = True) -> tuple[st
     if required:
         _fail(
             "no Hive team in scope — pass -t <team> (see `hive ls`), or run "
-            "from a bound pane (`hive init` binds one)"
+            "from a bound pane (`hive create` binds one)"
         )
     return None, None
 
@@ -365,7 +364,7 @@ def _resolve_workspace(team: Team | None = None, required: bool = False) -> str:
     if current_context.get("workspace"):
         return current_context["workspace"]
     if required:
-        _fail("workspace not found (create a team with --workspace, or run `hive init`)")
+        _fail("workspace not found (create a team with --workspace, or run `hive create`)")
     return ""
 
 
@@ -1685,13 +1684,13 @@ def _require_grok_leader_backed(pane: str) -> None:
     )
 
 
-def _create_orch_team(*, current_pane: str) -> dict[str, object]:
+def _create_orch_team(*, current_pane: str, name: str = "") -> dict[str, object]:
     """Bind the current pane as the orch of a fresh team.
 
     Spawns nobody — members come later via `hive spawn`, driven by the orch.
     Placement: a lone pane binds its window in place; a crowded window
     breaks the orch pane out to a fresh one first, so team identity
-    derives from the final window (Bug A).
+    derives from the final window (Bug A). *name* overrides the pool pick.
     Idempotent: an already-bound pane returns its existing binding.
     """
     _gc_dead_teams()
@@ -1708,9 +1707,9 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         _fail("cannot determine current window")
     panes = tmux.list_panes_full_or_none(window)
     if panes is None:
-        _fail(f"tmux did not answer the pane listing for {window}; rerun init")
+        _fail(f"tmux did not answer the pane listing for {window}; rerun create")
     if not any(p.pane_id == current_pane for p in panes):
-        _fail(f"current pane {current_pane} missing from {window} listing; rerun init")
+        _fail(f"current pane {current_pane} missing from {window} listing; rerun create")
 
     orch_pane = current_pane
     if len(panes) >= 2:
@@ -1723,9 +1722,9 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
     final_window_id = tmux.get_window_id(window) or ""
     final_index = window.rsplit(":", 1)[-1] if ":" in window else "0"
 
-    team_name = _pick_team_name(session_name, final_window_id, final_index)
+    team_name = name or _pick_team_name(session_name, final_window_id, final_index)
     _prepare_window_for_new_team(window, current_pane=orch_pane)
-    _claim_team_name(team_name, this_window=window, explicit=False)
+    _claim_team_name(team_name, this_window=window, explicit=bool(name))
 
 
     ws_path = _default_auto_workspace_path(session_name, final_window_id, final_index)
@@ -1783,46 +1782,94 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         "window": window,
         "orch": {"pane": orch_pane, "name": LEAD_AGENT_NAME, "cli": orch_cli},
         "workspace": str(ws_path),
-        "protocol": "/hive:orch",
+        "protocol": "/hive:hive",
     }
 
 
-@cli.command("init")
-def init_cmd():
-    """Make the current pane the orch of a fresh team.
+def _registry_member_for_session(session_id: str) -> tuple[str, str] | None:
+    """(team, member) whose recorded engine identity is *session_id*."""
+    from . import registry
 
-    Binds the window, names the team, starts the hived — and spawns
-    nobody. Members are created on demand with `hive spawn <name> --task`.
-    Team name and workspace derive from the final window. Idempotent:
-    re-running in a bound window reports the existing binding.
+    if not session_id:
+        return None
+    for entry in registry.list_entries():
+        for m in entry.get("members", []):
+            if str(m.get("sessionId") or "") == session_id:
+                return str(entry.get("team")), str(m.get("name"))
+    return None
+
+
+def _join_as_ccd(team_name: str, name_override: str) -> None:
+    """Join the current outside-tmux Claude session into a team's roster.
+
+    The session's own id becomes the member's engine identity; delivery
+    rides the same session channel `ccd.<name>` already uses. Idempotent:
+    an already-joined session reports its membership.
     """
-    if not tmux.is_inside_tmux():
-        _fail("hive init requires a tmux session. Run `tmux new-session` or `tmux attach` first, then rerun.")
-    current_pane = tmux.get_current_pane_id() or ""
-    if not current_pane:
-        _fail("cannot determine current pane")
-    if detect_profile_for_pane(current_pane) is None:
-        _fail("current pane must be running claude / codex / grok (this becomes the orch)")
-    _require_daemon_backed(current_pane)
+    from . import registry
+    from .adapters import claude_sessions
 
-    result = _create_orch_team(current_pane=current_pane)
-    click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    if not team_name:
+        _fail("join outside tmux needs a team: hive join <team> (see `hive ls`)")
+    entry = registry.load(team_name)
+    if entry is None:
+        _fail(f"team '{team_name}' not found (see `hive ls`)")
+    guest = claude_sessions.self_session()
+    if guest is None or not guest.session_id:
+        _fail(
+            "join outside tmux needs a live Claude session channel; "
+            "codex/grok TUIs have none — join from a team pane instead"
+        )
+    existing = _registry_member_for_session(guest.session_id)
+    if existing is not None:
+        e_team, e_name = existing
+        if e_team == team_name:
+            click.echo(f"already a member: {e_team}.{e_name}")
+            return
+        _fail(f"this session is already {e_team}.{e_name}; leave with `hive kill {e_team}.{e_name}` first")
+    seen = {str(m.get("name")) for m in entry.get("members", [])}
+    seen.add(LEAD_AGENT_NAME)
+    _claim_member_name(name_override, seen)
+    member_name = name_override or _derive_agent_name(seen)
+    registry.record_member(
+        team_name,
+        {
+            "name": member_name,
+            "cli": "claude",
+            "model": "",
+            "sessionId": guest.session_id,
+            "cwd": os.getcwd(),
+        },
+    )
+    click.echo(f"joined: {team_name}.{member_name}")
 
 
-@cli.command("register")
-@click.argument("pane_id")
+@cli.command("join")
+@click.argument("team_arg", default="")
 @click.option("--as", "name_override", default="", help="Name for the new member (default: auto-derived)")
+@click.option("--pane", "pane_override", default="", help="Register another pane instead of the current one (tmux only)")
 @click.option("--notify/--no-notify", default=True, help="Deliver the join message over the native transport (doubles as a reachability check; --no-notify registers without proving the pane deliverable)")
 @click.option("--group", "group_name", default="", help="Cross-team group tag for display and namespace reservation (optional; qualified-name routing works without it).")
-def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str):
-    """Register an external pane into the current team."""
+def join_cmd(team_arg: str, name_override: str, pane_override: str, notify: bool, group_name: str):
+    """Join a team.
+
+    Outside tmux: the current Claude session enters TEAM's roster as a
+    full member. Inside tmux: the current pane (or --pane) registers into
+    the window's team.
+    """
     if not tmux.is_inside_tmux():
-        _fail("hive register requires a tmux session.")
+        if pane_override:
+            _fail("--pane needs tmux; outside tmux `hive join <team>` joins this session")
+        _join_as_ccd(team_arg, name_override)
+        return
 
     binding = _discover_tmux_binding()
-    team_name = binding.get("team")
+    team_name = team_arg or binding.get("team")
     if not team_name:
-        _fail("no team bound to the current window. Run `hive init` first.")
+        _fail("no team in scope — pass a team (see `hive ls`) or run from a bound window")
+    pane_id = pane_override or tmux.get_current_pane_id() or ""
+    if not pane_id:
+        _fail("cannot determine current pane")
 
     t = Team.load(team_name, prefer_pane=tmux.get_current_pane_id() or "")
     window_target = t.tmux_window or tmux.get_current_window_target() or ""
@@ -1859,7 +1906,7 @@ def register_cmd(pane_id: str, name_override: str, notify: bool, group_name: str
     member_name = agent_name
 
     result_payload = {
-        "registered": member_name,
+        "joined": member_name,
         "role": role,
         "pane": pane_id,
         "team": team_name,
@@ -1905,20 +1952,39 @@ def _create_headless_team(
 
 
 @cli.command()
-@click.argument("name")
+@click.argument("name", default="")
 @click.option("--desc", "-d", default="", help="Team description")
 @click.option("--workspace", "-w", default="", help="Workspace path to initialize")
 @click.option("--reset-workspace", is_flag=True, help="Remove existing workspace before initialization")
 @click.option("--state", "state_entries", multiple=True, help="Initial state KEY=VALUE (repeatable)")
 def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_entries: tuple[str, ...]):
-    """Create a team."""
+    """Create a team.
+
+    Outside tmux: a headless team (NAME required) — `hive attach` renders it.
+    Inside tmux on an agent pane: that pane becomes the orch (NAME optional,
+    pool-picked by default). Inside tmux on a shell pane: the window binds
+    the team without an orch.
+    """
     if state_entries and not workspace:
         _fail("--state requires --workspace")
     if reset_workspace and not workspace:
         _fail("--reset-workspace requires --workspace")
     if not tmux.is_inside_tmux():
+        if not name:
+            _fail("a headless team needs a name: hive create <name>")
         _create_headless_team(name, workspace, reset_workspace, state_entries)
         return
+    current_pane = tmux.get_current_pane_id() or ""
+    if current_pane and detect_profile_for_pane(current_pane) is not None:
+        # Agent pane: this pane becomes the orch of the fresh team.
+        if workspace or state_entries or reset_workspace:
+            _fail("an orch create uses the auto workspace; run from a shell pane for --workspace")
+        _require_daemon_backed(current_pane)
+        result = _create_orch_team(current_pane=current_pane, name=name)
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if not name:
+        _fail("a shell-pane create needs a name: hive create <name>")
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)
@@ -2314,7 +2380,7 @@ def team_cmd(team_arg: str):
 
     If the current tmux window has no team bound, returns a bootstrap
     payload instead: `team=null`, a pane list, and a `hint` telling you
-    to run `hive init`.
+    to run `hive create`.
 
     \b
     Examples:
@@ -2352,7 +2418,7 @@ def team_cmd(team_arg: str):
         ],
         "paneCount": len(panes),
     }
-    result["hint"] = "No team bound. Run `hive init` to make this pane the orch of a fresh team, then spawn members with `hive spawn <name> --task <artifact>`."
+    result["hint"] = "No team bound. Run `hive create` to make this pane the orch of a fresh team, then spawn members with `hive spawn <name> --task <artifact>`."
     window_id = tmux.get_current_window_id() or ""
     if session_name and window_id:
         result["runtimeWorkspace"] = str(_default_auto_workspace_path(session_name, window_id))
@@ -2958,12 +3024,22 @@ def send(to_agent: str, body: str, artifact: str):
             _fail(_TMUX_REQUIRED_MESSAGE)
     if guest is not None:
         team_name, t = _resolve_guest_send_target(to_agent, explicit_team)
-        # The session NAME, never the title: a title may contain spaces, which
-        # would break `<HIVE from=...>` attribute tokenization downstream. The
-        # name addresses the session in `hive send ccd.<name>` just the same.
-        sender = f"ccd.{guest.name}"
+        membership = _registry_member_for_session(guest.session_id)
+        if membership is not None:
+            # A joined session is a full member: its roster name is the
+            # reply address, not the ccd guest label.
+            sender = f"{membership[0]}.{membership[1]}"
+        else:
+            # The session NAME, never the title: a title may contain spaces,
+            # which would break `<HIVE from=...>` attribute tokenization
+            # downstream. The name addresses the session in
+            # `hive send ccd.<name>` just the same.
+            sender = f"ccd.{guest.name}"
     else:
-        if explicit_team:
+        if explicit_team and explicit_team != (_default_team() or ""):
+            # Copying a teammate's `from=<team>.<member>` verbatim must just
+            # work, so an own-team prefix reads as the bare name; only a
+            # foreign-team prefix is refused.
             _fail(
                 "team members address teammates by bare name; "
                 "`<team>.<member>` is for a Claude session outside tmux"

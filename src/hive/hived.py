@@ -1281,7 +1281,26 @@ def _headless_member_runtime(agent) -> dict[str, Any]:
     sid = str(getattr(agent, "session_id", "") or "")
     cli = getattr(agent, "cli", "") or ""
     if cli == "claude" and sid:
-        runtime.update(_claude_job_runtime(sid))
+        job_rt = _claude_job_runtime(sid)
+        if not job_rt.get("cliAlive"):
+            from .adapters import claude_sessions
+
+            live = next(
+                (s for s in claude_sessions.list_sessions() if s.session_id == sid),
+                None,
+            )
+            if live is not None:
+                # A joined interactive session: its registry status is the
+                # runtime, its channel liveness is the pulse.
+                status = claude_sessions.session_status(live.pid)
+                session_rt: dict[str, Any] = {"cliAlive": True, "sessionId": sid, "_runtimeSource": "claude_session"}
+                session_rt.update(
+                    claude_sessions.runtime_from_status(*status)
+                    if status
+                    else {"busy": False, "inputState": "ready", "inputReason": ""}
+                )
+                job_rt = session_rt
+        runtime.update(job_rt)
     elif cli == "codex" and sid:
         from .adapters import codex_app_server
 

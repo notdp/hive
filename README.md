@@ -49,7 +49,7 @@ $ hclaude      # or: hcodex
 /hive
 ```
 
-The skill loads and the agent runs `hive init` to bind the current tmux window as a team, then spawns members as tasks call for them. From here on you talk to the agent; the agent runs the team.
+The skill loads and the agent runs `hive create` to bind the current tmux window as a team, then spawns members as tasks call for them. From here on you talk to the agent; the agent runs the team.
 
 ## Operator commands
 

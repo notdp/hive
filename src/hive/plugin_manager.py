@@ -217,7 +217,7 @@ def cleanup_retired_plugins() -> list[str]:
     """Disable any retired plugin left over from an older install.
 
     cvim/fork were promoted into core hive; code-review was removed.
-    Called during `hive init` so users who previously enabled them have
+    Called during `hive create` so users who previously enabled them have
     their legacy command shims, skill symlinks, install root and state
     entries cleaned up automatically.
     """
@@ -235,7 +235,7 @@ def enable_plugin(name: str) -> dict[str, object]:
     if name in RETIRED_PLUGINS:
         raise ValueError(
             f"plugin '{name}' is retired — nothing to enable. "
-            "Run `hive init` to clean up any legacy plugin state."
+            "Run `hive create` to clean up any legacy plugin state."
         )
     manifest = load_manifest(name)
     disable_plugin(name, missing_ok=True)

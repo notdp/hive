@@ -21,7 +21,7 @@ def test_create_initializes_workspace_and_state(runner, configure_hive_home, tmp
         ],
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert (workspace / "state" / "repo").read_text() == "owner/repo"
     assert (workspace / "state" / "pr-number").read_text() == "123"
     assert (workspace / "artifacts").is_dir()

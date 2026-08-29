@@ -208,6 +208,10 @@ def configure_hive_home(monkeypatch, tmp_path):
         # cli.tmux mocks
         monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: tmux_inside)
         monkeypatch.setattr("hive.cli.tmux.get_current_pane_id", lambda: current_pane)
+        # The placeholder pane id must never probe the developer's real tmux:
+        # default to "no CLI on this pane" (create's shell lane); orch-lane
+        # tests override with a profile of their own.
+        monkeypatch.setattr("hive.cli.detect_profile_for_pane", lambda _pane_id: None)
         monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: session_name)
         monkeypatch.setattr("hive.cli.tmux.get_current_window_target", lambda: f"{session_name}:0")
         monkeypatch.setattr("hive.cli.tmux.get_current_window_id", lambda: state.window_id_for_target(f"{session_name}:0"))
@@ -235,7 +239,7 @@ def configure_hive_home(monkeypatch, tmp_path):
         # Safety: cli tests must never touch the real tmux server. Duo placement
         # decides break-out from the *real* pane count when unmocked, and the
         # placeholder pane ids used in tests (%5, %10, ...) can collide with live
-        # panes — so a `hive init` could fire a real `break_pane` against a
+        # panes — so a `hive create` could fire a real `break_pane` against a
         # running session and rip a teammate's pane into a new window. Default to
         # a single-pane window (no break-out) and hard-fail if any test reaches
         # break_pane without mocking it; break-out tests override both.
