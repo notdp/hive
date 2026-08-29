@@ -1360,3 +1360,34 @@ def test_send_exits_zero_on_accepted(runner, configure_hive_home, monkeypatch, t
     result = runner.invoke(cli, ["send", "gpt", "hi"])
     assert result.exit_code == 0
     assert result.output == ""
+
+
+def test_send_to_flow_run_walks_the_bare_name_lane_and_confirms(runner, configure_hive_home, monkeypatch):
+    # The canonical mailbox address must not fall into qualified-agent
+    # resolution ("agent 'flow.run' not found"), and a mailbox delivery is
+    # the one send that prints: there is no peer runtime to be silent about.
+    configure_hive_home()
+    team_obj = type("T", (), {"name": "t2"})()
+    monkeypatch.setattr("hive.cli._default_team", lambda: "t2")
+    monkeypatch.setattr("hive.cli._load_team", lambda name, prefer_pane="": team_obj)
+    monkeypatch.setattr("hive.cli._find_qualified_agent_target", lambda a: pytest.fail("mailbox must not resolve as an agent"))
+    monkeypatch.setattr("hive.cli._resolve_sender", lambda _p: "impl")
+    monkeypatch.setattr("hive.cli._resolve_workspace", lambda t, required: "/tmp/ws-t2")
+    monkeypatch.setattr("hive.bus.latest_inbound_send_event", lambda *a, **kw: None)
+    sent = {}
+    monkeypatch.setattr(
+        "hive.cli._request_send_payload",
+        lambda **kw: sent.update(kw) or {"ok": True, "msgId": "m9", "mailbox": True},
+    )
+
+    result = runner.invoke(cli, ["send", "flow.run", "done: see artifact"])
+
+    assert result.exit_code == 0, result.output
+    assert sent["target_agent"] == "flow.run"
+    assert "delivered to flow mailbox msgId=m9" in result.output
+
+
+def test_flow_is_not_a_team_name(runner, configure_hive_home):
+    from hive.team import validate_team_name
+
+    assert "flow" in validate_team_name("flow")

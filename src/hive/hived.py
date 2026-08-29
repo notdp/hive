@@ -788,7 +788,7 @@ def _check_send_gate(target) -> None:
     )
 
 
-FLOW_MAILBOX_AGENT = "flow"
+FLOW_MAILBOX_AGENT = "flow.run"
 
 
 def _send_payload(

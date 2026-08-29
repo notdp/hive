@@ -23,6 +23,11 @@ def validate_team_name(name: str) -> str:
             f"team name '{name}' is invalid: 'ccd' is the reserved send "
             "address for Claude sessions outside any team"
         )
+    if name == "flow":
+        return (
+            f"team name '{name}' is invalid: 'flow' is the flow runner's "
+            "send-address kind (flow.run), not a team name"
+        )
     if "." in name:
         return (
             f"team name '{name}' is invalid: dots separate send-address "
@@ -267,8 +272,8 @@ class Team:
         cli: str = "claude",
     ) -> Agent:
         """Spawn a new agent in the team."""
-        if name == "flow":
-            raise ValueError("'flow' is the flow runner's reserved mailbox address, not a member name")
+        if name == "flow" or name.startswith("flow."):
+            raise ValueError(f"'{name}' collides with the flow runner's mailbox address kind (flow.run), not a member name")
         if name in self.agents:
             raise ValueError(f"Agent '{name}' already exists in team '{self.name}'")
         if not tmux.is_inside_tmux():

@@ -46,6 +46,7 @@ hive ls              # 全部 team（含没有窗口的）
   - 你是 tmux 里的 pane 成员：发队友用裸名（`hive send dodo …`）；本队前缀等价裸名（所以照抄 from 永远安全），别队前缀会被拒。
   - 你在 tmux 外（headless 成员、joined session、guest）：用 `<team>.<member>`；裸名全局唯一时也行。
   - team 外的 Claude session：`ccd.<name>`（见「互通」小节）。
+  - flow 脚本的收件箱：`flow.run`——一种地址,不是成员。收到 `from=flow.run` 的派发照抄回信即可;它不在名册里,这是正常的。
 - `group`：你所在 team 的实例名。
 - `inputState=waiting_user`：对方在等 human 作答，此时 `hive send` 会拒发；等它清掉再发。
 - `turnPhase`：判断发新线程会不会打断对方——`turn_closed` 表示对方这轮已收口，随时可发；其他值表示 turn 进行中，不急的消息等 `turn_closed`。claude 成员没有这个字段，退回看 `busy`。
@@ -53,7 +54,7 @@ hive ls              # 全部 team（含没有窗口的）
 
 ### 没活就停
 
-Hive 是 push 模型：有新消息时 runtime 会把 `<HIVE>` block 注入你的对话并唤醒你。当前 turn 没有待办就结束 turn——不要 `sleep`、while loop、反复 `hive team`，也不要翻 repo、artifact 或任务表猜下一件事。这条贯穿一生：刚出生没任务、回报完等验收，都一样。
+Hive 是 push 模型：有新消息时 runtime 会把 `<HIVE>` block 注入你的对话并唤醒你。当前 turn 没有待办就结束 turn——不要 `sleep`、while loop、反复 `hive team`，也不要翻 repo、artifact 或任务表猜下一件事。这条贯穿一生：刚出生没任务、回报完等验收，都一样。回报给 `flow.run` 之后同理：不要去 `hive team` 里找它,也不要再发一条「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
 
 ### 收活：任务以派发 artifact 为准
 
@@ -114,6 +115,7 @@ source: ...
 
 - 线程是自动的：对方最近一条发给你的消息还没被你回过时，你的下一条 send 记为它的回复；否则开新线程。你不用管 msgId。
 - 发送成功没有输出（exit 0）。退出非零才是没送到，错误里带原因。送到 = 对方运行时收下了这一帧；它可能在下一个 tool call 之间读到，也可能（按对方设置）停在待接受状态。
+- 唯一例外是发给 `flow.run`：成功会打一行 `delivered to flow mailbox …`——mailbox 没有对端 runtime,这行就是全部确认,**不会再有 HIVE 回执**,发完就停。
 - 新线程的 body 只放短摘要——超长、多行、代码块起头都会被拒；详情走 `--artifact`。回复不受此限，可以只发短文本。
 
 ```bash
@@ -133,7 +135,7 @@ shell 安全一条纪律：多行、反引号、`$(...)` 的内容永远先落�
 回报纪律：
 
 - 成果、blocked、失败，一切终态 `hive send` 回派发人——自动锚回派发线程。body=短摘要，详情落 artifact。
-- **收到任务不要回执。**派发人把你回派发线程的第一条消息当回报读，所以你的第一条回信就应该是终态（或阻断求助），不是「收到/开始做了」。
+- **收到任务不要回执。**派发人把你回派发线程的第一条消息当回报读，所以你的第一条回信就应该是终态（或阻断求助），不是「收到/开始做了」。回执禁令是双向的：你也不要期待对方（尤其 `flow.run`）用一条 HIVE 回「收到了」。
 - 不向 human 宣布完成，不越过派发人上行。human 问起时给状态，但交付走派发人。
 
 #### 和 team 外的 Claude session 互通

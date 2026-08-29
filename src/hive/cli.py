@@ -556,6 +556,10 @@ def _should_show_description(desc: object) -> bool:
 
 def _team_status_payload(t: Team) -> dict[str, object]:
     payload = _augment_team_payload_with_runtime(t, t.status())
+    # The flow runner's mailbox is a reserved address, not a member — list
+    # it beside the roster so "hive team can't find flow" never reads as
+    # "my report was lost".
+    payload["mailboxes"] = [{"addr": "flow.run", "kind": "flow", "delivery": "bus"}]
     if not _should_show_description(payload.get("description")):
         payload.pop("description", None)
     discovered = _discover_tmux_binding() if tmux.is_inside_tmux() else {}
@@ -908,8 +912,8 @@ def _window_seen_names(t: Team, panes: list[tmux.PaneInfo]) -> set[str]:
 def _claim_member_name(name_override: str, seen_names: set[str]) -> None:
     if not name_override:
         return
-    if name_override == "flow":
-        _fail("'flow' is the flow runner's reserved mailbox address, not a member name")
+    if name_override == "flow" or name_override.startswith("flow."):
+        _fail(f"'{name_override}' collides with the flow runner's mailbox address kind (flow.run), not a member name")
     if name_override in seen_names:
         _fail(f"name '{name_override}' is already taken in this window")
     seen_names.add(name_override)
@@ -1066,8 +1070,8 @@ def _spawn_headless_member(
     model_error = validate_spawn_model(resolved_cli, model)
     if model_error:
         raise ValueError(model_error)
-    if agent_name == "flow":
-        raise ValueError("'flow' is the flow runner's reserved mailbox address, not a member name")
+    if agent_name == "flow" or agent_name.startswith("flow."):
+        raise ValueError(f"'{agent_name}' collides with the flow runner's mailbox address kind (flow.run), not a member name")
     if agent_name in t.agents:
         raise ValueError(f"Agent '{agent_name}' already exists in team '{t.name}'")
     resolved_cwd = str(Path(cwd).expanduser()) if cwd else os.getcwd()
@@ -1448,7 +1452,7 @@ def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
     across tmux windows. Bare names fall back to the caller's scoped
     team (same behaviour as before).
     """
-    if "." in to_agent:
+    if "." in to_agent and to_agent != "flow.run":
         try:
             resolved = _find_qualified_agent_target(to_agent)
         except ValueError as exc:
@@ -1474,6 +1478,14 @@ def _resolve_guest_send_target(to_agent: str, team: str) -> tuple[str, Team]:
     slot: resolve by scanning live pane tags, or by the explicit
     `<team>.<member>` address.
     """
+    if to_agent == "flow.run":
+        from .adapters import claude_sessions
+
+        me = claude_sessions.self_session()
+        membership = _registry_member_for_session(me.session_id) if me else None
+        if membership is None:
+            _fail("the flow mailbox is a team-internal address; only members deliver to it")
+        return membership[0], _load_team(membership[0])
     if team:
         t = _load_team(team)
         if _existing_team_agent(t, to_agent) is None:
@@ -3041,7 +3053,10 @@ def send(to_agent: str, body: str, artifact: str):
     outside tmux, e.g. the desktop app, reaches in; bare names work there
     too while unique across live teams — its message arrives as
     `from=ccd.<its name>`). A Claude session outside any team is
-    `ccd.<name or title or pid>` (how a member reaches out).
+    `ccd.<name or title or pid>` (how a member reaches out). `flow.run`
+    is the flow runner's mailbox — an address kind, not a member; sends
+    to it confirm with one `delivered to flow mailbox` line and never
+    get a HIVE ack back.
 
     New-thread sends must keep `body` to a short summary and put details
     in `--artifact`; the body is rejected if longer than 500 chars, has
@@ -3127,7 +3142,7 @@ def send(to_agent: str, body: str, artifact: str):
         _validate_root_send_protocol(body, artifact)
     resolved_artifact = _resolve_artifact_path(artifact, workspace=ws)
     try:
-        _request_send_payload(
+        payload = _request_send_payload(
             workspace=ws,
             team=t,
             sender_agent=sender,
@@ -3139,8 +3154,15 @@ def send(to_agent: str, body: str, artifact: str):
         )
     except RuntimeError as exc:
         _fail(str(exc))
-    # Fire-and-forget: success is silent (rule of silence). The bus row
-    # carries the identity; `hive thread` reads it back.
+    if payload.get("mailbox"):
+        # A mailbox has no peer runtime to go silent about: say so once,
+        # in the sender's own tool result, so nobody invents a follow-up.
+        click.echo(
+            f"delivered to flow mailbox msgId={payload.get('msgId', '')} "
+            "(not a member; no ack will arrive)"
+        )
+    # Peer sends stay silent (rule of silence). The bus row carries the
+    # identity; `hive thread` reads it back.
 
 
 @cli.command()
