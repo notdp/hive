@@ -51,6 +51,7 @@ def _display_mocks(monkeypatch):
     monkeypatch.setattr("hive.layout.apply_adaptive", lambda w: None)
     monkeypatch.setattr("hive.cli.tmux.select_window", lambda w: calls["selected"].append(w))
     monkeypatch.setattr("hive.cli._ensure_team_hived", lambda t, ws: None)
+    monkeypatch.setattr("hive.adapters.claude_bg.job_row", lambda sid, **kw: {"id": sid})
     return calls
 
 
@@ -145,3 +146,23 @@ def test_attach_outside_tmux_creates_fallback_session(runner, configure_hive_hom
     assert calls["sessions"] == ["hive"]
     assert calls["windows"] == [("hive", "honey", "/repo")]
     assert attached == [("hive", "hive:9")]
+
+
+def test_attach_renders_an_interactive_session_as_a_readonly_viewer(runner, configure_hive_home, monkeypatch):
+    # A desktop/joined session must never be resumed into a fork: its pane
+    # gets the read-only transcript viewer instead.
+    configure_hive_home()
+    _entry(monkeypatch, members=[
+        {"name": "orch", "cli": "claude", "sessionId": "ccd-sid-7", "cwd": "/repo"},
+    ])
+    monkeypatch.setattr("hive.team._find_team_window", lambda name, prefer_pane="": ("", {}))
+    calls = _display_mocks(monkeypatch)
+    monkeypatch.setattr("hive.adapters.claude_bg.job_row", lambda sid, **kw: None)
+
+    result = runner.invoke(cli, ["attach", "honey"])
+
+    assert result.exit_code == 0, result.output
+    cmds = {pane: cmd for pane, cmd in calls["keys"]}
+    orch_cmd = next(iter(cmds.values()))
+    assert "hive view ccd-sid-7" in orch_cmd
+    assert "--resume" not in orch_cmd

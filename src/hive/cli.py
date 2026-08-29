@@ -45,6 +45,7 @@ _COMMAND_HELP_SECTIONS = {
     "pr": "Workflow",
     "ls": "Workflow",
     "attach": "Workflow",
+    "view": "Workflow",
     # Team — wire up the tmux team around the current window.
     "create": "Team",
     "delete": "Team",
@@ -121,7 +122,7 @@ _TMUX_REQUIRED_MESSAGE = "Hive requires tmux. Start or attach to a tmux session 
 _TMUX_OPTIONAL_ROOT_COMMANDS = {
     "plugin", "config", "shell-init", "codex", "claude", "grok",
     "resume-hint", "skills", "worktree", "ls", "ccd",
-    "create", "join", "spawn", "team", "kill", "delete", "attach",
+    "create", "join", "spawn", "team", "kill", "delete", "attach", "view",
 }
 
 
@@ -2691,6 +2692,15 @@ def pr_clear_cmd(plain: bool):
 # --- hive attach: materialize a team's display ---
 
 
+@cli.command("view")
+@click.argument("session_id")
+def view_cmd(session_id: str):
+    """Read-only viewer for a Claude session transcript (follows live)."""
+    from . import transcript_view
+
+    sys.exit(transcript_view.follow(session_id))
+
+
 _ATTACH_LAUNCHERS = {
     "claude": "hive claude --resume {sid}",
     "codex": "hive codex resume {sid}",
@@ -2700,6 +2710,14 @@ _ATTACH_LAUNCHERS = {
 
 def _member_attach_command(cli_name: str, session_id: str, cwd: str) -> str:
     launch = _ATTACH_LAUNCHERS[cli_name].format(sid=shlex.quote(session_id))
+    if cli_name == "claude":
+        from .adapters import claude_bg
+
+        if claude_bg.job_row(session_id) is None:
+            # An interactive session (desktop ccd, joined session) must NOT
+            # be resumed — `claude -r` forks a second engine that steals the
+            # member's deliveries. Render its transcript read-only instead.
+            launch = f"hive view {shlex.quote(session_id)}"
     return (
         f"cd {shlex.quote(cwd or os.getcwd())} && {launch}; "
         f"hive resume-hint {cli_name} 2>/dev/null || true"
