@@ -955,7 +955,67 @@ def _register_agent_member(
                 "nothing was registered. Fix the inbox/daemon and retry, "
                 "or use --no-notify to register without a reachability check."
             )
+    _registry_record_member(t, agent)
     return agent
+
+
+def _member_registry_row(agent: Agent) -> dict[str, str]:
+    """Registry roster row for *agent*, resolving its engine identity.
+
+    An Agent object fresh from spawn carries session_id only on resume/fork
+    paths; a fresh member's engine identity (claude jobId / codex threadId /
+    grok session id) lives in the pane record its spawn just wrote.
+    """
+    session_id = getattr(agent, "session_id", "") or ""
+    pane_id = getattr(agent, "pane_id", "") or ""
+    cli_name = getattr(agent, "cli", "") or ""
+    if not session_id and pane_id:
+        if cli_name == "claude":
+            from .adapters.claude_bg import job_id_for_pane
+            session_id = job_id_for_pane(pane_id) or ""
+        elif cli_name == "codex":
+            from .adapters.codex_app_server import thread_id_for_pane
+            session_id = thread_id_for_pane(pane_id) or ""
+        elif cli_name == "grok":
+            from .adapters.grok_leader import session_id_for_pane
+            session_id = session_id_for_pane(pane_id) or ""
+    return {
+        "name": getattr(agent, "name", "") or "",
+        "cli": cli_name,
+        "model": getattr(agent, "model", "") or "",
+        "sessionId": session_id,
+        "cwd": getattr(agent, "cwd", "") or "",
+    }
+
+
+def _registry_record_member(t: Team, agent: Agent) -> None:
+    """Register *agent* in the team registry; seed the team entry if absent.
+
+    Seeding covers a team whose entry predates the registry writers (or was
+    never written): record_member refuses a missing/foreign-instance entry,
+    and record_team then creates the entry for this instance — archiving a
+    recycled name's predecessor along the way.
+    """
+    from . import resume as resume_store
+
+    team_name = getattr(t, "name", "") or ""
+    if not team_name:
+        return
+    row = _member_registry_row(agent)
+    created_at = str(getattr(t, "created_at", "") or "")
+    verdict = resume_store.record_member(
+        team_name, row, now=_utc_now_iso(), created_at=created_at
+    )
+    if verdict == "missing":
+        resume_store.record_team(
+            handle=team_name,
+            workspace=getattr(t, "workspace", "") or "",
+            created_at=created_at,
+            now=_utc_now_iso(),
+            members=[row],
+            display=getattr(t, "tmux_window_id", "") or "",
+            repo_cwd=row["cwd"],
+        )
 
 
 def _spawn_team_agent(
@@ -993,6 +1053,7 @@ def _spawn_team_agent(
         agent=agent_name,
     )
     _remember_context(team=team_name, workspace=_resolve_workspace(t, required=False), agent=LEAD_AGENT_NAME)
+    _registry_record_member(t, agent)
     return agent
 
 
@@ -1527,6 +1588,21 @@ def _create_orch_team(*, current_pane: str) -> dict[str, object]:
         orch_pane, team=t.name, workspace=str(ws_path), agent=LEAD_AGENT_NAME
     )
     _remember_context(team=t.name, workspace=str(ws_path), agent=LEAD_AGENT_NAME)
+    resume_store.record_team(
+        handle=t.name,
+        workspace=str(ws_path),
+        created_at=str(t.created_at),
+        now=_utc_now_iso(),
+        members=[{
+            "name": LEAD_AGENT_NAME,
+            "cli": orch_cli,
+            "model": "",
+            "sessionId": t.lead_session_id or "",
+            "cwd": os.getcwd(),
+        }],
+        display=t.tmux_window_id,
+        repo_cwd=os.getcwd(),
+    )
     _ensure_team_sidecar(t, ws_path)
     tmux.select_window(window)
 
@@ -1636,6 +1712,25 @@ def create(name: str, desc: str, workspace: str, reset_workspace: bool, state_en
     try:
         ws_str = str(Path(workspace).expanduser()) if workspace else ""
         t = Team.create(name, description=desc, workspace=ws_str)
+        from . import resume as resume_store
+        from .agent_cli import member_role_for_pane
+
+        # The lead joins the roster only when its pane actually runs an
+        # agent — a shell-pane create has no engine to register (same
+        # authority the pane tagging uses).
+        lead = t.lead_agent()
+        lead_is_agent = (
+            lead is not None and member_role_for_pane(lead.pane_id) == "agent"
+        )
+        resume_store.record_team(
+            handle=t.name,
+            workspace=ws_str,
+            created_at=str(t.created_at),
+            now=_utc_now_iso(),
+            members=[_member_registry_row(lead)] if lead_is_agent else [],
+            display=t.tmux_window_id,
+            repo_cwd=os.getcwd(),
+        )
         if workspace:
             ws = Path(workspace).expanduser()
             if ws.exists() and reset_workspace:
@@ -1698,6 +1793,13 @@ def delete(name: str, workspace: str, keep_workspace: bool, delete_workspace: bo
     current = hive_context.load_current_context()
     if current.get("team") == name:
         hive_context.clear_current_context()
+
+    # The registry entry is the team's authoritative existence: archive it so
+    # readers (and the sidecar's registry-gone exit) see the team as deleted,
+    # while `hive ls` can still surface the archive under `<name>.prev`.
+    from . import resume as resume_store
+
+    resume_store.archive_stale_snapshot(name)
 
     click.echo(f"Team '{name}' deleted.")
 
@@ -2699,7 +2801,9 @@ def _resume_full_team(
         continued = dict(snap)
         continued["createdAt"] = str(t.created_at)
         continued["windowName"] = window_name
-        saved = resume_store.save_snapshot(continued, now=_utc_now_iso(), archive_on_new_instance=False)
+        continued["display"] = getattr(t, "tmux_window_id", "") or ""
+        with resume_store.locked():
+            saved = resume_store.save_snapshot(continued, now=_utc_now_iso(), archive_on_new_instance=False)
         if saved == "rejected":
             raise RuntimeError("continuation snapshot rejected by the store")
         _ensure_team_sidecar(t, Path(ws))
@@ -3107,6 +3211,16 @@ def kill(agent_name: str):
     agent.kill()
     if removed_from_team:
         del t.agents[agent_name]
+        from . import resume as resume_store
+
+        team_name = getattr(t, "name", "") or ""
+        if team_name:
+            resume_store.remove_member(
+                team_name,
+                agent_name,
+                now=_utc_now_iso(),
+                created_at=str(getattr(t, "created_at", "") or ""),
+            )
     layout_window = getattr(t, "tmux_window", "") or tmux.get_current_window_target() or ""
     if layout_window:
         from . import layout as layout_mod

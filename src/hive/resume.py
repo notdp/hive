@@ -1,24 +1,33 @@
-"""Durable team snapshots backing `hive ls` and `hive resume`.
+"""The team registry: durable team truth backing load, `hive ls`, `hive resume`.
 
-A team's identity normally lives only in tmux options and dies with the
-server. The snapshot store keeps one JSON file per team handle under
-``$HIVE_HOME/state/resume/`` so a dead team (tmux restart, reboot) can be
-listed and rebuilt with each member's original agent session.
+One JSON file per team handle under ``$HIVE_HOME/state/resume/``. This store
+is the authoritative record of a team's identity and roster — tmux windows
+and panes are a display layer resolved on top of it, so a team survives a
+tmux restart, a killed window, or a reboot.
 
-The store is deliberately dumb: callers (sidecar writer, `hive
-resume`) compute the payload; this module owns schema validation, safe
-file naming, atomic writes, roster merging, change detection, and the
-one-predecessor archive on a new team instance.
+Write lanes are split by authority:
+
+- **Roster membership belongs to the CLI**: :func:`record_team`,
+  :func:`record_member`, :func:`remove_member` add and remove names at
+  create/spawn/kill time, under the store lock.
+- **The sidecar only backfills**: :func:`backfill_members` refreshes fields
+  of names already in the roster and never adds one — an observation racing
+  a kill must not resurrect the killed member.
+
+The module also owns schema validation, safe file naming, atomic writes,
+change detection, and the one-predecessor archive on a new team instance.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
 
@@ -147,6 +156,7 @@ def build_snapshot(
     members: list[dict[str, str]],
     repo: str = "",
     pr: str = "",
+    display: str = "",
 ) -> dict[str, Any]:
     return {
         "schema": SCHEMA_VERSION,
@@ -159,6 +169,10 @@ def build_snapshot(
         "repo": repo,
         "branch": branch,
         "pr": pr,
+        # Display binding is a cache, not identity: the tmux window id the
+        # team is currently rendered in, empty when headless. Authority
+        # checks never read it.
+        "display": display,
         "createdAt": created_at,
         "savedAt": "",
         "members": [
@@ -212,14 +226,17 @@ def list_snapshots() -> list[dict[str, Any]]:
     return out
 
 
-def merge_members(
+def backfill_members(
     existing: list[dict[str, str]], observed: list[dict[str, str]]
 ) -> list[dict[str, str]]:
-    """Update *existing* roster from *observed* without ever dropping members.
+    """Refresh fields of members already in *existing* from *observed*.
 
-    A pane that disappeared stops being observed, but its member entry (and
-    sessionId — the thing `hive resume` exists to bring back) must survive.
-    Observed non-empty fields win; empty observations never erase state.
+    The sidecar's write lane: observation updates what a known member looks
+    like (model switch, cwd change, a sessionId learned late) but never adds
+    or removes a name — roster membership belongs to the CLI writers, and an
+    observation racing a `hive kill` must not resurrect the killed member.
+    Observed non-empty fields win; empty observations never erase state
+    (a dead pane's sessionId is exactly what `hive resume` brings back).
     """
     by_name: dict[str, dict[str, str]] = {
         str(m.get("name")): {field: str(m.get(field, "") or "") for field in _MEMBER_FIELDS}
@@ -227,11 +244,9 @@ def merge_members(
         if m.get("name")
     }
     for obs in observed:
-        name = str(obs.get("name") or "")
-        if not name:
+        entry = by_name.get(str(obs.get("name") or ""))
+        if entry is None:
             continue
-        entry = by_name.setdefault(name, {field: "" for field in _MEMBER_FIELDS})
-        entry["name"] = name
         for field in ("cli", "model", "sessionId", "cwd"):
             value = str(obs.get(field, "") or "")
             if value:
@@ -317,6 +332,91 @@ def archive_stale_snapshot(handle: str) -> bool:
     except OSError:
         pass
     return True
+
+
+@contextmanager
+def locked() -> Iterator[None]:
+    """Exclusive store lock for read-merge-write cycles.
+
+    One fcntl lock for the whole store: writers are a handful of CLI calls
+    and one sidecar tick per team every 30s, so contention is nil and a
+    single lock keeps the kill-vs-backfill race closed by construction.
+    """
+    root = store_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(root / ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def record_team(
+    *,
+    handle: str,
+    workspace: str,
+    created_at: str,
+    now: str,
+    members: list[dict[str, str]] | None = None,
+    display: str = "",
+    window_name: str = "",
+    repo_cwd: str = "",
+) -> str:
+    """Register a team at creation time (CLI write lane).
+
+    A predecessor entry from a recycled name is archived by
+    :func:`save_snapshot`'s own createdAt check. Returns the store verdict.
+    """
+    snap = build_snapshot(
+        handle=handle,
+        team=handle,
+        group=handle,
+        window_name=window_name,
+        workspace=workspace,
+        repo_cwd=repo_cwd,
+        repo=repo_label(repo_cwd),
+        branch=git_branch(repo_cwd),
+        created_at=created_at,
+        members=members or [],
+        display=display,
+    )
+    with locked():
+        return save_snapshot(snap, now=now)
+
+
+def record_member(
+    handle: str, member: dict[str, str], *, now: str, created_at: str = ""
+) -> str:
+    """Add or replace one member row in the team's roster (CLI write lane).
+
+    *created_at*, when given, must match the stored instance — a stale entry
+    left by a recycled name is never edited into (returns ``missing`` so the
+    caller can seed a fresh entry, which archives the predecessor).
+    """
+    name = str(member.get("name") or "")
+    if not name:
+        return "rejected"
+    with locked():
+        snap = load_snapshot(handle)
+        if snap is None or (created_at and str(snap.get("createdAt")) != created_at):
+            return "missing"
+        row = {field: str(member.get(field, "") or "") for field in _MEMBER_FIELDS}
+        snap["members"] = [
+            m for m in snap.get("members", []) if m.get("name") != name
+        ] + [row]
+        return save_snapshot(snap, now=now, archive_on_new_instance=False)
+
+
+def remove_member(handle: str, name: str, *, now: str, created_at: str = "") -> str:
+    """Drop one member row from the team's roster (CLI write lane)."""
+    with locked():
+        snap = load_snapshot(handle)
+        if snap is None or (created_at and str(snap.get("createdAt")) != created_at):
+            return "missing"
+        snap["members"] = [m for m in snap.get("members", []) if m.get("name") != name]
+        return save_snapshot(snap, now=now, archive_on_new_instance=False)
 
 
 def _write_atomic(path: Path, snap: dict[str, Any]) -> None:

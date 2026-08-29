@@ -9,6 +9,7 @@ active-turn fork routing that already exist in code.
 
 This document covers:
 
+- team identity: registry vs display
 - `busy`
 - `inputState`
 - `turnPhase`
@@ -21,6 +22,30 @@ This document does not define:
 - automatic scheduling
 - automatic fork/spawn decisions
 - automatic garbage collection
+
+## Team Identity: Registry vs Display
+
+A team's authoritative record is its **registry entry** — one JSON file per
+team handle under `$HIVE_HOME/state/resume/` (the resume store, promoted).
+tmux is a display layer resolved on top of it: window options and pane tags
+say *where the team is rendered*, never *whether it exists*.
+
+- `Team.load` reads the registry for identity (workspace, createdAt) and
+  roster (name, cli, model, sessionId, cwd), then binds live panes from the
+  team's window onto roster members. A team with an entry and no window loads
+  with pane-less members; a pane-tagged member missing from the registry still
+  loads (union), covering teams predating the registry writers.
+- Roster **membership is written only by the CLI**: create/init seed the
+  entry (archiving a recycled name's predecessor), spawn/register/fork add a
+  member, kill removes one, delete archives the entry.
+- The **sidecar only backfills** fields of names already in the roster
+  (model, cwd, a sessionId learned late) under the store lock; it never adds
+  or removes a name, so an observation racing a kill cannot resurrect the
+  killed member.
+- The entry's `display` field caches the tmux window id currently rendering
+  the team. It is a cache: authority checks never read it.
+- Sidecar identity is `(workspace socket, team)`. A dead window no longer
+  retires the sidecar; a missing registry entry (plus no window) does.
 
 ## Runtime Field Reference
 

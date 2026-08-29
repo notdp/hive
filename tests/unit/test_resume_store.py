@@ -97,10 +97,10 @@ def test_unchanged_payload_never_rewrites_or_bumps_saved_at(store):
     assert resume.load_snapshot("0-w2")["savedAt"] == "t3"
 
 
-def test_merge_members_keeps_dead_member_and_updates_observed(store):
+def test_backfill_keeps_dead_member_updates_observed_never_adds(store):
     existing = _snap()["members"]
     # validator pane died: only the worker is observed, with a fresher session.
-    merged = resume.merge_members(existing, [{"name": "worker", "sessionId": "sid-worker-2"}])
+    merged = resume.backfill_members(existing, [{"name": "worker", "sessionId": "sid-worker-2"}])
 
     by_name = {m["name"]: m for m in merged}
     assert by_name["worker"]["sessionId"] == "sid-worker-2"
@@ -108,13 +108,34 @@ def test_merge_members_keeps_dead_member_and_updates_observed(store):
     assert by_name["validator"]["sessionId"] == "sid-val"  # dead member survives
 
     # validator comes back: only its fields update.
-    merged2 = resume.merge_members(merged, [{"name": "validator", "sessionId": "sid-val-2", "cli": "codex"}])
+    merged2 = resume.backfill_members(merged, [{"name": "validator", "sessionId": "sid-val-2", "cli": "codex"}])
     by_name2 = {m["name"]: m for m in merged2}
     assert by_name2["validator"]["sessionId"] == "sid-val-2"
     assert by_name2["worker"]["sessionId"] == "sid-worker-2"
 
+    # membership belongs to the CLI writers: an observed stranger (e.g. a
+    # kill racing this observation) is never added back to the roster.
+    merged3 = resume.backfill_members(merged2, [{"name": "ghost", "cli": "claude", "sessionId": "sid-g"}])
+    assert {m["name"] for m in merged3} == {"worker", "validator"}
 
-# --- sidecar writer: roster-merged persistence (VAL A2-A3) ---
+
+def test_record_and_remove_member_guard_the_instance(store):
+    assert resume.record_team(
+        handle="0-w2", workspace="/ws", created_at="123.0", now="t0",
+        members=[{"name": "worker", "cli": "claude"}],
+    ) == "written"
+    # add a member, wrong instance refused
+    row = {"name": "validator", "cli": "codex", "sessionId": "sid-v"}
+    assert resume.record_member("0-w2", row, now="t1", created_at="999.0") == "missing"
+    assert resume.record_member("0-w2", row, now="t1", created_at="123.0") == "written"
+    assert {m["name"] for m in resume.load_snapshot("0-w2")["members"]} == {"worker", "validator"}
+    # remove honors the same guard
+    assert resume.remove_member("0-w2", "validator", now="t2", created_at="999.0") == "missing"
+    assert resume.remove_member("0-w2", "validator", now="t2", created_at="123.0") == "written"
+    assert {m["name"] for m in resume.load_snapshot("0-w2")["members"]} == {"worker"}
+
+
+# --- sidecar writer: registry backfill (VAL A2-A3) ---
 
 
 def _fake_team(agents, groups=None):
@@ -123,10 +144,21 @@ def _fake_team(agents, groups=None):
     return SimpleNamespace(
         name="0-w2",
         tmux_window="dev:0",
+        tmux_window_id="@0",
         created_at=123.0,
         agents=agents,
         member_groups=groups or {name: "duo" for name in agents},
     )
+
+
+def _seed_registry(names, created_at="123.0"):
+    assert resume.record_team(
+        handle="0-w2",
+        workspace="/ws",
+        created_at=created_at,
+        now="t-seed",
+        members=[{"name": n} for n in names],
+    ) == "written"
 
 
 def _fake_agent(pane, cli):
@@ -149,7 +181,8 @@ def _writer_mocks(monkeypatch, team, sessions):
     return sidecar
 
 
-def test_writer_persists_full_roster_then_keeps_dead_member(store, monkeypatch):
+def test_writer_backfills_roster_then_keeps_dead_member(store, monkeypatch):
+    _seed_registry(["worker", "validator"])
     worker = _fake_agent("%1", "claude")
     validator = _fake_agent("%2", "codex")
     sidecar = _writer_mocks(
@@ -165,6 +198,7 @@ def test_writer_persists_full_roster_then_keeps_dead_member(store, monkeypatch):
     assert by_name["validator"]["sessionId"] == "sid-v"
     assert by_name["validator"]["model"] == "m-codex"
     assert snap["windowName"] == "hive" and snap["branch"] == "main"
+    assert snap["display"] == "@0"
 
     # validator pane dies: only the worker is observed now, with a rotated session.
     sidecar2 = _writer_mocks(
@@ -177,9 +211,19 @@ def test_writer_persists_full_roster_then_keeps_dead_member(store, monkeypatch):
     assert by_name2["worker"]["sessionId"] == "sid-w2"
 
 
+def test_writer_without_registry_entry_writes_nothing(store, monkeypatch):
+    """Observation never creates a roster: membership belongs to the CLI."""
+    sidecar = _writer_mocks(
+        monkeypatch, _fake_team({"worker": _fake_agent("%1", "claude")}), {"%1": "sid-w"}
+    )
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+    assert resume.load_snapshot("0-w2") is None
+
+
 def test_writer_snapshots_groupless_teams_and_skips_unloadable(store, monkeypatch):
     # Post role-decouple, every loadable team is snapshotted — group tags are
     # display-only and no longer gate resumability.
+    _seed_registry(["worker"])
     worker = _fake_agent("%1", "claude")
     sidecar = _writer_mocks(
         monkeypatch,
@@ -202,6 +246,7 @@ def test_writer_snapshots_groupless_teams_and_skips_unloadable(store, monkeypatc
 
 def test_writer_never_leaks_sessions_across_instances(store, monkeypatch):
     """A same-handle NEW team must not inherit the previous instance's sessions."""
+    _seed_registry(["worker", "validator"])
     old_worker = _fake_agent("%1", "claude")
     old_val = _fake_agent("%2", "codex")
     sidecar = _writer_mocks(
@@ -212,10 +257,15 @@ def test_writer_never_leaks_sessions_across_instances(store, monkeypatch):
     sidecar._write_resume_snapshot("/ws", "0-w2")
     assert resume.load_snapshot("0-w2")["createdAt"] == "123.0"
 
-    # new instance (createdAt differs), only a worker observed, session unresolved
+    # new instance: creation archives the predecessor and seeds the roster;
+    # the writer refuses to touch a foreign-instance entry in between.
     new_team = _fake_team({"worker": _fake_agent("%9", "claude")})
     new_team.created_at = 200.0
     sidecar2 = _writer_mocks(monkeypatch, new_team, {})
+    sidecar2._write_resume_snapshot("/ws", "0-w2")
+    assert resume.load_snapshot("0-w2")["createdAt"] == "123.0"  # untouched
+
+    _seed_registry(["worker"], created_at="200.0")
     sidecar2._write_resume_snapshot("/ws", "0-w2")
 
     cur = resume.load_snapshot("0-w2")
@@ -273,6 +323,7 @@ def test_snapshot_repo_and_pr_round_trip_and_backcompat(store):
 
 
 def test_writer_records_window_pr_and_repo(store, monkeypatch):
+    _seed_registry(["worker"])
     worker = _fake_agent("%1", "claude")
     sidecar = _writer_mocks(monkeypatch, _fake_team({"worker": worker}), {"%1": "sid-w"})
     monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: "52" if key == "hive-pr" else None)
@@ -327,6 +378,7 @@ def test_age_renders_relative_time_and_degrades_safely():
 
 
 def test_writer_clears_pr_after_window_stamp_removed(store, monkeypatch):
+    _seed_registry(["worker"])
     worker = _fake_agent("%1", "claude")
     sidecar = _writer_mocks(monkeypatch, _fake_team({"worker": worker}), {"%1": "sid-w"})
     monkeypatch.setattr("hive.tmux.get_window_option", lambda _w, key: "52" if key == "hive-pr" else None)
@@ -361,3 +413,20 @@ def test_archive_stale_snapshot_rotates_without_replacement(store):
     # nothing left to archive: reports False and keeps the archive slot
     assert resume.archive_stale_snapshot("honey") is False
     assert resume.load_snapshot("honey.prev") is not None
+
+
+def test_writer_observation_never_resurrects_a_killed_member(store, monkeypatch):
+    """The kill-vs-backfill race, closed by construction: an observation that
+    still sees the killed member's pane cannot write it back into the roster."""
+    _seed_registry(["worker", "victim"])
+    sidecar = _writer_mocks(
+        monkeypatch,
+        _fake_team({"worker": _fake_agent("%1", "claude"), "victim": _fake_agent("%2", "codex")}),
+        {"%1": "sid-w", "%2": "sid-v"},
+    )
+    # hive kill removed the member between the observation and the write
+    assert resume.remove_member("0-w2", "victim", now="t-kill", created_at="123.0") == "written"
+
+    sidecar._write_resume_snapshot("/ws", "0-w2")
+
+    assert {m["name"] for m in resume.load_snapshot("0-w2")["members"]} == {"worker"}

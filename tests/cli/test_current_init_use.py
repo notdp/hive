@@ -559,7 +559,11 @@ def test_init_reusing_a_pool_name_archives_the_dead_predecessors_snapshot(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["team"] == "honey"
-    assert resume.load_snapshot("honey") is None  # the new team starts clean
+    # the new instance registers fresh: its own createdAt, no inherited session
+    cur = resume.load_snapshot("honey")
+    assert cur is not None and cur["createdAt"] != "100.0"
+    assert "DEAD-SID" not in {m.get("sessionId") for m in cur["members"]}
+    assert {m["name"] for m in cur["members"]} == {"orch"}
     prev = resume.load_snapshot("honey.prev")
     assert prev is not None and prev["members"][0]["sessionId"] == "DEAD-SID"
 
