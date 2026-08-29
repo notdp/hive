@@ -46,6 +46,16 @@ never *whether it exists*.
   the team. It is a cache: authority checks never read it.
 - Sidecar identity is `(workspace socket, team)`. A dead window no longer
   retires the sidecar; a missing registry entry (plus no window) does.
+- **The verbs work anywhere.** create/spawn/team/kill/delete no longer
+  require a tmux context: addressing is explicit team (`-t`, or a
+  `<team>.<member>` message address resolved through the registry) →
+  binding discovery (pane tags, then engine env identity). `hive create`
+  outside tmux registers a headless team; `hive spawn` with no live
+  display (or a caller outside tmux) spawns engine-only — claude bg job,
+  codex thread + `turn/start` bootstrap, grok member leader +
+  `session/new` + `session/prompt` bootstrap — and delivery, interrupt,
+  runtime and kill address the engine (jobId / threadId / member key)
+  when no pane exists.
 - **Engine keys follow the member, not the pane.** A grok member's leader
   daemon is keyed `m-<team>.<member>` (socket/pidfile/session record under
   `$GROK_HOME/hive/`); a raw `hive grok` pane outside any team keeps a

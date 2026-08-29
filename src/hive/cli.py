@@ -1408,6 +1408,26 @@ def _find_qualified_agent_target(qualified: str) -> tuple[str, str] | None:
     return candidates[0].team, candidates[0].agent
 
 
+def _split_team_address(addr: str) -> tuple[str, str]:
+    """Split ``<team>.<member>`` when the prefix names an existing team.
+
+    Team existence is the registry first (a headless team has no window),
+    the window scan second (a live pre-registry team). Returns
+    ``(team, member)`` or ``("", addr)`` when the prefix names no team.
+    """
+    if "." not in addr:
+        return "", addr
+    prefix, rest = addr.split(".", 1)
+    if not prefix or not rest:
+        return "", addr
+    from . import registry
+    from .team import _find_team_window
+
+    if registry.load(prefix) is not None or _find_team_window(prefix)[0]:
+        return prefix, rest
+    return "", addr
+
+
 def _resolve_send_target_team(to_agent: str) -> tuple[str, Team]:
     """Resolve the team that owns *to_agent* for a send.
 
@@ -1447,10 +1467,18 @@ def _resolve_guest_send_target(to_agent: str, team: str) -> tuple[str, Team]:
         if _existing_team_agent(t, to_agent) is None:
             _fail(f"agent '{to_agent}' not found in team '{team}'")
         return t.name, t
+    from . import registry
+
     candidates = [p for p in tmux.list_panes_all() if p.agent == to_agent and p.team]
-    teams = sorted({p.team for p in candidates})
+    registry_teams = {
+        str(e.get("team"))
+        for e in registry.list_entries()
+        if not e.get("corrupt")
+        and any(m.get("name") == to_agent for m in e.get("members", []))
+    }
+    teams = sorted({p.team for p in candidates} | registry_teams)
     if not teams:
-        _fail(f"agent '{to_agent}' not found in any live team (see `hive ls`)")
+        _fail(f"agent '{to_agent}' not found in any team (see `hive ls`)")
     if len(teams) > 1:
         addresses = ", ".join(f"{name}.{to_agent}" for name in teams)
         _fail(f"agent '{to_agent}' exists in {len(teams)} teams; address one of: {addresses}")
@@ -2781,16 +2809,10 @@ def send(to_agent: str, body: str, artifact: str):
     if to_agent.startswith("ccd."):
         _send_to_ccd_session(to_agent[4:], body, artifact)
         return
-    explicit_team = ""
-    if "." in to_agent:
-        # A dot splits the address only when the prefix names a live team
-        # (`honey.worker`); otherwise the address stays whole for
-        # qualified-name resolution across pane tags.
-        from .team import _find_team_window
-
-        prefix, rest = to_agent.split(".", 1)
-        if prefix and _find_team_window(prefix)[0]:
-            explicit_team, to_agent = prefix, rest
+    # A dot splits the address only when the prefix names an existing team
+    # (`honey.worker`); otherwise the address stays whole for qualified-name
+    # resolution across pane tags.
+    explicit_team, to_agent = _split_team_address(to_agent)
     guest = None
     if not tmux.is_inside_tmux():
         # The root gate admitted this call because the process runs inside a
@@ -2986,7 +3008,12 @@ def kill(agent_name: str):
     Example:
       hive kill worker1
     """
-    _, t = _resolve_send_target_team(agent_name)
+    explicit_team, bare_name = _split_team_address(agent_name)
+    if explicit_team:
+        t = _load_team(explicit_team)
+        agent_name = bare_name
+    else:
+        _, t = _resolve_send_target_team(agent_name)
     try:
         agent = t.get(agent_name)
     except KeyError:

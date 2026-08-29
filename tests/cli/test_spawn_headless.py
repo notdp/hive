@@ -128,3 +128,27 @@ def test_headless_spawn_duplicate_name_refused(runner, configure_hive_home, monk
     result = runner.invoke(cli, ["spawn", "rex", "-t", "honey", "--cli", "codex"])
     assert result.exit_code != 0
     assert "already exists" in result.output
+
+
+def test_kill_headless_member_by_qualified_address(runner, configure_hive_home, monkeypatch):
+    configure_hive_home()
+    from hive import registry
+
+    assert registry.record_team(
+        team="honey", workspace="", created_at="1.0",
+        members=[{"name": "rex", "cli": "grok", "sessionId": "sid-g", "cwd": "/repo"}],
+    ) == "written"
+    monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setattr("hive.team.tmux.is_inside_tmux", lambda: False)
+    killed = []
+    monkeypatch.setattr(
+        "hive.adapters.grok_leader.kill_daemon_key", lambda key: killed.append(key)
+    )
+
+    result = runner.invoke(cli, ["kill", "honey.rex"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["member"] == "rex"
+    assert killed == ["m-honey.rex"]
+    assert registry.load("honey")["members"] == []  # roster row removed
