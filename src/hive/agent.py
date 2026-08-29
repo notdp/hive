@@ -538,6 +538,8 @@ class Agent:
         # no *other* live CLI: a recycled pane id whose member is codex must
         # never route into a stale `hive-pane-<n>.job`, whichever way the
         # probe happens to read that pane.
+        if not self.pane_id:
+            return self._send_headless(text)
         from .agent_cli import detect_cli_process_for_pane
 
         probe = detect_cli_process_for_pane(self.pane_id)
@@ -549,46 +551,11 @@ class Agent:
                 "refusing native transport to a retained shell"
             )
         if claude_member:
-            from .adapters import claude_bg, claude_sessions
+            from .adapters import claude_bg
 
             job_id = claude_bg.job_id_for_pane(self.pane_id)
             if job_id:
-                engine = claude_bg.engine_session_for_job(job_id)
-                if engine is None and claude_bg.job_row(job_id) is not None:
-                    # Asleep, not dead: the job ledger still lists it, and a
-                    # tty-less attach revives the engine (same jobId and
-                    # sessionId, fresh pid) — then re-read its new entry.
-                    engine = claude_bg.ensure_engine(job_id)
-                if engine is None:
-                    raise DeliveryError(
-                        f"claude job '{job_id}' for pane {self.pane_id} is "
-                        "gone (removed from the job ledger, or the wake "
-                        "failed); the message stays on the bus"
-                    )
-                # Primary lane: the supervisor daemon's reply channel — the
-                # typed-keystroke lane, no peer wrapper in any state. Any
-                # failure falls back to the inbox socket, which still
-                # delivers (wrapped) with today's error semantics.
-                accepted = claude_sessions.daemon_reply(engine.session_id, text)
-                if accepted is not None:
-                    return accepted
-                accepted = claude_sessions.send(
-                    engine.socket_path,
-                    text,
-                    sender=f"{self.team_name}.{self.name}",
-                    session_id=engine.session_id,
-                )
-                if accepted == claude_sessions.WRITE_TIMED_OUT:
-                    raise DeliveryError(
-                        f"claude job '{job_id}' (pane {self.pane_id}) accepted "
-                        "the connection but did not drain the message in time"
-                    )
-                if accepted is None:
-                    raise DeliveryError(
-                        f"claude job '{job_id}' (pane {self.pane_id}) is not "
-                        "listening on its inbox; the message stays on the bus"
-                    )
-                return accepted
+                return self._deliver_claude_job(job_id, text)
         if profile_name == "codex":
             from .adapters import codex_app_server
 
@@ -628,6 +595,91 @@ class Agent:
             "native transports only"
         )
 
+    def _deliver_claude_job(self, job_id: str, text: str) -> str:
+        from .adapters import claude_bg, claude_sessions
+
+        where = f"pane {self.pane_id}" if self.pane_id else "headless"
+        engine = claude_bg.engine_session_for_job(job_id)
+        if engine is None and claude_bg.job_row(job_id) is not None:
+            # Asleep, not dead: the job ledger still lists it, and a
+            # tty-less attach revives the engine (same jobId and
+            # sessionId, fresh pid) — then re-read its new entry.
+            engine = claude_bg.ensure_engine(job_id)
+        if engine is None:
+            raise DeliveryError(
+                f"claude job '{job_id}' ({where}) is gone (removed from the "
+                "job ledger, or the wake failed); the message stays on the bus"
+            )
+        # Primary lane: the supervisor daemon's reply channel — the
+        # typed-keystroke lane, no peer wrapper in any state. Any
+        # failure falls back to the inbox socket, which still
+        # delivers (wrapped) with today's error semantics.
+        accepted = claude_sessions.daemon_reply(engine.session_id, text)
+        if accepted is not None:
+            return accepted
+        accepted = claude_sessions.send(
+            engine.socket_path,
+            text,
+            sender=f"{self.team_name}.{self.name}",
+            session_id=engine.session_id,
+        )
+        if accepted == claude_sessions.WRITE_TIMED_OUT:
+            raise DeliveryError(
+                f"claude job '{job_id}' ({where}) accepted the connection "
+                "but did not drain the message in time"
+            )
+        if accepted is None:
+            raise DeliveryError(
+                f"claude job '{job_id}' ({where}) is not listening on its "
+                "inbox; the message stays on the bus"
+            )
+        return accepted
+
+    def _send_headless(self, text: str) -> str:
+        """Deliver to a member with no pane: the engine is the only address.
+
+        Identity comes from the registry row (claude jobId / codex threadId /
+        grok member key) — there is no pane to probe, and nothing to guard
+        against pane-id recycling.
+        """
+        if self.cli == "claude":
+            job_id = self.session_id or ""
+            if not job_id:
+                raise DeliveryError(
+                    f"claude member '{self.name}' has no recorded job identity; "
+                    "the message stays on the bus"
+                )
+            return self._deliver_claude_job(job_id, text)
+        if self.cli == "codex":
+            from .adapters import codex_app_server
+
+            thread_id = self.session_id or ""
+            accepted = (
+                codex_app_server.send_to_thread(thread_id, text) if thread_id else None
+            )
+            if accepted is None:
+                raise DeliveryError(
+                    f"codex member '{self.name}' did not accept the turn "
+                    "(no recorded thread, daemon down, RPC error, or "
+                    "connection failure)"
+                )
+            return accepted
+        if self.cli == "grok":
+            from .adapters import grok_leader
+
+            key = grok_leader.member_key(self.team_name, self.name)
+            accepted = grok_leader.send_to_key(key, text)
+            if accepted is None:
+                raise DeliveryError(
+                    f"grok member '{self.name}' did not accept the prompt "
+                    "(no leader/session, RPC error, or connection failure)"
+                )
+            return accepted
+        raise DeliveryError(
+            f"member '{self.name}' runs '{self.cli}', which hive has no "
+            "headless transport for"
+        )
+
     def interrupt(self) -> None:
         """Abort the member's running turn over its CLI's native transport.
 
@@ -642,10 +694,12 @@ class Agent:
         if self.cli == "claude":
             from .adapters import claude_bg
 
-            job_id = claude_bg.job_id_for_pane(self.pane_id)
+            job_id = (
+                claude_bg.job_id_for_pane(self.pane_id) if self.pane_id else ""
+            ) or (self.session_id or "")
             if not job_id:
                 raise RuntimeError(
-                    f"claude member on pane {self.pane_id} has no bg job record "
+                    f"claude member '{self.name}' has no bg job record "
                     "to interrupt; hive never send-keys a member pane"
                 )
             result = claude_bg.interrupt_job(job_id)
@@ -655,7 +709,16 @@ class Agent:
         if self.cli == "codex":
             from .adapters import codex_app_server
 
-            if codex_app_server.interrupt_pane(self.pane_id) is None:
+            accepted = (
+                codex_app_server.interrupt_pane(self.pane_id)
+                if self.pane_id
+                else (
+                    codex_app_server.interrupt_thread(self.session_id)
+                    if self.session_id
+                    else None
+                )
+            )
+            if accepted is None:
                 raise RuntimeError(
                     f"codex pane {self.pane_id} did not accept turn/interrupt "
                     "(no recorded thread, daemon down, RPC error, or "
@@ -665,7 +728,14 @@ class Agent:
         if self.cli == "grok":
             from .adapters import grok_leader
 
-            if grok_leader.interrupt_pane(self.pane_id) is None:
+            accepted = (
+                grok_leader.interrupt_pane(self.pane_id)
+                if self.pane_id
+                else grok_leader.interrupt_key(
+                    grok_leader.member_key(self.team_name, self.name)
+                )
+            )
+            if accepted is None:
                 raise RuntimeError(
                     f"grok pane {self.pane_id} did not accept session/cancel "
                     "(no leader/session, or connection failure)"
@@ -681,7 +751,32 @@ class Agent:
         return tmux.capture_pane(self.pane_id, lines)
 
     def is_alive(self) -> bool:
-        return tmux.is_pane_alive(self.pane_id)
+        if self.pane_id:
+            return tmux.is_pane_alive(self.pane_id)
+        return self._engine_alive()
+
+    def _engine_alive(self) -> bool:
+        """A pane-less member is alive iff its engine answers for it."""
+        if self.cli == "claude":
+            from .adapters import claude_bg
+
+            job_id = self.session_id or ""
+            if not job_id:
+                return False
+            return (
+                claude_bg.engine_session_for_job(job_id) is not None
+                or claude_bg.job_row(job_id) is not None  # asleep is not dead
+            )
+        if self.cli == "codex":
+            from .adapters import codex_app_server
+
+            return bool(self.session_id) and codex_app_server.daemon_alive()
+        if self.cli == "grok":
+            from .adapters import grok_leader
+
+            key = grok_leader.member_key(self.team_name, self.name)
+            return grok_leader.probe_socket(str(grok_leader.socket_path_for_key(key)))
+        return False
 
     def kill(self) -> None:
         """Force kill the pane — and, for a claude member, park its engine.

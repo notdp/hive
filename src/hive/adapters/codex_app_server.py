@@ -762,10 +762,14 @@ def runtime_for_pane(pane: str) -> ThreadRuntime | None:
     tid = thread_id_for_pane(pane)
     if not tid:
         return None
+    return runtime_for_thread(tid)
+
+
+def runtime_for_thread(thread_id: str) -> ThreadRuntime | None:
     client = _shared_client()
     if client is None:
         return None
-    return client.runtime_or_backfill(tid)
+    return client.runtime_or_backfill(thread_id)
 
 
 def send_to_pane(pane: str, text: str) -> str | None:
