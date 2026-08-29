@@ -788,7 +788,8 @@ def _check_send_gate(target) -> None:
     )
 
 
-FLOW_MAILBOX_AGENT = "flow"
+FLOW_MAILBOX_AGENT = "flow.run"
+_FLOW_MAILBOX_ALIASES = ("flow.run", "flow")
 
 
 def _send_payload(
@@ -802,7 +803,7 @@ def _send_payload(
     artifact: str,
     reply_to: str,
 ) -> dict[str, Any]:
-    if target_agent == FLOW_MAILBOX_AGENT:
+    if target_agent in _FLOW_MAILBOX_ALIASES:
         # The flow runner's mailbox: it owns no pane and no transport —
         # the durable bus row IS the delivery, and the runner polls for
         # it. Members answer a flow dispatch with an ordinary

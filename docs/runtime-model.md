@@ -75,6 +75,16 @@ never *whether it exists*.
   grok leader daemon), so a tool subprocess resolves who it is without a
   pane — the env lane is the fallback behind a live pane binding.
 
+Send addresses come in three kinds, and only the first names an engine:
+a member (`dodo` bare in-team, `<team>.<member>` qualified, delivery over
+the member's transport), a Claude session outside any team (`ccd.<name>`,
+delivery over its session inbox), and the flow runner's mailbox
+(`flow.run`, legacy alias `flow` — delivery is the durable bus row itself;
+the runner polls it, owns no transport, and never acks). Mailboxes are
+listed in `hive team` under `mailboxes`, never in `members`: the roster
+stays engines-only. The `flow` prefix is reserved the way `ccd` is —
+not a team name, and `flow`/`flow.*` are not member names.
+
 ## Runtime Field Reference
 
 Every CLI's runtime now comes from a **native source** — the runtime the CLI

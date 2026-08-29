@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-FLOW_SENDER = "flow"
+FLOW_SENDER = "flow.run"
 _REPLY_POLL_SECONDS = 2.0
 
 # tmux splits and team registration race each other; spawns serialize,
@@ -193,8 +193,8 @@ def agent(prompt: str, *, name: str, cli: str | None = None, model: str = "") ->
     """
     from . import cli as cli_mod
 
-    if name == FLOW_SENDER:
-        raise FlowError(f"'{FLOW_SENDER}' is the flow runner's own address; pick another member name")
+    if name == "flow" or name.startswith("flow."):
+        raise FlowError(f"'{name}' collides with the flow runner's mailbox address kind ({FLOW_SENDER}); pick another member name")
     ctx = _context()
     last: Exception | None = None
     spawned = None
@@ -235,7 +235,7 @@ def agent(prompt: str, *, name: str, cli: str | None = None, model: str = "") ->
             raise FlowError(f"member '{name}' did not reach ready within the gate; inspect its pane")
 
     artifact = _task_artifact(name, prompt)
-    msg_id = _dispatch(name, body=f"task dispatch: {Path(artifact).name}", artifact=artifact)
+    msg_id = _dispatch(name, body=f"flow-mailbox dispatch: {Path(artifact).name} (not a member; hive send flow.run, then stop)", artifact=artifact)
     _log(f"{name} dispatched ({msg_id}); waiting for reply…")
     member = Member(name=name, pane=spawned.pane_id)
     member._absorb(_await_reply(name, msg_id))

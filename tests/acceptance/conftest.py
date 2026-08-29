@@ -74,7 +74,7 @@ class Rig:
         # not a queue) and the flow retries with a fresh msgId — several
         # same-body dispatch rows are legal. The one that reached the member
         # is whichever its reply anchors.
-        return [r for r in self.bus_rows if r[1] == "flow" and r[2] == member]
+        return [r for r in self.bus_rows if r[1] == "flow.run" and r[2] == member]
 
     def replies_for(self, member: str) -> list[tuple]:
         ids = {d[0] for d in self.dispatches_for(member)}

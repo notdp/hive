@@ -73,7 +73,7 @@ def test_agent_spawns_dispatches_and_returns_reply(monkeypatch):
     assert spawn["skill"] == "hive:hive"
     # dispatch rode an artifact carrying the full prompt, from the flow sender
     d = rec.dispatches[0]
-    assert d["sender_agent"] == "flow"
+    assert d["sender_agent"] == "flow.run"
     assert d["target_agent"] == "explore"
     assert open(d["artifact"]).read() == "explore auth\nwrite findings"
     # the wait is scoped to the member: a row anchored to m1 by anyone else is not the reply
@@ -95,7 +95,7 @@ def test_agent_claude_skips_ready_gate(monkeypatch):
 
 def test_agent_rejects_reserved_name(monkeypatch):
     _wire(monkeypatch)
-    with pytest.raises(flow.FlowError, match="own address"):
+    with pytest.raises(flow.FlowError, match="mailbox address kind"):
         flow.agent("task", name="flow")
 
 
@@ -232,3 +232,10 @@ def test_spawn_exhaustion_stays_loud(monkeypatch):
     )
     with pytest.raises(flow.FlowError, match="after 3 attempts"):
         flow.agent("task", name="impl", cli="codex")
+
+
+def test_agent_rejects_the_whole_mailbox_name_family(monkeypatch):
+    _wire(monkeypatch)
+    for name in ("flow", "flow.run", "flow.anything"):
+        with pytest.raises(flow.FlowError, match="mailbox address kind"):
+            flow.agent("task", name=name)
