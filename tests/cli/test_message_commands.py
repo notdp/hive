@@ -1385,10 +1385,6 @@ def test_send_to_flow_run_walks_the_bare_name_lane_and_confirms(runner, configur
     assert result.exit_code == 0, result.output
     assert sent["target_agent"] == "flow.run"
     assert "delivered to flow mailbox msgId=m9" in result.output
-    # legacy alias normalizes to the canonical address
-    result = runner.invoke(cli, ["send", "flow", "done again"])
-    assert result.exit_code == 0, result.output
-    assert sent["target_agent"] == "flow.run"
 
 
 def test_flow_is_not_a_team_name(runner, configure_hive_home):

@@ -36,7 +36,7 @@ def test_reply_identity_is_the_member_itself(rig):
         assert replies, f"{member}: no reply anchored to any of its dispatches"
         for r in replies:
             assert r[1] == member, f"{member}: reply from_agent={r[1]!r} (identity hijack)"
-            assert r[2] in ("flow", "flow.run"), f"{member}: reply to_agent={r[2]!r}, expected flow"
+            assert r[2] == "flow.run", f"{member}: reply to_agent={r[2]!r}, expected flow.run"
 
 
 def test_exactly_one_reply_per_dispatch(rig):

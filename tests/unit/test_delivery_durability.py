@@ -112,9 +112,9 @@ def test_three_message_busy_incident_regression(tmp_path, monkeypatch):
 
 
 def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeypatch):
-    """The reserved `flow` address is a mailbox: the durable bus row IS the
-    delivery. No member resolution, no gate, no transport — a member's
-    `hive send flow` must succeed with no flow-runner pane anywhere."""
+    """`flow.run` is a mailbox: the durable bus row IS the delivery. No
+    member resolution, no gate, no transport — a member's
+    `hive send flow.run` must succeed with no flow-runner pane anywhere."""
     workspace = tmp_path / "ws"
     bus.init_workspace(workspace)
 
@@ -125,33 +125,11 @@ def test_send_to_flow_mailbox_writes_bus_row_without_transport(tmp_path, monkeyp
 
     payload = hived._send_payload(
         workspace=str(workspace), team_name="team-x", sender_agent="impl",
-        sender_pane="%1", target_agent="flow", body="done", artifact="/tmp/a.md",
+        sender_pane="%1", target_agent="flow.run", body="done", artifact="/tmp/a.md",
         reply_to="m1",
     )
 
     assert payload["ok"] is True and payload["mailbox"] is True
     (event,) = bus.read_all_events(workspace)
-    assert event["to"] == "flow" and event["from"] == "impl"
+    assert event["to"] == "flow.run" and event["from"] == "impl"
     assert event["inReplyTo"] == "m1"
-
-
-def test_send_to_the_canonical_mailbox_address_also_lands(tmp_path, monkeypatch):
-    """`flow.run` is the canonical mailbox address; the legacy bare `flow`
-    stays a working alias (previous test). Same contract: bus row is the
-    delivery, no live-agent resolution."""
-    workspace = tmp_path / "ws"
-    bus.init_workspace(workspace)
-    monkeypatch.setattr(
-        "hive.hived._resolve_live_agent",
-        lambda _t, _a: (_ for _ in ()).throw(AssertionError("no resolution")),
-    )
-
-    payload = hived._send_payload(
-        workspace=str(workspace), team_name="team-x", sender_agent="impl",
-        sender_pane="%1", target_agent="flow.run", body="done", artifact="",
-        reply_to="",
-    )
-
-    assert payload["ok"] is True and payload["mailbox"] is True
-    (event,) = bus.read_all_events(workspace)
-    assert event["to"] == "flow.run"

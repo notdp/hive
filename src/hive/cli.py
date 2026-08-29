@@ -3081,11 +3081,6 @@ def send(to_agent: str, body: str, artifact: str):
     if to_agent.startswith("ccd."):
         _send_to_ccd_session(to_agent[4:], body, artifact)
         return
-    if to_agent in ("flow", "flow.run"):
-        # The flow runner's mailbox: an address kind like `ccd.`, not a
-        # member. Canonical form travels on the bus; the legacy bare name
-        # stays accepted.
-        to_agent = "flow.run"
     # A dot splits the address only when the prefix names an existing team
     # (`honey.worker`); otherwise the address stays whole for qualified-name
     # resolution across pane tags.
