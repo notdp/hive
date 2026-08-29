@@ -195,8 +195,13 @@ def test_spawn_passes_extra_env(monkeypatch):
     assert "/tmp/cr-test" in startup_cmd
     assert "HIVE_TEAM_NAME=" not in startup_cmd
     assert "HIVE_AGENT_NAME=" not in startup_cmd
-    # The engine runs outside the pane, so the env must reach the bg spawn.
-    assert state["spawns"][0]["extra_env"] == {"CR_WORKSPACE": "/tmp/cr-test"}
+    # The engine runs outside the pane, so the env must reach the bg spawn,
+    # alongside the member identity its tools resolve without a pane.
+    assert state["spawns"][0]["extra_env"] == {
+        "HIVE_TEAM": "t",
+        "HIVE_MEMBER": "w1",
+        "CR_WORKSPACE": "/tmp/cr-test",
+    }
 
 
 def test_spawn_without_extra_env_does_not_export_default_hive_vars(monkeypatch):
