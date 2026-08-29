@@ -91,3 +91,32 @@ def test_ccd_join_without_a_session_channel_fails(runner, configure_hive_home, m
 
     assert result.exit_code != 0
     assert "session channel" in result.output
+
+
+def test_headless_create_seats_the_creator_as_orch(runner, configure_hive_home, monkeypatch):
+    from hive import registry
+
+    _outside(configure_hive_home, monkeypatch)
+    _self_session(monkeypatch, session_id="ccd-sid-9")
+
+    result = runner.invoke(cli, ["create", "honey"])
+
+    assert result.exit_code == 0, result.output
+    assert "You are honey.orch" in result.output
+    rows = registry.load("honey")["members"]
+    assert [(m["name"], m["cli"], m["sessionId"]) for m in rows] == [("orch", "claude", "ccd-sid-9")]
+
+
+def test_headless_create_leaves_a_foreign_member_as_guest(runner, configure_hive_home, monkeypatch):
+    from hive import registry
+
+    _outside(configure_hive_home, monkeypatch)
+    _self_session(monkeypatch, session_id="ccd-sid-9")
+    registry.record_team(team="wasp", workspace="", created_at="1.0")
+    assert runner.invoke(cli, ["join", "wasp", "--as", "scout"]).exit_code == 0
+
+    result = runner.invoke(cli, ["create", "honey"])
+
+    assert result.exit_code == 0, result.output
+    assert "already wasp.scout" in result.output and "guest" in result.output
+    assert registry.load("honey")["members"] == []

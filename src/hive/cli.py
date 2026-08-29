@@ -1936,10 +1936,27 @@ def _create_headless_team(
     if registry.load(name) is not None:
         _fail(f"team '{name}' already exists (hive delete removes it)")
     ws_str = str(Path(workspace).expanduser()) if workspace else ""
+    # The creator is the orch when it is an agent: a Claude session outside
+    # tmux joins its own roster, same as an agent pane does inside tmux.
+    # A session already on another team's roster stays a guest here.
+    orch_member = None
+    from .adapters import claude_sessions
+
+    creator = claude_sessions.self_session()
+    if creator is not None and creator.session_id:
+        if _registry_member_for_session(creator.session_id) is None:
+            orch_member = {
+                "name": LEAD_AGENT_NAME,
+                "cli": "claude",
+                "model": "",
+                "sessionId": creator.session_id,
+                "cwd": os.getcwd(),
+            }
     registry.record_team(
         team=name,
         workspace=ws_str,
         created_at=str(time.time()),
+        members=[orch_member] if orch_member else [],
     )
     if ws_str:
         ws = Path(ws_str)
@@ -1950,6 +1967,15 @@ def _create_headless_team(
             (ws / "state" / key).write_text(value)
     _remember_context(team=name, workspace=ws_str, agent=LEAD_AGENT_NAME)
     click.echo(f"Team '{name}' created (headless — `hive attach {name}` renders it).")
+    if orch_member is not None:
+        click.echo(f"You are {name}.{LEAD_AGENT_NAME}.")
+    elif creator is not None and creator.session_id:
+        existing = _registry_member_for_session(creator.session_id)
+        if existing is not None:
+            click.echo(
+                f"You are already {existing[0]}.{existing[1]} — orchestrating "
+                f"'{name}' as a guest."
+            )
     if ws_str:
         click.echo(f"Workspace initialized: {ws_str}")
 

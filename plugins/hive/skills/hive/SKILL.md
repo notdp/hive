@@ -12,7 +12,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 ```bash
 hive team            # 名册 + runtime：你是谁、队里有谁、各自什么状态
 hive send <addr> "<内容>"   # 唯一投递动词。成功零输出，自动锚线程
-hive create [name]   # 建团,name 缺省池名。tmux 外：headless 团；tmux 内 agent pane：当前 pane 立为 orch；tmux 内 shell pane：当前窗口绑上新团（无 orch）
+hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外：headless 团（你以 <team>.orch 入册）；tmux 内 agent pane：当前 pane 立为 orch；shell 建的团无 orch
 hive join <team>     # 入队。tmux 外：当前 Claude session 进名册成为正式成员；tmux 内：当前 pane 注册进窗口的 team
 hive spawn <name>    # 造新成员。tmux 外（或团没有窗口）spawn 出 headless 成员：引擎直起、无 pane，投递、回报、kill 全都照常
 hive attach <team>   # 渲染。没有窗口的团长出布局完好的窗口；有窗口就跳过去
@@ -165,7 +165,7 @@ kill 是派发人的动词，你不用自己退场：验收通过后派发人会
 
 你要发起协作，你就是这个 team 的 **orch**：拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。没有仪式：orch 只是先开始派活的那个参与者。
 
-启动：还没有 team 就按开头动词表 `hive create`。tmux 外建的是 headless 团，此时你自己不在名册里，以 guest 身份照常和成员收发——你的回信地址就是 `ccd.<你的 session name>`，成员照抄你消息的 from 就能回到你；想进名册（被寻址、被派活）就 `hive join <name>`。成员的回信会注入你的对话并唤醒你，spawn/派发之后照常结束 turn 等推送。然后 `hive team` 确认 `self`，开始拆解。
+启动：还没有 team 就按开头动词表 `hive create`——建团者就是 orch，tmux 内外一样：你以 `<team>.orch` 进名册，成员回你直接寻址 orch（唯一例外：你已是别团成员时，本团以 guest 身份编排，回信地址是 `ccd.<你的 session name>`，成员照抄 from 就能回到你）。成员的回信会注入你的对话并唤醒你，spawn/派发之后照常结束 turn 等推送。然后 `hive team` 确认 `self`，开始拆解。
 
 ### 成员名就是任务标签
 
