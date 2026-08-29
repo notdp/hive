@@ -282,7 +282,13 @@ def bg_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """
     env = {
         k: v for k, v in os.environ.items()
-        if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))
+        if not (
+            k.startswith("CLAUDE")
+            or k.startswith("ANTHROPIC")
+            # the spawner may be another member's engine: its identity must
+            # not leak into this job (members get their own via extra)
+            or k in ("HIVE_TEAM", "HIVE_MEMBER")
+        )
     }
     config = _config_dir()
     if config != Path(os.path.expanduser("~/.claude")):

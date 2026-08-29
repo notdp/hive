@@ -2003,39 +2003,66 @@ def _serve_requests(
     return not _SHUTDOWN.is_set()
 
 
+_GROK_REAP_GRACE_SECONDS = 120.0
+
+
 def _cleanup_dead_daemons(workspace: str) -> None:
-    """Reap per-pane grok leader daemons whose pane died.
+    """Reap grok leader daemons that nothing owns any more.
 
-    The leader is started at spawn time with ``start_new_session`` so it
-    outlives the short-lived CLI process; the long-lived sidecar owns cleanup.
-    Scan the on-disk sockets and, for any whose pane is gone, kill the daemon
-    and remove its socket + pidfile. Independent of team bindings, so it also
-    reaps orphans from crashed spawns. (Codex has no per-pane daemon any more
-    — its shared daemon is machine-level state the supervisor keeps alive,
-    never reaps.)
+    Two lifecycles, told apart by key shape:
 
-    Killing a leader takes its attached TUI (and pane) down with it, so every
-    reap is logged; ``is_pane_alive`` only reports dead panes from a successful
-    tmux listing, never from a transient tmux failure.
+    - ``m-<team>.<member>`` — registry-driven: the engine belongs to a team
+      member, so a dead pane means nothing (the display closed). Reap only
+      when the team's registry file is *valid and lists no such member*
+      (kill/delete removed it), or the file is *missing entirely* (the team
+      was deleted/archived). An unreadable entry is never grounds to kill a
+      daemon, and a young pidfile gets a grace window so a spawn's
+      registration in flight cannot be raced.
+    - ``p<slug>`` — a raw ``hive grok`` pane outside any team keeps the old
+      pane lifecycle: pane gone, daemon reaped.
+
+    Killing a leader takes its attached TUI down with it, so every reap is
+    logged; ``is_pane_alive`` only reports dead panes from a successful tmux
+    listing, never from a transient tmux failure.
     """
-    from . import notify_debug, tmux
+    from . import notify_debug, registry, tmux
     from .adapters import grok_leader
 
-    for pane in grok_leader.list_daemon_panes():
-        if tmux.is_pane_alive(pane):
-            continue
-        try:
-            pid: int | None = int(
-                grok_leader.pane_pidfile_path(pane).read_text().strip()
-            )
-        except (OSError, ValueError):
-            pid = None
-        notify_debug.emit(workspace, "daemon.reap", pane=pane, pid=pid)
+    for key in grok_leader.list_daemon_keys():
+        binding = grok_leader.member_from_key(key)
+        if binding is None:
+            slug = key[1:]
+            if not slug.isdigit():
+                continue
+            pane = f"%{slug}"
+            if tmux.is_pane_alive(pane):
+                continue
+        else:
+            team, member = binding
+            path = registry.entry_path(team)
+            if path is None:
+                continue
+            if path.is_file():
+                entry = registry.load(team)
+                if entry is None:
+                    continue  # unreadable is not proof of absence
+                if any(m.get("name") == member for m in entry.get("members", [])):
+                    continue
+            # Missing registry file, or a valid roster without this member:
+            # the engine is an orphan — but never a newborn one.
+            try:
+                pidfile = grok_leader.socket_path_for_key(key).with_suffix(".pid")
+                age = time.time() - pidfile.stat().st_mtime
+            except OSError:
+                continue  # no pidfile yet: daemon mid-start
+            if age < _GROK_REAP_GRACE_SECONDS:
+                continue
+        notify_debug.emit(workspace, "daemon.reap", key=key)
         # Drop the pool's client BEFORE killing the daemon: a grok stdio
         # client that outlives its leader auto-spawns a replacement on the
         # same socket, resurrecting an orphan mid-reap.
-        grok_leader.pool().drop(pane)
-        grok_leader.kill_pane_daemon(pane)
+        grok_leader.pool().drop_key(key)
+        grok_leader.kill_daemon_key(key)
 
 
 # One send_keys attempt per pane per cooldown window, so a slow-starting codex

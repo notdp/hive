@@ -147,15 +147,41 @@ class SectionedHelpGroup(click.Group):
                 formatter.write_paragraph()
 
 
+def _discover_env_binding() -> dict[str, str]:
+    """Member identity from the engine's own env (HIVE_TEAM / HIVE_MEMBER).
+
+    Engines carry their member identity in env (claude bg spawn, grok leader
+    daemon), so a tool subprocess resolves who it is without any pane —
+    the fallback lane when no pane binding exists (headless member, dead
+    display). Workspace comes from the team's registry entry.
+    """
+    team = os.environ.get("HIVE_TEAM", "").strip()
+    agent = os.environ.get("HIVE_MEMBER", "").strip()
+    if not team or not agent:
+        return {}
+    from . import registry
+
+    entry = registry.load(team)
+    return {
+        "team": team,
+        "workspace": str(entry.get("workspace") or "") if entry else "",
+        "agent": agent,
+        "role": "agent",
+        "pane": "",
+        "tmuxSession": "",
+        "tmuxWindow": "",
+    }
+
+
 def _discover_tmux_binding() -> dict[str, str]:
     if not tmux.is_inside_tmux():
-        return {}
+        return _discover_env_binding()
     current_pane = tmux.get_current_pane_id()
     if not current_pane:
-        return {}
+        return _discover_env_binding()
     team_name = tmux.get_pane_option(current_pane, "hive-team")
     if not team_name:
-        return {}
+        return _discover_env_binding()
     agent_name = tmux.get_pane_option(current_pane, "hive-agent") or ""
     role = tmux.get_pane_option(current_pane, "hive-role") or ""
     if not agent_name and not role:

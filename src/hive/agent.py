@@ -344,12 +344,15 @@ class Agent:
                     extra_args.extend(["--model", model])
                 if session_id:  # session_mode == "fork": branch a copy
                     extra_args.extend(["-r", session_id, "--fork-session"])
+                # The engine's env carries the member identity so its tool
+                # subprocesses can resolve who they are without a pane.
+                identity_env = {"HIVE_TEAM": team_name, "HIVE_MEMBER": name}
                 claude_job_id = claude_bg.spawn_job(
                     cwd=cwd,
                     name=f"{team_name}.{name}",
                     prompt=initial_prompt,
                     extra_args=extra_args,
-                    extra_env=extra_env,
+                    extra_env={**identity_env, **(extra_env or {})},
                 )
                 if not claude_job_id:
                     _undo_pane_side_effects()
@@ -695,6 +698,16 @@ class Agent:
             if job_id:
                 claude_bg.stop_job(job_id)
             claude_bg.clear_pane_job(self.pane_id)
+        elif self.cli == "grok":
+            # The member's leader daemon is the engine; a kill removes the
+            # member, so the engine goes with it — deterministically, not on
+            # the sidecar's next orphan sweep. Resolve while the pane tags
+            # still exist.
+            from .adapters import grok_leader
+
+            key = grok_leader.resolve_pane_key(self.pane_id)
+            grok_leader.pool().drop_key(key)
+            grok_leader.kill_daemon_key(key)
         tmux.kill_pane(self.pane_id)
 
     # --- Serialization ---

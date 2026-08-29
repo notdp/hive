@@ -12,30 +12,34 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def reap_env(monkeypatch, tmp_path):
-    """One grok leader pane on disk; records emit/drop/kill call order."""
+    """Daemon keys on disk; records emit/drop/kill call order."""
     calls: list[tuple] = []
-    pidfile = tmp_path / "p4.pid"
+    state = {"keys": [], "pidfiles": {}}
 
     class _Pool:
-        def drop(self, pane: str) -> None:
-            calls.append(("drop", pane))
+        def drop_key(self, key: str) -> None:
+            calls.append(("drop", key))
 
     module = "hive.adapters.grok_leader"
-    monkeypatch.setattr(f"{module}.list_daemon_panes", lambda: ["%4"])
-    monkeypatch.setattr(f"{module}.pane_pidfile_path", lambda pane: pidfile)
+    monkeypatch.setattr(f"{module}.list_daemon_keys", lambda: list(state["keys"]))
     monkeypatch.setattr(
-        f"{module}.kill_pane_daemon", lambda pane: calls.append(("kill", pane))
+        f"{module}.socket_path_for_key", lambda key: tmp_path / f"{key}.sock"
+    )
+    monkeypatch.setattr(
+        f"{module}.kill_daemon_key", lambda key: calls.append(("kill", key))
     )
     monkeypatch.setattr(f"{module}.pool", lambda: _Pool())
     monkeypatch.setattr(
         "hive.notify_debug.emit",
         lambda workspace, event, **fields: calls.append(("emit", workspace, event, fields)),
     )
-    return calls, pidfile
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / ".hive"))
+    return calls, state, tmp_path
 
 
 def test_cleanup_skips_live_pane(monkeypatch, reap_env):
-    calls, _ = reap_env
+    calls, state, _ = reap_env
+    state["keys"] = ["p4"]
     monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: True)
 
     sidecar._cleanup_dead_daemons("/tmp/ws")
@@ -44,30 +48,95 @@ def test_cleanup_skips_live_pane(monkeypatch, reap_env):
 
 
 def test_cleanup_reaps_dead_pane_and_logs_before_kill(monkeypatch, reap_env):
-    calls, pidfile = reap_env
+    calls, state, _ = reap_env
+    state["keys"] = ["p4"]
+    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: False)
+
+    sidecar._cleanup_dead_daemons("/tmp/ws")
+
+    assert calls == [
+        ("emit", "/tmp/ws", "daemon.reap", {"key": "p4"}),
+        ("drop", "p4"),  # dropped first so a dying grok stdio client
+        ("kill", "p4"),  # cannot auto-spawn a replacement leader
+    ]
+
+
+def _write_pidfile(tmp_path, key, age_seconds):
+    import os
+    import time as _time
+
+    pidfile = tmp_path / f"{key}.pid"
     pidfile.write_text("12345")
-    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: False)
+    stamp = _time.time() - age_seconds
+    os.utime(pidfile, (stamp, stamp))
+    return pidfile
+
+
+def test_cleanup_member_daemon_reaped_when_registry_lists_no_such_member(reap_env):
+    calls, state, tmp_path = reap_env
+    state["keys"] = ["m-honey.rex"]
+    _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
+    from hive import registry
+
+    assert registry.record_team(
+        team="honey", workspace="/ws", created_at="1.0",
+        members=[{"name": "other", "cli": "grok"}],
+    ) == "written"
 
     sidecar._cleanup_dead_daemons("/tmp/ws")
 
     assert calls == [
-        ("emit", "/tmp/ws", "daemon.reap", {"pane": "%4", "pid": 12345}),
-        ("drop", "%4"),  # dropped first so a dying grok stdio client
-        ("kill", "%4"),  # cannot auto-spawn a replacement leader
+        ("emit", "/tmp/ws", "daemon.reap", {"key": "m-honey.rex"}),
+        ("drop", "m-honey.rex"),
+        ("kill", "m-honey.rex"),
     ]
 
 
-def test_cleanup_logs_reap_without_readable_pidfile(monkeypatch, reap_env):
-    calls, _ = reap_env
-    monkeypatch.setattr("hive.tmux.is_pane_alive", lambda pane: False)
+def test_cleanup_member_daemon_kept_while_registry_lists_it(reap_env):
+    calls, state, tmp_path = reap_env
+    state["keys"] = ["m-honey.rex"]
+    _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
+    from hive import registry
+
+    assert registry.record_team(
+        team="honey", workspace="/ws", created_at="1.0",
+        members=[{"name": "rex", "cli": "grok"}],
+    ) == "written"
 
     sidecar._cleanup_dead_daemons("/tmp/ws")
 
-    assert calls == [
-        ("emit", "/tmp/ws", "daemon.reap", {"pane": "%4", "pid": None}),
-        ("drop", "%4"),
-        ("kill", "%4"),
-    ]
+    assert calls == []
+
+
+def test_cleanup_member_daemon_survives_unreadable_registry(reap_env):
+    """A corrupt entry is not proof of absence — never reap on a bad read."""
+    calls, state, tmp_path = reap_env
+    state["keys"] = ["m-honey.rex"]
+    _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
+    from hive import registry
+
+    path = registry.entry_path("honey")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+
+    sidecar._cleanup_dead_daemons("/tmp/ws")
+
+    assert calls == []
+
+
+def test_cleanup_member_daemon_missing_registry_reaps_after_grace(reap_env):
+    calls, state, tmp_path = reap_env
+    state["keys"] = ["m-honey.rex"]
+
+    # newborn: inside the grace window, spawn registration may be in flight
+    _write_pidfile(tmp_path, "m-honey.rex", age_seconds=5)
+    sidecar._cleanup_dead_daemons("/tmp/ws")
+    assert calls == []
+
+    # past the grace window with no registry entry: orphan
+    _write_pidfile(tmp_path, "m-honey.rex", age_seconds=999)
+    sidecar._cleanup_dead_daemons("/tmp/ws")
+    assert ("kill", "m-honey.rex") in calls
 
 
 # --- codex shared-daemon supervisor -----------------------------------------
