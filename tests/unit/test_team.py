@@ -521,3 +521,15 @@ def test_list_teams_unions_registry_and_windows(configure_hive_home, monkeypatch
     assert teams["headlessteam"]["workspace"] == "/tmp/ws-h"
     assert teams["windowed"]["tmuxWindow"] == "dev:0"
     assert teams["windowed"]["workspace"] == "/tmp/ws-w"
+
+
+def test_create_refuses_a_registry_claimed_name(configure_hive_home, monkeypatch):
+    """The registry is the name authority: a headless team owns its name."""
+    configure_hive_home()
+    from hive import registry
+
+    assert registry.record_team(
+        team="team-h", workspace="/tmp/ws", created_at="1.0",
+    ) == "written"
+    with pytest.raises(ValueError, match="already exists in the registry"):
+        Team.create_for_window("team-h", window_target="dev:0")

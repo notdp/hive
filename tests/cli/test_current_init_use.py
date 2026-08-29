@@ -544,11 +544,12 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
     assert not team_dir.exists()
 
 
-def test_init_reusing_a_pool_name_registers_fresh_without_inherited_sessions(
+def test_init_never_picks_a_registry_claimed_pool_name(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
-    # a fresh team that picks a recycled pool name must not inherit the dead
-    # predecessor's roster or sessions
+    # The registry is the name authority: a headless/detached team owns its
+    # name until `hive delete` — init's pool pick must skip it, and the
+    # existing entry (engines may still run behind it) stays untouched.
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -567,22 +568,21 @@ def test_init_reusing_a_pool_name_registers_fresh_without_inherited_sessions(
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws")
 
     from hive import registry
+    from hive.cli import TEAM_NAME_POOL
 
+    first_pool_name = TEAM_NAME_POOL[0]
     assert registry.record_team(
-        team="honey", workspace="/tmp/hive-dev-w9", created_at="100.0",
-        members=[{"name": "worker", "cli": "claude", "model": "m", "sessionId": "DEAD-SID", "cwd": "/repo"}],
+        team=first_pool_name, workspace="/tmp/hive-old", created_at="100.0",
+        members=[{"name": "worker", "cli": "grok", "sessionId": "LIVE-SID", "cwd": "/repo"}],
     ) == "written"
+    before = registry.load(first_pool_name)
 
     result = runner.invoke(cli, ["init"])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["team"] == "honey"
-    # the new instance registers fresh: its own createdAt, no inherited session
-    cur = registry.load("honey")
-    assert cur is not None and cur["createdAt"] != "100.0"
-    assert "DEAD-SID" not in {m.get("sessionId") for m in cur["members"]}
-    assert {m["name"] for m in cur["members"]} == {"orch"}
-
+    picked = json.loads(result.output)["team"]
+    assert picked != first_pool_name
+    assert registry.load(first_pool_name) == before  # untouched
 
 def test_init_skips_pool_names_claimed_by_live_teams_and_squads(
     runner, configure_hive_home, monkeypatch, tmp_path,

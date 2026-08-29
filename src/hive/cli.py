@@ -445,8 +445,15 @@ def _pick_team_name(session_name: str, window_id: str, window_index: str = "0") 
     lookup). `_claim_team_name` stays the final anti-clobber; identity
     itself binds to the window via tags, never to the name's shape.
     """
+    from . import registry
+
     used = {p.team for p in tmux.list_panes_all() if p.team}
     used |= _claimed_group_namespaces()
+    # The registry is the name authority: a headless or detached team owns
+    # its name until `hive delete` — a pool pick must never clobber it.
+    used |= {
+        str(e.get("team")) for e in registry.list_entries() if e.get("team")
+    }
     for candidate in TEAM_NAME_POOL:
         if candidate not in used:
             return candidate

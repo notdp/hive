@@ -91,6 +91,16 @@ class Team:
         error = validate_team_name(name)
         if error:
             raise ValueError(error)
+        from . import registry
+
+        if registry.load(name) is not None:
+            # The registry is the name authority: a headless or detached
+            # team owns its name (its engines may still be running) until
+            # `hive delete` releases it. Never silently clobbered.
+            raise ValueError(
+                f"team '{name}' already exists in the registry "
+                f"(hive delete {name} releases the name)"
+            )
 
         existing_team = tmux.get_window_option(window_target, "hive-team") if window_target else None
         if existing_team:
