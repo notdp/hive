@@ -163,7 +163,7 @@ def test_spawn_loads_specified_skill(monkeypatch):
     )
 
     # The skill activation rides the bg spawn's prompt, not the pane command.
-    assert state["spawns"][0]["prompt"] == "/demo-review"
+    assert state["spawns"][0]["prompt"] == "/demo-review t"
     assert not any("hive teammate" in c for c in calls)
 
 
@@ -229,7 +229,7 @@ def test_spawn_hive_loads_skill_and_sends_prompt(monkeypatch):
     )
 
     # Skill activation + user prompt ride the bg spawn's positional prompt.
-    assert state["spawns"][0]["prompt"] == "/hive\n\nPlease check your inbox."
+    assert state["spawns"][0]["prompt"] == "/hive t\n\nPlease check your inbox."
     assert state["spawns"][0]["name"] == "t.w1"
 
 
