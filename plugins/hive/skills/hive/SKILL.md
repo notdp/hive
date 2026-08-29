@@ -12,7 +12,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 ```bash
 hive team            # 名册 + runtime：你是谁、队里有谁、各自什么状态
 hive send <addr> "<内容>"   # 唯一投递动词。成功零输出，自动锚线程
-hive create [name]   # 建团。tmux 外：headless 团（name 必填）；tmux 内 agent pane：当前 pane 立为 orch（name 缺省池名）；tmux 内 shell pane：当前窗口绑上新团（无 orch）
+hive create [name]   # 建团,name 缺省池名。tmux 外：headless 团；tmux 内 agent pane：当前 pane 立为 orch；tmux 内 shell pane：当前窗口绑上新团（无 orch）
 hive join <team>     # 入队。tmux 外：当前 Claude session 进名册成为正式成员；tmux 内：当前 pane 注册进窗口的 team
 hive spawn <name>    # 造新成员。tmux 外（或团没有窗口）spawn 出 headless 成员：引擎直起、无 pane，投递、回报、kill 全都照常
 hive attach <team>   # 渲染。没有窗口的团长出布局完好的窗口；有窗口就跳过去
@@ -27,9 +27,7 @@ hive ls              # 全部 team（含没有窗口的）
 
 1. **你已经在队里**（`hive team` 返回的 `self` 有值，或你出生时就带着队籍）：参数就是对你队籍的确认，直接进「你是成员」一章，从「出生」开始。参数与所在队不符时，回一句说明即可，不换队。
 2. **你不在任何队，参数给了 team 名**（`/hive:hive wasp`）：`hive join wasp` 入队；报 not found 就 `hive create wasp` 建团——同一个入口幂等，建完你就是发起人，读「你要当派发人时」。
-3. **你不在任何队，无参数**：
-   - tmux 内 agent pane：`hive create`（当前 pane 立为 orch），然后按 human 的需求开始编排。
-   - tmux 外：`hive ls` 看现有团，用阻塞式提问（claude `AskUserQuestion`）问 human 是建新团还是加入哪个，再走 create / join。
+3. **你不在任何队，无参数**：`hive create` 建新团（名字自动从池里挑）——tmux 内当前 pane 立为 orch，tmux 外是 headless 团，语义同一个。想加入已有团就带参数说队名，无参永远是要新团。
 
 处境只有两种，全文按此分章：**被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）读「你是成员」；**要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）成员章就是你的底座，再读「你要当派发人时」。
 

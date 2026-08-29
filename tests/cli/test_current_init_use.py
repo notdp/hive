@@ -692,13 +692,20 @@ def test_create_idempotent_rerun_from_bound_worker_pane(runner, configure_hive_h
     assert breaks == []                   # no break-out
 
 
-def test_create_outside_tmux_needs_a_name(runner, configure_hive_home, monkeypatch):
+def test_create_outside_tmux_picks_a_pool_name(runner, configure_hive_home, monkeypatch):
+    from hive import registry
+
     configure_hive_home(tmux_inside=False)
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: False)
+    monkeypatch.setattr("hive.cli.tmux.list_panes_all", lambda: [])
 
     result = runner.invoke(cli, ["create"])
-    assert result.exit_code != 0
-    assert "needs a name" in result.output
+    assert result.exit_code == 0, result.output
+    entries = registry.list_entries()
+    assert len(entries) == 1
+    from hive.cli import TEAM_NAME_POOL
+
+    assert entries[0]["team"] in TEAM_NAME_POOL
 
 
 def test_legacy_commands_removed(runner):
