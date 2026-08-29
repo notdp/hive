@@ -69,13 +69,6 @@ class Team:
         """
         if not tmux.is_inside_tmux():
             raise ValueError(_TMUX_REQUIRED_MESSAGE)
-        from .resume import is_archive_handle
-
-        if is_archive_handle(name):
-            raise ValueError(
-                f"team name '{name}' is invalid: the '.prev' suffix is reserved "
-                "for resume snapshot archives"
-            )
         if name == "ccd":
             raise ValueError(
                 f"team name '{name}' is invalid: 'ccd' is the reserved send "
@@ -133,18 +126,18 @@ class Team:
     def load(cls, name: str, *, prefer_pane: str = "") -> Team:
         """Load a team: registry entry for identity and roster, tmux for display.
 
-        The registry (resume store) is the authoritative record — a team with
-        an entry loads even when no tmux window renders it (members then have
-        no pane binding). The tmux window, when one claims the team, binds
-        panes onto roster members and contributes display-only metadata; a
-        pane-tagged member missing from the registry still loads (union), so
-        a team predating the registry writers keeps working.
+        The registry is the authoritative record — a team with an entry loads
+        even when no tmux window renders it (members then have no pane
+        binding). The tmux window, when one claims the team, binds panes onto
+        roster members and contributes display-only metadata; a pane-tagged
+        member missing from the registry still loads (union), so a team
+        predating the registry writers keeps working.
         When *prefer_pane* is given, its window is preferred when multiple
         windows claim the same team name.
         """
-        from . import resume as registry
+        from . import registry
 
-        snap = registry.load_snapshot(name)
+        snap = registry.load(name)
         hint = prefer_pane or tmux.get_current_pane_id() or ""
         window_target, window_data = _find_team_window(name, prefer_pane=hint)
         if snap is None and not window_target:
@@ -502,18 +495,18 @@ def list_teams() -> list[dict[str, str]]:
     A registry entry lists its team whether or not a window renders it; a
     window row fills in (or contributes teams predating the registry).
     """
-    from . import resume as registry
+    from . import registry
 
     by_name: dict[str, dict[str, str]] = {}
-    for snap in registry.list_snapshots():
-        handle = str(snap.get("handle") or "")
-        if snap.get("corrupt") or not handle or registry.is_archive_handle(handle):
+    for entry in registry.list_entries():
+        team = str(entry.get("team") or "")
+        if entry.get("corrupt") or not team:
             continue
-        by_name[str(snap.get("team") or handle)] = {
-            "name": str(snap.get("team") or handle),
+        by_name[team] = {
+            "name": team,
             "tmuxWindow": "",
             "tmuxSession": "",
-            "workspace": str(snap.get("workspace") or ""),
+            "workspace": str(entry.get("workspace") or ""),
         }
 
     r = tmux._run([

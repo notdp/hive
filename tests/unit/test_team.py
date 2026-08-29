@@ -433,10 +433,10 @@ def test_team_load_registry_only_team_loads_without_any_window(configure_hive_ho
     come back pane-less with their recorded engine identity (was
     FileNotFoundError when tmux was the truth layer)."""
     configure_hive_home()
-    from hive import resume
+    from hive import registry
 
-    assert resume.record_team(
-        handle="ghostteam", workspace="/tmp/ws-g", created_at="111.0", now="t0",
+    assert registry.record_team(
+        team="ghostteam", workspace="/tmp/ws-g", created_at="111.0",
         members=[
             {"name": "worker", "cli": "grok", "model": "grok-4.6", "sessionId": "sid-g", "cwd": "/repo"},
         ],
@@ -469,11 +469,11 @@ def test_team_load_pane_binds_onto_registry_roster(configure_hive_home, monkeypa
     for pane-derived fields, the recorded engine identity survives a wiped
     pane record), and a registry row without a pane stays as a member."""
     configure_hive_home()
-    from hive import resume
+    from hive import registry
     from hive.tmux import PaneInfo
 
-    assert resume.record_team(
-        handle="team-u", workspace="/tmp/ws-u", created_at="5.0", now="t0",
+    assert registry.record_team(
+        team="team-u", workspace="/tmp/ws-u", created_at="5.0",
         members=[
             {"name": "alive", "cli": "codex", "model": "m0", "sessionId": "sid-a", "cwd": "/old"},
             {"name": "headless", "cli": "claude", "sessionId": "sid-h", "cwd": "/repo"},
@@ -504,11 +504,11 @@ def test_team_load_pane_binds_onto_registry_roster(configure_hive_home, monkeypa
 
 def test_list_teams_unions_registry_and_windows(configure_hive_home, monkeypatch):
     configure_hive_home()
-    from hive import resume
+    from hive import registry
     from types import SimpleNamespace
 
-    assert resume.record_team(
-        handle="headlessteam", workspace="/tmp/ws-h", created_at="1.0", now="t0",
+    assert registry.record_team(
+        team="headlessteam", workspace="/tmp/ws-h", created_at="1.0",
     ) == "written"
     monkeypatch.setattr(
         "hive.team.tmux._run",

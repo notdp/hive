@@ -523,11 +523,11 @@ def test_team_gc_removes_leftover_team_dir_for_dead_team(runner, configure_hive_
     assert not team_dir.exists()
 
 
-def test_init_reusing_a_pool_name_archives_the_dead_predecessors_snapshot(
+def test_init_reusing_a_pool_name_registers_fresh_without_inherited_sessions(
     runner, configure_hive_home, monkeypatch, tmp_path,
 ):
     # a fresh team that picks a recycled pool name must not inherit the dead
-    # team's resume snapshot: resume-hint would hand out a foreign sessionId
+    # predecessor's roster or sessions
     configure_hive_home()
     monkeypatch.setattr("hive.cli.tmux.is_inside_tmux", lambda: True)
     monkeypatch.setattr("hive.cli.tmux.get_current_session_name", lambda: "dev")
@@ -545,27 +545,22 @@ def test_init_reusing_a_pool_name_archives_the_dead_predecessors_snapshot(
     monkeypatch.setattr("hive.cli.tmux.get_pane_window_target", lambda _pane: "dev:2")
     monkeypatch.setattr("hive.cli._default_auto_workspace_path", lambda *_a, **_k: tmp_path / "ws")
 
-    from hive import resume
+    from hive import registry
 
-    dead = resume.build_snapshot(
-        handle="honey", team="honey", group="duo", window_name="hive",
-        workspace="/tmp/hive-dev-w9", repo_cwd="/repo", branch="main",
-        created_at="100.0",
+    assert registry.record_team(
+        team="honey", workspace="/tmp/hive-dev-w9", created_at="100.0",
         members=[{"name": "worker", "cli": "claude", "model": "m", "sessionId": "DEAD-SID", "cwd": "/repo"}],
-    )
-    assert resume.save_snapshot(dead, now="t0") == "written"
+    ) == "written"
 
     result = runner.invoke(cli, ["init"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["team"] == "honey"
     # the new instance registers fresh: its own createdAt, no inherited session
-    cur = resume.load_snapshot("honey")
+    cur = registry.load("honey")
     assert cur is not None and cur["createdAt"] != "100.0"
     assert "DEAD-SID" not in {m.get("sessionId") for m in cur["members"]}
     assert {m["name"] for m in cur["members"]} == {"orch"}
-    prev = resume.load_snapshot("honey.prev")
-    assert prev is not None and prev["members"][0]["sessionId"] == "DEAD-SID"
 
 
 def test_init_skips_pool_names_claimed_by_live_teams_and_squads(

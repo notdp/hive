@@ -2247,18 +2247,16 @@ def _claude_view_tick(
             )
 
 
-def _write_resume_snapshot(workspace: str, team: str) -> None:
+def _write_registry_backfill(workspace: str, team: str) -> None:
     """Backfill the team's registry entry from live observation.
 
-    The sidecar's write lane refreshes fields of members the registry
-    already knows (model switch, cwd change, a sessionId learned late) and
-    updates display-derived context (window name, PR stamp, display cache).
-    It never adds or removes a roster name — membership belongs to the CLI
-    writers, and the whole read-merge-write runs under the store lock so an
+    Refreshes fields of members the registry already knows (model switch,
+    cwd change, a sessionId learned late) and the display cache. It never
+    adds or removes a roster name — membership belongs to the CLI writers,
+    and the whole read-merge-write runs under the store lock so an
     observation racing a `hive kill` cannot resurrect the killed member.
     """
-    from . import resume as resume_store
-    from . import tmux
+    from . import registry
     from .agent_cli import resolve_model_for_pane
     from .team import Team
 
@@ -2273,10 +2271,10 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
         if not agent.pane_id:
             continue  # registry-only member: nothing on screen to observe
         session_id = _fresh_snapshot_session_id(agent.pane_id) or (agent.session_id or "")
-        if not session_id and agent.cli == "grok" and agent.pane_id:
+        if not session_id and agent.cli == "grok":
             # Daemon-family runtimes never reach the transcript-probe path
             # that feeds runtime snapshots, so a grok member's session id
-            # must come straight from its pane's leader record.
+            # must come straight from its leader record.
             from .adapters import grok_leader
             session_id = grok_leader.session_id_for_pane(agent.pane_id) or ""
         model = resolve_model_for_pane(agent.pane_id, cli_name=agent.cli, current_model="")
@@ -2288,44 +2286,13 @@ def _write_resume_snapshot(workspace: str, team: str) -> None:
             "cwd": agent.cwd,
         })
 
-    repo_cwd_fallback = next(
-        (m.get("cwd", "") for m in observed if m.get("name") == "orch" and m.get("cwd")),
-        observed[0].get("cwd", "") if observed else "",
+    registry.backfill(
+        t.name,
+        observed,
+        created_at=str(t.created_at),
+        display=t.tmux_window_id,
+        workspace=workspace,
     )
-    window_name = dict(tmux.list_window_names()).get(t.tmux_window, "") if t.tmux_window else ""
-    # The window option is current truth: cleared (hive pr clear) means
-    # empty — never resurrect the previous snapshot's PR stamp.
-    pr = (tmux.get_window_option(t.tmux_window, "hive-pr") or "") if t.tmux_window else ""
-
-    with resume_store.locked():
-        existing = resume_store.load_snapshot(t.name)
-        if existing is None or str(existing.get("createdAt")) != str(t.created_at):
-            # No entry for this instance: the CLI writer owns creation, and a
-            # different-instance entry must not be overwritten from
-            # observation (name recycling archives it at create time).
-            return
-        members = resume_store.backfill_members(
-            list(existing.get("members", [])), observed
-        )
-        repo_cwd = next(
-            (m.get("cwd", "") for m in members if m.get("name") == "orch" and m.get("cwd")),
-            members[0].get("cwd", "") if members else repo_cwd_fallback,
-        )
-        snap = resume_store.build_snapshot(
-            handle=t.name,
-            team=t.name,
-            group=t.name,
-            window_name=window_name or str(existing.get("windowName", "")),
-            workspace=workspace,
-            repo_cwd=repo_cwd,
-            repo=resume_store.repo_label(repo_cwd),
-            branch=resume_store.git_branch(repo_cwd),
-            pr=pr,
-            created_at=str(t.created_at),
-            members=members,
-            display=t.tmux_window_id,
-        )
-        resume_store.save_snapshot(snap, now=_now_iso())
 
 
 def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: str) -> None:
@@ -2380,9 +2347,9 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 # registry file does (`hive delete` archives it). Corrupt or
                 # foreign-instance entries are not "missing": never retire on
                 # a read that might be wrong.
-                from . import resume as resume_store
+                from . import registry
 
-                path = resume_store.snapshot_path(team)
+                path = registry.entry_path(team)
                 if path is not None and not path.is_file():
                     if not _is_tmux_window_alive(tmux_window_id):
                         return
@@ -2400,7 +2367,7 @@ def _sidecar_loop(workspace: str, team: str, tmux_window: str, tmux_window_id: s
                 except Exception:
                     pass
                 try:
-                    _write_resume_snapshot(workspace, team)
+                    _write_registry_backfill(workspace, team)
                 except Exception:
                     # Snapshot persistence must never take the sidecar down.
                     pass
