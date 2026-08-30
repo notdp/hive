@@ -87,6 +87,9 @@ pub struct ViewTheme {
     pub md_muted: Color,
     pub md_text: Color,
     pub link_fg: Color,
+    /// Scrollbar track and thumb (grok theme `scrollbar_bg` / `scrollbar_fg`).
+    pub scrollbar_bg: Color,
+    pub scrollbar_fg: Color,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -133,6 +136,8 @@ pub static GROKNIGHT: ViewTheme = ViewTheme {
     md_muted: rgb(108, 108, 108),
     md_text: rgb(200, 200, 200),
     link_fg: rgb(122, 166, 218),
+    scrollbar_bg: rgb(17, 17, 17),
+    scrollbar_fg: rgb(36, 36, 36),
 };
 
 /// grokday (grok-build xai-grok-pager-render/src/theme/grokday.rs) —
@@ -176,6 +181,8 @@ pub static GROKDAY: ViewTheme = ViewTheme {
     md_muted: rgb(118, 118, 118),
     md_text: rgb(68, 68, 68),
     link_fg: rgb(47, 100, 210),
+    scrollbar_bg: rgb(234, 234, 234),
+    scrollbar_fg: rgb(222, 222, 222),
 };
 
 impl ThemeKind {

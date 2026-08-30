@@ -14,6 +14,7 @@
 //! The TUI renders the blocks; the plain non-tty stream below renders the
 //! same blocks to the legacy ANSI line format.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -195,47 +196,119 @@ fn _indent_block(text: &str, first: &str, rest: &str) -> String {
     out
 }
 
-/// `<HIVE\s+from=(\S+)[^>]*>\s*(.*?)\s*</HIVE>` with DOTALL, first match.
-pub(crate) fn hive_envelope(text: &str) -> Option<(&str, &str)> {
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find("<HIVE") {
-        let after_tag = search_from + rel + 5;
-        let rest = &text[after_tag..];
-        let ws_len = rest
-            .char_indices()
-            .find(|(_, c)| !c.is_whitespace())
-            .map(|(i, _)| i)
-            .unwrap_or(rest.len());
-        if ws_len > 0 && rest[ws_len..].starts_with("from=") {
-            let g1_start = after_tag + ws_len + 5;
-            let run = &text[g1_start..];
-            let run_len = run
-                .char_indices()
-                .find(|(_, c)| c.is_whitespace())
-                .map(|(i, _)| i)
-                .unwrap_or(run.len());
-            if run_len > 0 {
-                // `(\S+)` is greedy: try the longest prefix first, backtrack
-                // until `[^>]*>` and a later `</HIVE>` can both match.
-                let prefix = &run[..run_len];
-                let mut ends: Vec<usize> = prefix.char_indices().map(|(i, _)| i).skip(1).collect();
-                ends.push(run_len);
-                for &p_len in ends.iter().rev() {
-                    let after_g1 = g1_start + p_len;
-                    if let Some(gt) = text[after_g1..].find('>') {
-                        let body_start = after_g1 + gt + 1;
-                        if let Some(close) = text[body_start..].find("</HIVE>") {
-                            let sender = &text[g1_start..after_g1];
-                            let body = text[body_start..body_start + close].trim();
-                            return Some((sender, body));
-                        }
-                    }
-                }
-            }
+/// A HIVE envelope as it reaches a claude transcript, with the tag parsed
+/// into fields instead of shown raw.
+///
+/// Four carriers exist, all of which land in the same `user` row:
+/// bare (typed straight into the pane), claude's session-inbox injection at
+/// turn start or folded in mid-turn (a lead line plus a trailing safety
+/// paragraph), and the retired `<channel …>` wrapper still sitting in old
+/// transcripts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HiveMessage {
+    pub from: Option<String>,
+    pub msg_id: Option<String>,
+    pub reply_to: Option<String>,
+    pub artifact: Option<String>,
+    pub body: String,
+    /// The envelope arrived inside claude's peer-message wrapper rather than
+    /// on its own.
+    pub injected: bool,
+    /// The wrapper said the message folded into a turn already in flight.
+    pub mid_turn: bool,
+    /// Which agent avatar this sender drew (see [`AGENT_ICONS`]). Assigned by
+    /// the parser, which is the only layer that sees every sender in a
+    /// transcript and can keep them distinct.
+    pub icon: Option<char>,
+}
+
+/// Agent avatars for HIVE senders (Nerd Font: fa-robot, oct-hubot,
+/// md-robot_happy and its outline, fa-android, fa-reddit_alien,
+/// md-space_invaders). Every sender in a transcript draws a different one
+/// until the pool runs out.
+pub const AGENT_ICONS: [char; 7] = [
+    '\u{ee0d}', '\u{f477}', '\u{f1719}', '\u{f171a}', '\u{f17b}', '\u{f281}', '\u{f0bc9}',
+];
+
+const INJECT_LEAD_MID: &str = "Another Claude session sent a message while you were working:";
+const INJECT_LEAD: &str = "Another Claude session sent a message:";
+const INJECT_TAIL: &str = "This came from another Claude session";
+
+/// Peel the retired `<channel source=… msg_id=…>` wrapper.
+fn strip_channel_wrapper(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("<channel") else {
+        return text;
+    };
+    let Some(gt) = rest.find('>') else {
+        return text;
+    };
+    let inner = rest[gt + 1..].trim();
+    inner.strip_suffix("</channel>").unwrap_or(inner).trim()
+}
+
+/// Peel claude's peer-message wrapper: the lead line above the envelope and
+/// the safety paragraph below it. Returns the core plus (injected, mid_turn).
+fn strip_injection_wrapper(text: &str) -> (&str, bool, bool) {
+    let trimmed = strip_channel_wrapper(text.trim());
+    for (lead, mid) in [(INJECT_LEAD_MID, true), (INJECT_LEAD, false)] {
+        if let Some(rest) = trimmed.strip_prefix(lead) {
+            let rest = rest.trim_start();
+            let core = match rest.find(INJECT_TAIL) {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            return (core.trim(), true, mid);
         }
-        search_from = search_from + rel + 1;
     }
-    None
+    (trimmed, false, false)
+}
+
+/// Parse a user row's text as one HIVE envelope, in any of its carriers.
+///
+/// Deliberately strict: the row must be *nothing but* the envelope once the
+/// wrapper is peeled, so prose that merely quotes `<HIVE …>` — skill docs,
+/// this repo's own specs — stays ordinary user text.
+pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
+    let (core, injected, mid_turn) = strip_injection_wrapper(text);
+    if !core.starts_with("<HIVE") {
+        return None;
+    }
+    let body_end = core.strip_suffix("</HIVE>")?.len();
+    let gt = core.find('>')?;
+    if gt >= body_end {
+        return None;
+    }
+    let tag = &core[5..gt];
+    if !tag.is_empty() && !tag.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut msg = HiveMessage {
+        from: None,
+        msg_id: None,
+        reply_to: None,
+        artifact: None,
+        body: core[gt + 1..body_end].trim().to_string(),
+        injected,
+        mid_turn,
+        icon: None,
+    };
+    for attr in tag.split_whitespace() {
+        let Some((key, value)) = attr.split_once('=') else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let slot = match key {
+            "from" => &mut msg.from,
+            "msgId" => &mut msg.msg_id,
+            "reply-to" => &mut msg.reply_to,
+            "artifact" => &mut msg.artifact,
+            _ => continue,
+        };
+        *slot = Some(value.to_string());
+    }
+    Some(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,9 +483,9 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserBlock {
     /// Raw message text; for HIVE envelopes this still holds the full
-    /// `<HIVE from=… …>…</HIVE>` source (head shown raw, then body).
+    /// source, wrapper and all — `hive` carries the parsed view.
     pub text: String,
-    pub is_hive_envelope: bool,
+    pub hive: Option<HiveMessage>,
     pub timestamp: Option<Timestamp>,
 }
 
@@ -570,6 +643,35 @@ pub struct ToolBlock {
     /// Pretty-printed full input JSON, for the block viewer.
     pub input_json: String,
     pub result: Option<ToolOutcome>,
+}
+
+/// grok's inline picture chip (xai-grok-pager-render prompt_images.rs
+/// `display_text`): path-free, numbered, and nothing else — `[Image #1]`.
+/// The payload is never read; a pasted screenshot is ~600KB of base64 and
+/// the parser holds every entry for the session.
+fn image_chip(index: usize) -> String {
+    format!("[Image #{index}]")
+}
+
+/// Replace every `image` block inside a tool result with its chip, so the
+/// payload never reaches the outcome text.
+fn summarize_images(body: &Value, next_index: &mut usize) -> Value {
+    let Some(items) = body.as_array() else {
+        return body.clone();
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("image") {
+                    *next_index += 1;
+                    Value::String(image_chip(*next_index))
+                } else {
+                    item.clone()
+                }
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -797,6 +899,10 @@ pub struct TranscriptParser {
     busy: bool,
     model: Option<String>,
     effort: Option<String>,
+    ultra: bool,
+    image_count: usize,
+    agent_icons: HashMap<String, char>,
+    queued_texts: HashSet<String>,
 }
 
 impl Default for TranscriptParser {
@@ -806,6 +912,33 @@ impl Default for TranscriptParser {
 }
 
 impl TranscriptParser {
+    /// Pick this sender's avatar: hash its name into [`AGENT_ICONS`], then
+    /// walk forward past anything a teammate already took, so a team's
+    /// members never collide until the pool is exhausted. Stable — the same
+    /// transcript always deals the same icons.
+    fn agent_icon(&mut self, sender: &str) -> char {
+        if let Some(&ch) = self.agent_icons.get(sender) {
+            return ch;
+        }
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in sender.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let start = (hash % AGENT_ICONS.len() as u64) as usize;
+        let taken: Vec<char> = self.agent_icons.values().copied().collect();
+        let mut chosen = AGENT_ICONS[start];
+        for step in 0..AGENT_ICONS.len() {
+            let cand = AGENT_ICONS[(start + step) % AGENT_ICONS.len()];
+            if !taken.contains(&cand) {
+                chosen = cand;
+                break;
+            }
+        }
+        self.agent_icons.insert(sender.to_string(), chosen);
+        chosen
+    }
+
     pub fn new() -> Self {
         TranscriptParser {
             pending: Vec::new(),
@@ -816,6 +949,10 @@ impl TranscriptParser {
             turn_has_assistant_text: false,
             tokens: 0,
             busy: false,
+            ultra: false,
+            image_count: 0,
+            agent_icons: HashMap::new(),
+            queued_texts: HashSet::new(),
             model: None,
             effort: None,
         }
@@ -834,6 +971,16 @@ impl TranscriptParser {
     }
 
     /// True between a user message / tool_use and the next assistant text.
+    /// Epoch ms of the running turn's opening message, for a live timer.
+    pub fn turn_started_ms(&self) -> Option<i64> {
+        self.turn_start_ms
+    }
+
+    /// Output tokens counted so far.
+    pub fn tokens(&self) -> i64 {
+        self.tokens
+    }
+
     pub fn busy(&self) -> bool {
         self.busy
     }
@@ -843,8 +990,51 @@ impl TranscriptParser {
         self.model.as_deref()
     }
 
-    /// Reasoning-effort level from the most recent row carrying one.
+
+    /// Elapsed seconds of the still-open turn once it has settled (idle with
+    /// both a turn start and a final assistant text). The real WorkedFor
+    /// block is only emitted when the NEXT user message closes the turn —
+    /// this lets a live view synthesize the line in the meantime.
+    pub fn open_turn_worked_secs(&self) -> Option<f64> {
+        if self.busy {
+            return None;
+        }
+        match (self.turn_start_ms, self.last_assistant_text_ms) {
+            (Some(start), Some(end)) if end >= start => Some((end - start) as f64 / 1000.0),
+            _ => None,
+        }
+    }
+
+    /// Pick up session-level state from a line the viewer is about to skip.
+    /// The tail window holds the last few hundred events; `ultra_effort_enter`
+    /// is announced once and never repeated, so it usually sits above that
+    /// line and would otherwise be lost.
+    pub fn note_session_state(&mut self, raw: &str) {
+        if !raw.contains("ultra_effort_enter") {
+            return;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(raw) else {
+            return;
+        };
+        if row.get("type").and_then(Value::as_str) == Some("attachment")
+            && row
+                .get("attachment")
+                .and_then(|a| a.get("type"))
+                .and_then(Value::as_str)
+                == Some("ultra_effort_enter")
+        {
+            self.ultra = true;
+        }
+    }
+
+    /// Reasoning-effort level from the most recent row carrying one — or
+    /// `ultra`, which the assistant rows never say: it arrives once as an
+    /// `ultra_effort_enter` attachment and has no recorded counterpart for
+    /// leaving, so it holds for the rest of the transcript.
     pub fn effort(&self) -> Option<&str> {
+        if self.ultra {
+            return Some("ultra");
+        }
         self.effort.as_deref()
     }
 
@@ -922,6 +1112,111 @@ impl TranscriptParser {
         }
     }
 
+    /// A message that arrived while the turn was already running: claude
+    /// queues it, folds it into the turn, and records it *only* as a
+    /// `queued_command` attachment — no `user` row ever follows. Peer HIVE
+    /// envelopes and the human's own mid-turn messages both land here, so a
+    /// viewer that reads only `user` rows silently drops them.
+    ///
+    /// System plumbing (task notifications, which carry no origin) stays out
+    /// of the transcript.
+    fn push_queued_command(&mut self, row: &Value, out: &mut Vec<Entry>) {
+        let att = match row.get("attachment") {
+            Some(a) if a.get("type").and_then(Value::as_str) == Some("queued_command") => a,
+            _ => return,
+        };
+        let Some(prompt) = att.get("prompt").and_then(Value::as_str) else {
+            return;
+        };
+        let from_human = att
+            .get("origin")
+            .and_then(|o| o.get("kind"))
+            .and_then(Value::as_str)
+            == Some("human");
+        let hive = parse_hive_message(prompt).map(|mut m| {
+            m.icon = m.from.clone().map(|sender| self.agent_icon(&sender));
+            m
+        });
+        if hive.is_none() && !from_human {
+            return;
+        }
+        // The same text sometimes also lands as a `user` row; show it once.
+        self.queued_texts.insert(prompt.trim().to_string());
+        let ts = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp);
+        self.drain_all(out);
+        out.push(Entry {
+            id: self.alloc_id(),
+            block: DisplayBlock::User(UserBlock {
+                text: prompt.to_string(),
+                hive,
+                timestamp: ts,
+            }),
+        });
+    }
+
+    /// The queue's terminal states, from an append-only log: `dequeue` — it
+    /// left the queue to open its own turn, and a `user` row follows — or
+    /// `remove` with `absorbed_mid_turn`, folded into the turn already
+    /// running, where no `user` row ever comes. Both mean the model saw it.
+    ///
+    /// Absorption usually also writes a `queued_command` attachment, which
+    /// is the richer record (it carries the origin) and is handled above.
+    /// A few absorptions leave only these rows, so a HIVE envelope that
+    /// reaches its terminal state unrendered is drawn from here.
+    fn push_absorbed_queue_row(&mut self, row: &Value, out: &mut Vec<Entry>) {
+        if row.get("operation").and_then(Value::as_str) != Some("remove")
+            || row.get("reason").and_then(Value::as_str) != Some("absorbed_mid_turn")
+        {
+            return;
+        }
+        let Some(content) = row.get("content").and_then(Value::as_str) else {
+            return;
+        };
+        if self.queued_texts.contains(content.trim()) {
+            return;
+        }
+        let Some(mut hive) = parse_hive_message(content) else {
+            return;
+        };
+        hive.icon = hive.from.clone().map(|sender| self.agent_icon(&sender));
+        self.queued_texts.insert(content.trim().to_string());
+        let ts = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp);
+        self.drain_all(out);
+        out.push(Entry {
+            id: self.alloc_id(),
+            block: DisplayBlock::User(UserBlock {
+                text: content.to_string(),
+                hive: Some(hive),
+                timestamp: ts,
+            }),
+        });
+    }
+
+    /// Close the assistant's turn with its `Worked for` marker and start the
+    /// human's. Idempotent within a row: the second content block of the same
+    /// message finds the turn already open.
+    fn open_user_turn(&mut self, ts: &Option<Timestamp>, out: &mut Vec<Entry>) {
+        if self.turn_has_assistant_text {
+            let duration_secs = match (self.turn_start_ms, self.last_assistant_text_ms) {
+                (Some(start), Some(end)) if end >= start => Some((end - start) as f64 / 1000.0),
+                _ => None,
+            };
+            out.push(Entry {
+                id: self.alloc_id(),
+                block: DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }),
+            });
+        }
+        self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
+        self.last_assistant_text_ms = None;
+        self.turn_has_assistant_text = false;
+    }
+
     /// Feed one raw JSONL line; returns the blocks it finalized, in order.
     pub fn push(&mut self, raw: &str) -> Vec<DisplayBlock> {
         self.push_entries(raw)
@@ -938,6 +1233,19 @@ impl TranscriptParser {
             Err(_) => return out,
         };
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind == "attachment" {
+            if row.get("attachment").and_then(|a| a.get("type")).and_then(Value::as_str)
+                == Some("ultra_effort_enter")
+            {
+                self.ultra = true;
+            }
+            self.push_queued_command(&row, &mut out);
+            return out;
+        }
+        if kind == "queue-operation" {
+            self.push_absorbed_queue_row(&row, &mut out);
+            return out;
+        }
         if kind != "user" && kind != "assistant" {
             return out;
         }
@@ -967,6 +1275,9 @@ impl TranscriptParser {
         } else {
             Vec::new()
         };
+        // A user message is assembled whole — text and pictures in the order
+        // they were written — and emitted as one band once the row is read.
+        let mut parts: Vec<String> = Vec::new();
         // Anchor for thinking durations: the previous row's instant; a second
         // thinking block in the same row measures from this row instead.
         let mut thinking_anchor_ms = self.prev_row_ms;
@@ -984,34 +1295,10 @@ impl TranscriptParser {
                     if body.is_empty() {
                         continue;
                     }
-                    self.drain_all(&mut out);
                     if is_user {
-                        if self.turn_has_assistant_text {
-                            let duration_secs =
-                                match (self.turn_start_ms, self.last_assistant_text_ms) {
-                                    (Some(start), Some(end)) if end >= start => {
-                                        Some((end - start) as f64 / 1000.0)
-                                    }
-                                    _ => None,
-                                };
-                            out.push(Entry {
-                                id: self.alloc_id(),
-                                block: DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }),
-                            });
-                        }
-                        self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
-                        self.last_assistant_text_ms = None;
-                        self.turn_has_assistant_text = false;
-                        out.push(Entry {
-                            id: self.alloc_id(),
-                            block: DisplayBlock::User(UserBlock {
-                                text: body.to_string(),
-                                is_hive_envelope: hive_envelope(body).is_some(),
-                                timestamp: ts.clone(),
-                            }),
-                        });
-                        self.busy = true;
+                        parts.push(body.to_string());
                     } else {
+                        self.drain_all(&mut out);
                         out.push(Entry {
                             id: self.alloc_id(),
                             block: DisplayBlock::Assistant(AssistantBlock {
@@ -1115,6 +1402,10 @@ impl TranscriptParser {
                     }
                     self.drain_settled(&mut out);
                 }
+                "image" if is_user => {
+                    self.image_count += 1;
+                    parts.push(image_chip(self.image_count));
+                }
                 "tool_result" => {
                     let id = block
                         .get("tool_use_id")
@@ -1123,7 +1414,12 @@ impl TranscriptParser {
                     let body = block.get("content").unwrap_or(&null);
                     let text = match body.as_str() {
                         Some(s) => s.to_string(),
-                        None => serde_json::to_string(body).unwrap_or_default(),
+                        // An array body is serialized whole — which used to
+                        // pour a screenshot's base64 into the outcome text,
+                        // thousands of wrapped lines of it. Images are
+                        // described instead.
+                        None => serde_json::to_string(&summarize_images(body, &mut self.image_count))
+                            .unwrap_or_default(),
                     };
                     let is_error = block
                         .get("is_error")
@@ -1135,6 +1431,28 @@ impl TranscriptParser {
                 }
                 _ => {}
             }
+        }
+        if !parts.is_empty() {
+            self.drain_all(&mut out);
+            self.open_user_turn(&ts, &mut out);
+            let text = parts.join("\n");
+            // A queued message already rendered from its attachment row; do
+            // not draw it twice.
+            if !self.queued_texts.remove(&text) {
+                let hive = parse_hive_message(&text).map(|mut m| {
+                    m.icon = m.from.clone().map(|sender| self.agent_icon(&sender));
+                    m
+                });
+                out.push(Entry {
+                    id: self.alloc_id(),
+                    block: DisplayBlock::User(UserBlock {
+                        text,
+                        hive,
+                        timestamp: ts.clone(),
+                    }),
+                });
+            }
+            self.busy = true;
         }
         if let Some(t) = ts.as_ref() {
             self.prev_row_ms = Some(t.epoch_ms);
@@ -1163,8 +1481,9 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
 }
 
 fn _user_line(text: &str) -> String {
-    if let Some((sender, body)) = hive_envelope(text) {
-        let body = _clip(body, 160);
+    if let Some(msg) = parse_hive_message(text) {
+        let sender = msg.from.as_deref().unwrap_or("peer");
+        let body = _clip(&msg.body, 160);
         return format!("{MAGENTA}✉{RESET} {BOLD}{sender}{RESET} {DIM}▸{RESET} {body}");
     }
     let first = format!("{BOLD}❯{RESET} {BOLD}");
@@ -1455,6 +1774,299 @@ mod tests {
         let out = p.flush_rendered().unwrap();
         assert!(out.contains("Bash") && out.contains("List files"));
         assert!(!out.replace("List files", "").contains("ls"));
+    }
+
+    #[test]
+    fn test_a_picture_becomes_an_inline_chip(){
+        let mut p = TranscriptParser::new();
+        let data = "A".repeat(4000); // ~3 KB decoded
+        let out = p.push(&_row(
+            "user",
+            json!([{"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": data}}]),
+            None,
+        ));
+        match &out[0] {
+            DisplayBlock::User(u) => assert_eq!(u.text, "[Image #1]"),
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_a_picture_and_its_words_are_one_band() {
+        let mut p = TranscriptParser::new();
+        let out = p.push(&_row(
+            "user",
+            json!([
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(400)}},
+                {"type": "text", "text": "这张图里排版是不是有问题？"}
+            ]),
+            None,
+        ));
+        let users: Vec<_> = out
+            .iter()
+            .filter(|b| matches!(b, DisplayBlock::User(_)))
+            .collect();
+        assert_eq!(users.len(), 1, "one band, not a block each: {out:?}");
+        match users[0] {
+            DisplayBlock::User(u) => {
+                // The chip keeps its place ahead of the words it came with.
+                assert_eq!(u.text, "[Image #1]\n这张图里排版是不是有问题？");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_images_never_reach_the_outcome_text() {
+        let mut p = TranscriptParser::new();
+        let payload = "B".repeat(200_000);
+        p.push(&_tool_use("Read", "t1", json!({"file_path": "/tmp/shot.png"})));
+        let out = p.push(&_row(
+            "user",
+            json!([{ "type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "text", "text": "here it is"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": payload}}
+            ]}]),
+            None,
+        ));
+        let mut blocks = out;
+        blocks.extend(p.flush());
+        let text = blocks
+            .iter()
+            .find_map(|b| match b {
+                DisplayBlock::Tool(t) => t.result.as_ref().map(|r| r.text.clone()),
+                DisplayBlock::ToolGroup(g) => g
+                    .members
+                    .iter()
+                    .find_map(|m| m.result.as_ref().map(|r| r.text.clone())),
+                _ => None,
+            })
+            .expect("a tool outcome");
+        assert!(text.contains("here it is"), "{text:.200}");
+        assert!(text.contains("[Image #1]"), "{text:.200}");
+        assert!(!text.contains("BBBB"), "payload leaked into the outcome text");
+        assert!(text.len() < 1000, "outcome text is {} bytes", text.len());
+    }
+
+    #[test]
+    fn test_parse_hive_message_reads_every_arrival_shape() {
+        // bare: typed straight into the pane.
+        let bare = parse_hive_message(
+            "<HIVE from=comb.dodo to=comb.rex msgId=a1 reply-to=z9 artifact=/tmp/spec.md>\nreview the spec\n</HIVE>",
+        )
+        .unwrap();
+        assert_eq!(bare.from.as_deref(), Some("comb.dodo"));
+        assert_eq!(bare.msg_id.as_deref(), Some("a1"));
+        assert_eq!(bare.reply_to.as_deref(), Some("z9"));
+        assert_eq!(bare.artifact.as_deref(), Some("/tmp/spec.md"));
+        assert_eq!(bare.body, "review the spec");
+        assert!(!bare.injected && !bare.mid_turn);
+
+        // claude's session-inbox injection, turn start.
+        let turn_start = parse_hive_message(
+            "Another Claude session sent a message:\n\
+             <HIVE from=sage to=orch msgId=7boK>\ndone\n</HIVE>\n\n\
+             This came from another Claude session — not typed by your user, but very \
+             likely working on their behalf. …permission laundering.",
+        )
+        .unwrap();
+        assert_eq!(turn_start.from.as_deref(), Some("sage"));
+        assert_eq!(turn_start.body, "done");
+        assert!(turn_start.injected && !turn_start.mid_turn);
+
+        // same wrapper, folded into a turn already in flight.
+        let mid = parse_hive_message(
+            "Another Claude session sent a message while you were working:\n\
+             <HIVE from=sage to=orch>\ndone\n</HIVE>\n\n\
+             This came from another Claude session — …",
+        )
+        .unwrap();
+        assert!(mid.injected && mid.mid_turn);
+
+        // the retired <channel> transport, still in old transcripts.
+        let chan = parse_hive_message(
+            "<channel source=\"plugin:hive-channel:hive-channel\" msg_id=\"18kd\">\n\
+             <HIVE from=validator to=worker msgId=18kd>\nrt-1785757288\n</HIVE>\n</channel>",
+        )
+        .unwrap();
+        assert_eq!(chan.from.as_deref(), Some("validator"));
+        assert_eq!(chan.body, "rt-1785757288");
+
+        // attribute-less envelope still parses; the body is what matters.
+        let bald = parse_hive_message("<HIVE>hi</HIVE>").unwrap();
+        assert_eq!(bald.from, None);
+        assert_eq!(bald.body, "hi");
+    }
+
+    #[test]
+    fn test_every_hive_sender_draws_a_different_agent_icon() {
+        let mut p = TranscriptParser::new();
+        let mut icons = Vec::new();
+        for sender in ["sage", "scout", "dodo", "rex", "validator", "worker", "probe"] {
+            let out = p.push(&_row(
+                "user",
+                json!(format!("<HIVE from={sender} to=orch>hi</HIVE>")),
+                None,
+            ));
+            match &out[0] {
+                DisplayBlock::User(u) => icons.push(u.hive.as_ref().unwrap().icon.unwrap()),
+                other => panic!("expected User, got {other:?}"),
+            }
+        }
+        let mut unique = icons.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), AGENT_ICONS.len(), "{icons:?} collided");
+        // and the same sender keeps its icon.
+        let out = p.push(&_row("user", json!("<HIVE from=sage to=orch>again</HIVE>"), None));
+        match &out[0] {
+            DisplayBlock::User(u) => {
+                assert_eq!(u.hive.as_ref().unwrap().icon.unwrap(), icons[0]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ultra_effort_marker_overrides_the_row_effort() {
+        let mut p = TranscriptParser::new();
+        p.push(
+            &json!({
+                "type": "assistant",
+                "effort": "xhigh",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            })
+            .to_string(),
+        );
+        assert_eq!(p.effort(), Some("xhigh"));
+        p.push(
+            &json!({"type": "attachment", "attachment": {"type": "ultra_effort_enter", "reminderType": "full"}})
+                .to_string(),
+        );
+        assert_eq!(p.effort(), Some("ultra"));
+    }
+
+    #[test]
+    fn test_mid_turn_queued_command_is_the_fifth_carrier() {
+        let mut p = TranscriptParser::new();
+        // A peer envelope absorbed into a running turn: claude records it
+        // only as this attachment — no user row ever follows.
+        let out = p.push(
+            &json!({
+                "type": "attachment",
+                "timestamp": "2026-08-30T13:00:12.311Z",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "<HIVE from=scout to=orch msgId=b255>\nscout 报到\n</HIVE>",
+                    "origin": {"kind": "peer", "from": "honey.orch"},
+                    "isMeta": true,
+                },
+            })
+            .to_string(),
+        );
+        match &out[0] {
+            DisplayBlock::User(u) => {
+                let h = u.hive.as_ref().expect("peer envelope");
+                assert_eq!(h.from.as_deref(), Some("scout"));
+                assert_eq!(h.body, "scout 报到");
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+        // The human's own mid-turn message lands the same way.
+        let out = p.push(
+            &json!({
+                "type": "attachment",
+                "timestamp": "2026-08-30T13:00:20.000Z",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "顺便把 badge 挪一下",
+                    "origin": {"kind": "human"},
+                },
+            })
+            .to_string(),
+        );
+        assert!(matches!(&out[0], DisplayBlock::User(u) if u.hive.is_none()));
+        // …and when it also shows up as a user row, it draws only once.
+        let again = p.push(&_row("user", json!("顺便把 badge 挪一下"), None));
+        assert!(
+            !again
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::User(_))),
+            "{again:?}"
+        );
+        // Runtime plumbing carries no origin and stays out.
+        let noise = p.push(
+            &json!({
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "<task-notification>\n<task-id>abc</task-id>",
+                },
+            })
+            .to_string(),
+        );
+        assert!(noise.is_empty(), "{noise:?}");
+    }
+
+    #[test]
+    fn test_absorbed_queue_row_draws_when_no_attachment_carried_it() {
+        let envelope = "<HIVE from=sage to=orch msgId=9nMW>\nattach 后投递正常\n</HIVE>";
+        let absorbed = json!({
+            "type": "queue-operation",
+            "operation": "remove",
+            "reason": "absorbed_mid_turn",
+            "timestamp": "2026-08-30T13:00:19.267Z",
+            "content": envelope,
+        })
+        .to_string();
+
+        // No attachment row: the terminal state is the only record left.
+        let mut p = TranscriptParser::new();
+        let out = p.push(&absorbed);
+        assert!(
+            matches!(&out[0], DisplayBlock::User(u) if u.hive.as_ref().unwrap().from.as_deref() == Some("sage")),
+            "{out:?}"
+        );
+
+        // With the attachment row, the terminal state adds nothing.
+        let mut p = TranscriptParser::new();
+        let first = p.push(
+            &json!({
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": envelope,
+                    "origin": {"kind": "peer", "from": "honey.orch"},
+                },
+            })
+            .to_string(),
+        );
+        assert_eq!(first.len(), 1);
+        assert!(p.push(&absorbed).is_empty());
+
+        // enqueue is not a terminal state — it may still be cancelled.
+        let mut p = TranscriptParser::new();
+        assert!(p
+            .push(
+                &json!({"type": "queue-operation", "operation": "enqueue", "content": envelope})
+                    .to_string()
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn test_parse_hive_message_ignores_prose_that_quotes_an_envelope() {
+        // skill docs and specs quote the envelope; they are not messages.
+        assert!(parse_hive_message(
+            "其他 agent 的消息会以 `<HIVE from=a to=b>body</HIVE>` 注入当前 pane。"
+        )
+        .is_none());
+        assert!(parse_hive_message("<HIVE from=a to=b>unterminated").is_none());
+        assert!(parse_hive_message("<HIVEISH from=a>x</HIVE>").is_none());
+        // a body that merely mentions the tag stays whole.
+        let msg = parse_hive_message("<HIVE from=probe to=kilo>你上下文里的 <HIVE> 消息</HIVE>")
+            .unwrap();
+        assert_eq!(msg.body, "你上下文里的 <HIVE> 消息");
     }
 
     #[test]
@@ -1806,7 +2418,7 @@ mod tests {
         ));
         match &out[0] {
             DisplayBlock::User(u) => {
-                assert!(!u.is_hive_envelope);
+                assert!(u.hive.is_none());
                 assert_eq!(u.timestamp.as_ref().unwrap().clock, "12:40 PM");
             }
             other => panic!("expected User, got {other:?}"),
