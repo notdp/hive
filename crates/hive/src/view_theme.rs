@@ -51,6 +51,19 @@ pub struct ViewTheme {
     pub warning: Color,
     pub accent_error: Color,
     pub accent_model: Color,
+    // interaction layer (grok selection / fold / palette chrome)
+    /// Selection bracket-frame color (fg-only corners and sides).
+    pub selection_border: Color,
+    /// Tool-output panel strip and selected-collapsed-header patch.
+    pub bg_dark: Color,
+    /// Selected palette row background.
+    pub bg_visual: Color,
+    /// Thinking accent gutter (grok accent_thinking, magenta family).
+    pub accent_thinking: Color,
+    /// Successful run accent gutter.
+    pub accent_success: Color,
+    /// Palette fuzzy-match character highlight.
+    pub fuzzy_accent: Color,
     // markdown (grok_md)
     /// H1..H6 heading colors; H1-H5 render bold, H6 plain (both themes).
     pub md_heading: [Color; 6],
@@ -85,6 +98,12 @@ pub static GROKNIGHT: ViewTheme = ViewTheme {
     warning: rgb(224, 175, 104),
     accent_error: rgb(247, 118, 142),
     accent_model: rgb(26, 188, 156),
+    selection_border: rgb(60, 60, 65),
+    bg_dark: rgb(28, 28, 28),
+    bg_visual: rgb(54, 54, 54),
+    accent_thinking: rgb(187, 154, 247),
+    accent_success: rgb(158, 206, 106),
+    fuzzy_accent: rgb(122, 162, 247),
     md_heading: [
         rgb(26, 188, 156),  // teal
         rgb(122, 162, 247), // blue
@@ -119,6 +138,12 @@ pub static GROKDAY: ViewTheme = ViewTheme {
     warning: rgb(162, 118, 18),
     accent_error: rgb(205, 48, 72),
     accent_model: rgb(10, 142, 112),
+    selection_border: rgb(185, 185, 190),
+    bg_dark: rgb(228, 228, 228),
+    bg_visual: rgb(198, 198, 198),
+    accent_thinking: rgb(125, 75, 198),
+    accent_success: rgb(55, 142, 35),
+    fuzzy_accent: rgb(47, 100, 210),
     md_heading: [
         rgb(10, 142, 112),  // teal
         rgb(47, 100, 210),  // blue
@@ -530,6 +555,12 @@ mod tests {
         assert_eq!(t.md_code_bg, Color::Rgb(228, 228, 228)); // #e4e4e4
         assert_eq!(t.md_text, Color::Rgb(68, 68, 68)); // #444444
         assert_eq!(t.link_fg, Color::Rgb(47, 100, 210)); // #2F64D2
+        assert_eq!(t.selection_border, Color::Rgb(185, 185, 190)); // #b9b9be
+        assert_eq!(t.bg_dark, Color::Rgb(228, 228, 228)); // #e4e4e4
+        assert_eq!(t.bg_visual, Color::Rgb(198, 198, 198)); // #c6c6c6
+        assert_eq!(t.accent_thinking, Color::Rgb(125, 75, 198)); // #7d4bc6
+        assert_eq!(t.accent_success, Color::Rgb(55, 142, 35)); // #378e23
+        assert_eq!(t.fuzzy_accent, Color::Rgb(47, 100, 210)); // #2f64d2
     }
 
     #[test]
@@ -553,6 +584,12 @@ mod tests {
         assert_eq!(t.text_primary, Color::Rgb(225, 225, 225));
         assert_eq!(t.accent_error, Color::Rgb(247, 118, 142));
         assert_eq!(t.md_heading[0], Color::Rgb(26, 188, 156));
+        assert_eq!(t.selection_border, Color::Rgb(60, 60, 65)); // #3c3c41
+        assert_eq!(t.bg_dark, Color::Rgb(28, 28, 28)); // #1c1c1c
+        assert_eq!(t.bg_visual, Color::Rgb(54, 54, 54)); // #363636
+        assert_eq!(t.accent_thinking, Color::Rgb(187, 154, 247)); // #bb9af7
+        assert_eq!(t.accent_success, Color::Rgb(158, 206, 106)); // #9ece6a
+        assert_eq!(t.fuzzy_accent, Color::Rgb(122, 162, 247)); // #7aa2f7
     }
 
     #[test]

@@ -6,35 +6,50 @@
 //! (branch / worktree / `~`-abbreviated cwd, right-aligned token counter),
 //! scrollback (full-width user bands, `◈`/`◆` tool lines, grok-markdown
 //! assistant text with right-aligned timestamps, muted `Worked for …`), and a
-//! single muted bottom hint row. Read-only: keys and the mouse wheel only
-//! quit and scroll, with grok's pager bindings and follow semantics.
+//! single muted bottom hint row.
+//!
+//! Interaction layer (grok's pager surface, read-only): Up/Down block
+//! selection with grok's bracket-frame highlight, Shift+Left/Right turn
+//! jumps, Left/Right (and double-click) per-block collapse/expand, Ctrl+E
+//! all-thinking toggle, Ctrl+O density cycle (normal/thinking/verbose),
+//! Enter/Ctrl+F full-screen block viewer, and a `/` command palette
+//! (/theme /view /find /quit). Keystrokes still go nowhere by construction —
+//! the mirror only ever reads the transcript.
 
+mod interact;
+
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::transcript_view::{
-    grok_md, hive_envelope, AssistantBlock, DisplayBlock, ThinkingBlock, TranscriptParser,
-    UserBlock,
+    grok_md, hive_envelope, AssistantBlock, DisplayBlock, Entry, RunBlock, ThinkingBlock,
+    ToolBlock, ToolGroupBlock, ToolOutcome, TranscriptParser, UserBlock,
 };
-use crate::view_theme::ViewTheme;
+use crate::view_theme::{ThemeKind, ThemePref, ViewTheme};
+use interact::{
+    EntryInfo, FoldKind, FoldState, Palette, PaletteAction, SelectMove, MAX_PALETTE_ROWS,
+    PALETTE_COMMANDS,
+};
 
 /// jsonl poll cadence.
 const POLL_MS: u64 = 250;
@@ -53,9 +68,29 @@ const BAND_MAX_LINES: usize = 3;
 /// One mouse-wheel tick scrolls this many lines (grok mouse.rs
 /// DEFAULT_WHEEL_LINES_PER_TICK).
 const WHEEL_LINES: usize = 3;
+/// Same-block double-click window (grok MULTI_CLICK_TIMEOUT_MS).
+const MULTI_CLICK: Duration = Duration::from_millis(300);
+/// Thinking-body strength between bg and text (grok thinking.rs bg_blend).
+const THINKING_BLEND: f64 = 0.7;
 
 fn fg(c: Color) -> Style {
     Style::default().fg(c)
+}
+
+fn bold(c: Color) -> Style {
+    fg(c).add_modifier(Modifier::BOLD)
+}
+
+/// Per-channel lerp from `from` toward `to` (grok blend_color).
+fn blend(from: Color, to: Color, factor: f64) -> Color {
+    let ch = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    let (fr, fgc, fb) = ch(from);
+    let (tr, tgc, tb) = ch(to);
+    let l = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * factor).round() as u8;
+    Color::Rgb(l(fr, tr), l(fgc, tgc), l(fb, tb))
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +336,34 @@ fn envelope_head(text: &str) -> Option<&str> {
     Some(&text[start..=end])
 }
 
-fn push_user_block(t: &ViewTheme, out: &mut Vec<Line<'static>>, u: &UserBlock, inner_w: usize) {
+/// grok's selected-collapsed-header patch: fill the content columns
+/// (inset 1 col from the selection border on each side) with `bg`.
+fn patch_bg(line: Line<'static>, inner_w: usize, bg: Color) -> Line<'static> {
+    let mut cells = line_cells(&line);
+    let content_end = inner_w.saturating_sub(2);
+    let mut w = cells_width(&cells);
+    while w < content_end {
+        cells.push((' ', Style::default()));
+        w += 1;
+    }
+    let mut col = 0usize;
+    for cell in cells.iter_mut() {
+        let cw = cell_width(cell.0);
+        if col >= 3 && col + cw <= content_end {
+            cell.1.bg = Some(bg);
+        }
+        col += cw;
+    }
+    cells_to_line(&cells)
+}
+
+/// One rendered entry plus whether Left/Right can fold it at all.
+struct Rendered {
+    lines: Vec<Line<'static>>,
+    foldable: bool,
+}
+
+fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> Rendered {
     let band = Style::default().bg(t.bg_light);
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let bw = cw.saturating_sub(TS_RESERVE + 2).max(8);
@@ -324,11 +386,13 @@ fn push_user_block(t: &ViewTheme, out: &mut Vec<Line<'static>>, u: &UserBlock, i
     while vis.last().is_some_and(|l| l.is_empty()) && vis.len() > 1 {
         vis.pop();
     }
-    if vis.len() > BAND_MAX_LINES {
+    let foldable = vis.len() > BAND_MAX_LINES;
+    if foldable && !expanded {
         vis.truncate(BAND_MAX_LINES);
         let last = vis.pop().unwrap_or_default();
         vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
+    let mut out = Vec::new();
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
     for (i, text) in vis.iter().enumerate() {
         let prefix = if i == 0 { "❯ " } else { "  " };
@@ -350,14 +414,13 @@ fn push_user_block(t: &ViewTheme, out: &mut Vec<Line<'static>>, u: &UserBlock, i
         out.push(band_line(t, spans, inner_w));
     }
     out.push(band_line(t, Vec::new(), inner_w)); // vpad bottom
+    Rendered {
+        lines: out,
+        foldable,
+    }
 }
 
-fn push_assistant_block(
-    t: &ViewTheme,
-    out: &mut Vec<Line<'static>>,
-    a: &AssistantBlock,
-    inner_w: usize,
-) {
+fn render_assistant(t: &ViewTheme, a: &AssistantBlock, inner_w: usize) -> Rendered {
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let aw = cw.saturating_sub(TS_RESERVE).max(10);
     let mut wrapped: Vec<Line<'static>> = Vec::new();
@@ -367,6 +430,7 @@ fn push_assistant_block(
     while wrapped.last().is_some_and(|l| line_cells(l).is_empty()) {
         wrapped.pop();
     }
+    let mut out = Vec::new();
     for (i, line) in wrapped.into_iter().enumerate() {
         let mut spans = vec![Span::raw("   ")];
         let used = cells_width(&line_cells(&line));
@@ -383,12 +447,40 @@ fn push_assistant_block(
         }
         out.push(Line::from(spans));
     }
+    Rendered {
+        lines: out,
+        foldable: false,
+    }
 }
 
-fn thinking_spans(t: &ViewTheme, tb: &ThinkingBlock) -> Vec<Span<'static>> {
+/// Thinking body line at 70% strength between bg and its own colors.
+fn blend_thinking_line(line: Line<'static>, t: &ViewTheme) -> Line<'static> {
+    let mut cells = line_cells(&line);
+    for cell in cells.iter_mut() {
+        let base = cell.1.fg.unwrap_or(t.md_text);
+        cell.1.fg = Some(blend(t.bg_base, base, THINKING_BLEND));
+    }
+    cells_to_line(&cells)
+}
+
+fn render_thinking(
+    t: &ViewTheme,
+    tb: &ThinkingBlock,
+    inner_w: usize,
+    expanded: bool,
+    selected: bool,
+) -> Rendered {
+    let collapsed_sel = selected && !expanded;
+    let bullet = if collapsed_sel { "› " } else { "◆ " };
+    let label_style = if collapsed_sel {
+        bold(t.text_primary)
+    } else {
+        bold(t.gray)
+    };
     let mut spans = vec![
-        Span::styled("◆ ", fg(t.gray)),
-        Span::styled("Thought", fg(t.gray).add_modifier(Modifier::BOLD)),
+        Span::raw("   "),
+        Span::styled(bullet, fg(t.gray)),
+        Span::styled("Thought", label_style),
     ];
     if let Some(secs) = tb.duration_secs {
         spans.push(Span::styled(
@@ -399,80 +491,293 @@ fn thinking_spans(t: &ViewTheme, tb: &ThinkingBlock) -> Vec<Span<'static>> {
             fg(t.gray),
         ));
     }
-    spans
+    let mut header = clip_spans(spans, inner_w);
+    if collapsed_sel {
+        header = patch_bg(header, inner_w, t.bg_dark);
+    }
+    let mut lines = vec![header];
+    if expanded {
+        let bw = inner_w.saturating_sub(ROW_CHROME);
+        let mut body: Vec<Line<'static>> = Vec::new();
+        for line in grok_md::render_ratatui(&tb.text, t) {
+            body.extend(wrap_line(&line, bw));
+        }
+        while body.last().is_some_and(|l| line_cells(l).is_empty()) {
+            body.pop();
+        }
+        for line in body {
+            let blended = blend_thinking_line(line, t);
+            let mut spans = vec![Span::styled("│", fg(t.accent_thinking)), Span::raw("  ")];
+            spans.extend(blended.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+    Rendered {
+        lines,
+        foldable: true,
+    }
 }
 
-fn push_block(
+/// One tool-output panel row: accent gutter + text on the `bg_dark` strip.
+fn panel_line(
     t: &ViewTheme,
-    out: &mut Vec<Line<'static>>,
-    block: &DisplayBlock,
+    accent: Color,
+    text: String,
+    text_fg: Color,
     inner_w: usize,
-    last_dense: &mut bool,
-) {
-    let dense = matches!(
-        block,
-        DisplayBlock::ToolGroup(_)
-            | DisplayBlock::Run(_)
-            | DisplayBlock::Tool(_)
-            | DisplayBlock::Thinking(_)
-    );
-    if !out.is_empty() && !(dense && *last_dense) {
-        out.push(Line::default());
+) -> Line<'static> {
+    let cw = inner_w.saturating_sub(ROW_CHROME);
+    let used = UnicodeWidthStr::width(text.as_str());
+    let mut spans = vec![
+        Span::styled("│", fg(accent)),
+        Span::raw("  "),
+        Span::styled(text, fg(text_fg).bg(t.bg_dark)),
+    ];
+    if cw > used {
+        spans.push(Span::styled(
+            " ".repeat(cw - used),
+            Style::default().bg(t.bg_dark),
+        ));
     }
-    *last_dense = dense;
-    let margin = Span::raw("   ");
-    match block {
-        DisplayBlock::User(u) => push_user_block(t, out, u, inner_w),
-        DisplayBlock::Assistant(a) => push_assistant_block(t, out, a, inner_w),
-        DisplayBlock::ToolGroup(g) => {
-            let failed = g.failed();
-            let bullet = if failed > 0 { t.accent_error } else { t.gray };
-            let mut spans = vec![
-                margin,
-                Span::styled("◈ ", fg(bullet)),
-                Span::styled(g.label(), fg(t.gray_bright).add_modifier(Modifier::BOLD)),
-            ];
-            if failed > 0 {
-                spans.push(Span::styled(
-                    format!(" · {failed} failed"),
-                    fg(t.accent_error),
-                ));
-            }
-            out.push(clip_spans(spans, inner_w));
+    Line::from(spans)
+}
+
+/// Expanded tool output: full result text on a `bg_dark` strip with the
+/// success/error accent gutter; errors render in the error accent.
+fn panel_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, inner_w: usize) {
+    let accent = if res.is_error {
+        t.accent_error
+    } else {
+        t.accent_success
+    };
+    let text_fg = if res.is_error {
+        t.accent_error
+    } else {
+        t.text_primary
+    };
+    let pw = inner_w.saturating_sub(ROW_CHROME);
+    let text = res.text.trim_end();
+    if text.is_empty() && !res.truncated {
+        return;
+    }
+    for src in text.lines() {
+        for piece in wrap_plain(src, pw) {
+            out.push(panel_line(t, accent, piece, text_fg, inner_w));
         }
-        DisplayBlock::Run(r) => {
-            let err = r.result.as_ref().is_some_and(|res| res.is_error);
+    }
+    if res.truncated {
+        out.push(panel_line(
+            t,
+            accent,
+            "… output truncated".to_string(),
+            t.gray,
+            inner_w,
+        ));
+    }
+}
+
+fn render_group(
+    t: &ViewTheme,
+    g: &ToolGroupBlock,
+    inner_w: usize,
+    expanded: bool,
+    selected: bool,
+) -> Rendered {
+    let collapsed_sel = selected && !expanded;
+    let failed = g.failed();
+    let bullet_color = if failed > 0 { t.accent_error } else { t.gray };
+    let bullet = if collapsed_sel { "› " } else { "◈ " };
+    let label_style = if collapsed_sel {
+        bold(t.text_primary)
+    } else {
+        bold(t.gray_bright)
+    };
+    let mut spans = vec![
+        Span::raw("   "),
+        Span::styled(bullet, fg(bullet_color)),
+        Span::styled(g.label(), label_style),
+    ];
+    if failed > 0 {
+        spans.push(Span::styled(
+            format!(" · {failed} failed"),
+            fg(t.accent_error),
+        ));
+    }
+    let mut header = clip_spans(spans, inner_w);
+    if collapsed_sel {
+        header = patch_bg(header, inner_w, t.bg_dark);
+    }
+    let mut lines = vec![header];
+    if expanded {
+        for member in &g.members {
+            let err = member.result.as_ref().is_some_and(|r| r.is_error);
             let bullet = if err { t.accent_error } else { t.gray };
             let spans = vec![
-                margin,
+                Span::raw("   "),
                 Span::styled("◆ ", fg(bullet)),
-                Span::styled("Run ", fg(t.gray).add_modifier(Modifier::BOLD)),
-                Span::styled(r.description.clone(), fg(t.gray)),
+                Span::styled(member.name.clone(), bold(t.gray)),
+                Span::styled(format!("  {}", member.hint), fg(t.gray)),
             ];
-            out.push(clip_spans(spans, inner_w));
+            lines.push(clip_spans(spans, inner_w));
+            if let Some(res) = &member.result {
+                panel_rows(t, &mut lines, res, inner_w);
+            }
+        }
+    }
+    Rendered {
+        lines,
+        foldable: true,
+    }
+}
+
+fn render_run(
+    t: &ViewTheme,
+    r: &RunBlock,
+    inner_w: usize,
+    expanded: bool,
+    selected: bool,
+) -> Rendered {
+    let collapsed_sel = selected && !expanded;
+    let err = r.result.as_ref().is_some_and(|res| res.is_error);
+    let bullet_color = if err { t.accent_error } else { t.gray };
+    let bullet = if collapsed_sel { "› " } else { "◆ " };
+    let (label_style, desc_style) = if collapsed_sel {
+        (bold(t.text_primary), fg(t.text_primary))
+    } else {
+        (bold(t.gray), fg(t.gray))
+    };
+    let spans = vec![
+        Span::raw("   "),
+        Span::styled(bullet, fg(bullet_color)),
+        Span::styled("Run ", label_style),
+        Span::styled(r.description.clone(), desc_style),
+    ];
+    let mut header = clip_spans(spans, inner_w);
+    if collapsed_sel {
+        header = patch_bg(header, inner_w, t.bg_dark);
+    }
+    let mut lines = vec![header];
+    if expanded {
+        if let Some(res) = &r.result {
+            panel_rows(t, &mut lines, res, inner_w);
+        }
+    }
+    Rendered {
+        lines,
+        foldable: true,
+    }
+}
+
+fn render_tool(
+    t: &ViewTheme,
+    tool: &ToolBlock,
+    inner_w: usize,
+    expanded: bool,
+    selected: bool,
+) -> Rendered {
+    let collapsed_sel = selected && !expanded;
+    let err = tool.result.as_ref().is_some_and(|res| res.is_error);
+    let bullet_color = if err { t.accent_error } else { t.gray };
+    let bullet = if collapsed_sel { "› " } else { "◆ " };
+    let name_style = if collapsed_sel {
+        bold(t.text_primary)
+    } else {
+        bold(t.gray)
+    };
+    let mut spans = vec![
+        Span::raw("   "),
+        Span::styled(bullet, fg(bullet_color)),
+        Span::styled(tool.name.clone(), name_style),
+    ];
+    if !tool.hint.is_empty() {
+        spans.push(Span::styled(format!("  {}", tool.hint), fg(t.gray)));
+    }
+    let mut header = clip_spans(spans, inner_w);
+    if collapsed_sel {
+        header = patch_bg(header, inner_w, t.bg_dark);
+    }
+    let mut lines = vec![header];
+    if expanded {
+        if let Some(res) = &tool.result {
+            panel_rows(t, &mut lines, res, inner_w);
+        }
+    }
+    Rendered {
+        lines,
+        foldable: true,
+    }
+}
+
+fn render_entry(
+    t: &ViewTheme,
+    block: &DisplayBlock,
+    inner_w: usize,
+    expanded: bool,
+    selected: bool,
+) -> Rendered {
+    match block {
+        DisplayBlock::User(u) => render_user(t, u, inner_w, expanded),
+        DisplayBlock::Assistant(a) => render_assistant(t, a, inner_w),
+        DisplayBlock::ToolGroup(g) => render_group(t, g, inner_w, expanded, selected),
+        DisplayBlock::Run(r) => render_run(t, r, inner_w, expanded, selected),
+        DisplayBlock::Tool(tool) => render_tool(t, tool, inner_w, expanded, selected),
+        DisplayBlock::Thinking(tb) => render_thinking(t, tb, inner_w, expanded, selected),
+        DisplayBlock::WorkedFor(w) => Rendered {
+            lines: vec![clip_spans(
+                vec![Span::raw("   "), Span::styled(w.label(), fg(t.gray))],
+                inner_w,
+            )],
+            foldable: false,
+        },
+    }
+}
+
+fn fold_kind(block: &DisplayBlock) -> FoldKind {
+    match block {
+        DisplayBlock::Thinking(_) => FoldKind::Thinking,
+        DisplayBlock::ToolGroup(_) | DisplayBlock::Run(_) | DisplayBlock::Tool(_) => FoldKind::Tool,
+        DisplayBlock::User(_) => FoldKind::User,
+        DisplayBlock::Assistant(_) | DisplayBlock::WorkedFor(_) => FoldKind::Fixed,
+    }
+}
+
+/// The text `/find` matches against, per block.
+fn search_text(block: &DisplayBlock) -> String {
+    match block {
+        DisplayBlock::User(u) => u.text.clone(),
+        DisplayBlock::Assistant(a) => a.markdown.clone(),
+        DisplayBlock::Thinking(tb) => format!("{} {}", tb.label(), tb.text),
+        DisplayBlock::Run(r) => {
+            let mut s = format!("Run {} {}", r.description, r.command);
+            if let Some(res) = &r.result {
+                s.push(' ');
+                s.push_str(&res.text);
+            }
+            s
         }
         DisplayBlock::Tool(tool) => {
-            let err = tool.result.as_ref().is_some_and(|res| res.is_error);
-            let bullet = if err { t.accent_error } else { t.gray };
-            let mut spans = vec![
-                margin,
-                Span::styled("◆ ", fg(bullet)),
-                Span::styled(tool.name.clone(), fg(t.gray).add_modifier(Modifier::BOLD)),
-            ];
-            if !tool.hint.is_empty() {
-                spans.push(Span::styled(format!("  {}", tool.hint), fg(t.gray)));
+            let mut s = format!("{} {} {}", tool.name, tool.hint, tool.input_json);
+            if let Some(res) = &tool.result {
+                s.push(' ');
+                s.push_str(&res.text);
             }
-            out.push(clip_spans(spans, inner_w));
+            s
         }
-        DisplayBlock::Thinking(tb) => {
-            let mut spans = vec![margin];
-            spans.extend(thinking_spans(t, tb));
-            out.push(clip_spans(spans, inner_w));
+        DisplayBlock::ToolGroup(g) => {
+            let mut s = g.label();
+            for m in &g.members {
+                s.push(' ');
+                s.push_str(&m.name);
+                s.push(' ');
+                s.push_str(&m.hint);
+                if let Some(res) = &m.result {
+                    s.push(' ');
+                    s.push_str(&res.text);
+                }
+            }
+            s
         }
-        DisplayBlock::WorkedFor(w) => {
-            let spans = vec![margin, Span::styled(w.label(), fg(t.gray))];
-            out.push(clip_spans(spans, inner_w));
-        }
+        DisplayBlock::WorkedFor(_) => String::new(),
     }
 }
 
@@ -549,34 +854,30 @@ fn half_page_rows(viewport_h: usize) -> usize {
     (viewport_h / 2).max(1)
 }
 
-/// grok's scrollback-focused pager bindings (pager defaults.rs), reduced to
-/// the read-only surface: j/k/arrows line scroll, Ctrl+J/K line scroll,
-/// Ctrl+D/U half page, PageUp/Down page, g/G top/bottom, wheel ±3. `q` quits
-/// directly (grok's read-only dashboard-overlay semantics) plus Ctrl+Q and
-/// Ctrl+C. Returns true when the key quits the viewer.
-fn handle_key(scroll: &mut Scroll, viewport_h: usize, code: KeyCode, mods: KeyModifiers) -> bool {
+/// grok's scrollback-focused pager scroll bindings, minus the keys the
+/// interaction layer now owns (Up/Down select, q quits at the app level):
+/// j/k line scroll, Ctrl+J/K line scroll, Ctrl+D/U half page, PageUp/Down
+/// page, g/G top/bottom.
+fn handle_scroll_key(scroll: &mut Scroll, viewport_h: usize, code: KeyCode, mods: KeyModifiers) {
     if mods.contains(KeyModifiers::CONTROL) {
         match code {
-            KeyCode::Char('c') | KeyCode::Char('q') => return true,
             KeyCode::Char('j') => scroll.scroll_down(1),
             KeyCode::Char('k') => scroll.scroll_up(1),
             KeyCode::Char('d') => scroll.scroll_down(half_page_rows(viewport_h)),
             KeyCode::Char('u') => scroll.scroll_up(half_page_rows(viewport_h)),
             _ => {}
         }
-        return false;
+        return;
     }
     match code {
-        KeyCode::Char('q') => return true,
-        KeyCode::Char('j') | KeyCode::Down => scroll.scroll_down(1),
-        KeyCode::Char('k') | KeyCode::Up => scroll.scroll_up(1),
+        KeyCode::Char('j') => scroll.scroll_down(1),
+        KeyCode::Char('k') => scroll.scroll_up(1),
         KeyCode::Char('g') => scroll.goto_top(),
         KeyCode::Char('G') => scroll.goto_bottom(),
         KeyCode::PageDown => scroll.scroll_down(page_rows(viewport_h)),
         KeyCode::PageUp => scroll.scroll_up(page_rows(viewport_h)),
         _ => {}
     }
-    false
 }
 
 /// Wheel tick = 3 lines (grok mouse.rs), same follow rules as key scrolls.
@@ -589,20 +890,200 @@ fn handle_mouse(scroll: &mut Scroll, kind: MouseEventKind) {
 }
 
 // ---------------------------------------------------------------------------
-// App state & frame chrome
+// Block viewer overlay (grok views/block_viewer.rs + modal_window.rs)
 // ---------------------------------------------------------------------------
+
+struct Viewer {
+    title: String,
+    block: DisplayBlock,
+    scroll: usize,
+    lines: Vec<Line<'static>>,
+    cache_w: usize,
+    /// Content rows of the last draw, for page scrolling.
+    view_h: usize,
+}
+
+fn viewer_title(block: &DisplayBlock) -> String {
+    match block {
+        DisplayBlock::User(_) => "User".to_string(),
+        DisplayBlock::Assistant(_) => "Assistant".to_string(),
+        DisplayBlock::Thinking(_) => "Thinking".to_string(),
+        DisplayBlock::Run(_) => "Run".to_string(),
+        DisplayBlock::Tool(tool) => tool.name.clone(),
+        DisplayBlock::ToolGroup(g) => g.label(),
+        DisplayBlock::WorkedFor(_) => "Turn".to_string(),
+    }
+}
+
+fn viewer_outcome_lines(
+    out: &mut Vec<Line<'static>>,
+    t: &ViewTheme,
+    width: usize,
+    result: &Option<ToolOutcome>,
+) {
+    let Some(res) = result else {
+        return;
+    };
+    let text_fg = if res.is_error {
+        t.accent_error
+    } else {
+        t.text_primary
+    };
+    for src in res.text.trim_end().lines() {
+        for piece in wrap_plain(src, width) {
+            out.push(Line::from(Span::styled(piece, fg(text_fg))));
+        }
+    }
+    if res.truncated {
+        out.push(Line::from(Span::styled(
+            "… output truncated".to_string(),
+            fg(t.gray),
+        )));
+    }
+}
+
+fn viewer_lines(block: &DisplayBlock, t: &ViewTheme, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let md = |text: &str| -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        for line in grok_md::render_ratatui(text, t) {
+            out.extend(wrap_line(&line, width));
+        }
+        out
+    };
+    let mut out = Vec::new();
+    match block {
+        DisplayBlock::User(u) => {
+            for src in u.text.lines() {
+                for piece in wrap_plain(src, width) {
+                    out.push(Line::from(Span::styled(piece, fg(t.text_primary))));
+                }
+            }
+        }
+        DisplayBlock::Assistant(a) => out = md(&a.markdown),
+        DisplayBlock::Thinking(tb) => out = md(&tb.text),
+        DisplayBlock::Run(r) => {
+            for (i, src) in r.command.lines().enumerate() {
+                let prefix = if i == 0 { "$ " } else { "  " };
+                for (j, piece) in wrap_plain(src, width.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let lead = if j == 0 { prefix } else { "  " };
+                    out.push(Line::from(vec![
+                        Span::styled(lead.to_string(), fg(t.gray_dim)),
+                        Span::styled(piece, fg(t.text_primary)),
+                    ]));
+                }
+            }
+            if !out.is_empty() {
+                out.push(Line::default());
+            }
+            viewer_outcome_lines(&mut out, t, width, &r.result);
+        }
+        DisplayBlock::Tool(tool) => {
+            for src in tool.input_json.lines() {
+                for piece in wrap_plain(src, width) {
+                    out.push(Line::from(Span::styled(piece, fg(t.text_secondary))));
+                }
+            }
+            if !out.is_empty() {
+                out.push(Line::default());
+            }
+            viewer_outcome_lines(&mut out, t, width, &tool.result);
+        }
+        DisplayBlock::ToolGroup(g) => {
+            for (i, member) in g.members.iter().enumerate() {
+                if i > 0 {
+                    out.push(Line::default());
+                }
+                out.push(Line::from(vec![
+                    Span::styled("◆ ", fg(t.gray)),
+                    Span::styled(member.name.clone(), bold(t.text_primary)),
+                    Span::styled(format!("  {}", member.hint), fg(t.gray)),
+                ]));
+                viewer_outcome_lines(&mut out, t, width, &member.result);
+            }
+        }
+        DisplayBlock::WorkedFor(w) => out.push(Line::from(Span::styled(w.label(), fg(t.gray)))),
+    }
+    if out.is_empty() {
+        out.push(Line::from(Span::styled(
+            "(no content)".to_string(),
+            fg(t.gray),
+        )));
+    }
+    out
+}
+
+impl Viewer {
+    fn new(block: DisplayBlock) -> Self {
+        Viewer {
+            title: viewer_title(&block),
+            block,
+            scroll: 0,
+            lines: Vec::new(),
+            cache_w: 0,
+            view_h: 0,
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.cache_w = 0;
+        self.lines.clear();
+    }
+
+    fn build(&mut self, t: &ViewTheme, width: usize) {
+        if self.cache_w == width && !self.lines.is_empty() {
+            return;
+        }
+        self.lines = viewer_lines(&self.block, t, width);
+        self.cache_w = width;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+
+/// A cached per-entry render keyed by the states that change its pixels.
+struct CachedEntry {
+    expanded: bool,
+    selected: bool,
+    foldable: bool,
+    lines: Vec<Line<'static>>,
+}
+
+/// Where an entry landed in the assembled scrollback, plus its capabilities.
+#[derive(Clone, Copy)]
+struct LayoutEntry {
+    id: u64,
+    start: usize,
+    height: usize,
+    selectable: bool,
+    is_turn: bool,
+    foldable: bool,
+    kind: FoldKind,
+}
 
 struct App {
     theme: &'static ViewTheme,
     parser: TranscriptParser,
     chrome: Chrome,
-    finalized: Vec<DisplayBlock>,
-    cache: Vec<Line<'static>>,
-    cached_blocks: usize,
-    cache_width: usize,
-    cache_last_dense: bool,
+    finalized: Vec<Entry>,
+    fold: FoldState,
+    selected: Option<u64>,
+    palette: Option<Palette>,
+    viewer: Option<Viewer>,
+    find_query: Option<String>,
+    last_click: Option<(Instant, u64)>,
     scroll: Scroll,
     viewport_h: usize,
+    scroll_rect: Rect,
+    layout: Vec<LayoutEntry>,
+    cache: HashMap<u64, CachedEntry>,
+    cache_width: usize,
+    cache_theme: ThemeKind,
 }
 
 impl App {
@@ -612,12 +1093,19 @@ impl App {
             parser: TranscriptParser::new(),
             chrome: Chrome::default(),
             finalized: Vec::new(),
-            cache: Vec::new(),
-            cached_blocks: 0,
-            cache_width: 0,
-            cache_last_dense: false,
+            fold: FoldState::new(),
+            selected: None,
+            palette: None,
+            viewer: None,
+            find_query: None,
+            last_click: None,
             scroll: Scroll::new(),
             viewport_h: 0,
+            scroll_rect: Rect::default(),
+            layout: Vec::new(),
+            cache: HashMap::new(),
+            cache_width: 0,
+            cache_theme: theme.kind,
         }
     }
 
@@ -625,32 +1113,419 @@ impl App {
         if let Ok(row) = serde_json::from_str::<Value>(raw) {
             self.chrome.update(&row);
         }
-        self.finalized.extend(self.parser.push(raw));
+        self.finalized.extend(self.parser.push_entries(raw));
     }
 
-    /// Finalized cache (rebuilt on width change) + freshly rendered pending.
+    /// Assemble the scrollback: cached finalized entries (re-rendered when
+    /// their width/fold/selection state changes) + freshly rendered pending,
+    /// recording each entry's line range for selection and hit tests.
     fn scrollback_lines(&mut self, inner_w: usize) -> Vec<Line<'static>> {
-        if self.cache_width != inner_w {
+        if self.cache_width != inner_w || self.cache_theme != self.theme.kind {
             self.cache.clear();
-            self.cached_blocks = 0;
-            self.cache_last_dense = false;
             self.cache_width = inner_w;
+            self.cache_theme = self.theme.kind;
         }
-        while self.cached_blocks < self.finalized.len() {
-            let block = self.finalized[self.cached_blocks].clone();
-            let mut dense = self.cache_last_dense;
-            push_block(self.theme, &mut self.cache, &block, inner_w, &mut dense);
-            self.cache_last_dense = dense;
-            self.cached_blocks += 1;
+        let pending = self.parser.pending_entries();
+        let n_final = self.finalized.len();
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut layout: Vec<LayoutEntry> = Vec::new();
+        let mut last_dense = false;
+        for (i, entry) in self.finalized.iter().chain(pending.iter()).enumerate() {
+            let kind = fold_kind(&entry.block);
+            let expanded = self.fold.expanded(entry.id, kind);
+            let selected = self.selected == Some(entry.id);
+            let dense = matches!(
+                entry.block,
+                DisplayBlock::ToolGroup(_)
+                    | DisplayBlock::Run(_)
+                    | DisplayBlock::Tool(_)
+                    | DisplayBlock::Thinking(_)
+            );
+            if !lines.is_empty() && !(dense && last_dense) {
+                lines.push(Line::default());
+            }
+            last_dense = dense;
+            let (entry_lines, foldable) = if i < n_final {
+                match self.cache.get(&entry.id) {
+                    Some(c) if c.expanded == expanded && c.selected == selected => {
+                        (c.lines.clone(), c.foldable)
+                    }
+                    _ => {
+                        let r = render_entry(self.theme, &entry.block, inner_w, expanded, selected);
+                        self.cache.insert(
+                            entry.id,
+                            CachedEntry {
+                                expanded,
+                                selected,
+                                foldable: r.foldable,
+                                lines: r.lines.clone(),
+                            },
+                        );
+                        (r.lines, r.foldable)
+                    }
+                }
+            } else {
+                let r = render_entry(self.theme, &entry.block, inner_w, expanded, selected);
+                (r.lines, r.foldable)
+            };
+            layout.push(LayoutEntry {
+                id: entry.id,
+                start: lines.len(),
+                height: entry_lines.len(),
+                selectable: !matches!(entry.block, DisplayBlock::WorkedFor(_)),
+                is_turn: entry.block.starts_turn(),
+                foldable,
+                kind,
+            });
+            lines.extend(entry_lines);
         }
-        let mut lines = self.cache.clone();
-        let mut last_dense = self.cache_last_dense;
-        for block in self.parser.pending_blocks() {
-            push_block(self.theme, &mut lines, &block, inner_w, &mut last_dense);
-        }
+        self.layout = layout;
         lines
     }
+
+    fn infos(&self) -> Vec<EntryInfo> {
+        self.layout
+            .iter()
+            .map(|le| EntryInfo {
+                id: le.id,
+                selectable: le.selectable,
+                is_turn: le.is_turn,
+            })
+            .collect()
+    }
+
+    fn layout_of(&self, id: u64) -> Option<LayoutEntry> {
+        self.layout.iter().copied().find(|le| le.id == id)
+    }
+
+    fn scroll_to_selected(&mut self) {
+        let Some(le) = self.selected.and_then(|id| self.layout_of(id)) else {
+            return;
+        };
+        if let Some(offset) =
+            interact::scroll_into_view(self.scroll.offset, self.viewport_h, le.start, le.height)
+        {
+            self.scroll.offset = offset.min(self.scroll.max);
+            self.scroll.follow = false;
+        }
+    }
+
+    fn move_selection(&mut self, forward: bool) {
+        let infos = self.infos();
+        let mv = if forward {
+            interact::select_next(&infos, self.selected)
+        } else {
+            interact::select_prev(&infos, self.selected)
+        };
+        match mv {
+            SelectMove::To(id) => {
+                self.selected = Some(id);
+                self.scroll_to_selected();
+            }
+            SelectMove::Overscroll => self.scroll.goto_bottom(),
+            SelectMove::Stay => {}
+        }
+    }
+
+    /// Shift+Left/Right: select the turn's prompt and snap it to the top.
+    fn jump_turn(&mut self, forward: bool) {
+        let infos = self.infos();
+        let target = if forward {
+            interact::next_turn(&infos, self.selected)
+        } else {
+            interact::prev_turn(&infos, self.selected)
+        };
+        let Some(id) = target else { return };
+        self.selected = Some(id);
+        if let Some(le) = self.layout_of(id) {
+            self.scroll.offset = le.start.min(self.scroll.max);
+            self.scroll.follow = false;
+        }
+    }
+
+    fn fold_selected(&mut self, expanded: bool) {
+        let Some(le) = self.selected.and_then(|id| self.layout_of(id)) else {
+            return;
+        };
+        if le.foldable {
+            self.fold.set(le.id, le.kind, expanded);
+            self.scroll_to_selected();
+        }
+    }
+
+    fn toggle_selected_fold(&mut self) {
+        let Some(le) = self.selected.and_then(|id| self.layout_of(id)) else {
+            return;
+        };
+        if le.foldable {
+            self.fold.toggle(le.id, le.kind);
+        }
+    }
+
+    fn toggle_all_thinking(&mut self) {
+        let ids: Vec<u64> = self
+            .layout
+            .iter()
+            .filter(|le| le.kind == FoldKind::Thinking)
+            .map(|le| le.id)
+            .collect();
+        self.fold.toggle_all_thinking(&ids);
+    }
+
+    fn block_of(&self, id: u64) -> Option<DisplayBlock> {
+        self.finalized
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.block.clone())
+            .or_else(|| {
+                self.parser
+                    .pending_entries()
+                    .into_iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.block)
+            })
+    }
+
+    fn open_viewer(&mut self) {
+        let Some(block) = self.selected.and_then(|id| self.block_of(id)) else {
+            return;
+        };
+        self.viewer = Some(Viewer::new(block));
+    }
+
+    /// `/theme`: switch live, then persist through the settings store the
+    /// startup resolution reads (`view.theme`). `auto` re-detects from the
+    /// env stamps only — the OSC 11 probe needs the raw tty, which crossterm
+    /// owns mid-session.
+    fn apply_theme(&mut self, pref: Option<ThemePref>) {
+        use crate::view_theme::{parse_appearance_var, parse_colorfgbg, resolve_kind};
+        let (kind, persist) = match pref {
+            None => match self.theme.kind {
+                ThemeKind::Dark => (ThemeKind::Light, "light"),
+                ThemeKind::Light => (ThemeKind::Dark, "dark"),
+            },
+            Some(ThemePref::Light) => (ThemeKind::Light, "light"),
+            Some(ThemePref::Dark) => (ThemeKind::Dark, "dark"),
+            Some(ThemePref::Auto) => {
+                let detected =
+                    parse_appearance_var(std::env::var("HIVE_APPEARANCE").ok().as_deref())
+                        .or_else(|| parse_colorfgbg(std::env::var("COLORFGBG").ok().as_deref()));
+                (resolve_kind(ThemePref::Auto, detected), "auto")
+            }
+        };
+        self.theme = kind.theme();
+        if let Some(v) = &mut self.viewer {
+            v.invalidate();
+        }
+        let _ = crate::settings::set_setting("view.theme", serde_json::json!(persist));
+    }
+
+    fn run_find(&mut self, forward: bool) {
+        let Some(query) = self.find_query.clone() else {
+            return;
+        };
+        let pending = self.parser.pending_entries();
+        let list: Vec<(u64, String)> = self
+            .finalized
+            .iter()
+            .chain(pending.iter())
+            .filter(|e| !matches!(e.block, DisplayBlock::WorkedFor(_)))
+            .map(|e| (e.id, search_text(&e.block)))
+            .collect();
+        if let Some(id) = interact::find_match(&list, self.selected, &query, forward) {
+            self.selected = Some(id);
+            self.scroll_to_selected();
+        }
+    }
+
+    // ---- key/mouse routing ---------------------------------------------
+
+    /// Returns true when the app should quit.
+    fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        if mods.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('c') | KeyCode::Char('q'))
+        {
+            return true;
+        }
+        if self.viewer.is_some() {
+            self.viewer_key(code, mods);
+            return false;
+        }
+        if self.palette.is_some() {
+            return self.palette_key(code, mods);
+        }
+        self.main_key(code, mods)
+    }
+
+    fn main_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        if mods.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('f') => self.open_viewer(),
+                KeyCode::Char('e') => self.toggle_all_thinking(),
+                KeyCode::Char('o') => self.fold.cycle_density(),
+                _ => handle_scroll_key(&mut self.scroll, self.viewport_h, code, mods),
+            }
+            return false;
+        }
+        if mods.contains(KeyModifiers::SHIFT) && matches!(code, KeyCode::Left | KeyCode::Right) {
+            self.jump_turn(code == KeyCode::Right);
+            return false;
+        }
+        match code {
+            KeyCode::Char('q') => return true,
+            KeyCode::Char('/') => self.palette = Some(Palette::open()),
+            KeyCode::Up => self.move_selection(false),
+            KeyCode::Down => self.move_selection(true),
+            KeyCode::Left => self.fold_selected(false),
+            KeyCode::Right => self.fold_selected(true),
+            KeyCode::Enter => self.open_viewer(),
+            KeyCode::Char('n') => self.run_find(true),
+            KeyCode::Char('N') => self.run_find(false),
+            _ => handle_scroll_key(&mut self.scroll, self.viewport_h, code, mods),
+        }
+        false
+    }
+
+    fn viewer_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let closes = matches!(code, KeyCode::Esc)
+            || (!ctrl && code == KeyCode::Char('q'))
+            || (ctrl && code == KeyCode::Char('f'));
+        if closes {
+            self.viewer = None;
+            return;
+        }
+        let Some(v) = &mut self.viewer else { return };
+        let page = page_rows(v.view_h);
+        let half = half_page_rows(v.view_h);
+        if ctrl {
+            match code {
+                KeyCode::Char('j') => v.scroll += 1,
+                KeyCode::Char('k') => v.scroll = v.scroll.saturating_sub(1),
+                KeyCode::Char('d') => v.scroll += half,
+                KeyCode::Char('u') => v.scroll = v.scroll.saturating_sub(half),
+                _ => {}
+            }
+            return;
+        }
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => v.scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => v.scroll = v.scroll.saturating_sub(1),
+            KeyCode::PageDown => v.scroll += page,
+            KeyCode::PageUp => v.scroll = v.scroll.saturating_sub(page),
+            KeyCode::Char('g') => v.scroll = 0,
+            KeyCode::Char('G') => v.scroll = usize::MAX / 2,
+            _ => {}
+        }
+    }
+
+    fn palette_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        match code {
+            KeyCode::Esc => self.palette = None,
+            KeyCode::Enter => {
+                let action = self.palette.as_ref().map(Palette::enter);
+                match action {
+                    Some(PaletteAction::SwitchTheme(pref)) => {
+                        self.palette = None;
+                        self.apply_theme(pref);
+                    }
+                    Some(PaletteAction::SetDensity(density)) => {
+                        self.palette = None;
+                        self.fold.set_density(density);
+                    }
+                    Some(PaletteAction::Find(query)) => {
+                        self.palette = None;
+                        self.find_query = Some(query);
+                        self.run_find(true);
+                    }
+                    Some(PaletteAction::Quit) => return true,
+                    Some(PaletteAction::Complete(name)) => {
+                        if let Some(p) = &mut self.palette {
+                            p.input = format!("{name} ");
+                        }
+                    }
+                    Some(PaletteAction::Noop) | None => {}
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.palette {
+                    if !p.backspace() {
+                        self.palette = None;
+                    }
+                }
+            }
+            KeyCode::Up => {
+                if let Some(p) = &mut self.palette {
+                    p.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = &mut self.palette {
+                    p.move_down();
+                }
+            }
+            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+                if let Some(p) = &mut self.palette {
+                    p.insert(c);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn on_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16, now: Instant) {
+        match kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                if let Some(v) = &mut self.viewer {
+                    if kind == MouseEventKind::ScrollDown {
+                        v.scroll += WHEEL_LINES;
+                    } else {
+                        v.scroll = v.scroll.saturating_sub(WHEEL_LINES);
+                    }
+                } else {
+                    handle_mouse(&mut self.scroll, kind);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => self.on_click(x, y, now),
+            _ => {}
+        }
+    }
+
+    /// Single click selects the entry under the cursor; a second click on the
+    /// same entry within the multi-click window toggles its fold.
+    fn on_click(&mut self, x: u16, y: u16, now: Instant) {
+        if self.viewer.is_some() || self.palette.is_some() {
+            return;
+        }
+        let r = self.scroll_rect;
+        if x < r.x || x >= r.x + r.width || y < r.y || y >= r.y + r.height {
+            return;
+        }
+        let line_idx = self.scroll.offset + (y - r.y) as usize;
+        let Some(le) =
+            self.layout.iter().copied().find(|le| {
+                le.selectable && line_idx >= le.start && line_idx < le.start + le.height
+            })
+        else {
+            return;
+        };
+        let double = self
+            .last_click
+            .is_some_and(|(t0, id)| id == le.id && now.duration_since(t0) <= MULTI_CLICK);
+        self.selected = Some(le.id);
+        if double {
+            self.toggle_selected_fold();
+            self.last_click = None;
+        } else {
+            self.last_click = Some((now, le.id));
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Frame chrome
+// ---------------------------------------------------------------------------
 
 fn top_line(app: &App, inner_w: usize) -> Line<'static> {
     let t = app.theme;
@@ -710,7 +1585,7 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
 }
 
 fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'static> {
-    let key = fg(t.text_secondary).add_modifier(Modifier::BOLD);
+    let key = bold(t.text_secondary);
     let label = fg(t.gray);
     let sep = fg(t.gray).add_modifier(Modifier::DIM);
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -718,16 +1593,22 @@ fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'stat
         spans.push(Span::styled(m.to_string(), fg(t.accent_model)));
         spans.push(Span::styled(" · ", sep));
     }
-    spans.push(Span::styled("read-only mirror", label));
-    spans.push(Span::styled(" · ", sep));
-    spans.push(Span::styled("q", key));
-    spans.push(Span::styled(":quit ", label));
-    spans.push(Span::styled("j", key));
-    spans.push(Span::styled("/", label));
-    spans.push(Span::styled("k", key));
-    spans.push(Span::styled(":scroll ", label));
-    spans.push(Span::styled("G", key));
-    spans.push(Span::styled(":follow", label));
+    for (i, (k, what)) in [
+        ("↑↓", "select"),
+        ("←→", "fold"),
+        ("Enter", "view"),
+        ("/", "cmd"),
+        ("q", "quit"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if i > 0 {
+            spans.push(Span::styled(" · ", sep));
+        }
+        spans.push(Span::styled(k.to_string(), key));
+        spans.push(Span::styled(format!(" {what}"), label));
+    }
     spans.push(Span::raw(" "));
     let line = Line::from(spans);
     let w = cells_width(&line_cells(&line));
@@ -737,6 +1618,234 @@ fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'stat
     let mut spans = line.spans;
     spans.insert(0, Span::raw(" ".repeat(inner_w - w)));
     Line::from(spans)
+}
+
+/// grok SelectionBox: fg-only `┌ ┐ └ ┘` corners one row outside the entry,
+/// `│` sides in the padding columns, dashed `┆` where the viewport clips.
+fn draw_selection_frame(
+    buf: &mut Buffer,
+    t: &ViewTheme,
+    rect: Rect,
+    offset: usize,
+    le: LayoutEntry,
+) {
+    let h = rect.height as usize;
+    if h == 0 || rect.width < 8 {
+        return;
+    }
+    let start = le.start;
+    let end = le.start + le.height;
+    let vis_top = start.max(offset);
+    let vis_end = end.min(offset + h);
+    if vis_top >= vis_end {
+        return;
+    }
+    let top_clipped = start < offset;
+    let bottom_clipped = end > offset + h;
+    let left = rect.x + 2;
+    let right = rect.x + rect.width - 2;
+    let style = Style::default().fg(t.selection_border);
+    for row in vis_top..vis_end {
+        let y = rect.y + (row - offset) as u16;
+        let sym = if (row == vis_top && top_clipped) || (row == vis_end - 1 && bottom_clipped) {
+            "┆"
+        } else {
+            "│"
+        };
+        for x in [left, right] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(sym);
+                cell.set_style(style);
+            }
+        }
+    }
+    if !top_clipped && start > offset {
+        let y = rect.y + (start - offset) as u16 - 1;
+        for (x, sym) in [(left, "┌"), (right, "┐")] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(sym);
+                cell.set_style(style);
+            }
+        }
+    }
+    if !bottom_clipped && end < offset + h {
+        let y = rect.y + (end - offset) as u16;
+        for (x, sym) in [(left, "└"), (right, "┘")] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(sym);
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
+/// grok slash palette: input row `❯ /…` at the hint line, dropdown panel
+/// anchored directly above it — bg_light rows, bg_visual+bold selected row
+/// with a `❯ ` prefix, gray descriptions in an aligned column, fuzzy-match
+/// chars in fuzzy_accent, `─` rules top and bottom.
+fn draw_palette(frame: &mut Frame, app: &App, inner: Rect, hint_rect: Rect) {
+    let t = app.theme;
+    let Some(pal) = &app.palette else { return };
+    let base = Style::default().bg(t.bg_base).fg(t.text_primary);
+    let w = inner.width as usize;
+    let input_spans = vec![
+        Span::styled("❯ ".to_string(), bold(t.accent_user)),
+        Span::styled(pal.input.clone(), fg(t.text_primary)),
+    ];
+    frame.render_widget(
+        Paragraph::new(clip_spans(input_spans, w)).style(base),
+        hint_rect,
+    );
+    let hits = pal.filtered();
+    if hits.is_empty() {
+        return;
+    }
+    let avail = hint_rect.y.saturating_sub(inner.y) as usize;
+    let rows = hits
+        .len()
+        .min(MAX_PALETTE_ROWS)
+        .min(avail.saturating_sub(2));
+    if rows == 0 {
+        return;
+    }
+    let panel_h = rows + 2;
+    let panel = Rect {
+        x: inner.x,
+        y: hint_rect.y - panel_h as u16,
+        width: inner.width,
+        height: panel_h as u16,
+    };
+    let selected_row = pal.selected_row();
+    let label_w = hits
+        .iter()
+        .map(|&(i, _)| PALETTE_COMMANDS[i].name.len())
+        .max()
+        .unwrap_or(0)
+        .min((w * 6 / 10).min(40));
+    let rule = |count: Option<String>| -> Line<'static> {
+        let rule_style = fg(t.bg_light);
+        match count {
+            Some(text) if w > text.len() + 2 => Line::from(vec![
+                Span::styled("─".repeat(w - text.len() - 1), rule_style),
+                Span::styled(text, fg(t.gray)),
+                Span::styled("─".to_string(), rule_style),
+            ]),
+            _ => Line::from(Span::styled("─".repeat(w), rule_style)),
+        }
+    };
+    let count_text = format!(
+        " {} match{} ",
+        hits.len(),
+        if hits.len() == 1 { "" } else { "es" }
+    );
+    let mut lines: Vec<Line<'static>> = vec![rule(Some(count_text))];
+    for (row, &(cmd_idx, ref positions)) in hits.iter().take(rows).enumerate() {
+        let cmd = &PALETTE_COMMANDS[cmd_idx];
+        let is_sel = row == selected_row;
+        let row_bg = if is_sel { t.bg_visual } else { t.bg_light };
+        let mut cells: Vec<Cell> = Vec::new();
+        let pad_style = Style::default().bg(row_bg);
+        for _ in 0..2 {
+            cells.push((' ', pad_style));
+        }
+        let prefix = if is_sel { "❯ " } else { "  " };
+        for ch in prefix.chars() {
+            cells.push((ch, fg(t.text_primary).bg(row_bg)));
+        }
+        for (ci, ch) in cmd.name.chars().enumerate() {
+            let mut st = if positions.contains(&ci) {
+                fg(t.fuzzy_accent).bg(row_bg)
+            } else {
+                fg(t.text_primary).bg(row_bg)
+            };
+            if is_sel {
+                st = st.add_modifier(Modifier::BOLD);
+            }
+            cells.push((ch, st));
+        }
+        while cells.len() < 4 + label_w {
+            cells.push((' ', pad_style));
+        }
+        for _ in 0..2 {
+            cells.push((' ', pad_style));
+        }
+        let desc_budget = w.saturating_sub(cells_width(&cells) + 1);
+        for ch in clip_plain(cmd.desc, desc_budget).chars() {
+            cells.push((ch, fg(t.gray).bg(row_bg)));
+        }
+        while cells_width(&cells) < w {
+            cells.push((' ', pad_style));
+        }
+        lines.push(cells_to_line(&cells));
+    }
+    lines.push(rule(None));
+    frame.render_widget(Clear, panel);
+    frame.render_widget(Paragraph::new(lines).style(base), panel);
+}
+
+/// grok modal window: centered popup (90% width clamped to [60,140], 7-row
+/// vertical margins), square gray_dim border, `─ Title ─` on the top border,
+/// bg_base fill, scrollable content, footer hints.
+fn draw_viewer(frame: &mut Frame, app: &mut App) {
+    let t = app.theme;
+    let Some(v) = &mut app.viewer else { return };
+    let area = frame.area();
+    if area.width < 20 || area.height < 8 {
+        return;
+    }
+    let w = ((area.width as usize * 9 / 10).clamp(60, 140) as u16).min(area.width);
+    let (y, h) = if area.height > 20 {
+        (area.y + 7, area.height - 14)
+    } else {
+        (area.y + 1, area.height - 2)
+    };
+    let popup = Rect {
+        x: area.x + (area.width - w) / 2,
+        y,
+        width: w,
+        height: h,
+    };
+    let border_style = fg(t.gray_dim).bg(t.bg_base);
+    let title = Line::from(vec![
+        Span::styled("─ ".to_string(), border_style),
+        Span::styled(v.title.clone(), bold(t.text_primary).bg(t.bg_base)),
+        Span::styled(" ─".to_string(), border_style),
+    ]);
+    let block = Block::bordered()
+        .border_style(border_style)
+        .title(title)
+        .style(Style::default().bg(t.bg_base));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    if inner.width < 6 || inner.height < 3 {
+        return;
+    }
+    let content = Rect {
+        x: inner.x + 2,
+        y: inner.y + 1,
+        width: inner.width.saturating_sub(4),
+        height: inner.height.saturating_sub(3),
+    };
+    v.build(t, content.width as usize);
+    v.view_h = content.height as usize;
+    let max = v.lines.len().saturating_sub(content.height as usize);
+    v.scroll = v.scroll.min(max);
+    let end = (v.scroll + content.height as usize).min(v.lines.len());
+    let visible: Vec<Line> = v.lines[v.scroll..end].to_vec();
+    let base = Style::default().bg(t.bg_base).fg(t.text_primary);
+    frame.render_widget(Paragraph::new(visible).style(base), content);
+    let footer = Rect {
+        x: content.x,
+        y: inner.y + inner.height - 1,
+        width: content.width,
+        height: 1,
+    };
+    let hint = Line::from(Span::styled(
+        "Esc close · j/k scroll · g/G ends".to_string(),
+        fg(t.gray),
+    ));
+    frame.render_widget(Paragraph::new(hint).style(base), footer);
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
@@ -774,19 +1883,30 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let base = Style::default().bg(t.bg_base).fg(t.text_primary);
     let lines = app.scrollback_lines(inner.width as usize);
     app.viewport_h = scroll_h as usize;
+    app.scroll_rect = scroll_rect;
     app.scroll
         .sync(lines.len().saturating_sub(scroll_h as usize));
     let end = (app.scroll.offset + scroll_h as usize).min(lines.len());
     let visible: Vec<Line> = lines[app.scroll.offset..end].to_vec();
     frame.render_widget(Paragraph::new(visible).style(base), scroll_rect);
+    if let Some(le) = app.selected.and_then(|id| app.layout_of(id)) {
+        draw_selection_frame(frame.buffer_mut(), t, scroll_rect, app.scroll.offset, le);
+    }
     frame.render_widget(
         Paragraph::new(top_line(app, inner.width as usize)).style(base),
         status_rect,
     );
-    frame.render_widget(
-        Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
-        hint_rect,
-    );
+    if app.palette.is_some() {
+        draw_palette(frame, app, inner, hint_rect);
+    } else {
+        frame.render_widget(
+            Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
+            hint_rect,
+        );
+    }
+    if app.viewer.is_some() {
+        draw_viewer(frame, app);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -861,11 +1981,11 @@ fn event_loop(
         loop {
             match event::read()? {
                 Event::Key(k) if k.kind != KeyEventKind::Release => {
-                    if handle_key(&mut app.scroll, app.viewport_h, k.code, k.modifiers) {
+                    if app.on_key(k.code, k.modifiers) {
                         return Ok(());
                     }
                 }
-                Event::Mouse(m) => handle_mouse(&mut app.scroll, m.kind),
+                Event::Mouse(m) => app.on_mouse(m.kind, m.column, m.row, Instant::now()),
                 _ => {}
             }
             if !event::poll(Duration::from_millis(0))? {
@@ -877,10 +1997,10 @@ fn event_loop(
 
 #[cfg(test)]
 mod tests {
+    use super::interact::Density;
     use super::*;
     use crate::view_theme::{GROKDAY, GROKNIGHT};
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use serde_json::json;
 
     const W: u16 = 80;
@@ -929,6 +2049,14 @@ mod tests {
         .to_string()
     }
 
+    fn thinking_row(text: &str) -> String {
+        json!({
+            "type": "assistant", "timestamp": "2026-08-30T12:40:14.300Z",
+            "message": {"content": [{"type": "thinking", "thinking": text}]},
+        })
+        .to_string()
+    }
+
     fn tool_use_row(name: &str, id: &str, input: serde_json::Value) -> String {
         json!({
             "type": "assistant",
@@ -937,6 +2065,31 @@ mod tests {
             ]},
         })
         .to_string()
+    }
+
+    fn tool_result_row(id: &str, content: &str, is_error: bool) -> String {
+        json!({
+            "type": "user",
+            "message": {"content": [
+                {"type": "tool_result", "tool_use_id": id,
+                 "content": content, "is_error": is_error}
+            ]},
+        })
+        .to_string()
+    }
+
+    fn key(app: &mut App, code: KeyCode) -> bool {
+        app.on_key(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(app: &mut App, c: char) -> bool {
+        app.on_key(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            key(app, KeyCode::Char(c));
+        }
     }
 
     #[test]
@@ -1037,13 +2190,7 @@ mod tests {
             "t3",
             json!({"command": "ls", "description": "List files"}),
         ));
-        app.push_raw(
-            &json!({
-                "type": "assistant", "timestamp": "2026-08-30T12:40:14.300Z",
-                "message": {"content": [{"type": "thinking", "thinking": "hmm"}]},
-            })
-            .to_string(),
-        );
+        app.push_raw(&thinking_row("hmm"));
         let buf = draw_to_buffer(&mut app, W, H);
         let text = buffer_text(&buf);
         assert!(text.contains("◈ Read 1 file, Searched 1 pattern"), "{text}");
@@ -1059,7 +2206,7 @@ mod tests {
         let bottom = row_text(&buf, H - 2);
         let trimmed = bottom.trim_end();
         assert!(
-            trimmed.ends_with("claude-fable-5 · read-only mirror · q:quit j/k:scroll G:follow"),
+            trimmed.ends_with("claude-fable-5 · ↑↓ select · ←→ fold · Enter view · / cmd · q quit"),
             "{bottom:?}"
         );
         // Right-aligned: content hugs the inner right edge (one trailing space
@@ -1179,68 +2326,40 @@ mod tests {
 
     #[test]
     fn test_handle_key_quit_bindings() {
-        let mut s = scroll_at(0, 50, true);
-        assert!(handle_key(
-            &mut s,
-            30,
-            KeyCode::Char('q'),
-            KeyModifiers::NONE
-        ));
-        assert!(handle_key(
-            &mut s,
-            30,
-            KeyCode::Char('q'),
-            KeyModifiers::CONTROL
-        ));
-        assert!(handle_key(
-            &mut s,
-            30,
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL
-        ));
-        assert!(!handle_key(
-            &mut s,
-            30,
-            KeyCode::Char('x'),
-            KeyModifiers::NONE
-        ));
+        let mut app = App::new(&GROKNIGHT);
+        assert!(key(&mut app, KeyCode::Char('q')));
+        assert!(ctrl(&mut app, 'q'));
+        assert!(ctrl(&mut app, 'c'));
+        assert!(!key(&mut app, KeyCode::Char('x')));
     }
 
     #[test]
     fn test_handle_key_line_page_and_jump_bindings() {
         let mut s = scroll_at(20, 50, false);
-        assert!(!handle_key(
-            &mut s,
-            30,
-            KeyCode::Char('j'),
-            KeyModifiers::NONE
-        ));
+        handle_scroll_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(s.offset, 21);
-        handle_key(&mut s, 30, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(s.offset, 22);
-        handle_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::NONE);
-        handle_key(&mut s, 30, KeyCode::Up, KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::NONE);
         assert_eq!(s.offset, 20);
         // Ctrl+J / Ctrl+K single-line scroll.
-        handle_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::CONTROL);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::CONTROL);
         assert_eq!(s.offset, 21);
-        handle_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::CONTROL);
         assert_eq!(s.offset, 20);
         // Ctrl+D / Ctrl+U half page (viewport 30 → 15).
-        handle_key(&mut s, 30, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert_eq!(s.offset, 35);
-        handle_key(&mut s, 30, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert_eq!(s.offset, 20);
         // PageDown / PageUp (viewport 30 → 28).
-        handle_key(&mut s, 30, KeyCode::PageDown, KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::PageDown, KeyModifiers::NONE);
         assert_eq!(s.offset, 48);
-        handle_key(&mut s, 30, KeyCode::PageUp, KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::PageUp, KeyModifiers::NONE);
         assert_eq!(s.offset, 20);
         // g / G jumps (G also re-engages follow).
-        handle_key(&mut s, 30, KeyCode::Char('g'), KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('g'), KeyModifiers::NONE);
         assert_eq!(s.offset, 0);
         assert!(!s.follow);
-        handle_key(&mut s, 30, KeyCode::Char('G'), KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('G'), KeyModifiers::NONE);
         assert_eq!(s.offset, 50);
         assert!(s.follow);
     }
@@ -1249,7 +2368,7 @@ mod tests {
     fn test_j_at_bottom_reengages_follow() {
         // grok selection.rs: a single j on the last entry enters follow.
         let mut s = scroll_at(50, 50, false);
-        handle_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_scroll_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::NONE);
         assert!(s.follow);
     }
 
@@ -1266,5 +2385,381 @@ mod tests {
         s.offset = 50;
         handle_mouse(&mut s, MouseEventKind::ScrollDown);
         assert!(s.follow);
+    }
+
+    // ---- selection ------------------------------------------------------
+
+    #[test]
+    fn test_up_selects_and_draws_grok_bracket_frame() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("go"));
+        app.push_raw(&assistant_text_row("done"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        assert_eq!(app.selected, None, "no selection until first Up/Down");
+        key(&mut app, KeyCode::Up); // engage at the tail: the assistant block
+        let buf = draw_to_buffer(&mut app, W, H);
+        let le = app.layout_of(app.selected.unwrap()).unwrap();
+        // border columns: inner.x + 2 and inner.x + inner_w - 2
+        let (left, right) = (4u16, 2 + (W - 4) - 2);
+        let top_y = app.scroll_rect.y + (le.start - app.scroll.offset) as u16;
+        let above = top_y - 1;
+        let below = top_y + le.height as u16;
+        for (x, y, sym) in [
+            (left, above, "┌"),
+            (right, above, "┐"),
+            (left, top_y, "│"),
+            (right, top_y, "│"),
+            (left, below, "└"),
+            (right, below, "┘"),
+        ] {
+            let cell = buf.cell((x, y)).unwrap();
+            assert_eq!(cell.symbol(), sym, "at ({x},{y})");
+            assert_eq!(cell.style().fg, Some(GROKNIGHT.selection_border));
+        }
+        // Up again walks to the previous selectable entry (the user band).
+        key(&mut app, KeyCode::Up);
+        let user_le = app.layout_of(app.selected.unwrap()).unwrap();
+        assert!(user_le.is_turn);
+        // Down walks back; Down past the tail re-engages follow.
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.layout_of(app.selected.unwrap()).unwrap().id, le.id);
+        app.scroll.follow = false;
+        key(&mut app, KeyCode::Down);
+        assert!(app.scroll.follow, "overscroll past the last entry follows");
+    }
+
+    #[test]
+    fn test_shift_arrows_jump_turns() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("first"));
+        app.push_raw(&assistant_text_row("a1"));
+        app.push_raw(&user_row("second"));
+        app.push_raw(&assistant_text_row("a2"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up); // last assistant
+        app.on_key(KeyCode::Left, KeyModifiers::SHIFT); // current turn's prompt
+        let le = app.layout_of(app.selected.unwrap()).unwrap();
+        assert!(le.is_turn);
+        assert_eq!(app.scroll.offset, le.start.min(app.scroll.max));
+        app.on_key(KeyCode::Left, KeyModifiers::SHIFT); // previous prompt
+        let first = app.layout_of(app.selected.unwrap()).unwrap();
+        assert!(first.is_turn && first.id < le.id);
+        app.on_key(KeyCode::Right, KeyModifiers::SHIFT); // back to the next
+        assert_eq!(app.selected, Some(le.id));
+    }
+
+    // ---- fold / density -------------------------------------------------
+
+    fn thinking_app() -> App {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("go"));
+        app.push_raw(&thinking_row("deep reasoning body text"));
+        app.push_raw(&assistant_text_row("done"));
+        app
+    }
+
+    #[test]
+    fn test_right_expands_selected_thinking_block() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up); // assistant
+        key(&mut app, KeyCode::Up); // thinking
+        let buf = draw_to_buffer(&mut app, W, H);
+        assert!(!buffer_text(&buf).contains("deep reasoning body text"));
+        key(&mut app, KeyCode::Right);
+        let buf = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&buf);
+        assert!(text.contains("deep reasoning body text"), "{text}");
+        // expanded body rows carry the thinking accent gutter
+        let body_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("deep reasoning"))
+            .unwrap();
+        assert_eq!(buf.cell((2, body_row)).unwrap().symbol(), "│");
+        assert_eq!(
+            buf.cell((2, body_row)).unwrap().style().fg,
+            Some(GROKNIGHT.accent_thinking)
+        );
+        key(&mut app, KeyCode::Left);
+        let buf = draw_to_buffer(&mut app, W, H);
+        assert!(!buffer_text(&buf).contains("deep reasoning body text"));
+    }
+
+    #[test]
+    fn test_selected_collapsed_thinking_header_undims_with_patch() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up); // thinking selected, collapsed
+        let buf = draw_to_buffer(&mut app, W, H);
+        let row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("Thought"))
+            .unwrap();
+        // bullet swapped for the expandable indicator ›
+        assert!(row_text(&buf, row).contains('›'));
+        let label_x = (0..W)
+            .find(|&x| buf.cell((x, row)).is_some_and(|c| c.symbol() == "T"))
+            .unwrap();
+        let cell = buf.cell((label_x, row)).unwrap();
+        assert_eq!(cell.style().fg, Some(GROKNIGHT.text_primary), "undimmed");
+        assert_eq!(cell.style().bg, Some(GROKNIGHT.bg_dark), "header patch");
+    }
+
+    #[test]
+    fn test_ctrl_e_toggles_all_thinking() {
+        let mut app = thinking_app();
+        app.push_raw(&thinking_row("second thought body"));
+        app.push_raw(&assistant_text_row("done again"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        ctrl(&mut app, 'e');
+        let buf = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&buf);
+        assert!(text.contains("deep reasoning body text"), "{text}");
+        assert!(text.contains("second thought body"), "{text}");
+        ctrl(&mut app, 'e');
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(!text.contains("deep reasoning body text"));
+        assert!(!text.contains("second thought body"));
+    }
+
+    #[test]
+    fn test_ctrl_o_density_cycle_expands_thinking_then_tools() {
+        let mut app = thinking_app();
+        app.push_raw(&tool_use_row(
+            "Bash",
+            "t1",
+            json!({"command": "cargo build", "description": "Build"}),
+        ));
+        app.push_raw(&tool_result_row("t1", "Compiling hive v0.1", false));
+        app.push_raw(&assistant_text_row("built"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        assert_eq!(app.fold.density, Density::Normal);
+        ctrl(&mut app, 'o'); // thinking
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("deep reasoning body text"), "{text}");
+        assert!(!text.contains("Compiling hive"), "{text}");
+        ctrl(&mut app, 'o'); // verbose
+        let buf = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&buf);
+        assert!(text.contains("deep reasoning body text"), "{text}");
+        assert!(text.contains("Compiling hive"), "{text}");
+        // output rows sit on the bg_dark strip with the success accent gutter
+        let out_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("Compiling hive"))
+            .unwrap();
+        assert_eq!(buf.cell((2, out_row)).unwrap().symbol(), "│");
+        assert_eq!(
+            buf.cell((2, out_row)).unwrap().style().fg,
+            Some(GROKNIGHT.accent_success)
+        );
+        let body_x = (0..W)
+            .find(|&x| buf.cell((x, out_row)).unwrap().symbol() == "C")
+            .unwrap();
+        assert_eq!(
+            buf.cell((body_x, out_row)).unwrap().style().bg,
+            Some(GROKNIGHT.bg_dark)
+        );
+        ctrl(&mut app, 'o'); // back to normal
+        assert_eq!(app.fold.density, Density::Normal);
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(!text.contains("Compiling hive"));
+    }
+
+    #[test]
+    fn test_double_click_toggles_fold_and_click_selects() {
+        let mut app = thinking_app();
+        let buf = draw_to_buffer(&mut app, W, H);
+        let row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("Thought"))
+            .unwrap();
+        let now = Instant::now();
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), 10, row, now);
+        let id = app.selected.expect("click selects");
+        assert_eq!(app.layout_of(id).unwrap().kind, FoldKind::Thinking);
+        app.on_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            10,
+            row,
+            now + Duration::from_millis(100),
+        );
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("deep reasoning body text"), "{text}");
+        // two slow clicks do NOT toggle back
+        let later = now + Duration::from_secs(2);
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), 10, row, later);
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("deep reasoning body text"), "{text}");
+    }
+
+    // ---- viewer ---------------------------------------------------------
+
+    #[test]
+    fn test_enter_opens_viewer_and_q_closes_it_not_the_app() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up); // assistant
+        key(&mut app, KeyCode::Enter);
+        assert!(app.viewer.is_some());
+        let buf = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&buf);
+        assert!(text.contains("─ Assistant ─"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
+        // the popup clears the transcript beneath it
+        assert!(text.contains("done"), "viewer shows the block body: {text}");
+        assert!(!key(&mut app, KeyCode::Char('q')), "q closes, not quits");
+        assert!(app.viewer.is_none());
+        assert!(key(&mut app, KeyCode::Char('q')), "next q quits the app");
+    }
+
+    #[test]
+    fn test_ctrl_f_opens_viewer_for_run_with_command_and_output() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("go"));
+        app.push_raw(&tool_use_row(
+            "Bash",
+            "t1",
+            json!({"command": "cargo nextest run\n--all", "description": "Test"}),
+        ));
+        app.push_raw(&tool_result_row("t1", "849 tests passed", false));
+        app.push_raw(&assistant_text_row("green"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up); // assistant
+        key(&mut app, KeyCode::Up); // run block
+        ctrl(&mut app, 'f');
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("─ Run ─"), "{text}");
+        assert!(text.contains("$ cargo nextest run"), "{text}");
+        assert!(text.contains("849 tests passed"), "{text}");
+        ctrl(&mut app, 'f');
+        assert!(app.viewer.is_none(), "Ctrl+F toggles the viewer closed");
+    }
+
+    // ---- palette --------------------------------------------------------
+
+    #[test]
+    fn test_slash_opens_palette_with_rows_and_esc_closes() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Char('/'));
+        let buf = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&buf);
+        assert!(text.contains("❯ /"), "{text}");
+        assert!(text.contains("/theme"), "{text}");
+        assert!(text.contains("/view"), "{text}");
+        assert!(text.contains("/find"), "{text}");
+        assert!(text.contains("/quit"), "{text}");
+        assert!(text.contains("4 matches"), "{text}");
+        // selected row carries the bg_visual band
+        let theme_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("/theme"))
+            .unwrap();
+        assert_eq!(
+            buf.cell((6, theme_row)).unwrap().style().bg,
+            Some(GROKNIGHT.bg_visual)
+        );
+        let view_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("/view"))
+            .unwrap();
+        assert_eq!(
+            buf.cell((6, view_row)).unwrap().style().bg,
+            Some(GROKNIGHT.bg_light)
+        );
+        // q types into the input instead of quitting
+        assert!(!key(&mut app, KeyCode::Char('q')));
+        assert!(app.palette.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn test_palette_theme_switch_persists_and_restyles() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path());
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "theme light");
+        assert!(!key(&mut app, KeyCode::Enter));
+        assert!(app.palette.is_none());
+        assert_eq!(app.theme.kind, ThemeKind::Light);
+        assert_eq!(
+            crate::settings::get_setting("view.theme"),
+            Some(json!("light"))
+        );
+        // the frame really re-renders in grokday
+        let buf = draw_to_buffer(&mut app, W, H);
+        assert_eq!(buf.cell((0, 0)).unwrap().style().bg, Some(GROKDAY.bg_base));
+        // bare /theme cycles back to dark and persists that too
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "theme");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.theme.kind, ThemeKind::Dark);
+        assert_eq!(
+            crate::settings::get_setting("view.theme"),
+            Some(json!("dark"))
+        );
+    }
+
+    #[test]
+    fn test_palette_view_sets_density_and_quit_quits() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "view verbose");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.fold.density, Density::Verbose);
+        assert!(app.palette.is_none());
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "quit");
+        assert!(key(&mut app, KeyCode::Enter), "/quit exits");
+    }
+
+    #[test]
+    fn test_palette_find_jumps_and_n_cycles() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("alpha SPEC here"));
+        app.push_raw(&assistant_text_row("nothing to see"));
+        app.push_raw(&user_row("the spec again"));
+        app.push_raw(&assistant_text_row("tail"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "find spec");
+        key(&mut app, KeyCode::Enter);
+        let first = app.selected.expect("find selects a match");
+        assert!(app.layout_of(first).unwrap().is_turn);
+        key(&mut app, KeyCode::Char('n'));
+        let second = app.selected.unwrap();
+        assert_ne!(first, second);
+        assert!(app.layout_of(second).unwrap().is_turn);
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.selected, Some(first), "wraps around");
+        key(&mut app, KeyCode::Char('N'));
+        assert_eq!(app.selected, Some(second), "N goes backward");
+    }
+
+    #[test]
+    fn test_long_user_band_folds_and_expands() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        let long: String = (1..=8)
+            .map(|i| format!("user line number {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.push_raw(&user_row(&long));
+        app.push_raw(&assistant_text_row("ok"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("user line number 1"), "{text}");
+        assert!(!text.contains("user line number 8"), "folded at 3 lines");
+        assert!(text.contains(" …"), "{text}");
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up); // select the user band
+        key(&mut app, KeyCode::Right);
+        let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+        assert!(text.contains("user line number 8"), "{text}");
     }
 }

@@ -2834,11 +2834,11 @@ mod tests {
         let picked = _members_to_backfill(
             &rendered,
             vec![
-                member("orch", "claude", "sid-1"),   // already rendered
-                member("scout", "claude", "sid-2"),  // already rendered
-                member("sage", "grok", "sid-3"),     // missing -> backfill
-                member("ghost", "grok", ""),         // no engine identity
-                member("shelly", "bash", "sid-4"),   // not an agent CLI
+                member("orch", "claude", "sid-1"),  // already rendered
+                member("scout", "claude", "sid-2"), // already rendered
+                member("sage", "grok", "sid-3"),    // missing -> backfill
+                member("ghost", "grok", ""),        // no engine identity
+                member("shelly", "bash", "sid-4"),  // not an agent CLI
             ],
         );
         let names: Vec<String> = picked.iter().map(|m| map_str(m, "name")).collect();

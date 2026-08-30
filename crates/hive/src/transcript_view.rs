@@ -36,6 +36,9 @@ const _POLL_SECONDS: f64 = 0.25;
 const _SPINNER: &str = "✻✼✢✽";
 /// Idle polls before the plain stream force-finalizes pending blocks.
 const _IDLE_FLUSH_TICKS: usize = 4;
+/// Storage cap for one tool result's full text; longer results are cut at a
+/// char boundary and flagged `truncated`.
+pub const TOOL_RESULT_MAX_BYTES: usize = 512 * 1024;
 
 pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
@@ -374,6 +377,25 @@ pub enum DisplayBlock {
     WorkedFor(WorkedForBlock),
 }
 
+impl DisplayBlock {
+    /// True when this block starts a turn — a turn spans a user prompt up to
+    /// the next one (grok nav.rs rebuild_turns), so User blocks are the turn
+    /// anchors Shift+Left/Right jump between.
+    pub fn starts_turn(&self) -> bool {
+        matches!(self, DisplayBlock::User(_))
+    }
+}
+
+/// A [`DisplayBlock`] plus its stable identity. Ids increase monotonically in
+/// birth order (which matches display order), are assigned once — when the
+/// block first appears, pending or immediate — and survive finalization, so
+/// the TUI can key selection/fold state on them across live re-parses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub id: u64,
+    pub block: DisplayBlock,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserBlock {
     /// Raw message text; for HIVE envelopes this still holds the full
@@ -428,11 +450,45 @@ impl GroupKind {
     }
 }
 
-/// First line of a tool result, plus its error flag.
+/// A tool result: the full text (capped at [`TOOL_RESULT_MAX_BYTES`]) plus
+/// its error flag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {
-    pub first_line: String,
+    /// Full result text, cut at [`TOOL_RESULT_MAX_BYTES`] on a char boundary.
+    pub text: String,
+    /// True when `text` was cut at the storage cap.
+    pub truncated: bool,
     pub is_error: bool,
+}
+
+impl ToolOutcome {
+    fn new(text: String, is_error: bool) -> Self {
+        let truncated = text.len() > TOOL_RESULT_MAX_BYTES;
+        let text = if truncated {
+            let mut cut = TOOL_RESULT_MAX_BYTES;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text[..cut].to_string()
+        } else {
+            text
+        };
+        ToolOutcome {
+            text,
+            truncated,
+            is_error,
+        }
+    }
+
+    /// Collapsed display line: the whole text clipped at 160 chars, first
+    /// line only (the legacy stream's derivation, now an accessor).
+    pub fn first_line(&self) -> String {
+        _clip(&self.text, 160)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -442,6 +498,8 @@ pub struct GroupMember {
     pub name: String,
     /// Most relevant input field (path, pattern, url, query).
     pub hint: String,
+    /// Pretty-printed full input JSON, for the block viewer.
+    pub input_json: String,
     pub result: Option<ToolOutcome>,
 }
 
@@ -488,6 +546,9 @@ pub struct RunBlock {
     /// a leading `Run`/`Running` word stripped, else the command's first
     /// line, else `…`.
     pub description: String,
+    /// Full command text (all lines), for the block viewer; empty when the
+    /// input carried none.
+    pub command: String,
     pub result: Option<ToolOutcome>,
 }
 
@@ -495,11 +556,15 @@ pub struct RunBlock {
 pub struct ToolBlock {
     pub name: String,
     pub hint: String,
+    /// Pretty-printed full input JSON, for the block viewer.
+    pub input_json: String,
     pub result: Option<ToolOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThinkingBlock {
+    /// Full thinking text from the transcript's thinking content block.
+    pub text: String,
     /// Seconds between the previous transcript row and the thinking row;
     /// `None` when either timestamp is missing.
     pub duration_secs: Option<f64>,
@@ -544,33 +609,66 @@ impl WorkedForBlock {
 
 enum Pending {
     Group {
+        entry_id: u64,
         block: ToolGroupBlock,
         ids: Vec<String>,
     },
     Run {
+        entry_id: u64,
         block: RunBlock,
         id: String,
     },
     Tool {
+        entry_id: u64,
         block: ToolBlock,
         id: String,
     },
 }
 
 impl Pending {
-    fn into_block(self) -> DisplayBlock {
+    fn into_entry(self) -> Entry {
         match self {
-            Pending::Group { block, .. } => DisplayBlock::ToolGroup(block),
-            Pending::Run { block, .. } => DisplayBlock::Run(block),
-            Pending::Tool { block, .. } => DisplayBlock::Tool(block),
+            Pending::Group {
+                entry_id, block, ..
+            } => Entry {
+                id: entry_id,
+                block: DisplayBlock::ToolGroup(block),
+            },
+            Pending::Run {
+                entry_id, block, ..
+            } => Entry {
+                id: entry_id,
+                block: DisplayBlock::Run(block),
+            },
+            Pending::Tool {
+                entry_id, block, ..
+            } => Entry {
+                id: entry_id,
+                block: DisplayBlock::Tool(block),
+            },
         }
     }
 
-    fn snapshot(&self) -> DisplayBlock {
+    fn snapshot(&self) -> Entry {
         match self {
-            Pending::Group { block, .. } => DisplayBlock::ToolGroup(block.clone()),
-            Pending::Run { block, .. } => DisplayBlock::Run(block.clone()),
-            Pending::Tool { block, .. } => DisplayBlock::Tool(block.clone()),
+            Pending::Group {
+                entry_id, block, ..
+            } => Entry {
+                id: *entry_id,
+                block: DisplayBlock::ToolGroup(block.clone()),
+            },
+            Pending::Run {
+                entry_id, block, ..
+            } => Entry {
+                id: *entry_id,
+                block: DisplayBlock::Run(block.clone()),
+            },
+            Pending::Tool {
+                entry_id, block, ..
+            } => Entry {
+                id: *entry_id,
+                block: DisplayBlock::Tool(block.clone()),
+            },
         }
     }
 
@@ -616,6 +714,11 @@ fn generic_hint(input: &Value) -> String {
         })
         .unwrap_or_else(|| serde_json::to_string(input).unwrap_or_default());
     hint.lines().next().unwrap_or("").to_string()
+}
+
+/// Pretty-printed full input JSON, stored for the block viewer.
+fn input_json(input: &Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_default()
 }
 
 fn member_hint(name: &str, input: &Value) -> String {
@@ -667,11 +770,14 @@ fn run_description(input: &Value) -> String {
 
 /// Fold transcript JSONL lines into [`DisplayBlock`]s, streaming.
 ///
-/// `push` returns the blocks *finalized* by that line, in display order;
-/// `pending_blocks` snapshots what is still open (an aggregating tool group,
-/// a running Bash) for live rendering; `flush` force-finalizes the rest.
+/// `push_entries` returns the blocks *finalized* by that line — with their
+/// stable ids — in display order; `pending_entries` snapshots what is still
+/// open (an aggregating tool group, a running Bash) for live rendering;
+/// `flush_entries` force-finalizes the rest. `push`/`pending_blocks`/`flush`
+/// are the id-less views over the same stream.
 pub struct TranscriptParser {
     pending: Vec<Pending>,
+    next_id: u64,
     prev_row_ms: Option<i64>,
     turn_start_ms: Option<i64>,
     last_assistant_text_ms: Option<i64>,
@@ -691,6 +797,7 @@ impl TranscriptParser {
     pub fn new() -> Self {
         TranscriptParser {
             pending: Vec::new(),
+            next_id: 0,
             prev_row_ms: None,
             turn_start_ms: None,
             last_assistant_text_ms: None,
@@ -699,6 +806,13 @@ impl TranscriptParser {
             busy: false,
             model: None,
         }
+    }
+
+    /// Mint the next block identity; each block takes exactly one, at birth.
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// Accumulated `output_tokens` across all rows seen.
@@ -716,28 +830,39 @@ impl TranscriptParser {
         self.model.as_deref()
     }
 
-    /// Snapshot of the not-yet-finalized tail, in display order.
-    pub fn pending_blocks(&self) -> Vec<DisplayBlock> {
+    /// Snapshot of the not-yet-finalized tail, in display order. Ids are
+    /// stable across snapshots and survive into the finalized stream.
+    pub fn pending_entries(&self) -> Vec<Entry> {
         self.pending.iter().map(Pending::snapshot).collect()
     }
 
+    /// Snapshot of the not-yet-finalized tail, blocks only.
+    pub fn pending_blocks(&self) -> Vec<DisplayBlock> {
+        self.pending.iter().map(|p| p.snapshot().block).collect()
+    }
+
     /// Force-finalize everything pending (EOF, idle flush).
-    pub fn flush(&mut self) -> Vec<DisplayBlock> {
+    pub fn flush_entries(&mut self) -> Vec<Entry> {
         let mut out = Vec::new();
         self.drain_all(&mut out);
         out
     }
 
-    fn drain_all(&mut self, out: &mut Vec<DisplayBlock>) {
+    /// Force-finalize everything pending, blocks only.
+    pub fn flush(&mut self) -> Vec<DisplayBlock> {
+        self.flush_entries().into_iter().map(|e| e.block).collect()
+    }
+
+    fn drain_all(&mut self, out: &mut Vec<Entry>) {
         for item in self.pending.drain(..) {
-            out.push(item.into_block());
+            out.push(item.into_entry());
         }
     }
 
     /// Emit the settled prefix of `pending`: complete runs/tools, and groups
     /// that stopped aggregating because a non-member was queued after them.
     /// Stops at the first incomplete item so display order is preserved.
-    fn drain_settled(&mut self, out: &mut Vec<DisplayBlock>) {
+    fn drain_settled(&mut self, out: &mut Vec<Entry>) {
         loop {
             let deliverable = match self.pending.first() {
                 Some(Pending::Group { .. }) => self.pending.len() > 1,
@@ -747,7 +872,7 @@ impl TranscriptParser {
             if !deliverable {
                 break;
             }
-            out.push(self.pending.remove(0).into_block());
+            out.push(self.pending.remove(0).into_entry());
         }
     }
 
@@ -757,19 +882,19 @@ impl TranscriptParser {
         }
         for item in &mut self.pending {
             match item {
-                Pending::Group { block, ids } => {
+                Pending::Group { block, ids, .. } => {
                     if let Some(i) = ids.iter().position(|x| x == id) {
                         block.members[i].result = Some(outcome);
                         return;
                     }
                 }
-                Pending::Run { block, id: rid } => {
+                Pending::Run { block, id: rid, .. } => {
                     if rid == id {
                         block.result = Some(outcome);
                         return;
                     }
                 }
-                Pending::Tool { block, id: rid } => {
+                Pending::Tool { block, id: rid, .. } => {
                     if rid == id {
                         block.result = Some(outcome);
                         return;
@@ -781,6 +906,14 @@ impl TranscriptParser {
 
     /// Feed one raw JSONL line; returns the blocks it finalized, in order.
     pub fn push(&mut self, raw: &str) -> Vec<DisplayBlock> {
+        self.push_entries(raw)
+            .into_iter()
+            .map(|e| e.block)
+            .collect()
+    }
+
+    /// Feed one raw JSONL line; returns the entries it finalized, in order.
+    pub fn push_entries(&mut self, raw: &str) -> Vec<Entry> {
         let mut out = Vec::new();
         let row: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
@@ -840,22 +973,31 @@ impl TranscriptParser {
                                     }
                                     _ => None,
                                 };
-                            out.push(DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }));
+                            out.push(Entry {
+                                id: self.alloc_id(),
+                                block: DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }),
+                            });
                         }
                         self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
                         self.last_assistant_text_ms = None;
                         self.turn_has_assistant_text = false;
-                        out.push(DisplayBlock::User(UserBlock {
-                            text: body.to_string(),
-                            is_hive_envelope: hive_envelope(body).is_some(),
-                            timestamp: ts.clone(),
-                        }));
+                        out.push(Entry {
+                            id: self.alloc_id(),
+                            block: DisplayBlock::User(UserBlock {
+                                text: body.to_string(),
+                                is_hive_envelope: hive_envelope(body).is_some(),
+                                timestamp: ts.clone(),
+                            }),
+                        });
                         self.busy = true;
                     } else {
-                        out.push(DisplayBlock::Assistant(AssistantBlock {
-                            markdown: body.to_string(),
-                            timestamp: ts.clone(),
-                        }));
+                        out.push(Entry {
+                            id: self.alloc_id(),
+                            block: DisplayBlock::Assistant(AssistantBlock {
+                                markdown: body.to_string(),
+                                timestamp: ts.clone(),
+                            }),
+                        });
                         self.last_assistant_text_ms = ts.as_ref().map(|t| t.epoch_ms);
                         self.turn_has_assistant_text = true;
                         self.busy = false;
@@ -869,7 +1011,18 @@ impl TranscriptParser {
                         }
                         _ => None,
                     };
-                    out.push(DisplayBlock::Thinking(ThinkingBlock { duration_secs }));
+                    let text = block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    out.push(Entry {
+                        id: self.alloc_id(),
+                        block: DisplayBlock::Thinking(ThinkingBlock {
+                            text,
+                            duration_secs,
+                        }),
+                    });
                     if let Some(t) = ts.as_ref() {
                         thinking_anchor_ms = Some(t.epoch_ms);
                     }
@@ -892,33 +1045,48 @@ impl TranscriptParser {
                             kind,
                             name: name.to_string(),
                             hint: member_hint(name, input),
+                            input_json: input_json(input),
                             result: None,
                         };
                         match self.pending.last_mut() {
-                            Some(Pending::Group { block, ids }) => {
+                            Some(Pending::Group { block, ids, .. }) => {
                                 block.members.push(member);
                                 ids.push(id);
                             }
-                            _ => self.pending.push(Pending::Group {
-                                block: ToolGroupBlock {
-                                    members: vec![member],
-                                },
-                                ids: vec![id],
-                            }),
+                            _ => {
+                                let entry_id = self.alloc_id();
+                                self.pending.push(Pending::Group {
+                                    entry_id,
+                                    block: ToolGroupBlock {
+                                        members: vec![member],
+                                    },
+                                    ids: vec![id],
+                                });
+                            }
                         }
                     } else if name == "Bash" {
+                        let entry_id = self.alloc_id();
                         self.pending.push(Pending::Run {
+                            entry_id,
                             block: RunBlock {
                                 description: run_description(input),
+                                command: input
+                                    .get("command")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
                                 result: None,
                             },
                             id,
                         });
                     } else {
+                        let entry_id = self.alloc_id();
                         self.pending.push(Pending::Tool {
+                            entry_id,
                             block: ToolBlock {
                                 name: name.to_string(),
                                 hint: generic_hint(input),
+                                input_json: input_json(input),
                                 result: None,
                             },
                             id,
@@ -936,14 +1104,11 @@ impl TranscriptParser {
                         Some(s) => s.to_string(),
                         None => serde_json::to_string(body).unwrap_or_default(),
                     };
-                    let first_line = _clip(&text, 160).lines().next().unwrap_or("").to_string();
-                    let outcome = ToolOutcome {
-                        first_line,
-                        is_error: block
-                            .get("is_error")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    };
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let outcome = ToolOutcome::new(text, is_error);
                     self.attach_result(id, outcome);
                     self.drain_settled(&mut out);
                 }
@@ -968,7 +1133,8 @@ fn _tool_line(name: &str, hint: &str) -> String {
 
 fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
     let res = result.as_ref()?;
-    let first = res.first_line.trim();
+    let first = res.first_line();
+    let first = first.trim();
     if first.is_empty() {
         return None;
     }
@@ -1390,7 +1556,10 @@ mod tests {
         let g = group(&out[0]);
         assert_eq!(g.members.len(), 2);
         assert_eq!(g.label(), "Read 2 files");
-        assert_eq!(g.members[0].result.as_ref().unwrap().first_line, "1\tfn a");
+        assert_eq!(
+            g.members[0].result.as_ref().unwrap().first_line(),
+            "1\tfn a"
+        );
     }
 
     #[test]
@@ -1457,7 +1626,7 @@ mod tests {
         let out = p.push(&_tool_result("t1", json!("Compiling hive"), false));
         assert_eq!(out.len(), 1, "{out:?}");
         let r = run(&out[0]);
-        assert_eq!(r.result.as_ref().unwrap().first_line, "Compiling hive");
+        assert_eq!(r.result.as_ref().unwrap().first_line(), "Compiling hive");
         assert!(p.pending_blocks().is_empty());
     }
 
@@ -1647,5 +1816,191 @@ mod tests {
         assert_eq!(g.members.len(), 2);
         assert_eq!(g.label(), "Read 2 files");
         assert!(p.busy());
+    }
+
+    // ---- parser: full-content capture ----------------------------------
+
+    #[test]
+    fn test_thinking_block_captures_full_text() {
+        let mut p = TranscriptParser::new();
+        let out = p.push(&_row(
+            "assistant",
+            json!([{"type": "thinking", "thinking": "deep\nthought\nhere"}]),
+            None,
+        ));
+        match &out[0] {
+            DisplayBlock::Thinking(t) => assert_eq!(t.text, "deep\nthought\nhere"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tool_outcome_stores_full_text_and_derives_first_line() {
+        let mut p = TranscriptParser::new();
+        p.push(&_tool_use("Bash", "t1", json!({"command": "cargo build"})));
+        let out = p.push(&_tool_result(
+            "t1",
+            json!("Compiling hive\nFinished dev\nwarning: unused"),
+            false,
+        ));
+        let res = run(&out[0]).result.as_ref().unwrap().clone();
+        assert_eq!(res.text, "Compiling hive\nFinished dev\nwarning: unused");
+        assert!(!res.truncated);
+        assert_eq!(res.first_line(), "Compiling hive");
+    }
+
+    #[test]
+    fn test_first_line_clips_long_lines_with_ellipsis() {
+        let res = ToolOutcome::new("a".repeat(200), false);
+        assert_eq!(res.first_line(), format!("{} …", "a".repeat(160)));
+        assert!(!res.truncated, "200 chars is far below the storage cap");
+        assert_eq!(res.text.len(), 200, "storage keeps the full text");
+    }
+
+    #[test]
+    fn test_tool_outcome_truncates_at_byte_cap() {
+        let res = ToolOutcome::new("x".repeat(TOOL_RESULT_MAX_BYTES + 1000), true);
+        assert!(res.truncated);
+        assert!(res.is_error);
+        assert_eq!(res.text.len(), TOOL_RESULT_MAX_BYTES);
+        let ok = ToolOutcome::new("x".repeat(TOOL_RESULT_MAX_BYTES), false);
+        assert!(!ok.truncated, "exactly at the cap is not truncated");
+        assert_eq!(ok.text.len(), TOOL_RESULT_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_tool_outcome_truncation_respects_char_boundaries() {
+        // '宽' is 3 bytes; the cap is not a multiple of 3, so a naive byte
+        // cut would split a char.
+        let count = TOOL_RESULT_MAX_BYTES / 3 + 100;
+        let res = ToolOutcome::new("宽".repeat(count), false);
+        assert!(res.truncated);
+        assert!(res.text.len() <= TOOL_RESULT_MAX_BYTES);
+        assert!(res.text.chars().all(|c| c == '宽'), "no split chars");
+    }
+
+    #[test]
+    fn test_run_block_keeps_full_command() {
+        let mut p = TranscriptParser::new();
+        p.push(&_tool_use(
+            "Bash",
+            "t1",
+            json!({"command": "ls -la\npwd", "description": "List files"}),
+        ));
+        p.push(&_tool_use("Bash", "t2", json!({})));
+        let out = p.flush();
+        assert_eq!(run(&out[0]).command, "ls -la\npwd");
+        assert_eq!(run(&out[1]).command, "", "absent command stores empty");
+    }
+
+    #[test]
+    fn test_tool_block_keeps_full_input_json() {
+        let input = json!({"file_path": "/a.rs", "old_string": "line1\nline2",
+                           "new_string": "line3"});
+        let mut p = TranscriptParser::new();
+        p.push(&_tool_use("Edit", "t1", input.clone()));
+        let out = p.flush();
+        match &out[0] {
+            DisplayBlock::Tool(t) => {
+                let parsed: Value = serde_json::from_str(&t.input_json).unwrap();
+                assert_eq!(parsed, input, "{}", t.input_json);
+            }
+            other => panic!("expected Tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_group_member_keeps_full_input_json() {
+        let input = json!({"pattern": "fn main", "path": "/src", "-n": true});
+        let mut p = TranscriptParser::new();
+        p.push(&_tool_use("Grep", "t1", input.clone()));
+        let out = p.flush();
+        let g = group(&out[0]);
+        let parsed: Value = serde_json::from_str(&g.members[0].input_json).unwrap();
+        assert_eq!(parsed, input);
+    }
+
+    // ---- parser: entry identity & turns --------------------------------
+
+    #[test]
+    fn test_entry_ids_stable_from_pending_through_finalization() {
+        let mut p = TranscriptParser::new();
+        assert!(p
+            .push_entries(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})))
+            .is_empty());
+        let snap = p.pending_entries();
+        assert_eq!(snap.len(), 1);
+        let group_id = snap[0].id;
+        // Aggregating another member keeps the group's id.
+        p.push_entries(&_tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
+        assert_eq!(p.pending_entries()[0].id, group_id);
+        // Finalization emits the same id, and later blocks mint higher ones.
+        let out = p.push_entries(&_text("assistant", "done"));
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].id, group_id);
+        assert!(matches!(out[0].block, DisplayBlock::ToolGroup(_)));
+        assert!(out[1].id > group_id);
+        assert!(matches!(out[1].block, DisplayBlock::Assistant(_)));
+    }
+
+    #[test]
+    fn test_entry_ids_never_collide_between_pending_and_finalized() {
+        let mut p = TranscriptParser::new();
+        p.push_entries(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+        let finalized = p.push_entries(&_row(
+            "assistant",
+            json!([{"type": "thinking", "thinking": "hmm"}]),
+            None,
+        ));
+        p.push_entries(&_tool_use("Bash", "t2", json!({"command": "ls"})));
+        let pending = p.pending_entries();
+        let mut ids: Vec<u64> = finalized
+            .iter()
+            .chain(pending.iter())
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            {
+                let mut sorted = ids.clone();
+                sorted.sort_unstable();
+                sorted
+            },
+            "ids are monotonic in display order"
+        );
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "group, thinking, run all distinct: {ids:?}");
+        // The pending run finalizes with the id its snapshot showed.
+        let out = p.flush_entries();
+        assert_eq!(out[0].id, pending[0].id);
+    }
+
+    #[test]
+    fn test_user_blocks_start_turns() {
+        let mut p = TranscriptParser::new();
+        let out = p.push_entries(&_row_at(
+            "user",
+            json!("go"),
+            None,
+            Some("2026-08-30T12:40:00.000Z"),
+        ));
+        assert!(out[0].block.starts_turn());
+        let out = p.push_entries(&_row_at(
+            "assistant",
+            json!([{"type": "text", "text": "done"}]),
+            None,
+            Some("2026-08-30T12:41:00.000Z"),
+        ));
+        assert!(!out[0].block.starts_turn());
+        // WorkedFor emitted ahead of the next user prompt is not a turn start.
+        let out = p.push_entries(&_row_at(
+            "user",
+            json!("next"),
+            None,
+            Some("2026-08-30T12:42:00.000Z"),
+        ));
+        assert!(matches!(out[0].block, DisplayBlock::WorkedFor(_)));
+        assert!(!out[0].block.starts_turn());
+        assert!(out[1].block.starts_turn());
     }
 }
