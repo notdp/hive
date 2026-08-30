@@ -457,6 +457,8 @@ pub enum DisplayBlock {
     Thinking(ThinkingBlock),
     /// Assistant markdown, right-aligned timestamp on the first line.
     Assistant(AssistantBlock),
+    /// `▣ Image  image/webp · 423 KB` — a picture in the transcript.
+    Image(ImageBlock),
     /// Muted `Worked for 4m6s` turn-end marker.
     WorkedFor(WorkedForBlock),
 }
@@ -643,6 +645,75 @@ pub struct ToolBlock {
     /// Pretty-printed full input JSON, for the block viewer.
     pub input_json: String,
     pub result: Option<ToolOutcome>,
+}
+
+/// A picture in the transcript. The payload is never kept — a pasted
+/// screenshot is ~600KB of base64 and the parser holds every entry for the
+/// session — so the block carries only what it takes to describe it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageBlock {
+    /// `image/webp`, `image/png`, …
+    pub media_type: String,
+    /// Decoded size, from the base64 length.
+    pub bytes: usize,
+    pub timestamp: Option<Timestamp>,
+}
+
+impl ImageBlock {
+    /// `image/webp · 423 KB`
+    pub fn label(&self) -> String {
+        let kb = self.bytes as f64 / 1024.0;
+        let size = if kb >= 1024.0 {
+            format!("{:.1} MB", kb / 1024.0)
+        } else {
+            format!("{:.0} KB", kb)
+        };
+        format!("{} · {size}", self.media_type)
+    }
+}
+
+/// Replace every `image` block inside a tool result with a short label, so
+/// the payload never reaches the outcome text.
+fn summarize_images(body: &Value) -> Value {
+    let Some(items) = body.as_array() else {
+        return body.clone();
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("image") {
+                    Value::String(format!("[image {}]", image_block(item, &None).label()))
+                } else {
+                    item.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Decoded byte count of a base64 payload, without decoding it.
+fn base64_bytes(data: &str) -> usize {
+    let pad = data.bytes().rev().take_while(|&b| b == b'=').count();
+    data.len() / 4 * 3 - pad.min(2)
+}
+
+/// Describe an `image` content block without carrying its payload.
+fn image_block(block: &Value, ts: &Option<Timestamp>) -> ImageBlock {
+    let src = block.get("source").unwrap_or(&Value::Null).clone();
+    ImageBlock {
+        media_type: src
+            .get("media_type")
+            .and_then(Value::as_str)
+            .unwrap_or("image")
+            .to_string(),
+        bytes: src
+            .get("data")
+            .and_then(Value::as_str)
+            .map(base64_bytes)
+            .unwrap_or(0),
+        timestamp: ts.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1157,6 +1228,25 @@ impl TranscriptParser {
         });
     }
 
+    /// Close the assistant's turn with its `Worked for` marker and start the
+    /// human's. Idempotent within a row: the second content block of the same
+    /// message finds the turn already open.
+    fn open_user_turn(&mut self, ts: &Option<Timestamp>, out: &mut Vec<Entry>) {
+        if self.turn_has_assistant_text {
+            let duration_secs = match (self.turn_start_ms, self.last_assistant_text_ms) {
+                (Some(start), Some(end)) if end >= start => Some((end - start) as f64 / 1000.0),
+                _ => None,
+            };
+            out.push(Entry {
+                id: self.alloc_id(),
+                block: DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }),
+            });
+        }
+        self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
+        self.last_assistant_text_ms = None;
+        self.turn_has_assistant_text = false;
+    }
+
     /// Feed one raw JSONL line; returns the blocks it finalized, in order.
     pub fn push(&mut self, raw: &str) -> Vec<DisplayBlock> {
         self.push_entries(raw)
@@ -1234,22 +1324,7 @@ impl TranscriptParser {
                     }
                     self.drain_all(&mut out);
                     if is_user {
-                        if self.turn_has_assistant_text {
-                            let duration_secs =
-                                match (self.turn_start_ms, self.last_assistant_text_ms) {
-                                    (Some(start), Some(end)) if end >= start => {
-                                        Some((end - start) as f64 / 1000.0)
-                                    }
-                                    _ => None,
-                                };
-                            out.push(Entry {
-                                id: self.alloc_id(),
-                                block: DisplayBlock::WorkedFor(WorkedForBlock { duration_secs }),
-                            });
-                        }
-                        self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
-                        self.last_assistant_text_ms = None;
-                        self.turn_has_assistant_text = false;
+                        self.open_user_turn(&ts, &mut out);
                         // A queued message already rendered from its
                         // attachment row; do not draw it twice.
                         if !self.queued_texts.remove(body) {
@@ -1373,6 +1448,19 @@ impl TranscriptParser {
                     }
                     self.drain_settled(&mut out);
                 }
+                // Only user rows ever carry one (3067/3067 in the local
+                // transcripts); the payload stays on disk.
+                "image" if is_user => {
+                    self.drain_all(&mut out);
+                    // A picture opens the turn exactly as its text would;
+                    // otherwise it lands ahead of the `Worked for` marker
+                    // that closes the previous one.
+                    self.open_user_turn(&ts, &mut out);
+                    out.push(Entry {
+                        id: self.alloc_id(),
+                        block: DisplayBlock::Image(image_block(block, &ts)),
+                    });
+                }
                 "tool_result" => {
                     let id = block
                         .get("tool_use_id")
@@ -1381,7 +1469,11 @@ impl TranscriptParser {
                     let body = block.get("content").unwrap_or(&null);
                     let text = match body.as_str() {
                         Some(s) => s.to_string(),
-                        None => serde_json::to_string(body).unwrap_or_default(),
+                        // An array body is serialized whole — which used to
+                        // pour a screenshot's base64 into the outcome text,
+                        // thousands of wrapped lines of it. Images are
+                        // described instead.
+                        None => serde_json::to_string(&summarize_images(body)).unwrap_or_default(),
                     };
                     let is_error = block
                         .get("is_error")
@@ -1489,6 +1581,7 @@ impl StreamPrinter {
 
     fn render_block(block: &DisplayBlock) -> Option<String> {
         match block {
+            DisplayBlock::Image(img) => Some(format!("\n{DIM}▣ Image  {}{RESET}", img.label())),
             DisplayBlock::User(u) => Some(format!("\n{}", _user_line(&u.text))),
             DisplayBlock::Assistant(a) => Some(format!(
                 "\n{}",
@@ -1714,6 +1807,57 @@ mod tests {
         let out = p.flush_rendered().unwrap();
         assert!(out.contains("Bash") && out.contains("List files"));
         assert!(!out.replace("List files", "").contains("ls"));
+    }
+
+    #[test]
+    fn test_image_blocks_render_without_carrying_the_payload() {
+        let mut p = TranscriptParser::new();
+        let data = "A".repeat(4000); // ~3 KB decoded
+        let out = p.push(&_row(
+            "user",
+            json!([{"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": data}}]),
+            None,
+        ));
+        match &out[0] {
+            DisplayBlock::Image(img) => {
+                assert_eq!(img.media_type, "image/webp");
+                assert_eq!(img.bytes, 3000);
+                assert_eq!(img.label(), "image/webp · 3 KB");
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_images_never_reach_the_outcome_text() {
+        let mut p = TranscriptParser::new();
+        let payload = "B".repeat(200_000);
+        p.push(&_tool_use("Read", "t1", json!({"file_path": "/tmp/shot.png"})));
+        let out = p.push(&_row(
+            "user",
+            json!([{ "type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "text", "text": "here it is"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": payload}}
+            ]}]),
+            None,
+        ));
+        let mut blocks = out;
+        blocks.extend(p.flush());
+        let text = blocks
+            .iter()
+            .find_map(|b| match b {
+                DisplayBlock::Tool(t) => t.result.as_ref().map(|r| r.text.clone()),
+                DisplayBlock::ToolGroup(g) => g
+                    .members
+                    .iter()
+                    .find_map(|m| m.result.as_ref().map(|r| r.text.clone())),
+                _ => None,
+            })
+            .expect("a tool outcome");
+        assert!(text.contains("here it is"), "{text:.200}");
+        assert!(text.contains("[image image/png"), "{text:.200}");
+        assert!(!text.contains("BBBB"), "payload leaked into the outcome text");
+        assert!(text.len() < 1000, "outcome text is {} bytes", text.len());
     }
 
     #[test]
