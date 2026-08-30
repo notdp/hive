@@ -1883,10 +1883,6 @@ fn draw_selection_frame(
 /// Composer box height: top border, one input row, bottom border.
 const COMPOSER_H: u16 = 3;
 
-/// Bottom-border lead before the density label. Two dashes, so the label's
-/// first letter lands in the same column as the input row's text (which sits
-/// behind `│ ❯ `).
-const BOTTOM_LEAD: &str = "╰──";
 
 /// grok's composer box (prompt_widget/mod.rs draw): rounded `╭─╮` top and
 /// `╰─╯` bottom dividers with `│` sides on prompt_border (active shade while
@@ -1910,42 +1906,32 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
     let top = Line::from(Span::styled(format!("╭{}╮", "─".repeat(w - 2)), border));
     let bottom = {
         // grok embeds the model badge in the bottom border, right-aligned:
-        // "─ Grok 4.6 (xhigh) ─". Ours carries model and effort there, and
-        // the Ctrl+O density mode on the left.
+        // "─ Grok 4.6 (xhigh) · always-approve ─". Ours carries model,
+        // effort, and the Ctrl+O density mode behind them.
         let mut badge: Vec<Span<'static>> = Vec::new();
         if let Some(m) = app.parser.model() {
             badge.push(Span::styled(
                 format!(" {}", display_model(m)),
                 fg(t.accent_model),
             ));
-            match app.parser.effort() {
-                Some(e) => badge.push(Span::styled(format!(" ({e}) "), fg(t.gray))),
-                None => badge.push(Span::raw(" ")),
+            if let Some(e) = app.parser.effort() {
+                badge.push(Span::styled(format!(" ({e})"), fg(t.gray)));
             }
+            badge.push(Span::styled(
+                " · ".to_string(),
+                fg(t.gray).add_modifier(Modifier::DIM),
+            ));
         }
+        badge.push(Span::styled(
+            format!("{} ", app.fold.density.label()),
+            fg(t.gray),
+        ));
         let badge_w = cells_width(&line_cells(&Line::from(badge.clone())));
-        let mode = format!(" {} ", app.fold.density.label());
-        let mode_w = UnicodeWidthStr::width(mode.as_str());
-        // BOTTOM_LEAD + mode + fill + badge + "─╯" spans the full width.
-        let fill = (w as isize) - (BOTTOM_LEAD.chars().count() + 2) as isize
-            - mode_w as isize
-            - badge_w as isize;
-        if fill >= 1 {
-            let mut spans = vec![
-                Span::styled(BOTTOM_LEAD.to_string(), border),
-                Span::styled(mode, fg(t.gray)),
-                Span::styled("─".repeat(fill as usize), border),
-            ];
+        if w >= badge_w + 6 {
+            let left = w - 3 - badge_w;
+            let mut spans = vec![Span::styled(format!("╰{}", "─".repeat(left)), border)];
             spans.extend(badge);
             spans.push(Span::styled("─╯".to_string(), border));
-            Line::from(spans)
-        } else if w >= mode_w + 6 {
-            let spans = vec![
-                Span::styled(BOTTOM_LEAD.to_string(), border),
-                Span::styled(mode, fg(t.gray)),
-                Span::styled("─".repeat(w - 4 - mode_w), border),
-                Span::styled("╯".to_string(), border),
-            ];
             Line::from(spans)
         } else {
             Line::from(Span::styled(format!("╰{}╯", "─".repeat(w - 2)), border))
@@ -3259,18 +3245,11 @@ mod tests {
         // bottom border carries the Ctrl+O density mode on the left and the
         // model badge on the right — no read-only marker there.
         let border_row = row_text(&buf, H - 4);
-        assert!(border_row.contains("╰── Normal ─"), "{border_row:?}");
-        // the label's first letter sits in the input row's text column.
-        let mode_col = border_row.chars().position(|c| c == 'N').unwrap();
-        let text_col = row_text(&buf, H - 5)
-            .chars()
-            .position(|c| c == 'r')
-            .unwrap();
-        assert_eq!(mode_col, text_col, "{border_row:?}");
+        assert!(border_row.contains("Fable 5 · Normal"), "{border_row:?}");
         assert!(!border_row.contains("read-only"), "{border_row:?}");
         assert!(!border_row.contains("claude-fable-5"), "{border_row:?}");
         assert!(
-            border_row.trim_end().ends_with("Fable 5 ─╯"),
+            border_row.trim_end().ends_with("Normal ─╯"),
             "{border_row:?}"
         );
         // hint row stays below the box.
