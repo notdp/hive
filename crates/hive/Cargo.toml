@@ -17,6 +17,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 libc = "0.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
+xai-grok-markdown = { git = "https://github.com/xai-org/grok-build", rev = "bc7f02eddd3d84085849dc19ed216f11c23b0571" }
+anstyle = "1"
 
 [dev-dependencies]
 tempfile = "3"

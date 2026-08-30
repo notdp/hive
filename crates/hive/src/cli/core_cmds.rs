@@ -1336,14 +1336,6 @@ pub(crate) fn _format_ls_human(payload: &Map<String, Value>) -> Vec<String> {
 
 /// Read-only viewer for a Claude session transcript (follows live).
 pub fn view_cmd(session_id: &str) {
-    if let Some(viewer) = crate::transcript_view::external_viewer().filter(|v| !v.is_empty()) {
-        if let Some(path) = crate::transcript_view::transcript_path(session_id) {
-            use std::os::unix::process::CommandExt;
-            let err = std::process::Command::new(&viewer).arg(&path).exec();
-            eprintln!("Error: {err}");
-            std::process::exit(1);
-        }
-    }
     std::process::exit(crate::transcript_view::follow(session_id));
 }
 

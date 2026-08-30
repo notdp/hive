@@ -27,50 +27,6 @@ const _TAIL_EVENTS: usize = 40;
 const _POLL_SECONDS: f64 = 0.25;
 const _SPINNER: &str = "✻✼✢✽";
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
-}
-
-/// Minimal `shutil.which` for absolute lookup on PATH.
-fn which(cmd: &str) -> Option<String> {
-    let path = std::env::var("PATH").ok()?;
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let candidate = Path::new(dir).join(cmd);
-        if candidate.is_file() && is_executable(&candidate) {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
-}
-
-/// Path to tail-claude when installed — the preferred renderer.
-///
-/// tail-claude (github.com/kylesnowschwartz/tail-claude) live-tails a
-/// session JSONL as a full conversation TUI; the built-in renderer below
-/// is the dependency-free fallback.
-pub fn external_viewer() -> Option<String> {
-    if let Some(found) = which("tail-claude") {
-        return Some(found);
-    }
-    let home = std::env::var("HOME").ok()?;
-    let candidate = PathBuf::from(home)
-        .join("go")
-        .join("bin")
-        .join("tail-claude");
-    if candidate.is_file() && is_executable(&candidate) {
-        Some(candidate.to_string_lossy().into_owned())
-    } else {
-        None
-    }
-}
-
 pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let projects = Path::new(&home).join(".claude").join("projects");
@@ -95,70 +51,85 @@ fn _clip(text: &str, limit: usize) -> String {
     }
 }
 
-// ponytail: hand-rolled scanners stand in for _MD_BOLD/_MD_CODE/_HIVE_RE —
-// the regex crate is not a dependency; swap back if it ever lands.
+/// Grok Build's markdown engine (xai-grok-markdown, Apache-2.0) with the
+/// groknight palette lifted from xai-grok-pager-render's theme — syntax
+/// highlighting, tables, headings, the whole surface, rendered to ANSI.
+mod grok_md {
+    use std::sync::OnceLock;
+    use xai_grok_markdown::{MarkdownStyle, Syntect};
 
-/// `\*\*(.+?)\*\*` — bold span, no newline inside, first close wins.
-fn md_bold(text: &str) -> String {
-    let b = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'*' && i + 2 < b.len() && b[i + 1] == b'*' && b[i + 2] != b'\n' {
-            let mut close = None;
-            let mut k = i + 3;
-            while k + 1 < b.len() {
-                if b[k] == b'\n' {
-                    break;
-                }
-                if b[k] == b'*' && b[k + 1] == b'*' {
-                    close = Some(k);
-                    break;
-                }
-                k += 1;
-            }
-            if let Some(k) = close {
-                out.extend_from_slice(BOLD.as_bytes());
-                out.extend_from_slice(&b[i + 2..k]);
-                out.extend_from_slice(RESET.as_bytes());
-                i = k + 2;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
+    type Style = anstyle::Style;
+
+    fn rgb(r: u8, g: u8, b: u8) -> anstyle::Color {
+        anstyle::Color::Rgb(anstyle::RgbColor(r, g, b))
     }
-    String::from_utf8(out).unwrap()
+
+    fn fg(c: anstyle::Color) -> Style {
+        Style::new().fg_color(Some(c))
+    }
+
+    // groknight palette (grok-build crates/codegen/xai-grok-pager-render/
+    // src/theme/groknight.rs).
+    fn style() -> MarkdownStyle {
+        let teal = rgb(26, 188, 156);
+        let blue = rgb(122, 162, 247);
+        let purple = rgb(157, 124, 216);
+        let dark5 = rgb(120, 120, 120);
+        let comment = rgb(108, 108, 108);
+        let dark3 = rgb(90, 90, 90);
+        let blue1 = rgb(58, 149, 171);
+        let green = rgb(158, 206, 106);
+        let fg_dark = rgb(200, 200, 200);
+        let link = rgb(122, 166, 218);
+        let heading_colors = [teal, blue, purple, dark5, comment, dark3];
+        let mut heading_inner = heading_colors.map(fg);
+        for s in heading_inner.iter_mut().take(5) {
+            *s = s.bold();
+        }
+        MarkdownStyle {
+            heading_inner,
+            heading_outer: heading_colors.map(|c| fg(c).dimmed().hidden()),
+            strong_inner: fg(fg_dark).bold(),
+            strong_outer: Style::new().dimmed().hidden(),
+            emphasis_inner: fg(fg_dark).italic(),
+            emphasis_outer: Style::new().dimmed().hidden(),
+            strikethrough_inner: fg(fg_dark).strikethrough(),
+            strikethrough_outer: Style::new().dimmed().hidden(),
+            inline_code_inner: fg(blue1).bold(),
+            inline_code_outer: fg(blue1).dimmed().hidden(),
+            blockquote_outer: fg(comment).dimmed(),
+            task_checked: fg(green),
+            task_unchecked: fg(fg_dark).dimmed(),
+            list_item: fg(comment),
+            rule: fg(comment),
+            link_outer: fg(comment),
+            link_text: fg(link).underline(),
+            link_url: fg(comment),
+            link_title: fg(comment),
+            code_outer: fg(blue1).dimmed().hidden(),
+            code_language: fg(purple).hidden(),
+            code_untagged: fg(fg_dark),
+            code_background: Style::new().bg_color(Some(rgb(28, 28, 28))),
+            table_outer: fg(blue).hidden(),
+            text: fg(fg_dark),
+            math: fg(fg_dark).italic(),
+        }
+    }
+
+    fn syntect() -> &'static Syntect {
+        static SYNTECT: OnceLock<Syntect> = OnceLock::new();
+        SYNTECT.get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme")))
+    }
+
+    /// Render markdown to an ANSI string, trailing whitespace trimmed.
+    pub fn render(text: &str) -> String {
+        let (out, _) = xai_grok_markdown::render_markdown(text, style(), true, Some(syntect()));
+        out.trim_end().to_string()
+    }
 }
 
-/// `` `([^`\n]+)` `` — inline code span.
-fn md_code(text: &str) -> String {
-    let b = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'`' {
-            let mut j = i + 1;
-            while j < b.len() && b[j] != b'`' && b[j] != b'\n' {
-                j += 1;
-            }
-            if j < b.len() && b[j] == b'`' && j > i + 1 {
-                out.extend_from_slice(CYAN.as_bytes());
-                out.extend_from_slice(&b[i + 1..j]);
-                out.extend_from_slice(RESET.as_bytes());
-                i = j + 1;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap()
-}
-
-/// Just enough markdown for a terminal: bold and inline code.
 fn _md(text: &str) -> String {
-    md_code(&md_bold(text))
+    grok_md::render(text)
 }
 
 fn _indent_block(text: &str, first: &str, rest: &str) -> String {
@@ -476,7 +447,10 @@ mod tests {
                 None,
             ))
             .unwrap();
-        assert!(out.contains("⏺") && out.contains("\x1b[1mall green\x1b[0m"));
+        assert!(out.contains("⏺"), "{out}");
+        // grok markdown engine: bold content survives, markers are hidden
+        assert!(out.contains("all green"), "{out}");
+        assert!(!out.contains("**"), "{out}");
         assert_eq!(r.state, "idle");
     }
 
@@ -542,32 +516,4 @@ mod tests {
         assert!(r.render("not json").is_none());
     }
 
-    #[test]
-    fn test_external_viewer_prefers_path_then_go_bin() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bin = tmp.path().join("optbin");
-        fs::create_dir_all(&bin).unwrap();
-        let path_exe = bin.join("tail-claude");
-        fs::write(&path_exe, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&path_exe, fs::Permissions::from_mode(0o755)).unwrap();
-        let home = tmp.path().join("home");
-        fs::create_dir_all(&home).unwrap();
-        std::env::set_var("HOME", &home);
-        std::env::set_var("PATH", &bin);
-        assert_eq!(
-            external_viewer(),
-            Some(path_exe.to_string_lossy().into_owned())
-        );
-
-        std::env::set_var("PATH", tmp.path().join("nowhere"));
-        assert_eq!(external_viewer(), None);
-        let gobin = home.join("go").join("bin");
-        fs::create_dir_all(&gobin).unwrap();
-        let exe = gobin.join("tail-claude");
-        fs::write(&exe, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(external_viewer(), Some(exe.to_string_lossy().into_owned()));
-    }
 }
