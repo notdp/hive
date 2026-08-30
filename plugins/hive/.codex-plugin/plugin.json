@@ -1,6 +1,6 @@
 {
   "name": "hive",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Hive multi-agent collaboration entrypoint: member/orch protocol discovery for tmux teams.",
   "author": {
     "name": "notdp",
