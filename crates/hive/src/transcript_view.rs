@@ -486,10 +486,17 @@ pub struct UserBlock {
     /// source, wrapper and all — `hive` carries the parsed view.
     pub text: String,
     pub hive: Option<HiveMessage>,
-    /// Pictures pasted with this message; they belong to the band, not to a
-    /// block of their own.
-    pub images: Vec<ImageBlock>,
+    /// Text and pictures in the order they were written, so a picture keeps
+    /// the place it was pasted into rather than being hoisted to the top.
+    pub parts: Vec<UserPart>,
     pub timestamp: Option<Timestamp>,
+}
+
+/// One piece of a user message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserPart {
+    Text(String),
+    Image(ImageBlock),
 }
 
 /// Aggregation bucket kind for read-only tools (grok VerbGroupKind subset).
@@ -1203,7 +1210,7 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: prompt.to_string(),
                 hive,
-                images: Vec::new(),
+                parts: vec![UserPart::Text(prompt.to_string())],
                 timestamp: ts,
             }),
         });
@@ -1245,7 +1252,7 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: content.to_string(),
                 hive: Some(hive),
-                images: Vec::new(),
+                parts: vec![UserPart::Text(content.to_string())],
                 timestamp: ts,
             }),
         });
@@ -1328,19 +1335,9 @@ impl TranscriptParser {
         } else {
             Vec::new()
         };
-        // Pictures belong to the message they arrived with, so they are
-        // collected up front and handed to its band rather than becoming
-        // blocks of their own.
-        let mut images: Vec<ImageBlock> = Vec::new();
-        if is_user {
-            for b in blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
-            {
-                self.image_count += 1;
-                images.push(image_block(b, self.image_count));
-            }
-        }
+        // A user message is assembled whole — text and pictures in the order
+        // they were written — and emitted as one band once the row is read.
+        let mut parts: Vec<UserPart> = Vec::new();
         // Anchor for thinking durations: the previous row's instant; a second
         // thinking block in the same row measures from this row instead.
         let mut thinking_anchor_ms = self.prev_row_ms;
@@ -1358,30 +1355,10 @@ impl TranscriptParser {
                     if body.is_empty() {
                         continue;
                     }
-                    self.drain_all(&mut out);
                     if is_user {
-                        self.open_user_turn(&ts, &mut out);
-                        // A queued message already rendered from its
-                        // attachment row; do not draw it twice.
-                        if !self.queued_texts.remove(body) {
-                            out.push(Entry {
-                                id: self.alloc_id(),
-                                block: DisplayBlock::User(UserBlock {
-                                    text: body.to_string(),
-                                    hive: parse_hive_message(body).map(|mut m| {
-                                        m.icon = m
-                                            .from
-                                            .clone()
-                                            .map(|sender| self.agent_icon(&sender));
-                                        m
-                                    }),
-                                    images: std::mem::take(&mut images),
-                                    timestamp: ts.clone(),
-                                }),
-                            });
-                        }
-                        self.busy = true;
+                        parts.push(UserPart::Text(body.to_string()));
                     } else {
+                        self.drain_all(&mut out);
                         out.push(Entry {
                             id: self.alloc_id(),
                             block: DisplayBlock::Assistant(AssistantBlock {
@@ -1485,6 +1462,10 @@ impl TranscriptParser {
                     }
                     self.drain_settled(&mut out);
                 }
+                "image" if is_user => {
+                    self.image_count += 1;
+                    parts.push(UserPart::Image(image_block(block, self.image_count)));
+                }
                 "tool_result" => {
                     let id = block
                         .get("tool_use_id")
@@ -1511,19 +1492,34 @@ impl TranscriptParser {
                 _ => {}
             }
         }
-        // A message that is nothing but a picture still gets its band.
-        if !images.is_empty() {
+        if !parts.is_empty() {
             self.drain_all(&mut out);
             self.open_user_turn(&ts, &mut out);
-            out.push(Entry {
-                id: self.alloc_id(),
-                block: DisplayBlock::User(UserBlock {
-                    text: String::new(),
-                    hive: None,
-                    images,
-                    timestamp: ts.clone(),
-                }),
-            });
+            let text = parts
+                .iter()
+                .filter_map(|p| match p {
+                    UserPart::Text(t) => Some(t.as_str()),
+                    UserPart::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // A queued message already rendered from its attachment row; do
+            // not draw it twice.
+            if !self.queued_texts.remove(&text) {
+                let hive = parse_hive_message(&text).map(|mut m| {
+                    m.icon = m.from.clone().map(|sender| self.agent_icon(&sender));
+                    m
+                });
+                out.push(Entry {
+                    id: self.alloc_id(),
+                    block: DisplayBlock::User(UserBlock {
+                        text,
+                        hive,
+                        parts,
+                        timestamp: ts.clone(),
+                    }),
+                });
+            }
             self.busy = true;
         }
         if let Some(t) = ts.as_ref() {
@@ -1627,13 +1623,12 @@ impl StreamPrinter {
         match block {
             DisplayBlock::User(u) => {
                 let mut out = String::new();
-                for img in &u.images {
+                for part in &u.parts {
                     out.push('\n');
-                    out.push_str(&_user_image_line(img));
-                }
-                if !u.text.trim().is_empty() {
-                    out.push('\n');
-                    out.push_str(&_user_line(&u.text));
+                    match part {
+                        UserPart::Image(img) => out.push_str(&_user_image_line(img)),
+                        UserPart::Text(text) => out.push_str(&_user_line(text)),
+                    }
                 }
                 (!out.is_empty()).then_some(out)
             }
@@ -1875,7 +1870,9 @@ mod tests {
         match &out[0] {
             DisplayBlock::User(u) => {
                 assert!(u.text.is_empty(), "picture-only message");
-                let img = &u.images[0];
+                let UserPart::Image(img) = &u.parts[0] else {
+                    panic!("expected an image part: {:?}", u.parts)
+                };
                 assert_eq!(img.media_type, "image/webp");
                 assert_eq!(img.bytes, 3000);
                 assert_eq!(img.index, 1);
@@ -1903,8 +1900,9 @@ mod tests {
         assert_eq!(users.len(), 1, "one band, not a block each: {out:?}");
         match users[0] {
             DisplayBlock::User(u) => {
-                assert_eq!(u.images.len(), 1);
-                assert!(u.text.contains("排版"));
+                // The picture keeps its place ahead of the words it came with.
+                assert!(matches!(u.parts[0], UserPart::Image(_)), "{:?}", u.parts);
+                assert!(matches!(&u.parts[1], UserPart::Text(t) if t.contains("排版")));
             }
             _ => unreachable!(),
         }
