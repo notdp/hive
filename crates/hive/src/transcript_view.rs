@@ -62,85 +62,103 @@ fn _clip(text: &str, limit: usize) -> String {
 }
 
 /// Grok Build's markdown engine (xai-grok-markdown, Apache-2.0) with the
-/// groknight palette lifted from xai-grok-pager-render's theme — syntax
-/// highlighting, tables, headings, the whole surface, rendered to ANSI.
+/// palette derived from the active [`ViewTheme`] (groknight or grokday) —
+/// syntax highlighting, tables, headings, the whole surface.
 pub(crate) mod grok_md {
     use std::sync::OnceLock;
     use xai_grok_markdown::{MarkdownStyle, Syntect};
 
+    use crate::view_theme::{ThemeKind, ViewTheme, GROKNIGHT};
+
     type Style = anstyle::Style;
 
-    fn rgb(r: u8, g: u8, b: u8) -> anstyle::Color {
-        anstyle::Color::Rgb(anstyle::RgbColor(r, g, b))
+    fn ans(c: ratatui::style::Color) -> anstyle::Color {
+        match c {
+            ratatui::style::Color::Rgb(r, g, b) => anstyle::Color::Rgb(anstyle::RgbColor(r, g, b)),
+            _ => anstyle::Color::Rgb(anstyle::RgbColor(0, 0, 0)),
+        }
     }
 
     fn fg(c: anstyle::Color) -> Style {
         Style::new().fg_color(Some(c))
     }
 
-    // groknight palette (grok-build crates/codegen/xai-grok-pager-render/
-    // src/theme/groknight.rs).
-    fn style() -> MarkdownStyle {
-        let teal = rgb(26, 188, 156);
-        let blue = rgb(122, 162, 247);
-        let purple = rgb(157, 124, 216);
-        let dark5 = rgb(120, 120, 120);
-        let comment = rgb(108, 108, 108);
-        let dark3 = rgb(90, 90, 90);
-        let blue1 = rgb(58, 149, 171);
-        let green = rgb(158, 206, 106);
-        let fg_dark = rgb(200, 200, 200);
-        let link = rgb(122, 166, 218);
-        let heading_colors = [teal, blue, purple, dark5, comment, dark3];
+    /// grok's MarkdownStyle built from the theme's md_* fields.
+    fn style(t: &ViewTheme) -> MarkdownStyle {
+        let heading_colors = t.md_heading.map(ans);
         let mut heading_inner = heading_colors.map(fg);
         for s in heading_inner.iter_mut().take(5) {
             *s = s.bold();
         }
+        let text = ans(t.md_text);
+        let code = ans(t.md_code);
+        let muted = ans(t.md_muted);
         MarkdownStyle {
             heading_inner,
             heading_outer: heading_colors.map(|c| fg(c).dimmed().hidden()),
-            strong_inner: fg(fg_dark).bold(),
+            strong_inner: fg(text).bold(),
             strong_outer: Style::new().dimmed().hidden(),
-            emphasis_inner: fg(fg_dark).italic(),
+            emphasis_inner: fg(text).italic(),
             emphasis_outer: Style::new().dimmed().hidden(),
-            strikethrough_inner: fg(fg_dark).strikethrough(),
+            strikethrough_inner: fg(text).strikethrough(),
             strikethrough_outer: Style::new().dimmed().hidden(),
-            inline_code_inner: fg(blue1).bold(),
-            inline_code_outer: fg(blue1).dimmed().hidden(),
-            blockquote_outer: fg(comment).dimmed(),
-            task_checked: fg(green),
-            task_unchecked: fg(fg_dark).dimmed(),
-            list_item: fg(comment),
-            rule: fg(comment),
-            link_outer: fg(comment),
-            link_text: fg(link).underline(),
-            link_url: fg(comment),
-            link_title: fg(comment),
-            code_outer: fg(blue1).dimmed().hidden(),
-            code_language: fg(purple).hidden(),
-            code_untagged: fg(fg_dark),
-            code_background: Style::new().bg_color(Some(rgb(28, 28, 28))),
-            table_outer: fg(blue).hidden(),
-            text: fg(fg_dark),
-            math: fg(fg_dark).italic(),
+            inline_code_inner: fg(code).bold(),
+            inline_code_outer: fg(code).dimmed().hidden(),
+            blockquote_outer: fg(muted).dimmed(),
+            task_checked: fg(ans(t.md_task_checked)),
+            task_unchecked: fg(ans(t.md_task_unchecked)).dimmed(),
+            list_item: fg(muted),
+            rule: fg(muted),
+            link_outer: fg(muted),
+            link_text: fg(ans(t.link_fg)).underline(),
+            link_url: fg(muted),
+            link_title: fg(muted),
+            code_outer: fg(code).dimmed().hidden(),
+            code_language: fg(ans(t.md_code_language)).hidden(),
+            code_untagged: fg(text),
+            code_background: Style::new().bg_color(Some(ans(t.md_code_bg))),
+            table_outer: fg(ans(t.md_table)).hidden(),
+            text: fg(text),
+            math: fg(text).italic(),
         }
     }
 
-    fn syntect() -> &'static Syntect {
-        static SYNTECT: OnceLock<Syntect> = OnceLock::new();
-        SYNTECT.get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme")))
+    /// grok syntax.rs::get_syntect: GrokNight ships grok-night.tmTheme,
+    /// GrokDay ships grok-day.tmTheme; both vendored verbatim.
+    fn syntect(kind: ThemeKind) -> &'static Syntect {
+        static NIGHT: OnceLock<Syntect> = OnceLock::new();
+        static DAY: OnceLock<Syntect> = OnceLock::new();
+        match kind {
+            ThemeKind::Dark => {
+                NIGHT.get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme")))
+            }
+            ThemeKind::Light => {
+                DAY.get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme")))
+            }
+        }
     }
 
-    /// Render markdown to an ANSI string, trailing whitespace trimmed.
+    /// Render markdown to an ANSI string, trailing whitespace trimmed. The
+    /// plain piped stream has no terminal to detect and keeps the groknight
+    /// look.
     pub fn render(text: &str) -> String {
-        let (out, _) = xai_grok_markdown::render_markdown(text, style(), true, Some(syntect()));
+        let (out, _) = xai_grok_markdown::render_markdown(
+            text,
+            style(&GROKNIGHT),
+            true,
+            Some(syntect(ThemeKind::Dark)),
+        );
         out.trim_end().to_string()
     }
 
-    /// Render markdown to ratatui lines (the TUI mirror), same style/theme.
-    pub fn render_ratatui(text: &str) -> Vec<ratatui::text::Line<'static>> {
-        let (lines, _) =
-            xai_grok_markdown::render_markdown_ratatui(text, style(), true, Some(syntect()));
+    /// Render markdown to ratatui lines (the TUI mirror) in `theme`.
+    pub fn render_ratatui(text: &str, theme: &ViewTheme) -> Vec<ratatui::text::Line<'static>> {
+        let (lines, _) = xai_grok_markdown::render_markdown_ratatui(
+            text,
+            style(theme),
+            true,
+            Some(syntect(theme.kind)),
+        );
         lines
     }
 }

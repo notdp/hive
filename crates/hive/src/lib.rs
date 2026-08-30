@@ -22,4 +22,5 @@ pub mod team;
 pub mod tmux;
 pub mod transcript_tui;
 pub mod transcript_view;
+pub mod view_theme;
 pub mod worktree;

@@ -1,18 +1,23 @@
-//! Ratatui TUI for `hive view` — the Grok Build look (groknight palette) over
-//! the [`crate::transcript_view`] display-block model.
+//! Ratatui TUI for `hive view` — the Grok Build look over the
+//! [`crate::transcript_view`] display-block model, in the resolved
+//! [`crate::view_theme`] (grokday light / groknight dark).
 //!
-//! Chrome: full-screen `#141414` fill, 2-col outer inset, top status line
+//! Chrome: full-screen bg fill, 2-col outer inset, top status line
 //! (branch / worktree / `~`-abbreviated cwd, right-aligned token counter),
-//! scrollback (gray full-width user bands, `◈`/`◆` tool lines, grok-markdown
+//! scrollback (full-width user bands, `◈`/`◆` tool lines, grok-markdown
 //! assistant text with right-aligned timestamps, muted `Worked for …`), and a
-//! single muted bottom hint row. Read-only: keys only quit and scroll.
+//! single muted bottom hint row. Read-only: keys and the mouse wheel only
+//! quit and scroll, with grok's pager bindings and follow semantics.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -29,17 +34,7 @@ use crate::transcript_view::{
     grok_md, hive_envelope, AssistantBlock, DisplayBlock, ThinkingBlock, TranscriptParser,
     UserBlock,
 };
-
-// groknight palette (grok-build xai-grok-pager-render/src/theme/groknight.rs).
-const BG_BASE: Color = Color::Rgb(20, 20, 20);
-const BG_BAND: Color = Color::Rgb(36, 36, 36);
-const FG_TEXT: Color = Color::Rgb(225, 225, 225);
-const FG_SECONDARY: Color = Color::Rgb(200, 200, 200);
-const GRAY: Color = Color::Rgb(108, 108, 108);
-const GRAY_DIM: Color = Color::Rgb(88, 88, 88);
-const GRAY_BRIGHT: Color = Color::Rgb(120, 120, 120);
-const RED: Color = Color::Rgb(247, 118, 142);
-const MODEL_TEAL: Color = Color::Rgb(26, 188, 156);
+use crate::view_theme::ViewTheme;
 
 /// jsonl poll cadence.
 const POLL_MS: u64 = 250;
@@ -55,6 +50,9 @@ const ROW_CHROME: usize = 5;
 const TS_RESERVE: usize = 10;
 /// User band folds past this many visual lines (grok COLLAPSED_MAX_LINES).
 const BAND_MAX_LINES: usize = 3;
+/// One mouse-wheel tick scrolls this many lines (grok mouse.rs
+/// DEFAULT_WHEEL_LINES_PER_TICK).
+const WHEEL_LINES: usize = 3;
 
 fn fg(c: Color) -> Style {
     Style::default().fg(c)
@@ -125,31 +123,6 @@ fn fmt_tokens(n: i64) -> String {
     } else {
         format!("{}M", n / 1_000_000)
     }
-}
-
-/// Usage gradient: #e1e1e1 → #c8c8c8 (50-65) → #e0af68 (75-85) → #f7768e (95+).
-fn token_color(pct: f64) -> Color {
-    const STOPS: [(f64, (u8, u8, u8)); 7] = [
-        (0.0, (225, 225, 225)),
-        (50.0, (200, 200, 200)),
-        (65.0, (200, 200, 200)),
-        (75.0, (224, 175, 104)),
-        (85.0, (224, 175, 104)),
-        (95.0, (247, 118, 142)),
-        (100.0, (247, 118, 142)),
-    ];
-    let pct = pct.clamp(0.0, 100.0);
-    for pair in STOPS.windows(2) {
-        let (p0, c0) = pair[0];
-        let (p1, c1) = pair[1];
-        if pct <= p1 {
-            let t = if p1 > p0 { (pct - p0) / (p1 - p0) } else { 0.0 };
-            let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
-            return Color::Rgb(lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
-        }
-    }
-    let (_, c) = STOPS[STOPS.len() - 1];
-    Color::Rgb(c.0, c.1, c.2)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,8 +281,8 @@ fn clip_plain(text: &str, width: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// Band row: 3-col margin + spans + fill, everything on `bg_light`.
-fn band_line(spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
-    let band = Style::default().bg(BG_BAND);
+fn band_line(t: &ViewTheme, spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
+    let band = Style::default().bg(t.bg_light);
     let mut all = vec![Span::styled("   ", band)];
     all.extend(spans);
     let line = Line::from(all);
@@ -328,8 +301,8 @@ fn envelope_head(text: &str) -> Option<&str> {
     Some(&text[start..=end])
 }
 
-fn push_user_block(out: &mut Vec<Line<'static>>, u: &UserBlock, inner_w: usize) {
-    let band = Style::default().bg(BG_BAND);
+fn push_user_block(t: &ViewTheme, out: &mut Vec<Line<'static>>, u: &UserBlock, inner_w: usize) {
+    let band = Style::default().bg(t.bg_light);
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let bw = cw.saturating_sub(TS_RESERVE + 2).max(8);
     let mut srcs: Vec<String> = Vec::new();
@@ -356,12 +329,12 @@ fn push_user_block(out: &mut Vec<Line<'static>>, u: &UserBlock, inner_w: usize) 
         let last = vis.pop().unwrap_or_default();
         vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
-    out.push(band_line(Vec::new(), inner_w)); // vpad top
+    out.push(band_line(t, Vec::new(), inner_w)); // vpad top
     for (i, text) in vis.iter().enumerate() {
         let prefix = if i == 0 { "❯ " } else { "  " };
         let mut spans = vec![
-            Span::styled(prefix.to_string(), fg(FG_SECONDARY).bg(BG_BAND)),
-            Span::styled(text.clone(), fg(FG_TEXT).bg(BG_BAND)),
+            Span::styled(prefix.to_string(), fg(t.accent_user).bg(t.bg_light)),
+            Span::styled(text.clone(), fg(t.text_primary).bg(t.bg_light)),
         ];
         if i == 0 {
             if let Some(ts) = u.timestamp.as_ref() {
@@ -370,20 +343,25 @@ fn push_user_block(out: &mut Vec<Line<'static>>, u: &UserBlock, inner_w: usize) 
                 let ts_w = UnicodeWidthStr::width(ts_text.as_str());
                 if cw > used + ts_w {
                     spans.push(Span::styled(" ".repeat(cw - used - ts_w), band));
-                    spans.push(Span::styled(ts_text, fg(GRAY).bg(BG_BAND)));
+                    spans.push(Span::styled(ts_text, fg(t.gray).bg(t.bg_light)));
                 }
             }
         }
-        out.push(band_line(spans, inner_w));
+        out.push(band_line(t, spans, inner_w));
     }
-    out.push(band_line(Vec::new(), inner_w)); // vpad bottom
+    out.push(band_line(t, Vec::new(), inner_w)); // vpad bottom
 }
 
-fn push_assistant_block(out: &mut Vec<Line<'static>>, a: &AssistantBlock, inner_w: usize) {
+fn push_assistant_block(
+    t: &ViewTheme,
+    out: &mut Vec<Line<'static>>,
+    a: &AssistantBlock,
+    inner_w: usize,
+) {
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let aw = cw.saturating_sub(TS_RESERVE).max(10);
     let mut wrapped: Vec<Line<'static>> = Vec::new();
-    for line in grok_md::render_ratatui(&a.markdown) {
+    for line in grok_md::render_ratatui(&a.markdown, t) {
         wrapped.extend(wrap_line(&line, aw));
     }
     while wrapped.last().is_some_and(|l| line_cells(l).is_empty()) {
@@ -399,7 +377,7 @@ fn push_assistant_block(out: &mut Vec<Line<'static>>, a: &AssistantBlock, inner_
                 let ts_w = UnicodeWidthStr::width(ts_text.as_str());
                 if cw > used + ts_w {
                     spans.push(Span::raw(" ".repeat(cw - used - ts_w)));
-                    spans.push(Span::styled(ts_text, fg(GRAY)));
+                    spans.push(Span::styled(ts_text, fg(t.gray)));
                 }
             }
         }
@@ -407,24 +385,25 @@ fn push_assistant_block(out: &mut Vec<Line<'static>>, a: &AssistantBlock, inner_
     }
 }
 
-fn thinking_spans(t: &ThinkingBlock) -> Vec<Span<'static>> {
+fn thinking_spans(t: &ViewTheme, tb: &ThinkingBlock) -> Vec<Span<'static>> {
     let mut spans = vec![
-        Span::styled("◆ ", fg(GRAY)),
-        Span::styled("Thought", fg(GRAY).add_modifier(Modifier::BOLD)),
+        Span::styled("◆ ", fg(t.gray)),
+        Span::styled("Thought", fg(t.gray).add_modifier(Modifier::BOLD)),
     ];
-    if let Some(secs) = t.duration_secs {
+    if let Some(secs) = tb.duration_secs {
         spans.push(Span::styled(
             format!(
                 " for {}",
                 crate::transcript_view::format_thinking_duration(secs)
             ),
-            fg(GRAY),
+            fg(t.gray),
         ));
     }
     spans
 }
 
 fn push_block(
+    t: &ViewTheme,
     out: &mut Vec<Line<'static>>,
     block: &DisplayBlock,
     inner_w: usize,
@@ -443,54 +422,169 @@ fn push_block(
     *last_dense = dense;
     let margin = Span::raw("   ");
     match block {
-        DisplayBlock::User(u) => push_user_block(out, u, inner_w),
-        DisplayBlock::Assistant(a) => push_assistant_block(out, a, inner_w),
+        DisplayBlock::User(u) => push_user_block(t, out, u, inner_w),
+        DisplayBlock::Assistant(a) => push_assistant_block(t, out, a, inner_w),
         DisplayBlock::ToolGroup(g) => {
             let failed = g.failed();
-            let bullet = if failed > 0 { RED } else { GRAY };
+            let bullet = if failed > 0 { t.accent_error } else { t.gray };
             let mut spans = vec![
                 margin,
                 Span::styled("◈ ", fg(bullet)),
-                Span::styled(g.label(), fg(GRAY_BRIGHT).add_modifier(Modifier::BOLD)),
+                Span::styled(g.label(), fg(t.gray_bright).add_modifier(Modifier::BOLD)),
             ];
             if failed > 0 {
-                spans.push(Span::styled(format!(" · {failed} failed"), fg(RED)));
+                spans.push(Span::styled(
+                    format!(" · {failed} failed"),
+                    fg(t.accent_error),
+                ));
             }
             out.push(clip_spans(spans, inner_w));
         }
         DisplayBlock::Run(r) => {
             let err = r.result.as_ref().is_some_and(|res| res.is_error);
-            let bullet = if err { RED } else { GRAY };
+            let bullet = if err { t.accent_error } else { t.gray };
             let spans = vec![
                 margin,
                 Span::styled("◆ ", fg(bullet)),
-                Span::styled("Run ", fg(GRAY).add_modifier(Modifier::BOLD)),
-                Span::styled(r.description.clone(), fg(GRAY)),
+                Span::styled("Run ", fg(t.gray).add_modifier(Modifier::BOLD)),
+                Span::styled(r.description.clone(), fg(t.gray)),
             ];
             out.push(clip_spans(spans, inner_w));
         }
-        DisplayBlock::Tool(t) => {
-            let err = t.result.as_ref().is_some_and(|res| res.is_error);
-            let bullet = if err { RED } else { GRAY };
+        DisplayBlock::Tool(tool) => {
+            let err = tool.result.as_ref().is_some_and(|res| res.is_error);
+            let bullet = if err { t.accent_error } else { t.gray };
             let mut spans = vec![
                 margin,
                 Span::styled("◆ ", fg(bullet)),
-                Span::styled(t.name.clone(), fg(GRAY).add_modifier(Modifier::BOLD)),
+                Span::styled(tool.name.clone(), fg(t.gray).add_modifier(Modifier::BOLD)),
             ];
-            if !t.hint.is_empty() {
-                spans.push(Span::styled(format!("  {}", t.hint), fg(GRAY)));
+            if !tool.hint.is_empty() {
+                spans.push(Span::styled(format!("  {}", tool.hint), fg(t.gray)));
             }
             out.push(clip_spans(spans, inner_w));
         }
-        DisplayBlock::Thinking(t) => {
+        DisplayBlock::Thinking(tb) => {
             let mut spans = vec![margin];
-            spans.extend(thinking_spans(t));
+            spans.extend(thinking_spans(t, tb));
             out.push(clip_spans(spans, inner_w));
         }
         DisplayBlock::WorkedFor(w) => {
-            let spans = vec![margin, Span::styled(w.label(), fg(GRAY))];
+            let spans = vec![margin, Span::styled(w.label(), fg(t.gray))];
             out.push(clip_spans(spans, inner_w));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scroll/follow state (grok scrollback/state/nav.rs semantics)
+// ---------------------------------------------------------------------------
+
+struct Scroll {
+    offset: usize,
+    max: usize,
+    follow: bool,
+}
+
+impl Scroll {
+    fn new() -> Self {
+        Scroll {
+            offset: 0,
+            max: 0,
+            follow: true,
+        }
+    }
+
+    /// The renderer feeds the fresh max offset; follow pins to the bottom.
+    fn sync(&mut self, max: usize) {
+        self.max = max;
+        if self.follow || self.offset > max {
+            self.offset = max;
+        }
+    }
+
+    /// Any upward scroll leaves follow mode (nav.rs scroll_up).
+    fn scroll_up(&mut self, rows: usize) {
+        self.follow = false;
+        self.offset = self.offset.saturating_sub(rows);
+    }
+
+    /// Downward scroll clamps to the bottom. Follow re-engages only on
+    /// overscroll — a down gesture that was already pinned at the bottom and
+    /// moved zero rows (nav.rs scroll_down + follow_by_overscroll; grok's
+    /// j-on-last-entry rule collapses to the same gesture here). A scroll
+    /// that merely lands at the bottom does NOT re-engage.
+    fn scroll_down(&mut self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        let before = self.offset;
+        self.offset = (self.offset + rows).min(self.max);
+        if self.offset == before && before == self.max {
+            self.follow = true;
+        }
+    }
+
+    /// `g` (nav.rs goto_top): jump to the top, follow off.
+    fn goto_top(&mut self) {
+        self.follow = false;
+        self.offset = 0;
+    }
+
+    /// `G` (nav.rs goto_bottom): jump to the bottom AND re-engage follow.
+    fn goto_bottom(&mut self) {
+        self.follow = true;
+        self.offset = self.max;
+    }
+}
+
+/// Page scroll = viewport − 2 overlap rows, min 1 (nav.rs page_scroll_rows;
+/// hive view has no sticky header).
+fn page_rows(viewport_h: usize) -> usize {
+    viewport_h.saturating_sub(2).max(1)
+}
+
+/// Half page = viewport / 2, min 1 (nav.rs half_page_up/down).
+fn half_page_rows(viewport_h: usize) -> usize {
+    (viewport_h / 2).max(1)
+}
+
+/// grok's scrollback-focused pager bindings (pager defaults.rs), reduced to
+/// the read-only surface: j/k/arrows line scroll, Ctrl+J/K line scroll,
+/// Ctrl+D/U half page, PageUp/Down page, g/G top/bottom, wheel ±3. `q` quits
+/// directly (grok's read-only dashboard-overlay semantics) plus Ctrl+Q and
+/// Ctrl+C. Returns true when the key quits the viewer.
+fn handle_key(scroll: &mut Scroll, viewport_h: usize, code: KeyCode, mods: KeyModifiers) -> bool {
+    if mods.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('c') | KeyCode::Char('q') => return true,
+            KeyCode::Char('j') => scroll.scroll_down(1),
+            KeyCode::Char('k') => scroll.scroll_up(1),
+            KeyCode::Char('d') => scroll.scroll_down(half_page_rows(viewport_h)),
+            KeyCode::Char('u') => scroll.scroll_up(half_page_rows(viewport_h)),
+            _ => {}
+        }
+        return false;
+    }
+    match code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Char('j') | KeyCode::Down => scroll.scroll_down(1),
+        KeyCode::Char('k') | KeyCode::Up => scroll.scroll_up(1),
+        KeyCode::Char('g') => scroll.goto_top(),
+        KeyCode::Char('G') => scroll.goto_bottom(),
+        KeyCode::PageDown => scroll.scroll_down(page_rows(viewport_h)),
+        KeyCode::PageUp => scroll.scroll_up(page_rows(viewport_h)),
+        _ => {}
+    }
+    false
+}
+
+/// Wheel tick = 3 lines (grok mouse.rs), same follow rules as key scrolls.
+fn handle_mouse(scroll: &mut Scroll, kind: MouseEventKind) {
+    match kind {
+        MouseEventKind::ScrollDown => scroll.scroll_down(WHEEL_LINES),
+        MouseEventKind::ScrollUp => scroll.scroll_up(WHEEL_LINES),
+        _ => {}
     }
 }
 
@@ -499,6 +593,7 @@ fn push_block(
 // ---------------------------------------------------------------------------
 
 struct App {
+    theme: &'static ViewTheme,
     parser: TranscriptParser,
     chrome: Chrome,
     finalized: Vec<DisplayBlock>,
@@ -506,14 +601,14 @@ struct App {
     cached_blocks: usize,
     cache_width: usize,
     cache_last_dense: bool,
-    scroll: usize,
-    max_scroll: usize,
-    follow: bool,
+    scroll: Scroll,
+    viewport_h: usize,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(theme: &'static ViewTheme) -> Self {
         App {
+            theme,
             parser: TranscriptParser::new(),
             chrome: Chrome::default(),
             finalized: Vec::new(),
@@ -521,9 +616,8 @@ impl App {
             cached_blocks: 0,
             cache_width: 0,
             cache_last_dense: false,
-            scroll: 0,
-            max_scroll: 0,
-            follow: true,
+            scroll: Scroll::new(),
+            viewport_h: 0,
         }
     }
 
@@ -545,20 +639,21 @@ impl App {
         while self.cached_blocks < self.finalized.len() {
             let block = self.finalized[self.cached_blocks].clone();
             let mut dense = self.cache_last_dense;
-            push_block(&mut self.cache, &block, inner_w, &mut dense);
+            push_block(self.theme, &mut self.cache, &block, inner_w, &mut dense);
             self.cache_last_dense = dense;
             self.cached_blocks += 1;
         }
         let mut lines = self.cache.clone();
         let mut last_dense = self.cache_last_dense;
         for block in self.parser.pending_blocks() {
-            push_block(&mut lines, &block, inner_w, &mut last_dense);
+            push_block(self.theme, &mut lines, &block, inner_w, &mut last_dense);
         }
         lines
     }
 }
 
 fn top_line(app: &App, inner_w: usize) -> Line<'static> {
+    let t = app.theme;
     let right = if app.chrome.context_used > 0 {
         let used = app.chrome.context_used;
         let total = if used > CONTEXT_TOTAL {
@@ -571,13 +666,13 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
             text.push(' ');
         }
         let pct = used as f64 / total as f64 * 100.0;
-        Some((text, token_color(pct)))
+        Some((text, t.usage_color(pct)))
     } else {
         None
     };
     let right_w = right
         .as_ref()
-        .map(|(t, _)| UnicodeWidthStr::width(t.as_str()))
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
         .unwrap_or(0);
     let budget = if right_w > 0 {
         inner_w.saturating_sub(right_w + 1)
@@ -598,11 +693,11 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
     let left = vec![
         Span::styled(
             format!("⎇ {branch}"),
-            fg(FG_TEXT).add_modifier(Modifier::DIM),
+            fg(t.text_primary).add_modifier(Modifier::DIM),
         ),
         Span::raw(" "),
-        Span::styled("worktree ", fg(FG_SECONDARY)),
-        Span::styled(cwd, fg(GRAY_DIM)),
+        Span::styled("worktree ", fg(t.accent_user)),
+        Span::styled(cwd, fg(t.gray_dim)),
     ];
     let mut line = clip_spans(left, budget);
     if let Some((text, color)) = right {
@@ -614,13 +709,13 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
     line
 }
 
-fn bottom_line(model: Option<&str>, inner_w: usize) -> Line<'static> {
-    let key = fg(FG_SECONDARY).add_modifier(Modifier::BOLD);
-    let label = fg(GRAY);
-    let sep = fg(GRAY).add_modifier(Modifier::DIM);
+fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'static> {
+    let key = fg(t.text_secondary).add_modifier(Modifier::BOLD);
+    let label = fg(t.gray);
+    let sep = fg(t.gray).add_modifier(Modifier::DIM);
     let mut spans: Vec<Span<'static>> = Vec::new();
     if let Some(m) = model {
-        spans.push(Span::styled(m.to_string(), fg(MODEL_TEAL)));
+        spans.push(Span::styled(m.to_string(), fg(t.accent_model)));
         spans.push(Span::styled(" · ", sep));
     }
     spans.push(Span::styled("read-only mirror", label));
@@ -645,8 +740,9 @@ fn bottom_line(model: Option<&str>, inner_w: usize) -> Line<'static> {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
+    let t = app.theme;
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(BG_BASE)), area);
+    frame.render_widget(Block::default().style(Style::default().bg(t.bg_base)), area);
     if area.width < 10 || area.height < 4 {
         return;
     }
@@ -675,21 +771,20 @@ fn draw(frame: &mut Frame, app: &mut App) {
         height: scroll_h,
     };
 
-    let base = Style::default().bg(BG_BASE).fg(FG_TEXT);
+    let base = Style::default().bg(t.bg_base).fg(t.text_primary);
     let lines = app.scrollback_lines(inner.width as usize);
-    app.max_scroll = lines.len().saturating_sub(scroll_h as usize);
-    if app.follow || app.scroll > app.max_scroll {
-        app.scroll = app.max_scroll;
-    }
-    let end = (app.scroll + scroll_h as usize).min(lines.len());
-    let visible: Vec<Line> = lines[app.scroll..end].to_vec();
+    app.viewport_h = scroll_h as usize;
+    app.scroll
+        .sync(lines.len().saturating_sub(scroll_h as usize));
+    let end = (app.scroll.offset + scroll_h as usize).min(lines.len());
+    let visible: Vec<Line> = lines[app.scroll.offset..end].to_vec();
     frame.render_widget(Paragraph::new(visible).style(base), scroll_rect);
     frame.render_widget(
         Paragraph::new(top_line(app, inner.width as usize)).style(base),
         status_rect,
     );
     frame.render_widget(
-        Paragraph::new(bottom_line(app.parser.model(), inner.width as usize)).style(base),
+        Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
         hint_rect,
     );
 }
@@ -700,16 +795,24 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    let _ = crossterm::execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 /// Run the TUI mirror over `path`. Only call with stdout on a tty.
 pub fn run(path: &Path) -> anyhow::Result<i32> {
+    // Resolve the theme BEFORE crossterm owns the terminal: in auto mode the
+    // OSC 11 background probe writes/reads the raw tty itself.
+    let theme = crate::view_theme::active_theme_kind().theme();
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut backlog = String::new();
     reader.read_to_string(&mut backlog)?;
-    let mut app = App::new();
+    let mut app = App::new(theme);
     {
         let lines: Vec<&str> = backlog.lines().collect();
         for raw in &lines[lines.len().saturating_sub(TAIL_EVENTS)..] {
@@ -718,7 +821,12 @@ pub fn run(path: &Path) -> anyhow::Result<i32> {
     }
 
     enable_raw_mode()?;
-    crossterm::execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide)?;
+    crossterm::execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::cursor::Hide
+    )?;
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -751,25 +859,14 @@ fn event_loop(
             continue;
         }
         loop {
-            if let Event::Key(k) = event::read()? {
-                if k.kind != KeyEventKind::Release {
-                    match (k.code, k.modifiers) {
-                        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                            return Ok(())
-                        }
-                        (KeyCode::Char('q'), _) => return Ok(()),
-                        (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
-                            app.scroll = (app.scroll + 1).min(app.max_scroll);
-                            app.follow = app.scroll >= app.max_scroll;
-                        }
-                        (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
-                            app.follow = false;
-                            app.scroll = app.scroll.saturating_sub(1);
-                        }
-                        (KeyCode::Char('G'), _) => app.follow = true,
-                        _ => {}
+            match event::read()? {
+                Event::Key(k) if k.kind != KeyEventKind::Release => {
+                    if handle_key(&mut app.scroll, app.viewport_h, k.code, k.modifiers) {
+                        return Ok(());
                     }
                 }
+                Event::Mouse(m) => handle_mouse(&mut app.scroll, m.kind),
+                _ => {}
             }
             if !event::poll(Duration::from_millis(0))? {
                 break;
@@ -781,6 +878,7 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view_theme::{GROKDAY, GROKNIGHT};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use serde_json::json;
@@ -845,7 +943,7 @@ mod tests {
     fn test_top_line_renders_branch_worktree_cwd_and_token_counter() {
         std::env::set_var("HOME", "/Users/dp");
         std::env::set_var("TZ", "UTC");
-        let mut app = App::new();
+        let mut app = App::new(&GROKNIGHT);
         app.push_raw(&user_row("hello"));
         app.push_raw(&assistant_text_row("done"));
         let buf = draw_to_buffer(&mut app, W, H);
@@ -861,7 +959,7 @@ mod tests {
     #[test]
     fn test_user_band_fills_full_inner_width_with_cjk_text() {
         std::env::set_var("TZ", "UTC");
-        let mut app = App::new();
+        let mut app = App::new(&GROKNIGHT);
         app.push_raw(&user_row(
             "宽度测试中文段落，一直排到需要换行为止，确认背景条完整。",
         ));
@@ -869,7 +967,7 @@ mod tests {
         let band_rows: Vec<u16> = (0..H)
             .filter(|&y| {
                 buf.cell((2, y))
-                    .is_some_and(|c| c.style().bg == Some(BG_BAND))
+                    .is_some_and(|c| c.style().bg == Some(GROKNIGHT.bg_light))
             })
             .collect();
         assert!(band_rows.len() >= 3, "vpad + content rows: {band_rows:?}");
@@ -885,13 +983,19 @@ mod tests {
                 let cell = buf.cell((x, y)).unwrap();
                 assert_eq!(
                     cell.style().bg,
-                    Some(BG_BAND),
+                    Some(GROKNIGHT.bg_light),
                     "band bg must span the inner width at ({x},{y})"
                 );
                 x += UnicodeWidthStr::width(cell.symbol()).max(1) as u16;
             }
-            assert_eq!(buf.cell((0, y)).unwrap().style().bg, Some(BG_BASE));
-            assert_eq!(buf.cell((W - 1, y)).unwrap().style().bg, Some(BG_BASE));
+            assert_eq!(
+                buf.cell((0, y)).unwrap().style().bg,
+                Some(GROKNIGHT.bg_base)
+            );
+            assert_eq!(
+                buf.cell((W - 1, y)).unwrap().style().bg,
+                Some(GROKNIGHT.bg_base)
+            );
         }
         // Timestamp overlays the first band line, right-aligned.
         let first = row_text(&buf, prompt_row);
@@ -899,9 +1003,32 @@ mod tests {
     }
 
     #[test]
+    fn test_grokday_theme_paints_light_frame_and_band() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKDAY);
+        app.push_raw(&user_row("hello light"));
+        app.push_raw(&assistant_text_row("done"));
+        let buf = draw_to_buffer(&mut app, W, H);
+        // Frame fill is the grokday base, not the dark one.
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().style().bg,
+            Some(Color::Rgb(238, 238, 238))
+        );
+        // User band uses the grokday highlight bg with dark primary text.
+        let prompt_row = (0..H).find(|&y| row_text(&buf, y).contains('❯')).unwrap();
+        let band_cell = buf.cell((2, prompt_row)).unwrap();
+        assert_eq!(band_cell.style().bg, Some(Color::Rgb(222, 222, 222)));
+        let prompt_x = (0..W)
+            .find(|&x| buf.cell((x, prompt_row)).unwrap().symbol() == "❯")
+            .unwrap();
+        let body_cell = buf.cell((prompt_x + 2, prompt_row)).unwrap();
+        assert_eq!(body_cell.style().fg, Some(Color::Rgb(38, 38, 38)));
+    }
+
+    #[test]
     fn test_tool_lines_render_group_run_and_thinking() {
         std::env::set_var("TZ", "UTC");
-        let mut app = App::new();
+        let mut app = App::new(&GROKNIGHT);
         app.push_raw(&user_row("go"));
         app.push_raw(&tool_use_row("Read", "t1", json!({"file_path": "/a.rs"})));
         app.push_raw(&tool_use_row("Grep", "t2", json!({"pattern": "fn main"})));
@@ -926,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_bottom_line_is_right_aligned_muted_hint() {
-        let mut app = App::new();
+        let mut app = App::new(&GROKNIGHT);
         app.push_raw(&assistant_text_row("hi"));
         let buf = draw_to_buffer(&mut app, W, H);
         let bottom = row_text(&buf, H - 2);
@@ -945,7 +1072,7 @@ mod tests {
     #[test]
     fn test_worked_for_line_and_hive_envelope_head() {
         std::env::set_var("TZ", "UTC");
-        let mut app = App::new();
+        let mut app = App::new(&GROKNIGHT);
         app.push_raw(&user_row("go"));
         app.push_raw(&assistant_text_row("done"));
         let envelope = "<HIVE from=comb.dodo to=comb.rex msgId=a1>review the spec</HIVE>";
@@ -973,5 +1100,171 @@ mod tests {
         assert_eq!(lines, vec!["宽宽", "宽宽", "宽"]);
         let lines = wrap_plain("one two three", 7);
         assert_eq!(lines, vec!["one two", "three"]);
+    }
+
+    // ---- scroll/follow state machine (grok nav.rs semantics) -----------
+
+    fn scroll_at(offset: usize, max: usize, follow: bool) -> Scroll {
+        Scroll {
+            offset,
+            max,
+            follow,
+        }
+    }
+
+    #[test]
+    fn test_scroll_up_disengages_follow() {
+        let mut s = scroll_at(50, 50, true);
+        s.scroll_up(1);
+        assert!(!s.follow);
+        assert_eq!(s.offset, 49);
+        s.scroll_up(100);
+        assert_eq!(s.offset, 0);
+    }
+
+    #[test]
+    fn test_scroll_down_landing_at_bottom_does_not_follow() {
+        // A scroll that merely reaches the bottom is not an overscroll.
+        let mut s = scroll_at(47, 50, false);
+        s.scroll_down(3);
+        assert_eq!(s.offset, 50);
+        assert!(!s.follow, "landing exactly at max must not re-engage");
+        // The next down gesture moves zero rows → overscroll → follow.
+        s.scroll_down(1);
+        assert!(s.follow);
+    }
+
+    #[test]
+    fn test_scroll_down_mid_buffer_keeps_follow_off() {
+        let mut s = scroll_at(10, 50, false);
+        s.scroll_down(3);
+        assert_eq!(s.offset, 13);
+        assert!(!s.follow);
+        s.scroll_down(0);
+        assert!(!s.follow, "zero-row scroll is not a gesture");
+    }
+
+    #[test]
+    fn test_goto_top_and_bottom() {
+        let mut s = scroll_at(25, 50, true);
+        s.goto_top();
+        assert_eq!(s.offset, 0);
+        assert!(!s.follow);
+        s.goto_bottom();
+        assert_eq!(s.offset, 50);
+        assert!(s.follow);
+    }
+
+    #[test]
+    fn test_sync_pins_to_bottom_only_while_following() {
+        let mut s = scroll_at(50, 50, true);
+        s.sync(60); // new transcript lines arrived
+        assert_eq!(s.offset, 60, "follow tails the file");
+        s.scroll_up(5);
+        s.sync(70);
+        assert_eq!(s.offset, 55, "detached offset holds its place");
+        s.sync(40); // width change shrank the line count
+        assert_eq!(s.offset, 40, "offset clamps to the new max");
+    }
+
+    #[test]
+    fn test_page_and_half_page_rows_match_grok() {
+        assert_eq!(page_rows(30), 28); // viewport − 2 overlap
+        assert_eq!(page_rows(2), 1); // min 1
+        assert_eq!(page_rows(0), 1);
+        assert_eq!(half_page_rows(30), 15);
+        assert_eq!(half_page_rows(1), 1);
+        assert_eq!(half_page_rows(0), 1);
+    }
+
+    #[test]
+    fn test_handle_key_quit_bindings() {
+        let mut s = scroll_at(0, 50, true);
+        assert!(handle_key(
+            &mut s,
+            30,
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        ));
+        assert!(handle_key(
+            &mut s,
+            30,
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(handle_key(
+            &mut s,
+            30,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(!handle_key(
+            &mut s,
+            30,
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        ));
+    }
+
+    #[test]
+    fn test_handle_key_line_page_and_jump_bindings() {
+        let mut s = scroll_at(20, 50, false);
+        assert!(!handle_key(
+            &mut s,
+            30,
+            KeyCode::Char('j'),
+            KeyModifiers::NONE
+        ));
+        assert_eq!(s.offset, 21);
+        handle_key(&mut s, 30, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(s.offset, 22);
+        handle_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::NONE);
+        handle_key(&mut s, 30, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(s.offset, 20);
+        // Ctrl+J / Ctrl+K single-line scroll.
+        handle_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(s.offset, 21);
+        handle_key(&mut s, 30, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(s.offset, 20);
+        // Ctrl+D / Ctrl+U half page (viewport 30 → 15).
+        handle_key(&mut s, 30, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(s.offset, 35);
+        handle_key(&mut s, 30, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(s.offset, 20);
+        // PageDown / PageUp (viewport 30 → 28).
+        handle_key(&mut s, 30, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(s.offset, 48);
+        handle_key(&mut s, 30, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(s.offset, 20);
+        // g / G jumps (G also re-engages follow).
+        handle_key(&mut s, 30, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(s.offset, 0);
+        assert!(!s.follow);
+        handle_key(&mut s, 30, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(s.offset, 50);
+        assert!(s.follow);
+    }
+
+    #[test]
+    fn test_j_at_bottom_reengages_follow() {
+        // grok selection.rs: a single j on the last entry enters follow.
+        let mut s = scroll_at(50, 50, false);
+        handle_key(&mut s, 30, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(s.follow);
+    }
+
+    #[test]
+    fn test_mouse_wheel_scrolls_three_lines() {
+        let mut s = scroll_at(20, 50, true);
+        handle_mouse(&mut s, MouseEventKind::ScrollUp);
+        assert_eq!(s.offset, 17);
+        assert!(!s.follow, "wheel up leaves follow");
+        handle_mouse(&mut s, MouseEventKind::ScrollDown);
+        assert_eq!(s.offset, 20);
+        assert!(!s.follow);
+        // At the bottom, one more wheel-down tick re-engages follow.
+        s.offset = 50;
+        handle_mouse(&mut s, MouseEventKind::ScrollDown);
+        assert!(s.follow);
     }
 }

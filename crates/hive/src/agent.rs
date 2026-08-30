@@ -712,7 +712,7 @@ impl Agent {
             return self._send_headless(text);
         }
         let probe = hooked_detect_cli_process_for_pane(&self.pane_id);
-        let profile_name = probe.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        let profile_name = probe.as_ref().map(|p| p.name).unwrap_or_default();
         let claude_member =
             self.cli == "claude" && (profile_name.is_empty() || profile_name == "claude");
         if probe.is_none() && !claude_member {
