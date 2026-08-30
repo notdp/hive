@@ -195,47 +195,109 @@ fn _indent_block(text: &str, first: &str, rest: &str) -> String {
     out
 }
 
-/// `<HIVE\s+from=(\S+)[^>]*>\s*(.*?)\s*</HIVE>` with DOTALL, first match.
-pub(crate) fn hive_envelope(text: &str) -> Option<(&str, &str)> {
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find("<HIVE") {
-        let after_tag = search_from + rel + 5;
-        let rest = &text[after_tag..];
-        let ws_len = rest
-            .char_indices()
-            .find(|(_, c)| !c.is_whitespace())
-            .map(|(i, _)| i)
-            .unwrap_or(rest.len());
-        if ws_len > 0 && rest[ws_len..].starts_with("from=") {
-            let g1_start = after_tag + ws_len + 5;
-            let run = &text[g1_start..];
-            let run_len = run
-                .char_indices()
-                .find(|(_, c)| c.is_whitespace())
-                .map(|(i, _)| i)
-                .unwrap_or(run.len());
-            if run_len > 0 {
-                // `(\S+)` is greedy: try the longest prefix first, backtrack
-                // until `[^>]*>` and a later `</HIVE>` can both match.
-                let prefix = &run[..run_len];
-                let mut ends: Vec<usize> = prefix.char_indices().map(|(i, _)| i).skip(1).collect();
-                ends.push(run_len);
-                for &p_len in ends.iter().rev() {
-                    let after_g1 = g1_start + p_len;
-                    if let Some(gt) = text[after_g1..].find('>') {
-                        let body_start = after_g1 + gt + 1;
-                        if let Some(close) = text[body_start..].find("</HIVE>") {
-                            let sender = &text[g1_start..after_g1];
-                            let body = text[body_start..body_start + close].trim();
-                            return Some((sender, body));
-                        }
-                    }
-                }
-            }
+/// A HIVE envelope as it reaches a claude transcript, with the tag parsed
+/// into fields instead of shown raw.
+///
+/// Four carriers exist, all of which land in the same `user` row:
+/// bare (typed straight into the pane), claude's session-inbox injection at
+/// turn start or folded in mid-turn (a lead line plus a trailing safety
+/// paragraph), and the retired `<channel …>` wrapper still sitting in old
+/// transcripts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HiveMessage {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub msg_id: Option<String>,
+    pub reply_to: Option<String>,
+    pub artifact: Option<String>,
+    pub body: String,
+    /// The envelope arrived inside claude's peer-message wrapper rather than
+    /// on its own.
+    pub injected: bool,
+    /// The wrapper said the message folded into a turn already in flight.
+    pub mid_turn: bool,
+}
+
+const INJECT_LEAD_MID: &str = "Another Claude session sent a message while you were working:";
+const INJECT_LEAD: &str = "Another Claude session sent a message:";
+const INJECT_TAIL: &str = "This came from another Claude session";
+
+/// Peel the retired `<channel source=… msg_id=…>` wrapper.
+fn strip_channel_wrapper(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("<channel") else {
+        return text;
+    };
+    let Some(gt) = rest.find('>') else {
+        return text;
+    };
+    let inner = rest[gt + 1..].trim();
+    inner.strip_suffix("</channel>").unwrap_or(inner).trim()
+}
+
+/// Peel claude's peer-message wrapper: the lead line above the envelope and
+/// the safety paragraph below it. Returns the core plus (injected, mid_turn).
+fn strip_injection_wrapper(text: &str) -> (&str, bool, bool) {
+    let trimmed = strip_channel_wrapper(text.trim());
+    for (lead, mid) in [(INJECT_LEAD_MID, true), (INJECT_LEAD, false)] {
+        if let Some(rest) = trimmed.strip_prefix(lead) {
+            let rest = rest.trim_start();
+            let core = match rest.find(INJECT_TAIL) {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            return (core.trim(), true, mid);
         }
-        search_from = search_from + rel + 1;
     }
-    None
+    (trimmed, false, false)
+}
+
+/// Parse a user row's text as one HIVE envelope, in any of its carriers.
+///
+/// Deliberately strict: the row must be *nothing but* the envelope once the
+/// wrapper is peeled, so prose that merely quotes `<HIVE …>` — skill docs,
+/// this repo's own specs — stays ordinary user text.
+pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
+    let (core, injected, mid_turn) = strip_injection_wrapper(text);
+    if !core.starts_with("<HIVE") {
+        return None;
+    }
+    let body_end = core.strip_suffix("</HIVE>")?.len();
+    let gt = core.find('>')?;
+    if gt >= body_end {
+        return None;
+    }
+    let tag = &core[5..gt];
+    if !tag.is_empty() && !tag.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut msg = HiveMessage {
+        from: None,
+        to: None,
+        msg_id: None,
+        reply_to: None,
+        artifact: None,
+        body: core[gt + 1..body_end].trim().to_string(),
+        injected,
+        mid_turn,
+    };
+    for attr in tag.split_whitespace() {
+        let Some((key, value)) = attr.split_once('=') else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let slot = match key {
+            "from" => &mut msg.from,
+            "to" => &mut msg.to,
+            "msgId" => &mut msg.msg_id,
+            "reply-to" => &mut msg.reply_to,
+            "artifact" => &mut msg.artifact,
+            _ => continue,
+        };
+        *slot = Some(value.to_string());
+    }
+    Some(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,9 +472,9 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserBlock {
     /// Raw message text; for HIVE envelopes this still holds the full
-    /// `<HIVE from=… …>…</HIVE>` source (head shown raw, then body).
+    /// source, wrapper and all — `hive` carries the parsed view.
     pub text: String,
-    pub is_hive_envelope: bool,
+    pub hive: Option<HiveMessage>,
     pub timestamp: Option<Timestamp>,
 }
 
@@ -843,6 +905,21 @@ impl TranscriptParser {
         self.model.as_deref()
     }
 
+
+    /// Elapsed seconds of the still-open turn once it has settled (idle with
+    /// both a turn start and a final assistant text). The real WorkedFor
+    /// block is only emitted when the NEXT user message closes the turn —
+    /// this lets a live view synthesize the line in the meantime.
+    pub fn open_turn_worked_secs(&self) -> Option<f64> {
+        if self.busy {
+            return None;
+        }
+        match (self.turn_start_ms, self.last_assistant_text_ms) {
+            (Some(start), Some(end)) if end >= start => Some((end - start) as f64 / 1000.0),
+            _ => None,
+        }
+    }
+
     /// Reasoning-effort level from the most recent row carrying one.
     pub fn effort(&self) -> Option<&str> {
         self.effort.as_deref()
@@ -1006,7 +1083,7 @@ impl TranscriptParser {
                             id: self.alloc_id(),
                             block: DisplayBlock::User(UserBlock {
                                 text: body.to_string(),
-                                is_hive_envelope: hive_envelope(body).is_some(),
+                                hive: parse_hive_message(body),
                                 timestamp: ts.clone(),
                             }),
                         });
@@ -1163,8 +1240,9 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
 }
 
 fn _user_line(text: &str) -> String {
-    if let Some((sender, body)) = hive_envelope(text) {
-        let body = _clip(body, 160);
+    if let Some(msg) = parse_hive_message(text) {
+        let sender = msg.from.as_deref().unwrap_or("peer");
+        let body = _clip(&msg.body, 160);
         return format!("{MAGENTA}✉{RESET} {BOLD}{sender}{RESET} {DIM}▸{RESET} {body}");
     }
     let first = format!("{BOLD}❯{RESET} {BOLD}");
@@ -1455,6 +1533,72 @@ mod tests {
         let out = p.flush_rendered().unwrap();
         assert!(out.contains("Bash") && out.contains("List files"));
         assert!(!out.replace("List files", "").contains("ls"));
+    }
+
+    #[test]
+    fn test_parse_hive_message_reads_every_arrival_shape() {
+        // bare: typed straight into the pane.
+        let bare = parse_hive_message(
+            "<HIVE from=comb.dodo to=comb.rex msgId=a1 reply-to=z9 artifact=/tmp/spec.md>\nreview the spec\n</HIVE>",
+        )
+        .unwrap();
+        assert_eq!(bare.from.as_deref(), Some("comb.dodo"));
+        assert_eq!(bare.to.as_deref(), Some("comb.rex"));
+        assert_eq!(bare.msg_id.as_deref(), Some("a1"));
+        assert_eq!(bare.reply_to.as_deref(), Some("z9"));
+        assert_eq!(bare.artifact.as_deref(), Some("/tmp/spec.md"));
+        assert_eq!(bare.body, "review the spec");
+        assert!(!bare.injected && !bare.mid_turn);
+
+        // claude's session-inbox injection, turn start.
+        let turn_start = parse_hive_message(
+            "Another Claude session sent a message:\n\
+             <HIVE from=sage to=orch msgId=7boK>\ndone\n</HIVE>\n\n\
+             This came from another Claude session — not typed by your user, but very \
+             likely working on their behalf. …permission laundering.",
+        )
+        .unwrap();
+        assert_eq!(turn_start.from.as_deref(), Some("sage"));
+        assert_eq!(turn_start.body, "done");
+        assert!(turn_start.injected && !turn_start.mid_turn);
+
+        // same wrapper, folded into a turn already in flight.
+        let mid = parse_hive_message(
+            "Another Claude session sent a message while you were working:\n\
+             <HIVE from=sage to=orch>\ndone\n</HIVE>\n\n\
+             This came from another Claude session — …",
+        )
+        .unwrap();
+        assert!(mid.injected && mid.mid_turn);
+
+        // the retired <channel> transport, still in old transcripts.
+        let chan = parse_hive_message(
+            "<channel source=\"plugin:hive-channel:hive-channel\" msg_id=\"18kd\">\n\
+             <HIVE from=validator to=worker msgId=18kd>\nrt-1785757288\n</HIVE>\n</channel>",
+        )
+        .unwrap();
+        assert_eq!(chan.from.as_deref(), Some("validator"));
+        assert_eq!(chan.body, "rt-1785757288");
+
+        // attribute-less envelope still parses; the body is what matters.
+        let bald = parse_hive_message("<HIVE>hi</HIVE>").unwrap();
+        assert_eq!(bald.from, None);
+        assert_eq!(bald.body, "hi");
+    }
+
+    #[test]
+    fn test_parse_hive_message_ignores_prose_that_quotes_an_envelope() {
+        // skill docs and specs quote the envelope; they are not messages.
+        assert!(parse_hive_message(
+            "其他 agent 的消息会以 `<HIVE from=a to=b>body</HIVE>` 注入当前 pane。"
+        )
+        .is_none());
+        assert!(parse_hive_message("<HIVE from=a to=b>unterminated").is_none());
+        assert!(parse_hive_message("<HIVEISH from=a>x</HIVE>").is_none());
+        // a body that merely mentions the tag stays whole.
+        let msg = parse_hive_message("<HIVE from=probe to=kilo>你上下文里的 <HIVE> 消息</HIVE>")
+            .unwrap();
+        assert_eq!(msg.body, "你上下文里的 <HIVE> 消息");
     }
 
     #[test]
@@ -1806,7 +1950,7 @@ mod tests {
         ));
         match &out[0] {
             DisplayBlock::User(u) => {
-                assert!(!u.is_hive_envelope);
+                assert!(u.hive.is_none());
                 assert_eq!(u.timestamp.as_ref().unwrap().clock, "12:40 PM");
             }
             other => panic!("expected User, got {other:?}"),

@@ -44,6 +44,15 @@ impl Density {
         }
     }
 
+    /// Name shown on the composer's bottom-left border.
+    pub fn label(self) -> &'static str {
+        match self {
+            Density::Normal => "Normal",
+            Density::Thinking => "Thinking",
+            Density::Verbose => "Verbose",
+        }
+    }
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "normal" => Some(Density::Normal),
