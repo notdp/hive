@@ -113,12 +113,23 @@ itself maintains — never from screen scraping or transcript tail heuristics:
   (`_runtimeSource: claude_bg`) — see "Claude Native Runtime"
 - codex: the shared app-server daemon's status stream
   (`_runtimeSource: codex_app_server`) — see "Codex Native Runtime"
-- grok: the per-pane leader's notification stream
-  (`_runtimeSource: grok-leader`) — see "Grok Native Runtime"
+- grok: the leader's notification stream (`_runtimeSource: grok-leader`) —
+  see "Grok Native Runtime"
+
+An interactive claude — no bg job — answers from its own session registry
+entry instead: `_runtimeSource: claude_registry` for a pane TUI
+(`crates/hive/src/hived.rs:1558`), `claude_session` for a pane-less joined
+member (`crates/hive/src/hived.rs:1644`).
+
+A member with no pane at all reads the same sources by engine identity —
+jobId, threadId, or the grok member key — through
+`_headless_member_runtime` (`crates/hive/src/hived.rs:1624`); the pane is an
+address, never a prerequisite.
 
 The tmux control-mode output monitor remains only as the fallback `busy`
 heuristic for panes with no native state (terminal panes, unmanaged CLIs) and
-as the idle-notify target-pane chooser.
+as the idle-notify target-pane chooser
+(`_most_recent_output_pane`, `crates/hive/src/hived.rs:1183`).
 
 ### `busy`
 
@@ -461,8 +472,9 @@ The pane's viewer is a screen: what the human has it showing can no longer
 misroute, block, or get kicked by a delivery. There is no fallback — a member
 pane never gets `send-keys`.
 
-The sequence (`adapters/claude_bg.type_into_job` / `interrupt_job`) and what
-each step is evidence of:
+The sequence (`type_into_job` / `interrupt_job`,
+`crates/hive/src/adapters/claude_bg.rs:1476` and `:1649`) and what each step
+is evidence of:
 
 1. **client readiness** — the attach client writes its own attach-journal
    entry (~0.3s) when the session goes on screen. Control bytes wait for it:
@@ -527,10 +539,22 @@ composer belongs to whichever session it is displaying. So a member whose job
 record went missing fails loudly instead of quietly typing into a stranger's
 turn.
 
-An unmanaged claude — a bare interactive TUI with no job record — is
-deliberately unsupported **as a Hive team member**: `hive create` / `hive spawn`
-reject it at team entry, and delivery to a recorded-less claude pane fails
-loudly. It still works as a `ccd.<name>` guest session over its own inbox.
+An unmanaged claude **pane** — a bare interactive TUI with no job record — is
+deliberately unsupported as a member: a `hive create` run from that pane
+refuses it and prints the `hclaude` / `hive claude -r <sessionId>` fix
+(`_require_claude_job_backed`, `crates/hive/src/cli/core_cmds.rs:474`, reached
+from `crates/hive/src/cli/core_cmds.rs:53`), and delivery to a record-less
+claude pane fails loudly. `hive spawn` never meets one: it launches the
+engine itself.
+
+A claude session that is **not on a pane** is a different case and is
+supported: run outside tmux, `hive join <team>` enrols the calling session
+into the roster with its own sessionId as engine identity
+(`_join_as_ccd`, `crates/hive/src/cli/core_cmds.rs:633`). Delivery to it takes
+the same two lanes as a job — daemon reply first, the session's own inbox
+socket second (`_deliver_claude_session`, `crates/hive/src/agent.rs:839`) — and `hive
+attach` renders it read-only through `hive view`. Such a member has no bg
+job, so nothing on the keyboard path applies to it.
 
 ## Codex Native Runtime (app-server source)
 
@@ -563,17 +587,19 @@ config.toml on disk, so every new cwd gets `[projects."<dir>"] trust_level =
 This path is taken only when the pane has a recorded thread and the shared
 daemon answers. An unmanaged codex — embedded, or a `resume` picker launch
 whose chosen thread hive cannot know — is deliberately unsupported **as a Hive
-team member**: `hive create` / `hive spawn` reject it at team entry. It still
-runs, but hive reads no state from it — session id stays `unresolved`,
-`turnPhase` stays unknown, and there is no transcript fallback.
+team member**: a `hive create` run from that pane refuses it and prints the
+`hcodex` / `hive codex resume` fix (`_require_daemon_backed`,
+`crates/hive/src/cli/core_cmds.rs:425`). It still runs, but hive reads no
+state from it — session id stays `unresolved`, `turnPhase` stays unknown,
+and there is no transcript fallback.
 
 The daemon is machine-level shared state: hive never kills it (a dead daemon
 takes every attached TUI down with it within ~5s), and the hived supervises
 it — a dead daemon is respawned while the team has live codex members, and a
 member pane whose CLI exited but whose thread is recorded gets one `hive codex
 resume <threadId>` typed into its retained shell (guarded by a live-process
-check, a shell-prompt check, and a cooldown). Records of dead panes are
-pruned on the same tick.
+check, a shell-prompt check, and a cooldown; `crates/hive/src/hived.rs:2919`).
+Records of dead panes are pruned on the same tick.
 
 State is event-sourced from the daemon's broadcasts and stays valid until the
 next event — there is no time-based staleness gate. On a shared daemon a

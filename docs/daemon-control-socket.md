@@ -45,9 +45,15 @@ by `respawn-stale`.
   Termux (`TERMUX_VERSION` and `PREFIX` both set) where it is `$PREFIX/tmp`.
   `$TMPDIR` is never consulted. Hive computes the same path but hardcodes
   `/tmp` (`claude_sessions.rs:437`) — correct everywhere but Termux.
-- Verified locally: `sha256("/Users/<u>/.claude")[:8] == 758434e4`, and
+  Verified locally: `sha256("/Users/<u>/.claude")[:8] == 758434e4`, and
   `/tmp/cc-daemon-501/758434e4/` holds `control.sock` plus `pty/`, `rv/`,
   `spare/`.
+- **configDir disagreement is silent.** The binary never reads `CLAUDE_HOME`
+  (zero occurrences in 2.1.240); hive's `_config_dir` prefers it over
+  `CLAUDE_CONFIG_DIR` (`claude_sessions.rs:77-89`). A dev lane that sets only
+  `CLAUDE_HOME` makes hive hash a directory the daemon has never heard of, so
+  `daemon_reply` finds no socket and every delivery quietly takes the wrapped
+  inbox lane. Set `CLAUDE_CONFIG_DIR` too when sandboxing.
 - **Windows** uses a named pipe `\\.\pipe\cc-daemon-<key>-control`, where
   `<key>` is 16 hex from `<configDir>/daemon/pipe.key` — not the configDir
   hash.
@@ -149,8 +155,11 @@ json"`, `"unknown op: <op>"`, and `"malformed request: <first zod issue>"`.
 A known op missing a required field is the third — `{"op":"has"}` answers
 `"malformed request: Invalid input: expected string, received undefined"`,
 while an unknown op answers the bare `"Invalid input"` (the union
-discriminant failing). That difference is the only safe way to probe whether
-a verb exists without executing it.
+discriminant failing). That difference tells you whether a verb exists
+without executing it — but only for verbs that have a required field.
+`ping`, `nudge`, `yield`, `lease`, `leases` and `shutdown` need nothing but
+`op`, so a bare probe *runs* them. Never probe blind: `{"op":"shutdown"}`
+stops the supervisor and reaps every worker.
 
 ## Verbs (2.1.240)
 
@@ -242,10 +251,12 @@ primary claude-member lane (`crates/hive/src/agent.rs:813`, and
 `agent.rs:844` for a joined `ccd.<name>` session). The wrapped inbox socket
 is the fallback when this lane returns nothing.
 
-And `{ok:true}` on branch 2 means *written into the pty*, not *accepted as a
-turn*: the branch resolves as soon as the bytes are queued on `replyChain`.
-Only branch 3 (and a failing branch 1) can report refusal. A delivery
-confirmed here is a delivery the composer received.
+And `{ok:true}` on branch 2 means *the bytes were queued into the pty*,
+nothing more: the branch returns as soon as the write is chained, before the
+worker has read a keystroke. Only branch 3 (and a branch 1 whose rv channel
+refuses) can ever produce `ENOREPLY`. So a `reply` acceptance is evidence
+the composer was written to, never evidence a turn started — the response
+obligation still rides the member skill's receipt duty, not the carriage.
 
 ## Hive's client
 

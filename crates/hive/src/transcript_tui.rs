@@ -457,12 +457,13 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
         vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
     let mut out = Vec::new();
-    // The icon marks the band's top-left corner, on the padding row above the
-    // words, so nothing shares a line with it.
+    // The icon marks the band's corner: its own row, inset from the top and
+    // left edges so it does not sit against them.
+    out.push(band_line(t, Vec::new(), inner_w)); // vpad top
     out.push(band_line_marked(
         t,
         Some(Span::styled(
-            USER_ICON.trim_end().to_string(),
+            format!(" {}", USER_ICON.trim_end()),
             fg(t.accent_user).bg(t.bg_light),
         )),
         Vec::new(),
@@ -2698,8 +2699,14 @@ mod tests {
             .find(|&y| row_text(&buf, y).contains(USER_ICON.trim_end()))
             .unwrap();
         assert!(band_rows.contains(&icon_row));
-        assert_eq!(band_rows[0], icon_row, "icon opens the band: {band_rows:?}");
+        // Inset from both edges: a padding row above it, words below.
+        assert_eq!(band_rows[0], icon_row - 1, "vpad above: {band_rows:?}");
         assert!(band_rows.contains(&(icon_row + 1)), "text under the icon");
+        let icon_col = row_text(&buf, icon_row)
+            .chars()
+            .position(|c| !c.is_whitespace())
+            .unwrap();
+        assert!(icon_col >= 3, "icon hugs the left edge at {icon_col}");
         for &y in &band_rows {
             // Wide glyphs leave a reset shadow cell behind them in the
             // buffer (the glyph itself paints both columns), so walk by
