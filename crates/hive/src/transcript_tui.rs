@@ -1637,6 +1637,40 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
     line
 }
 
+/// Human model name the way the CLIs badge themselves: "claude-fable-5" →
+/// "Fable 5", "claude-haiku-4-5-20251001" → "Haiku 4.5". Unknown shapes pass
+/// through untouched.
+fn display_model(id: &str) -> String {
+    let Some(rest) = id.strip_prefix("claude-") else {
+        return id.to_string();
+    };
+    let mut words: Vec<String> = Vec::new();
+    let mut version: Vec<String> = Vec::new();
+    for seg in rest.split('-') {
+        if seg.chars().all(|c| c.is_ascii_digit()) {
+            if seg.len() >= 8 {
+                break; // a datestamp tail, not a version part
+            }
+            version.push(seg.to_string());
+        } else {
+            let mut chars = seg.chars();
+            let cap = match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => continue,
+            };
+            words.push(cap);
+        }
+    }
+    if !version.is_empty() {
+        words.push(version.join("."));
+    }
+    if words.is_empty() {
+        id.to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
 fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'static> {
     // grok hint row: left-aligned "Key:label" pairs with │ separators
     // (Shift+Tab:mode │ Ctrl+x:shortcuts); model/effort live on the
@@ -1755,7 +1789,10 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
         // effort, and the read-only marker.
         let mut badge: Vec<Span<'static>> = Vec::new();
         if let Some(m) = app.parser.model() {
-            badge.push(Span::styled(format!(" {m}"), fg(t.accent_model)));
+            badge.push(Span::styled(
+                format!(" {}", display_model(m)),
+                fg(t.accent_model),
+            ));
             if let Some(e) = app.parser.effort() {
                 badge.push(Span::styled(format!(" ({e})"), fg(t.gray)));
             }
@@ -3011,6 +3048,14 @@ mod tests {
     // ---- composer box ---------------------------------------------------
 
     #[test]
+    fn test_display_model_humanizes_claude_ids() {
+        assert_eq!(display_model("claude-fable-5"), "Fable 5");
+        assert_eq!(display_model("claude-opus-5"), "Opus 5");
+        assert_eq!(display_model("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(display_model("grok-4"), "grok-4");
+    }
+
+    #[test]
     fn test_composer_box_rows_present_and_idle() {
         std::env::set_var("TZ", "UTC");
         let mut app = App::new(&GROKNIGHT);
@@ -3039,7 +3084,8 @@ mod tests {
         assert_eq!(interior.trim(), "read-only", "{interior:?}");
         // model badge embedded on the bottom border, right side.
         let border_row = row_text(&buf, H - 3);
-        assert!(border_row.contains("claude-fable-5"), "{border_row:?}");
+        assert!(border_row.contains("Fable 5"), "{border_row:?}");
+        assert!(!border_row.contains("claude-fable-5"), "{border_row:?}");
         assert!(
             border_row.trim_end().ends_with("read-only ─╯"),
             "{border_row:?}"
