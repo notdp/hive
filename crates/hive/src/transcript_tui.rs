@@ -213,11 +213,20 @@ fn cells_to_line(cells: &[Cell]) -> Line<'static> {
 
 /// Word-aware wrap of one styled line into display-column budget `width`.
 fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
-    let width = width.max(2);
+    wrap_cells_first(cells, width, width)
+}
+
+/// Wrap with a narrower first line: the clock sits at the right end of a
+/// block's opening line, and only that line has to make room for it — the
+/// rest of the paragraph reflows across the full content width.
+fn wrap_cells_first(cells: Vec<Cell>, first: usize, rest: usize) -> Vec<Vec<Cell>> {
+    let first = first.max(2);
+    let rest = rest.max(2);
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut cur: Vec<Cell> = Vec::new();
     let mut curw = 0usize;
     for (ch, st) in cells {
+        let width = if lines.is_empty() { first } else { rest };
         let w = cell_width(ch);
         if curw + w > width && curw > 0 {
             if ch == ' ' {
@@ -252,20 +261,28 @@ fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
 }
 
 fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
-    wrap_cells(line_cells(line), width)
+    wrap_line_first(line, width, width)
+}
+
+fn wrap_line_first(line: &Line, first: usize, rest: usize) -> Vec<Line<'static>> {
+    wrap_cells_first(line_cells(line), first, rest)
         .iter()
         .map(|cells| cells_to_line(cells))
         .collect()
 }
 
 fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    wrap_plain_first(text, width, width)
+}
+
+fn wrap_plain_first(text: &str, first: usize, rest: usize) -> Vec<String> {
     let style = Style::default();
     let cells: Vec<Cell> = text
         .chars()
         .filter(|c| !c.is_control() || *c == '\t')
         .map(|c| (if c == '\t' { ' ' } else { c }, style))
         .collect();
-    wrap_cells(cells, width)
+    wrap_cells_first(cells, first, rest)
         .iter()
         .map(|cells| cells.iter().map(|&(c, _)| c).collect())
         .collect()
@@ -365,14 +382,16 @@ struct Rendered {
 fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> Rendered {
     let band = Style::default().bg(t.bg_light);
     let cw = inner_w.saturating_sub(ROW_CHROME);
-    let bw = cw.saturating_sub(TS_RESERVE + 2).max(8);
+    let bw = cw.saturating_sub(2).max(8);
+    let head_w = cw.saturating_sub(TS_RESERVE + 2).max(8);
     if let Some(msg) = u.hive.as_ref() {
         return render_hive(t, u, msg, inner_w, expanded);
     }
     let srcs: Vec<String> = u.text.lines().map(str::to_string).collect();
     let mut vis: Vec<String> = Vec::new();
     for src in &srcs {
-        vis.extend(wrap_plain(src, bw));
+        let first = if vis.is_empty() { head_w } else { bw };
+        vis.extend(wrap_plain_first(src, first, bw));
     }
     while vis.last().is_some_and(|l| l.is_empty()) && vis.len() > 1 {
         vis.pop();
@@ -531,10 +550,21 @@ fn render_hive(
 
 fn render_assistant(t: &ViewTheme, a: &AssistantBlock, inner_w: usize) -> Rendered {
     let cw = inner_w.saturating_sub(ROW_CHROME);
-    let aw = cw.saturating_sub(TS_RESERVE).max(10);
+    // Only the opening line gives up columns to the clock.
+    let aw = cw.max(10);
+    let head_w = cw.saturating_sub(TS_RESERVE).max(10);
     let mut wrapped: Vec<Line<'static>> = Vec::new();
     for line in grok_md::render_ratatui(&a.markdown, t, aw) {
-        wrapped.extend(wrap_line(&line, aw));
+        // Narrowing the opening line only works where there is a space to
+        // break on. A table's frame row has none, so it would be sawn in
+        // half; leave those at full width and let the clock drop instead.
+        let breakable = line_cells(&line).iter().any(|&(c, _)| c == ' ');
+        let first = if wrapped.is_empty() && breakable {
+            head_w
+        } else {
+            aw
+        };
+        wrapped.extend(wrap_line_first(&line, first, aw));
     }
     while wrapped.last().is_some_and(|l| line_cells(l).is_empty()) {
         wrapped.pop();
@@ -785,7 +815,6 @@ fn render_run(
     selected: bool,
 ) -> Rendered {
     let collapsed_sel = selected && !expanded;
-    let err = r.result.as_ref().is_some_and(|res| res.is_error);
     let bullet_color = outcome_color(t, &r.result);
     let bullet = if collapsed_sel { "› " } else { "◆ " };
     let (label_style, desc_style) = if collapsed_sel {
@@ -826,7 +855,6 @@ fn render_tool(
     selected: bool,
 ) -> Rendered {
     let collapsed_sel = selected && !expanded;
-    let err = tool.result.as_ref().is_some_and(|res| res.is_error);
     let bullet_color = outcome_color(t, &tool.result);
     let bullet = if collapsed_sel { "› " } else { "◆ " };
     let name_style = if collapsed_sel {
@@ -1839,6 +1867,52 @@ fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'sta
     line
 }
 
+/// grok's scrollbar (xai-grok-pager-render render/scrollbar.rs): the same
+/// `tui-scrollbar` crate places the thumb at sub-cell precision, and every
+/// covered cell is then flattened to a solid `█` — some emulators do not
+/// stretch a fg-only block over the cell's line gap, so the thumb fills the
+/// background too. Following dims the thumb toward the track; scrolled up it
+/// stands at full strength, which is how grok shows you have left the tail.
+fn draw_scrollbar(
+    buf: &mut Buffer,
+    t: &ViewTheme,
+    track: Rect,
+    total: usize,
+    offset: usize,
+    following: bool,
+) {
+    if track.width == 0 || track.height == 0 || total <= track.height as usize {
+        return;
+    }
+    // The widget takes u16 lengths; long transcripts scale down to fit.
+    let scale = (total / u16::MAX as usize) + 1;
+    let lengths = tui_scrollbar::ScrollLengths {
+        content_len: total / scale,
+        viewport_len: track.height as usize,
+    };
+    let metrics = tui_scrollbar::ScrollMetrics::new(lengths, offset / scale, track.height);
+    let thumb = if following {
+        blend(t.scrollbar_bg, t.scrollbar_fg, 0.4)
+    } else {
+        t.scrollbar_fg
+    };
+    for row in 0..track.height {
+        let (x, y) = (track.x, track.y + row);
+        let empty = matches!(
+            metrics.cell_fill(row as usize),
+            tui_scrollbar::CellFill::Empty
+        );
+        let cell = &mut buf[(x, y)];
+        if empty {
+            cell.set_symbol(" ");
+            cell.set_style(Style::default().bg(t.scrollbar_bg));
+        } else {
+            cell.set_symbol("█");
+            cell.set_style(Style::default().fg(thumb).bg(thumb));
+        }
+    }
+}
+
 /// grok SelectionBox: fg-only `┌ ┐ └ ┘` corners one row outside the entry,
 /// `│` sides in the padding columns, dashed `┆` where the viewport clips.
 fn draw_selection_frame(
@@ -2208,6 +2282,24 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let end = (app.scroll.offset + scroll_h as usize).min(lines.len());
     let visible: Vec<Line> = lines[app.scroll.offset..end].to_vec();
     frame.render_widget(Paragraph::new(visible).style(base), scroll_rect);
+    if hpad > 0 {
+        // The track rides the page's right margin: grok's gap + 1-col track,
+        // and the transcript keeps every column it had.
+        let track = Rect {
+            x: area.x + area.width - 1,
+            y: scroll_rect.y,
+            width: 1,
+            height: scroll_rect.height,
+        };
+        draw_scrollbar(
+            frame.buffer_mut(),
+            t,
+            track,
+            lines.len(),
+            app.scroll.offset,
+            app.scroll.follow,
+        );
+    }
     if let Some(le) = app.selected.and_then(|id| app.layout_of(id)) {
         draw_selection_frame(frame.buffer_mut(), t, scroll_rect, app.scroll.offset, le);
     }
@@ -3336,6 +3428,71 @@ mod tests {
     }
 
     // ---- markdown tables re-layout on resize ----------------------------
+
+    #[test]
+    fn test_scrollbar_thumb_tracks_the_viewport() {
+        let mut app = App::new(&GROKNIGHT);
+        for i in 0..60 {
+            app.push_raw(&assistant_text_row(&format!("line {i}")));
+        }
+        let track_x = W - 1;
+        let thumb_rows = |buf: &Buffer| -> Vec<u16> {
+            (0..H)
+                .filter(|&y| buf.cell((track_x, y)).unwrap().symbol() == "█")
+                .collect()
+        };
+        let buf = draw_to_buffer(&mut app, W, H);
+        let bottom = thumb_rows(&buf);
+        assert!(!bottom.is_empty(), "no thumb drawn while following");
+
+        key(&mut app, KeyCode::Char('g')); // jump to the top
+        let buf = draw_to_buffer(&mut app, W, H);
+        let top = thumb_rows(&buf);
+        assert!(!top.is_empty(), "no thumb drawn at the top");
+        assert!(
+            top[0] < bottom[0],
+            "thumb did not move with the viewport: top={top:?} bottom={bottom:?}"
+        );
+        // Following pins the thumb to the end of the track.
+        key(&mut app, KeyCode::Char('G'));
+        let buf = draw_to_buffer(&mut app, W, H);
+        let back = thumb_rows(&buf);
+        // The track is exactly the column the scrollbar painted.
+        let track_end = (0..H)
+            .filter(|&y| {
+                let c = buf.cell((track_x, y)).unwrap();
+                c.symbol() == "█" || c.style().bg == Some(GROKNIGHT.scrollbar_bg)
+            })
+            .max()
+            .unwrap();
+        assert_eq!(*back.last().unwrap(), track_end, "{back:?}");
+    }
+
+    #[test]
+    fn test_only_the_opening_line_makes_room_for_the_clock() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&assistant_text_row(&"palabra ".repeat(60)));
+        let buf = draw_to_buffer(&mut app, W, H);
+        let rows: Vec<String> = (0..H)
+            .map(|y| row_text(&buf, y))
+            .filter(|r| r.contains("palabra"))
+            .collect();
+        assert!(rows.len() >= 3, "{rows:?}");
+        let words = |r: &String| r.matches("palabra").count();
+        // The clock rides the first line; the ones under it reclaim those
+        // columns instead of leaving a ragged gutter.
+        assert!(rows[0].contains("AM") || rows[0].contains("PM"), "{rows:?}");
+        assert!(
+            words(&rows[1]) > words(&rows[0]),
+            "body line no wider than the clock line: {rows:?}"
+        );
+        // 8 chars a word: a full body line fills the content column.
+        assert!(
+            words(&rows[1]) * 8 >= W as usize - ROW_CHROME - 8,
+            "body line still short of the content width: {rows:?}"
+        );
+    }
 
     #[test]
     fn test_markdown_table_relayouts_on_resize() {
