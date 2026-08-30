@@ -1011,6 +1011,16 @@ impl TranscriptParser {
     }
 
     /// True between a user message / tool_use and the next assistant text.
+    /// Epoch ms of the running turn's opening message, for a live timer.
+    pub fn turn_started_ms(&self) -> Option<i64> {
+        self.turn_start_ms
+    }
+
+    /// Output tokens counted so far.
+    pub fn tokens(&self) -> i64 {
+        self.tokens
+    }
+
     pub fn busy(&self) -> bool {
         self.busy
     }

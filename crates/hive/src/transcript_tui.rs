@@ -1894,6 +1894,72 @@ fn display_model(id: &str) -> String {
     }
 }
 
+/// grok's braille turn spinner (`⠋⠙⠹⠸⠼⠴⠦⠧`, xai-grok-pager-render
+/// glyphs.rs::braille_spinner_frames), stepped at its ~7.5fps cadence off
+/// wall-clock rather than a frame counter, since this viewer only redraws
+/// on its poll interval.
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+const SPINNER_MS: i64 = 133;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// What the mirrored session is doing right now, named the way grok names it
+/// (views/turn_status.rs): the innermost unfinished block if there is one,
+/// otherwise the assistant is writing.
+fn activity_label(app: &App) -> String {
+    match app.parser.pending_entries().last().map(|e| e.block.clone()) {
+        Some(DisplayBlock::Thinking(_)) => "Thinking…".to_string(),
+        Some(DisplayBlock::Run(r)) if !r.description.is_empty() => format!("{}…", r.description),
+        Some(DisplayBlock::Run(_)) => "Running…".to_string(),
+        Some(DisplayBlock::Tool(tool)) => format!("{}…", tool.name),
+        Some(DisplayBlock::ToolGroup(g)) => format!("{}…", g.label()),
+        _ => "Responding…".to_string(),
+    }
+}
+
+/// grok's turn-status row (views/turn_status.rs): `⠧ Thinking… 3s` on the
+/// left, the turn timer and token count on the right, and nothing at all
+/// while idle. No `[stop]` — this viewer is read-only, there is nothing here
+/// to cancel.
+fn running_line(app: &App, inner_w: usize) -> Option<Line<'static>> {
+    if !app.parser.busy() {
+        return None;
+    }
+    let t = app.theme;
+    let elapsed_ms = app
+        .parser
+        .turn_started_ms()
+        .map(|start| (now_ms() - start).max(0))
+        .unwrap_or(0);
+    let frame = SPINNER[((elapsed_ms / SPINNER_MS) as usize) % SPINNER.len()];
+    let secs = elapsed_ms as f64 / 1000.0;
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(format!("{frame} "), fg(t.accent_model)),
+        Span::styled(activity_label(app), fg(t.text_secondary)),
+        Span::styled(
+            format!(" {}", crate::transcript_view::format_worked_duration(secs)),
+            fg(t.gray),
+        ),
+    ];
+    let tokens = app.parser.tokens();
+    if tokens > 0 {
+        let right = format!("⇣{}", fmt_tokens(tokens));
+        let used = cells_width(&line_cells(&Line::from(spans.clone())));
+        let right_w = UnicodeWidthStr::width(right.as_str());
+        if inner_w > used + right_w + 1 {
+            spans.push(Span::raw(" ".repeat(inner_w - used - right_w - 1)));
+            spans.push(Span::styled(right, fg(t.gray)));
+        }
+    }
+    Some(clip_spans(spans, inner_w))
+}
+
 fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'static> {
     // grok hint row: left-aligned "Key:label" pairs with │ separators
     // (Shift+Tab:mode │ Ctrl+x:shortcuts); model/effort live on the
@@ -2367,6 +2433,18 @@ fn draw(frame: &mut Frame, app: &mut App) {
         status_rect,
     );
     if let Some(bx) = box_rect {
+        // The breather above the box doubles as grok's turn-status row.
+        if let Some(line) = running_line(app, inner.width as usize) {
+            frame.render_widget(
+                Paragraph::new(line).style(base),
+                Rect {
+                    x: inner.x,
+                    y: bx.y - 1,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
         // Palette input renders inside the box; the hint row stays below it.
         draw_composer(frame, app, bx);
         frame.render_widget(
@@ -3405,6 +3483,40 @@ mod tests {
         assert_eq!(display_model("claude-opus-5"), "Opus 5");
         assert_eq!(display_model("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(display_model("grok-4"), "grok-4");
+    }
+
+    #[test]
+    fn test_turn_status_row_appears_only_while_busy() {
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&assistant_text_row("done"));
+        let buf = draw_to_buffer(&mut app, W, H);
+        // Idle: the breather above the composer stays empty.
+        assert_eq!(row_text(&buf, H - 7).trim(), "", "{:?}", row_text(&buf, H - 7));
+
+        // A user message opens a turn; the row shows the spinner and label.
+        app.push_raw(&user_row("go"));
+        let buf = draw_to_buffer(&mut app, W, H);
+        let row = row_text(&buf, H - 7);
+        assert!(
+            SPINNER.iter().any(|f| row.contains(f)),
+            "no spinner: {row:?}"
+        );
+        assert!(row.contains("Responding…"), "{row:?}");
+
+        // A pending tool names itself.
+        app.push_raw(&tool_use_row(
+            "Bash",
+            "t1",
+            json!({"command": "cargo build", "description": "Build"}),
+        ));
+        let row = row_text(&draw_to_buffer(&mut app, W, H), H - 7);
+        assert!(row.contains("Build…"), "{row:?}");
+
+        // Assistant text closes it again.
+        app.push_raw(&tool_result_row("t1", "ok", false));
+        app.push_raw(&assistant_text_row("built"));
+        let row = row_text(&draw_to_buffer(&mut app, W, H), H - 7);
+        assert_eq!(row.trim(), "", "{row:?}");
     }
 
     #[test]
