@@ -441,6 +441,18 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     }
     let mut out = Vec::new();
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
+    // A pasted picture belongs to the message it came with: it stands inside
+    // the band, above the words, not as a block of its own.
+    for img in &u.images {
+        out.push(band_line(
+            t,
+            vec![
+                Span::styled("▣ ".to_string(), fg(t.accent_thinking).bg(t.bg_light)),
+                Span::styled(img.label(), fg(t.gray).bg(t.bg_light)),
+            ],
+            inner_w,
+        ));
+    }
     for (i, text) in vis.iter().enumerate() {
         let prefix = if i == 0 { USER_ICON } else { "  " };
         let mut spans = vec![
@@ -937,18 +949,6 @@ fn render_entry(
         DisplayBlock::Run(r) => render_run(t, r, inner_w, expanded, selected),
         DisplayBlock::Tool(tool) => render_tool(t, tool, inner_w, expanded, selected),
         DisplayBlock::Thinking(tb) => render_thinking(t, tb, inner_w, expanded, selected),
-        DisplayBlock::Image(img) => Rendered {
-            lines: vec![clip_spans(
-                vec![
-                    Span::raw("   "),
-                    Span::styled("▣ ".to_string(), fg(t.accent_thinking)),
-                    Span::styled("Image".to_string(), bold(t.gray)),
-                    Span::styled(format!("  {}", img.label()), fg(t.gray)),
-                ],
-                inner_w,
-            )],
-            foldable: false,
-        },
         DisplayBlock::WorkedFor(w) => Rendered {
             lines: vec![clip_spans(
                 vec![Span::raw("   "), Span::styled(w.label(), fg(t.gray))],
@@ -964,17 +964,20 @@ fn fold_kind(block: &DisplayBlock) -> FoldKind {
         DisplayBlock::Thinking(_) => FoldKind::Thinking,
         DisplayBlock::ToolGroup(_) | DisplayBlock::Run(_) | DisplayBlock::Tool(_) => FoldKind::Tool,
         DisplayBlock::User(_) => FoldKind::User,
-        DisplayBlock::Assistant(_) | DisplayBlock::Image(_) | DisplayBlock::WorkedFor(_) => {
-            FoldKind::Fixed
-        }
+        DisplayBlock::Assistant(_) | DisplayBlock::WorkedFor(_) => FoldKind::Fixed,
     }
 }
 
 /// The text `/find` matches against, per block.
 fn search_text(block: &DisplayBlock) -> String {
     match block {
-        DisplayBlock::Image(img) => format!("Image {}", img.label()),
-        DisplayBlock::User(u) => u.text.clone(),
+        DisplayBlock::User(u) => {
+            let mut s = u.text.clone();
+            for img in &u.images {
+                s.push_str(&format!(" Image {}", img.label()));
+            }
+            s
+        }
         DisplayBlock::Assistant(a) => a.markdown.clone(),
         DisplayBlock::Thinking(tb) => format!("{} {}", tb.label(), tb.text),
         DisplayBlock::Run(r) => {
@@ -1141,7 +1144,6 @@ fn viewer_title(block: &DisplayBlock) -> String {
         DisplayBlock::Run(_) => "Run".to_string(),
         DisplayBlock::Tool(tool) => tool.name.clone(),
         DisplayBlock::ToolGroup(g) => g.label(),
-        DisplayBlock::Image(_) => "Image".to_string(),
         DisplayBlock::WorkedFor(_) => "Turn".to_string(),
     }
 }
@@ -1209,12 +1211,6 @@ fn viewer_lines(block: &DisplayBlock, t: &ViewTheme, width: usize) -> Vec<Line<'
     };
     let mut out = Vec::new();
     match block {
-        DisplayBlock::Image(img) => {
-            out.push(Line::from(Span::styled(
-                format!("Image  {}", img.label()),
-                fg(t.text_primary),
-            )));
-        }
         DisplayBlock::User(u) => {
             for src in u.text.lines() {
                 for piece in wrap_plain(src, width) {

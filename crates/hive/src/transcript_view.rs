@@ -457,8 +457,6 @@ pub enum DisplayBlock {
     Thinking(ThinkingBlock),
     /// Assistant markdown, right-aligned timestamp on the first line.
     Assistant(AssistantBlock),
-    /// `▣ Image  image/webp · 423 KB` — a picture in the transcript.
-    Image(ImageBlock),
     /// Muted `Worked for 4m6s` turn-end marker.
     WorkedFor(WorkedForBlock),
 }
@@ -488,6 +486,9 @@ pub struct UserBlock {
     /// source, wrapper and all — `hive` carries the parsed view.
     pub text: String,
     pub hive: Option<HiveMessage>,
+    /// Pictures pasted with this message; they belong to the band, not to a
+    /// block of their own.
+    pub images: Vec<ImageBlock>,
     pub timestamp: Option<Timestamp>,
 }
 
@@ -656,7 +657,6 @@ pub struct ImageBlock {
     pub media_type: String,
     /// Decoded size, from the base64 length.
     pub bytes: usize,
-    pub timestamp: Option<Timestamp>,
 }
 
 impl ImageBlock {
@@ -683,7 +683,7 @@ fn summarize_images(body: &Value) -> Value {
             .iter()
             .map(|item| {
                 if item.get("type").and_then(Value::as_str) == Some("image") {
-                    Value::String(format!("[image {}]", image_block(item, &None).label()))
+                    Value::String(format!("[image {}]", image_block(item).label()))
                 } else {
                     item.clone()
                 }
@@ -699,7 +699,7 @@ fn base64_bytes(data: &str) -> usize {
 }
 
 /// Describe an `image` content block without carrying its payload.
-fn image_block(block: &Value, ts: &Option<Timestamp>) -> ImageBlock {
+fn image_block(block: &Value) -> ImageBlock {
     let src = block.get("source").unwrap_or(&Value::Null).clone();
     ImageBlock {
         media_type: src
@@ -712,7 +712,6 @@ fn image_block(block: &Value, ts: &Option<Timestamp>) -> ImageBlock {
             .and_then(Value::as_str)
             .map(base64_bytes)
             .unwrap_or(0),
-        timestamp: ts.clone(),
     }
 }
 
@@ -1192,6 +1191,7 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: prompt.to_string(),
                 hive,
+                images: Vec::new(),
                 timestamp: ts,
             }),
         });
@@ -1233,6 +1233,7 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: content.to_string(),
                 hive: Some(hive),
+                images: Vec::new(),
                 timestamp: ts,
             }),
         });
@@ -1315,6 +1316,18 @@ impl TranscriptParser {
         } else {
             Vec::new()
         };
+        // Pictures belong to the message they arrived with, so they are
+        // collected up front and handed to its band rather than becoming
+        // blocks of their own.
+        let mut images: Vec<ImageBlock> = if is_user {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+                .map(image_block)
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Anchor for thinking durations: the previous row's instant; a second
         // thinking block in the same row measures from this row instead.
         let mut thinking_anchor_ms = self.prev_row_ms;
@@ -1349,6 +1362,7 @@ impl TranscriptParser {
                                             .map(|sender| self.agent_icon(&sender));
                                         m
                                     }),
+                                    images: std::mem::take(&mut images),
                                     timestamp: ts.clone(),
                                 }),
                             });
@@ -1458,19 +1472,6 @@ impl TranscriptParser {
                     }
                     self.drain_settled(&mut out);
                 }
-                // Only user rows ever carry one (3067/3067 in the local
-                // transcripts); the payload stays on disk.
-                "image" if is_user => {
-                    self.drain_all(&mut out);
-                    // A picture opens the turn exactly as its text would;
-                    // otherwise it lands ahead of the `Worked for` marker
-                    // that closes the previous one.
-                    self.open_user_turn(&ts, &mut out);
-                    out.push(Entry {
-                        id: self.alloc_id(),
-                        block: DisplayBlock::Image(image_block(block, &ts)),
-                    });
-                }
                 "tool_result" => {
                     let id = block
                         .get("tool_use_id")
@@ -1496,6 +1497,21 @@ impl TranscriptParser {
                 _ => {}
             }
         }
+        // A message that is nothing but a picture still gets its band.
+        if !images.is_empty() {
+            self.drain_all(&mut out);
+            self.open_user_turn(&ts, &mut out);
+            out.push(Entry {
+                id: self.alloc_id(),
+                block: DisplayBlock::User(UserBlock {
+                    text: String::new(),
+                    hive: None,
+                    images,
+                    timestamp: ts.clone(),
+                }),
+            });
+            self.busy = true;
+        }
         if let Some(t) = ts.as_ref() {
             self.prev_row_ms = Some(t.epoch_ms);
         }
@@ -1520,6 +1536,10 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
         return None;
     }
     Some(format!("\n  {DIM}⎿  {first}{RESET}"))
+}
+
+fn _user_image_line(img: &ImageBlock) -> String {
+    format!("{DIM}▣ {}{RESET}", img.label())
 }
 
 fn _user_line(text: &str) -> String {
@@ -1591,8 +1611,18 @@ impl StreamPrinter {
 
     fn render_block(block: &DisplayBlock) -> Option<String> {
         match block {
-            DisplayBlock::Image(img) => Some(format!("\n{DIM}▣ Image  {}{RESET}", img.label())),
-            DisplayBlock::User(u) => Some(format!("\n{}", _user_line(&u.text))),
+            DisplayBlock::User(u) => {
+                let mut out = String::new();
+                for img in &u.images {
+                    out.push('\n');
+                    out.push_str(&_user_image_line(img));
+                }
+                if !u.text.trim().is_empty() {
+                    out.push('\n');
+                    out.push_str(&_user_line(&u.text));
+                }
+                (!out.is_empty()).then_some(out)
+            }
             DisplayBlock::Assistant(a) => Some(format!(
                 "\n{}",
                 _indent_block(&_md(&_clip(&a.markdown, 4000)), "⏺ ", "  ")
@@ -1820,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn test_image_blocks_render_without_carrying_the_payload() {
+    fn test_images_ride_their_message_without_carrying_the_payload() {
         let mut p = TranscriptParser::new();
         let data = "A".repeat(4000); // ~3 KB decoded
         let out = p.push(&_row(
@@ -1829,12 +1859,39 @@ mod tests {
             None,
         ));
         match &out[0] {
-            DisplayBlock::Image(img) => {
+            DisplayBlock::User(u) => {
+                assert!(u.text.is_empty(), "picture-only message");
+                let img = &u.images[0];
                 assert_eq!(img.media_type, "image/webp");
                 assert_eq!(img.bytes, 3000);
                 assert_eq!(img.label(), "image/webp · 3 KB");
             }
-            other => panic!("expected Image, got {other:?}"),
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_a_picture_and_its_words_are_one_band() {
+        let mut p = TranscriptParser::new();
+        let out = p.push(&_row(
+            "user",
+            json!([
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(400)}},
+                {"type": "text", "text": "这张图里排版是不是有问题？"}
+            ]),
+            None,
+        ));
+        let users: Vec<_> = out
+            .iter()
+            .filter(|b| matches!(b, DisplayBlock::User(_)))
+            .collect();
+        assert_eq!(users.len(), 1, "one band, not a block each: {out:?}");
+        match users[0] {
+            DisplayBlock::User(u) => {
+                assert_eq!(u.images.len(), 1);
+                assert!(u.text.contains("排版"));
+            }
+            _ => unreachable!(),
         }
     }
 
