@@ -154,15 +154,26 @@ pub(crate) mod grok_md {
         out.trim_end().to_string()
     }
 
-    /// Render markdown to ratatui lines (the TUI mirror) in `theme`.
-    pub fn render_ratatui(text: &str, theme: &ViewTheme) -> Vec<ratatui::text::Line<'static>> {
-        let (lines, _) = xai_grok_markdown::render_markdown_ratatui(
+    /// Render markdown to ratatui lines (the TUI mirror) in `theme`, with
+    /// tables constrained to `width` display columns. The width MUST be the
+    /// caller's current content width: the simple no-width API lays tables
+    /// out at their natural width and the caller's outer soft-wrap then
+    /// hard-breaks the box-drawing rows (the resize-collapse bug).
+    pub fn render_ratatui(
+        text: &str,
+        theme: &ViewTheme,
+        width: usize,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        let mut buffers = xai_grok_markdown::MarkdownBuffers::new();
+        let (out, _) = xai_grok_markdown::render_markdown_ratatui_with_buffers_width(
             text,
             style(theme),
             true,
+            &mut buffers,
             Some(syntect(theme.kind)),
+            Some(width.max(4)),
         );
-        lines
+        out.lines
     }
 }
 

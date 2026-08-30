@@ -5,15 +5,17 @@
 //! Chrome: full-screen bg fill, 2-col outer inset, top status line
 //! (branch / worktree / `~`-abbreviated cwd, right-aligned token counter),
 //! scrollback (full-width user bands, `◈`/`◆` tool lines, grok-markdown
-//! assistant text with right-aligned timestamps, muted `Worked for …`), and a
-//! single muted bottom hint row.
+//! assistant text with right-aligned timestamps, muted `Worked for …`),
+//! grok's rounded read-only composer box (`╭─╮ │ ❯ │ ╰─╯`), and the muted
+//! hint row below it.
 //!
 //! Interaction layer (grok's pager surface, read-only): Up/Down block
 //! selection with grok's bracket-frame highlight, Shift+Left/Right turn
 //! jumps, Left/Right (and double-click) per-block collapse/expand, Ctrl+E
 //! all-thinking toggle, Ctrl+O density cycle (normal/thinking/verbose),
 //! Enter/Ctrl+F full-screen block viewer, and a `/` command palette
-//! (/theme /view /find /quit). Keystrokes still go nowhere by construction —
+//! (/theme /view /find /quit) whose input types into the composer box, the
+//! dropdown anchored above it. Keystrokes still go nowhere by construction —
 //! the mirror only ever reads the transcript.
 
 mod interact;
@@ -424,7 +426,7 @@ fn render_assistant(t: &ViewTheme, a: &AssistantBlock, inner_w: usize) -> Render
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let aw = cw.saturating_sub(TS_RESERVE).max(10);
     let mut wrapped: Vec<Line<'static>> = Vec::new();
-    for line in grok_md::render_ratatui(&a.markdown, t) {
+    for line in grok_md::render_ratatui(&a.markdown, t, aw) {
         wrapped.extend(wrap_line(&line, aw));
     }
     while wrapped.last().is_some_and(|l| line_cells(l).is_empty()) {
@@ -499,7 +501,7 @@ fn render_thinking(
     if expanded {
         let bw = inner_w.saturating_sub(ROW_CHROME);
         let mut body: Vec<Line<'static>> = Vec::new();
-        for line in grok_md::render_ratatui(&tb.text, t) {
+        for line in grok_md::render_ratatui(&tb.text, t, bw) {
             body.extend(wrap_line(&line, bw));
         }
         while body.last().is_some_and(|l| line_cells(l).is_empty()) {
@@ -518,19 +520,13 @@ fn render_thinking(
     }
 }
 
-/// One tool-output panel row: accent gutter + text on the `bg_dark` strip.
-fn panel_line(
-    t: &ViewTheme,
-    accent: Color,
-    text: String,
-    text_fg: Color,
-    inner_w: usize,
-) -> Line<'static> {
+/// One tool-output band row (grok execute.rs `.with_panel_background`): the
+/// text on the full content-width `bg_dark` band.
+fn band_row(t: &ViewTheme, text: String, text_fg: Color, inner_w: usize) -> Line<'static> {
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let used = UnicodeWidthStr::width(text.as_str());
     let mut spans = vec![
-        Span::styled("│", fg(accent)),
-        Span::raw("  "),
+        Span::raw("   "),
         Span::styled(text, fg(text_fg).bg(t.bg_dark)),
     ];
     if cw > used {
@@ -542,37 +538,61 @@ fn panel_line(
     Line::from(spans)
 }
 
-/// Expanded tool output: full result text on a `bg_dark` strip with the
-/// success/error accent gutter; errors render in the error accent.
-fn panel_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, inner_w: usize) {
-    let accent = if res.is_error {
-        t.accent_error
-    } else {
-        t.accent_success
-    };
-    let text_fg = if res.is_error {
-        t.accent_error
-    } else {
-        t.text_primary
-    };
+/// Expanded tool output (grok execute.rs render_with_truncation): one blank
+/// spacer, then — success — full-width `bg_dark` band rows in primary text
+/// preserving line breaks, or — error — accent_error text with no band
+/// (grok's error branch). The storage-cap marker renders muted.
+fn outcome_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, inner_w: usize) {
     let pw = inner_w.saturating_sub(ROW_CHROME);
     let text = res.text.trim_end();
     if text.is_empty() && !res.truncated {
         return;
     }
+    out.push(Line::default());
+    if res.is_error {
+        for src in text.lines() {
+            for piece in wrap_plain(src, pw) {
+                out.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(piece, fg(t.accent_error)),
+                ]));
+            }
+        }
+        if res.truncated {
+            out.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled("… output truncated".to_string(), fg(t.gray)),
+            ]));
+        }
+        return;
+    }
     for src in text.lines() {
         for piece in wrap_plain(src, pw) {
-            out.push(panel_line(t, accent, piece, text_fg, inner_w));
+            out.push(band_row(t, piece, t.text_primary, inner_w));
         }
     }
     if res.truncated {
-        out.push(panel_line(
-            t,
-            accent,
-            "… output truncated".to_string(),
-            t.gray,
-            inner_w,
-        ));
+        out.push(band_row(t, "… output truncated".to_string(), t.gray, inner_w));
+    }
+}
+
+/// Expanded Run command lines (grok execute.rs push_command_soft_wrap): `$ `
+/// in gray_dim, the command body in the theme's bash function-call blue,
+/// physical newlines preserved, soft-wrap and continuation rows hanging
+/// 2 cols so they align under the command after the `$ `.
+fn command_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, command: &str, inner_w: usize) {
+    let bw = inner_w.saturating_sub(ROW_CHROME + 2).max(1);
+    let mut first = true;
+    for src in command.lines() {
+        for piece in wrap_plain(src, bw) {
+            let lead = if first { "$ " } else { "  " };
+            first = false;
+            out.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(lead.to_string(), fg(t.gray_dim)),
+                Span::styled(piece, fg(t.command_fg)),
+            ]));
+        }
     }
 }
 
@@ -620,7 +640,7 @@ fn render_group(
             ];
             lines.push(clip_spans(spans, inner_w));
             if let Some(res) = &member.result {
-                panel_rows(t, &mut lines, res, inner_w);
+                outcome_rows(t, &mut lines, res, inner_w);
             }
         }
     }
@@ -658,8 +678,11 @@ fn render_run(
     }
     let mut lines = vec![header];
     if expanded {
+        if !r.command.is_empty() {
+            command_rows(t, &mut lines, &r.command, inner_w);
+        }
         if let Some(res) = &r.result {
-            panel_rows(t, &mut lines, res, inner_w);
+            outcome_rows(t, &mut lines, res, inner_w);
         }
     }
     Rendered {
@@ -699,7 +722,7 @@ fn render_tool(
     let mut lines = vec![header];
     if expanded {
         if let Some(res) = &tool.result {
-            panel_rows(t, &mut lines, res, inner_w);
+            outcome_rows(t, &mut lines, res, inner_w);
         }
     }
     Rendered {
@@ -915,6 +938,20 @@ fn viewer_title(block: &DisplayBlock) -> String {
     }
 }
 
+/// One viewer output row on the full-width `bg_dark` band (same style as the
+/// scrollback's expanded outcome band).
+fn viewer_band_row(t: &ViewTheme, text: String, text_fg: Color, width: usize) -> Line<'static> {
+    let used = UnicodeWidthStr::width(text.as_str());
+    let mut spans = vec![Span::styled(text, fg(text_fg).bg(t.bg_dark))];
+    if width > used {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(t.bg_dark),
+        ));
+    }
+    Line::from(spans)
+}
+
 fn viewer_outcome_lines(
     out: &mut Vec<Line<'static>>,
     t: &ViewTheme,
@@ -924,21 +961,32 @@ fn viewer_outcome_lines(
     let Some(res) = result else {
         return;
     };
-    let text_fg = if res.is_error {
-        t.accent_error
-    } else {
-        t.text_primary
-    };
+    if res.is_error {
+        for src in res.text.trim_end().lines() {
+            for piece in wrap_plain(src, width) {
+                out.push(Line::from(Span::styled(piece, fg(t.accent_error))));
+            }
+        }
+        if res.truncated {
+            out.push(Line::from(Span::styled(
+                "… output truncated".to_string(),
+                fg(t.gray),
+            )));
+        }
+        return;
+    }
     for src in res.text.trim_end().lines() {
         for piece in wrap_plain(src, width) {
-            out.push(Line::from(Span::styled(piece, fg(text_fg))));
+            out.push(viewer_band_row(t, piece, t.text_primary, width));
         }
     }
     if res.truncated {
-        out.push(Line::from(Span::styled(
+        out.push(viewer_band_row(
+            t,
             "… output truncated".to_string(),
-            fg(t.gray),
-        )));
+            t.gray,
+            width,
+        ));
     }
 }
 
@@ -946,7 +994,7 @@ fn viewer_lines(block: &DisplayBlock, t: &ViewTheme, width: usize) -> Vec<Line<'
     let width = width.max(4);
     let md = |text: &str| -> Vec<Line<'static>> {
         let mut out = Vec::new();
-        for line in grok_md::render_ratatui(text, t) {
+        for line in grok_md::render_ratatui(text, t, width) {
             out.extend(wrap_line(&line, width));
         }
         out
@@ -972,7 +1020,7 @@ fn viewer_lines(block: &DisplayBlock, t: &ViewTheme, width: usize) -> Vec<Line<'
                     let lead = if j == 0 { prefix } else { "  " };
                     out.push(Line::from(vec![
                         Span::styled(lead.to_string(), fg(t.gray_dim)),
-                        Span::styled(piece, fg(t.text_primary)),
+                        Span::styled(piece, fg(t.command_fg)),
                     ]));
                 }
             }
@@ -1679,28 +1727,78 @@ fn draw_selection_frame(
     }
 }
 
-/// grok slash palette: input row `❯ /…` at the hint line, dropdown panel
-/// anchored directly above it — bg_light rows, bg_visual+bold selected row
-/// with a `❯ ` prefix, gray descriptions in an aligned column, fuzzy-match
-/// chars in fuzzy_accent, `─` rules top and bottom.
-fn draw_palette(frame: &mut Frame, app: &App, inner: Rect, hint_rect: Rect) {
+/// Composer box height: top border, one input row, bottom border.
+const COMPOSER_H: u16 = 3;
+
+/// grok's composer box (prompt_widget/mod.rs draw): rounded `╭─╮` top and
+/// `╰─╯` bottom dividers with `│` sides on prompt_border (active shade while
+/// the palette is typing into it), content inset 2 cols, `❯ ` prefix —
+/// accent_user when focused, gray_dim idle (grok PromptStyle::accent_color).
+/// Permanently read-only: the slash palette is the only thing that ever
+/// types here; idle it shows just the prompt arrow, hints stay on the row
+/// below the box (grok keeps its shortcuts bar under the composer).
+fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
+    let t = app.theme;
+    if rect.width < 4 || rect.height < COMPOSER_H {
+        return;
+    }
+    let focused = app.palette.is_some();
+    let border = fg(if focused {
+        t.prompt_border_active
+    } else {
+        t.prompt_border
+    });
+    let w = rect.width as usize;
+    let top = Line::from(Span::styled(
+        format!("╭{}╮", "─".repeat(w - 2)),
+        border,
+    ));
+    let bottom = Line::from(Span::styled(
+        format!("╰{}╯", "─".repeat(w - 2)),
+        border,
+    ));
+    let prefix_color = if focused { t.accent_user } else { t.gray_dim };
+    let mut spans = vec![
+        Span::styled("│".to_string(), border),
+        Span::raw(" "),
+        Span::styled("❯ ".to_string(), fg(prefix_color)),
+    ];
+    if let Some(pal) = &app.palette {
+        spans.push(Span::styled(pal.input.clone(), fg(t.text_primary)));
+    }
+    let mut mid = clip_spans(spans, w - 1);
+    let used = cells_width(&line_cells(&mid));
+    if w > used + 1 {
+        mid.spans.push(Span::raw(" ".repeat(w - 1 - used)));
+    }
+    mid.spans.push(Span::styled("│".to_string(), border));
+    let base = Style::default().bg(t.bg_base).fg(t.text_primary);
+    frame.render_widget(Paragraph::new(vec![top, mid, bottom]).style(base), rect);
+}
+
+/// grok slash palette: the input types into the composer box; the dropdown
+/// panel anchors directly above `anchor_y` (the box top; in the tiny-pane
+/// fallback the hint row, where `input_rect` renders the input instead) —
+/// bg_light rows, bg_visual+bold selected row with a `❯ ` prefix, gray
+/// descriptions in an aligned column, fuzzy-match chars in fuzzy_accent,
+/// `─` rules top and bottom.
+fn draw_palette(frame: &mut Frame, app: &App, inner: Rect, anchor_y: u16, input_rect: Option<Rect>) {
     let t = app.theme;
     let Some(pal) = &app.palette else { return };
     let base = Style::default().bg(t.bg_base).fg(t.text_primary);
     let w = inner.width as usize;
-    let input_spans = vec![
-        Span::styled("❯ ".to_string(), bold(t.accent_user)),
-        Span::styled(pal.input.clone(), fg(t.text_primary)),
-    ];
-    frame.render_widget(
-        Paragraph::new(clip_spans(input_spans, w)).style(base),
-        hint_rect,
-    );
+    if let Some(rect) = input_rect {
+        let input_spans = vec![
+            Span::styled("❯ ".to_string(), bold(t.accent_user)),
+            Span::styled(pal.input.clone(), fg(t.text_primary)),
+        ];
+        frame.render_widget(Paragraph::new(clip_spans(input_spans, w)).style(base), rect);
+    }
     let hits = pal.filtered();
     if hits.is_empty() {
         return;
     }
-    let avail = hint_rect.y.saturating_sub(inner.y) as usize;
+    let avail = anchor_y.saturating_sub(inner.y) as usize;
     let rows = hits
         .len()
         .min(MAX_PALETTE_ROWS)
@@ -1711,7 +1809,7 @@ fn draw_palette(frame: &mut Frame, app: &App, inner: Rect, hint_rect: Rect) {
     let panel_h = rows + 2;
     let panel = Rect {
         x: inner.x,
-        y: hint_rect.y - panel_h as u16,
+        y: anchor_y - panel_h as u16,
         width: inner.width,
         height: panel_h as u16,
     };
@@ -1872,7 +1970,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
         width: inner.width,
         height: 1,
     };
-    let scroll_h = inner.height.saturating_sub(2 + gap);
+    // The composer box sits between the scrollback and the hint row; a pane
+    // too short for status + gap + one scroll row + box + hint drops it.
+    let have_box = inner.height >= 2 + gap + COMPOSER_H + 1;
+    let box_rect = have_box.then(|| Rect {
+        x: inner.x,
+        y: hint_rect.y - COMPOSER_H,
+        width: inner.width,
+        height: COMPOSER_H,
+    });
+    let reserved = 2 + gap + if have_box { COMPOSER_H } else { 0 };
+    let scroll_h = inner.height.saturating_sub(reserved);
     let scroll_rect = Rect {
         x: inner.x,
         y: inner.y + 1 + gap,
@@ -1896,8 +2004,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(top_line(app, inner.width as usize)).style(base),
         status_rect,
     );
-    if app.palette.is_some() {
-        draw_palette(frame, app, inner, hint_rect);
+    if let Some(bx) = box_rect {
+        // Palette input renders inside the box; the hint row stays below it.
+        draw_composer(frame, app, bx);
+        frame.render_widget(
+            Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
+            hint_rect,
+        );
+        if app.palette.is_some() {
+            draw_palette(frame, app, inner, bx.y, None);
+        }
+    } else if app.palette.is_some() {
+        // Tiny-pane fallback: input at the hint row, panel above it.
+        draw_palette(frame, app, inner, hint_rect.y, Some(hint_rect));
     } else {
         frame.render_widget(
             Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
@@ -2545,20 +2664,21 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("deep reasoning body text"), "{text}");
         assert!(text.contains("Compiling hive"), "{text}");
-        // output rows sit on the bg_dark strip with the success accent gutter
+        // verbose also reveals the run's `$ command` line
+        assert!(text.contains("$ cargo build"), "{text}");
+        // output rows sit on the full-width bg_dark band in primary text
         let out_row = (0..H)
             .find(|&y| row_text(&buf, y).contains("Compiling hive"))
             .unwrap();
-        assert_eq!(buf.cell((2, out_row)).unwrap().symbol(), "│");
-        assert_eq!(
-            buf.cell((2, out_row)).unwrap().style().fg,
-            Some(GROKNIGHT.accent_success)
-        );
         let body_x = (0..W)
             .find(|&x| buf.cell((x, out_row)).unwrap().symbol() == "C")
             .unwrap();
+        let body = buf.cell((body_x, out_row)).unwrap();
+        assert_eq!(body.style().bg, Some(GROKNIGHT.bg_dark));
+        assert_eq!(body.style().fg, Some(GROKNIGHT.text_primary));
+        // the band fill runs to the content right edge
         assert_eq!(
-            buf.cell((body_x, out_row)).unwrap().style().bg,
+            buf.cell((W - 5, out_row)).unwrap().style().bg,
             Some(GROKNIGHT.bg_dark)
         );
         ctrl(&mut app, 'o'); // back to normal
@@ -2761,5 +2881,194 @@ mod tests {
         key(&mut app, KeyCode::Right);
         let text = buffer_text(&draw_to_buffer(&mut app, W, H));
         assert!(text.contains("user line number 8"), "{text}");
+    }
+
+    // ---- expanded run: $ command + output band (grok execute.rs) --------
+
+    #[test]
+    fn test_expanded_run_shows_dollar_command_and_banded_output() {
+        std::env::set_var("TZ", "UTC");
+        for t in [&GROKNIGHT, &GROKDAY] {
+            let mut app = App::new(t);
+            app.push_raw(&user_row("go"));
+            app.push_raw(&tool_use_row(
+                "Bash",
+                "t1",
+                json!({"command": "cargo nextest run\n--all-features", "description": "Test"}),
+            ));
+            app.push_raw(&tool_result_row("t1", "line one\nline two", false));
+            app.push_raw(&assistant_text_row("green"));
+            let _ = draw_to_buffer(&mut app, W, H);
+            key(&mut app, KeyCode::Up); // assistant
+            key(&mut app, KeyCode::Up); // run block
+            key(&mut app, KeyCode::Right); // expand
+            let buf = draw_to_buffer(&mut app, W, H);
+            let text = buffer_text(&buf);
+            assert!(text.contains("◆ Run Test"), "{text}");
+            // `$ ` in gray_dim, the command body in the function-call blue.
+            let dollar_row = (0..H)
+                .find(|&y| row_text(&buf, y).contains("$ cargo nextest run"))
+                .unwrap();
+            let dollar = buf.cell((5, dollar_row)).unwrap();
+            assert_eq!(dollar.symbol(), "$");
+            assert_eq!(dollar.style().fg, Some(t.gray_dim));
+            let cmd = buf.cell((7, dollar_row)).unwrap();
+            assert_eq!(cmd.symbol(), "c");
+            assert_eq!(cmd.style().fg, Some(t.command_fg));
+            // physical newline preserved, continuation hangs under the `$ `.
+            let cont_row = dollar_row + 1;
+            let cont = buf.cell((7, cont_row)).unwrap();
+            assert_eq!(cont.symbol(), "-", "{:?}", row_text(&buf, cont_row));
+            assert_eq!(cont.style().fg, Some(t.command_fg));
+            // exactly one blank spacer row, then the banded output.
+            let out_row = (0..H)
+                .find(|&y| row_text(&buf, y).contains("line one"))
+                .unwrap();
+            assert_eq!(out_row, dollar_row + 3, "command, spacer, then output");
+            for x in [5u16, 40, W - 5] {
+                assert_eq!(
+                    buf.cell((x, out_row)).unwrap().style().bg,
+                    Some(t.bg_dark),
+                    "band bg at ({x},{out_row})"
+                );
+            }
+            assert_eq!(
+                buf.cell((5, out_row)).unwrap().style().fg,
+                Some(t.text_primary)
+            );
+            assert!(
+                row_text(&buf, out_row + 1).contains("line two"),
+                "output line breaks preserved"
+            );
+            assert_eq!(
+                buf.cell((1, out_row)).unwrap().style().bg,
+                Some(t.bg_base),
+                "outer pad stays on the base bg"
+            );
+        }
+    }
+
+    #[test]
+    fn test_expanded_run_error_output_is_unbanded_error_text() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("go"));
+        app.push_raw(&tool_use_row(
+            "Bash",
+            "t1",
+            json!({"command": "false", "description": "Fail"}),
+        ));
+        app.push_raw(&tool_result_row("t1", "exit status 1", true));
+        app.push_raw(&assistant_text_row("failed"));
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Right);
+        let buf = draw_to_buffer(&mut app, W, H);
+        let err_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("exit status 1"))
+            .unwrap();
+        let cell = buf.cell((5, err_row)).unwrap();
+        assert_eq!(cell.style().fg, Some(GROKNIGHT.accent_error));
+        assert_eq!(cell.style().bg, Some(GROKNIGHT.bg_base), "no band on errors");
+    }
+
+    // ---- composer box ---------------------------------------------------
+
+    #[test]
+    fn test_composer_box_rows_present_and_idle() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("hi"));
+        app.push_raw(&assistant_text_row("ok"));
+        let buf = draw_to_buffer(&mut app, W, H);
+        // rows: top border H-5, input H-4, bottom border H-3, hint H-2.
+        assert_eq!(buf.cell((2, H - 5)).unwrap().symbol(), "╭");
+        assert_eq!(buf.cell((W - 3, H - 5)).unwrap().symbol(), "╮");
+        assert_eq!(buf.cell((2, H - 4)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((W - 3, H - 4)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((2, H - 3)).unwrap().symbol(), "╰");
+        assert_eq!(buf.cell((W - 3, H - 3)).unwrap().symbol(), "╯");
+        // idle: dim border, gray_dim prompt arrow, nothing typed.
+        assert_eq!(
+            buf.cell((2, H - 5)).unwrap().style().fg,
+            Some(GROKNIGHT.prompt_border)
+        );
+        let arrow = buf.cell((4, H - 4)).unwrap();
+        assert_eq!(arrow.symbol(), "❯");
+        assert_eq!(arrow.style().fg, Some(GROKNIGHT.gray_dim));
+        // idle interior: just the prompt arrow, no text, no placeholder.
+        let interior: String = (6..W - 3)
+            .map(|x| buf.cell((x, H - 4)).unwrap().symbol().to_string())
+            .collect();
+        assert_eq!(interior.trim(), "", "idle box holds only ❯: {interior:?}");
+        // hint row stays below the box.
+        assert!(row_text(&buf, H - 2).contains("q quit"));
+    }
+
+    #[test]
+    fn test_slash_palette_types_into_composer_box() {
+        let mut app = thinking_app();
+        let _ = draw_to_buffer(&mut app, W, H);
+        key(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "theme");
+        let buf = draw_to_buffer(&mut app, W, H);
+        let mid = row_text(&buf, H - 4);
+        assert!(mid.contains("❯ /theme"), "input inside the box: {mid:?}");
+        // focused chrome: active border + accent_user prompt arrow.
+        assert_eq!(
+            buf.cell((2, H - 5)).unwrap().style().fg,
+            Some(GROKNIGHT.prompt_border_active)
+        );
+        assert_eq!(
+            buf.cell((4, H - 4)).unwrap().style().fg,
+            Some(GROKNIGHT.accent_user)
+        );
+        // dropdown panel anchors fully above the box's top border.
+        let dropdown_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains("/theme"))
+            .unwrap();
+        assert!(dropdown_row < H - 5, "dropdown above the box: {dropdown_row}");
+        // hint row still rendered under the box while the palette is open.
+        assert!(row_text(&buf, H - 2).contains("q quit"));
+        key(&mut app, KeyCode::Esc);
+        let buf = draw_to_buffer(&mut app, W, H);
+        assert!(!row_text(&buf, H - 4).contains("/theme"), "box back to idle");
+    }
+
+    // ---- markdown tables re-layout on resize ----------------------------
+
+    #[test]
+    fn test_markdown_table_relayouts_on_resize() {
+        std::env::set_var("TZ", "UTC");
+        let mut app = App::new(&GROKNIGHT);
+        app.push_raw(&user_row("table"));
+        // Natural width well past 120-col wrap budget: the no-width markdown
+        // API laid this out at full width and the outer soft-wrap then broke
+        // the box-drawing rows after a resize.
+        app.push_raw(&assistant_text_row(
+            "| alpha column heading one | beta column heading two | gamma column heading three |\n\
+             |---|---|---|\n\
+             | first cell with a fairly long body | second cell also carrying text | third cell rounding out the row |",
+        ));
+        let check = |buf: &Buffer, label: &str| {
+            let mut saw_frame = false;
+            for y in 0..buf.area.height {
+                let row = row_text(buf, y);
+                for (open, close) in [('┌', '┐'), ('└', '┘'), ('├', '┤')] {
+                    if row.contains(open) {
+                        saw_frame = true;
+                        assert!(
+                            row.contains(close),
+                            "{label}: table frame row {y} hard-broken: {row:?}"
+                        );
+                    }
+                }
+            }
+            assert!(saw_frame, "{label}: table frame rendered");
+        };
+        check(&draw_to_buffer(&mut app, 200, H), "200 cols");
+        check(&draw_to_buffer(&mut app, 120, H), "120 cols");
+        check(&draw_to_buffer(&mut app, 200, H), "back to 200 cols");
     }
 }

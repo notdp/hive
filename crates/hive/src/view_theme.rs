@@ -64,6 +64,15 @@ pub struct ViewTheme {
     pub accent_success: Color,
     /// Palette fuzzy-match character highlight.
     pub fuzzy_accent: Color,
+    /// Expanded-run `$ command` body — grok's bash function-call scope color
+    /// (grok-night/grok-day tmTheme "Function Definition": the blue the
+    /// command word renders in under syntect).
+    pub command_fg: Color,
+    /// Composer box border `╭─╮│╰─╯` while idle (grok prompt_border).
+    pub prompt_border: Color,
+    /// Composer box border while the slash palette types into it
+    /// (grok prompt_border_active).
+    pub prompt_border_active: Color,
     // markdown (grok_md)
     /// H1..H6 heading colors; H1-H5 render bold, H6 plain (both themes).
     pub md_heading: [Color; 6],
@@ -104,6 +113,9 @@ pub static GROKNIGHT: ViewTheme = ViewTheme {
     accent_thinking: rgb(187, 154, 247),
     accent_success: rgb(158, 206, 106),
     fuzzy_accent: rgb(122, 162, 247),
+    command_fg: rgb(122, 162, 247),
+    prompt_border: rgb(50, 50, 55),
+    prompt_border_active: rgb(80, 80, 88),
     md_heading: [
         rgb(26, 188, 156),  // teal
         rgb(122, 162, 247), // blue
@@ -144,6 +156,9 @@ pub static GROKDAY: ViewTheme = ViewTheme {
     accent_thinking: rgb(125, 75, 198),
     accent_success: rgb(55, 142, 35),
     fuzzy_accent: rgb(47, 100, 210),
+    command_fg: rgb(47, 100, 210),
+    prompt_border: rgb(200, 200, 205),
+    prompt_border_active: rgb(165, 165, 175),
     md_heading: [
         rgb(10, 142, 112),  // teal
         rgb(47, 100, 210),  // blue
@@ -561,6 +576,9 @@ mod tests {
         assert_eq!(t.accent_thinking, Color::Rgb(125, 75, 198)); // #7d4bc6
         assert_eq!(t.accent_success, Color::Rgb(55, 142, 35)); // #378e23
         assert_eq!(t.fuzzy_accent, Color::Rgb(47, 100, 210)); // #2f64d2
+        assert_eq!(t.command_fg, Color::Rgb(47, 100, 210)); // #2F64D2 grok-day
+        assert_eq!(t.prompt_border, Color::Rgb(200, 200, 205)); // #c8c8cd
+        assert_eq!(t.prompt_border_active, Color::Rgb(165, 165, 175)); // #a5a5af
     }
 
     #[test]
@@ -590,6 +608,9 @@ mod tests {
         assert_eq!(t.accent_thinking, Color::Rgb(187, 154, 247)); // #bb9af7
         assert_eq!(t.accent_success, Color::Rgb(158, 206, 106)); // #9ece6a
         assert_eq!(t.fuzzy_accent, Color::Rgb(122, 162, 247)); // #7aa2f7
+        assert_eq!(t.command_fg, Color::Rgb(122, 162, 247)); // #7aa2f7 grok-night
+        assert_eq!(t.prompt_border, Color::Rgb(50, 50, 55)); // #323237
+        assert_eq!(t.prompt_border_active, Color::Rgb(80, 80, 88)); // #505058
     }
 
     #[test]
