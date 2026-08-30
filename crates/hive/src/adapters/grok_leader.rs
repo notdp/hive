@@ -1122,6 +1122,34 @@ pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     )
 }
 
+/// The pid recorded for this key's leader, alive or not.
+///
+/// Two files can name it: our own pidfile, written once a spawn binds, and
+/// grok's `<sock>.lock`, which the leader writes with its pid and holds an
+/// flock on for as long as it runs. Only the second one exists after a spawn
+/// that never bound, which is exactly the case that needs reclaiming.
+fn _recorded_pid(sock: &Path) -> Option<libc::pid_t> {
+    [sock.with_extension("pid"), sock.with_extension("lock")]
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|text| text.trim().parse::<libc::pid_t>().ok())
+        .find(|pid| *pid > 0)
+}
+
+/// The recorded pid, only while that process is still running.
+fn _holder_pid(sock: &Path) -> Option<libc::pid_t> {
+    for path in [sock.with_extension("pid"), sock.with_extension("lock")] {
+        let pid: Option<libc::pid_t> = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        match pid {
+            Some(pid) if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 => return Some(pid),
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// Start (or reuse) the leader daemon on *key*'s socket.
 ///
 /// `start_new_session` detaches it from the short-lived CLI; the hived
@@ -1139,11 +1167,23 @@ fn _spawn_daemon_key(
             return false;
         }
     }
-    if sock.exists() {
-        if probe_socket(&sock) {
-            return true;
-        }
-        let _ = fs::remove_file(&sock); // stale socket from a dead daemon
+    if sock.exists() && probe_socket(&sock) {
+        return true;
+    }
+    // Nothing answers, but a leader may still be alive holding grok's flock
+    // for this key (`<sock>.lock`, written with its pid). While it holds it,
+    // a replacement cannot bind, and deleting the socket only makes the pair
+    // permanent: no socket to probe, no pidfile of ours to reclaim by, and
+    // every later spawn times out into plain grok. Reclaim the key first.
+    if let Some(pid) = _holder_pid(&sock) {
+        _terminate_process_group(pid);
+    }
+    for path in [
+        sock.clone(),
+        sock.with_extension("lock"),
+        sock.with_extension("pid"),
+    ] {
+        let _ = fs::remove_file(path);
     }
     let argv: Vec<String> = vec![
         grok_bin.to_string(),
@@ -1203,12 +1243,22 @@ fn _terminate_process_group(pid: libc::pid_t) {
             return;
         }
     }
+    // Our own leaders are start_new_session'd, so the group is the daemon and
+    // whatever it forked. A holder we adopted from grok's lock file may not be:
+    // signalling its group could then take out the pane's shell with it, so a
+    // pid that is not its own group leader is signalled alone.
     let pgid = unsafe { libc::getpgid(pid) };
     if pgid < 0 {
         return;
     }
+    let group = pgid == pid;
     for sig in [libc::SIGTERM, libc::SIGKILL] {
-        if unsafe { libc::killpg(pgid, sig) } != 0 {
+        let sent = if group {
+            unsafe { libc::killpg(pgid, sig) }
+        } else {
+            unsafe { libc::kill(pid, sig) }
+        };
+        if sent != 0 {
             return;
         }
         for _ in 0..10 {
@@ -1225,10 +1275,7 @@ fn _terminate_process_group(pid: libc::pid_t) {
 pub fn kill_daemon_key(key: &str) {
     let sock = socket_path_for_key(key);
     let pidfile = sock.with_extension("pid");
-    let pid: Option<libc::pid_t> = fs::read_to_string(&pidfile)
-        .ok()
-        .and_then(|text| text.trim().parse().ok());
-    if let Some(pid) = pid {
+    if let Some(pid) = _recorded_pid(&sock) {
         _terminate_process_group(pid);
     }
     for path in [
@@ -2715,6 +2762,64 @@ mod tests {
         fs::write(&sock, "").unwrap();
         fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
         set_daemon_spawn(|_argv, _env| panic!("must not respawn a live leader"));
+        assert!(spawn_daemon("%19"));
+    }
+
+    #[test]
+    fn test_spawn_daemon_reclaims_a_key_a_live_leader_still_locks() {
+        // The state a pane rebuild leaves behind: grok's flock file names a
+        // live leader, our pidfile was never written because that leader
+        // never bound, and no socket exists. Without reclaiming the holder
+        // every later spawn times out and the member falls back to plain
+        // grok — reachable outward, deaf inward.
+        let _bed = setup();
+        let sock = pane_socket_path("%19");
+        fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        fs::write(sock.with_extension("lock"), std::process::id().to_string()).unwrap();
+        let killed: Arc<Mutex<Vec<libc::pid_t>>> = Arc::new(Mutex::new(Vec::new()));
+        let killed_record = killed.clone();
+        set_terminate_pg(move |pid| killed_record.lock().unwrap().push(pid));
+        let lock_at_spawn: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let lock_probe = lock_at_spawn.clone();
+        let lock_path = sock.with_extension("lock");
+        set_daemon_spawn(move |argv, _env| {
+            *lock_probe.lock().unwrap() = Some(lock_path.exists());
+            touch_leader_socket(argv);
+            Ok(Box::new(FakeDaemonChild {
+                pid: 4242,
+                returncode: None,
+                panic_on_terminate: true,
+            }))
+        });
+        assert!(spawn_daemon("%19"));
+        assert_eq!(
+            *killed.lock().unwrap(),
+            vec![std::process::id() as libc::pid_t],
+            "the lock holder must be terminated before respawning"
+        );
+        assert_eq!(
+            *lock_at_spawn.lock().unwrap(),
+            Some(false),
+            "the stale lock must be gone before the new leader tries to bind"
+        );
+    }
+
+    #[test]
+    fn test_spawn_daemon_leaves_a_dead_holder_alone() {
+        let _bed = setup();
+        let sock = pane_socket_path("%19");
+        fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        // pid 0 is never a live process: nothing to reclaim.
+        fs::write(sock.with_extension("lock"), "0").unwrap();
+        set_terminate_pg(|pid| panic!("terminated {pid} for a dead holder"));
+        set_daemon_spawn(|argv, _env| {
+            touch_leader_socket(argv);
+            Ok(Box::new(FakeDaemonChild {
+                pid: 4243,
+                returncode: None,
+                panic_on_terminate: true,
+            }))
+        });
         assert!(spawn_daemon("%19"));
     }
 

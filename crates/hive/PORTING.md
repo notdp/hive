@@ -1,60 +1,95 @@
-# hive py→rs porting conventions
+# Python-shaped conventions in the Rust crate
 
-Read this before porting any module. The Python tree at `src/hive/` is the
-behavioral spec; the e2e/acceptance pytest suites are the oracle. The goal is a
-behavior-identical Rust binary, not a redesign.
+The Python tree is gone and nothing is being ported any more. `crates/hive/src/`
+is the whole implementation. What survives from the port is shape: function
+names, JSON key order, value-comparison rules, output bytes. Those shapes
+survive because the on-disk documents, the `<HIVE …>` envelope and the pytest
+suites were never rewritten alongside the code. This file records which of them
+still bind on new Rust, and why.
 
-## Layout & naming
+## Underscore-prefixed names
 
-- `src/hive/<name>.py` → `crates/hive/src/<name>.rs`; `src/hive/adapters/<name>.py`
-  → `crates/hive/src/adapters/<name>.rs`. One module per Python file, same name.
-- Keep Python function names in snake_case as-is. Keep module-level constants
-  under the same names.
-- A shared type is defined in the module where the Python class/dict is born
-  (e.g. team registry documents live in `registry`, adapter profile types in
-  `adapters::base`) and referenced as `crate::<module>::<Type>` everywhere else.
-- Do not invent new behavior, flags, fields, or output text. Byte-identical
-  stdout/stderr wherever tests or peers parse it (JSON payloads, `<HIVE ...>`
-  envelopes, doctor output, error strings that tests match).
+AGENTS.md carries the rule. It omits two things.
 
-## Language conventions
+Prose names these symbols. `docs/daemon-control-socket.md` names
+`_daemon_control_sock` and `_config_dir`; AGENTS.md names the first as well.
+Renaming either compiles clean and silently breaks the cross-reference; nothing
+checks it.
 
-- Edition 2021. `anyhow::Result` for fallible functions; return errors, don't
-  panic, except for programmer invariants (`unreachable!`).
-- JSON via `serde_json`. Field names must match the Python payloads exactly
-  (`#[serde(rename_all = "camelCase")]` or explicit renames — check the actual
-  JSON the Python code writes, not the Python attribute names). Unknown fields
-  are preserved where Python round-trips dicts: model those documents as
-  `serde_json::Value` or keep a `#[serde(flatten)] extra: Map<String, Value>`.
-- Subprocess: `std::process::Command`. Unix sockets: `std::os::unix::net`.
-  Threads: `std::thread` (no async runtime).
-- Env/paths: `std::env`, `PathBuf`. `Path.home()` → `std::env::home_dir()` is
-  deprecated; use the `HOME` env var like the Python code effectively does.
-- Timeouts on sockets mirror the Python constants exactly.
+The convention deliberately covers code with no Python ancestor.
+`transcript_view.rs` has none and still carries the prefix. New code follows
+the crate convention rather than the Rust default.
 
-## Tests
+## JSON documents
 
-- Port the module's unit tests from `tests/unit/` (and cli-level logic tests
-  where they test pure functions) into `#[cfg(test)] mod tests` in the same
-  file. Keep the test names.
-- Tests must not touch the real tmux server, real `~/.hive`, or the network.
-  Use `tempfile::TempDir` and env-var redirection the same way conftest.py does
-  (`HIVE_HOME`, `XDG_CACHE_HOME`).
-- The suite runs under `cargo nextest run` (one process per test), so env-var
-  mutation inside a test is safe and needs no restore. Plain `cargo test`
-  shares one process and WILL cross-contaminate — don't chase those failures.
+Nothing in the crate derives `Deserialize`. Every read goes through
+`serde_json::Value`, so keys hive does not know about survive a
+read-modify-write. These documents are written by more than one version of hive
+and read by things that are not hive.
 
-## Cross-module references during parallel porting
+`Serialize` is derived only on wire types hive owns end to end. Anything that
+round-trips a document someone else wrote stays a `Value`.
 
-Other modules may not exist yet when you port yours. Write cross-module calls
-as `crate::<module>::<fn>` matching the Python name and expected signature. If
-you must assume a signature, take it from the Python definition. Never stub
-another module inside your file. Your module must compile standalone in the
-sense of: correct syntax, self-contained types, and only well-derived external
-references (an integration pass wires the whole crate and fixes seams).
+Key order is part of the format. `serde_json` carries the `preserve_order`
+feature (`crates/hive/Cargo.toml`) so insertion order survives a `Value` round
+trip, and `notify_debug` assembles its JSONL line by hand to match Python's
+`json.dumps(..., ensure_ascii=False, separators=(",", ":"))`. Neither is visible
+from a call site: dropping the feature or replacing the hand-built line reorders
+files that existing readers diff.
 
-## Out of scope for module ports
+Python value semantics decide what loads. `registry::truthy` is Python
+truthiness and gates whether a registry entry is valid at all; `registry::py_str`
+is how `createdAt` values compare when a team name is recycled. Swapping either
+for a Rust-native comparison changes which entries already on disk are accepted.
 
-- `core_assets/` and `plugins/` stay as data files; Rust embeds or locates them
-  (integration pass decides; don't copy them).
-- Version bumps, README, packaging.
+## Output that something parses
+
+stdout is a contract wherever a peer or a test reads it. The e2e suite matches
+`Team '<name>' created.` literally and `json.loads` the `hive team` payload. The
+`<HIVE …>` header built in `runtime_state` is re-parsed by the transcript viewer
+and by member skills. None of those readers compile with the crate, so nothing
+fails at build time when the bytes change.
+
+`cli/help_text.rs` is byte-captured click output, and its own header still says
+to regenerate it by running `src/hive/cli.py`. That file is gone; the
+captured text is now the source and hand-editing it is the only way to change
+it. The automated coupling is two checks:
+`test_command_tree_declares_every_python_command` asserts every known command
+exists as a clap subcommand, and `test_render_root_help_sections_present` reads
+the captured root help for its section headings and for hidden commands leaking.
+Nothing catches flags and options that drift from what the help text claims.
+
+## `HOME`, not `home_dir()`
+
+Every hive root resolves through `std::env::var("HOME")`.
+`std::env::home_dir()` is no longer deprecated (it compiles warning-free on
+rustc 1.93) but it falls back to the passwd database when `HOME` is unset: with
+the variable removed it still returns the real home directory, walking straight
+out of a redirected test root.
+
+## `ponytail:`
+
+A `ponytail:` comment marks a deliberate narrowing: a place where the Rust
+covers less than the Python did, or less than the general case. Each one names
+what it does not cover and what would justify widening it.
+
+Keep the prefix on a deliberate shortcut, and grep for it before treating a gap
+as an oversight. The marker is defined nowhere else in the repo, and it appears
+outside Rust: the embedded pylib carries one.
+
+## Assets stay in their own language
+
+`crates/hive/assets/` ships as data and is embedded at compile time, never
+transliterated into Rust. The cvim toolkit, the flow pylib and the notify
+plugin manifest are executed or read by something that is not this binary, so
+rewriting them in Rust would mean reimplementing that interpreter's job; the
+two grok `.tmTheme` palettes are parsed in process by the linked-in markdown
+engine and stay byte-verbatim because that is the form it accepts. Embedding
+keeps the single-binary install with nothing to lay out at install time.
+
+## Comments that lie
+
+The crate is the spec. Comments that say otherwise are port-era residue, not
+instructions: several module docs still cite `src/hive/…` paths, `flow.rs`
+describes modules that "are still being ported", and `team.rs`'s test helper
+calls itself a mirror of a `tests/conftest.py` fixture that no longer exists.

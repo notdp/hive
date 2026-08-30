@@ -1,82 +1,105 @@
-# Repository Guidelines
+# Repository guidelines
 
 `CLAUDE.md` is a symlink to this file. Update `AGENTS.md` only.
 
-## Project Structure & Module Organization
+Hive is a Rust CLI (a cargo workspace with one crate, `crates/hive/`). This
+file records the decisions and rules the code cannot state itself. Module
+behavior is documented in the modules themselves.
 
-Hive is a Rust CLI (a cargo workspace with one crate). Main code lives in
-`crates/hive/src/`:
-- `cli/` defines the clap command surface (`mod.rs` tree + helpers,
-  `core_cmds.rs` registry-truth verbs, `rest.rs` everything else,
-  `help_text.rs` byte-locked help output).
-- `agent.rs`, `team.rs`, and `tmux.rs` implement runtime behavior.
-- `bus.rs` and `context.rs` handle workspace state and per-pane context.
-- `flow.rs` is the orchestration engine behind `hive flow run`; flow scripts
-  stay Python (`from hive.flow import agent, parallel`) against the embedded
-  client in `crates/hive/assets/pylib/`, bridged over the hidden `flow-op`
-  command.
-- `hived.rs` is the per-team daemon (`hive --hived …` re-enters the binary).
-- `adapters/` hold the per-CLI transports (claude/codex/grok).
-- `crates/hive/assets/` are embedded data files (cvim toolkit, pylib,
-  plugins) materialized to `$HIVE_HOME/core_assets/` at first use.
-- `crates/hive/PORTING.md` records the Python→Rust port conventions.
+## Truth layers
 
-Tests:
-- Rust unit tests live in `#[cfg(test)]` blocks next to the code; real-tmux
-  integration tests in `crates/hive/tests/` (own detached sessions only).
-- `tests/e2e/` — Python black-box tests driving the built binary in tmux.
-- `tests/acceptance/` — post-install live acceptance (real agents).
+- `registry.rs` is the team truth layer: one JSON file per team under
+  `$HIVE_HOME/state/teams/`. tmux is display, resolved on top of it, and a
+  pane or a window is not the authority on who is on a team. The write lanes
+  are split, with the CLI owning roster membership and the hived only
+  backfilling fields of names already there, so an observation racing a kill
+  cannot resurrect the member that was killed.
+- The `hive view` transcript viewer is a read-only mirror by construction: in
+  production code the subsystem's only call out is `crate::settings` on the
+  `view.theme` key, with no registry, bus, or hived access. Keep it that way;
+  the viewer must stay usable against a transcript file alone.
+- The flow engine is Rust; its scripting surface is Python. Flow scripts run
+  against the embedded client in `crates/hive/assets/pylib/`, reaching the
+  engine over a hidden `flow-op` subcommand that re-enters the binary.
+  Changing the flow API is always a two-sided change: the Rust side and the
+  embedded pylib. A change to one side alone still compiles, because the
+  compiler sees only the Rust side and the pylib test shims the other.
+- Embedded assets (the cvim toolkit, the flow pylib) materialize under
+  `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
+  differs from the embedded bytes is rewritten. Editing a materialized asset
+  is not a way to change behavior; change the embedded copy.
+- `plugins/hive/` is the Claude/Codex marketplace plugin. Its two manifests
+  (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`) carry the crate
+  version; nothing enforces the match, so bumps are manual.
+- The viewer's markdown engine is the pinned git dependency
+  `xai-grok-markdown` (`crates/hive/Cargo.toml`), and its chrome mirrors
+  grok's own pager: doc comments cite grok files by bare name (`grok
+  mouse.rs`, `grok execute.rs`, `grok context_bar.rs`), whose full source sits
+  in the cargo checkout at
+  `~/.cargo/git/checkouts/grok-build-*/<rev>/crates/codegen/xai-grok-pager*/src/`.
+  Read that source before changing a mirrored component.
 
-## Design Docs
+## Design docs
 
-- Runtime design lives in `docs/runtime-model.md`.
-- Keep runtime-field semantics there in sync with code:
-  - `busy`
-  - `inputState`
-  - `turnPhase`
-- `CLAUDE.md` is only a symlink entrypoint to this file. Do not edit it separately.
+Design truth lives in these docs, one question each:
 
-## Build, Test, and Development Commands
+- `docs/runtime-model.md` — what hive knows about an engine: team identity
+  (registry vs tmux display), the runtime fields and their per-CLI native
+  sources, send addressing, active-turn fork routing. Runtime-field semantics
+  belong there; keep them in sync with the code that computes them.
+- `docs/transcript-view.md` — what a reader sees on screen: the JSONL →
+  `DisplayBlock` parse model, the TUI's chrome and interaction layer, theme
+  and appearance resolution. The boundary against `runtime-model.md` follows
+  the code: the viewer holds none of the runtime state `runtime-model.md`
+  defines and feeds none back.
+- `docs/daemon-control-socket.md` — the Claude bg supervisor daemon's control
+  protocol. Every claim there is pinned to one Claude Code build and must be
+  re-verified on upgrade. Hive consumes only `op: "reply"`; the rest is
+  recorded, not used.
+
+## Build, test, and development commands
 
 - Live Hive agents use the stable installed `hive` binary as their
   communication transport. Do not point that live install at an in-progress
-  checkout while a team is using it.
-- `cargo build` — debug binary at `target/debug/hive`.
+  checkout while a team is using it. Install from a committed main checkout
+  (`cargo install --path crates/hive`); the live install never points at a
+  dirty worktree.
 - `cargo nextest run` — the whole Rust suite. nextest (one process per test)
-  is required: tests mutate env vars freely and plain `cargo test` shares one
+  is required: tests mutate env vars freely, and plain `cargo test` shares one
   process and cross-contaminates.
 - `python -m pytest tests/e2e -q` — black-box tmux flows against
-  `target/debug/hive` (or `HIVE_E2E_BIN=<path>` to point elsewhere).
+  `target/debug/hive` (`cargo build` first, or point `HIVE_E2E_BIN` elsewhere).
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok python -m pytest tests/acceptance -q`
-  — post-install live acceptance: spawns one real member per CLI through the
-  installed `hive` and asserts the oracles unit suites cannot see (reply
-  identity, no acks, pane color via `capture-pane -e`, no picker residue,
-  nonce causality) plus a headless-claude semantic coroner. Run it after
-  every live install; it is skipped everywhere else.
-- Install: `cargo install --path crates/hive` (from a committed main
-  checkout); the live install never points at a dirty worktree.
+  — post-install live acceptance: one real agent per CLI, spawned through the
+  installed `hive`. It asserts what unit suites structurally cannot see (reply
+  identity, absence of acks, pane color as tmux actually renders it, picker
+  residue, nonce causality) plus a headless-claude semantic coroner. Run it
+  after every live install; it is skipped everywhere else.
 - Plugin/skill materialization and hived behavior that must exercise new
   source code need an isolated dev lane: disposable `HIVE_HOME`,
-  `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart
-  the current live team's hived onto checkout code; the live hived stays on
-  the stable install until an intentional upgrade.
+  `CLAUDE_HOME`, `CODEX_HOME`, and a temporary team/window. Do not restart the
+  current live team's hived onto checkout code; the live hived stays on the
+  stable install until an intentional upgrade.
 
-## Coding Style & Naming Conventions
+## Coding style & naming conventions
 
 Rust 2021, rustfmt defaults. Match the existing style: small focused
 functions, minimal comments, snake_case function names carried over from the
-Python spec (see `crates/hive/PORTING.md`). Test names stay explicit, e.g.
-`test_wait_status_times_out_without_match`. Do not leave dead code: if a
-function becomes a no-op or unused, delete it along with all call sites
-instead of leaving an empty body.
+retired Python implementation, leading underscore included
+(`_daemon_control_sock`), where it marks a Python-private ancestor and says
+nothing about Rust visibility. Do not strip those prefixes.
+`crates/hive/PORTING.md` records the port-era naming and JSON-compat rules.
+Test names stay explicit, e.g. `test_wait_status_times_out_without_match`. Do
+not leave dead code: if a function becomes a no-op or unused, delete it along
+with all call sites instead of leaving an empty body.
 
-## Testing Guidelines
+## Testing guidelines
 
-Every CLI command should have test coverage at some layer; complex flows
-also get e2e coverage. Add unit tests for pure logic before relying on
-higher-level tests. Rust tests must not touch the real tmux server, real
-`~/.hive`, or the network — integration tests in `crates/hive/tests/` that
-need tmux create their own detached sessions and kill them.
+Every CLI command should have test coverage at some layer; complex flows also
+get e2e coverage. Add unit tests for pure logic before relying on higher-level
+tests. Rust tests must not touch the real tmux server, real `~/.hive`, or the
+network — integration tests in `crates/hive/tests/` that need tmux create
+their own detached sessions and kill them.
 
 Do not test hand-written prose by locking exact words. Forbidden: tests that
 read repo-authored docs, specs, prompts, or skill text (`AGENTS.md`,
@@ -93,10 +116,9 @@ literal wording.
 
 When touching `/cvim` popup sendback behavior, keep
 `crates/hive/tests/cvim_command.rs::test_popup_schedules_post_after_popup_exits`
-passing. It guards the regression where `run-shell` was started before popup
-teardown completed, causing the returned edit payload to be swallowed.
+passing.
 
-## Commit & Pull Request Guidelines
+## Commit & pull request guidelines
 
 Follow the existing history style: short conventional messages such as
 `fix: ...`, `refactor: ...`, or `docs: ...`. Keep commits scoped to one
@@ -104,7 +126,7 @@ logical change. Before opening a PR, run `cargo nextest run` and the e2e
 suite, summarize the behavioral change, and call out tmux assumptions or
 manual verification steps.
 
-## Version Bump
+## Version bump
 
 Only bump when the user explicitly says `bump`（或 `commit push bump`）. Normal `commit push` does **not** bump.
 
@@ -122,22 +144,26 @@ When bumping, scan all commits since the last version bump commit and determine 
 5. Edit the version in `crates/hive/Cargo.toml` (plugin manifests are
    version-locked to it), commit as `chore: bump version to X.Y.Z`, then push.
 
-## Security & Runtime Notes
+## Security & runtime notes
 
-Do not hardcode secrets, session IDs, or local machine paths. Hive depends on `tmux`; e2e tests assume tmux is available.
+Do not hardcode secrets, session IDs, or local machine paths.
 The hived is a long-lived workspace process. When validating hived-related runtime changes manually, restart it from the current workspace before trusting `doctor`, delivery, or activity output.
 
-## Debug Log Locations
+## Debug logs
 
-`hive doctor` includes the current workspace `runDir` and `logs` map. Prefer those paths when debugging a specific team:
-- `<workspace>/run/notify.jsonl` — notify UI and idle watcher state-machine events.
-- `<workspace>/run/hived.stderr` — hived stderr and uncaught process-level failures.
-- `<workspace>/run/cvim/` — per-run JSONL logs for `hive cvim` / `hive vim`; `latest` points to the newest run.
+`hive doctor` prints the current workspace `runDir` and its `logs` map; read
+the paths from there rather than hardcoding one. Two facts those paths do not
+carry:
 
-When no workspace can be resolved, logs fall back under `${XDG_CACHE_HOME:-~/.cache}/hive/`:
-- `notify.jsonl`
-- `cvim/`
+- `run/cvim/` is written by the embedded cvim bash toolkit
+  (`assets/cvim/bin/cvim-command`), not by Rust, with `latest` naming the
+  newest run. Grepping the crate's Rust source for the writer finds nothing.
+- Log verbosity defaults to `normal`, which drops the three highest-frequency
+  hived events (`DEV_ONLY_EVENTS` in `devlog.rs`); every other notify event is
+  recorded either way, and the gate is notify-only. An event missing from
+  `notify.jsonl` is not evidence that it never fired. Use
+  `HIVE_LOG_VERBOSITY=dev` only as a temporary debugging escape hatch.
 
-Log verbosity defaults to `normal`, which only filters low-information hived
-heartbeat events; business-path notify and cvim events are still recorded.
-Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging escape hatch.
+When no workspace resolves, both `notify.jsonl` and `cvim/` fall back under
+`${XDG_CACHE_HOME:-~/.cache}/hive/`, which is also where a cvim run from an
+untagged pane lands.
