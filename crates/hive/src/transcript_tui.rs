@@ -373,8 +373,26 @@ fn clip_plain(text: &str, width: usize) -> String {
 
 /// Band row: 3-col margin + spans + fill, everything on `bg_light`.
 fn band_line(t: &ViewTheme, spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
+    band_line_marked(t, None, spans, inner_w)
+}
+
+/// Band row whose 3-column margin can carry a mark — the message icon sits
+/// in that gutter, in the band's corner, so every line of text starts in the
+/// same column instead of hanging off the first one.
+fn band_line_marked(
+    t: &ViewTheme,
+    mark: Option<Span<'static>>,
+    spans: Vec<Span<'static>>,
+    inner_w: usize,
+) -> Line<'static> {
     let band = Style::default().bg(t.bg_light);
-    let mut all = vec![Span::styled("   ", band)];
+    let mut all = match mark {
+        Some(m) => {
+            let w = UnicodeWidthStr::width(m.content.as_ref());
+            vec![m, Span::styled(" ".repeat(3usize.saturating_sub(w)), band)]
+        }
+        None => vec![Span::styled("   ".to_string(), band)],
+    };
     all.extend(spans);
     let line = Line::from(all);
     let used = cells_width(&line_cells(&line));
@@ -441,14 +459,19 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     let mut out = Vec::new();
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
     for (i, text) in vis.iter().enumerate() {
-        let prefix = if i == 0 { USER_ICON } else { "  " };
-        let mut spans = vec![
-            Span::styled(prefix.to_string(), fg(t.accent_user).bg(t.bg_light)),
-            Span::styled(text.clone(), fg(t.text_primary).bg(t.bg_light)),
-        ];
+        let mark = (i == 0).then(|| {
+            Span::styled(
+                USER_ICON.trim_end().to_string(),
+                fg(t.accent_user).bg(t.bg_light),
+            )
+        });
+        let mut spans = vec![Span::styled(
+            text.clone(),
+            fg(t.text_primary).bg(t.bg_light),
+        )];
         if i == 0 {
             if let Some(ts) = u.timestamp.as_ref() {
-                let used = 2 + UnicodeWidthStr::width(text.as_str());
+                let used = UnicodeWidthStr::width(text.as_str());
                 let ts_text = format!("  {}", ts.clock);
                 let ts_w = UnicodeWidthStr::width(ts_text.as_str());
                 if cw > used + ts_w {
@@ -457,7 +480,7 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
                 }
             }
         }
-        out.push(band_line(t, spans, inner_w));
+        out.push(band_line_marked(t, mark, spans, inner_w));
     }
     out.push(band_line(t, Vec::new(), inner_w)); // vpad bottom
     Rendered {

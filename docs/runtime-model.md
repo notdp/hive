@@ -11,10 +11,11 @@ This document covers:
 
 - team identity: registry vs display
 - `busy`
+- `cliAlive`
 - `inputState`
 - `turnPhase`
+- delivery: what each transport accepts, and what the receiver keeps
 - root-message summary/artifact protocol
-- active-turn fork routing
 
 This document does not define:
 
@@ -22,6 +23,13 @@ This document does not define:
 - automatic scheduling
 - automatic fork/spawn decisions
 - automatic garbage collection
+
+Boundary with [transcript-view.md](transcript-view.md): this document owns
+what is true of a **running member** — the state its engine reports and what
+its transport does with a message. That one owns what a **read-only observer**
+can recover from a session's JSONL, which is strictly less. The transcript
+holds only what was written to it, and a delivery folded into a running turn
+writes no turn of its own (see "What the receiver's transcript records").
 
 ## Team Identity: Registry vs Display
 
