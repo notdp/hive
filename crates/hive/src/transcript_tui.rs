@@ -407,7 +407,7 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     }
 }
 
-/// A HIVE envelope. The tag becomes a header — `✉ from → to`, ids and clock
+/// A HIVE envelope. The tag becomes a header — `✉ from`, ids and clock
 /// on the right — the body reads as plain text, and `artifact=` gets its own
 /// line. Whatever wrapper carried it (claude's peer-message injection, the
 /// retired `<channel>` block) never reaches the screen.
@@ -429,10 +429,6 @@ fn render_hive(
             fg(t.accent_user).bg(t.bg_light).add_modifier(Modifier::BOLD),
         ),
     ];
-    if let Some(to) = msg.to.as_deref() {
-        head.push(Span::styled(" → ".to_string(), fg(t.gray_dim).bg(t.bg_light)));
-        head.push(Span::styled(to.to_string(), fg(t.gray).bg(t.bg_light)));
-    }
     let mut tail = String::new();
     if let Some(r) = msg.reply_to.as_deref() {
         tail.push_str(&format!("↩{r} "));
@@ -2524,7 +2520,8 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Worked for 4m6s"), "{text}");
         // the tag becomes a header, never raw source.
-        assert!(text.contains("✉ comb.dodo → comb.rex"), "{text}");
+        assert!(text.contains("✉ comb.dodo"), "{text}");
+        assert!(!text.contains("comb.rex"), "{text}");
         assert!(!text.contains("<HIVE"), "{text}");
         assert!(text.contains("review the spec"), "{text}");
         assert!(text.contains("a1"), "{text}");
@@ -2544,7 +2541,8 @@ mod tests {
         ));
         let buf = draw_to_buffer(&mut app, W, H);
         let text = buffer_text(&buf);
-        assert!(text.contains("✉ sage → orch"), "{text}");
+        assert!(text.contains("✉ sage"), "{text}");
+        assert!(!text.contains("orch"), "{text}");
         assert!(text.contains("done: Exclusive<T> landed"), "{text}");
         assert!(text.contains("↩65cE"), "{text}");
         assert!(text.contains("↳ /tmp/spec.md"), "{text}");

@@ -206,7 +206,6 @@ fn _indent_block(text: &str, first: &str, rest: &str) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HiveMessage {
     pub from: Option<String>,
-    pub to: Option<String>,
     pub msg_id: Option<String>,
     pub reply_to: Option<String>,
     pub artifact: Option<String>,
@@ -272,7 +271,6 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
     }
     let mut msg = HiveMessage {
         from: None,
-        to: None,
         msg_id: None,
         reply_to: None,
         artifact: None,
@@ -289,7 +287,6 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
         }
         let slot = match key {
             "from" => &mut msg.from,
-            "to" => &mut msg.to,
             "msgId" => &mut msg.msg_id,
             "reply-to" => &mut msg.reply_to,
             "artifact" => &mut msg.artifact,
@@ -1543,7 +1540,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bare.from.as_deref(), Some("comb.dodo"));
-        assert_eq!(bare.to.as_deref(), Some("comb.rex"));
         assert_eq!(bare.msg_id.as_deref(), Some("a1"));
         assert_eq!(bare.reply_to.as_deref(), Some("z9"));
         assert_eq!(bare.artifact.as_deref(), Some("/tmp/spec.md"));
