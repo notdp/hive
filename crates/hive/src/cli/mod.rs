@@ -1725,7 +1725,7 @@ pub(crate) fn build_cli() -> Command {
                      Example:\n  hive inject dodo \"plain ping\"",
                 )
                 .arg(Arg::new("agent_name").required(true))
-                .arg(Arg::new("text").required(true)),
+                .arg(Arg::new("text").required(true).allow_hyphen_values(true)),
         )
         .subcommand(
             Command::new("compact")
@@ -1900,8 +1900,14 @@ pub(crate) fn build_cli() -> Command {
                      hive send dodo \"see report\" --artifact - <<'EOF'\n  \
                      # Findings\n  - item\n  EOF",
                 )
+                // click passes hyphen-leading values ("- bullet reply…")
+                // through positional arguments; clap must too.
                 .arg(Arg::new("to_agent").required(true))
-                .arg(Arg::new("body").default_value(""))
+                .arg(
+                    Arg::new("body")
+                        .default_value("")
+                        .allow_hyphen_values(true),
+                )
                 .arg(
                     Arg::new("artifact")
                         .long("artifact")
@@ -2020,7 +2026,7 @@ pub(crate) fn build_cli() -> Command {
                      what happened, why you need them now, what to do on return.\n\n\
                      Examples:\n  hive notify \"press Space to come back and confirm migration\"",
                 )
-                .arg(Arg::new("message").required(true)),
+                .arg(Arg::new("message").required(true).allow_hyphen_values(true)),
         )
         .subcommand(
             Command::new("plugin")
@@ -2574,6 +2580,21 @@ fn dispatch(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_free_text_positionals_accept_hyphen_leading_values() {
+        // A member's reply often starts with a markdown bullet ("- point");
+        // click passed those through, clap needs allow_hyphen_values.
+        for argv in [
+            vec!["hive", "send", "orch", "- bullet reply"],
+            vec!["hive", "inject", "orch", "- bullet text"],
+            vec!["hive", "notify", "- check the pane"],
+        ] {
+            build_cli()
+                .try_get_matches_from(argv.clone())
+                .unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"));
+        }
+    }
 
     fn _pane(agent: &str, team: &str, group: &str, pane_id: &str) -> PaneInfo {
         PaneInfo {
