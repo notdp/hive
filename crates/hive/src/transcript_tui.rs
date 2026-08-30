@@ -572,6 +572,16 @@ fn blend_thinking_line(line: Line<'static>, t: &ViewTheme) -> Line<'static> {
     cells_to_line(&cells)
 }
 
+/// grok colours an execution bullet by its outcome: green once it came back
+/// clean, red when it errored, grey while it is still running.
+fn outcome_color(t: &ViewTheme, result: &Option<crate::transcript_view::ToolOutcome>) -> Color {
+    match result {
+        Some(r) if r.is_error => t.accent_error,
+        Some(_) => t.accent_success,
+        None => t.gray,
+    }
+}
+
 fn render_thinking(
     t: &ViewTheme,
     tb: &ThinkingBlock,
@@ -600,22 +610,12 @@ fn render_thinking(
             fg(t.gray),
         ));
     }
-    // Current claude builds persist only the signature of a thinking block,
-    // never its text, so there is nothing behind the header to open. Say so
-    // once, in place, instead of offering a fold that expands to nothing.
-    let recorded = !tb.text.trim().is_empty();
-    if !recorded {
-        spans.push(Span::styled(
-            " · not recorded".to_string(),
-            fg(t.gray_dim).add_modifier(Modifier::DIM),
-        ));
-    }
     let mut header = clip_spans(spans, inner_w);
     if collapsed_sel {
         header = patch_bg(header, inner_w, t.bg_dark);
     }
     let mut lines = vec![header];
-    if expanded && recorded {
+    if expanded {
         let bw = inner_w.saturating_sub(ROW_CHROME);
         let mut body: Vec<Line<'static>> = Vec::new();
         for line in grok_md::render_ratatui(&tb.text, t, bw) {
@@ -633,7 +633,7 @@ fn render_thinking(
     }
     Rendered {
         lines,
-        foldable: recorded,
+        foldable: true,
     }
 }
 
@@ -727,7 +727,13 @@ fn render_group(
 ) -> Rendered {
     let collapsed_sel = selected && !expanded;
     let failed = g.failed();
-    let bullet_color = if failed > 0 { t.accent_error } else { t.gray };
+    let bullet_color = if failed > 0 {
+        t.accent_error
+    } else if g.members.iter().all(|m| m.result.is_some()) {
+        t.accent_success
+    } else {
+        t.gray
+    };
     let bullet = if collapsed_sel { "› " } else { "◈ " };
     let label_style = if collapsed_sel {
         bold(t.text_primary)
@@ -752,8 +758,7 @@ fn render_group(
     let mut lines = vec![header];
     if expanded {
         for member in &g.members {
-            let err = member.result.as_ref().is_some_and(|r| r.is_error);
-            let bullet = if err { t.accent_error } else { t.gray };
+            let bullet = outcome_color(t, &member.result);
             let spans = vec![
                 Span::raw("   "),
                 Span::styled("◆ ", fg(bullet)),
@@ -781,7 +786,7 @@ fn render_run(
 ) -> Rendered {
     let collapsed_sel = selected && !expanded;
     let err = r.result.as_ref().is_some_and(|res| res.is_error);
-    let bullet_color = if err { t.accent_error } else { t.gray };
+    let bullet_color = outcome_color(t, &r.result);
     let bullet = if collapsed_sel { "› " } else { "◆ " };
     let (label_style, desc_style) = if collapsed_sel {
         (bold(t.text_primary), fg(t.text_primary))
@@ -822,7 +827,7 @@ fn render_tool(
 ) -> Rendered {
     let collapsed_sel = selected && !expanded;
     let err = tool.result.as_ref().is_some_and(|res| res.is_error);
-    let bullet_color = if err { t.accent_error } else { t.gray };
+    let bullet_color = outcome_color(t, &tool.result);
     let bullet = if collapsed_sel { "› " } else { "◆ " };
     let name_style = if collapsed_sel {
         bold(t.text_primary)
@@ -2849,6 +2854,29 @@ mod tests {
     }
 
     #[test]
+    fn test_execution_bullet_carries_the_outcome() {
+        fn bullet_fg(result: Option<bool>) -> Option<Color> {
+            let mut app = App::new(&GROKNIGHT);
+            app.push_raw(&tool_use_row(
+                "Bash",
+                "t1",
+                json!({"command": "cargo build", "description": "Build"}),
+            ));
+            if let Some(is_error) = result {
+                app.push_raw(&tool_result_row("t1", "out", is_error));
+            }
+            app.push_raw(&assistant_text_row("done"));
+            let buf = draw_to_buffer(&mut app, W, H);
+            let row = (0..H).find(|&y| row_text(&buf, y).contains("Build"))?;
+            let x = (0..W).find(|&x| buf.cell((x, row)).unwrap().symbol() == "◆")?;
+            buf.cell((x, row)).unwrap().style().fg
+        }
+        assert_eq!(bullet_fg(Some(false)), Some(GROKNIGHT.accent_success));
+        assert_eq!(bullet_fg(Some(true)), Some(GROKNIGHT.accent_error));
+        assert_eq!(bullet_fg(None), Some(GROKNIGHT.gray), "still running");
+    }
+
+    #[test]
     fn test_selected_collapsed_thinking_header_undims_with_patch() {
         let mut app = thinking_app();
         let _ = draw_to_buffer(&mut app, W, H);
@@ -2886,7 +2914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_o_density_cycle_expands_thinking_then_tools() {
+    fn test_ctrl_o_density_cycle_expands_thinking_and_tools() {
         let mut app = thinking_app();
         app.push_raw(&tool_use_row(
             "Bash",
@@ -2897,9 +2925,8 @@ mod tests {
         app.push_raw(&assistant_text_row("built"));
         let _ = draw_to_buffer(&mut app, W, H);
         assert_eq!(app.fold.density, Density::Normal);
-        ctrl(&mut app, 'o'); // thinking
         let text = buffer_text(&draw_to_buffer(&mut app, W, H));
-        assert!(text.contains("deep reasoning body text"), "{text}");
+        assert!(!text.contains("deep reasoning body text"), "{text}");
         assert!(!text.contains("Compiling hive"), "{text}");
         ctrl(&mut app, 'o'); // verbose
         let buf = draw_to_buffer(&mut app, W, H);

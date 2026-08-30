@@ -14,7 +14,7 @@ use crate::view_theme::{parse_theme_pref, ThemePref};
 /// Which fold family an entry belongs to (drives its density default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldKind {
-    /// Thinking blocks: expanded at `thinking` and `verbose` density.
+    /// Thinking blocks: expanded at `verbose` density.
     Thinking,
     /// Run / Tool / ToolGroup blocks: expanded at `verbose` density only.
     Tool,
@@ -25,21 +25,22 @@ pub enum FoldKind {
 }
 
 /// Transcript view density (hive's own design, session-local): `normal` is
-/// today's rendering, `thinking` expands all thinking blocks, `verbose`
-/// additionally expands all tool execution blocks.
+/// today's rendering, `verbose` expands thinking and tool execution blocks.
+///
+/// There was a `thinking` level between them; it went away when it turned
+/// out claude no longer records thinking text, which left it expanding a
+/// row of empty blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Density {
     Normal,
-    Thinking,
     Verbose,
 }
 
 impl Density {
-    /// Ctrl+O cycle order: normal → thinking → verbose → normal.
+    /// Ctrl+O cycle order: normal → verbose → normal.
     pub fn next(self) -> Self {
         match self {
-            Density::Normal => Density::Thinking,
-            Density::Thinking => Density::Verbose,
+            Density::Normal => Density::Verbose,
             Density::Verbose => Density::Normal,
         }
     }
@@ -48,7 +49,6 @@ impl Density {
     pub fn label(self) -> &'static str {
         match self {
             Density::Normal => "Normal",
-            Density::Thinking => "Thinking",
             Density::Verbose => "Verbose",
         }
     }
@@ -56,7 +56,6 @@ impl Density {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "normal" => Some(Density::Normal),
-            "thinking" => Some(Density::Thinking),
             "verbose" => Some(Density::Verbose),
             _ => None,
         }
@@ -81,7 +80,7 @@ impl FoldState {
     /// The density default for a fold family (true = expanded).
     pub fn default_expanded(density: Density, kind: FoldKind) -> bool {
         match kind {
-            FoldKind::Thinking => density != Density::Normal,
+            FoldKind::Thinking => density == Density::Verbose,
             FoldKind::Tool => density == Density::Verbose,
             FoldKind::User | FoldKind::Fixed => false,
         }
@@ -308,7 +307,7 @@ pub const PALETTE_COMMANDS: [PaletteCmd; 4] = [
     },
     PaletteCmd {
         name: "/view",
-        desc: "transcript density: normal · thinking · verbose",
+        desc: "transcript density: normal · verbose",
     },
     PaletteCmd {
         name: "/find",
@@ -589,10 +588,9 @@ mod tests {
 
     #[test]
     fn test_density_cycle_order() {
-        assert_eq!(Density::Normal.next(), Density::Thinking);
-        assert_eq!(Density::Thinking.next(), Density::Verbose);
+        assert_eq!(Density::Normal.next(), Density::Verbose);
         assert_eq!(Density::Verbose.next(), Density::Normal);
-        assert_eq!(Density::parse("Thinking"), Some(Density::Thinking));
+        assert_eq!(Density::parse("Verbose"), Some(Density::Verbose));
         assert_eq!(Density::parse("bogus"), None);
     }
 
@@ -601,9 +599,8 @@ mod tests {
         use FoldKind::*;
         let d = FoldState::default_expanded;
         assert!(!d(Density::Normal, Thinking) && !d(Density::Normal, Tool));
-        assert!(d(Density::Thinking, Thinking) && !d(Density::Thinking, Tool));
         assert!(d(Density::Verbose, Thinking) && d(Density::Verbose, Tool));
-        for density in [Density::Normal, Density::Thinking, Density::Verbose] {
+        for density in [Density::Normal, Density::Verbose] {
             assert!(!d(density, User) && !d(density, Fixed));
         }
     }
@@ -614,7 +611,7 @@ mod tests {
         assert!(!f.expanded(1, FoldKind::Thinking));
         f.toggle(1, FoldKind::Thinking);
         assert!(f.expanded(1, FoldKind::Thinking));
-        f.set_density(Density::Thinking);
+        f.set_density(Density::Verbose);
         // density change cleared the override; default now expanded
         assert_eq!(f.override_count(), 0);
         assert!(f.expanded(1, FoldKind::Thinking));
@@ -626,8 +623,8 @@ mod tests {
         f.toggle(1, FoldKind::Thinking);
         assert_eq!(f.override_count(), 0);
         f.cycle_density();
-        assert_eq!(f.density, Density::Verbose);
-        assert!(f.expanded(2, FoldKind::Tool));
+        assert_eq!(f.density, Density::Normal);
+        assert!(!f.expanded(2, FoldKind::Tool));
     }
 
     #[test]
@@ -706,8 +703,8 @@ mod tests {
         );
         assert_eq!(cmd("/theme solarized").enter(), PaletteAction::Noop);
         assert_eq!(
-            cmd("/view thinking").enter(),
-            PaletteAction::SetDensity(Density::Thinking)
+            cmd("/view verbose").enter(),
+            PaletteAction::SetDensity(Density::Verbose)
         );
         assert_eq!(cmd("/view bogus").enter(), PaletteAction::Noop);
         assert_eq!(
