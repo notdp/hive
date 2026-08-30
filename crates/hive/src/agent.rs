@@ -749,6 +749,16 @@ impl Agent {
             };
         }
         if claude_member {
+            // The pane may be a display-only mirror (hive attach renders an
+            // interactive member — a joined ccd — as a read-only viewer and
+            // tags the pane with the member's name). The engine identity is
+            // the roster sessionId; when it names a live interactive session
+            // rather than a bg job, deliver there — the pane was never the
+            // address, only the picture.
+            let sid = self.session_id.clone().unwrap_or_default();
+            if !sid.is_empty() && hooked_job_row(&sid).is_none() {
+                return self._deliver_claude_session(&sid, text);
+            }
             return Err(DeliveryError(format!(
                 "claude pane {} has no bg job record; a hive \
                  claude member runs as a background job (relaunch it with \
@@ -2988,6 +2998,23 @@ mod tests {
         member("w", "t", "%3", "claude").send("hi").unwrap();
         assert_eq!(hook(|h| h.pane_job_lookups.clone()), vec!["%3"]);
         assert_eq!(hook(|h| h.seen_jobs.clone()), vec!["beef4321"]); // the pane's own record keys the engine
+    }
+
+    #[test]
+    fn test_send_claude_pane_without_job_delivers_to_interactive_session() {
+        // hive attach renders an interactive member (a joined ccd) as a
+        // read-only mirror pane tagged with the member's name; the roster
+        // sessionId — not the mirror pane — is the delivery address.
+        let _guard = setup();
+        pin_cli_probe("claude");
+        hook(|h| h.daemon_reply = Some("udsWriteAccepted"));
+        let mut orch = member("orch", "t", "%690", "claude");
+        orch.session_id = Some("ccd-sess-1".to_string());
+        assert_eq!(orch.send("hi").unwrap(), "udsWriteAccepted");
+        assert_eq!(
+            hook(|h| h.daemon_replies.clone()),
+            vec![("ccd-sess-1".to_string(), "hi".to_string())]
+        );
     }
 
     #[test]
