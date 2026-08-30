@@ -102,16 +102,16 @@ fn verbosity_for_source(source: &Path) -> &'static str {
         "normal" => return "normal",
         _ => {}
     }
-    let installed = source.ancestors().any(|parent| {
-        matches!(
-            parent.file_name().and_then(|name| name.to_str()),
-            Some("site-packages") | Some("dist-packages")
-        )
+    // Python keyed "installed" on a site-packages ancestor; the Rust binary's
+    // dev signal is running from a cargo target/ dir (any profile).
+    let dev_checkout = source.ancestors().any(|parent| {
+        matches!(parent.file_name().and_then(|name| name.to_str()), Some("target"))
+            && parent.join("../Cargo.toml").exists()
     });
-    if installed {
-        "normal"
-    } else {
+    if dev_checkout {
         "dev"
+    } else {
+        "normal"
     }
 }
 
@@ -132,11 +132,11 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn test_default_verbosity_is_normal_from_site_packages() {
+    fn test_default_verbosity_is_normal_from_installed_binary() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         env::remove_var("HIVE_LOG_VERBOSITY");
 
-        let source = Path::new("/venv/lib/python3.11/site-packages/hive/devlog.py");
+        let source = Path::new("/usr/local/bin/hive");
         assert_eq!(verbosity_for_source(source), "normal");
     }
 
@@ -145,8 +145,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         env::remove_var("HIVE_LOG_VERBOSITY");
 
-        let source = Path::new("/repo/src/hive/devlog.py");
-        assert_eq!(verbosity_for_source(source), "dev");
+        assert_eq!(
+            verbosity_for_source(&env::current_exe().expect("test binary path")),
+            "dev"
+        );
     }
 
     #[test]

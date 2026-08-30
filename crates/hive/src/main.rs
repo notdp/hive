@@ -1,27 +1,4 @@
-mod adapters;
-mod agent;
-mod agent_cli;
-mod bus;
-mod cli;
-mod context;
-mod core_hooks;
-mod cvim;
-mod devlog;
-mod draft_guard;
-mod flow;
-mod hived;
-mod layout;
-mod notify_debug;
-mod notify_ui;
-mod plugin_manager;
-mod registry;
-mod runtime_snapshot;
-mod runtime_state;
-mod settings;
-mod team;
-mod tmux;
-mod transcript_view;
-mod worktree;
+use hive::*;
 
 /// PEP 538 C-locale coercion, as CPython applies it at interpreter startup.
 ///

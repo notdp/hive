@@ -2346,6 +2346,10 @@ pub fn main() {
         "cvim-session" => std::process::exit(crate::cvim::session_main(&tail)),
         "cvim-profile" => std::process::exit(crate::cvim::profile_main(&tail)),
         "flow-op" => std::process::exit(crate::flow::op_main(&tail)),
+        // notify's tmux hook / flash-script callbacks (Python's
+        // `-m hive.notify_ui` and the pane-attention middle layer).
+        "notify-hook" => std::process::exit(crate::notify_ui::main(&tail)),
+        "notify-attention" => std::process::exit(crate::notify_ui::attention_main()),
         _ => {}
     }
 

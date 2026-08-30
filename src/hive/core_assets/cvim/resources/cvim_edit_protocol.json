@@ -1,6 +1,0 @@
-{
-  "tag": "comment",
-  "onAttr": "on",
-  "defaultTarget": "previous_reply",
-  "offsetTargetFormat": "reply[-{n}]"
-}

@@ -2,25 +2,18 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CLI_CODE = "from hive.cli import cli; cli()"
 
 
 def base_env(tmp_path: Path) -> dict[str, str]:
-    pythonpath = str(ROOT / "src")
-    if os.environ.get("PYTHONPATH"):
-        pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
     return {
         "HIVE_HOME": str(tmp_path / ".hive"),
         "XDG_CACHE_HOME": str(tmp_path / ".cache"),
-        "PYTHONPATH": pythonpath,
-        "PYTHONUNBUFFERED": "1",
     }
 
 
@@ -43,12 +36,15 @@ def wait_for(predicate, *, timeout: float = 10.0, interval: float = 0.05) -> Non
 
 
 def hive_binary_argv() -> list[str]:
-    """How the suite invokes hive: the Rust binary when HIVE_E2E_BIN is set,
-    else the Python CLI from this checkout."""
+    """How the suite invokes hive: HIVE_E2E_BIN when set, else this
+    checkout's debug build (cargo build first)."""
     override = os.environ.get("HIVE_E2E_BIN")
     if override:
         return [override]
-    return [sys.executable, "-c", CLI_CODE]
+    debug = ROOT / "target" / "debug" / "hive"
+    if debug.is_file():
+        return [str(debug)]
+    raise RuntimeError("no hive binary: run `cargo build` or set HIVE_E2E_BIN")
 
 
 def hive_shell_command(args: list[str], *, env: dict[str, str], cwd: Path, stdout_path: Path) -> str:
@@ -93,4 +89,4 @@ def run_hive_in_tmux_pane(
     assert returncode is not None
     stdout = output_path.read_text() if output_path.exists() else ""
     output_path.unlink(missing_ok=True)
-    return subprocess.CompletedProcess([sys.executable, "-c", CLI_CODE, *args], returncode, stdout, "")
+    return subprocess.CompletedProcess([*hive_binary_argv(), *args], returncode, stdout, "")

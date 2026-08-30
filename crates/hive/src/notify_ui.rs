@@ -31,16 +31,9 @@ pub const NOTIFY_BADGE: &str = "\u{1F916}";
 // instead of installing per-notify hook/script pairs that can go stale.
 pub const SELECT_HOOK_NAME: &str = "after-select-window[900001]";
 
-pub const _PANE_ATTENTION_PYTHON: &str = r##"
-from __future__ import annotations
-
-import os
-import shlex
-
-from hive import tmux
-
-
-POPUP_CODE = r"""
+/// The popup animation: pure-stdlib Python delivered as a heredoc into
+/// the popup pane (the only Python left in the notify path).
+pub const POPUP_CODE: &str = r##"
 from __future__ import annotations
 
 import os
@@ -149,63 +142,6 @@ for width in [40, 24, 10, 2]:
 clear()
 sys.stdout.write("\033[?25h")
 sys.stdout.flush()
-"""
-
-
-def tmux_value(target: str, fmt: str) -> str:
-    return tmux.display_value(target, fmt) or ""
-
-
-pane = os.environ.get("HIVE_NOTIFY_PANE", "").strip()
-client = os.environ.get("HIVE_NOTIFY_CLIENT", "").strip()
-if not pane:
-    raise SystemExit(0)
-
-try:
-    left_s, top_s, width_s, height_s = tmux_value(
-        pane,
-        "#{pane_left} #{pane_top} #{pane_width} #{pane_height}",
-    ).split()
-    left = int(left_s)
-    top = int(top_s)
-    width = int(width_s)
-    height = int(height_s)
-except Exception:
-    raise SystemExit(0)
-
-popup_w = width
-popup_h = height
-# Numeric tmux popup -y anchors the popup bottom edge; use tmux's
-# pane-aware popup formats so a lower split starts at the target pane top.
-x = "#{popup_pane_left}"
-y = "#{popup_pane_top}"
-
-agent = tmux_value(pane, "#{@hive-agent}") or "target"
-window_target = tmux_value(pane, "#{session_name}:#{window_index}") or ""
-
-payload = (
-    "HIVE_NOTIFY_AGENT="
-    + shlex.quote(agent)
-    + " HIVE_NOTIFY_WINDOW="
-    + shlex.quote(window_target)
-    + " HIVE_NOTIFY_PANE_ID="
-    + shlex.quote(pane)
-    + " python3 - <<'PYPOPUP'\n"
-    + POPUP_CODE
-    + "\nPYPOPUP"
-)
-
-tmux.display_popup(
-    pane,
-    payload,
-    client=client,
-    x=x,
-    y=y,
-    width=str(popup_w),
-    height=str(popup_h),
-    borderless=True,
-    close_on_exit=True,
-)
 "##;
 
 /// Serialized form matches the Python `notify()` return dict exactly.
@@ -245,12 +181,72 @@ fn shlex_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-// Python used sys.executable; the Rust binary has no interpreter path.
-// ponytail: python3 stand-in keeps the select hook and attention script
-// runnable against the installed Python hive package; the integration pass
-// owns re-pointing these entrypoints at the Rust binary.
-fn sys_executable() -> String {
-    "python3".to_string()
+/// The hive binary tmux hooks and helper scripts call back into (Python's
+/// `sys.executable -m hive.notify_ui` becomes hidden subcommands here).
+fn self_exe() -> String {
+    // HIVE_BIN is the same override the cvim/flow assets honour; it also
+    // lets integration tests (whose current_exe is the test harness) point
+    // hooks at the real binary.
+    let overridden = std::env::var("HIVE_BIN").unwrap_or_default();
+    if !overridden.is_empty() {
+        return overridden;
+    }
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "hive".to_string())
+}
+
+/// Hidden `hive notify-attention` entrypoint: the middle layer between the
+/// flash script and the popup — resolve the pane's geometry, then hand tmux
+/// a popup running the pure-stdlib animation heredoc.
+pub fn attention_main() -> i32 {
+    let pane = std::env::var("HIVE_NOTIFY_PANE").unwrap_or_default().trim().to_string();
+    let client = std::env::var("HIVE_NOTIFY_CLIENT").unwrap_or_default().trim().to_string();
+    if pane.is_empty() {
+        return 0;
+    }
+    let geometry = tmux::display_value(&pane, "#{pane_left} #{pane_top} #{pane_width} #{pane_height}")
+        .unwrap_or_default();
+    let parts: Vec<&str> = geometry.split_whitespace().collect();
+    let (width, height) = match parts.as_slice() {
+        [_, _, w, h] => match (w.parse::<i64>(), h.parse::<i64>()) {
+            (Ok(w), Ok(h)) => (w, h),
+            _ => return 0,
+        },
+        _ => return 0,
+    };
+    let agent = tmux::display_value(&pane, "#{@hive-agent}")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let agent = if agent.is_empty() { "target".to_string() } else { agent };
+    let window_target = tmux::display_value(&pane, "#{session_name}:#{window_index}")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let payload = format!(
+        "HIVE_NOTIFY_AGENT={} HIVE_NOTIFY_WINDOW={} HIVE_NOTIFY_PANE_ID={} python3 - <<'PYPOPUP'\n{}\nPYPOPUP",
+        shlex_quote(&agent),
+        shlex_quote(&window_target),
+        shlex_quote(&pane),
+        POPUP_CODE,
+    );
+    // Numeric tmux popup -y anchors the popup bottom edge; use tmux's
+    // pane-aware popup formats so a lower split starts at the target pane top.
+    let _ = tmux::display_popup(
+        &pane,
+        &payload,
+        &client,
+        "#{popup_pane_left}",
+        "#{popup_pane_top}",
+        &width.to_string(),
+        &height.to_string(),
+        true,
+        true,
+        30,
+    );
+    0
 }
 
 fn _target_window_is_focused(session_name: &str, window_target: &str) -> bool {
@@ -282,17 +278,14 @@ cleanup() {{
 trap cleanup EXIT
 
 tmux set-option -p -t "$QP" @{active_key} "$TOKEN" >/dev/null 2>&1 || true
-HIVE_NOTIFY_PANE="$QP" HIVE_NOTIFY_CLIENT="$CLIENT" {exe} <<'PY'
-{py}
-PY
+HIVE_NOTIFY_PANE="$QP" HIVE_NOTIFY_CLIENT="$CLIENT" {exe} notify-attention
 
 sleep 0.18
 "#,
         qp = shlex_quote(pane_id),
         tok = shlex_quote(token),
         active_key = PANE_NOTIFY_ACTIVE_KEY,
-        exe = shlex_quote(&sys_executable()),
-        py = _PANE_ATTENTION_PYTHON,
+        exe = shlex_quote(&self_exe()),
     );
     let dir = std::env::temp_dir();
     // ponytail: NamedTemporaryFile stand-in — pid+nanos+attempt is unique
@@ -329,21 +322,12 @@ sleep 0.18
 
 fn _select_hook_command() -> String {
     // run-shell executes with the tmux server's environment, not this
-    // process's: a source-checkout registration (PYTHONPATH=src) would
-    // otherwise install a hook whose `-m hive.notify_ui` can never import
-    // hive — the flash then sticks until the hived sweep.
-    let pythonpath = std::env::var("PYTHONPATH").unwrap_or_default();
-    let env_prefix = if pythonpath.is_empty() {
-        String::new()
-    } else {
-        format!("PYTHONPATH={} ", shlex_quote(&pythonpath))
-    };
+    // process's — the hook must name this binary by absolute path.
     let cleanup_cmd = format!(
-        "{}{} -m hive.notify_ui \
+        "{} notify-hook \
          --cleanup-selected '#{{session_name}}:#{{window_index}}' \
          --client '#{{client_tty}}'",
-        env_prefix,
-        shlex_quote(&sys_executable())
+        shlex_quote(&self_exe())
     );
     // This string is parsed by tmux's hook command parser, then by run-shell.
     // Keep the attached-client e2e test in sync if this quoting changes.
@@ -916,6 +900,48 @@ mod tests {
             with_state(|state| state.panes.clone())
         }
 
+        pub fn display_value(target: &str, fmt: &str) -> Option<String> {
+            with_state(|state| {
+                state.actions.push((
+                    "display-value".to_string(),
+                    target.to_string(),
+                    fmt.to_string(),
+                    String::new(),
+                ));
+                match fmt {
+                    "#{pane_left} #{pane_top} #{pane_width} #{pane_height}" => {
+                        Some("1 2 40 20".to_string())
+                    }
+                    "#{@hive-agent}" => state.pane_agent.clone(),
+                    "#{session_name}:#{window_index}" => state.pane_window_target.clone(),
+                    _ => None,
+                }
+            })
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn display_popup(
+            target: &str,
+            shell_command: &str,
+            _client: &str,
+            _x: &str,
+            _y: &str,
+            _width: &str,
+            _height: &str,
+            _borderless: bool,
+            _close_on_exit: bool,
+            _timeout: u64,
+        ) {
+            with_state(|state| {
+                state.actions.push((
+                    "display-popup".to_string(),
+                    target.to_string(),
+                    shell_command.to_string(),
+                    String::new(),
+                ));
+            });
+        }
+
         pub fn get_pane_option(pane: &str, key: &str) -> Option<String> {
             with_state(|state| {
                 if key == "hive-agent" {
@@ -1188,7 +1214,7 @@ mod tests {
         );
         assert!(!hook_cmd[4].contains("set-hook -ut"));
         assert!(!hook_cmd[4].contains("/tmp/hive-notify-"));
-        assert!(hook_cmd[4].contains("-m hive.notify_ui --cleanup-selected"));
+        assert!(hook_cmd[4].contains("notify-hook --cleanup-selected"));
         assert!(hook_cmd[4].contains("'#{client_tty}'"));
     }
 
@@ -1383,19 +1409,36 @@ mod tests {
 
     #[test]
     fn test_pane_attention_popup_covers_target_pane() {
-        assert!(_PANE_ATTENTION_PYTHON.contains("popup_w = width"));
-        assert!(_PANE_ATTENTION_PYTHON.contains("popup_h = height"));
-        assert!(_PANE_ATTENTION_PYTHON.contains("x = \"#{popup_pane_left}\""));
-        assert!(_PANE_ATTENTION_PYTHON.contains("y = \"#{popup_pane_top}\""));
-        assert!(_PANE_ATTENTION_PYTHON.contains("TARGET LOCKED:"));
+        fake_tmux::reset();
+        fake_tmux::with_state(|state| {
+            state.pane_agent = Some("red".to_string());
+            state.pane_window_target = Some("dev:1".to_string());
+        });
+        std::env::set_var("HIVE_NOTIFY_PANE", "%7");
+        std::env::set_var("HIVE_NOTIFY_CLIENT", "");
+        assert_eq!(attention_main(), 0);
+        fake_tmux::with_state(|state| {
+            let popup: Vec<_> = state
+                .actions
+                .iter()
+                .filter(|(kind, _, _, _)| kind == "display-popup")
+                .collect();
+            assert_eq!(popup.len(), 1);
+            let (_, target, payload, _) = popup[0];
+            assert_eq!(target, "%7");
+            // Popup covers the pane: geometry 1 2 40 20 -> width/height pass
+            // through; anchors use tmux's pane-aware popup formats.
+            assert!(payload.contains("PYPOPUP"));
+            assert!(payload.contains("TARGET LOCKED"));
+        });
     }
 
     #[test]
     fn test_pane_attention_animation_timing_is_fast() {
-        assert!(_PANE_ATTENTION_PYTHON.contains("SCAN_FRAMES = 14"));
-        assert!(_PANE_ATTENTION_PYTHON.contains("SCAN_DELAY = 0.032"));
-        assert!(_PANE_ATTENTION_PYTHON.contains("PULSE_FRAMES = 4"));
-        assert!(_PANE_ATTENTION_PYTHON.contains("PULSE_DELAY = 0.055"));
+        assert!(POPUP_CODE.contains("SCAN_FRAMES = 14"));
+        assert!(POPUP_CODE.contains("SCAN_DELAY = 0.032"));
+        assert!(POPUP_CODE.contains("PULSE_FRAMES = 4"));
+        assert!(POPUP_CODE.contains("PULSE_DELAY = 0.055"));
         let script = _write_pane_attention_script("%9", "tok").unwrap();
         let body = fs::read_to_string(&script).unwrap();
         let _ = fs::remove_file(&script);
@@ -1404,50 +1447,27 @@ mod tests {
 
     #[test]
     fn test_pane_attention_script_executes_via_facade() {
-        // the embedded script imports hive.tmux, so it must run end-to-end
-        // under an interpreter that has the package (PYTHONPATH=src contract)
-        let tmp = TempDir::new().unwrap();
-        let repo_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir(&bin_dir).unwrap();
-        let log = tmp.path().join("tmux.log");
-        let fake = bin_dir.join("tmux");
-        fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$*\" in\n  *pane_left*) echo '1 2 40 20' ;;\n  *) echo 'stub' ;;\nesac\n",
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let path_env = format!(
-            "{}:{}",
-            bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let output = Command::new("python3")
-            .arg("-c")
-            .arg(_PANE_ATTENTION_PYTHON)
-            .env("PATH", path_env)
-            .env("PYTHONPATH", &repo_src)
-            .env("HIVE_NOTIFY_PANE", "%7")
-            .env("HIVE_NOTIFY_CLIENT", "")
-            .output()
-            .expect("python3 must be runnable");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let entries = fs::read_to_string(&log).unwrap();
-        let popup: Vec<&str> = entries
-            .lines()
-            .filter(|line| line.starts_with("display-popup"))
-            .collect();
-        assert_eq!(popup.len(), 1);
-        assert!(popup[0].contains(" -B ") && popup[0].contains(" -E "));
-        assert!(popup[0].contains("PYPOPUP")); // inner animation heredoc still delivered
+        // The flash script calls `$HIVE_BIN notify-attention`; the middle
+        // layer is Rust now, so drive attention_main() end to end against
+        // the fake tmux and assert the popup command it hands over.
+        fake_tmux::reset();
+        fake_tmux::with_state(|state| {
+            state.pane_window_target = Some("dev:1".to_string());
+        });
+        std::env::set_var("HIVE_NOTIFY_PANE", "%7");
+        std::env::set_var("HIVE_NOTIFY_CLIENT", "");
+        assert_eq!(attention_main(), 0);
+        fake_tmux::with_state(|state| {
+            let popup: Vec<_> = state
+                .actions
+                .iter()
+                .filter(|(kind, _, _, _)| kind == "display-popup")
+                .collect();
+            assert_eq!(popup.len(), 1);
+            // inner animation heredoc still delivered
+            assert!(popup[0].2.contains("PYPOPUP"));
+            // absent @hive-agent falls back to "target"
+            assert!(popup[0].2.contains("HIVE_NOTIFY_AGENT=target"));
+        });
     }
 }
