@@ -20,5 +20,6 @@ pub mod runtime_state;
 pub mod settings;
 pub mod team;
 pub mod tmux;
+pub mod transcript_tui;
 pub mod transcript_view;
 pub mod worktree;

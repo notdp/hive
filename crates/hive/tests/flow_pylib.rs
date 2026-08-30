@@ -187,7 +187,10 @@ fn test_flow_op_guard_and_unknown_op_through_the_real_binary() {
             .last()
             .unwrap_or_default()
             .to_string();
-        (out.status.code(), serde_json::from_str::<Value>(&last).unwrap())
+        (
+            out.status.code(),
+            serde_json::from_str::<Value>(&last).unwrap(),
+        )
     };
 
     // the flow/flow.* name guard fires before any team/tmux resolution
@@ -195,7 +198,10 @@ fn test_flow_op_guard_and_unknown_op_through_the_real_binary() {
     assert_eq!(code, Some(1));
     assert_eq!(v["ok"], Value::Bool(false));
     assert!(
-        v["error"].as_str().unwrap().contains("mailbox address kind"),
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("mailbox address kind"),
         "{v}"
     );
 

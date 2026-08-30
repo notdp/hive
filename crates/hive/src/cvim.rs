@@ -27,7 +27,9 @@ const PROTOCOL_JSON: &str = include_str!("../assets/cvim/resources/cvim_edit_pro
 /// (rewriting any file whose on-disk copy drifted from the embedded content)
 /// and return the `cvim-command` path.
 pub fn materialize_assets() -> anyhow::Result<PathBuf> {
-    let root = crate::core_hooks::hive_home().join("core_assets").join("cvim");
+    let root = crate::core_hooks::hive_home()
+        .join("core_assets")
+        .join("cvim");
     crate::core_hooks::materialize_asset_tree(
         &root,
         &[
@@ -139,7 +141,9 @@ fn _list_messages_via_adapter(
 }
 
 fn _read_lossy(path: &Path) -> Option<String> {
-    fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 fn _list_messages_via_raw_jsonl(file_path: &Path, limit: usize) -> Vec<RecentEntry> {
@@ -503,7 +507,10 @@ fn _claude_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fi
             // composer is its own, so keystrokes are safe.
             return (
                 NO_NATIVE_ADDRESS,
-                vec![("route", "tmuxKeys".into()), ("why", "no_job_record".into())],
+                vec![
+                    ("route", "tmuxKeys".into()),
+                    ("why", "no_job_record".into()),
+                ],
             );
         }
         // An attach viewer (its composer belongs to whatever session it
@@ -643,7 +650,11 @@ fn sendback(pane: &str, profile: &str, text: Option<&str>, interrupt: bool) -> (
                     "why",
                     format!(
                         "profile_{}",
-                        if profile.is_empty() { "unknown" } else { profile }
+                        if profile.is_empty() {
+                            "unknown"
+                        } else {
+                            profile
+                        }
                     ),
                 ),
             ],
@@ -653,7 +664,9 @@ fn sendback(pane: &str, profile: &str, text: Option<&str>, interrupt: bool) -> (
 
 pub fn sendback_main(args: &[String]) -> i32 {
     if args.len() < 5 {
-        eprintln!("usage: hive cvim-sendback <pane> <profile> <send_file> <content_changed> <interrupt>");
+        eprintln!(
+            "usage: hive cvim-sendback <pane> <profile> <send_file> <content_changed> <interrupt>"
+        );
         return 1;
     }
     let (pane, profile, send_file, content_changed, interrupt) =
@@ -831,7 +844,10 @@ pub fn list_main(args: &[String]) -> i32 {
         };
         let mut row = Map::new();
         row.insert("offset".to_string(), Value::from(entry.offset));
-        row.insert("label".to_string(), Value::from(format!("{timestamp}  {preview}")));
+        row.insert(
+            "label".to_string(),
+            Value::from(format!("{timestamp}  {preview}")),
+        );
         menu.push(Value::Object(row));
     }
     let rendered = crate::cli::rest::py_dumps(&Value::Array(menu), false, None, false);
@@ -974,7 +990,9 @@ mod difflib {
             bestj -= 1;
             bestsize += 1;
         }
-        while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize]
+        while besti + bestsize < ahi
+            && bestj + bestsize < bhi
+            && a[besti + bestsize] == b[bestj + bestsize]
         {
             bestsize += 1;
         }
@@ -1049,7 +1067,13 @@ mod difflib {
         }
         if codes[0].0 == "equal" {
             let (tag, i1, i2, j1, j2) = codes[0];
-            codes[0] = (tag, i1.max(i2.saturating_sub(n)), i2, j1.max(j2.saturating_sub(n)), j2);
+            codes[0] = (
+                tag,
+                i1.max(i2.saturating_sub(n)),
+                i2,
+                j1.max(j2.saturating_sub(n)),
+                j2,
+            );
         }
         let last = codes.len() - 1;
         if codes[last].0 == "equal" {
@@ -1320,7 +1344,10 @@ mod tests {
     fn test_diff_payload_uses_effective_offset_from_transcript() {
         let tmp = TempDir::new().unwrap();
         let transcript = tmp.path().join("codex.jsonl");
-        write_codex_transcript(&transcript, "使用 `cvim` skill,按要求直接启动外部编辑器助手。");
+        write_codex_transcript(
+            &transcript,
+            "使用 `cvim` skill,按要求直接启动外部编辑器助手。",
+        );
         fs::write(
             tmp.path().join("transcript_path"),
             transcript.to_str().unwrap(),
@@ -1396,8 +1423,7 @@ mod tests {
             fs::read_to_string(seeds.join("1.md")).unwrap(),
             "answer A\n"
         );
-        let menu: Value =
-            serde_json::from_str(&fs::read_to_string(&menu_json).unwrap()).unwrap();
+        let menu: Value = serde_json::from_str(&fs::read_to_string(&menu_json).unwrap()).unwrap();
         let rows = menu.as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["offset"], 0);
@@ -1411,7 +1437,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let session = make_claude_session(
             tmp.path(),
-            &[serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "seeded"}]})],
+            &[
+                serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "seeded"}]}),
+            ],
         );
         let dst = tmp.path().join("message.md");
         let args: Vec<String> = [

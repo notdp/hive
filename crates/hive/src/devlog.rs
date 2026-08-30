@@ -105,8 +105,10 @@ fn verbosity_for_source(source: &Path) -> &'static str {
     // Python keyed "installed" on a site-packages ancestor; the Rust binary's
     // dev signal is running from a cargo target/ dir (any profile).
     let dev_checkout = source.ancestors().any(|parent| {
-        matches!(parent.file_name().and_then(|name| name.to_str()), Some("target"))
-            && parent.join("../Cargo.toml").exists()
+        matches!(
+            parent.file_name().and_then(|name| name.to_str()),
+            Some("target")
+        ) && parent.join("../Cargo.toml").exists()
     });
     if dev_checkout {
         "dev"

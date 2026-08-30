@@ -328,7 +328,10 @@ fn test_popup_schedules_post_after_popup_exits() {
         ],
     );
     let actions = harness.actions();
-    let run_shell: Vec<&Value> = actions.iter().filter(|e| cmd_of(e) == "run-shell").collect();
+    let run_shell: Vec<&Value> = actions
+        .iter()
+        .filter(|e| cmd_of(e) == "run-shell")
+        .collect();
     assert_eq!(run_shell.len(), 1);
     assert!(!run_shell[0]["dropped"].as_bool().unwrap_or(false));
     assert!(actions.iter().any(|e| cmd_of(e) == "paste-buffer"));
@@ -451,8 +454,7 @@ fn test_cvim_menu_mode_activates_with_session_seed_and_no_offset() {
         ],
     );
 
-    let record: Value =
-        serde_json::from_str(&fs::read_to_string(&editor_log).unwrap()).unwrap();
+    let record: Value = serde_json::from_str(&fs::read_to_string(&editor_log).unwrap()).unwrap();
     let argv: Vec<&str> = record["argv"]
         .as_array()
         .unwrap()
@@ -462,11 +464,23 @@ fn test_cvim_menu_mode_activates_with_session_seed_and_no_offset() {
     assert!(argv.contains(&"-S"));
     assert!(argv.iter().any(|a| a.ends_with("menu.vim")));
     let env = &record["env"];
-    assert!(env["CVIM_MENU_JSON"].as_str().unwrap().ends_with("/menu.json"));
+    assert!(env["CVIM_MENU_JSON"]
+        .as_str()
+        .unwrap()
+        .ends_with("/menu.json"));
     assert!(env["CVIM_SEEDS_DIR"].as_str().unwrap().ends_with("/seeds"));
-    assert!(env["CVIM_MSG_FILE"].as_str().unwrap().ends_with("/message.md"));
-    assert!(env["CVIM_ORIG_FILE"].as_str().unwrap().ends_with("/original.md"));
-    assert!(env["CVIM_OFFSET_FILE"].as_str().unwrap().ends_with("/offset"));
+    assert!(env["CVIM_MSG_FILE"]
+        .as_str()
+        .unwrap()
+        .ends_with("/message.md"));
+    assert!(env["CVIM_ORIG_FILE"]
+        .as_str()
+        .unwrap()
+        .ends_with("/original.md"));
+    assert!(env["CVIM_OFFSET_FILE"]
+        .as_str()
+        .unwrap()
+        .ends_with("/offset"));
     assert!(env["CVIM_MENU_SELECTED_FILE"]
         .as_str()
         .unwrap()

@@ -8,7 +8,8 @@
 /// Exact click `--help` output for a command path (`[]` = root).
 pub(crate) fn help_for(path: &[&str]) -> Option<&'static str> {
     Some(match path {
-        [] => r#"Usage: hive [OPTIONS] COMMAND [ARGS]...
+        [] => {
+            r#"Usage: hive [OPTIONS] COMMAND [ARGS]...
 
   Hive - tmux-first multi-agent collaboration runtime.
 
@@ -110,8 +111,10 @@ Examples:
 
   # Debug connectivity
   hive doctor dodo                             # probe a peer's connectivity
-"#,
-        ["attach"] => r#"Usage: hive attach [OPTIONS] TEAM_NAME
+"#
+        }
+        ["attach"] => {
+            r#"Usage: hive attach [OPTIONS] TEAM_NAME
 
   Render a team's display: jump to its window, or build one.
 
@@ -122,8 +125,10 @@ Examples:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["capture"] => r#"Usage: hive capture [OPTIONS] MEMBER_NAME
+"#
+        }
+        ["capture"] => {
+            r#"Usage: hive capture [OPTIONS] MEMBER_NAME
 
   Debug: capture raw pane output from a team member's pane.
 
@@ -137,8 +142,10 @@ Options:
 Options:
   -n, --lines INTEGER
   -h, --help           Show this message and exit.
-"#,
-        ["ccd"] => r#"Usage: hive ccd [OPTIONS] COMMAND [ARGS]...
+"#
+        }
+        ["ccd"] => {
+            r#"Usage: hive ccd [OPTIONS] COMMAND [ARGS]...
 
   Discover Claude Code sessions outside the team — the desktop app, another
   terminal — by their cross-session inbox registry.
@@ -151,8 +158,10 @@ Options:
 
 Commands:
   ls  List the Claude Code sessions `hive send ccd.<name>` can reach.
-"#,
-        ["compact"] => r##"Usage: hive compact [OPTIONS]
+"#
+        }
+        ["compact"] => {
+            r##"Usage: hive compact [OPTIONS]
 
   Trigger /compact on your own pane.
 
@@ -171,8 +180,10 @@ Commands:
 Options:
   --pane TEXT  Target pane ID (default: current pane via TMUX_PANE)
   -h, --help   Show this message and exit.
-"##,
-        ["config"] => r#"Usage: hive config [OPTIONS] COMMAND [ARGS]...
+"##
+        }
+        ["config"] => {
+            r#"Usage: hive config [OPTIONS] COMMAND [ARGS]...
 
   Read / write user-level settings (~/.hive/settings.json).
 
@@ -183,8 +194,10 @@ Commands:
   get    Print the value at KEY (dot-path).
   set    Set KEY to VALUE (true/false/int/float/string).
   unset  Remove KEY.
-"#,
-        ["create"] => r#"Usage: hive create [OPTIONS] [NAME]
+"#
+        }
+        ["create"] => {
+            r#"Usage: hive create [OPTIONS] [NAME]
 
   Create a team.
 
@@ -199,8 +212,10 @@ Options:
   --reset-workspace     Remove existing workspace before initialization
   --state TEXT          Initial state KEY=VALUE (repeatable)
   -h, --help            Show this message and exit.
-"#,
-        ["cvim"] => r#"Usage: hive cvim [OPTIONS] [ARGS]...
+"#
+        }
+        ["cvim"] => {
+            r#"Usage: hive cvim [OPTIONS] [ARGS]...
 
   Human-only: edit the last assistant message in vim, send it back.
 
@@ -211,8 +226,10 @@ Options:
 
 Options:
   --help  Show this message and exit.
-"#,
-        ["delete"] => r#"Usage: hive delete [OPTIONS] NAME
+"#
+        }
+        ["delete"] => {
+            r#"Usage: hive delete [OPTIONS] NAME
 
   Delete a team and clean up.
 
@@ -220,8 +237,10 @@ Options:
   -w, --workspace TEXT  Workspace path to remove
   --delete-workspace    Also delete the workspace directory
   -h, --help            Show this message and exit.
-"#,
-        ["doctor"] => r#"Usage: hive doctor [OPTIONS] [AGENT_NAME]
+"#
+        }
+        ["doctor"] => {
+            r#"Usage: hive doctor [OPTIONS] [AGENT_NAME]
 
   Diagnose agent connectivity and session state.
 
@@ -234,8 +253,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["flow"] => r#"Usage: hive flow [OPTIONS] COMMAND [ARGS]...
+"#
+        }
+        ["flow"] => {
+            r#"Usage: hive flow [OPTIONS] COMMAND [ARGS]...
 
   Deterministic member orchestration from a Python script.
 
@@ -249,8 +270,10 @@ Options:
 
 Commands:
   run  Run SCRIPT against the current team.
-"#,
-        ["fork"] => r#"Usage: hive fork [OPTIONS]
+"#
+        }
+        ["fork"] => {
+            r#"Usage: hive fork [OPTIONS]
 
   Fork the current agent session into a new split pane.
 
@@ -278,8 +301,10 @@ Options:
                           this agent name
   --prompt TEXT           Prompt to send to the forked agent after it is ready
   -h, --help              Show this message and exit.
-"#,
-        ["hfork"] => r#"Usage: hive hfork [OPTIONS] [ARGS]...
+"#
+        }
+        ["hfork"] => {
+            r#"Usage: hive hfork [OPTIONS] [ARGS]...
 
   Human-only: fork the current Hive session into a horizontal split.
 
@@ -289,8 +314,10 @@ Options:
 
 Options:
   --help  Show this message and exit.
-"#,
-        ["inject"] => r#"Usage: hive inject [OPTIONS] AGENT_NAME TEXT
+"#
+        }
+        ["inject"] => {
+            r#"Usage: hive inject [OPTIONS] AGENT_NAME TEXT
 
   Debug: inject raw input into an agent pane.
 
@@ -303,8 +330,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["interrupt"] => r#"Usage: hive interrupt [OPTIONS] AGENT_NAME
+"#
+        }
+        ["interrupt"] => {
+            r#"Usage: hive interrupt [OPTIONS] AGENT_NAME
 
   Interrupt an agent's running turn.
 
@@ -317,8 +346,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["join"] => r#"Usage: hive join [OPTIONS] [TEAM_ARG]
+"#
+        }
+        ["join"] => {
+            r#"Usage: hive join [OPTIONS] [TEAM_ARG]
 
   Join a team.
 
@@ -337,8 +368,10 @@ Options:
                           reservation (optional; qualified-name routing works
                           without it).
   -h, --help              Show this message and exit.
-"#,
-        ["kill"] => r#"Usage: hive kill [OPTIONS] AGENT_NAME
+"#
+        }
+        ["kill"] => {
+            r#"Usage: hive kill [OPTIONS] AGENT_NAME
 
   Kill an agent pane and remove it from the team.
 
@@ -351,8 +384,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["layout"] => r#"Usage: hive layout [OPTIONS] {auto|main-vertical|main-horizontal|tiled|even-
+"#
+        }
+        ["layout"] => {
+            r#"Usage: hive layout [OPTIONS] {auto|main-vertical|main-horizontal|tiled|even-
                    horizontal|even-vertical}
 
   Apply a tmux layout preset to the current team window.
@@ -361,8 +396,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["ls"] => r#"Usage: hive ls [OPTIONS]
+"#
+        }
+        ["ls"] => {
+            r#"Usage: hive ls [OPTIONS]
 
   List hive teams from the registry, with their display state.
 
@@ -372,8 +409,10 @@ Options:
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["notify"] => r#"Usage: hive notify [OPTIONS] MESSAGE
+"#
+        }
+        ["notify"] => {
+            r#"Usage: hive notify [OPTIONS] MESSAGE
 
   Notify the user for the current pane.
 
@@ -389,8 +428,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["plugin"] => r#"Usage: hive plugin [OPTIONS] COMMAND [ARGS]...
+"#
+        }
+        ["plugin"] => {
+            r#"Usage: hive plugin [OPTIONS] COMMAND [ARGS]...
 
   Manage first-party Hive plugins.
 
@@ -401,8 +442,10 @@ Commands:
   disable  Disable a plugin and remove its commands.
   enable   Enable a plugin and materialize its commands.
   list     List available plugins and whether they are enabled.
-"#,
-        ["pr"] => r#"Usage: hive pr [OPTIONS] COMMAND [ARGS]...
+"#
+        }
+        ["pr"] => {
+            r#"Usage: hive pr [OPTIONS] COMMAND [ARGS]...
 
   Pin a PR number on the team window's status bar.
 
@@ -412,8 +455,10 @@ Options:
 Commands:
   clear  Clear the current team window's PR number stamp.
   set    Label the current team window with its PR number.
-"#,
-        ["resume-hint"] => r#"Usage: hive resume-hint [OPTIONS] {claude|codex|grok}
+"#
+        }
+        ["resume-hint"] => {
+            r#"Usage: hive resume-hint [OPTIONS] {claude|codex|grok}
 
   Print a cd-ready resume command for the session this pane just ran.
 
@@ -430,8 +475,10 @@ Commands:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["send"] => r#"Usage: hive send [OPTIONS] TO_AGENT [BODY]
+"#
+        }
+        ["send"] => {
+            r#"Usage: hive send [OPTIONS] TO_AGENT [BODY]
 
   Send a message to another agent — the only message verb.
 
@@ -470,8 +517,10 @@ Options:
 Options:
   --artifact TEXT  Artifact path for large payloads
   -h, --help       Show this message and exit.
-"#,
-        ["shell-init"] => r#"Usage: hive shell-init [OPTIONS] [SHELL]
+"#
+        }
+        ["shell-init"] => {
+            r#"Usage: hive shell-init [OPTIONS] [SHELL]
 
   Print the `hcodex` / `hclaude` / `hgrok` launchers for your shell.
 
@@ -489,8 +538,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["spawn"] => r#"Usage: hive spawn [OPTIONS] AGENT_NAME
+"#
+        }
+        ["spawn"] => {
+            r#"Usage: hive spawn [OPTIONS] AGENT_NAME
 
   Spawn an agent pane, optionally dispatching a task atomically.
 
@@ -525,8 +576,10 @@ Options:
                              inbox)
   -t, --team TEXT            Explicit team (default: the pane's binding)
   -h, --help                 Show this message and exit.
-"#,
-        ["team"] => r#"Usage: hive team [OPTIONS]
+"#
+        }
+        ["team"] => {
+            r#"Usage: hive team [OPTIONS]
 
   Show team overview.
 
@@ -548,8 +601,10 @@ Options:
 Options:
   -t, --team TEXT  Explicit team (default: the pane's binding)
   -h, --help       Show this message and exit.
-"#,
-        ["thread"] => r#"Usage: hive thread [OPTIONS] MESSAGE_ID
+"#
+        }
+        ["thread"] => {
+            r#"Usage: hive thread [OPTIONS] MESSAGE_ID
 
   Show a reply thread rooted at a msgId.
 
@@ -561,8 +616,10 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["vfork"] => r#"Usage: hive vfork [OPTIONS] [ARGS]...
+"#
+        }
+        ["vfork"] => {
+            r#"Usage: hive vfork [OPTIONS] [ARGS]...
 
   Human-only: fork the current Hive session into a vertical split.
 
@@ -572,15 +629,19 @@ Options:
 
 Options:
   --help  Show this message and exit.
-"#,
-        ["view"] => r#"Usage: hive view [OPTIONS] SESSION_ID
+"#
+        }
+        ["view"] => {
+            r#"Usage: hive view [OPTIONS] SESSION_ID
 
   Read-only viewer for a Claude session transcript (follows live).
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["vim"] => r#"Usage: hive vim [OPTIONS] [ARGS]...
+"#
+        }
+        ["vim"] => {
+            r#"Usage: hive vim [OPTIONS] [ARGS]...
 
   Human-only: compose in a blank vim buffer, send it to the agent pane.
 
@@ -589,8 +650,10 @@ Options:
 
 Options:
   --help  Show this message and exit.
-"#,
-        ["worktree"] => r#"Usage: hive worktree [OPTIONS] COMMAND [ARGS]...
+"#
+        }
+        ["worktree"] => {
+            r#"Usage: hive worktree [OPTIONS] COMMAND [ARGS]...
 
   Per-feature worktree pool: start a feature, finish it, inspect state.
 
@@ -612,8 +675,10 @@ Commands:
   set-base  Declare the team's integration branch (the base of every...
   start     Create (or re-attach) the worktree for FEATURE and print its...
   status    Read-only lifecycle view of FEATURE (or every hive-labeled...
-"#,
-        ["ccd", "ls"] => r#"Usage: hive ccd ls [OPTIONS]
+"#
+        }
+        ["ccd", "ls"] => {
+            r#"Usage: hive ccd ls [OPTIONS]
 
   List the Claude Code sessions `hive send ccd.<name>` can reach.
 
@@ -626,29 +691,37 @@ Commands:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["config", "get"] => r#"Usage: hive config get [OPTIONS] KEY
+"#
+        }
+        ["config", "get"] => {
+            r#"Usage: hive config get [OPTIONS] KEY
 
   Print the value at KEY (dot-path). Exit 1 when unset.
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["config", "set"] => r#"Usage: hive config set [OPTIONS] KEY VALUE
+"#
+        }
+        ["config", "set"] => {
+            r#"Usage: hive config set [OPTIONS] KEY VALUE
 
   Set KEY to VALUE (true/false/int/float/string).
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["config", "unset"] => r#"Usage: hive config unset [OPTIONS] KEY
+"#
+        }
+        ["config", "unset"] => {
+            r#"Usage: hive config unset [OPTIONS] KEY
 
   Remove KEY. Exit 1 when KEY was not set.
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["flow", "run"] => r#"Usage: hive flow run [OPTIONS] SCRIPT
+"#
+        }
+        ["flow", "run"] => {
+            r#"Usage: hive flow run [OPTIONS] SCRIPT
 
   Run SCRIPT against the current team.
 
@@ -668,48 +741,60 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#,
-        ["plugin", "disable"] => r#"Usage: hive plugin disable [OPTIONS] NAME
+"#
+        }
+        ["plugin", "disable"] => {
+            r#"Usage: hive plugin disable [OPTIONS] NAME
 
   Disable a plugin and remove its commands.
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["plugin", "enable"] => r#"Usage: hive plugin enable [OPTIONS] NAME
+"#
+        }
+        ["plugin", "enable"] => {
+            r#"Usage: hive plugin enable [OPTIONS] NAME
 
   Enable a plugin and materialize its commands.
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["plugin", "list"] => r#"Usage: hive plugin list [OPTIONS]
+"#
+        }
+        ["plugin", "list"] => {
+            r#"Usage: hive plugin list [OPTIONS]
 
   List available plugins and whether they are enabled.
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["plugin", "ls"] => r#"Usage: hive plugin ls [OPTIONS]
+"#
+        }
+        ["plugin", "ls"] => {
+            r#"Usage: hive plugin ls [OPTIONS]
 
   Hidden alias of `hive plugin list`.
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["pr", "clear"] => r#"Usage: hive pr clear [OPTIONS]
+"#
+        }
+        ["pr", "clear"] => {
+            r#"Usage: hive pr clear [OPTIONS]
 
   Clear the current team window's PR number stamp.
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["pr", "set"] => r#"Usage: hive pr set [OPTIONS] NUMBER
+"#
+        }
+        ["pr", "set"] => {
+            r#"Usage: hive pr set [OPTIONS] NUMBER
 
   Label the current team window with its PR number.
 
@@ -723,8 +808,10 @@ Options:
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["worktree", "done"] => r#"Usage: hive worktree done [OPTIONS] FEATURE
+"#
+        }
+        ["worktree", "done"] => {
+            r#"Usage: hive worktree done [OPTIONS] FEATURE
 
   Remove FEATURE's worktree. The branch is always kept (PRs live on it).
 
@@ -736,8 +823,10 @@ Options:
               first)
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["worktree", "set-base"] => r#"Usage: hive worktree set-base [OPTIONS] REF
+"#
+        }
+        ["worktree", "set-base"] => {
+            r#"Usage: hive worktree set-base [OPTIONS] REF
 
   Declare the team's integration branch (the base of every sub-PR).
 
@@ -748,8 +837,10 @@ Options:
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
-        ["worktree", "start"] => r#"Usage: hive worktree start [OPTIONS] FEATURE
+"#
+        }
+        ["worktree", "start"] => {
+            r#"Usage: hive worktree start [OPTIONS] FEATURE
 
   Create (or re-attach) the worktree for FEATURE and print its path as JSON.
 
@@ -762,15 +853,18 @@ Options:
                from `hive worktree set-base`, else detected default branch)
   --plain      Human-readable output instead of the default JSON
   -h, --help   Show this message and exit.
-"#,
-        ["worktree", "status"] => r#"Usage: hive worktree status [OPTIONS] [FEATURE]
+"#
+        }
+        ["worktree", "status"] => {
+            r#"Usage: hive worktree status [OPTIONS] [FEATURE]
 
   Read-only lifecycle view of FEATURE (or every hive-labeled worktree).
 
 Options:
   --plain     Human-readable output instead of the default JSON
   -h, --help  Show this message and exit.
-"#,
+"#
+        }
         _ => return None,
     })
 }

@@ -27,10 +27,7 @@ pub fn hive_home() -> PathBuf {
 /// Write an embedded asset tree under `root`, rewriting any file whose
 /// on-disk copy drifted from the embedded content (heal-on-drift). Shared by
 /// the cvim toolkit and the flow pylib client materialization.
-pub(crate) fn materialize_asset_tree(
-    root: &Path,
-    files: &[(&str, &str, bool)],
-) -> Result<()> {
+pub(crate) fn materialize_asset_tree(root: &Path, files: &[(&str, &str, bool)]) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for (rel, content, executable) in files {
         let path = root.join(rel);

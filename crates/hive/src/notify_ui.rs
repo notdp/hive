@@ -201,13 +201,22 @@ fn self_exe() -> String {
 /// flash script and the popup — resolve the pane's geometry, then hand tmux
 /// a popup running the pure-stdlib animation heredoc.
 pub fn attention_main() -> i32 {
-    let pane = std::env::var("HIVE_NOTIFY_PANE").unwrap_or_default().trim().to_string();
-    let client = std::env::var("HIVE_NOTIFY_CLIENT").unwrap_or_default().trim().to_string();
+    let pane = std::env::var("HIVE_NOTIFY_PANE")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let client = std::env::var("HIVE_NOTIFY_CLIENT")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if pane.is_empty() {
         return 0;
     }
-    let geometry = tmux::display_value(&pane, "#{pane_left} #{pane_top} #{pane_width} #{pane_height}")
-        .unwrap_or_default();
+    let geometry = tmux::display_value(
+        &pane,
+        "#{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+    )
+    .unwrap_or_default();
     let parts: Vec<&str> = geometry.split_whitespace().collect();
     let (width, height) = match parts.as_slice() {
         [_, _, w, h] => match (w.parse::<i64>(), h.parse::<i64>()) {
@@ -220,7 +229,11 @@ pub fn attention_main() -> i32 {
         .unwrap_or_default()
         .trim()
         .to_string();
-    let agent = if agent.is_empty() { "target".to_string() } else { agent };
+    let agent = if agent.is_empty() {
+        "target".to_string()
+    } else {
+        agent
+    };
     let window_target = tmux::display_value(&pane, "#{session_name}:#{window_index}")
         .unwrap_or_default()
         .trim()

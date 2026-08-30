@@ -640,7 +640,12 @@ pub fn op_main(args: &[String]) -> i32 {
 }
 
 fn run_op(env: &dyn FlowEnv, op: &str, args: &Value) -> Result<Map<String, Value>, FlowError> {
-    let str_arg = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let str_arg = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     let mut result = Map::new();
     match op {
         "context" => {
@@ -659,7 +664,12 @@ fn run_op(env: &dyn FlowEnv, op: &str, args: &Value) -> Result<Map<String, Value
         }
         "ready" => ready_gate(env, &str_arg("name"), &str_arg("cli"))?,
         "dispatch" => {
-            let msg_id = dispatch(env, &str_arg("name"), &str_arg("body"), &str_arg("artifact"))?;
+            let msg_id = dispatch(
+                env,
+                &str_arg("name"),
+                &str_arg("body"),
+                &str_arg("artifact"),
+            )?;
             result.insert("msgId".to_string(), Value::String(msg_id));
         }
         "wait-reply" => {
@@ -1129,12 +1139,15 @@ mod tests {
         assert_eq!(r.get("teamName"), Some(&Value::String("t-x".into())));
         assert_eq!(
             r.get("workspace"),
-            Some(&Value::String(
-                env.workspace.to_string_lossy().into_owned()
-            ))
+            Some(&Value::String(env.workspace.to_string_lossy().into_owned()))
         );
 
-        let r = run_op(&env, "spawn", &json!({"name": "impl", "cli": null, "model": ""})).unwrap();
+        let r = run_op(
+            &env,
+            "spawn",
+            &json!({"name": "impl", "cli": null, "model": ""}),
+        )
+        .unwrap();
         assert_eq!(r.get("pane"), Some(&Value::String("%1".into())));
         assert_eq!(r.get("cli"), Some(&Value::String("claude".into())));
 

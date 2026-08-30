@@ -529,12 +529,15 @@ dependencies = [
  "anstyle",
  "anyhow",
  "clap",
+ "crossterm",
  "libc",
+ "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "unicode-width 0.2.0",
  "xai-grok-markdown",
 ]
 

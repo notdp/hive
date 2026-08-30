@@ -2886,7 +2886,9 @@ mod tests {
 
     // --- tests/unit/test_launcher_mint_names.py ---
 
-    fn tags_lookup<'a>(mapping: &'a [((&'a str, &'a str), &'a str)]) -> impl Fn(&str, &str) -> Option<String> + 'a {
+    fn tags_lookup<'a>(
+        mapping: &'a [((&'a str, &'a str), &'a str)],
+    ) -> impl Fn(&str, &str) -> Option<String> + 'a {
         move |target: &str, key: &str| {
             mapping
                 .iter()

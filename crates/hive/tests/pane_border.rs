@@ -16,7 +16,9 @@ fn run_tmux(args: &[&str]) -> String {
         args,
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string()
+    String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 struct BorderPane {
@@ -28,7 +30,17 @@ impl BorderPane {
     fn new(tag: &str) -> Self {
         let session = format!("hive-e2e-border-{tag}-{}", std::process::id());
         let pane = run_tmux(&[
-            "new-session", "-d", "-s", &session, "-x", "80", "-y", "20", "-P", "-F", "#{pane_id}",
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-x",
+            "80",
+            "-y",
+            "20",
+            "-P",
+            "-F",
+            "#{pane_id}",
         ]);
         BorderPane { session, pane }
     }
@@ -38,13 +50,21 @@ impl BorderPane {
     }
 
     fn render(&self) -> String {
-        run_tmux(&["display-message", "-p", "-t", &self.pane, hive::tmux::_HIVE_PANE_BORDER_FORMAT])
+        run_tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &self.pane,
+            hive::tmux::_HIVE_PANE_BORDER_FORMAT,
+        ])
     }
 }
 
 impl Drop for BorderPane {
     fn drop(&mut self) {
-        let _ = Command::new("tmux").args(["kill-session", "-t", &self.session]).output();
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &self.session])
+            .output();
     }
 }
 
@@ -67,7 +87,10 @@ fn test_border_follows_the_viewed_session() {
 
     // Viewer switched to another member: dual display, both sides named.
     p.set("@hive-view", "comb.blue");
-    assert_eq!(p.render(), " probe.red#[fg=colour220] -> comb.blue#[default] ");
+    assert_eq!(
+        p.render(),
+        " probe.red#[fg=colour220] -> comb.blue#[default] "
+    );
 
     // Notify marker composes with the drift suffix.
     p.set("@hive-notify-active", "1");
