@@ -216,6 +216,33 @@ fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
     wrap_cells_first(cells, width, width)
 }
 
+/// Punctuation that may not open a line (CJK closing marks and their ASCII
+/// cousins) or close one (opening brackets and quotes).
+const NO_LINE_START: &str = "，。、；：！？）］｝」』》〉】〕”’…—,.;:!?)]}";
+const NO_LINE_END: &str = "（［｛「『《〈【〔“‘([{";
+
+/// Whether a line may break between `prev` and `next`.
+///
+/// Latin prose breaks at spaces; CJK has none, so a run of Han text used to
+/// count as one unbreakable word and got pushed to the next line whole,
+/// leaving the line it came from half empty. CJK breaks between any two
+/// characters — subject to the punctuation that may not start or end a line.
+fn may_break_between(prev: char, next: char) -> bool {
+    if next == ' ' || prev == ' ' {
+        return true;
+    }
+    if NO_LINE_START.contains(next) || NO_LINE_END.contains(prev) {
+        return false;
+    }
+    // A path or flag run is breakable after its separators, the way a
+    // browser breaks a long URL — otherwise `a/b/c/d…` behaves like one
+    // enormous word and strands the line it would not fit on.
+    if matches!(prev, '/' | '-' | '_' | '\\') {
+        return true;
+    }
+    cell_width(prev) == 2 || cell_width(next) == 2
+}
+
 /// Wrap with a narrower first line: the clock sits at the right end of a
 /// block's opening line, and only that line has to make room for it — the
 /// rest of the paragraph reflows across the full content width.
@@ -239,8 +266,18 @@ fn wrap_cells_first(cells: Vec<Cell>, first: usize, rest: usize) -> Vec<Vec<Cell
                 curw = 0;
                 continue;
             }
-            if let Some(sp) = cur.iter().rposition(|&(c, _)| c == ' ') {
-                let rest = cur.split_off(sp + 1);
+            let breaks_here = cur
+                .last()
+                .is_some_and(|&(prev, _)| may_break_between(prev, ch));
+            let split_at = if breaks_here {
+                Some(cur.len())
+            } else {
+                (1..cur.len()).rev().find(|&i| {
+                    may_break_between(cur[i - 1].0, cur[i].0)
+                })
+            };
+            if let Some(at) = split_at {
+                let rest = cur.split_off(at);
                 while cur.last().is_some_and(|&(c, _)| c == ' ') {
                     cur.pop();
                 }
@@ -3466,6 +3503,25 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(*back.last().unwrap(), track_end, "{back:?}");
+    }
+
+    #[test]
+    fn test_cjk_fills_the_line_instead_of_moving_the_run_down() {
+        // A Han run has no spaces: the old wrapper treated it as one word and
+        // pushed the whole thing to the next line, ending the line early.
+        let text = "我们的解析器只认 text/tool_use/tool_result/thinking，所以整块被丢掉，连占位符都没有。";
+        let lines = wrap_plain(text, 40);
+        assert!(lines.len() >= 2, "{lines:?}");
+        for l in &lines[..lines.len() - 1] {
+            let w = UnicodeWidthStr::width(l.as_str());
+            // Was 16 of 40 before Han runs became breakable.
+            assert!(w >= 34, "line left {} columns empty: {l:?}", 40 - w);
+        }
+        // Closing punctuation never opens a line.
+        for l in &lines[1..] {
+            let first = l.chars().next().unwrap();
+            assert!(!"，。、；：！？）".contains(first), "{lines:?}");
+        }
     }
 
     #[test]
