@@ -416,15 +416,7 @@ struct Rendered {
     foldable: bool,
 }
 
-/// One rendered row of a user band: either wrapped words or a picture's
-/// placeholder, kept in the order they were written.
-enum BandRow {
-    Text(String),
-    Image(crate::transcript_view::ImageBlock),
-}
-
 fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> Rendered {
-    use crate::transcript_view::UserPart;
     let band = Style::default().bg(t.bg_light);
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let bw = cw.saturating_sub(2).max(8);
@@ -432,86 +424,31 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     if let Some(msg) = u.hive.as_ref() {
         return render_hive(t, u, msg, inner_w, expanded);
     }
-    let mut vis: Vec<BandRow> = Vec::new();
-    for part in &u.parts {
-        match part {
-            UserPart::Image(img) => vis.push(BandRow::Image(img.clone())),
-            UserPart::Text(text) => {
-                for src in text.lines() {
-                    let first = if vis.is_empty() { head_w } else { bw };
-                    vis.extend(
-                        wrap_plain_first(src, first, bw)
-                            .into_iter()
-                            .map(BandRow::Text),
-                    );
-                }
-            }
-        }
+    let mut vis: Vec<String> = Vec::new();
+    for src in u.text.lines() {
+        let first = if vis.is_empty() { head_w } else { bw };
+        vis.extend(wrap_plain_first(src, first, bw));
     }
-    while vis.len() > 1 && matches!(vis.last(), Some(BandRow::Text(l)) if l.is_empty()) {
+    while vis.last().is_some_and(|l| l.is_empty()) && vis.len() > 1 {
         vis.pop();
     }
-    let text_rows = vis
-        .iter()
-        .filter(|r| matches!(r, BandRow::Text(_)))
-        .count();
-    let foldable = text_rows > BAND_MAX_LINES;
+    let foldable = vis.len() > BAND_MAX_LINES;
     if foldable && !expanded {
-        // Words collapse; the pictures never do. They are the landmarks of a
-        // long message, and hiding one behind an ellipsis loses the only
-        // handle it has.
-        let mut kept: Vec<BandRow> = Vec::new();
-        let mut seen = 0usize;
-        for row in vis {
-            match row {
-                BandRow::Image(_) => kept.push(row),
-                BandRow::Text(text) => {
-                    seen += 1;
-                    if seen < BAND_MAX_LINES {
-                        kept.push(BandRow::Text(text));
-                    } else if seen == BAND_MAX_LINES {
-                        kept.push(BandRow::Text(format!(
-                            "{} …",
-                            clip_plain(&text, bw.saturating_sub(2))
-                        )));
-                    }
-                }
-            }
-        }
-        vis = kept;
+        vis.truncate(BAND_MAX_LINES);
+        let last = vis.pop().unwrap_or_default();
+        vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
     let mut out = Vec::new();
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
-    for (i, row) in vis.iter().enumerate() {
+    for (i, text) in vis.iter().enumerate() {
         let prefix = if i == 0 { USER_ICON } else { "  " };
-        let mut spans = vec![Span::styled(
-            prefix.to_string(),
-            fg(t.accent_user).bg(t.bg_light),
-        )];
-        let used = match row {
-            BandRow::Text(text) => {
-                spans.push(Span::styled(
-                    text.clone(),
-                    fg(t.text_primary).bg(t.bg_light),
-                ));
-                2 + UnicodeWidthStr::width(text.as_str())
-            }
-            BandRow::Image(img) => {
-                let name = format!("Image#{}", img.index);
-                let rest = format!("  {}", img.describe());
-                let w = 2 + 2 + UnicodeWidthStr::width(name.as_str())
-                    + UnicodeWidthStr::width(rest.as_str());
-                spans.push(Span::styled(
-                    "▣ ".to_string(),
-                    fg(t.accent_thinking).bg(t.bg_light),
-                ));
-                spans.push(Span::styled(name, bold(t.text_secondary).bg(t.bg_light)));
-                spans.push(Span::styled(rest, fg(t.gray).bg(t.bg_light)));
-                w
-            }
-        };
+        let mut spans = vec![
+            Span::styled(prefix.to_string(), fg(t.accent_user).bg(t.bg_light)),
+            Span::styled(text.clone(), fg(t.text_primary).bg(t.bg_light)),
+        ];
         if i == 0 {
             if let Some(ts) = u.timestamp.as_ref() {
+                let used = 2 + UnicodeWidthStr::width(text.as_str());
                 let ts_text = format!("  {}", ts.clock);
                 let ts_w = UnicodeWidthStr::width(ts_text.as_str());
                 if cw > used + ts_w {
@@ -1021,16 +958,7 @@ fn fold_kind(block: &DisplayBlock) -> FoldKind {
 /// The text `/find` matches against, per block.
 fn search_text(block: &DisplayBlock) -> String {
     match block {
-        DisplayBlock::User(u) => {
-            let mut s = u.text.clone();
-            for part in &u.parts {
-                if let crate::transcript_view::UserPart::Image(img) = part {
-                    s.push(' ');
-                    s.push_str(&img.label());
-                }
-            }
-            s
-        }
+        DisplayBlock::User(u) => u.text.clone(),
         DisplayBlock::Assistant(a) => a.markdown.clone(),
         DisplayBlock::Thinking(tb) => format!("{} {}", tb.label(), tb.text),
         DisplayBlock::Run(r) => {

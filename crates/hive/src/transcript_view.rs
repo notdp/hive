@@ -486,17 +486,7 @@ pub struct UserBlock {
     /// source, wrapper and all — `hive` carries the parsed view.
     pub text: String,
     pub hive: Option<HiveMessage>,
-    /// Text and pictures in the order they were written, so a picture keeps
-    /// the place it was pasted into rather than being hoisted to the top.
-    pub parts: Vec<UserPart>,
     pub timestamp: Option<Timestamp>,
-}
-
-/// One piece of a user message.
-#[derive(Debug, Clone, PartialEq)]
-pub enum UserPart {
-    Text(String),
-    Image(ImageBlock),
 }
 
 /// Aggregation bucket kind for read-only tools (grok VerbGroupKind subset).
@@ -655,40 +645,16 @@ pub struct ToolBlock {
     pub result: Option<ToolOutcome>,
 }
 
-/// A picture in the transcript. The payload is never kept — a pasted
-/// screenshot is ~600KB of base64 and the parser holds every entry for the
-/// session — so the block carries only what it takes to describe it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ImageBlock {
-    /// 1-based position among every picture in the transcript, so one can be
-    /// named — "look at Image#3" — without any way to show it.
-    pub index: usize,
-    /// `image/webp`, `image/png`, …
-    pub media_type: String,
-    /// Decoded size, from the base64 length.
-    pub bytes: usize,
+/// grok's inline picture chip (xai-grok-pager-render prompt_images.rs
+/// `display_text`): path-free, numbered, and nothing else — `[Image #1]`.
+/// The payload is never read; a pasted screenshot is ~600KB of base64 and
+/// the parser holds every entry for the session.
+fn image_chip(index: usize) -> String {
+    format!("[Image #{index}]")
 }
 
-impl ImageBlock {
-    /// `Image#3  image/webp · 423 KB`
-    pub fn label(&self) -> String {
-        format!("Image#{}  {}", self.index, self.describe())
-    }
-
-    /// `image/webp · 423 KB`
-    pub fn describe(&self) -> String {
-        let kb = self.bytes as f64 / 1024.0;
-        let size = if kb >= 1024.0 {
-            format!("{:.1} MB", kb / 1024.0)
-        } else {
-            format!("{:.0} KB", kb)
-        };
-        format!("{} · {size}", self.media_type)
-    }
-}
-
-/// Replace every `image` block inside a tool result with a short label, so
-/// the payload never reaches the outcome text.
+/// Replace every `image` block inside a tool result with its chip, so the
+/// payload never reaches the outcome text.
 fn summarize_images(body: &Value, next_index: &mut usize) -> Value {
     let Some(items) = body.as_array() else {
         return body.clone();
@@ -699,37 +665,13 @@ fn summarize_images(body: &Value, next_index: &mut usize) -> Value {
             .map(|item| {
                 if item.get("type").and_then(Value::as_str) == Some("image") {
                     *next_index += 1;
-                    Value::String(format!("[{}]", image_block(item, *next_index).label()))
+                    Value::String(image_chip(*next_index))
                 } else {
                     item.clone()
                 }
             })
             .collect(),
     )
-}
-
-/// Decoded byte count of a base64 payload, without decoding it.
-fn base64_bytes(data: &str) -> usize {
-    let pad = data.bytes().rev().take_while(|&b| b == b'=').count();
-    data.len() / 4 * 3 - pad.min(2)
-}
-
-/// Describe an `image` content block without carrying its payload.
-fn image_block(block: &Value, index: usize) -> ImageBlock {
-    let src = block.get("source").unwrap_or(&Value::Null).clone();
-    ImageBlock {
-        index,
-        media_type: src
-            .get("media_type")
-            .and_then(Value::as_str)
-            .unwrap_or("image")
-            .to_string(),
-        bytes: src
-            .get("data")
-            .and_then(Value::as_str)
-            .map(base64_bytes)
-            .unwrap_or(0),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1210,7 +1152,6 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: prompt.to_string(),
                 hive,
-                parts: vec![UserPart::Text(prompt.to_string())],
                 timestamp: ts,
             }),
         });
@@ -1252,7 +1193,6 @@ impl TranscriptParser {
             block: DisplayBlock::User(UserBlock {
                 text: content.to_string(),
                 hive: Some(hive),
-                parts: vec![UserPart::Text(content.to_string())],
                 timestamp: ts,
             }),
         });
@@ -1337,7 +1277,7 @@ impl TranscriptParser {
         };
         // A user message is assembled whole — text and pictures in the order
         // they were written — and emitted as one band once the row is read.
-        let mut parts: Vec<UserPart> = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
         // Anchor for thinking durations: the previous row's instant; a second
         // thinking block in the same row measures from this row instead.
         let mut thinking_anchor_ms = self.prev_row_ms;
@@ -1356,7 +1296,7 @@ impl TranscriptParser {
                         continue;
                     }
                     if is_user {
-                        parts.push(UserPart::Text(body.to_string()));
+                        parts.push(body.to_string());
                     } else {
                         self.drain_all(&mut out);
                         out.push(Entry {
@@ -1464,7 +1404,7 @@ impl TranscriptParser {
                 }
                 "image" if is_user => {
                     self.image_count += 1;
-                    parts.push(UserPart::Image(image_block(block, self.image_count)));
+                    parts.push(image_chip(self.image_count));
                 }
                 "tool_result" => {
                     let id = block
@@ -1495,14 +1435,7 @@ impl TranscriptParser {
         if !parts.is_empty() {
             self.drain_all(&mut out);
             self.open_user_turn(&ts, &mut out);
-            let text = parts
-                .iter()
-                .filter_map(|p| match p {
-                    UserPart::Text(t) => Some(t.as_str()),
-                    UserPart::Image(_) => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = parts.join("\n");
             // A queued message already rendered from its attachment row; do
             // not draw it twice.
             if !self.queued_texts.remove(&text) {
@@ -1515,7 +1448,6 @@ impl TranscriptParser {
                     block: DisplayBlock::User(UserBlock {
                         text,
                         hive,
-                        parts,
                         timestamp: ts.clone(),
                     }),
                 });
@@ -1546,10 +1478,6 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
         return None;
     }
     Some(format!("\n  {DIM}⎿  {first}{RESET}"))
-}
-
-fn _user_image_line(img: &ImageBlock) -> String {
-    format!("{DIM}▣ {BOLD}Image#{}{RESET}{DIM}  {}{RESET}", img.index, img.describe())
 }
 
 fn _user_line(text: &str) -> String {
@@ -1621,17 +1549,7 @@ impl StreamPrinter {
 
     fn render_block(block: &DisplayBlock) -> Option<String> {
         match block {
-            DisplayBlock::User(u) => {
-                let mut out = String::new();
-                for part in &u.parts {
-                    out.push('\n');
-                    match part {
-                        UserPart::Image(img) => out.push_str(&_user_image_line(img)),
-                        UserPart::Text(text) => out.push_str(&_user_line(text)),
-                    }
-                }
-                (!out.is_empty()).then_some(out)
-            }
+            DisplayBlock::User(u) => Some(format!("\n{}", _user_line(&u.text))),
             DisplayBlock::Assistant(a) => Some(format!(
                 "\n{}",
                 _indent_block(&_md(&_clip(&a.markdown, 4000)), "⏺ ", "  ")
@@ -1859,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_images_ride_their_message_without_carrying_the_payload() {
+    fn test_a_picture_becomes_an_inline_chip(){
         let mut p = TranscriptParser::new();
         let data = "A".repeat(4000); // ~3 KB decoded
         let out = p.push(&_row(
@@ -1868,16 +1786,7 @@ mod tests {
             None,
         ));
         match &out[0] {
-            DisplayBlock::User(u) => {
-                assert!(u.text.is_empty(), "picture-only message");
-                let UserPart::Image(img) = &u.parts[0] else {
-                    panic!("expected an image part: {:?}", u.parts)
-                };
-                assert_eq!(img.media_type, "image/webp");
-                assert_eq!(img.bytes, 3000);
-                assert_eq!(img.index, 1);
-                assert_eq!(img.label(), "Image#1  image/webp · 3 KB");
-            }
+            DisplayBlock::User(u) => assert_eq!(u.text, "[Image #1]"),
             other => panic!("expected User, got {other:?}"),
         }
     }
@@ -1900,9 +1809,8 @@ mod tests {
         assert_eq!(users.len(), 1, "one band, not a block each: {out:?}");
         match users[0] {
             DisplayBlock::User(u) => {
-                // The picture keeps its place ahead of the words it came with.
-                assert!(matches!(u.parts[0], UserPart::Image(_)), "{:?}", u.parts);
-                assert!(matches!(&u.parts[1], UserPart::Text(t) if t.contains("排版")));
+                // The chip keeps its place ahead of the words it came with.
+                assert_eq!(u.text, "[Image #1]\n这张图里排版是不是有问题？");
             }
             _ => unreachable!(),
         }
@@ -1935,7 +1843,7 @@ mod tests {
             })
             .expect("a tool outcome");
         assert!(text.contains("here it is"), "{text:.200}");
-        assert!(text.contains("[Image#1  image/png"), "{text:.200}");
+        assert!(text.contains("[Image #1]"), "{text:.200}");
         assert!(!text.contains("BBBB"), "payload leaked into the outcome text");
         assert!(text.len() < 1000, "outcome text is {} bytes", text.len());
     }
