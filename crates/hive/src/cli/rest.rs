@@ -1290,6 +1290,92 @@ fn _member_attach_command(cli_name: &str, session_id: &str, cwd: &str) -> String
 /// Build a window for the team: one attach pane per member, tiled.
 ///
 /// Returns (window_target, attached_member_names, skipped_member_names).
+/// Title + tags + context + viewer launcher for one member's display pane.
+fn _bind_member_viewer(pane: &str, member: &Map<String, Value>, team: &str, ws: &str) {
+    let name = map_str(member, "name");
+    let cli_name = map_str(member, "cli");
+    let cwd = map_str(member, "cwd");
+    tmux::set_pane_title(pane, &format!("[{name}]"));
+    tmux::tag_pane(pane, "agent", &name, team, &cli_name, "");
+    if !ws.is_empty() {
+        let _ = crate::context::save_context_for_pane(pane, team, ws, &name);
+    }
+    ok_or_fail(tmux::send_keys(
+        pane,
+        &_member_attach_command(&cli_name, &map_str(member, "sessionId"), &cwd),
+        true,
+    ));
+}
+
+/// Roster members an existing window should gain panes for: not rendered
+/// yet, engine identity recorded, and an attachable CLI — in roster order.
+fn _members_to_backfill(
+    rendered: &std::collections::HashSet<String>,
+    members: Vec<Map<String, Value>>,
+) -> Vec<Map<String, Value>> {
+    _sorted_member_rows(members)
+        .into_iter()
+        .filter(|member| {
+            let name = map_str(member, "name");
+            !rendered.contains(&name)
+                && truthy(member.get("sessionId"))
+                && matches!(map_str(member, "cli").as_str(), "claude" | "codex" | "grok")
+        })
+        .collect()
+}
+
+/// Split panes into an existing team window for roster members it does not
+/// render yet (a member spawned after the window was built).
+fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> Vec<String> {
+    let team = map_str(entry, "team");
+    let ws = map_str(entry, "workspace");
+    let rendered: std::collections::HashSet<String> = tmux::list_panes_full(window)
+        .into_iter()
+        .filter(|p| p.role == "agent" && !p.agent.is_empty())
+        .map(|p| p.agent)
+        .collect();
+    let mut prev_pane = tmux::list_panes(window)
+        .into_iter()
+        .last()
+        .unwrap_or_default();
+    if prev_pane.is_empty() {
+        return Vec::new();
+    }
+    let members: Vec<Map<String, Value>> = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_object().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut added = Vec::new();
+    for member in _members_to_backfill(&rendered, members) {
+        let name = map_str(&member, "name");
+        let cwd = map_str(&member, "cwd");
+        let count = tmux::list_panes(window).len();
+        let split = tmux::split_window(
+            &prev_pane,
+            crate::layout::split_horizontal(window, count + 1),
+            None,
+            true,
+            if cwd.is_empty() { None } else { Some(&cwd) },
+        )
+        .unwrap_or_default();
+        if split.is_empty() {
+            continue;
+        }
+        _bind_member_viewer(&split, &member, &team, &ws);
+        added.push(name);
+        prev_pane = split;
+    }
+    if !added.is_empty() {
+        let _ = crate::layout::apply_adaptive(window);
+    }
+    added
+}
+
 fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>, Vec<String>) {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
@@ -1373,16 +1459,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
             }
             split
         };
-        tmux::set_pane_title(&pane, &format!("[{name}]"));
-        tmux::tag_pane(&pane, "agent", &name, &team, &cli_name, "");
-        if !ws.is_empty() {
-            let _ = crate::context::save_context_for_pane(&pane, &team, &ws, &name);
-        }
-        ok_or_fail(tmux::send_keys(
-            &pane,
-            &_member_attach_command(&cli_name, &map_str(member, "sessionId"), &cwd),
-            true,
-        ));
+        _bind_member_viewer(&pane, member, &team, &ws);
         attached.push(name);
         prev_pane = pane;
     }
@@ -1408,6 +1485,12 @@ pub fn attach_cmd(team_name: &str) {
         built = true;
         for name in skipped {
             eprintln!("! {name}: no attachable engine identity — not rendered");
+        }
+    } else {
+        // A member spawned after the window was built has no pane yet —
+        // fold it into the existing display instead of leaving it headless.
+        for name in _backfill_missing_member_panes(&window, &entry) {
+            eprintln!("+ {name}: rendered into the existing window");
         }
     }
     let ws = map_str(&entry, "workspace");
@@ -2735,6 +2818,31 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_attach_backfills_only_missing_attachable_members() {
+        let member = |name: &str, cli: &str, sid: &str| -> Map<String, Value> {
+            let mut m = Map::new();
+            m.insert("name".to_string(), Value::from(name));
+            m.insert("cli".to_string(), Value::from(cli));
+            m.insert("sessionId".to_string(), Value::from(sid));
+            m
+        };
+        let rendered: std::collections::HashSet<String> =
+            ["orch".to_string(), "scout".to_string()].into();
+        let picked = _members_to_backfill(
+            &rendered,
+            vec![
+                member("orch", "claude", "sid-1"),   // already rendered
+                member("scout", "claude", "sid-2"),  // already rendered
+                member("sage", "grok", "sid-3"),     // missing -> backfill
+                member("ghost", "grok", ""),         // no engine identity
+                member("shelly", "bash", "sid-4"),   // not an agent CLI
+            ],
+        );
+        let names: Vec<String> = picked.iter().map(|m| map_str(m, "name")).collect();
+        assert_eq!(names, vec!["sage".to_string()]);
     }
 
     // --- tests/unit/test_launcher_opt_values.py ---
