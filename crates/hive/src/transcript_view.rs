@@ -14,7 +14,7 @@
 //! The TUI renders the blocks; the plain non-tty stream below renders the
 //! same blocks to the legacy ANSI line format.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -871,6 +871,7 @@ pub struct TranscriptParser {
     model: Option<String>,
     effort: Option<String>,
     agent_icons: HashMap<String, char>,
+    queued_texts: HashSet<String>,
 }
 
 impl Default for TranscriptParser {
@@ -918,6 +919,7 @@ impl TranscriptParser {
             tokens: 0,
             busy: false,
             agent_icons: HashMap::new(),
+            queued_texts: HashSet::new(),
             model: None,
             effort: None,
         }
@@ -1039,6 +1041,51 @@ impl TranscriptParser {
         }
     }
 
+    /// A message that arrived while the turn was already running: claude
+    /// queues it, folds it into the turn, and records it *only* as a
+    /// `queued_command` attachment — no `user` row ever follows. Peer HIVE
+    /// envelopes and the human's own mid-turn messages both land here, so a
+    /// viewer that reads only `user` rows silently drops them.
+    ///
+    /// System plumbing (task notifications, which carry no origin) stays out
+    /// of the transcript.
+    fn push_queued_command(&mut self, row: &Value, out: &mut Vec<Entry>) {
+        let att = match row.get("attachment") {
+            Some(a) if a.get("type").and_then(Value::as_str) == Some("queued_command") => a,
+            _ => return,
+        };
+        let Some(prompt) = att.get("prompt").and_then(Value::as_str) else {
+            return;
+        };
+        let from_human = att
+            .get("origin")
+            .and_then(|o| o.get("kind"))
+            .and_then(Value::as_str)
+            == Some("human");
+        let hive = parse_hive_message(prompt).map(|mut m| {
+            m.icon = m.from.clone().map(|sender| self.agent_icon(&sender));
+            m
+        });
+        if hive.is_none() && !from_human {
+            return;
+        }
+        // The same text sometimes also lands as a `user` row; show it once.
+        self.queued_texts.insert(prompt.trim().to_string());
+        let ts = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp);
+        self.drain_all(out);
+        out.push(Entry {
+            id: self.alloc_id(),
+            block: DisplayBlock::User(UserBlock {
+                text: prompt.to_string(),
+                hive,
+                timestamp: ts,
+            }),
+        });
+    }
+
     /// Feed one raw JSONL line; returns the blocks it finalized, in order.
     pub fn push(&mut self, raw: &str) -> Vec<DisplayBlock> {
         self.push_entries(raw)
@@ -1055,6 +1102,10 @@ impl TranscriptParser {
             Err(_) => return out,
         };
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind == "attachment" {
+            self.push_queued_command(&row, &mut out);
+            return out;
+        }
         if kind != "user" && kind != "assistant" {
             return out;
         }
@@ -1119,20 +1170,24 @@ impl TranscriptParser {
                         self.turn_start_ms = ts.as_ref().map(|t| t.epoch_ms);
                         self.last_assistant_text_ms = None;
                         self.turn_has_assistant_text = false;
-                        out.push(Entry {
-                            id: self.alloc_id(),
-                            block: DisplayBlock::User(UserBlock {
-                                text: body.to_string(),
-                                hive: parse_hive_message(body).map(|mut m| {
-                                    m.icon = m
-                                        .from
-                                        .clone()
-                                        .map(|sender| self.agent_icon(&sender));
-                                    m
+                        // A queued message already rendered from its
+                        // attachment row; do not draw it twice.
+                        if !self.queued_texts.remove(body) {
+                            out.push(Entry {
+                                id: self.alloc_id(),
+                                block: DisplayBlock::User(UserBlock {
+                                    text: body.to_string(),
+                                    hive: parse_hive_message(body).map(|mut m| {
+                                        m.icon = m
+                                            .from
+                                            .clone()
+                                            .map(|sender| self.agent_icon(&sender));
+                                        m
+                                    }),
+                                    timestamp: ts.clone(),
                                 }),
-                                timestamp: ts.clone(),
-                            }),
-                        });
+                            });
+                        }
                         self.busy = true;
                     } else {
                         out.push(Entry {
@@ -1658,6 +1713,68 @@ mod tests {
             }
             other => panic!("expected User, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_mid_turn_queued_command_is_the_fifth_carrier() {
+        let mut p = TranscriptParser::new();
+        // A peer envelope absorbed into a running turn: claude records it
+        // only as this attachment — no user row ever follows.
+        let out = p.push(
+            &json!({
+                "type": "attachment",
+                "timestamp": "2026-08-30T13:00:12.311Z",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "<HIVE from=scout to=orch msgId=b255>\nscout 报到\n</HIVE>",
+                    "origin": {"kind": "peer", "from": "honey.orch"},
+                    "isMeta": true,
+                },
+            })
+            .to_string(),
+        );
+        match &out[0] {
+            DisplayBlock::User(u) => {
+                let h = u.hive.as_ref().expect("peer envelope");
+                assert_eq!(h.from.as_deref(), Some("scout"));
+                assert_eq!(h.body, "scout 报到");
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+        // The human's own mid-turn message lands the same way.
+        let out = p.push(
+            &json!({
+                "type": "attachment",
+                "timestamp": "2026-08-30T13:00:20.000Z",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "顺便把 badge 挪一下",
+                    "origin": {"kind": "human"},
+                },
+            })
+            .to_string(),
+        );
+        assert!(matches!(&out[0], DisplayBlock::User(u) if u.hive.is_none()));
+        // …and when it also shows up as a user row, it draws only once.
+        let again = p.push(&_row("user", json!("顺便把 badge 挪一下"), None));
+        assert!(
+            !again
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::User(_))),
+            "{again:?}"
+        );
+        // Runtime plumbing carries no origin and stays out.
+        let noise = p.push(
+            &json!({
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": "<task-notification>\n<task-id>abc</task-id>",
+                },
+            })
+            .to_string(),
+        );
+        assert!(noise.is_empty(), "{noise:?}");
     }
 
     #[test]
