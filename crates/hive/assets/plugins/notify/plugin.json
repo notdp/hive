@@ -1,0 +1,4 @@
+{
+  "name": "notify",
+  "description": "Toggle the hived idle watcher. Manual `hive notify` stays available either way."
+}

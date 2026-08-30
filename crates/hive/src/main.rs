@@ -5,6 +5,7 @@ mod bus;
 mod cli;
 mod context;
 mod core_hooks;
+mod cvim;
 mod devlog;
 mod draft_guard;
 mod flow;

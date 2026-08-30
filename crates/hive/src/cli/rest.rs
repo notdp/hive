@@ -1051,15 +1051,49 @@ pub fn layout_cmd(preset: &str) {
 // flow
 // ---------------------------------------------------------------------------
 
+/// The `python3 -c` shell around the script: runpy like the Python-era
+/// command, with FlowError surfaced as a clean CLI failure (`_fail`).
+const FLOW_RUNNER: &str = r#"import runpy, sys
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+try:
+    runpy.run_path(script, run_name="__main__")
+except SystemExit:
+    raise
+except Exception as exc:
+    from hive.flow import FlowError
+    if isinstance(exc, FlowError):
+        sys.stderr.write(f"Error: {exc}\n")
+        sys.exit(1)
+    raise
+"#;
+
 pub fn flow_run_cmd(script: &str) {
     let _ = ok_or_fail(resolve_scoped_team(None, true));
     let script_path = std::fs::canonicalize(script)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| script.to_string());
-    // ponytail: flow scripts are trusted Python programs (`from hive.flow
-    // import agent`); the Rust binary delegates to the interpreter instead of
-    // Python's in-process runpy. Upgrade path: a Rust-native flow DSL.
-    execvp("python3", &[script_path]);
+    // ponytail: flow scripts are trusted Python programs; the binary
+    // delegates to the interpreter instead of in-process runpy. Upgrade
+    // path: a Rust-native flow DSL. The script's `from hive.flow import
+    // agent` resolves against the materialized pylib client, which calls
+    // back into this binary (hidden `flow-op` subcommands via $HIVE_BIN)
+    // for every hive interaction.
+    let pylib = ok_or_fail(crate::flow::materialize_pylib())
+        .to_string_lossy()
+        .into_owned();
+    let pythonpath = match std::env::var("PYTHONPATH") {
+        Ok(existing) if !existing.is_empty() => format!("{pylib}:{existing}"),
+        _ => pylib,
+    };
+    std::env::set_var("PYTHONPATH", pythonpath);
+    if let Ok(exe) = std::env::current_exe() {
+        std::env::set_var("HIVE_BIN", exe);
+    }
+    execvp(
+        "python3",
+        &["-c".to_string(), FLOW_RUNNER.to_string(), script_path],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,15 +1475,17 @@ pub fn capture(member_name: &str, lines: i64) {
 // ---------------------------------------------------------------------------
 
 fn _cvim_binary() -> PathBuf {
-    // ponytail: locate, don't embed — the cvim toolkit is a multi-file
-    // bash+python asset tree. Env override for installs; dev-checkout
-    // fallback beside this crate. Integration pass owns the final layout.
+    // The toolkit is embedded in this binary and materialized to
+    // `$HIVE_HOME/core_assets/cvim/` at first use; HIVE_CORE_ASSETS stays as
+    // the dev escape hatch pointing at an external asset tree.
     let overridden = env_string("HIVE_CORE_ASSETS");
     if !overridden.is_empty() {
         return PathBuf::from(overridden).join("cvim/bin/cvim-command");
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/hive/core_assets/cvim/bin/cvim-command")
+    match crate::cvim::materialize_assets() {
+        Ok(path) => path,
+        Err(err) => fail(&format!("cannot materialize cvim assets: {err}")),
+    }
 }
 
 fn _exec_cvim(mode: &str, args: &[String]) -> ! {
@@ -1459,9 +1495,12 @@ fn _exec_cvim(mode: &str, args: &[String]) -> ! {
     if let Some(pane) = tmux::get_current_pane_id().filter(|pane| !pane.is_empty()) {
         std::env::set_var("TMUX_PANE", pane);
     }
-    // Python exports HIVE_PYTHON=sys.executable for the script's callbacks;
-    // the Rust binary carries no interpreter, so the script's own `python3`
-    // default applies.
+    // The script's helper callbacks are hidden subcommands of this binary
+    // (the Python original exported HIVE_PYTHON for the same reason); a bare
+    // `hive` on the pane's PATH is only the script's fallback.
+    if let Ok(exe) = std::env::current_exe() {
+        std::env::set_var("HIVE_BIN", exe);
+    }
     let mut argv: Vec<String> = vec![
         _cvim_binary().to_string_lossy().into_owned(),
         mode.to_string(),

@@ -242,33 +242,22 @@ impl Member {
 
     /// Retire the member's pane; the window re-tiles.
     pub fn kill(&mut self, env: &dyn FlowEnv) -> Result<(), FlowError> {
-        let ctx = env.context()?;
-        {
-            let _guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            env.kill_team_agent(&self.name);
-            if !ctx.tmux_window.is_empty() {
-                env.apply_adaptive(&ctx.tmux_window);
-            }
-        }
+        kill_member(env, &self.name)?;
         self.dead = true;
         log(&format!("{} retired", self.name));
         Ok(())
     }
 }
 
-/// Spawn a member, dispatch `prompt` as its task, block for its reply.
-///
-/// The prompt is the whole contract — write it self-contained (scope,
-/// deliverable path, acceptance, material paths). It is written to
-/// `<workspace>/artifacts/tasks/<name>.md` and dispatched with the
-/// same atomic skeleton as `hive spawn --task`.
-pub fn agent(
+/// The spawn phase of `agent()`: flow/flow.* name guard plus the bounded
+/// retry loop, each attempt serialized under the process-local spawn lock
+/// (the script client adds cross-process serialization with its own lock).
+fn spawn_member(
     env: &dyn FlowEnv,
-    prompt: &str,
     name: &str,
     cli: Option<&str>,
     model: &str,
-) -> Result<Member, FlowError> {
+) -> Result<SpawnedAgent, FlowError> {
     if name == "flow" || name.starts_with("flow.") {
         return Err(FlowError(format!(
             "'{name}' collides with the flow runner's mailbox address kind ({FLOW_SENDER}); pick another member name"
@@ -276,17 +265,13 @@ pub fn agent(
     }
     let ctx = env.context()?;
     let mut last = String::new();
-    let mut spawned: Option<SpawnedAgent> = None;
     for attempt in 0..DISPATCH_ATTEMPTS {
         let result = {
             let _guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
             env.spawn_team_agent(&ctx.team_name, name, model, "", "hive:hive", cli)
         };
         match result {
-            Ok(agent) => {
-                spawned = Some(agent);
-                break;
-            }
+            Ok(agent) => return Ok(agent),
             Err(exc) => {
                 // A cloud transport (codex mint, grok leader) fails fast under
                 // provider throttling; absorb blips here instead of widening
@@ -302,15 +287,16 @@ pub fn agent(
             env.sleep(DISPATCH_RETRY_GAP);
         }
     }
-    let spawned = spawned.ok_or_else(|| {
-        FlowError(format!(
-            "spawn '{name}' failed after {DISPATCH_ATTEMPTS} attempts: {last}"
-        ))
-    })?;
-    log(&format!("{name} spawned in {}", spawned.pane_id));
+    Err(FlowError(format!(
+        "spawn '{name}' failed after {DISPATCH_ATTEMPTS} attempts: {last}"
+    )))
+}
 
+/// The post-spawn phase of `agent()`: hived convergence plus the ready gate.
+fn ready_gate(env: &dyn FlowEnv, name: &str, cli: &str) -> Result<(), FlowError> {
+    let ctx = env.context()?;
     env.ensure_team_hived(&ctx.workspace);
-    if spawned.cli != "claude" {
+    if cli != "claude" {
         // claude inboxes queue; only TUI-injected CLIs need the ready gate.
         let mut agents = HashSet::new();
         agents.insert(name.to_string());
@@ -321,6 +307,36 @@ pub fn agent(
             )));
         }
     }
+    Ok(())
+}
+
+/// Retire a member's pane and re-tile the window (`Member::kill` body).
+fn kill_member(env: &dyn FlowEnv, name: &str) -> Result<(), FlowError> {
+    let ctx = env.context()?;
+    let _guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    env.kill_team_agent(name);
+    if !ctx.tmux_window.is_empty() {
+        env.apply_adaptive(&ctx.tmux_window);
+    }
+    Ok(())
+}
+
+/// Spawn a member, dispatch `prompt` as its task, block for its reply.
+///
+/// The prompt is the whole contract — write it self-contained (scope,
+/// deliverable path, acceptance, material paths). It is written to
+/// `<workspace>/artifacts/tasks/<name>.md` and dispatched with the
+/// same atomic skeleton as `hive spawn --task`.
+pub fn agent(
+    env: &dyn FlowEnv,
+    prompt: &str,
+    name: &str,
+    cli: Option<&str>,
+    model: &str,
+) -> Result<Member, FlowError> {
+    let spawned = spawn_member(env, name, cli, model)?;
+    log(&format!("{name} spawned in {}", spawned.pane_id));
+    ready_gate(env, name, &spawned.cli)?;
 
     let artifact = task_artifact(env, name, prompt)?;
     let artifact_name = Path::new(&artifact)
@@ -561,6 +577,101 @@ impl FlowEnv for RealEnv {
     fn sleep(&self, seconds: f64) {
         std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
     }
+}
+
+// ---------------------------------------------------------------------------
+// script bridge: materialized python client + hidden `hive flow-op` surface
+// ---------------------------------------------------------------------------
+
+const PYLIB_INIT: &str = include_str!("../assets/pylib/hive/__init__.py");
+const PYLIB_FLOW: &str = include_str!("../assets/pylib/hive/flow.py");
+
+/// Write the embedded flow-client python tree under
+/// `$HIVE_HOME/core_assets/pylib/` (heal-on-drift, like the cvim assets) and
+/// return the directory `hive flow run` prepends to PYTHONPATH.
+pub fn materialize_pylib() -> anyhow::Result<std::path::PathBuf> {
+    let root = crate::core_hooks::hive_home()
+        .join("core_assets")
+        .join("pylib");
+    crate::core_hooks::materialize_asset_tree(
+        &root,
+        &[
+            ("hive/__init__.py", PYLIB_INIT, false),
+            ("hive/flow.py", PYLIB_FLOW, false),
+        ],
+    )?;
+    Ok(root)
+}
+
+/// Hidden `hive flow-op <op> [json-args]` — the seams the materialized
+/// python client calls back into. stdout protocol: `[flow] …` progress
+/// lines stream through, the final line is one JSON object
+/// (`{"ok": true, …}` on success, `{"ok": false, "error": …}` + exit 1).
+pub fn op_main(args: &[String]) -> i32 {
+    let Some(op) = args.first() else {
+        eprintln!("usage: hive flow-op <op> [json-args]");
+        return 2;
+    };
+    let payload: Value = match args.get(1) {
+        Some(raw) => match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(err) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": format!("bad flow-op args: {err}")})
+                );
+                return 1;
+            }
+        },
+        None => Value::Object(Map::new()),
+    };
+    let env = RealEnv::new();
+    match run_op(&env, op, &payload) {
+        Ok(mut result) => {
+            result.insert("ok".to_string(), Value::Bool(true));
+            println!("{}", Value::Object(result));
+            0
+        }
+        Err(err) => {
+            println!("{}", serde_json::json!({"ok": false, "error": err.0}));
+            1
+        }
+    }
+}
+
+fn run_op(env: &dyn FlowEnv, op: &str, args: &Value) -> Result<Map<String, Value>, FlowError> {
+    let str_arg = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut result = Map::new();
+    match op {
+        "context" => {
+            let ctx = env.context()?;
+            result.insert("teamName".to_string(), Value::String(ctx.team_name));
+            result.insert("workspace".to_string(), Value::String(ctx.workspace));
+        }
+        "spawn" => {
+            let cli = args
+                .get("cli")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let spawned = spawn_member(env, &str_arg("name"), cli, &str_arg("model"))?;
+            result.insert("pane".to_string(), Value::String(spawned.pane_id));
+            result.insert("cli".to_string(), Value::String(spawned.cli));
+        }
+        "ready" => ready_gate(env, &str_arg("name"), &str_arg("cli"))?,
+        "dispatch" => {
+            let msg_id = dispatch(env, &str_arg("name"), &str_arg("body"), &str_arg("artifact"))?;
+            result.insert("msgId".to_string(), Value::String(msg_id));
+        }
+        "wait-reply" => {
+            let row = await_reply(env, &str_arg("name"), &str_arg("msgId"))?;
+            result.insert("body".to_string(), Value::String(row.body));
+            result.insert("artifact".to_string(), Value::String(row.artifact));
+            result.insert("msgId".to_string(), Value::String(row.msg_id));
+        }
+        "kill" => kill_member(env, &str_arg("name"))?,
+        _ => return Err(FlowError(format!("unknown flow op '{op}'"))),
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1001,5 +1112,104 @@ mod tests {
             let err = agent(&env, "task", name, None, "").unwrap_err();
             assert!(err.0.contains("mailbox address kind"), "{err}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // flow-op bridge
+    // -----------------------------------------------------------------------
+
+    use serde_json::json;
+
+    #[test]
+    fn test_run_op_covers_the_script_client_protocol() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+
+        let r = run_op(&env, "context", &json!({})).unwrap();
+        assert_eq!(r.get("teamName"), Some(&Value::String("t-x".into())));
+        assert_eq!(
+            r.get("workspace"),
+            Some(&Value::String(
+                env.workspace.to_string_lossy().into_owned()
+            ))
+        );
+
+        let r = run_op(&env, "spawn", &json!({"name": "impl", "cli": null, "model": ""})).unwrap();
+        assert_eq!(r.get("pane"), Some(&Value::String("%1".into())));
+        assert_eq!(r.get("cli"), Some(&Value::String("claude".into())));
+
+        run_op(&env, "ready", &json!({"name": "impl", "cli": "claude"})).unwrap();
+
+        let r = run_op(
+            &env,
+            "dispatch",
+            &json!({"name": "impl", "body": "b", "artifact": ""}),
+        )
+        .unwrap();
+        assert_eq!(r.get("msgId"), Some(&Value::String("m1".into())));
+        let dispatches = env.dispatches.lock().unwrap();
+        assert_eq!(dispatches[0].sender_agent, "flow.run");
+        assert_eq!(dispatches[0].target_agent, "impl");
+        drop(dispatches);
+
+        env.replies
+            .lock()
+            .unwrap()
+            .insert("m1".to_string(), reply_row("done", "/tmp/f.md", "r1"));
+        let r = run_op(&env, "wait-reply", &json!({"name": "impl", "msgId": "m1"})).unwrap();
+        assert_eq!(r.get("body"), Some(&Value::String("done".into())));
+        assert_eq!(r.get("artifact"), Some(&Value::String("/tmp/f.md".into())));
+        assert_eq!(r.get("msgId"), Some(&Value::String("r1".into())));
+
+        env.agents.lock().unwrap().push("impl".to_string());
+        run_op(&env, "kill", &json!({"name": "impl"})).unwrap();
+        assert_eq!(
+            *env.killed.lock().unwrap(),
+            vec!["impl".to_string(), "layout dev:0".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_run_op_ready_gates_non_claude_and_skips_claude() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.ready = false;
+        run_op(&env, "ready", &json!({"name": "impl", "cli": "claude"})).unwrap();
+        let err = run_op(&env, "ready", &json!({"name": "impl", "cli": "codex"})).unwrap_err();
+        assert!(err.0.contains("did not reach ready"), "{err}");
+    }
+
+    #[test]
+    fn test_run_op_spawn_rejects_the_mailbox_name_family() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        for name in ["flow", "flow.run", "flow.anything"] {
+            let err = run_op(&env, "spawn", &json!({"name": name, "model": ""})).unwrap_err();
+            assert!(err.0.contains("mailbox address kind"), "{err}");
+        }
+        assert!(env.spawns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_run_op_unknown_op_is_loud() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let err = run_op(&env, "bogus", &json!({})).unwrap_err();
+        assert_eq!(err.0, "unknown flow op 'bogus'");
+    }
+
+    #[test]
+    fn test_materialize_pylib_writes_and_heals_the_tree() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path());
+        let root = materialize_pylib().unwrap();
+        assert!(root.ends_with("core_assets/pylib"));
+        assert!(root.join("hive/__init__.py").exists());
+        let flow_py = root.join("hive/flow.py");
+        let embedded = fs::read_to_string(&flow_py).unwrap();
+        assert!(embedded.contains("FLOW_SENDER = \"flow.run\""));
+        fs::write(&flow_py, "drifted").unwrap();
+        materialize_pylib().unwrap();
+        assert_eq!(fs::read_to_string(&flow_py).unwrap(), embedded);
     }
 }

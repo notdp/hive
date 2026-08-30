@@ -31,7 +31,7 @@ static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
     name: "notify",
     files: &[(
         "plugin.json",
-        include_str!("../../../src/hive/plugins/notify/plugin.json"),
+        include_str!("../assets/plugins/notify/plugin.json"),
     )],
 }];
 

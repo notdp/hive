@@ -2332,6 +2332,23 @@ pub fn main() {
     let invoked = args[0].clone();
     let tail: Vec<String> = args.iter().skip(1).cloned().collect();
 
+    // Hidden helper subcommands, never listed in help: the cvim toolkit
+    // (called back into by the materialized `cvim-command` bash asset) and
+    // the flow-op bridge (called by the materialized pylib flow client),
+    // both via $HIVE_BIN. They replace standalone Python beside the old
+    // asset trees, so they dispatch before the known-command gate and skip
+    // the root gates.
+    match invoked.as_str() {
+        "cvim-sendback" => std::process::exit(crate::cvim::sendback_main(&tail)),
+        "cvim-payload" => std::process::exit(crate::cvim::payload_main(&tail)),
+        "cvim-list" => std::process::exit(crate::cvim::list_main(&tail)),
+        "cvim-seed" => std::process::exit(crate::cvim::seed_main(&tail)),
+        "cvim-session" => std::process::exit(crate::cvim::session_main(&tail)),
+        "cvim-profile" => std::process::exit(crate::cvim::profile_main(&tail)),
+        "flow-op" => std::process::exit(crate::flow::op_main(&tail)),
+        _ => {}
+    }
+
     // Click resolves the subcommand before the group callback runs, so an
     // unknown command errors before any tmux/codex gate fires.
     if !_KNOWN_COMMANDS.contains(&invoked.as_str()) && !invoked.starts_with('-') {
