@@ -352,6 +352,10 @@ fn patch_bg(line: Line<'static>, inner_w: usize, bg: Color) -> Line<'static> {
     cells_to_line(&cells)
 }
 
+/// What a user message leads with (Nerd Font md-forum): the human's turn,
+/// marked the same way a peer's turn carries its agent avatar.
+const USER_ICON: &str = "\u{f028c} ";
+
 /// One rendered entry plus whether Left/Right can fold it at all.
 struct Rendered {
     lines: Vec<Line<'static>>,
@@ -382,7 +386,7 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     let mut out = Vec::new();
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
     for (i, text) in vis.iter().enumerate() {
-        let prefix = if i == 0 { "❯ " } else { "  " };
+        let prefix = if i == 0 { USER_ICON } else { "  " };
         let mut spans = vec![
             Span::styled(prefix.to_string(), fg(t.accent_user).bg(t.bg_light)),
             Span::styled(text.clone(), fg(t.text_primary).bg(t.bg_light)),
@@ -407,10 +411,44 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     }
 }
 
-/// A HIVE envelope. The tag becomes a header — `✉ from`, ids and clock
+/// How a peer message separates itself from an ordinary user band: its own
+/// band colour plus a rail glyph in the left margin. Three candidates while
+/// the look is being chosen (`HIVE_VIEW_BAND=1|2|3`).
+fn hive_band_style(t: &ViewTheme) -> (Color, char, Color) {
+    let accent = t.accent_model;
+    match std::env::var("HIVE_VIEW_BAND").ok().as_deref() {
+        // 2 — rail plus a shallow neutral fill, halfway to the user band.
+        Some("2") => (blend(t.bg_base, t.bg_light, 0.45), '▏', accent),
+        // 1 (default) — rail only. The contrast against a user message is
+        // structural: theirs is a filled band, a peer's is an open rail.
+        _ => (t.bg_base, '▏', accent),
+    }
+}
+
+/// Band row for a peer message: rail glyph in the margin, everything on the
+/// hive band colour.
+fn hive_line(bg: Color, rail: char, rail_fg: Color, spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
+    let band = Style::default().bg(bg);
+    let mut all = vec![
+        Span::styled(" ".to_string(), band),
+        Span::styled(rail.to_string(), Style::default().fg(rail_fg).bg(bg)),
+        Span::styled(" ".to_string(), band),
+    ];
+    all.extend(spans);
+    let line = Line::from(all);
+    let used = cells_width(&line_cells(&line));
+    let mut all = line.spans;
+    if inner_w > used {
+        all.push(Span::styled(" ".repeat(inner_w - used), band));
+    }
+    Line::from(all)
+}
+
+/// A HIVE envelope. The tag becomes a header — the sender, ids and clock
 /// on the right — the body reads as plain text, and `artifact=` gets its own
 /// line. Whatever wrapper carried it (claude's peer-message injection, the
-/// retired `<channel>` block) never reaches the screen.
+/// retired `<channel>` block) never reaches the screen. The whole block sits
+/// on its own band so peer traffic never reads as something the human typed.
 fn render_hive(
     t: &ViewTheme,
     u: &UserBlock,
@@ -418,17 +456,20 @@ fn render_hive(
     inner_w: usize,
     expanded: bool,
 ) -> Rendered {
-    let band = Style::default().bg(t.bg_light);
+    let (bg, rail, rail_fg) = hive_band_style(t);
+    let band = Style::default().bg(bg);
+    let line = |spans: Vec<Span<'static>>| hive_line(bg, rail, rail_fg, spans, inner_w);
     let cw = inner_w.saturating_sub(ROW_CHROME);
     let bw = cw.saturating_sub(2).max(8);
 
-    let mut head: Vec<Span<'static>> = vec![
-        Span::styled("✉ ".to_string(), fg(t.accent_user).bg(t.bg_light)),
-        Span::styled(
-            msg.from.clone().unwrap_or_else(|| "peer".to_string()),
-            fg(t.accent_user).bg(t.bg_light).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut head: Vec<Span<'static>> = Vec::new();
+    if let Some(icon) = msg.icon {
+        head.push(Span::styled(format!("{icon} "), fg(rail_fg).bg(bg)));
+    }
+    head.push(Span::styled(
+        msg.from.clone().unwrap_or_else(|| "peer".to_string()),
+        fg(rail_fg).bg(bg).add_modifier(Modifier::BOLD),
+    ));
     let mut tail = String::new();
     if let Some(r) = msg.reply_to.as_deref() {
         tail.push_str(&format!("↩{r} "));
@@ -449,11 +490,8 @@ fn render_hive(
     if !tail.is_empty() {
         let tail_w = UnicodeWidthStr::width(tail.as_str());
         if cw > head_w + tail_w + 2 {
-            head.push(Span::styled(
-                " ".repeat(cw - head_w - tail_w),
-                band,
-            ));
-            head.push(Span::styled(tail, fg(t.gray_dim).bg(t.bg_light)));
+            head.push(Span::styled(" ".repeat(cw - head_w - tail_w), band));
+            head.push(Span::styled(tail, fg(t.gray).bg(bg)));
         }
     }
 
@@ -471,31 +509,20 @@ fn render_hive(
         body.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
 
-    let mut out = vec![band_line(t, Vec::new(), inner_w), band_line(t, head, inner_w)];
+    let mut out = vec![line(Vec::new()), line(head)];
     for text in body {
-        out.push(band_line(
-            t,
-            vec![
-                Span::styled("  ".to_string(), band),
-                Span::styled(text, fg(t.text_primary).bg(t.bg_light)),
-            ],
-            inner_w,
-        ));
+        out.push(line(vec![Span::styled(text, fg(t.text_primary).bg(bg))]));
     }
     if let Some(path) = msg.artifact.as_deref() {
-        out.push(band_line(
-            t,
-            vec![
-                Span::styled("  ↳ ".to_string(), fg(t.gray_dim).bg(t.bg_light)),
-                Span::styled(
-                    clip_plain(path, bw.saturating_sub(4)),
-                    fg(t.link_fg).bg(t.bg_light),
-                ),
-            ],
-            inner_w,
-        ));
+        out.push(line(vec![
+            Span::styled("↳ ".to_string(), fg(t.gray).bg(bg)),
+            Span::styled(
+                clip_plain(path, bw.saturating_sub(2)),
+                fg(t.link_fg).bg(bg),
+            ),
+        ]));
     }
-    out.push(band_line(t, Vec::new(), inner_w));
+    out.push(line(Vec::new()));
     Rendered {
         lines: out,
         foldable,
@@ -1856,6 +1883,11 @@ fn draw_selection_frame(
 /// Composer box height: top border, one input row, bottom border.
 const COMPOSER_H: u16 = 3;
 
+/// Bottom-border lead before the density label. Two dashes, so the label's
+/// first letter lands in the same column as the input row's text (which sits
+/// behind `│ ❯ `).
+const BOTTOM_LEAD: &str = "╰──";
+
 /// grok's composer box (prompt_widget/mod.rs draw): rounded `╭─╮` top and
 /// `╰─╯` bottom dividers with `│` sides on prompt_border (active shade while
 /// the palette is typing into it), content inset 2 cols, `❯ ` prefix —
@@ -1894,21 +1926,24 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
         let badge_w = cells_width(&line_cells(&Line::from(badge.clone())));
         let mode = format!(" {} ", app.fold.density.label());
         let mode_w = UnicodeWidthStr::width(mode.as_str());
-        let fill = (w as isize) - 4 - mode_w as isize - badge_w as isize;
+        // BOTTOM_LEAD + mode + fill + badge + "─╯" spans the full width.
+        let fill = (w as isize) - (BOTTOM_LEAD.chars().count() + 2) as isize
+            - mode_w as isize
+            - badge_w as isize;
         if fill >= 1 {
             let mut spans = vec![
-                Span::styled("╰─".to_string(), border),
+                Span::styled(BOTTOM_LEAD.to_string(), border),
                 Span::styled(mode, fg(t.gray)),
                 Span::styled("─".repeat(fill as usize), border),
             ];
             spans.extend(badge);
             spans.push(Span::styled("─╯".to_string(), border));
             Line::from(spans)
-        } else if w >= mode_w + 5 {
+        } else if w >= mode_w + 6 {
             let spans = vec![
-                Span::styled("╰─".to_string(), border),
+                Span::styled(BOTTOM_LEAD.to_string(), border),
                 Span::styled(mode, fg(t.gray)),
-                Span::styled("─".repeat(w - 3 - mode_w), border),
+                Span::styled("─".repeat(w - 4 - mode_w), border),
                 Span::styled("╯".to_string(), border),
             ];
             Line::from(spans)
@@ -2415,7 +2450,9 @@ mod tests {
             })
             .collect();
         assert!(band_rows.len() >= 3, "vpad + content rows: {band_rows:?}");
-        let prompt_row = (0..H).find(|&y| row_text(&buf, y).contains('❯')).unwrap();
+        let prompt_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains(USER_ICON.trim_end()))
+            .unwrap();
         assert!(band_rows.contains(&prompt_row));
         assert!(band_rows.contains(&(prompt_row - 1)), "vpad above");
         for &y in &band_rows {
@@ -2459,11 +2496,14 @@ mod tests {
             Some(Color::Rgb(238, 238, 238))
         );
         // User band uses the grokday highlight bg with dark primary text.
-        let prompt_row = (0..H).find(|&y| row_text(&buf, y).contains('❯')).unwrap();
+        let icon = USER_ICON.trim_end();
+        let prompt_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains(icon))
+            .unwrap();
         let band_cell = buf.cell((2, prompt_row)).unwrap();
         assert_eq!(band_cell.style().bg, Some(Color::Rgb(222, 222, 222)));
         let prompt_x = (0..W)
-            .find(|&x| buf.cell((x, prompt_row)).unwrap().symbol() == "❯")
+            .find(|&x| buf.cell((x, prompt_row)).unwrap().symbol() == icon)
             .unwrap();
         let body_cell = buf.cell((prompt_x + 2, prompt_row)).unwrap();
         assert_eq!(body_cell.style().fg, Some(Color::Rgb(38, 38, 38)));
@@ -2520,7 +2560,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("Worked for 4m6s"), "{text}");
         // the tag becomes a header, never raw source.
-        assert!(text.contains("✉ comb.dodo"), "{text}");
+        assert!(text.contains("comb.dodo"), "{text}");
         assert!(!text.contains("comb.rex"), "{text}");
         assert!(!text.contains("<HIVE"), "{text}");
         assert!(text.contains("review the spec"), "{text}");
@@ -2541,7 +2581,7 @@ mod tests {
         ));
         let buf = draw_to_buffer(&mut app, W, H);
         let text = buffer_text(&buf);
-        assert!(text.contains("✉ sage"), "{text}");
+        assert!(text.contains("sage"), "{text}");
         assert!(!text.contains("orch"), "{text}");
         assert!(text.contains("done: Exclusive<T> landed"), "{text}");
         assert!(text.contains("↩65cE"), "{text}");
@@ -3219,7 +3259,14 @@ mod tests {
         // bottom border carries the Ctrl+O density mode on the left and the
         // model badge on the right — no read-only marker there.
         let border_row = row_text(&buf, H - 4);
-        assert!(border_row.contains("╰─ Normal ─"), "{border_row:?}");
+        assert!(border_row.contains("╰── Normal ─"), "{border_row:?}");
+        // the label's first letter sits in the input row's text column.
+        let mode_col = border_row.chars().position(|c| c == 'N').unwrap();
+        let text_col = row_text(&buf, H - 5)
+            .chars()
+            .position(|c| c == 'r')
+            .unwrap();
+        assert_eq!(mode_col, text_col, "{border_row:?}");
         assert!(!border_row.contains("read-only"), "{border_row:?}");
         assert!(!border_row.contains("claude-fable-5"), "{border_row:?}");
         assert!(

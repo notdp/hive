@@ -14,6 +14,7 @@
 //! The TUI renders the blocks; the plain non-tty stream below renders the
 //! same blocks to the legacy ANSI line format.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -215,7 +216,19 @@ pub struct HiveMessage {
     pub injected: bool,
     /// The wrapper said the message folded into a turn already in flight.
     pub mid_turn: bool,
+    /// Which agent avatar this sender drew (see [`AGENT_ICONS`]). Assigned by
+    /// the parser, which is the only layer that sees every sender in a
+    /// transcript and can keep them distinct.
+    pub icon: Option<char>,
 }
+
+/// Agent avatars for HIVE senders (Nerd Font: fa-robot, oct-hubot,
+/// md-robot_happy and its outline, fa-android, fa-reddit_alien,
+/// md-space_invaders). Every sender in a transcript draws a different one
+/// until the pool runs out.
+pub const AGENT_ICONS: [char; 7] = [
+    '\u{ee0d}', '\u{f477}', '\u{f1719}', '\u{f171a}', '\u{f17b}', '\u{f281}', '\u{f0bc9}',
+];
 
 const INJECT_LEAD_MID: &str = "Another Claude session sent a message while you were working:";
 const INJECT_LEAD: &str = "Another Claude session sent a message:";
@@ -277,6 +290,7 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
         body: core[gt + 1..body_end].trim().to_string(),
         injected,
         mid_turn,
+        icon: None,
     };
     for attr in tag.split_whitespace() {
         let Some((key, value)) = attr.split_once('=') else {
@@ -856,6 +870,7 @@ pub struct TranscriptParser {
     busy: bool,
     model: Option<String>,
     effort: Option<String>,
+    agent_icons: HashMap<String, char>,
 }
 
 impl Default for TranscriptParser {
@@ -865,6 +880,33 @@ impl Default for TranscriptParser {
 }
 
 impl TranscriptParser {
+    /// Pick this sender's avatar: hash its name into [`AGENT_ICONS`], then
+    /// walk forward past anything a teammate already took, so a team's
+    /// members never collide until the pool is exhausted. Stable — the same
+    /// transcript always deals the same icons.
+    fn agent_icon(&mut self, sender: &str) -> char {
+        if let Some(&ch) = self.agent_icons.get(sender) {
+            return ch;
+        }
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in sender.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let start = (hash % AGENT_ICONS.len() as u64) as usize;
+        let taken: Vec<char> = self.agent_icons.values().copied().collect();
+        let mut chosen = AGENT_ICONS[start];
+        for step in 0..AGENT_ICONS.len() {
+            let cand = AGENT_ICONS[(start + step) % AGENT_ICONS.len()];
+            if !taken.contains(&cand) {
+                chosen = cand;
+                break;
+            }
+        }
+        self.agent_icons.insert(sender.to_string(), chosen);
+        chosen
+    }
+
     pub fn new() -> Self {
         TranscriptParser {
             pending: Vec::new(),
@@ -875,6 +917,7 @@ impl TranscriptParser {
             turn_has_assistant_text: false,
             tokens: 0,
             busy: false,
+            agent_icons: HashMap::new(),
             model: None,
             effort: None,
         }
@@ -1080,7 +1123,13 @@ impl TranscriptParser {
                             id: self.alloc_id(),
                             block: DisplayBlock::User(UserBlock {
                                 text: body.to_string(),
-                                hive: parse_hive_message(body),
+                                hive: parse_hive_message(body).map(|mut m| {
+                                    m.icon = m
+                                        .from
+                                        .clone()
+                                        .map(|sender| self.agent_icon(&sender));
+                                    m
+                                }),
                                 timestamp: ts.clone(),
                             }),
                         });
@@ -1580,6 +1629,35 @@ mod tests {
         let bald = parse_hive_message("<HIVE>hi</HIVE>").unwrap();
         assert_eq!(bald.from, None);
         assert_eq!(bald.body, "hi");
+    }
+
+    #[test]
+    fn test_every_hive_sender_draws_a_different_agent_icon() {
+        let mut p = TranscriptParser::new();
+        let mut icons = Vec::new();
+        for sender in ["sage", "scout", "dodo", "rex", "validator", "worker", "probe"] {
+            let out = p.push(&_row(
+                "user",
+                json!(format!("<HIVE from={sender} to=orch>hi</HIVE>")),
+                None,
+            ));
+            match &out[0] {
+                DisplayBlock::User(u) => icons.push(u.hive.as_ref().unwrap().icon.unwrap()),
+                other => panic!("expected User, got {other:?}"),
+            }
+        }
+        let mut unique = icons.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), AGENT_ICONS.len(), "{icons:?} collided");
+        // and the same sender keeps its icon.
+        let out = p.push(&_row("user", json!("<HIVE from=sage to=orch>again</HIVE>"), None));
+        match &out[0] {
+            DisplayBlock::User(u) => {
+                assert_eq!(u.hive.as_ref().unwrap().icon.unwrap(), icons[0]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
     }
 
     #[test]
