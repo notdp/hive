@@ -2037,16 +2037,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
         width: inner.width,
         height: 1,
     };
-    // The composer box sits between the scrollback and the hint row; a pane
-    // too short for status + gap + one scroll row + box + hint drops it.
-    let have_box = inner.height >= 2 + gap + COMPOSER_H + 1;
+    // The composer box sits between the scrollback and the hint row with a
+    // one-row breather above the hints (grok spacing); a pane too short for
+    // status + gap + one scroll row + box + breather + hint drops the box.
+    let have_box = inner.height >= 2 + gap + COMPOSER_H + 2;
     let box_rect = have_box.then(|| Rect {
         x: inner.x,
-        y: hint_rect.y - COMPOSER_H,
+        y: hint_rect.y - 1 - COMPOSER_H,
         width: inner.width,
         height: COMPOSER_H,
     });
-    let reserved = 2 + gap + if have_box { COMPOSER_H } else { 0 };
+    let reserved = 2 + gap + if have_box { COMPOSER_H + 1 } else { 0 };
     let scroll_h = inner.height.saturating_sub(reserved);
     let scroll_rect = Rect {
         x: inner.x,
@@ -3062,28 +3063,30 @@ mod tests {
         app.push_raw(&user_row("hi"));
         app.push_raw(&assistant_text_row("ok"));
         let buf = draw_to_buffer(&mut app, W, H);
-        // rows: top border H-5, input H-4, bottom border H-3, hint H-2.
-        assert_eq!(buf.cell((2, H - 5)).unwrap().symbol(), "╭");
-        assert_eq!(buf.cell((W - 3, H - 5)).unwrap().symbol(), "╮");
-        assert_eq!(buf.cell((2, H - 4)).unwrap().symbol(), "│");
-        assert_eq!(buf.cell((W - 3, H - 4)).unwrap().symbol(), "│");
-        assert_eq!(buf.cell((2, H - 3)).unwrap().symbol(), "╰");
-        assert_eq!(buf.cell((W - 3, H - 3)).unwrap().symbol(), "╯");
+        // rows: top border H-6, input H-5, bottom border H-4, breather H-3,
+        // hint H-2.
+        assert_eq!(buf.cell((2, H - 6)).unwrap().symbol(), "╭");
+        assert_eq!(buf.cell((W - 3, H - 6)).unwrap().symbol(), "╮");
+        assert_eq!(buf.cell((2, H - 5)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((W - 3, H - 5)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((2, H - 4)).unwrap().symbol(), "╰");
+        assert_eq!(buf.cell((W - 3, H - 4)).unwrap().symbol(), "╯");
+        assert_eq!(row_text(&buf, H - 3).trim(), "", "breather row");
         // idle: dim border, gray_dim prompt arrow, nothing typed.
         assert_eq!(
-            buf.cell((2, H - 5)).unwrap().style().fg,
+            buf.cell((2, H - 6)).unwrap().style().fg,
             Some(GROKNIGHT.prompt_border)
         );
-        let arrow = buf.cell((4, H - 4)).unwrap();
+        let arrow = buf.cell((4, H - 5)).unwrap();
         assert_eq!(arrow.symbol(), "❯");
         assert_eq!(arrow.style().fg, Some(GROKNIGHT.gray_dim));
         // idle interior: the prompt arrow plus a faint read-only placeholder.
         let interior: String = (6..W - 3)
-            .map(|x| buf.cell((x, H - 4)).unwrap().symbol().to_string())
+            .map(|x| buf.cell((x, H - 5)).unwrap().symbol().to_string())
             .collect();
         assert_eq!(interior.trim(), "read-only", "{interior:?}");
         // model badge embedded on the bottom border, right side.
-        let border_row = row_text(&buf, H - 3);
+        let border_row = row_text(&buf, H - 4);
         assert!(border_row.contains("Fable 5"), "{border_row:?}");
         assert!(!border_row.contains("claude-fable-5"), "{border_row:?}");
         assert!(
@@ -3101,15 +3104,15 @@ mod tests {
         key(&mut app, KeyCode::Char('/'));
         type_str(&mut app, "theme");
         let buf = draw_to_buffer(&mut app, W, H);
-        let mid = row_text(&buf, H - 4);
+        let mid = row_text(&buf, H - 5);
         assert!(mid.contains("❯ /theme"), "input inside the box: {mid:?}");
         // focused chrome: active border + accent_user prompt arrow.
         assert_eq!(
-            buf.cell((2, H - 5)).unwrap().style().fg,
+            buf.cell((2, H - 6)).unwrap().style().fg,
             Some(GROKNIGHT.prompt_border_active)
         );
         assert_eq!(
-            buf.cell((4, H - 4)).unwrap().style().fg,
+            buf.cell((4, H - 5)).unwrap().style().fg,
             Some(GROKNIGHT.accent_user)
         );
         // dropdown panel anchors fully above the box's top border.
@@ -3125,7 +3128,7 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         let buf = draw_to_buffer(&mut app, W, H);
         assert!(
-            !row_text(&buf, H - 4).contains("/theme"),
+            !row_text(&buf, H - 5).contains("/theme"),
             "box back to idle"
         );
     }
