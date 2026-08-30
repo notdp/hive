@@ -448,7 +448,11 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
             t,
             vec![
                 Span::styled("▣ ".to_string(), fg(t.accent_thinking).bg(t.bg_light)),
-                Span::styled(img.label(), fg(t.gray).bg(t.bg_light)),
+                Span::styled(
+                    format!("Image#{}", img.index),
+                    bold(t.text_secondary).bg(t.bg_light),
+                ),
+                Span::styled(format!("  {}", img.describe()), fg(t.gray).bg(t.bg_light)),
             ],
             inner_w,
         ));

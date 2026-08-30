@@ -653,6 +653,9 @@ pub struct ToolBlock {
 /// session — so the block carries only what it takes to describe it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageBlock {
+    /// 1-based position among every picture in the transcript, so one can be
+    /// named — "look at Image#3" — without any way to show it.
+    pub index: usize,
     /// `image/webp`, `image/png`, …
     pub media_type: String,
     /// Decoded size, from the base64 length.
@@ -660,8 +663,13 @@ pub struct ImageBlock {
 }
 
 impl ImageBlock {
-    /// `image/webp · 423 KB`
+    /// `Image#3  image/webp · 423 KB`
     pub fn label(&self) -> String {
+        format!("Image#{}  {}", self.index, self.describe())
+    }
+
+    /// `image/webp · 423 KB`
+    pub fn describe(&self) -> String {
         let kb = self.bytes as f64 / 1024.0;
         let size = if kb >= 1024.0 {
             format!("{:.1} MB", kb / 1024.0)
@@ -674,7 +682,7 @@ impl ImageBlock {
 
 /// Replace every `image` block inside a tool result with a short label, so
 /// the payload never reaches the outcome text.
-fn summarize_images(body: &Value) -> Value {
+fn summarize_images(body: &Value, next_index: &mut usize) -> Value {
     let Some(items) = body.as_array() else {
         return body.clone();
     };
@@ -683,7 +691,8 @@ fn summarize_images(body: &Value) -> Value {
             .iter()
             .map(|item| {
                 if item.get("type").and_then(Value::as_str) == Some("image") {
-                    Value::String(format!("[image {}]", image_block(item).label()))
+                    *next_index += 1;
+                    Value::String(format!("[{}]", image_block(item, *next_index).label()))
                 } else {
                     item.clone()
                 }
@@ -699,9 +708,10 @@ fn base64_bytes(data: &str) -> usize {
 }
 
 /// Describe an `image` content block without carrying its payload.
-fn image_block(block: &Value) -> ImageBlock {
+fn image_block(block: &Value, index: usize) -> ImageBlock {
     let src = block.get("source").unwrap_or(&Value::Null).clone();
     ImageBlock {
+        index,
         media_type: src
             .get("media_type")
             .and_then(Value::as_str)
@@ -941,6 +951,7 @@ pub struct TranscriptParser {
     model: Option<String>,
     effort: Option<String>,
     ultra: bool,
+    image_count: usize,
     agent_icons: HashMap<String, char>,
     queued_texts: HashSet<String>,
 }
@@ -990,6 +1001,7 @@ impl TranscriptParser {
             tokens: 0,
             busy: false,
             ultra: false,
+            image_count: 0,
             agent_icons: HashMap::new(),
             queued_texts: HashSet::new(),
             model: None,
@@ -1319,15 +1331,16 @@ impl TranscriptParser {
         // Pictures belong to the message they arrived with, so they are
         // collected up front and handed to its band rather than becoming
         // blocks of their own.
-        let mut images: Vec<ImageBlock> = if is_user {
-            blocks
+        let mut images: Vec<ImageBlock> = Vec::new();
+        if is_user {
+            for b in blocks
                 .iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
-                .map(image_block)
-                .collect()
-        } else {
-            Vec::new()
-        };
+            {
+                self.image_count += 1;
+                images.push(image_block(b, self.image_count));
+            }
+        }
         // Anchor for thinking durations: the previous row's instant; a second
         // thinking block in the same row measures from this row instead.
         let mut thinking_anchor_ms = self.prev_row_ms;
@@ -1484,7 +1497,8 @@ impl TranscriptParser {
                         // pour a screenshot's base64 into the outcome text,
                         // thousands of wrapped lines of it. Images are
                         // described instead.
-                        None => serde_json::to_string(&summarize_images(body)).unwrap_or_default(),
+                        None => serde_json::to_string(&summarize_images(body, &mut self.image_count))
+                            .unwrap_or_default(),
                     };
                     let is_error = block
                         .get("is_error")
@@ -1539,7 +1553,7 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
 }
 
 fn _user_image_line(img: &ImageBlock) -> String {
-    format!("{DIM}▣ {}{RESET}", img.label())
+    format!("{DIM}▣ {BOLD}Image#{}{RESET}{DIM}  {}{RESET}", img.index, img.describe())
 }
 
 fn _user_line(text: &str) -> String {
@@ -1864,7 +1878,8 @@ mod tests {
                 let img = &u.images[0];
                 assert_eq!(img.media_type, "image/webp");
                 assert_eq!(img.bytes, 3000);
-                assert_eq!(img.label(), "image/webp · 3 KB");
+                assert_eq!(img.index, 1);
+                assert_eq!(img.label(), "Image#1  image/webp · 3 KB");
             }
             other => panic!("expected User, got {other:?}"),
         }
@@ -1922,7 +1937,7 @@ mod tests {
             })
             .expect("a tool outcome");
         assert!(text.contains("here it is"), "{text:.200}");
-        assert!(text.contains("[image image/png"), "{text:.200}");
+        assert!(text.contains("[Image#1  image/png"), "{text:.200}");
         assert!(!text.contains("BBBB"), "payload leaked into the outcome text");
         assert!(text.len() < 1000, "outcome text is {} bytes", text.len());
     }
