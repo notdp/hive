@@ -1560,7 +1560,9 @@ impl App {
 
     fn viewer_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
-        let closes = matches!(code, KeyCode::Esc)
+        // Enter closes as well as opens — the key you reached for to get in
+        // is the one you reach for to get out.
+        let closes = matches!(code, KeyCode::Esc | KeyCode::Enter)
             || (!ctrl && code == KeyCode::Char('q'))
             || (ctrl && code == KeyCode::Char('f'));
         if closes {
@@ -1801,6 +1803,7 @@ fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'sta
     for (i, (k, what)) in [
         ("↑↓", "select"),
         ("←→", "fold"),
+        ("Enter", "open"),
         ("Ctrl+o", "view"),
         ("/", "cmd"),
         ("q", "quit"),
@@ -2131,7 +2134,7 @@ fn draw_viewer(frame: &mut Frame, app: &mut App) {
         height: 1,
     };
     let hint = Line::from(Span::styled(
-        "Esc close · j/k scroll · g/G ends".to_string(),
+        "Enter close · j/k scroll · g/G ends".to_string(),
         fg(t.gray),
     ));
     frame.render_widget(Paragraph::new(hint).style(base), footer);
@@ -2523,12 +2526,11 @@ mod tests {
         let bottom = row_text(&buf, H - 2);
         let trimmed = bottom.trim();
         // grok layout: left-aligned Key:label pairs, │ separators, no model
-        // (the badge moved onto the composer border), no Enter entry.
+        // (the badge moved onto the composer border).
         assert_eq!(
-            trimmed, "↑↓:select  │  ←→:fold  │  Ctrl+o:view  │  /:cmd  │  q:quit",
+            trimmed, "↑↓:select  │  ←→:fold  │  Enter:open  │  Ctrl+o:view  │  /:cmd  │  q:quit",
             "{bottom:?}"
         );
-        assert!(!bottom.contains("Enter"), "{bottom:?}");
         // Left-aligned inside the 2-col inset + 1-space lead.
         let lead = bottom.len() - bottom.trim_start().len();
         assert!(lead <= 4, "{bottom:?}");
@@ -2951,7 +2953,7 @@ mod tests {
         let buf = draw_to_buffer(&mut app, W, H);
         let text = buffer_text(&buf);
         assert!(text.contains("─ Assistant ─"), "{text}");
-        assert!(text.contains("Esc close"), "{text}");
+        assert!(text.contains("Enter close"), "{text}");
         // the popup clears the transcript beneath it
         assert!(text.contains("done"), "viewer shows the block body: {text}");
         assert!(!key(&mut app, KeyCode::Char('q')), "q closes, not quits");
