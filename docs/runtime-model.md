@@ -1,9 +1,9 @@
 # Hive Runtime Model
 
-This document records the current runtime design that Hive actually implements.
-It is intentionally narrower than a full architecture spec. The goal is to pin
-down the meanings, sources, and intended uses of the runtime fields and
-active-turn fork routing that already exist in code.
+This document records the runtime design Hive implements. It is intentionally
+narrower than a full architecture spec: it pins down the meaning, source and
+intended use of each runtime field, and what the delivery transports do with a
+message once it reaches an engine.
 
 ## Scope
 
@@ -106,7 +106,7 @@ names (`crates/hive/src/team.rs:616`).
 
 ## Runtime Field Reference
 
-Every CLI's runtime now comes from a **native source** — the runtime the CLI
+Every CLI's runtime comes from a **native source** — the runtime the CLI
 itself maintains — never from screen scraping or transcript tail heuristics:
 
 - claude: the session registry entry its bg-job engine writes
@@ -229,8 +229,9 @@ Source:
 - codex app-server thread status for a daemon-backed codex pane
 - grok leader notifications for a daemon-backed grok pane
 - claude emits **no** `turnPhase`: the registry `status` carries no turn
-  structure, and the transcript tail probe that used to synthesize one is
-  retired
+  structure, and nothing synthesizes one from the transcript — neither
+  `_claude_job_runtime` (`crates/hive/src/hived.rs:1290`) nor
+  `runtime_from_status` writes the field
 
 Current values:
 
@@ -438,11 +439,13 @@ never becomes a turn of its own. It leaves an `enqueue`, an `attachment` row
 whose `attachment.type` is `queued_command` — carrying the text as `prompt`,
 plus `commandMode: "prompt"`, `source_uuid`, and the lane's `origin`
 (`{"kind":"peer","from":…}` for the inbox socket, `{"kind":"human"}` for the
-daemon reply) — and a terminal `queue-operation` `remove`. From client
-2.1.246 that `remove` carries `reason: "absorbed_mid_turn"`
+daemon reply) — and a terminal `queue-operation` `remove`. On every client
+observed from 2.1.246 that `remove` carries `reason: "absorbed_mid_turn"`
 (`…hive-duo-pr70-claim-test-999a90/afbbecfe-2ba3-48d3-accb-0b57f4d8c617.jsonl:2461-2465`,
-2.1.247); earlier clients write the same terminal `remove` with no `reason`
-(`…hgl-proj/9393a297-….jsonl:71-76`, 2.1.240). There is no `user` row for it.
+2.1.247); on 2.1.241 and earlier the same terminal `remove` carries no
+`reason` (`…hgl-proj/9393a297-….jsonl:71-76`, 2.1.240), so a reader must key
+on the terminal `remove`, not on the reason string. There is no `user` row
+for the absorbed message at all.
 
 That asymmetry is the cost of folding: an absorbed arrival exists in the
 transcript only as an attachment and its queue rows, so nothing downstream —
@@ -608,7 +611,8 @@ non-turn-owning client receives only `thread/status/changed` (and
 events are the sole busy source. A client that connected after a thread went
 active backfills its current status once via `thread/resume`.
 
-Field mapping (notification → runtime field):
+Field mapping (`_apply_status`,
+`crates/hive/src/adapters/codex_app_server.rs:551`):
 
 - `busy`
   - `true` — `thread/status/changed` with `status.type=active`
@@ -633,11 +637,18 @@ read, available from spawn time with no probing and no `unresolved` window.
 ## Grok Native Runtime (leader source)
 
 A born-connected grok pane — hive-spawned, or launched through `hgrok` (the
-`hive shell-init` launcher) — runs a per-pane `grok agent leader` daemon. The
+`hive shell-init` launcher) — runs a `grok agent leader` daemon. The
 TUI attaches to it, and hive attaches as a second client through `grok agent
 --leader stdio`, an ACP JSON-RPC subprocess. `busy` / `inputState` / `turnPhase`
-are folded from that client's notification stream; the emitted payload is tagged
+are folded from that client's notification stream
+(`crates/hive/src/adapters/grok_leader.rs:522`); the emitted payload is tagged
 `_runtimeSource: grok-leader`.
+
+The daemon is keyed by whoever owns it: `m-<team>.<member>` for a member,
+`p<slug>` for a raw `hive grok` pane outside any team
+(`crates/hive/src/adapters/grok_leader.rs:90`). A headless member has no pane
+and is read by member key; everything below holds for both, with "pane"
+standing for whichever key resolves.
 
 The leader keeps every session of the cwd, so which one is *this pane's* is not
 discoverable from it: hive mints the session id at spawn time, passes it as
@@ -670,7 +681,7 @@ Field mapping (notification → runtime field):
   - `ready` — `turn_completed`, `activity: idle`, or any `tool_call_update` (the
     permission it was blocked on has been decided)
   - `unknown` (`inputReason: no_leader_runtime`) — no leader state for the pane.
-    Grok never falls back to the transcript gate: `check_input_gate()` knows
+    Grok never falls back to the transcript gate: `check_input_gate` knows
     only the claude/codex record shapes and reads a pending grok permission
     request as clear.
 
@@ -689,14 +700,16 @@ session warms up.
 `hive send` is the only message verb; threading is automatic. When the
 latest inbound message from the recipient is still unanswered, the send
 is recorded as its reply (carries `replyTo`, exempt from the root
-protocol). Otherwise it is a root send opening a new thread.
+protocol; `crates/hive/src/cli/core_cmds.rs:745`). Otherwise it is a root
+send opening a new thread.
 
 Hive enforces a two-layer protocol for root sends:
 
 - `body`: short summary only
 - `artifact`: detailed content
 
-Current root-body hard failures:
+Current root-body hard failures (`body_warning_hint`,
+`crates/hive/src/runtime_state.rs:49`; limits at `:5-7`):
 
 - body longer than `500` chars
 - body with `3+` lines
@@ -706,17 +719,21 @@ Current root-body hard failures:
   - `- `
   - `* `
 
-This rule applies to root sends. Replies are not subject to these summary-body
-limits.
+An empty body fails too. A reply runs the same check but only prints its hint
+on stderr (`_maybe_warn_long_body`, `crates/hive/src/cli/mod.rs:431`); on a
+root send the verdict is fatal (`_root_send_protocol_error`,
+`crates/hive/src/cli/mod.rs:442`).
 
 ## Why There Is Only One Runtime Doc
 
-This design was split many times during discussion, but the stable part that
-actually shipped is small enough to keep in one place:
+Everything here is one subject seen from different sides — what a member's
+engine reports, and what a message does when it reaches that engine:
 
-- output activity
-- interrupt safety
-- root protocol
-- active-turn fork routing
+- runtime fields (`busy`, `cliAlive`, `inputState`, `turnPhase`) and their
+  native sources
+- delivery: transport acceptance, queue carriage, and the rows it leaves
+- the root send protocol
 
-Keeping these together reduces drift between overlapping docs.
+Splitting them would put the same mechanism in two files and let one of them
+rot. What a read-only observer can recover afterwards is the one part that
+lives elsewhere, in [transcript-view.md](transcript-view.md).

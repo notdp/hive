@@ -373,26 +373,8 @@ fn clip_plain(text: &str, width: usize) -> String {
 
 /// Band row: 3-col margin + spans + fill, everything on `bg_light`.
 fn band_line(t: &ViewTheme, spans: Vec<Span<'static>>, inner_w: usize) -> Line<'static> {
-    band_line_marked(t, None, spans, inner_w)
-}
-
-/// Band row whose 3-column margin can carry a mark — the message icon sits
-/// in that gutter, in the band's corner, so every line of text starts in the
-/// same column instead of hanging off the first one.
-fn band_line_marked(
-    t: &ViewTheme,
-    mark: Option<Span<'static>>,
-    spans: Vec<Span<'static>>,
-    inner_w: usize,
-) -> Line<'static> {
     let band = Style::default().bg(t.bg_light);
-    let mut all = match mark {
-        Some(m) => {
-            let w = UnicodeWidthStr::width(m.content.as_ref());
-            vec![m, Span::styled(" ".repeat(3usize.saturating_sub(w)), band)]
-        }
-        None => vec![Span::styled("   ".to_string(), band)],
-    };
+    let mut all = vec![Span::styled("   ", band)];
     all.extend(spans);
     let line = Line::from(all);
     let used = cells_width(&line_cells(&line));
@@ -424,10 +406,6 @@ fn patch_bg(line: Line<'static>, inner_w: usize, bg: Color) -> Line<'static> {
     cells_to_line(&cells)
 }
 
-/// What a user message leads with (Nerd Font md-forum): the human's turn,
-/// marked the same way a peer's turn carries its agent avatar.
-const USER_ICON: &str = "\u{f028c} ";
-
 /// One rendered entry plus whether Left/Right can fold it at all.
 struct Rendered {
     lines: Vec<Line<'static>>,
@@ -457,18 +435,8 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
         vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
     let mut out = Vec::new();
-    // The icon marks the band's corner: its own row, inset from the top and
-    // left edges so it does not sit against them.
+    // No marker: the band's own background is what says this is the human.
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
-    out.push(band_line_marked(
-        t,
-        Some(Span::styled(
-            format!(" {}", USER_ICON.trim_end()),
-            fg(t.accent_user).bg(t.bg_light),
-        )),
-        Vec::new(),
-        inner_w,
-    ));
     for (i, text) in vis.iter().enumerate() {
         let mut spans = vec![Span::styled(
             text.clone(),
@@ -2694,19 +2662,12 @@ mod tests {
             })
             .collect();
         assert!(band_rows.len() >= 3, "vpad + content rows: {band_rows:?}");
-        // The icon marks the band's first row; the words start under it.
-        let icon_row = (0..H)
-            .find(|&y| row_text(&buf, y).contains(USER_ICON.trim_end()))
+        // A wide glyph leaves a shadow cell behind it, so match one char.
+        let text_row = (0..H)
+            .find(|&y| row_text(&buf, y).contains('宽'))
             .unwrap();
-        assert!(band_rows.contains(&icon_row));
-        // Inset from both edges: a padding row above it, words below.
-        assert_eq!(band_rows[0], icon_row - 1, "vpad above: {band_rows:?}");
-        assert!(band_rows.contains(&(icon_row + 1)), "text under the icon");
-        let icon_col = row_text(&buf, icon_row)
-            .chars()
-            .position(|c| !c.is_whitespace())
-            .unwrap();
-        assert!(icon_col >= 3, "icon hugs the left edge at {icon_col}");
+        assert!(band_rows.contains(&text_row));
+        assert!(band_rows.contains(&(text_row - 1)), "vpad above");
         for &y in &band_rows {
             // Wide glyphs leave a reset shadow cell behind them in the
             // buffer (the glyph itself paints both columns), so walk by
@@ -2731,7 +2692,7 @@ mod tests {
             );
         }
         // Timestamp overlays the first line of words, right-aligned.
-        let first = row_text(&buf, icon_row + 1);
+        let first = row_text(&buf, text_row);
         assert!(first.contains("12:40 PM"), "{first:?}");
     }
 
@@ -2748,16 +2709,15 @@ mod tests {
             Some(Color::Rgb(238, 238, 238))
         );
         // User band uses the grokday highlight bg with dark primary text.
-        let icon = USER_ICON.trim_end();
         let prompt_row = (0..H)
-            .find(|&y| row_text(&buf, y).contains(icon))
+            .find(|&y| row_text(&buf, y).contains("hello light"))
             .unwrap();
         let band_cell = buf.cell((2, prompt_row)).unwrap();
         assert_eq!(band_cell.style().bg, Some(Color::Rgb(222, 222, 222)));
-        let prompt_x = (0..W)
-            .find(|&x| buf.cell((x, prompt_row)).unwrap().symbol() == icon)
+        let body_x = (0..W)
+            .find(|&x| buf.cell((x, prompt_row)).unwrap().symbol() == "h")
             .unwrap();
-        let body_cell = buf.cell((prompt_x + 2, prompt_row)).unwrap();
+        let body_cell = buf.cell((body_x, prompt_row)).unwrap();
         assert_eq!(body_cell.style().fg, Some(Color::Rgb(38, 38, 38)));
     }
 
