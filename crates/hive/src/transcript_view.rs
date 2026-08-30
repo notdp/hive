@@ -174,7 +174,31 @@ pub(crate) mod grok_md {
             Some(syntect(theme.kind)),
             Some(width.max(4)),
         );
-        out.lines
+        out.lines.into_iter().map(|l| frame_table(l, theme)).collect()
+    }
+
+    /// The engine paints a table's verticals with the muted+dim blockquote
+    /// style but leaves its horizontals unstyled, so the `│` column reads
+    /// broken: faint between rows, full-strength wherever a `─` rule crosses
+    /// it. One style for the whole frame.
+    fn frame_table(
+        line: ratatui::text::Line<'static>,
+        theme: &ViewTheme,
+    ) -> ratatui::text::Line<'static> {
+        const BOX: &str = "─│┌┐└┘├┤┬┴┼";
+        let frame = ratatui::style::Style::default().fg(theme.md_muted);
+        let spans = line
+            .spans
+            .into_iter()
+            .map(|s| {
+                if !s.content.is_empty() && s.content.chars().all(|c| BOX.contains(c)) {
+                    ratatui::text::Span::styled(s.content, frame)
+                } else {
+                    s
+                }
+            })
+            .collect::<Vec<_>>();
+        ratatui::text::Line::from(spans)
     }
 }
 
@@ -1777,6 +1801,36 @@ mod tests {
     }
 
     #[test]
+    fn test_table_frame_is_one_style() {
+        let t = &crate::view_theme::GROKDAY;
+        let md = "| 键 | 作用 |\n|---|---|\n| Ctrl+B | 后台 |";
+        let lines = grok_md::render_ratatui(md, t, 60);
+        const BOX: &str = "─│┌┐└┘├┤┬┴┼";
+        let mut seen = 0;
+        for line in &lines {
+            for span in &line.spans {
+                if span.content.is_empty() || !span.content.chars().all(|c| BOX.contains(c)) {
+                    continue;
+                }
+                seen += 1;
+                // The engine hands verticals a dim muted style and horizontals
+                // none at all; both must come out the same or the column
+                // flickers where the rules cross it.
+                assert_eq!(span.style.fg, Some(t.md_muted), "{:?}", span.content);
+                assert!(
+                    !span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::DIM),
+                    "{:?} still dim",
+                    span.content
+                );
+            }
+        }
+        assert!(seen >= 6, "expected a framed table, saw {seen} frame spans");
+    }
+
+    #[test]
     fn test_a_picture_becomes_an_inline_chip(){
         let mut p = TranscriptParser::new();
         let data = "A".repeat(4000); // ~3 KB decoded
@@ -2637,3 +2691,4 @@ mod tests {
         assert!(out[1].block.starts_turn());
     }
 }
+

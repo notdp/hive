@@ -23,7 +23,7 @@ hive ls              # 全部 team（含没有窗口的）
 
 ## 入口分派：`/hive:hive [team]`
 
-本协议由 `/hive:hive <team>` 载入——spawn bootstrap 和 human 手打用的是同一个形式，参数就是你的队。先判处境，再看参数：
+本协议由 `/hive:hive <team>` 载入——spawn bootstrap 和 human 手打用的是同一个形式，参数就是你的队（同一个 skill 在 codex 上是 `$hive <team>`，在 grok 上是 `/hive <team>`）。先判处境，再看参数：
 
 1. **你已经在队里**（`hive team` 返回的 `self` 有值，或你出生时就带着队籍）：参数就是对你队籍的确认，直接进「你是成员」一章，从「出生」开始。参数与所在队不符时，回一句说明即可，不换队。
 2. **你不在任何队，参数给了 team 名**（`/hive:hive wasp`）：`hive join wasp` 入队；报 not found 就 `hive create wasp` 建团——同一个入口幂等，建完你就是发起人，读「你要当派发人时」。
@@ -46,8 +46,8 @@ hive ls              # 全部 team（含没有窗口的）
   - 你是 tmux 里的 pane 成员：发队友用裸名（`hive send dodo …`）；本队前缀等价裸名（所以照抄 from 永远安全），别队前缀会被拒。
   - 你在 tmux 外（headless 成员、joined session、guest）：用 `<team>.<member>`；裸名全局唯一时也行。
   - team 外的 Claude session：`ccd.<name>`（见「互通」小节）。
-  - flow 脚本的收件箱：`flow.run`——一种地址,不是成员。收到 `from=flow.run` 的派发照抄回信即可;它不在名册里,这是正常的。
-- `group`：你所在 team 的实例名。
+  - flow 脚本的收件箱：`flow.run`——一种地址,不是成员。收到 `from=flow.run` 的派发照抄回信即可;它列在 `hive team` 的 `mailboxes` 里、不在 `members` 里,这是正常的。
+- `name`：你所在 team 的名字。member 行上偶尔出现的 `group` 是另一回事——`hive join --group` 打的跨队标签，不是队名。
 - `inputState=waiting_user`：对方在等 human 作答，此时 `hive send` 会拒发；等它清掉再发。
 - `turnPhase`：判断发新线程会不会打断对方——`turn_closed` 表示对方这轮已收口，随时可发；其他值表示 turn 进行中，不急的消息等 `turn_closed`。claude 成员没有这个字段，退回看 `busy`。
 - `busy`：粗粒度活动信号，不等于语义上的忙闲，只作参考。

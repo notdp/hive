@@ -10,15 +10,45 @@ Hive is a Rust CLI (a cargo workspace with one crate). Main code lives in
   `core_cmds.rs` registry-truth verbs, `rest.rs` everything else,
   `help_text.rs` byte-locked help output).
 - `agent.rs`, `team.rs`, and `tmux.rs` implement runtime behavior.
-- `bus.rs` and `context.rs` handle workspace state and per-pane context.
+- `registry.rs` is the team truth layer — one JSON file per team under
+  `$HIVE_HOME/state/teams/`, with the write lanes split (CLI owns roster
+  membership, the hived only backfills). tmux is display resolved on top.
+- `bus.rs` and `context.rs` handle workspace state (sqlite `hive.db` plus
+  `artifacts/ state/ run/`) and per-pane context.
 - `flow.rs` is the orchestration engine behind `hive flow run`; flow scripts
   stay Python (`from hive.flow import agent, parallel`) against the embedded
   client in `crates/hive/assets/pylib/`, bridged over the hidden `flow-op`
   command.
 - `hived.rs` is the per-team daemon (`hive --hived …` re-enters the binary).
 - `adapters/` hold the per-CLI transports (claude/codex/grok).
-- `crates/hive/assets/` are embedded data files (cvim toolkit, pylib,
-  plugins) materialized to `$HIVE_HOME/core_assets/` at first use.
+- The `hive view` transcript viewer is four modules: `transcript_view.rs`
+  folds a Claude session JSONL into typed `DisplayBlock`s and picks the
+  renderer by `isatty(1)` — TUI on a tty, legacy plain-ANSI stream into a
+  pipe (`transcript_view.rs:1614`); `transcript_tui.rs` is the ratatui
+  renderer (`run()` at `transcript_tui.rs:2465`);
+  `transcript_tui/interact.rs` is its pure interaction state (selection,
+  fold/density, the `/theme /view /find /quit` palette); `view_theme.rs`
+  resolves the grokday/groknight palette. They are a read-only mirror by
+  construction: `crate::settings` (key `view.theme`) is their only call out
+  of the subsystem — no registry, bus, or hived. See
+  `docs/transcript-view.md`.
+- The viewer's markdown engine is the pinned git dependency
+  `xai-grok-markdown` (`crates/hive/Cargo.toml`, rev `bc7f02e`), and its
+  chrome mirrors grok's own pager: doc comments cite grok files by bare name
+  (`grok mouse.rs`, `grok execute.rs`, `grok context_bar.rs`), whose full
+  source sits in the cargo checkout at
+  `~/.cargo/git/checkouts/grok-build-*/<rev>/crates/codegen/xai-grok-pager*/src/`.
+  Read that source before changing a mirrored component.
+- `crates/hive/assets/` is compile-time embedded data with three fates: the
+  cvim toolkit and the flow pylib are materialized heal-on-drift under
+  `$HIVE_HOME/core_assets/` at first use (`cvim.rs:26`, `flow.rs:590`); the
+  `notify` plugin is written to `$HIVE_HOME/plugins/installed/` on enable
+  (`plugin_manager.rs:44`); the two grok `.tmTheme` palettes never reach
+  disk — `include_bytes!` at `transcript_view.rs:137`.
+- `plugins/hive/` is the Claude/Codex marketplace plugin (skills, hooks,
+  scripts) published through `.claude-plugin/marketplace.json`. Its two
+  manifests (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`)
+  carry the crate version; nothing enforces the match, so bumps are manual.
 - `crates/hive/PORTING.md` records the Python→Rust port conventions.
 
 Tests:
@@ -29,11 +59,25 @@ Tests:
 
 ## Design Docs
 
-- Runtime design lives in `docs/runtime-model.md`.
+- Runtime design lives in `docs/runtime-model.md`: team identity (registry vs
+  tmux display), the runtime fields and their per-CLI native sources, send
+  addressing, active-turn fork routing.
 - Keep runtime-field semantics there in sync with code:
   - `busy`
   - `inputState`
   - `turnPhase`
+- `docs/transcript-view.md` owns `hive view`: the JSONL → `DisplayBlock`
+  parse model, the TUI's chrome and interaction layer, theme and appearance
+  resolution. The boundary against `runtime-model.md` follows the code —
+  the viewer reads a transcript file and `settings`, nothing else, so it
+  holds none of the runtime state `runtime-model.md` defines and feeds none
+  back. What hive knows about an engine → `runtime-model.md`; what a reader
+  sees on screen → `transcript-view.md`.
+- `docs/daemon-control-socket.md` records the Claude bg supervisor daemon's
+  control protocol. Sharp edge: every claim is pinned to Claude Code
+  2.1.240 and must be re-verified on upgrade. Hive consumes only
+  `op: "reply"` (`adapters/claude_sessions.rs:478`); the rest is recorded,
+  not used.
 - `CLAUDE.md` is only a symlink entrypoint to this file. Do not edit it separately.
 
 ## Build, Test, and Development Commands
@@ -65,7 +109,13 @@ Tests:
 
 Rust 2021, rustfmt defaults. Match the existing style: small focused
 functions, minimal comments, snake_case function names carried over from the
-Python spec (see `crates/hive/PORTING.md`). Test names stay explicit, e.g.
+retired Python implementation — leading underscore included
+(`pub fn _daemon_control_sock`, `adapters/claude_sessions.rs:417`), where it
+marks a Python-private ancestor and says nothing about Rust visibility. Do
+not strip those prefixes. `crates/hive/PORTING.md` is the port-era record of
+these conventions; it still describes a `src/hive/` spec tree and a
+`tests/unit/` suite, neither of which exists any more, so read it for naming
+and JSON-compat rules, not for repo layout. Test names stay explicit, e.g.
 `test_wait_status_times_out_without_match`. Do not leave dead code: if a
 function becomes a no-op or unused, delete it along with all call sites
 instead of leaving an empty body.
@@ -132,12 +182,15 @@ The hived is a long-lived workspace process. When validating hived-related runti
 `hive doctor` includes the current workspace `runDir` and `logs` map. Prefer those paths when debugging a specific team:
 - `<workspace>/run/notify.jsonl` — notify UI and idle watcher state-machine events.
 - `<workspace>/run/hived.stderr` — hived stderr and uncaught process-level failures.
-- `<workspace>/run/cvim/` — per-run JSONL logs for `hive cvim` / `hive vim`; `latest` points to the newest run.
+- `<workspace>/run/cvim/` — advertised by the `logs` map (`devlog.rs:63`) but
+  empty: nothing writes it. `hive cvim` / `hive vim` emit no per-run JSONL, so
+  debug those against tmux state and the popup's sendback payload instead.
 
-When no workspace can be resolved, logs fall back under `${XDG_CACHE_HOME:-~/.cache}/hive/`:
-- `notify.jsonl`
-- `cvim/`
+When no workspace can be resolved, `notify.jsonl` falls back to
+`${XDG_CACHE_HOME:-~/.cache}/hive/notify.jsonl` (`devlog.rs:19`).
 
-Log verbosity defaults to `normal`, which only filters low-information hived
-heartbeat events; business-path notify and cvim events are still recorded.
-Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging escape hatch.
+Log verbosity defaults to `normal`, which drops exactly three high-frequency
+hived events — `active.changed`, `tick.summary`, `windows.changed`
+(`devlog.rs:15`); every other notify event is recorded either way. The gate is
+notify-only. Use `HIVE_LOG_VERBOSITY=dev|normal` only as a temporary debugging
+escape hatch.
