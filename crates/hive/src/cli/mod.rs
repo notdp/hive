@@ -6,6 +6,7 @@
 //! separately as `cli/rest.rs`).
 
 pub mod core_cmds;
+pub mod help_text;
 pub mod rest;
 
 use std::collections::{HashMap, HashSet};
@@ -19,121 +20,6 @@ use crate::agent::Agent;
 use crate::team::{Team, LEAD_AGENT_NAME};
 use crate::tmux;
 use crate::tmux::PaneInfo;
-
-// ---------------------------------------------------------------------------
-// Help layout tables (SectionedHelpGroup equivalent)
-// ---------------------------------------------------------------------------
-
-pub(crate) const _COMMAND_HELP_SECTIONS: &[(&str, &str)] = &[
-    // Daily — per-turn agent collaboration loop.
-    ("team", "Daily"),
-    ("send", "Daily"),
-    ("ccd", "Daily"),
-    ("notify", "Daily"),
-    ("compact", "Daily"),
-    ("skills", "Daily"),
-    // Panes — bring up another agent pane (fresh or forked).
-    ("fork", "Panes"),
-    ("spawn", "Panes"),
-    // Workflow — higher-level flows on top of Hive.
-    ("flow", "Workflow"),
-    ("worktree", "Workflow"),
-    ("pr", "Workflow"),
-    ("ls", "Workflow"),
-    ("attach", "Workflow"),
-    ("view", "Workflow"),
-    // Team — wire up the tmux team around the current window.
-    ("create", "Team"),
-    ("delete", "Team"),
-    ("join", "Team"),
-    ("layout", "Team"),
-    // Human Helpers — human-only popup + split helpers.
-    ("cvim", "Human Helpers"),
-    ("vim", "Human Helpers"),
-    ("vfork", "Human Helpers"),
-    ("hfork", "Human Helpers"),
-    // Debug — troubleshooting, rarely on the happy path.
-    ("doctor", "Debug"),
-    ("thread", "Debug"),
-    ("capture", "Debug"),
-    ("inject", "Debug"),
-    ("interrupt", "Debug"),
-    ("kill", "Debug"),
-    // Extensions.
-    ("plugin", "Extensions"),
-    ("config", "Extensions"),
-    // Launchers — hive-managed claude/codex/grok entry points + shell integration.
-    ("claude", "Launchers"),
-    ("codex", "Launchers"),
-    ("grok", "Launchers"),
-    ("shell-init", "Launchers"),
-];
-
-pub(crate) const _COMMAND_HELP_SECTION_ORDER: &[&str] = &[
-    "Daily",
-    "Panes",
-    "Workflow",
-    "Team",
-    "Human Helpers",
-    "Debug",
-    "Extensions",
-    "Launchers",
-    "Other Commands",
-];
-
-pub(crate) const _COMMAND_HELP_SECTION_DESCRIPTIONS: &[(&str, &str)] = &[
-    (
-        "Daily",
-        "Core loop per turn: inspect context, talk to peers, pull the human in when blocked.",
-    ),
-    (
-        "Panes",
-        "Bring up another agent pane — a fresh spawn or a forked clone.",
-    ),
-    (
-        "Workflow",
-        "Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.",
-    ),
-    (
-        "Team",
-        "Create, extend, and wire up the tmux team around the current window.",
-    ),
-    (
-        "Human Helpers",
-        "Popup editor and split helpers for the human (not the model). In Claude Code / Codex, type `!hive cvim` via shell escape. Requires tmux >= 3.2.",
-    ),
-    (
-        "Debug",
-        "Troubleshoot delivery, runtime state, and low-level pane behavior. Not on the happy path.",
-    ),
-    (
-        "Extensions",
-        "Manage first-party Hive plugins (Claude Code, Codex).",
-    ),
-    (
-        "Launchers",
-        "hive-managed launchers behind the `hcodex` / `hclaude` / `hgrok` shell functions from `hive shell-init`, rarely run by hand. All arguments are forwarded verbatim, so `hive claude --help` shows claude's own help, not this wrapper's.",
-    ),
-];
-
-pub(crate) const _ROOT_HELP_EXAMPLES: &str = r#"# Team lifecycle
-hive create                                  # make this pane the orch of a new team
-hive spawn explore --task /tmp/task.md       # spawn a member and dispatch its task atomically
-hive team                                    # members + runtime state (busy / inputState / turnPhase)
-
-# Messaging (root thread: body is a short summary, details go in --artifact)
-hive send dodo "review this diff" --artifact /tmp/diff.md
-hive send dodo "see report" --artifact - <<'EOF'
-# Findings
-- item
-EOF
-
-# Fork, spawn
-hive fork                                    # split the current pane into a clone
-hive spawn claude                            # bring up a new agent pane
-
-# Debug connectivity
-hive doctor dodo                             # probe a peer's connectivity"#;
 
 pub(crate) const _TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
@@ -2305,72 +2191,6 @@ pub(crate) fn build_cli() -> Command {
 }
 
 // ---------------------------------------------------------------------------
-// Root help rendering (SectionedHelpGroup equivalent)
-// ---------------------------------------------------------------------------
-
-fn section_for(name: &str) -> &'static str {
-    _COMMAND_HELP_SECTIONS
-        .iter()
-        .find(|(cmd, _)| *cmd == name)
-        .map(|(_, section)| *section)
-        .unwrap_or("Other Commands")
-}
-
-pub(crate) fn render_root_help() -> String {
-    let cli = build_cli();
-    let mut rows: Vec<(String, String)> = Vec::new();
-    for sub in cli.get_subcommands() {
-        if sub.is_hide_set() {
-            continue;
-        }
-        rows.push((
-            sub.get_name().to_string(),
-            sub.get_about().map(|s| s.to_string()).unwrap_or_default(),
-        ));
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut sections: HashMap<&'static str, Vec<(String, String)>> = HashMap::new();
-    for (name, help) in rows {
-        sections
-            .entry(section_for(&name))
-            .or_default()
-            .push((name, help));
-    }
-
-    let mut out = String::new();
-    out.push_str("Usage: hive [OPTIONS] COMMAND [ARGS]...\n\n");
-    out.push_str("  Hive - tmux-first multi-agent collaboration runtime.\n\n");
-    out.push_str("Options:\n");
-    out.push_str("  --version   Show the version and exit.\n");
-    out.push_str("  -h, --help  Show this message and exit.\n");
-    for section in _COMMAND_HELP_SECTION_ORDER {
-        let rows = match sections.get(section) {
-            Some(rows) if !rows.is_empty() => rows,
-            _ => continue,
-        };
-        out.push('\n');
-        out.push_str(section);
-        out.push_str(":\n");
-        if let Some((_, description)) = _COMMAND_HELP_SECTION_DESCRIPTIONS
-            .iter()
-            .find(|(name, _)| name == section)
-        {
-            out.push_str(&format!("  {description}\n\n"));
-        }
-        let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
-        for (name, help) in rows {
-            out.push_str(&format!("  {name:<width$}  {help}\n"));
-        }
-    }
-    out.push_str("\nExamples:\n");
-    for block in _ROOT_HELP_EXAMPLES.split("\n\n") {
-        out.push_str(&format!("  {}\n\n", block.replace('\n', "\n  ")));
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
 // main + dispatch
 // ---------------------------------------------------------------------------
 
@@ -2411,6 +2231,61 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "worktree",
 ];
 
+/// Click groups and their subcommands (help lookup + bare-group help).
+const _HELP_GROUPS: &[(&str, &[&str])] = &[
+    ("ccd", &["ls"]),
+    ("config", &["get", "set", "unset"]),
+    ("flow", &["run"]),
+    ("plugin", &["disable", "enable", "list", "ls"]),
+    ("pr", &["clear", "set"]),
+    ("worktree", &["done", "set-base", "start", "status"]),
+];
+
+/// Click help interception: the command path whose help click would print.
+///
+/// Click's `--help` (and `-h` outside the cvim family, whose
+/// `help_option_names` is `["--help"]`) is an eager option: it prints help
+/// and exits 0 wherever it appears among the parsed args (never past `--`).
+/// A group prints its own help unless a known subcommand appears first.
+fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
+    if matches!(invoked, "claude" | "codex" | "grok") {
+        return None; // launchers forward all args to the wrapped CLI
+    }
+    let help_opts: &[&str] = if matches!(invoked, "cvim" | "vim" | "vfork" | "hfork") {
+        &["--help"]
+    } else {
+        &["-h", "--help"]
+    };
+    let subs = _HELP_GROUPS
+        .iter()
+        .find(|(group, _)| *group == invoked)
+        .map(|(_, subs)| *subs);
+    for (i, tok) in tail.iter().enumerate() {
+        if tok == "--" {
+            return None;
+        }
+        if help_opts.contains(&tok.as_str()) {
+            return Some(vec![invoked]);
+        }
+        if let Some(subs) = subs {
+            if subs.contains(&tok.as_str()) {
+                for tok2 in &tail[i + 1..] {
+                    if tok2 == "--" {
+                        break;
+                    }
+                    if help_opts.contains(&tok2.as_str()) {
+                        return Some(vec![invoked, tok.as_str()]);
+                    }
+                }
+            }
+            // ponytail: a non-sub token stops the scan; click's own parse
+            // error for it (out of the equivalence corpus) falls to clap.
+            return None;
+        }
+    }
+    None
+}
+
 fn arg_str<'a>(m: &'a ArgMatches, key: &str) -> &'a str {
     m.get_one::<String>(key).map(String::as_str).unwrap_or("")
 }
@@ -2435,14 +2310,16 @@ fn run_root_gates(invoked: &str) {
 pub fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let args: Vec<String> = argv.iter().skip(1).cloned().collect();
+    let root_help = help_text::help_for(&[]).expect("root help");
 
     if args.is_empty() {
-        print!("{}", render_root_help());
-        std::process::exit(0);
+        // Click's `no_args_is_help`: help goes to stderr, exit code 2.
+        eprint!("{root_help}");
+        std::process::exit(2);
     }
     match args[0].as_str() {
         "-h" | "--help" => {
-            print!("{}", render_root_help());
+            print!("{root_help}");
             std::process::exit(0);
         }
         "--version" => {
@@ -2453,14 +2330,42 @@ pub fn main() {
     }
 
     let invoked = args[0].clone();
+    let tail: Vec<String> = args.iter().skip(1).cloned().collect();
+
+    // Click resolves the subcommand before the group callback runs, so an
+    // unknown command errors before any tmux/codex gate fires.
+    if !_KNOWN_COMMANDS.contains(&invoked.as_str()) && !invoked.starts_with('-') {
+        eprint!(
+            "Usage: hive [OPTIONS] COMMAND [ARGS]...\n\
+             Try 'hive -h' for help.\n\n\
+             Error: No such command '{invoked}'.\n"
+        );
+        std::process::exit(2);
+    }
+
+    // Click's eager help option prints before the subcommand body runs (and
+    // the root callback skips its gates whenever -h/--help is in argv).
+    if let Some(path) = help_path(&invoked, &tail) {
+        print!("{}", help_text::help_for(&path).expect("known help path"));
+        std::process::exit(0);
+    }
+
     let help_requested = args.iter().any(|a| a == "-h" || a == "--help");
     if _KNOWN_COMMANDS.contains(&invoked.as_str()) && !help_requested {
         run_root_gates(&invoked);
     }
 
+    // Click group with no subcommand: `no_args_is_help` — stderr, exit 2.
+    if tail.is_empty() && _HELP_GROUPS.iter().any(|(group, _)| *group == invoked) {
+        eprint!(
+            "{}",
+            help_text::help_for(&[invoked.as_str()]).expect("group help")
+        );
+        std::process::exit(2);
+    }
+
     // Launcher / human-helper passthrough: everything after the subcommand is
     // forwarded verbatim (Click's ignore_unknown_options + UNPROCESSED args).
-    let tail: Vec<String> = args.iter().skip(1).cloned().collect();
     match invoked.as_str() {
         "codex" => {
             rest::codex_cmd(&tail);
@@ -2474,20 +2379,20 @@ pub fn main() {
             rest::grok_cmd(&tail);
             return;
         }
-        "cvim" | "vim" | "vfork" | "hfork" => {
-            if tail.first().map(String::as_str) == Some("--help") {
-                let mut cli = build_cli();
-                if let Some(sub) = cli.find_subcommand_mut(invoked.as_str()) {
-                    let _ = sub.print_long_help();
-                }
-                std::process::exit(0);
-            }
-            match invoked.as_str() {
-                "cvim" => rest::cvim_cmd(&tail),
-                "vim" => rest::vim_cmd(&tail),
-                "vfork" => rest::vfork_cmd(&tail),
-                _ => rest::hfork_cmd(&tail),
-            }
+        "cvim" => {
+            rest::cvim_cmd(&tail);
+            return;
+        }
+        "vim" => {
+            rest::vim_cmd(&tail);
+            return;
+        }
+        "vfork" => {
+            rest::vfork_cmd(&tail);
+            return;
+        }
+        "hfork" => {
+            rest::hfork_cmd(&tail);
             return;
         }
         _ => {}
@@ -2635,7 +2540,7 @@ fn dispatch(matches: &ArgMatches) {
             _ => unreachable!("subcommand required"),
         },
         _ => {
-            print!("{}", render_root_help());
+            print!("{}", help_text::help_for(&[]).expect("root help"));
             std::process::exit(0);
         }
     }
@@ -2940,7 +2845,7 @@ mod tests {
 
     #[test]
     fn test_render_root_help_sections_present() {
-        let help = render_root_help();
+        let help = help_text::help_for(&[]).unwrap();
         for section in [
             "Daily:",
             "Panes:",

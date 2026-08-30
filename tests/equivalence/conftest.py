@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-CLI_CODE = "from hive.cli import cli; cli()"
+# prog_name pins what every real invocation shows: the installed entry point
+# (pyproject [project.scripts] hive = "hive.cli:cli") runs with argv[0]
+# "hive", while this harness's `python -c` would leak click's detected prog
+# name "-c" into every Usage:/error line — a capture artifact of the harness,
+# not CLI behavior.
+CLI_CODE = "from hive.cli import cli; cli(prog_name='hive')"
 
 
 def rs_binary() -> str | None:
