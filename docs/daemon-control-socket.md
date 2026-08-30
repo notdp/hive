@@ -4,30 +4,22 @@ The Claude Code bg supervisor's control protocol, recovered from the shipped
 binary and probed live. This is an unpublished surface: every claim here is
 versioned, and the daemon's own `EAUTH` text tells clients to "stop driving
 the control socket directly". Hive drives exactly one verb — `reply`, the
-claude-member delivery lane (`crates/hive/src/adapters/claude_sessions.rs:478`);
-the rest is recorded because several verbs look like replacements for
-machinery hive hand-rolls, and because knowing what they actually do is what
-rules most of them out.
+claude-member delivery lane (`claude_sessions::daemon_reply`); the rest is
+recorded because several verbs look like replacements for machinery hive
+hand-rolls, and because knowing what they actually do is what rules most of
+them out.
 
 ## The pin
 
-Pinned to **2.1.240**, and that still matches what is installed:
+Pinned to **2.1.240**, still the installed version, and the running supervisor
+agrees: `{"proto":1,"op":"ping"}` answers `{"version":"2.1.240","proto":1}`.
+The surveyed bundle is `~/.local/share/claude/versions/2.1.240` (Mach-O,
+bun-compiled, JS bundle embedded as plain text), `BUILD_TIME
+2026-08-22T05:07:39Z`, `GIT_SHA d235569e3f61fc4d9aacd7c85e6d1b6253e03f52`.
 
-```
-$ claude --version
-2.1.240 (Claude Code)
-```
-
-and writing `{"proto":1,"op":"ping"}` plus a newline to the socket answers
-`{"ok":true,"op":"ping","version":"2.1.240","proto":1}` — the running
-supervisor agrees with the installed CLI.
-
-The binary is `~/.local/share/claude/versions/2.1.240` (Mach-O, bun-compiled;
-the JS bundle sits in it as plain text). Build metadata it carries:
-`BUILD_TIME 2026-08-22T05:07:39Z`, `GIT_SHA d235569e3f61fc4d9aacd7c85e6d1b6253e03f52`.
-
-To re-recover after an upgrade, find the request handler by a stable literal
-rather than a minified name:
+Every claim below must be re-verified on upgrade. To re-recover, find the
+request handler by a stable literal rather than a minified name — the names
+change every build:
 
 ```
 strings -n 3 <binary> | grep -n "job isn't accepting replies"
@@ -43,20 +35,19 @@ by `respawn-stale`.
   `sha256(path.resolve(configDir)).hex[:8]` and configDir is
   `$CLAUDE_CONFIG_DIR` or `~/.claude`. `<base>` is `/tmp`, except under
   Termux (`TERMUX_VERSION` and `PREFIX` both set) where it is `$PREFIX/tmp`.
-  `$TMPDIR` is never consulted. Hive computes the same path but hardcodes
-  `/tmp` (`claude_sessions.rs:437`) — correct everywhere but Termux.
-  Verified locally: `sha256("/Users/<u>/.claude")[:8] == 758434e4`, and
-  `/tmp/cc-daemon-501/758434e4/` holds `control.sock` plus `pty/`, `rv/`,
-  `spare/`.
+  `$TMPDIR` is never consulted. Hive's `_daemon_control_sock` hardcodes `/tmp`
+  — correct everywhere but Termux, which hive does not target. The namespace
+  directory also holds `pty/`, `rv/` and `spare/`, the two live reply
+  transports and the spare pool.
 - **configDir disagreement is silent.** The binary never reads `CLAUDE_HOME`
   (zero occurrences in 2.1.240); hive's `_config_dir` prefers it over
-  `CLAUDE_CONFIG_DIR` (`claude_sessions.rs:77-89`). A dev lane that sets only
-  `CLAUDE_HOME` makes hive hash a directory the daemon has never heard of, so
-  `daemon_reply` finds no socket and every delivery quietly takes the wrapped
-  inbox lane. Set `CLAUDE_CONFIG_DIR` too when sandboxing.
+  `CLAUDE_CONFIG_DIR`. A dev lane that sets only `CLAUDE_HOME` makes hive hash
+  a directory the daemon has never heard of, so `daemon_reply` finds no socket
+  and every delivery quietly takes the wrapped inbox lane. Set
+  `CLAUDE_CONFIG_DIR` too when sandboxing.
 - **Windows** uses a named pipe `\\.\pipe\cc-daemon-<key>-control`, where
   `<key>` is 16 hex from `<configDir>/daemon/pipe.key` — not the configDir
-  hash.
+  hash. Nothing in hive implements this.
 - **`short`**: the job address, `^[a-f0-9]{8}$` (a non-matching string is a
   schema failure, not `ENOJOB`). It is the first 8 chars of the job's session
   UUID, and it is also the jobId: the dispatcher mints
@@ -97,43 +88,24 @@ The gate runs **before** op discrimination, so `EPROTO` never tells you
 whether the op you sent exists. Six verbs are answered before the gate and
 therefore ignore `proto` entirely: `ping`, `nudge`, `yield`, `lease`,
 `leases`, `shutdown`. That makes `ping` the version probe that survives a
-skew — it answers `{version, proto}` whatever you claim:
-
-```
-$ … '{"proto":99,"op":"ping"}'  → {"ok":true,"op":"ping","version":"2.1.240","proto":1}
-$ … '{"proto":99,"op":"has","short":"deadbeef"}'
-  → {"ok":false,"code":"EPROTO","serverProto":1,"serverVersion":"2.1.240", …}
-```
-
-Those same six also skip the adoption gate below.
+skew — it answers `{version, proto}` whatever you claim, where any other verb
+under a bad `proto` answers only `EPROTO`. Those same six also skip the
+adoption gate (`ESTARTING`).
 
 ## Auth
 
 `auth` is the contents of `<configDir>/daemon/control.key`: 16 random bytes
 hex-encoded (32 chars), file mode 0600 inside a 0700 `daemon/` dir, minted on
 first need and reused. Comparison is `timingSafeEqual` after a length check;
-absent or empty never matches.
+absent or empty never matches. Which verbs demand it is the verb table below;
+`attach` is the odd one — absent is allowed (logged "[bg-attach] legacy
+client (no control key) — allowed via peerUid"), a *wrong* key is rejected.
 
-- **Required**: `dispatch`, `reply`, `permission-response`. Wrong or missing
-  → `EAUTH`.
-- **Optional-but-checked**: `attach`. Absent is allowed (logged
-  "[bg-attach] legacy client (no control key) — allowed via peerUid"); a
-  *wrong* key is rejected.
-- **None**: `ping`, `nudge`, `yield`, `lease`, `leases`, `shutdown`, `list`,
-  `has`, `await-ack`, `kill`, `respawn-stale`, `resize`, `ensure-spare`,
-  `subscribe`.
-
-That last line is the sharp edge: `kill` and `shutdown` are unauthenticated.
-Any process running as the same uid can retire a worker or stop the
-supervisor and reap every bg job with one JSON line.
+The sharp edge is what that table leaves unauthenticated: `kill` and
+`shutdown`. Any process running as the same uid can retire a worker or stop
+the supervisor and reap every bg job with one JSON line.
 
 ## Error vocabulary
-
-The daemon's full code set, as its own telemetry map enumerates it:
-`ENOJOB`, `ETIMEOUT`, `EUNKNOWN`, `ENOREPLY`, `ERESPAWNING`, `ESTALE`,
-`EALIVE`, `ESTARTING`, `EPEERUID`, `ETOOLARGE`, `EUNVERIFIED`, `EAUTH`,
-`EPROTO`. (`ENOTOWNED` is a bind-time failure — "refusing to bind: <dir> is
-owned by uid N" — never a response.)
 
 | code | meaning | reachable from |
 | --- | --- | --- |
@@ -149,6 +121,11 @@ owned by uid N" — never a response.)
 | `EUNVERIFIED` | worker live but the supervisor could not verify its identity | `attach` |
 | `ESTALE` | a previous dispatch with this id is still being cleaned up | `dispatch`, `await-ack` |
 | `ETIMEOUT` | the worker did not acknowledge within `timeoutMs` | `dispatch`, `await-ack` |
+
+Those twelve plus `EALIVE` — enumerated in the daemon's telemetry map, but
+returned by no verb surveyed — are the whole vocabulary. `ENOTOWNED` is a
+bind-time failure — "refusing to bind: <dir> is owned by uid N" — never a
+response.
 
 `EUNKNOWN` covers three different failures with two different texts: `"bad
 json"`, `"unknown op: <op>"`, and `"malformed request: <first zod issue>"`.
@@ -186,30 +163,26 @@ Input is the zod schema verbatim; `?` marks optional.
 | `permission-response` | **yes** | `short`, `requestId`, `allow` | `{ok:true}` — **stub** |
 | `shutdown` | no | `reapWorkers?` | `{reaped:N}` |
 
-Details that matter:
+What the names do not tell you:
 
 - **`list` is not the job ledger.** It maps the supervisor's in-memory worker
-  handles, adding `dying:true` for one that is killing or retiring. Live
-  here: 3 records, against 52 directories under `~/.claude/jobs/` — the
-  parked and stopped jobs are simply absent. Record fields observed:
-  `attempt`, `backend`, `cliVersion`, `createdAt`, `cwd`, `detail`, `intent`,
-  `name`, `nonce`, `pid`, `sessionId`, `short`, `source`, `startedAt`,
-  `state`, `tempo`.
+  handles, adding `dying:true` for one that is killing or retiring. Parked and
+  stopped jobs are simply absent: probed live at 3 records against 52
+  directories under `~/.claude/jobs/`.
 - **`has` cannot see a parked job either.** `alive` = a live handle (or the
   short sitting in the respawn set), `present` = a handle exists at all,
   `ready` = present and not booting. A stopped job whose directory and
   `state.json` are still on disk answers
   `{"alive":false,"present":false,"ready":false}` — indistinguishable from a
   short that never existed. Probed against a real `state: stopped` job.
-- **`ensure-spare` prewarms nothing.** The handler fires the
-  `tengu_dead_probe_bg_legacy_op` telemetry event and returns `{ok:true}`,
-  ignoring the `cwd` it demands. It is instrumented as a candidate for
-  removal upstream.
-- **`permission-response` answers nothing.** It checks the control key and
-  returns `{ok:true}`, ignoring `short`, `requestId` and `allow`. There is no
-  plumbing behind it on 2.1.240.
+- **Two verbs answer `ok:true` and do nothing.** `ensure-spare` prewarms
+  nothing: it fires the `tengu_dead_probe_bg_legacy_op` telemetry event and
+  returns, ignoring the `cwd` it demands. `permission-response` checks the
+  control key and returns, ignoring `short`, `requestId` and `allow` — there
+  is no plumbing behind it on 2.1.240.
 - **`respawn-stale` fires the same dead-op probe** but still does the work
-  (`respawnIfIdleStale()`). Treat it as live-but-deprecated.
+  (`respawnIfIdleStale()`). The probe is upstream's instrumentation for
+  removal candidates: live, but deprecated.
 - **`kill` evicts before it checks.** With `evict:true` the roster row is
   deleted first, so an unknown short still loses its row and *then* gets
   `ENOJOB`.
@@ -221,9 +194,8 @@ Details that matter:
   25ms until `min(timeoutMs, 30000)`, and when a `nonce` is supplied it waits
   for the handle whose `record.nonce` matches, extending the budget once.
 
-Hive touches `attach` only through the CLI — `claude attach <jobId>` as a
-subprocess (`crates/hive/src/adapters/claude_bg.rs:1336`) — never over this
-socket.
+Hive touches `attach` only through the published CLI — `claude attach
+<jobId>` as a subprocess — never over this socket.
 
 ## `reply`: the typed-keystroke delivery lane
 
@@ -237,7 +209,7 @@ socket.
 2. The worker has a **pty** → bracketed paste (`ESC[200~ text ESC[201~`,
    raw for an `exec`-mode job) followed by `\r` 10ms later, serialized
    through the worker's `replyChain`. This is the official version of what
-   `claude_bg.type_into_job` hand-rolls at the pane.
+   `claude_bg::type_into_job` hand-rolls at the pane.
 3. **No pty** → the rv channel again; a channel that refuses is `ENOREPLY`.
 
 Two consequences.
@@ -247,9 +219,9 @@ off: the wrapper is applied for `peer`, `channel`, `observer`, `slack-ping`
 and `unclassified`, and skipped for `human`, `auto-continuation`,
 `task-notification` and undefined. So a `reply`-delivered message carries no
 banner in any layer — which is why this, not the inbox socket, is hive's
-primary claude-member lane (`crates/hive/src/agent.rs:813`, and
-`agent.rs:844` for a joined `ccd.<name>` session). The wrapped inbox socket
-is the fallback when this lane returns nothing.
+primary claude-member lane. The wrapped inbox socket is the fallback when this
+lane returns nothing, so an outage here degrades presentation, never delivery;
+that is what lets hive drive an unpublished surface at all.
 
 And `{ok:true}` on branch 2 means *the bytes were queued into the pty*,
 nothing more: the branch returns as soon as the write is chained, before the
@@ -258,28 +230,16 @@ refuses) can ever produce `ENOREPLY`. So a `reply` acceptance is evidence
 the composer was written to, never evidence a turn started — the response
 obligation still rides the member skill's receipt duty, not the carriage.
 
-## Hive's client
+Two notes on hive's client (`claude_sessions::daemon_reply_via`), which the
+code does not say:
 
-`claude_sessions.rs:490` `daemon_reply_via` — one frame,
-`{proto:1, op:"reply", short, auth, text}`, no `session_id` field, a fresh
-connection per attempt with 10s read and write timeouts:
-
-- `short` is `session_id[:8]`, taken without checking it is hex
-  (`claude_sessions.rs:496`). A non-hex prefix comes back `EUNKNOWN`, which
-  is terminal — the caller falls back to the inbox lane rather than looping.
-- `ok:true` → `daemonReplyAccepted`.
-- `EAUTH` → re-read the key once and retry with it; a second `EAUTH` is
-  terminal. The daemon does not rotate the key in normal operation, so this
-  costs one wasted round trip at most.
-- `ESTARTING`, `ENOREPLY`, `ERESPAWNING` → sleep 200ms and retry, up to 24
-  attempts (`claude_sessions.rs:36-39`). All three share one budget, unlike
-  the CLI's own attach client, which retries `ESTARTING`/`ERESPAWNING` as
-  transient and separately boots a daemon on a dead socket.
-  `SUBMIT_TIMEOUT` folds that 4.8s into the connect and write budgets so a
-  hived RPC cannot outlive its own retry run (`claude_sessions.rs:42`).
-- Anything else — `ENOJOB`, `EPROTO`, `EUNKNOWN`, `ETOOLARGE`, `EPEERUID`,
-  no socket at all — is `None`, and delivery falls through to the inbox
-  socket, which still delivers (wrapped).
+- The CLI's own attach client treats `ESTARTING`/`ERESPAWNING` as transient
+  and boots a daemon on a dead socket. Hive folds all three retry codes into
+  one budget and deliberately boots nothing: the fallback lane already covers
+  a supervisor that is not running.
+- The `EAUTH` re-read is one retry, not a loop, because the daemon does not
+  rotate the key in normal operation — it is minted once and reused. A second
+  `EAUTH` means the key is wrong, not stale.
 
 ## Tech-debt offset candidates (not adopted, recorded)
 
@@ -288,22 +248,20 @@ measured current cost before adoption.
 
 - `list` / `has` — **ruled out for liveness.** Hive's three-tier model
   (alive / asleep / gone) turns on separating a parked job from a removed
-  one, and neither verb can: both report a parked job exactly as they report
-  a job that never existed. `claude agents --json --all` stays the only
-  source for the asleep tier (`claude_bg.rs:482` `job_row`, ~270ms, cached).
-  `list` is still the cheaper answer for "which workers are live right now",
-  if a consumer ever wants only that.
+  one, and neither verb can. `claude agents --json --all` stays the only
+  source for the asleep tier, at ~270ms a call. `list` is still the cheaper
+  answer for "which workers are live right now", if a consumer ever wants
+  only that.
 - `kill` — member reap could retire workers through the supervisor
-  (`evict:true` also drops the roster row) instead of signalling pids. No
-  auth needed. The evict-before-check ordering means a stale short still
-  cleans its row.
+  (`evict:true` also drops the roster row) instead of signalling pids.
 - `respawn-stale` — a stuck-member self-heal lever the wake path does not
   have. Deprecation-flagged upstream; do not build on it without re-checking
   the next version.
-- `dispatch` / `await-ack` — a drop-in for `claude_bg.spawn_job`'s
-  subprocess-plus-stdout-regex minting (`claude_bg.rs:532`), and it returns
+- `dispatch` / `await-ack` — a drop-in for `claude_bg::spawn_job`'s
+  subprocess-plus-stdout-regex minting, and it returns
   `{short, pid, messagingSock}` directly, which is what spawn then goes
-  looking for in the registry. The record `d` is fully schema'd:
+  looking for in the registry. The record `d` is fully schema'd, so the port
+  is mechanical:
 
   ```
   { proto, short, nonce?, sessionId, createdAt, cwd,
@@ -319,9 +277,7 @@ measured current cost before adoption.
   Still not adopted: it trades the published `--bg` CLI contract for an
   unpublished wire record, it has never been live-tested, and the one real
   cost of the current path (a FORCE_COLOR-poisoned jobId parse) is already
-  fixed and guarded (`claude_bg.rs:556`).
+  fixed and guarded.
 - `subscribe` — push state and stream instead of polling. Surveyed and
   retracted: no consumer beat the sub-millisecond registry scan it would
   replace.
-- `ensure-spare` / `permission-response` — not candidates. Both are stubs
-  that answer `ok:true` and do nothing.

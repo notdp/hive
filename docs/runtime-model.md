@@ -1,386 +1,187 @@
 # Hive Runtime Model
 
-This document records the runtime design Hive implements. It is intentionally
-narrower than a full architecture spec: it pins down the meaning, source and
-intended use of each runtime field, and what the delivery transports do with a
-message once it reaches an engine.
-
-## Scope
-
-This document covers:
-
-- team identity: registry vs display
-- `busy`
-- `cliAlive`
-- `inputState`
-- `turnPhase`
-- delivery: what each transport accepts, and what the receiver keeps
-- root-message summary/artifact protocol
-
-This document does not define:
-
-- a semantic global `busy/idle` truth model
-- automatic scheduling
-- automatic fork/spawn decisions
-- automatic garbage collection
+Why the runtime is shaped the way it is: where each fact about a running
+member comes from, which layer owns which truth, and what the delivery
+transports do with a message once it reaches an engine.
 
 Boundary with [transcript-view.md](transcript-view.md): this document owns
 what is true of a **running member** — the state its engine reports and what
 its transport does with a message. That one owns what a **read-only observer**
 can recover from a session's JSONL, which is strictly less. The transcript
 holds only what was written to it, and a delivery folded into a running turn
-writes no turn of its own (see "What the receiver's transcript records").
+writes no turn of its own.
 
-## Team Identity: Registry vs Display
+## Out of scope by decision
 
-A team's authoritative record is its **registry entry** — one JSON file per
-team under `$HIVE_HOME/state/teams/`. tmux is a display layer resolved on
-top of it: window options and pane tags say *where the team is rendered*,
-never *whether it exists*.
+Hive does not define a semantic global `busy`/`idle` truth, automatic
+scheduling, automatic fork/spawn decisions, or automatic garbage collection.
+It reports what each engine reports about itself and refuses to synthesize a
+scheduler on top. Scheduling around a busy target is the receiver's queue's
+job.
 
-- `Team::load` (`crates/hive/src/team.rs:431`) reads the registry for identity
-  (workspace, createdAt) and roster (name, cli, model, sessionId, cwd), then
-  binds live panes from the team's window onto roster members. A team with an
-  entry and no window loads with pane-less members; a pane-tagged member
-  missing from the registry still loads (union), covering teams predating the
-  registry writers.
-- Roster **membership is written only by the CLI**: create seeds the entry
-  (overwriting whatever a recycled name left behind), spawn/join/fork add a
-  member (`crates/hive/src/cli/mod.rs:1140`), kill removes one, delete removes
-  the entry.
-- The **hived only backfills** fields of names already in the roster
-  (model, cwd, a sessionId learned late) under the store lock
-  (`crates/hive/src/registry.rs:352`); it never adds or removes a name, so an
-  observation racing a kill cannot resurrect the killed member.
-- The entry's `display` field caches the tmux window id currently rendering
-  the team. It is a cache: authority checks never read it.
-- Hived identity is `(workspace socket, team)`. A dead window no longer
-  retires the hived; a missing registry entry (plus no window) does.
-- **`hive attach` renders; it never defines.** Attach jumps to the team's
-  window or builds one — one pane per member — writes the display cache and
-  window/pane tags, and (outside tmux) execs `tmux attach`
-  (`crates/hive/src/cli/rest.rs:1472`). Only a member with a recorded engine
-  identity and an attachable cli is rendered; the rest are named on stderr and
-  left headless. What the pane runs depends on the engine: a claude bg job,
-  codex thread or grok session gets its own viewer, while a claude member
-  whose sessionId names an **interactive** session (a joined ccd) gets
-  `hive view <sessionId>` — read-only, because the resume lane would mint a
-  forked job that steals the member's deliveries
-  (`crates/hive/src/cli/rest.rs:1276`). Deleting the window is closing a
-  screen; `hive delete` is the team's actual end of life. Team names are owned
-  by the registry: a pool pick skips every name the registry still lists, so
-  no create lane reuses a name until `hive delete` releases it
-  (`crates/hive/src/cli/mod.rs:546`).
-- **The verbs work anywhere.** create/spawn/team/kill/delete no longer
-  require a tmux context: addressing is explicit team (`-t`, or a
-  `<team>.<member>` message address resolved through the registry) →
-  binding discovery (pane tags, then engine env identity). `hive create`
-  outside tmux registers a headless team; `hive spawn` with no live
-  display (or a caller outside tmux) spawns engine-only — claude bg job,
-  codex thread + `turn/start` bootstrap, grok member leader +
-  `session/new` + `session/prompt` bootstrap — and delivery, interrupt,
-  runtime and kill address the engine (jobId / threadId / member key)
-  when no pane exists.
-- **Engine keys follow the member, not the pane.** A grok member's leader
-  daemon is keyed `m-<team>.<member>` (socket/pidfile/session record under
-  `$GROK_HOME/hive/`); a raw `hive grok` pane outside any team keeps a
-  pane key (`p<slug>`) and pane lifecycle. Pane-facing APIs resolve a pane
-  to its key through the pane's member tags. The hived reaps member
-  daemons the registry no longer lists (valid roster without the member, or
-  a missing entry past a newborn grace window — never on an unreadable
-  read); `hive kill` reaps deterministically. Engines carry their member
-  identity in env (`HIVE_TEAM` / `HIVE_MEMBER`; claude bg spawn and the
-  grok leader daemon), so a tool subprocess resolves who it is without a
-  pane — the env lane is the fallback behind a live pane binding.
+## Registry is truth, tmux is display
 
-Send addresses come in three kinds, and only the first names an engine:
-a member (`dodo` bare in-team, `<team>.<member>` qualified, delivery over
-the member's transport), a Claude session outside any team (`ccd.<name>`,
-delivery over its session inbox), and the flow runner's mailbox
-(`flow.run` — delivery is the durable bus row itself; the runner polls it,
-owns no transport, and never acks). Mailboxes are
-listed in `hive team` under `mailboxes`, never in `members`: the roster
-stays engines-only. The `flow` prefix is reserved the way `ccd` is — not a
-team name (`crates/hive/src/team.rs:107`), and `flow`/`flow.*` are not member
-names (`crates/hive/src/team.rs:616`).
+A team exists because it has a **registry entry**, not because a window
+renders it. tmux is a display layer resolved on top: window options and pane
+tags say *where* the team is rendered, never *whether* it exists. Deleting
+the window is closing a screen; `hive delete` is the team's end of life.
 
-## Runtime Field Reference
+Consequences that are load-bearing across modules:
 
-Every CLI's runtime comes from a **native source** — the runtime the CLI
-itself maintains — never from screen scraping or transcript tail heuristics:
+- **Membership has one writer.** The CLI adds and removes roster names;
+  the hived only backfills fields of names already there. An observation
+  racing a `hive kill` must never resurrect the killed member.
+- **The `display` window id is a cache.** Authority checks never read it, and
+  hived identity is `(workspace socket, team)` — a dead window no longer
+  retires a hived on its own; a missing registry entry with no window left
+  behind it does.
+- **The team verbs work anywhere.** create/join/spawn/team/kill/delete/attach
+  and view need no tmux context: a team created outside tmux is headless, and a
+  spawn with no live display launches the engine alone, addressed directly from
+  then on. The pane is an address, never a prerequisite. The rest of the surface
+  is display work and refuses to run outside tmux.
+- **Engine keys follow the member, not the pane.** A member's daemon is keyed
+  by `<team>.<member>`, so it survives the pane; a raw non-team pane keeps a
+  pane key and pane lifecycle. Engines also carry their member identity in
+  env, so a tool subprocess can resolve who it is with no pane at all — the
+  fallback behind a live pane binding.
+- **Absence of evidence is not evidence of death.** Daemon reaping never
+  fires on an unreadable registry read, and a young pidfile gets a grace
+  window so a spawn mid-registration is not mistaken for an orphan.
+- **Team names are owned by the registry.** A name-pool pick skips every name
+  the registry still lists, so no create lane reuses a name until
+  `hive delete` releases it.
 
-- claude: the session registry entry its bg-job engine writes
-  (`_runtimeSource: claude_bg`) — see "Claude Native Runtime"
-- codex: the shared app-server daemon's status stream
-  (`_runtimeSource: codex_app_server`) — see "Codex Native Runtime"
-- grok: the leader's notification stream (`_runtimeSource: grok-leader`) —
-  see "Grok Native Runtime"
+`hive attach` renders; it never defines. Only a member with a recorded engine
+identity and an attachable cli gets a pane; the rest are named on stderr and
+left headless. A claude member whose sessionId names an **interactive**
+session (a joined desktop/ccd session, not a bg job) is rendered read-only
+through `hive view`, because the resume lane would mint a forked job that
+steals the member's deliveries.
 
-An interactive claude — no bg job — answers from its own session registry
-entry instead: `_runtimeSource: claude_registry` for a pane TUI
-(`crates/hive/src/hived.rs:1558`), `claude_session` for a pane-less joined
-member (`crates/hive/src/hived.rs:1644`).
+### Mailboxes are not engines
 
-A member with no pane at all reads the same sources by engine identity —
-jobId, threadId, or the grok member key — through
-`_headless_member_runtime` (`crates/hive/src/hived.rs:1624`); the pane is an
-address, never a prerequisite.
+Of the three send address kinds only a member names an engine with a
+transport. `ccd.<name>` reaches a Claude session outside any team over that
+session's own inbox; `flow.run` is the flow runner's mailbox, where delivery
+is the durable bus row itself — the runner polls it, owns no transport, and
+never acks. Mailboxes are listed under `mailboxes`, never in `members`: the
+roster stays engines-only, and `flow` is a reserved prefix the way `ccd` is.
 
-The tmux control-mode output monitor remains only as the fallback `busy`
-heuristic for panes with no native state (terminal panes, unmanaged CLIs) and
-as the idle-notify target-pane chooser
-(`_most_recent_output_pane`, `crates/hive/src/hived.rs:1183`).
+## Runtime fields: meaning, and where truth comes from
 
-### `busy`
+Every field comes from the CLI's **own** runtime — never screen scraping,
+never transcript-tail heuristics. A native source has an authoritative edge; a
+screen has redraws.
 
-Source — the pane's native runtime source, when one holds state for it:
+**`busy`** — is the engine working. The tmux control-mode output monitor
+survives only as the fallback for panes with no native state (terminal panes,
+unmanaged CLIs) and as the idle-notify target chooser. That fallback is gated
+on the transcript file's mtime advancing in the same window, which is what
+suppresses Ink/ratatui frame-redraw spikes being read as work. When the
+transcript path cannot be resolved the gate abstains and the monitor stands
+alone: idle-notify must never silently disappear for panes the gate cannot
+introspect.
 
-1. codex: shared daemon `thread/status/changed`
-2. grok: leader `activity` notifications
-3. claude: the session registry `status` field (`busy` / `shell` / `idle` /
-   `waiting`), read from the bg engine's entry (via the pane's job record) or,
-   for an interactive non-member claude on the pane tty, from that session's
-   own entry
+**`cliAlive`** — the member's agent runtime is alive, which is not the same as
+the pane being alive. Spawned launches do not `exec` over the pane shell, so
+the pane survives the CLI, and a retained shell reports `alive` without
+`cliAlive`. For codex and grok on a pane the only evidence is a live process
+on the pane's TTY — never the pane title, never the `@hive-cli` tag. A
+pane-less member has no TTY to read: there the daemon's own state for the
+threadId or the member key is the evidence, and its absence is what reports
+the runtime dead. For claude it is the bg job's engine state and never the
+pane TTY at all: a viewer gap (reattach window, closed viewer) is not member
+death.
 
-Fallback (no native state) — tmux control-mode output within the last `3s`
-(`BUSY_OUTPUT_THRESHOLD_SECONDS`, `crates/hive/src/hived.rs:51`), gated by
-transcript jsonl mtime advance within the same window (the phantom-redraw
-gate that suppresses Ink/ratatui frame-redraw spikes). If the transcript path
-can't be resolved, the gate returns `None` and the fallback stands on monitor
-activity alone — idle-notify must never silently disappear for panes the gate
-can't introspect.
+**`inputState`** — whether the agent is waiting for a human answer. Its
+important consumer is the send gate, which refuses a send to a waiting target.
+One waiver exists: claude parks its status on `waiting` while a `/status`-style
+dialog is open in an attached viewer, yet the inbox still queues normally, so
+that reason alone does not gate a send.
 
-Combined into `_pane_is_truly_busy` (`crates/hive/src/hived.rs:1116`); the
-native lookup it consults first is `_native_daemon_busy_impl`
-(`crates/hive/src/hived.rs:1101`), which is where that source order lives.
+**`turnPhase`** — the phase of the receiver's turn, per its daemon's events.
+Claude emits none: its registry status carries no turn structure and nothing
+synthesizes one from the transcript. Consumers must treat an absent
+`turnPhase` as "no turn structure available" and fall back to `busy` and the
+runtime source, not as an error.
 
-### `cliAlive`
+## Claude: the job is the member, the pane is a viewer
 
-Meaning — the member's agent runtime is actually alive. Spawned launches do
-not `exec` over the pane shell, so the pane (and `alive`) survives; a
-retained shell is not an agent runtime.
-
-Source, per CLI:
-
-- codex / grok: live process evidence on the pane's TTY only — the pane's
-  current command and TTY process table, parsed by the shared CLI matchers
-  (`detect_cli_process_for_pane`, `crates/hive/src/agent_cli.rs:437`). Never
-  the pane title, the `@hive-cli` tag, or a surviving daemon.
-- claude: the bg job's engine state, **never** the pane TTY — the pane only
-  shows an attach viewer, and a viewer gap (reattach window, closed viewer)
-  is not member death. See the three-tier liveness table under "Claude
-  Native Runtime".
-
-The generic three states:
-
-| state | `alive` | `cliAlive` | `inputState` | `inputReason` | `busy` |
-|---|---|---|---|---|---|
-| pane dead | false | false | offline | pane_dead | false |
-| retained shell (CLI exited) | true | false | offline | cli_exited | false |
-| live CLI | true | true | per runtime | per runtime | per runtime |
-
-Consumers — delivery refuses a dead runtime before any native transport
-(`crates/hive/src/agent.rs:719`), and the send event is already on the bus by
-then (`crates/hive/src/hived.rs:2580`), so a refusal loses nothing; idle
-notify skips dead runtimes.
-
-### `inputState`
-
-Source:
-
-- claude: registry `status == waiting` plus its `waitingFor` label
-  (`inputReason: registry:<waitingFor>`) — from the bg engine's entry for a
-  member, from the session's own entry for an interactive pane
-  (`_runtimeSource: claude_registry`)
-- codex: app-server `status.activeFlags` (see "Codex Native Runtime")
-- grok: leader `session/request_permission` (see "Grok Native Runtime")
-- unmanaged codex panes, and claude panes whose session reports no `status`
-  at all (headless/desktop-hosted): transcript gate inspection via
-  `check_input_gate` (`crates/hive/src/adapters/base.rs:391`) — it reads the
-  jsonl tail for the last relevant record and knows two record shapes only,
-  claude's `{"type":"user"}` and codex's `response_item` message, so a grok
-  pane with no leader state reports `unknown` instead of falling into it. Its
-  verdict reaches the payload as `inputReason: ask_pending` (waiting) or the
-  gate's own failure reason
-
-Current values:
-
-- `ready`
-- `waiting_user`
-- `unknown`
-- `offline`
-
-Meaning:
-
-- whether the agent is currently waiting for a user answer
-
-Important consumer:
-
-- the send gate: `hive send` reads the member's runtime payload and refuses
-  while the target is `waiting_user` (`crates/hive/src/hived.rs:2525`) — with
-  one waiver, claude's `registry:dialog open` (a `/status`-style dialog in an
-  attached viewer parks the status on waiting, but the inbox still queues
-  normally; `_SEND_GATE_WAIVED_REASONS`, `crates/hive/src/hived.rs:67`)
-
-### `turnPhase`
-
-Source:
-
-- codex app-server thread status for a daemon-backed codex pane
-- grok leader notifications for a daemon-backed grok pane
-- claude emits **no** `turnPhase`: the registry `status` carries no turn
-  structure, and nothing synthesizes one from the transcript — neither
-  `_claude_job_runtime` (`crates/hive/src/hived.rs:1290`) nor
-  `runtime_from_status` writes the field
-
-Current values:
-
-- `tool_open`
-- `turn_closed`
-- `input_backlog`
-- `tool_result_pending_reply`
-- `user_prompt_pending`
-- `unknown_evidence`
-
-Meaning:
-
-- the phase the receiver's turn is in, per its daemon's events
-- consumers treat an absent `turnPhase` as "no turn structure available" and
-  fall back to `busy` / `_runtimeSource`
-
-## Claude Native Runtime (bg job source)
-
-A hive claude member is a **`claude --bg` job**. The engine — a full Claude
-Code TUI on a pty owned by claude's own supervisor daemon (argv `claude
-bg-spare`) — runs outside tmux; the member's pane only shows it through a
-`claude attach <jobId>` viewer held in the managed launcher's watch loop.
-The pane process table therefore says nothing about the member's life: the
-viewer is furniture, the job is the member.
+A hive claude member is a **`claude --bg` job**. The engine is a full Claude
+Code TUI on a pty owned by claude's own supervisor daemon, running outside
+tmux; the member's pane only shows it through an attach viewer. The pane
+process table therefore says nothing about the member's life: the viewer is
+furniture, the job is the member.
 
 Identity is the **jobId** — durable across engine restarts, wakes and
-upgrades (the engine pid is not; the sessionId is durable too and stays the
-resume/transcript key). Which job belongs to which tmux pane is a per-pane
-`hive-pane-<n>.job` record under `<claude-config>/hive-control/`, written at
-spawn / managed-launch time (the same shape as codex's `.thread` records).
-`Agent.session_id` for a claude member IS its jobId, and resume snapshots
-carry it. Tool-side identity: the engine's tool subprocesses carry
-`CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/<enginePid>.sock`; hive parses
-the engine pid out of it, reads that engine's registry entry for the jobId,
-and reverse-looks-up the pane through the job records (the claude analogue of
-`CODEX_THREAD_ID`). This resolution also satisfies the in-tmux gate for the
-engine's tools, whose env has no usable `$TMUX`.
+upgrades, which the engine pid is not. The sessionId is durable too and stays
+the resume/transcript key.
 
-Signal surfaces:
+What each signal is worth:
 
-- `<claude-config>/sessions/<enginePid>.json` — the live engine's registry
-  entry: `kind:"bg"`, `jobId`, `status` (`idle`/`busy`/`waiting`/`shell`, an
-  observed vocabulary, not a documented enum), `waitingFor` (only while waiting),
-  `statusUpdatedAt`, `sessionId`, `messagingSocketPath`. The attach viewer
-  never registers. This entry is the busy/inputState/delivery authority; a
-  `statusUpdatedAt` older than 30 minutes demotes the status to `unknown`
-  (`inputReason: stale_status`) without touching liveness
-  (`STATUS_STALE_AFTER_SECONDS`,
-  `crates/hive/src/adapters/claude_bg.rs:62`).
-- `claude agents --json --all` — the durable job ledger. Consulted only when
-  the engine entry is missing (~270ms per call, cached 30s in the hived —
-  `_CLAUDE_JOBS_CACHE_TTL`, `crates/hive/src/hived.rs:57`); the ledger's
-  `state` field lags reality and is never used for liveness.
-- `jobs/<jobId>/state.json` is deliberately **not** read (undocumented
-  fields).
+- The live engine's session registry entry is the busy/inputState/delivery
+  authority. Its `status` vocabulary is *observed, not documented*, so an
+  unrecognized value must degrade to unknown rather than be trusted. A status
+  timestamp older than half an hour demotes the status without touching
+  liveness — a quiet engine is not a dead one.
+- The durable job ledger (`claude agents --json`) costs ~270ms per call and is
+  consulted only when the engine entry is missing. Its `state` field lags
+  reality and is never used for liveness.
+- `jobs/<jobId>/state.json` is deliberately **not** read: undocumented fields.
 
-Three-tier liveness:
+Liveness is three-tier, and the middle tier is the point: with no engine entry
+but a ledger row, the job is **asleep** — the supervisor parks jobs after
+about an hour idle — not dead. A wake revives it with the same
+jobId/sessionId, so an asleep member is never reaped. A *failed* ledger read
+is none of the three tiers: the member keeps `cliAlive` and reports an unknown
+input state. An unreadable ledger is not evidence of death, and treating it as
+one would reap a live member.
 
-| tier | evidence | meaning | payload |
-|---|---|---|---|
-| alive | engine registry entry present (pid live, socket exists) | engine up; `status` is truth | `cliAlive: true`, status-mapped fields |
-| asleep | no entry, but the ledger lists the jobId (row without pid/status) | supervisor parked the job (~1h idle) or it was stopped; **not dead** — wake revives it with the same jobId/sessionId; never reaped | `cliAlive: true`, `busy: false`, `inputState: ready`, `_engineState: asleep` |
-| gone | no entry and no ledger row | job removed | `cliAlive: false`, `inputState: offline`, `inputReason: engine_gone` |
+Delivery self-heals through the same wake primitive: when the entry is missing
+but the ledger still lists the job, a tty-less attach revives the engine — new
+pid, same jobId/sessionId — and delivery re-reads the fresh entry. Only a job
+missing from the ledger, or a failed wake, is a delivery error.
 
-A failed ledger read is none of the three: with no entry and no readable
-ledger the member keeps `cliAlive: true` and reports `inputState: unknown`,
-`inputReason: ledger_unavailable` (`crates/hive/src/hived.rs:1316`). An
-unreadable ledger is not evidence of death, and treating it as one would reap
-a live member.
+Spawn-time traps, both invisible at the call site:
 
-Status mapping (registry `status` → runtime fields):
+- The spawn env is washed of `CLAUDE*`/`ANTHROPIC*`. An inherited
+  `CLAUDE_CODE_CHILD_SESSION` makes the engine skip registration entirely,
+  which produces a member that exists and can never be seen.
+- Path-valued spawn flags must be absolute: they persist verbatim as the job's
+  respawn flags.
 
-- `busy` → `busy: true`, `inputState: ready`
-- `idle` / `shell` → `busy: false`, `inputState: ready`
-- `waiting` → `busy: false`, `inputState: waiting_user`,
-  `inputReason: registry:<waitingFor>`
-- anything else (an empty or unrecognized status) → `busy: false`,
-  `inputState: unknown`, `inputReason: no_registry_status`
-  (`runtime_from_status`, `crates/hive/src/adapters/claude_sessions.rs:285`)
+The pane sits in an attach watch loop because `claude attach` exits 0 both on
+user detach and when an engine respawn kicks the viewer — the loop cannot tell
+them apart, so it reattaches after a short window the user can break, and only
+a non-zero exit (job removed) ends it. `hive kill` parks the job with `claude
+stop` rather than destroying it, so the next resume or delivery wakes it. The
+hived's supervisor prunes job records whose pane died and parks those orphaned
+engines the same way; it never reattaches a viewer, because a user who closed
+one deliberately must not be typed at.
 
-Delivery self-heals through the wake primitive: `Agent::send`
-(`crates/hive/src/agent.rs:702`) resolves pane → job record → engine entry,
-then hands the envelope to the daemon reply lane, falling back to the
-engine's inbox socket; when the entry is missing but the ledger still lists
-the job, a tty-less `claude attach <jobId>` (stdin at /dev/null) revives the
-engine — new pid, same jobId/sessionId — and delivery re-reads the fresh
-entry. Only a job missing from the ledger (or a failed wake) is a
-`DeliveryError`. Spawn readiness is the engine's registry entry
-appearing, proven **before** the pane command is even typed; spawn env is
-washed of `CLAUDE*`/`ANTHROPIC*` vars (an inherited
-`CLAUDE_CODE_CHILD_SESSION` makes the engine skip registration entirely), and
-path-valued spawn flags must be absolute (they persist verbatim as the job's
-`respawnFlags`).
+### The viewer can be showing anything
 
-The managed launcher (`hive claude`, the `hclaude` path) makes user launches
-the same shape: an interactive launch mints a bg job (flags and prompt ride
-the spawn), `--resume <jobId>` rebinds the pane and wakes a parked job (what
-spawn panes, resume hints and `hive resume` all run), `-r <sessionId>
-[--fork-session]` mints a bg job resuming/forking that session, and
-management subcommands / headless / picker shapes pass through to plain
-claude. The pane then sits in an attach watch loop: `claude attach` exits 0
-both on user detach and when an engine respawn/upgrade kicks the viewer, so
-the loop reattaches after a 1s window the user can break with Ctrl-C; a
-non-zero attach (job removed) ends the loop.
+The attach panel switches sessions in-process, so a member pane can be showing
+another member's session, a stranger's, or the panel list, while keeping its
+own tags, job record and delivery address. Reading *what is on screen* is a
+separate probe, and each of its steps exists because a simpler signal lies:
 
-Lifecycle: `hive kill` (and team cleanup) parks the member's job with
-`claude stop` before killing the pane — the job stays in the ledger and
-`hive resume` can wake it. The hived's claude supervisor tick
-(`_claude_supervisor_tick`, `crates/hive/src/hived.rs:2974`) prunes job
-records whose pane died and parks those orphaned engines the same way; it
-never reattaches viewers (the watch loop self-heals, and a user who left it
-deliberately must not be typed at) and never touches an asleep member with a
-live pane.
+- With no viewer process on the pane tty, nothing is displayed — the pane
+  title is a latched leftover of what the dead viewer showed last, never
+  evidence.
+- Attach-journal entries outlive crashed viewers, so an entry counts only when
+  its pid is alive and started when the entry says. No live entry for the
+  viewer's pid means the panel list, whatever the other signals say.
+- The viewer's argv names the job outright, but only until the process
+  re-execs on first entering the panel.
+- The pane title carries the viewed session's bare name and is the only
+  carrier of *which* once the argv is gone. Member jobs are named
+  `<team>.<member>`, so a title maps back to a jobId without paying for the
+  ledger — matched on token boundaries, so `probe.red2` never resolves to
+  `probe.red`.
 
-The pane is a viewer, and the human can drive it: the attach panel switches
-bg sessions in-process, so a member pane can be showing another member's
-session, a stranger's, or the panel list while keeping its own tags, job
-record and delivery address. What is on screen is probed in this order
-(`view_for_pane`, `crates/hive/src/adapters/claude_view.rs:475`):
-
-1. is a viewer running on the pane tty at all (argv `claude attach`/`claude
-   agents`)? No viewer means nothing is displayed — the pane title is a
-   latched leftover of what the dead viewer showed last, never evidence;
-2. the attach journal (`<claude-config>/daemon/attach-journal/*.json`) — one
-   entry per attach gesture, written when a session goes on screen and
-   removed when the viewer returns to the list or detaches. It answers
-   *whether* a session is displayed, never which, and its entries outlive
-   crashed viewers, so an entry only counts when its `pid` is alive and
-   started when `procStart` says. No live entry for the viewer's pid is the
-   panel list, whatever the other two signals say — which is what closes the
-   window where a panel-entered viewer still carries its launch argv;
-3. the viewer's argv — behind that gate, `claude attach <jobId>` names the
-   job outright (`certain`), until the process re-execs to `claude agents`
-   on first entering the panel;
-4. `#{pane_title}` — the panel writes the viewed session's bare name on every
-   switch, the only carrier of *which* once the argv is gone (`likely`). Hive
-   member jobs are named `<team>.<member>`, so a title maps back to a jobId
-   without paying for the `claude agents --json` ledger; the name is matched
-   on token boundaries, so a decorated title still resolves while a longer
-   name that merely contains a member's (`probe.red-notes`, `probe.red2`)
-   never does.
-
-The verdict is `certain` / `likely` / `unknown` plus a kind (`member_view`,
-`foreign`, `list_view`, `no_viewer`). It is **display truth only**: the
-runtime fields `_viewKind` / `_viewCertainty` / `_viewedJob` /
-`_viewedMember` (`hive doctor -v` shows them as `claudeView`) and the pane's
-`@hive-view` tmux option, which the border renders as `name -> what you are
-really looking at` (the hived refreshes it whenever the journal or a pane
-title changes). Nothing about typing depends on it.
+This is **display truth only**. Nothing about typing depends on it.
 
 ### Delivery rides the receiver's own queue
 
@@ -396,143 +197,114 @@ turn, which is what guarantees it gets processed. `now` is not an abort: it
 lands inside the running turn, wrapped, and the turn runs on.
 
 Hive's primary lane for a claude member sidesteps the wrapper entirely: the
-supervisor daemon's `op:"reply"` (`daemon_reply`,
-`crates/hive/src/adapters/claude_sessions.rs:478`) hands the
-envelope to the worker as its own typed input — `origin:{kind:"human"}`, the
-keystroke lane — so it lands with no banner in any state: idle starts its
-own turn (a mechanical response guarantee), mid-turn folds in at the next
-tool boundary as a bare `❯` line, and a blocked worker takes it on its rv
-channel. Protocol details live in
+supervisor daemon's `op:"reply"` hands the envelope to the worker as its own
+typed input — `origin:{kind:"human"}`, the keystroke lane — so it lands with
+no banner in any state: idle starts its own turn (a mechanical response
+guarantee), mid-turn folds in at the next tool boundary as a bare `❯` line,
+and a blocked worker takes it on its rv channel. Protocol details live in
 [daemon-control-socket.md](daemon-control-socket.md).
 
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
-running turn at the next tool boundary, everything else lands as its own
-turn wearing the peer wrapper. On either lane a folded arrival has no
-mechanical guarantee of a response; that obligation is supplied by the
-member skill's receipt duty, which teaches the arrival shapes at birth and
-makes silent skips a protocol violation. The blind-verified evidence for
-this split lives in
-[reports/wrapped-verdict.html](reports/wrapped-verdict.html). The hived adds nothing on
-top: the durable bus row is written, the transport either accepts or
-refuses, and scheduling around a mid-turn target is the receiver's queue's
+running turn at the next tool boundary, everything else lands as its own turn
+wearing the peer wrapper. On either lane a folded arrival has no mechanical
+guarantee of a response; that obligation is supplied by the member skill's
+receipt duty, which teaches the arrival shapes at birth and makes silent skips
+a protocol violation. The blind-verified evidence for this split lives in
+[reports/wrapped-verdict.html](reports/wrapped-verdict.html). The hived adds
+nothing on top: the durable bus row is written, the transport either accepts
+or refuses, and scheduling around a mid-turn target is the receiver's queue's
 job, not hive's.
 
-### What the receiver's transcript records
+### What a delivery leaves in the receiver's transcript
 
-The rows a delivery leaves in the receiving session's JSONL depend on where
-the turn boundary fell when it landed. Line references below are real
-transcripts under `~/.claude/projects/`.
+Between turns, the daemon lane writes nothing but the turn itself — a plain
+`user` row with a human origin, carrying the bare envelope, no queue rows at
+all. The inbox lane between turns is enqueued, dequeued, and lands as a `user`
+row with a peer origin wearing the wrapper.
 
-**Between turns.** The daemon lane writes nothing but the turn itself: a
-plain `user` row, `origin: {"kind":"human"}`, whose content is the bare
-`<HIVE …>` envelope — no queue rows at all
-(`-private-tmp-receipt-test/a65300e6-fed7-460f-ae17-9a94752d6fce.jsonl:259`).
-The inbox lane is queued and taken immediately: a `queue-operation`
-`enqueue`, a `queue-operation` `dequeue`, then a `user` row with
-`origin: {"kind":"peer", …}` whose content wears the peer wrapper
-(`Another Claude session sent a message:` ahead of the envelope) —
-`-private-tmp-hgl-proj/9393a297-af0a-433e-9126-9185b586ec11.jsonl:111-115`.
+Mid-turn, both lanes leave an `enqueue`, an `attachment` row of type
+`queued_command` carrying the text, and a terminal `queue-operation` `remove` —
+and no `user` row for the message at all. That terminal `remove` is what
+separates absorption from mere delay: a frame that is *not* `priority: next`
+(which hive never sends) is held to the end of the turn and then dequeued into
+its own wrapped turn, from the same opening row. **Key on the terminal
+`remove`, never on its reason string**: clients from 2.1.246 carry
+`reason: "absorbed_mid_turn"`, while 2.1.241 and earlier write the same
+terminal `remove` with no reason at all.
 
-**Mid-turn.** On either lane the message is folded into the running turn and
-never becomes a turn of its own. It leaves an `enqueue`, an `attachment` row
-whose `attachment.type` is `queued_command` — carrying the text as `prompt`,
-plus `commandMode: "prompt"`, `source_uuid`, and the lane's `origin`
-(`{"kind":"peer","from":…}` for the inbox socket, `{"kind":"human"}` for the
-daemon reply) — and a terminal `queue-operation` `remove`. On every client
-observed from 2.1.246 that `remove` carries `reason: "absorbed_mid_turn"`
-(`…hive-duo-pr70-claim-test-999a90/afbbecfe-2ba3-48d3-accb-0b57f4d8c617.jsonl:2461-2465`,
-2.1.247); on 2.1.241 and earlier the same terminal `remove` carries no
-`reason` (`…hgl-proj/9393a297-….jsonl:71-76`, 2.1.240), so a reader must key
-on the terminal `remove`, not on the reason string. There is no `user` row
-for the absorbed message at all.
+The cost of folding is that an absorbed arrival exists only as an attachment
+and its queue rows, so nothing downstream — a reader, a viewer, an oracle —
+can count it as a turn or read a response obligation out of the file. The
+receipt duty covers it; the queue does not.
 
-That asymmetry is the cost of folding: an absorbed arrival exists in the
-transcript only as an attachment and its queue rows, so nothing downstream —
-a reader, a viewer, an oracle — can count it as a turn or read a response
-obligation out of the file. The member skill's receipt duty is what covers
-it; the queue does not.
-
-One more receiving-side trap: `origin.from` does not name the sender on the
-member lane. Hive labels the inbox frame with the **target's** own
-`<team>.<member>` (`crates/hive/src/hived.rs:2609` resolves the target and
-hands it to `Agent::send`, which writes the label at
-`crates/hive/src/agent.rs:819`), so `honey.worker`'s transcript shows
-`"from": "honey.worker"` on a message the validator sent (`…hgl-proj/…:76`).
-The real sender travels in band, in the `<HIVE from=…>` envelope. The
-`ccd.<name>` lane is the exception: it labels the frame with the sending
-member's address (`crates/hive/src/cli/core_cmds.rs:841`).
+One receiving-side trap: on the member lane, `origin.from` does **not** name
+the sender. Hive labels the inbox frame with the *target's* own
+`<team>.<member>`, so a member's transcript shows its own address on a message
+someone else sent. The real sender travels in band, in the `<HIVE from=…>`
+envelope. The `ccd.<name>` lane is the exception: it labels the frame with the
+sending member's address.
 
 ### The member keyboard is the job, not the pane
 
-Every keyboard path for a claude member (`hive inject`, `/compact`, cvim
-sendback, `hive interrupt`'s Escape) pipes into `claude attach <jobId>`
-instead of typing at the pane. Hive opens its own attach client with stdin on
-a pipe, writes the keystrokes and closes it; the pane's viewer stays attached
-and unflickered throughout, and the attach also wakes a parked engine, so the
-1h park self-heals on the keyboard path the same way it does on delivery.
-The pane's viewer is a screen: what the human has it showing can no longer
-misroute, block, or get kicked by a delivery. There is no fallback — a member
-pane never gets `send-keys`.
+Every keyboard path for a claude member — inject, `/compact`, cvim sendback,
+interrupt — opens hive's own attach client with stdin on a pipe, writes the
+keystrokes, and closes it. The pane's viewer stays attached and unflickered,
+and the attach wakes a parked engine, so the park self-heals on the keyboard
+path exactly as it does on delivery. The pane's viewer is a screen: what the
+human has it showing can no longer misroute, block, or get kicked by a
+delivery. There is no fallback — a member pane never gets `send-keys`.
 
-The sequence (`type_into_job` / `interrupt_job`,
-`crates/hive/src/adapters/claude_bg.rs:1476` and `:1649`) and what each step
-is evidence of:
+Each step of that sequence is there because of a specific failure:
 
-1. **client readiness** — the attach client writes its own attach-journal
-   entry (~0.3s) when the session goes on screen. Control bytes wait for it:
-   a `C-u` written into a client that has not taken the keyboard yet is
-   inserted into the composer as a literal character instead of clearing it
-   (observed once on 2.1.240, and silent when it happens).
-2. **clear, in a chunk of its own** — `C-u`, then the text as a separate
-   write. Anything already in the composer would otherwise be submitted in
-   front of the delivery.
-3. **typing readiness** — `claude logs <jobId>` is the engine's own pty
-   output, readable headlessly, and the composer's unsubmitted content is at
-   the end of it. It is polled until the typed text echoes back; that echo,
-   not a sleep, is the proof the client is forwarding stdin. A slice without
-   an echo re-types, and because every attempt re-clears first, a retype
-   cannot double the text. Two details make the echo *evidence* rather than a
-   coincidence: it is counted against a snapshot taken before anything was
-   typed, so the same text delivered twice (or a payload quoting what is
-   already on screen) does not read as an echo that predates the typing; and
-   the copy on screen may be the head of the text, its tail (the composer
-   scrolls to the cursor on a long paste) or a `[Pasted text #N]` placeholder
-   holding none of it, so all three count.
-4. **submit** — `\r`, then the transcript. A slash command lands as a
-   `<command-name>` record (the engine ran the command); anything else lands
-   as a user turn whose content must equal what was typed **exactly** — an
-   equal turn is also the proof that no draft rode along. A turn that ends
-   with the text but carries something in front of it is reported as a
-   failure, not delivered silently. A slash command with no record at all
-   (`/cost` and other UI-only commands write none) degrades to "written".
-5. **Escape** leaves no echo, so it skips step 3, and it is written exactly
-   once — a second Escape lands on claude's own "edit previous message"
-   chord. It is confirmed by the transcript's `[Request interrupted by user]`
-   marker or by the engine leaving `busy`. An engine that was not busy has
-   nothing to interrupt and nothing that could confirm one either, so that
-   returns immediately: a success, not a failure and not a wait (cvim sends
-   an Escape before every sendback, and members are idle most of the time).
+- **Wait for the client to take the keyboard.** A `C-u` written into a client
+  that has not taken it yet is inserted into the composer as a literal
+  character instead of clearing it — observed once, and silent when it
+  happens.
+- **Clear in a write of its own.** Anything already in the composer would
+  otherwise be submitted in front of the delivery.
+- **Treat the echo as the proof, not a sleep.** The engine's own pty output is
+  readable headlessly and the composer's unsubmitted content is at the end of
+  it; polling until the typed text appears is the only proof the client is
+  forwarding stdin. Two details make it evidence rather than coincidence: the
+  echo is counted against a snapshot taken before anything was typed, so the
+  same text delivered twice does not read as an echo that predates the typing;
+  and the on-screen copy may be the head of the text, its tail (the composer
+  scrolls to the cursor on a long paste), or a `[Pasted text #N]` placeholder
+  holding none of it, so all three shapes count. A slice without an echo
+  re-types, and because every attempt re-clears first, a retype cannot double
+  the text.
+- **Verify the submit in the transcript.** A slash command lands as a command
+  record; anything else lands as a user turn whose content must equal what was
+  typed **exactly** — equality is also the proof that no leftover draft rode
+  along. A turn that ends with the text but carries something in front of it
+  is reported as a failure, not delivered silently. UI-only slash commands
+  write no record at all and degrade to "written".
+- **Escape exactly once.** It leaves no echo, so it skips the echo wait, and a
+  second Escape lands on claude's own "edit previous message" chord. An engine
+  that was not busy has nothing to interrupt and nothing that could confirm
+  one either, so that returns immediately: a success, not a failure and not a
+  wait — cvim sends an Escape before every sendback, and members are idle most
+  of the time.
 
-Every subprocess in that path (`attach`, `logs`) is hard-bounded and its env
-is washed of `CLAUDE*`/`ANTHROPIC*` like the spawn's, and the subcommand is
-argv[1] — a leading flag silently downgrades `attach` into a prompt.
+Every subprocess on that path is hard-bounded and its env washed like the
+spawn's, and the subcommand must be argv[1]: a leading flag silently downgrades
+`attach` into a prompt.
 
-The draft round-trip: `C-u` drops whatever the human was typing into the
-member's composer onto claude's kill ring, and a confirmed submit pastes it
-back (`C-y`) — the engine itself restores the exact bytes. The paste is
-gated, because the ring survives a `C-u` that killed nothing and would
-otherwise resurrect unrelated content: only when the member's own pane is
-certainly-or-likely showing this job does the styled pane capture
-(`draft_guard`, dim-aware so autocomplete ghost text never counts) vouch for
-a real draft. The `claude logs` replay cannot stand in for that read — it is
+The draft round-trip: the clear drops whatever the human was typing onto
+claude's kill ring, and a confirmed submit pastes it back — the engine itself
+restores the exact bytes. The paste is gated, because the ring survives a
+clear that killed nothing and would otherwise resurrect unrelated content:
+only when the member's own pane is certainly-or-likely showing this job does a
+styled pane capture (dim-aware, so autocomplete ghost text never counts) vouch
+for a real draft. The engine's log replay cannot stand in for that read — it is
 an incremental paint stream whose last `❯` can be a history echo, not the
-composer. A re-type forfeits the restore: the second `C-u` overwrites the
-single-slot ring with hive's own text. With the gate closed the behavior is
-the old trade-off — the draft stays on the ring and the TUI offers `Ctrl+Y
-to paste deleted txt`. The tmux buffer dance that guards codex and grok
-drafts still does not apply here: it types at the pane, and the pane is not
-where a member's keyboard is.
+composer. A re-type forfeits the restore: the second clear overwrites the
+single-slot ring with hive's own text. With the gate closed the draft stays on
+the ring and the TUI still offers to paste it — recoverable by hand, never
+silently lost. The tmux buffer dance that guards codex and grok drafts does not
+apply here: it types at the pane, and the pane is not where a member's keyboard
+is.
 
 Non-member claude panes — a plain interactive TUI with no job record — are a
 different target, not a fallback: they keep the tmux keystroke path with its
@@ -542,198 +314,70 @@ composer belongs to whichever session it is displaying. So a member whose job
 record went missing fails loudly instead of quietly typing into a stranger's
 turn.
 
-An unmanaged claude **pane** — a bare interactive TUI with no job record — is
-deliberately unsupported as a member: a `hive create` run from that pane
-refuses it and prints the `hclaude` / `hive claude -r <sessionId>` fix
-(`_require_claude_job_backed`, `crates/hive/src/cli/core_cmds.rs:474`, reached
-from `crates/hive/src/cli/core_cmds.rs:53`), and delivery to a record-less
-claude pane fails loudly. `hive spawn` never meets one: it launches the
-engine itself.
+An unmanaged claude **pane** is deliberately unsupported as a member: `hive
+create` run from one refuses it and prints the managed-launch fix, and
+delivery to a record-less claude pane fails loudly. `hive spawn` never meets
+one — it launches the engine itself. A claude session that is **not on a pane**
+is the opposite case and is supported: run outside tmux, `hive join` enrols the
+calling session with its own sessionId as engine identity, delivery takes the
+same two lanes (daemon reply, then the session's own inbox socket), and attach
+renders it read-only. Such a member has no bg job, no ledger row, and none of
+the keyboard path above applies to it.
 
-A claude session that is **not on a pane** is a different case and is
-supported: run outside tmux, `hive join <team>` enrols the calling session
-into the roster with its own sessionId as engine identity
-(`_join_as_ccd`, `crates/hive/src/cli/core_cmds.rs:633`). Delivery to it takes
-the same two lanes as a job — daemon reply first, the session's own inbox
-socket second (`_deliver_claude_session`, `crates/hive/src/agent.rs:839`) — and `hive
-attach` renders it read-only through `hive view`. Such a member has no bg
-job, so nothing on the keyboard path applies to it.
+## Codex: one shared app-server daemon
 
-## Codex Native Runtime (app-server source)
+One `codex app-server` daemon per `CODEX_HOME` hosts every hive codex thread;
+each TUI attaches to its own thread over that socket and hive connects as one
+more client, reading state natively from the daemon's status stream instead of
+reverse-engineering it from the transcript.
 
-One `codex app-server` daemon per CODEX_HOME (socket
-`$CODEX_HOME/app-server-control/hive-shared.sock`) hosts every hive codex
-thread. Each codex TUI attaches to its own thread with `codex resume
-<threadId> --remote unix://<sock> --cd <cwd>`; hive connects as one more
-client over the same socket and reads `busy` / `inputState` / `turnPhase`
-**natively** from the daemon's status stream, instead of reverse-engineering
-them from the transcript. The emitted payload is tagged `_runtimeSource:
-codex_app_server`.
+- **Identity is the threadId, never the process env.** The daemon's env is
+  frozen at spawn time and shared by every thread; codex injects the thread's
+  own id into tool subprocesses instead, and per-pane records map threads to
+  panes both ways.
+- **A minted thread must be flushed before it is resumable.** `thread/start`
+  alone leaves the thread unpersisted and a later resume fails with no rollout
+  found; the follow-up name write flushes it to disk. An unflushed thread is
+  treated as a spawn failure.
+- **Trust in remote mode is read from the daemon's config on disk**, not from
+  the client, so every new cwd gets its trust entry written before its thread
+  starts.
+- **The daemon is machine-level shared state.** Hive never kills it — a dead
+  daemon takes every attached TUI down with it within seconds. The hived
+  supervises instead: respawn while live codex members exist, and one guarded
+  resume typed into a member's retained shell.
+- **State is event-sourced and has no time-based staleness gate**; it stays
+  valid until the next event. On a shared daemon a client that does not own
+  the turn receives only status events — turn and item events go to the turn's
+  owner — so status is the sole busy source, and a client that connected late
+  backfills once on resume.
+- **Active phases are deliberately not subdivided**: the native path trades
+  transcript-tail granularity for an authoritative busy edge.
+- An unmanaged codex — embedded, or a picker launch whose chosen thread hive
+  cannot know — is deliberately unsupported **as a member**: it still runs, but
+  hive reads no state from it and there is no transcript fallback.
 
-Identity is the threadId (== transcript sessionId), never the process env: the
-daemon's env is frozen at spawn time and shared by every thread (hive strips
-`TMUX_PANE` from it), and codex injects the thread's own `CODEX_THREAD_ID`
-into tool subprocesses. Which thread belongs to which tmux pane is a per-pane
-`.thread` record beside the socket, written at spawn / managed-launch time;
-`hive` invocations inside a codex tool resolve their pane by reverse lookup of
-`CODEX_THREAD_ID` through those records.
+## Grok: the leader daemon
 
-Spawn mints the thread up front: hive calls `thread/start` (with cwd, and the
-model when pinned) followed by `thread/name/set` — the name write flushes the
-rollout to disk, without which a fresh thread is not resumable — records the
-pane binding, and launches the TUI as a `resume` of that thread. `hive codex
-fork <sid>` forks server-side (`thread/fork`), records the fork, and resumes
-it the same way. Directory trust in remote mode is judged from the daemon's
-config.toml on disk, so every new cwd gets `[projects."<dir>"] trust_level =
-"trusted"` written before its thread starts.
+A born-connected grok pane runs a `grok agent leader` daemon; the TUI attaches
+to it and hive attaches as a second ACP client, folding runtime from that
+client's notification stream.
 
-This path is taken only when the pane has a recorded thread and the shared
-daemon answers. An unmanaged codex — embedded, or a `resume` picker launch
-whose chosen thread hive cannot know — is deliberately unsupported **as a Hive
-team member**: a `hive create` run from that pane refuses it and prints the
-`hcodex` / `hive codex resume` fix (`_require_daemon_backed`,
-`crates/hive/src/cli/core_cmds.rs:425`). It still runs, but hive reads no
-state from it — session id stays `unresolved`, `turnPhase` stays unknown,
-and there is no transcript fallback.
-
-The daemon is machine-level shared state: hive never kills it (a dead daemon
-takes every attached TUI down with it within ~5s), and the hived supervises
-it — a dead daemon is respawned while the team has live codex members, and a
-member pane whose CLI exited but whose thread is recorded gets one `hive codex
-resume <threadId>` typed into its retained shell (guarded by a live-process
-check, a shell-prompt check, and a cooldown; `crates/hive/src/hived.rs:2919`).
-Records of dead panes are pruned on the same tick.
-
-State is event-sourced from the daemon's broadcasts and stays valid until the
-next event — there is no time-based staleness gate. On a shared daemon a
-non-turn-owning client receives only `thread/status/changed` (and
-`thread/goal/*`); `turn/*` and `item/*` go to the turn's own client, so status
-events are the sole busy source. A client that connected after a thread went
-active backfills its current status once via `thread/resume`.
-
-Field mapping (`_apply_status`,
-`crates/hive/src/adapters/codex_app_server.rs:551`):
-
-- `busy`
-  - `true` — `thread/status/changed` with `status.type=active`
-  - `false` — `status.type=idle`
-- `turnPhase`
-  - `tool_open` — any `active` status. The native path does not subdivide
-    active phases (no `tool_result_pending_reply` / `user_prompt_pending`
-    split); it trades transcript-tail granularity for an authoritative busy
-    edge.
-  - `turn_closed` — `idle`
-  - `unknown_evidence` — before the first event; `notLoaded` / `systemError`
-    leave the prior phase unchanged
-- `inputState`
-  - `waiting_user` — `active` whose `status.activeFlags` contain
-    `waitingOnApproval` or `waitingOnUserInput`; emitted with
-    `inputReason=app_server_active_flag`
-  - `ready` — any other `active`, or `idle`
-
-`sessionId` for a hive-managed pane IS the recorded threadId — a plain record
-read, available from spawn time with no probing and no `unresolved` window.
-
-## Grok Native Runtime (leader source)
-
-A born-connected grok pane — hive-spawned, or launched through `hgrok` (the
-`hive shell-init` launcher) — runs a `grok agent leader` daemon. The
-TUI attaches to it, and hive attaches as a second client through `grok agent
---leader stdio`, an ACP JSON-RPC subprocess. `busy` / `inputState` / `turnPhase`
-are folded from that client's notification stream
-(`crates/hive/src/adapters/grok_leader.rs:522`); the emitted payload is tagged
-`_runtimeSource: grok-leader`.
-
-The daemon is keyed by whoever owns it: `m-<team>.<member>` for a member,
-`p<slug>` for a raw `hive grok` pane outside any team
-(`crates/hive/src/adapters/grok_leader.rs:90`). A headless member has no pane
-and is read by member key; everything below holds for both, with "pane"
-standing for whichever key resolves.
-
-The leader keeps every session of the cwd, so which one is *this pane's* is not
-discoverable from it: hive mints the session id at spawn time, passes it as
-`--session-id`, and records it beside the socket. The client loads exactly that
-session and ignores notifications for any other.
-
-`session/load` replays the session's past updates before it answers, so
-everything received before the load response is discarded — a replayed turn must
-never mark the pane busy. This is why spawn asks the hived to connect
-(`connect-grok`) once the pane's session exists and its grok is up, rather than
-lazily on the next tick.
-
-Field mapping (notification → runtime field):
-
-- `busy` — `_x.ai/sessions/changed` `activity` is the authority:
-  - `true` — `activity: working`, or any `session/update` chunk/tool event
-  - `false` — `activity: idle`, or `_x.ai/session_notification` `turn_completed`
-- `turnPhase`
-  - `tool_open` — `session/update` `tool_call`
-  - `tool_result_pending_reply` — `tool_call_update` with `status: completed`
-  - `user_prompt_pending` — an agent/thought/user message chunk with no tool
-    phase open
-  - `input_backlog` — `_x.ai/queue/changed` with non-empty entries
-  - `turn_closed` — `turn_completed`, or `activity: idle`
-  - `unknown_evidence` — before the first post-load notification
-- `inputState`
-  - `waiting_user` — the leader asked `session/request_permission`; hive answers
-    its copy `cancelled` (the decision belongs to the human at the TUI, which
-    gets its own copy) and emits `inputReason=leader_permission_request`
-  - `ready` — `turn_completed`, `activity: idle`, or any `tool_call_update` (the
-    permission it was blocked on has been decided)
-  - `unknown` (`inputReason: no_leader_runtime`) — no leader state for the pane.
-    Grok never falls back to the transcript gate: `check_input_gate` knows
-    only the claude/codex record shapes and reads a pending grok permission
-    request as clear.
-
-Queue semantics: a prompt sent mid-turn is queued FIFO by the leader and runs
-when the current turn ends — there is no steering and no bounce, the same as
-typing into the TUI. Delivery is therefore accepted at the *echo* (a queue entry
-or `user_message_chunk` carrying the text), not at the `session/prompt`
-response, which only lands when the whole turn ends.
-
-`sessionId` for a daemon-backed pane is the spawn-minted id read straight from
-the pane's `.session` file — no probing, and no `unresolved` window while the
-session warms up.
-
-## Root Send Protocol
-
-`hive send` is the only message verb; threading is automatic. When the
-latest inbound message from the recipient is still unanswered, the send
-is recorded as its reply (carries `replyTo`, exempt from the root
-protocol; `crates/hive/src/cli/core_cmds.rs:745`). Otherwise it is a root
-send opening a new thread.
-
-Hive enforces a two-layer protocol for root sends:
-
-- `body`: short summary only
-- `artifact`: detailed content
-
-Current root-body hard failures (`body_warning_hint`,
-`crates/hive/src/runtime_state.rs:49`; limits at `:5-7`):
-
-- body longer than `500` chars
-- body with `3+` lines
-- body containing fenced code
-- body lines starting with markdown heading/list markers:
-  - `# `
-  - `- `
-  - `* `
-
-An empty body fails too. A reply runs the same check but only prints its hint
-on stderr (`_maybe_warn_long_body`, `crates/hive/src/cli/mod.rs:431`); on a
-root send the verdict is fatal (`_root_send_protocol_error`,
-`crates/hive/src/cli/mod.rs:442`).
-
-## Why There Is Only One Runtime Doc
-
-Everything here is one subject seen from different sides — what a member's
-engine reports, and what a message does when it reaches that engine:
-
-- runtime fields (`busy`, `cliAlive`, `inputState`, `turnPhase`) and their
-  native sources
-- delivery: transport acceptance, queue carriage, and the rows it leaves
-- the root send protocol
-
-Splitting them would put the same mechanism in two files and let one of them
-rot. What a read-only observer can recover afterwards is the one part that
-lives elsewhere, in [transcript-view.md](transcript-view.md).
+- **The leader keeps every session of the cwd**, so which one belongs to this
+  pane is not discoverable from it. Hive mints the session id at spawn, passes
+  it in, records it, and the client ignores notifications for any other.
+- **Session load replays the session's past updates before it answers**, so
+  everything received before the load response is discarded — a replayed turn
+  must never mark the pane busy. This is why spawn asks the hived to connect
+  once the session exists and grok is up, rather than lazily on the next tick.
+- **Hive answers its own copy of a permission request with `cancelled`** and
+  reports the member as waiting: the decision belongs to the human at the TUI,
+  which gets its own copy.
+- **Grok never falls back to the transcript gate.** That gate knows only the
+  claude and codex record shapes and would read a pending grok permission
+  request as clear, so a grok pane with no leader state reports unknown
+  instead.
+- **A prompt sent mid-turn is queued FIFO and runs when the turn ends** — no
+  steering, no bounce, the same as typing into the TUI. Delivery is therefore
+  accepted at the *echo* (a queue entry or message chunk carrying the text),
+  not at the prompt response, which only lands when the whole turn ends.

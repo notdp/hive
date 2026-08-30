@@ -7,7 +7,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 
 一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口只是可选的显示器：headless 成员照常收发消息、被派活、被 kill，`hive attach` 只是把团画出来。
 
-全部动词：
+主线动词（`worktree` / `ccd` / `thread` / `flow` 在各自小节里按需登场）：
 
 ```bash
 hive team            # 名册 + runtime：你是谁、队里有谁、各自什么状态
