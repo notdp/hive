@@ -600,12 +600,22 @@ fn render_thinking(
             fg(t.gray),
         ));
     }
+    // Current claude builds persist only the signature of a thinking block,
+    // never its text, so there is nothing behind the header to open. Say so
+    // once, in place, instead of offering a fold that expands to nothing.
+    let recorded = !tb.text.trim().is_empty();
+    if !recorded {
+        spans.push(Span::styled(
+            " · not recorded".to_string(),
+            fg(t.gray_dim).add_modifier(Modifier::DIM),
+        ));
+    }
     let mut header = clip_spans(spans, inner_w);
     if collapsed_sel {
         header = patch_bg(header, inner_w, t.bg_dark);
     }
     let mut lines = vec![header];
-    if expanded {
+    if expanded && recorded {
         let bw = inner_w.saturating_sub(ROW_CHROME);
         let mut body: Vec<Line<'static>> = Vec::new();
         for line in grok_md::render_ratatui(&tb.text, t, bw) {
@@ -623,7 +633,7 @@ fn render_thinking(
     }
     Rendered {
         lines,
-        foldable: true,
+        foldable: recorded,
     }
 }
 
@@ -2250,7 +2260,11 @@ pub fn run(path: &Path) -> anyhow::Result<i32> {
     let mut app = App::new(theme);
     {
         let lines: Vec<&str> = backlog.lines().collect();
-        for raw in &lines[lines.len().saturating_sub(TAIL_EVENTS)..] {
+        let tail_from = lines.len().saturating_sub(TAIL_EVENTS);
+        for raw in &lines[..tail_from] {
+            app.parser.note_session_state(raw);
+        }
+        for raw in &lines[tail_from..] {
             app.push_raw(raw);
         }
     }

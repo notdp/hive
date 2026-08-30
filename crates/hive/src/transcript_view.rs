@@ -870,6 +870,7 @@ pub struct TranscriptParser {
     busy: bool,
     model: Option<String>,
     effort: Option<String>,
+    ultra: bool,
     agent_icons: HashMap<String, char>,
     queued_texts: HashSet<String>,
 }
@@ -918,6 +919,7 @@ impl TranscriptParser {
             turn_has_assistant_text: false,
             tokens: 0,
             busy: false,
+            ultra: false,
             agent_icons: HashMap::new(),
             queued_texts: HashSet::new(),
             model: None,
@@ -962,8 +964,36 @@ impl TranscriptParser {
         }
     }
 
-    /// Reasoning-effort level from the most recent row carrying one.
+    /// Pick up session-level state from a line the viewer is about to skip.
+    /// The tail window holds the last few hundred events; `ultra_effort_enter`
+    /// is announced once and never repeated, so it usually sits above that
+    /// line and would otherwise be lost.
+    pub fn note_session_state(&mut self, raw: &str) {
+        if !raw.contains("ultra_effort_enter") {
+            return;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(raw) else {
+            return;
+        };
+        if row.get("type").and_then(Value::as_str) == Some("attachment")
+            && row
+                .get("attachment")
+                .and_then(|a| a.get("type"))
+                .and_then(Value::as_str)
+                == Some("ultra_effort_enter")
+        {
+            self.ultra = true;
+        }
+    }
+
+    /// Reasoning-effort level from the most recent row carrying one — or
+    /// `ultra`, which the assistant rows never say: it arrives once as an
+    /// `ultra_effort_enter` attachment and has no recorded counterpart for
+    /// leaving, so it holds for the rest of the transcript.
     pub fn effort(&self) -> Option<&str> {
+        if self.ultra {
+            return Some("ultra");
+        }
         self.effort.as_deref()
     }
 
@@ -1144,6 +1174,11 @@ impl TranscriptParser {
         };
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "attachment" {
+            if row.get("attachment").and_then(|a| a.get("type")).and_then(Value::as_str)
+                == Some("ultra_effort_enter")
+            {
+                self.ultra = true;
+            }
             self.push_queued_command(&row, &mut out);
             return out;
         }
@@ -1758,6 +1793,25 @@ mod tests {
             }
             other => panic!("expected User, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_ultra_effort_marker_overrides_the_row_effort() {
+        let mut p = TranscriptParser::new();
+        p.push(
+            &json!({
+                "type": "assistant",
+                "effort": "xhigh",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            })
+            .to_string(),
+        );
+        assert_eq!(p.effort(), Some("xhigh"));
+        p.push(
+            &json!({"type": "attachment", "attachment": {"type": "ultra_effort_enter", "reminderType": "full"}})
+                .to_string(),
+        );
+        assert_eq!(p.effort(), Some("ultra"));
     }
 
     #[test]
