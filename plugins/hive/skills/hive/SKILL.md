@@ -42,7 +42,7 @@ hive ls              # 全部 team（含没有窗口的）
 字段怎么用：
 
 - `self`：你的名字。寻址规则：
-  - 回信永远照抄来信的 `from=` 地址，不用想。
+  - 回信永远照抄来信的 `from=` 地址。
   - 你是 tmux 里的 pane 成员：发队友用裸名（`hive send dodo …`）；本队前缀等价裸名（所以照抄 from 永远安全），别队前缀会被拒。
   - 你在 tmux 外（headless 成员、joined session、guest）：用 `<team>.<member>`；裸名全局唯一时也行。
   - team 外的 Claude session：`ccd.<name>`（见「互通」小节）。
@@ -54,7 +54,7 @@ hive ls              # 全部 team（含没有窗口的）
 
 ### 没活就停
 
-Hive 是 push 模型：有新消息时 runtime 会把 `<HIVE>` block 注入你的对话并唤醒你。当前 turn 没有待办就结束 turn——不要 `sleep`、while loop、反复 `hive team`，也不要翻 repo、artifact 或任务表猜下一件事。这条贯穿一生：刚出生没任务、回报完等验收，都一样。回报给 `flow.run` 之后同理：不要去 `hive team` 里找它,也不要再发一条「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
+Hive 是 push 模型：有新消息时 runtime 会把 `<HIVE>` block 注入你的对话并唤醒你。当前 turn 没有待办就结束 turn——不要 `sleep`、while loop、反复 `hive team`，也不要翻 repo、artifact 或任务表猜下一件事。刚出生没任务、回报完等验收，都一样。回报给 `flow.run` 之后同理：不要去 `hive team` 里找它,也不要再发一条「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
 
 ### 收活：任务以派发 artifact 为准
 
@@ -69,7 +69,7 @@ Hive 是 push 模型：有新消息时 runtime 会把 `<HIVE>` block 注入你�
 
 **什么时候到**——你空闲时，它自己开启新的一轮；你正在干活时，它折进当前这一轮，出现在某个工具结果旁边。折进来的那条一样是要办的活。
 
-**外面包没包**——claude 成员的主投递道把信封当成你自己敲进去的输入，落地时外面什么都没有，你看到的就是裸信封：
+**外面包没包**——claude 成员的主投递道把信封当成你自己敲进去的输入，你看到的就是裸信封：
 
 ```
 <HIVE from=comb.dodo to=comb.rex msgId=a1b2 artifact=/tmp/spec.md>
@@ -167,7 +167,7 @@ kill 是派发人的动词，你不用自己退场：验收通过后派发人会
 
 ## 你要当派发人时
 
-你要发起协作，你就是这个 team 的 **orch**：拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。没有仪式：orch 只是先开始派活的那个参与者。
+你要发起协作，你就是这个 team 的 **orch**：拆解任务、spawn 成员、派发、收结论、跑集成终验、向 human 汇报。你不写业务代码。orch 只是先开始派活的那个参与者。
 
 启动：还没有 team 就按开头动词表 `hive create`——建团者就是 orch，tmux 内外一样：你以 `<team>.orch` 进名册，成员回你直接寻址 orch（唯一例外：你已经是别团成员时，你不会再入册，本团以 guest 身份编排，回信地址仍是原队的 `<原 team>.<你的成员名>`，成员照抄 from 就能回到你）。成员的回信会注入你的对话并唤醒你，spawn/派发之后照常结束 turn 等推送。然后 `hive team` 确认 `self`，开始拆解。
 
@@ -199,11 +199,11 @@ hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 
 ### 进度只来自回信
 
-成员的进度信号只有三个：它的回报消息、notify 事件、`hive team` 的 runtime 字段。前两个是推送；`hive team` 用于收到消息后核对状态，不是轮询工具。**不要用 `tmux capture-pane` 或任何读屏手段观察成员**——屏幕是给 human 看的显示层，有残屏和中间态，不是真相；窥屏还烧你自己的 context。**已派发的任务也不要自己并行做一遍**——你的产出没人验收，还烧掉终验要用的 context。派发出去之后没有待办就结束 turn，等消息唤醒。
+成员的进度信号只有三个：它的回报消息、notify 事件、`hive team` 的 runtime 字段。前两个是推送；`hive team` 用于收到消息后核对状态，不是轮询工具。**不要用 `tmux capture-pane` 或任何读屏手段观察成员**——屏幕是给 human 看的显示层，有残屏和中间态，不是真相；读屏还烧掉你自己的 context。**已派发的任务也不要自己并行做一遍**——你的产出没人验收，还烧掉终验要用的 context。派发出去之后没有待办就结束 turn，等消息唤醒。
 
 ### 成员生命周期
 
-- **验收前不 kill**。回报 ≠ 验收：不满意就 `hive send` 打回追问——活成员带全部上下文，杀了重生是失忆的。
+- **验收前不 kill**。回报 ≠ 验收：不满意就 `hive send` 打回追问——活成员带全部上下文，杀掉重 spawn 会丢掉上下文。
 - 验收通过、下游任务的 artifact 写好之后，`hive kill <member>`，再 spawn 下一环节。
 - 唯一例外是 fix 循环（pattern ④）：产出还会被打回的成员，留到下游 verify pass 再 kill。
 
@@ -240,7 +240,7 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 **⑤ 集成验收**——所有任务 DONE 后，你自己跑集成验（拉集成分支、跑测试、核验收标准）。过了才向 human 汇报。终验不外包。
 
-**⑥ flow 脚本（机械流程的一把梭）**——循环、fan-out、barrier 这类确定性控制流不用手工编排：写一个 Python 脚本交给 `hive flow run`，每个 `agent()` 都是真实成员，human 全程可见可介入。`agent()` 走的是 pane spawn，所以这条只在 tmux 里跑得起来，headless 团用不了。
+**⑥ flow 脚本（机械流程）**——循环、fan-out、barrier 这类确定性控制流不用手工编排：写一个 Python 脚本交给 `hive flow run`，每个 `agent()` 都是真实成员，human 全程可见可介入。`agent()` 走的是 pane spawn，所以这条只在 tmux 里跑得起来，headless 团用不了。
 
 ```python
 # workflow.py

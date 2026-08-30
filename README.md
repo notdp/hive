@@ -8,11 +8,11 @@ _This README is maintained in English. Translations may lag behind the canonical
 
 ## What is Hive
 
-Hive is a runtime for agents, not a CLI you drive by hand. A team is a roster in the registry — one JSON file per team under `$HIVE_HOME/state/teams/` — plus one engine per member. The tmux window is a display that `hive attach` renders on top of that, and nothing more.
+Hive is a runtime for agents, not a hand-driven CLI. A team is a roster in the registry (one JSON file per team under `$HIVE_HOME/state/teams/`) plus one engine per member. The tmux window is a display that `hive attach` renders on top of that.
 
-The split is enforced. `hive create` outside tmux registers a headless team, `hive spawn` with no display brings up engine-only members that still receive, report, and get killed normally, and `hive attach <team>` materializes the window later, one pane per member. Nothing tmux holds is truth, so closing the window costs nothing.
+The split is enforced in the implementation. `hive create` outside tmux registers a headless team, `hive spawn` with no display brings up engine-only members that still receive, report, and get killed normally, and `hive attach <team>` materializes the window later, one pane per member. Nothing tmux holds is truth, so closing the window discards no state.
 
-Dispatching tasks, sending messages, reading runtime state: all of it happens inside the agent session, and your agent runs the commands. The human entry point is the plugin skill `/hive:hive [team]`: no argument creates or joins by circumstance, a name joins that team and creates it if it does not exist. A small set of commands stays yours — installing plugins, reading a session transcript (`hive view`), the popup editor (`hive cvim` / `hive vim`), split forks, and local dev setup.
+Dispatching tasks, sending messages, and reading runtime state happen inside the agent session, and the agent runs the commands. The human entry point is the plugin skill `/hive:hive [team]`: no argument creates or joins by circumstance, a name joins that team and creates it if it does not exist. A small set of commands is run by hand: installing plugins, reading a session transcript (`hive view`), the popup editor (`hive cvim` / `hive vim`), split forks, and local dev setup.
 
 ## Install
 
@@ -36,7 +36,7 @@ codex plugin marketplace add https://github.com/notdp/hive.git
 codex plugin add hive@hive
 ```
 
-Install the CLI yourself first. The plugin's `SessionStart` hook looks like it will do that for you and cannot: its converge step still shells out to `pipx install` against this repo, which predates the Rust cutover and has shipped no `pyproject.toml` since, so that lane cannot produce a binary and the hook's second phase — enabling Claude's marketplace auto-update — is never reached. With a new enough `hive` already on PATH the check installs nothing and falls through, which is the only path that converges.
+Install the CLI first. The plugin's `SessionStart` hook does not install it despite appearing to: its converge step still shells out to `pipx install` against this repo, which predates the Rust cutover and has shipped no `pyproject.toml` since, so that lane cannot produce a binary and the hook's second phase (enabling Claude's marketplace auto-update) is never reached. The only converging path is a new enough `hive` already on PATH: the check then installs nothing and falls through.
 
 Requires:
 
@@ -56,7 +56,7 @@ $ hclaude      # or: hcodex / hgrok
 /hive:hive
 ```
 
-The agent makes the current pane the team's orch and spawns members as tasks call for them. From here on you talk to the agent; the agent runs the team.
+The agent makes the current pane the team's orch and spawns members as tasks call for them. From that point the conversation is with the agent, and the agent runs the team.
 
 ## Binding `hive fork` to a key
 
@@ -72,15 +72,15 @@ keybind = cmd+shift+f=text:\x1bf
 bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 ```
 
-`-b` is load-bearing: without it the tmux server blocks while the fork runs. So
-is `--pane` — the binding fires from outside the pane, so auto-detection would
-pick the wrong source.
+Without `-b` the tmux server blocks while the fork runs. `--pane` is required
+too: the binding fires from outside the pane, so auto-detection would pick the
+wrong source.
 
 ## Why the transcript viewer is read-only
 
-An interactive Claude session has no attachable pty — `claude attach` is job-only — but its transcript is appended event by event as the turn unfolds, so a renderer over that file is a faithful live mirror that cannot type back. That is what `hive view` is.
+An interactive Claude session has no attachable pty (`claude attach` is job-only), but its transcript is appended event by event as the turn unfolds, so a renderer over that file is a live mirror that cannot type back. `hive view` is that renderer.
 
-`hive attach` binds it on its own for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume. The accepted cost is a read-only pane. Delivery is unaffected — the same missing job row routes `hive send` to the live interactive session instead of the pane — but nobody can type at that member except the app that owns the session.
+`hive attach` binds it automatically for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume, and the pane is read-only. Delivery is unaffected: the same missing job row routes `hive send` to the live interactive session instead of the pane. Nobody can type at that member except the app that owns the session.
 
 ## Upgrade
 
@@ -88,11 +88,11 @@ An interactive Claude session has no attachable pty — `claude attach` is job-o
 git pull && cargo install --path crates/hive
 ```
 
-Plugin manifest versions are locked to the CLI version, so a release ships plugin updates with it. Claude Code auto-updates the marketplace once the bootstrap hook has written its `extraKnownMarketplaces` entry; it skips that write when `DISABLE_AUTOUPDATER` is set without `FORCE_AUTOUPDATE_PLUGINS`, and then `claude plugin update hive@hive` is manual. Codex snapshots the marketplace when you add it and never refreshes on its own — run `codex plugin marketplace upgrade hive`.
+Plugin manifest versions are locked to the CLI version, so a release ships plugin updates with it. Claude Code auto-updates the marketplace once the bootstrap hook has written its `extraKnownMarketplaces` entry; it skips that write when `DISABLE_AUTOUPDATER` is set without `FORCE_AUTOUPDATE_PLUGINS`, and then `claude plugin update hive@hive` is manual. Codex snapshots the marketplace at add time and never refreshes on its own; refreshing it requires `codex plugin marketplace upgrade hive`.
 
 ## Development
 
-The installed `hive` binary is live agent transport. Keep it on a committed checkout while developing Hive itself; never `cargo install` from a dirty worktree a team is using. Manual verification that needs plugin materialization or hived behavior gets a disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME` and a throwaway team, not the live team's hived. Test lanes and repository conventions live in [AGENTS.md](AGENTS.md).
+The installed `hive` binary is the transport for live agents. Keep it on a committed checkout while developing Hive itself, and do not `cargo install` from a dirty worktree a team is using. Manual verification that needs plugin materialization or hived behavior uses a disposable `HIVE_HOME`, `CLAUDE_HOME`, `CODEX_HOME` and a throwaway team, not the live team's hived. Test lanes and repository conventions live in [AGENTS.md](AGENTS.md).
 
 ## Docs
 
