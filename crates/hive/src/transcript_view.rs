@@ -1086,6 +1086,47 @@ impl TranscriptParser {
         });
     }
 
+    /// The queue's terminal states, from an append-only log: `dequeue` — it
+    /// left the queue to open its own turn, and a `user` row follows — or
+    /// `remove` with `absorbed_mid_turn`, folded into the turn already
+    /// running, where no `user` row ever comes. Both mean the model saw it.
+    ///
+    /// Absorption usually also writes a `queued_command` attachment, which
+    /// is the richer record (it carries the origin) and is handled above.
+    /// A few absorptions leave only these rows, so a HIVE envelope that
+    /// reaches its terminal state unrendered is drawn from here.
+    fn push_absorbed_queue_row(&mut self, row: &Value, out: &mut Vec<Entry>) {
+        if row.get("operation").and_then(Value::as_str) != Some("remove")
+            || row.get("reason").and_then(Value::as_str) != Some("absorbed_mid_turn")
+        {
+            return;
+        }
+        let Some(content) = row.get("content").and_then(Value::as_str) else {
+            return;
+        };
+        if self.queued_texts.contains(content.trim()) {
+            return;
+        }
+        let Some(mut hive) = parse_hive_message(content) else {
+            return;
+        };
+        hive.icon = hive.from.clone().map(|sender| self.agent_icon(&sender));
+        self.queued_texts.insert(content.trim().to_string());
+        let ts = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp);
+        self.drain_all(out);
+        out.push(Entry {
+            id: self.alloc_id(),
+            block: DisplayBlock::User(UserBlock {
+                text: content.to_string(),
+                hive: Some(hive),
+                timestamp: ts,
+            }),
+        });
+    }
+
     /// Feed one raw JSONL line; returns the blocks it finalized, in order.
     pub fn push(&mut self, raw: &str) -> Vec<DisplayBlock> {
         self.push_entries(raw)
@@ -1104,6 +1145,10 @@ impl TranscriptParser {
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "attachment" {
             self.push_queued_command(&row, &mut out);
+            return out;
+        }
+        if kind == "queue-operation" {
+            self.push_absorbed_queue_row(&row, &mut out);
             return out;
         }
         if kind != "user" && kind != "assistant" {
@@ -1775,6 +1820,52 @@ mod tests {
             .to_string(),
         );
         assert!(noise.is_empty(), "{noise:?}");
+    }
+
+    #[test]
+    fn test_absorbed_queue_row_draws_when_no_attachment_carried_it() {
+        let envelope = "<HIVE from=sage to=orch msgId=9nMW>\nattach 后投递正常\n</HIVE>";
+        let absorbed = json!({
+            "type": "queue-operation",
+            "operation": "remove",
+            "reason": "absorbed_mid_turn",
+            "timestamp": "2026-08-30T13:00:19.267Z",
+            "content": envelope,
+        })
+        .to_string();
+
+        // No attachment row: the terminal state is the only record left.
+        let mut p = TranscriptParser::new();
+        let out = p.push(&absorbed);
+        assert!(
+            matches!(&out[0], DisplayBlock::User(u) if u.hive.as_ref().unwrap().from.as_deref() == Some("sage")),
+            "{out:?}"
+        );
+
+        // With the attachment row, the terminal state adds nothing.
+        let mut p = TranscriptParser::new();
+        let first = p.push(
+            &json!({
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "prompt": envelope,
+                    "origin": {"kind": "peer", "from": "honey.orch"},
+                },
+            })
+            .to_string(),
+        );
+        assert_eq!(first.len(), 1);
+        assert!(p.push(&absorbed).is_empty());
+
+        // enqueue is not a terminal state — it may still be cancelled.
+        let mut p = TranscriptParser::new();
+        assert!(p
+            .push(
+                &json!({"type": "queue-operation", "operation": "enqueue", "content": envelope})
+                    .to_string()
+            )
+            .is_empty());
     }
 
     #[test]
