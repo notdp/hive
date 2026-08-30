@@ -572,7 +572,12 @@ fn outcome_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, 
         }
     }
     if res.truncated {
-        out.push(band_row(t, "… output truncated".to_string(), t.gray, inner_w));
+        out.push(band_row(
+            t,
+            "… output truncated".to_string(),
+            t.gray,
+            inner_w,
+        ));
     }
 }
 
@@ -1632,19 +1637,17 @@ fn top_line(app: &App, inner_w: usize) -> Line<'static> {
     line
 }
 
-fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'static> {
+fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'static> {
+    // grok hint row: left-aligned "Key:label" pairs with │ separators
+    // (Shift+Tab:mode │ Ctrl+x:shortcuts); model/effort live on the
+    // composer's bottom border instead.
     let key = bold(t.text_secondary);
     let label = fg(t.gray);
     let sep = fg(t.gray).add_modifier(Modifier::DIM);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if let Some(m) = model {
-        spans.push(Span::styled(m.to_string(), fg(t.accent_model)));
-        spans.push(Span::styled(" · ", sep));
-    }
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
     for (i, (k, what)) in [
         ("↑↓", "select"),
         ("←→", "fold"),
-        ("Enter", "view"),
         ("/", "cmd"),
         ("q", "quit"),
     ]
@@ -1652,20 +1655,16 @@ fn bottom_line(t: &ViewTheme, model: Option<&str>, inner_w: usize) -> Line<'stat
     .enumerate()
     {
         if i > 0 {
-            spans.push(Span::styled(" · ", sep));
+            spans.push(Span::styled("  │  ", sep));
         }
         spans.push(Span::styled(k.to_string(), key));
-        spans.push(Span::styled(format!(" {what}"), label));
+        spans.push(Span::styled(format!(":{what}"), label));
     }
-    spans.push(Span::raw(" "));
     let line = Line::from(spans);
-    let w = cells_width(&line_cells(&line));
-    if w > inner_w {
+    if cells_width(&line_cells(&line)) > inner_w {
         return clip_spans(line.spans, inner_w);
     }
-    let mut spans = line.spans;
-    spans.insert(0, Span::raw(" ".repeat(inner_w - w)));
-    Line::from(spans)
+    line
 }
 
 /// grok SelectionBox: fg-only `┌ ┐ └ ┘` corners one row outside the entry,
@@ -1749,14 +1748,34 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
         t.prompt_border
     });
     let w = rect.width as usize;
-    let top = Line::from(Span::styled(
-        format!("╭{}╮", "─".repeat(w - 2)),
-        border,
-    ));
-    let bottom = Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(w - 2)),
-        border,
-    ));
+    let top = Line::from(Span::styled(format!("╭{}╮", "─".repeat(w - 2)), border));
+    let bottom = {
+        // grok embeds the model badge in the bottom border, right-aligned:
+        // "─ Grok 4.6 (xhigh) · always-approve ─" — ours carries model,
+        // effort, and the read-only marker.
+        let mut badge: Vec<Span<'static>> = Vec::new();
+        if let Some(m) = app.parser.model() {
+            badge.push(Span::styled(format!(" {m}"), fg(t.accent_model)));
+            if let Some(e) = app.parser.effort() {
+                badge.push(Span::styled(format!(" ({e})"), fg(t.gray)));
+            }
+            badge.push(Span::styled(
+                " · ".to_string(),
+                fg(t.gray).add_modifier(Modifier::DIM),
+            ));
+        }
+        badge.push(Span::styled("read-only ".to_string(), fg(t.gray)));
+        let badge_w = cells_width(&line_cells(&Line::from(badge.clone())));
+        if w >= badge_w + 6 {
+            let left = w - 3 - badge_w;
+            let mut spans = vec![Span::styled(format!("╰{}", "─".repeat(left)), border)];
+            spans.extend(badge);
+            spans.push(Span::styled("─╯".to_string(), border));
+            Line::from(spans)
+        } else {
+            Line::from(Span::styled(format!("╰{}╯", "─".repeat(w - 2)), border))
+        }
+    };
     let prefix_color = if focused { t.accent_user } else { t.gray_dim };
     let mut spans = vec![
         Span::styled("│".to_string(), border),
@@ -1765,6 +1784,11 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
     ];
     if let Some(pal) = &app.palette {
         spans.push(Span::styled(pal.input.clone(), fg(t.text_primary)));
+    } else {
+        spans.push(Span::styled(
+            "read-only".to_string(),
+            fg(t.gray_dim).add_modifier(Modifier::DIM),
+        ));
     }
     let mut mid = clip_spans(spans, w - 1);
     let used = cells_width(&line_cells(&mid));
@@ -1782,7 +1806,13 @@ fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
 /// bg_light rows, bg_visual+bold selected row with a `❯ ` prefix, gray
 /// descriptions in an aligned column, fuzzy-match chars in fuzzy_accent,
 /// `─` rules top and bottom.
-fn draw_palette(frame: &mut Frame, app: &App, inner: Rect, anchor_y: u16, input_rect: Option<Rect>) {
+fn draw_palette(
+    frame: &mut Frame,
+    app: &App,
+    inner: Rect,
+    anchor_y: u16,
+    input_rect: Option<Rect>,
+) {
     let t = app.theme;
     let Some(pal) = &app.palette else { return };
     let base = Style::default().bg(t.bg_base).fg(t.text_primary);
@@ -2318,21 +2348,22 @@ mod tests {
     }
 
     #[test]
-    fn test_bottom_line_is_right_aligned_muted_hint() {
+    fn test_bottom_line_is_left_aligned_key_hints() {
         let mut app = App::new(&GROKNIGHT);
         app.push_raw(&assistant_text_row("hi"));
         let buf = draw_to_buffer(&mut app, W, H);
         let bottom = row_text(&buf, H - 2);
-        let trimmed = bottom.trim_end();
-        assert!(
-            trimmed.ends_with("claude-fable-5 · ↑↓ select · ←→ fold · Enter view · / cmd · q quit"),
+        let trimmed = bottom.trim();
+        // grok layout: left-aligned Key:label pairs, │ separators, no model
+        // (the badge moved onto the composer border), no Enter entry.
+        assert_eq!(
+            trimmed, "↑↓:select  │  ←→:fold  │  /:cmd  │  q:quit",
             "{bottom:?}"
         );
-        // Right-aligned: content hugs the inner right edge (one trailing space
-        // inside the row, then the 2-col outer pad).
-        let pad = bottom.len() - trimmed.len();
-        assert!(pad <= 3, "{bottom:?}");
-        assert!(bottom.starts_with(' '), "{bottom:?}");
+        assert!(!bottom.contains("Enter"), "{bottom:?}");
+        // Left-aligned inside the 2-col inset + 1-space lead.
+        let lead = bottom.len() - bottom.trim_start().len();
+        assert!(lead <= 4, "{bottom:?}");
     }
 
     #[test]
@@ -2970,7 +3001,11 @@ mod tests {
             .unwrap();
         let cell = buf.cell((5, err_row)).unwrap();
         assert_eq!(cell.style().fg, Some(GROKNIGHT.accent_error));
-        assert_eq!(cell.style().bg, Some(GROKNIGHT.bg_base), "no band on errors");
+        assert_eq!(
+            cell.style().bg,
+            Some(GROKNIGHT.bg_base),
+            "no band on errors"
+        );
     }
 
     // ---- composer box ---------------------------------------------------
@@ -2997,13 +3032,20 @@ mod tests {
         let arrow = buf.cell((4, H - 4)).unwrap();
         assert_eq!(arrow.symbol(), "❯");
         assert_eq!(arrow.style().fg, Some(GROKNIGHT.gray_dim));
-        // idle interior: just the prompt arrow, no text, no placeholder.
+        // idle interior: the prompt arrow plus a faint read-only placeholder.
         let interior: String = (6..W - 3)
             .map(|x| buf.cell((x, H - 4)).unwrap().symbol().to_string())
             .collect();
-        assert_eq!(interior.trim(), "", "idle box holds only ❯: {interior:?}");
+        assert_eq!(interior.trim(), "read-only", "{interior:?}");
+        // model badge embedded on the bottom border, right side.
+        let border_row = row_text(&buf, H - 3);
+        assert!(border_row.contains("claude-fable-5"), "{border_row:?}");
+        assert!(
+            border_row.trim_end().ends_with("read-only ─╯"),
+            "{border_row:?}"
+        );
         // hint row stays below the box.
-        assert!(row_text(&buf, H - 2).contains("q quit"));
+        assert!(row_text(&buf, H - 2).contains("q:quit"));
     }
 
     #[test]
@@ -3028,12 +3070,18 @@ mod tests {
         let dropdown_row = (0..H)
             .find(|&y| row_text(&buf, y).contains("/theme"))
             .unwrap();
-        assert!(dropdown_row < H - 5, "dropdown above the box: {dropdown_row}");
+        assert!(
+            dropdown_row < H - 5,
+            "dropdown above the box: {dropdown_row}"
+        );
         // hint row still rendered under the box while the palette is open.
-        assert!(row_text(&buf, H - 2).contains("q quit"));
+        assert!(row_text(&buf, H - 2).contains("q:quit"));
         key(&mut app, KeyCode::Esc);
         let buf = draw_to_buffer(&mut app, W, H);
-        assert!(!row_text(&buf, H - 4).contains("/theme"), "box back to idle");
+        assert!(
+            !row_text(&buf, H - 4).contains("/theme"),
+            "box back to idle"
+        );
     }
 
     // ---- markdown tables re-layout on resize ----------------------------

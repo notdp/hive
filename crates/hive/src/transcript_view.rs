@@ -796,6 +796,7 @@ pub struct TranscriptParser {
     tokens: i64,
     busy: bool,
     model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Default for TranscriptParser {
@@ -816,6 +817,7 @@ impl TranscriptParser {
             tokens: 0,
             busy: false,
             model: None,
+            effort: None,
         }
     }
 
@@ -839,6 +841,11 @@ impl TranscriptParser {
     /// Model id from the most recent assistant row, if any.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// Reasoning-effort level from the most recent row carrying one.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
     }
 
     /// Snapshot of the not-yet-finalized tail, in display order. Ids are
@@ -943,6 +950,9 @@ impl TranscriptParser {
         let message = row.get("message").unwrap_or(&null);
         if let Some(m) = message.get("model").and_then(Value::as_str) {
             self.model = Some(m.to_string());
+        }
+        if let Some(e) = row.get("effort").and_then(Value::as_str) {
+            self.effort = Some(e.to_string());
         }
         let usage = message.get("usage").unwrap_or(&null);
         self.tokens += usage
