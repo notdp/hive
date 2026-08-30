@@ -93,15 +93,12 @@ class Rig:
         The claude TUI pre-renders a predicted next input in dim text (the
         human sees gray; a plain capture sees ordinary characters). Capture
         with escapes and drop dim cells so a screen-reading oracle never
-        mistakes a prediction for typed input.
+        mistakes a prediction for typed input. (Inlined from the retired
+        Python hive.draft_guard SGR parser; the Rust port carries the same
+        logic in draft_guard.rs.)
         """
-        from hive.draft_guard import _styled_chars
-
         raw = self.capture(member, escapes=True)
-        lines = []
-        for line in raw.splitlines():
-            lines.append("".join(c.value for c in _styled_chars(line) if not c.dim))
-        return "\n".join(lines)
+        return "\n".join(_drop_dim_cells(line) for line in raw.splitlines())
 
 
 @pytest.fixture(scope="session")
@@ -191,3 +188,44 @@ def rig():
         subprocess.run(["hive", "delete", r.team], capture_output=True, timeout=30)
         _tmux("kill-session", "-t", r.session, check=False)
         subprocess.run(["rm", "-rf", str(r.root)], timeout=15)
+
+
+def _drop_dim_cells(line: str) -> str:
+    """Drop characters rendered dim (SGR 2) — claude's ghost predictions."""
+    out: list[str] = []
+    dim = False
+    i = 0
+    while i < len(line):
+        if line[i] == "\x1b" and i + 1 < len(line) and line[i + 1] == "[":
+            end = line.find("m", i + 2)
+            if end != -1:
+                raw = line[i + 2:end]
+                params: list[int] = []
+                for part in raw.split(";") if raw else ["0"]:
+                    if not part:
+                        params.append(0)
+                        continue
+                    try:
+                        params.append(int(part))
+                    except ValueError:
+                        continue
+                j = 0
+                while j < len(params):
+                    code = params[j]
+                    if code == 0 or code == 22:
+                        dim = False
+                    elif code == 2:
+                        dim = True
+                    elif code in (38, 48) and j + 1 < len(params):
+                        mode = params[j + 1]
+                        if mode == 2:
+                            j += 4
+                        elif mode == 5:
+                            j += 2
+                    j += 1
+                i = end + 1
+                continue
+        if not dim:
+            out.append(line[i])
+        i += 1
+    return "".join(out)

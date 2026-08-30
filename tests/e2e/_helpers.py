@@ -2,25 +2,18 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CLI_CODE = "from hive.cli import cli; cli()"
 
 
 def base_env(tmp_path: Path) -> dict[str, str]:
-    pythonpath = str(ROOT / "src")
-    if os.environ.get("PYTHONPATH"):
-        pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
     return {
         "HIVE_HOME": str(tmp_path / ".hive"),
         "XDG_CACHE_HOME": str(tmp_path / ".cache"),
-        "PYTHONPATH": pythonpath,
-        "PYTHONUNBUFFERED": "1",
     }
 
 
@@ -42,13 +35,23 @@ def wait_for(predicate, *, timeout: float = 10.0, interval: float = 0.05) -> Non
     raise AssertionError("timed out waiting for condition")
 
 
+def hive_binary_argv() -> list[str]:
+    """How the suite invokes hive: HIVE_E2E_BIN when set, else this
+    checkout's debug build (cargo build first)."""
+    override = os.environ.get("HIVE_E2E_BIN")
+    if override:
+        return [override]
+    debug = ROOT / "target" / "debug" / "hive"
+    if debug.is_file():
+        return [str(debug)]
+    raise RuntimeError("no hive binary: run `cargo build` or set HIVE_E2E_BIN")
+
+
 def hive_shell_command(args: list[str], *, env: dict[str, str], cwd: Path, stdout_path: Path) -> str:
     env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     cmd = " ".join([
         env_prefix,
-        shlex.quote(sys.executable),
-        "-c",
-        shlex.quote(CLI_CODE),
+        *(shlex.quote(part) for part in hive_binary_argv()),
         *(shlex.quote(arg) for arg in args),
     ])
     return f"cd {shlex.quote(str(cwd))} && {cmd} > {shlex.quote(str(stdout_path))} 2>&1"
@@ -86,4 +89,4 @@ def run_hive_in_tmux_pane(
     assert returncode is not None
     stdout = output_path.read_text() if output_path.exists() else ""
     output_path.unlink(missing_ok=True)
-    return subprocess.CompletedProcess([sys.executable, "-c", CLI_CODE, *args], returncode, stdout, "")
+    return subprocess.CompletedProcess([*hive_binary_argv(), *args], returncode, stdout, "")
