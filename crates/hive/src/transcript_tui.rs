@@ -457,14 +457,18 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
         vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
     }
     let mut out = Vec::new();
-    out.push(band_line(t, Vec::new(), inner_w)); // vpad top
+    // The icon marks the band's top-left corner, on the padding row above the
+    // words, so nothing shares a line with it.
+    out.push(band_line_marked(
+        t,
+        Some(Span::styled(
+            USER_ICON.trim_end().to_string(),
+            fg(t.accent_user).bg(t.bg_light),
+        )),
+        Vec::new(),
+        inner_w,
+    ));
     for (i, text) in vis.iter().enumerate() {
-        let mark = (i == 0).then(|| {
-            Span::styled(
-                USER_ICON.trim_end().to_string(),
-                fg(t.accent_user).bg(t.bg_light),
-            )
-        });
         let mut spans = vec![Span::styled(
             text.clone(),
             fg(t.text_primary).bg(t.bg_light),
@@ -480,7 +484,7 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
                 }
             }
         }
-        out.push(band_line_marked(t, mark, spans, inner_w));
+        out.push(band_line(t, spans, inner_w));
     }
     out.push(band_line(t, Vec::new(), inner_w)); // vpad bottom
     Rendered {
@@ -2689,11 +2693,13 @@ mod tests {
             })
             .collect();
         assert!(band_rows.len() >= 3, "vpad + content rows: {band_rows:?}");
-        let prompt_row = (0..H)
+        // The icon marks the band's first row; the words start under it.
+        let icon_row = (0..H)
             .find(|&y| row_text(&buf, y).contains(USER_ICON.trim_end()))
             .unwrap();
-        assert!(band_rows.contains(&prompt_row));
-        assert!(band_rows.contains(&(prompt_row - 1)), "vpad above");
+        assert!(band_rows.contains(&icon_row));
+        assert_eq!(band_rows[0], icon_row, "icon opens the band: {band_rows:?}");
+        assert!(band_rows.contains(&(icon_row + 1)), "text under the icon");
         for &y in &band_rows {
             // Wide glyphs leave a reset shadow cell behind them in the
             // buffer (the glyph itself paints both columns), so walk by
@@ -2717,8 +2723,8 @@ mod tests {
                 Some(GROKNIGHT.bg_base)
             );
         }
-        // Timestamp overlays the first band line, right-aligned.
-        let first = row_text(&buf, prompt_row);
+        // Timestamp overlays the first line of words, right-aligned.
+        let first = row_text(&buf, icon_row + 1);
         assert!(first.contains("12:40 PM"), "{first:?}");
     }
 

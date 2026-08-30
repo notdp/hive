@@ -6,7 +6,7 @@ ccd, a session collected by `hive join` — has no attachable pty: `claude
 attach` addresses jobs, and resuming would fork a second engine. `hive
 attach` therefore substitutes `hive view <sessionId>` for any claude member
 whose pane has no bg-job record, instead of the usual resume launcher
-(`crates/hive/src/cli/rest.rs:1274`). The member's `sessionId` is in its
+(`crates/hive/src/cli/rest.rs:1282`). The member's `sessionId` is in its
 registry roster row and in `hive doctor <member>`'s runtime payload
 (`crates/hive/src/hived.rs:1301`).
 
@@ -33,10 +33,11 @@ renderer by `isatty(stdout)`: a tty gets the TUI, a pipe gets the legacy ANSI
 stream (`transcript_view.rs:1646`).
 
 There is no second channel. The TUI opens the file once
-(`transcript_tui.rs:2469`), reads the appended tail every 250 ms, and never
-writes anything anywhere. No socket, no pty, no `claude attach`. Keystrokes
-go nowhere by construction — not by policy, but because the process holds no
-handle that could reach the session.
+(`transcript_tui.rs:2496`), drains whatever has been appended before each
+draw, and wakes at least every 250 ms (`POLL_MS`). It writes nothing
+anywhere. No socket, no pty, no `claude attach`. Keystrokes go nowhere by
+construction — not by policy, but because the process holds no handle that
+could reach the session.
 
 The consequence is the thing to internalize: **the Claude Code UI is not a
 mirror of the transcript, so this is not a mirror of the UI.** The JSONL is
@@ -47,14 +48,16 @@ uncommitted state that never becomes a row. What that costs, concretely:
   not here. The parser ignores `queue-operation` `enqueue` rows — an
   enqueued message can still be cancelled — and only draws terminal states
   (see below).
-- Thinking text, image pixels, and the composer draft are never in the file
-  at all (next two sections).
+- Thinking text and image pixels are never in the file at all (next two
+  sections).
 - Row kinds the parser drops on the floor: `push_entries` returns early for
   any `type` outside `user` / `assistant` / `attachment` / `queue-operation`
   (`transcript_view.rs:1253`). Real sessions also write `system`,
   `file-history-snapshot`, `last-prompt`, `custom-title`, `agent-name`,
-  `mode`, `permission-mode`, `atis-latch`. Compaction notices and permission
-  dialogs live in that set and never render.
+  `mode`, `permission-mode`, `atis-latch` — none of which render. Inside the
+  `attachment` branch the same is true: only `queued_command` and
+  `ultra_effort_enter` are read, so `compact_file_reference`,
+  `command_permissions`, hook output, and the rest are dropped too.
 
 ## How a HIVE Message Arrives
 
@@ -141,13 +144,13 @@ computed from adjacent row timestamps, not from the model — but expanding one
 shows nothing, and the block viewer says `(no content)`. This is why the
 density ladder lost its middle rung: a `thinking` level between normal and
 verbose expanded a row of empty blocks
-(`crates/hive/src/transcript_tui/interact.rs:29`).
+(`crates/hive/src/transcript_tui/interact.rs:30`).
 
 **Image payloads are never read.** An `image` content block in a user row
 becomes a path-free numbered chip `[Image #N]`, keeping its position among
 the words it arrived with (`image_chip`, `transcript_view.rs:676`). The same
 chip replaces `image` blocks inside a `tool_result` array before that array
-is serialized into the outcome text (`summarize_images`, `:658`) — without
+is serialized into the outcome text (`summarize_images`, `:682`) — without
 it, a screenshot poured a few hundred KB of base64 into the scrollback as
 thousands of wrapped lines.
 
@@ -157,7 +160,7 @@ an `effort` field, but it never says `ultra`; entering ultra writes
 once and rarely. Because that row usually sits far above the tail window, the
 TUI scans every line of the prelude for it before rendering anything —
 `note_session_state` (`transcript_view.rs:1036`) is called on the whole
-pre-tail slice at `transcript_tui.rs:2478`. It is the *only* thing recovered
+pre-tail slice at `transcript_tui.rs:2505`. It is the *only* thing recovered
 from above the window; branch, cwd, model, and context usage come from tail
 rows alone.
 
@@ -166,7 +169,7 @@ rows alone.
 Seven block kinds (`DisplayBlock`, `transcript_view.rs:471`): `User`,
 `ToolGroup`, `Run`, `Tool`, `Thinking`, `Assistant`, `WorkedFor`. Every block
 is wrapped in an `Entry` carrying a `u64` id minted once at birth, monotonic
-in display order, surviving finalization (`:478`, `alloc_id` `:986`) — that
+in display order, surviving finalization (`:502`, `alloc_id` `:986`) — that
 id is what fold state, selection, and the render cache key on across live
 re-parses.
 
@@ -181,7 +184,7 @@ assigned.
 
 `WorkedFor` is emitted only when the *next* user message closes the turn, so
 the live view synthesizes the line as soon as a turn settles
-(`open_turn_worked_secs`, `:1022`; `transcript_tui.rs:1417`).
+(`open_turn_worked_secs`, `:1022`; `transcript_tui.rs:1450`).
 
 **Folding.** Four families (`FoldKind`, `interact.rs:16`):
 
@@ -198,7 +201,7 @@ erases itself, and changing density clears every pin (`set_density`,
 
 **Density has two levels**, Normal and Verbose, cycled with Ctrl+O. The
 current one is named on the composer box's bottom border, next to the model
-and effort badge (`draw_composer`, `transcript_tui.rs:2088`).
+and effort badge (`draw_composer`, `transcript_tui.rs:2115`).
 
 **Selection** walks selectable entries; `WorkedFor` is the only
 non-selectable kind. Moving down past the last entry re-engages follow and
@@ -213,7 +216,7 @@ viewport clips it.
 full: user text *including* whatever wrapper carried it, assistant and
 thinking as markdown, `Run` as `$ command` plus outcome, `Tool` as its full
 pretty-printed input JSON plus outcome, `ToolGroup` member by member
-(`viewer_lines`, `transcript_tui.rs:1184`).
+(`viewer_lines`, `transcript_tui.rs:1211`).
 
 **Slash palette** (`/`) types into the composer box with the dropdown
 anchored above it. Four commands (`PALETTE_COMMANDS`, `interact.rs:303`):
@@ -222,7 +225,7 @@ is matched as a case-insensitive subsequence; Enter on a bare `/view` or
 `/find` autocompletes to `"<name> "` and stays open.
 
 **`/find`** is a case-insensitive substring search over a per-block search
-string (`search_text`, `transcript_tui.rs:959` — tool results and input JSON
+string (`search_text`, `transcript_tui.rs:986` — tool results and input JSON
 included), skipping `WorkedFor`, starting after the current selection and
 wrapping around. `n` / `N` cycle forward and back.
 
@@ -268,13 +271,13 @@ Palette:
 | `Esc` | close |
 
 `Ctrl+C` and `Ctrl+Q` quit from anywhere, palette and viewer included
-(`on_key`, `transcript_tui.rs:1595`). Bare `q` quits only from the
+(`on_key`, `transcript_tui.rs:1622`). Bare `q` quits only from the
 scrollback — in the palette it types.
 
 ## Theme Resolution
 
 Two palettes, `GROKNIGHT` (dark) and `GROKDAY` (light), both transcribed from
-grok's own theme structs (`view_theme.rs:97`, `:141`). The precedence chain
+grok's own theme structs (`view_theme.rs:100`, `:145`). The precedence chain
 (`resolve_pref`, `:257`):
 
 1. `HIVE_VIEW_THEME`
@@ -300,12 +303,12 @@ Grok falls dark here; this is a deliberate delta.
 
 The whole resolution must run before crossterm owns the terminal, because the
 OSC 11 probe reads raw stdin itself — hence `active_theme_kind()` is the
-first statement of `run()` (`transcript_tui.rs:2468`), ahead of
+first statement of `run()` (`transcript_tui.rs:2492`, `:2495`), ahead of
 `enable_raw_mode`.
 
 `/theme` switches live and persists the result to `view.theme`. `/theme auto`
 *mid-session* re-detects from the env stamps only: the OSC 11 probe needs a
-raw tty that crossterm now holds (`apply_theme`, `transcript_tui.rs:1545`).
+raw tty that crossterm now holds (`apply_theme`, `transcript_tui.rs:1578`).
 
 The markdown engine is themed from the same struct: `grok_md` builds grok's
 `MarkdownStyle` from the theme's `md_*` fields and picks the matching
@@ -316,7 +319,7 @@ and is hardcoded to groknight.
 ## Sharp Edges
 
 **The tail window is 200 rows.** `run()` renders only the last `TAIL_EVENTS`
-lines of the backlog (`transcript_tui.rs:59`, `:2476`); everything above is
+lines of the backlog (`transcript_tui.rs:59`, `:2503`); everything above is
 read once and thrown away, save the `ultra_effort_enter` scan. Scrolling up
 reaches the top of that window, not the top of the session. The mirror is a
 tail, not an archive — for the full history, read the JSONL. The plain
@@ -324,8 +327,10 @@ non-tty stream's window is 40 rows (`transcript_view.rs:35`).
 
 **One tool result stores at most 512 KiB.** Longer results are cut at a char
 boundary and flagged; the renderer appends a muted `… output truncated`
-(`TOOL_RESULT_MAX_BYTES`, `transcript_view.rs:42`). The collapsed one-line
-form clips at 160 chars on top of that.
+(`TOOL_RESULT_MAX_BYTES`, `transcript_view.rs:42`). In the TUI a collapsed
+tool block shows no output at all — expand it, or open the block viewer. The
+plain stream's one-line summary clips at 160 chars on top of the cap
+(`first_line`, `:593`).
 
 **`ultra` latches for the rest of the file.** `self.ultra` is set by
 `ultra_effort_enter` and never cleared, so the composer badge keeps saying
@@ -350,18 +355,18 @@ notifications live, and it is intentional — but it also means a peer message
 in some future non-HIVE shape would vanish silently.
 
 **The file is opened once and never reopened.** The reader holds one `File`
-handle from startup (`transcript_tui.rs:2469`) and only reads appended bytes.
+handle from startup (`transcript_tui.rs:2496`) and only reads appended bytes.
 Nothing checks inode or size, so a transcript rotated or truncated in place
 leaves the viewer reading a stale descriptor.
 
 **Nerd Font glyphs are unconditional.** The user icon, the agent avatars, and
 the block bullets are all private-use codepoints
-(`USER_ICON`, `transcript_tui.rs:411`; `AGENT_ICONS`,
+(`USER_ICON`, `transcript_tui.rs:429`; `AGENT_ICONS`,
 `transcript_view.rs:253`). A terminal without a patched font shows tofu.
 
 **`HIVE_VIEW_BAND`** picks the HIVE band treatment — `2` for a shallow
 neutral fill, anything else for the default rail-only look
-(`hive_band_style`, `transcript_tui.rs:472`). It is an unfinished look
+(`hive_band_style`, `transcript_tui.rs:499`). It is an unfinished look
 selector, not a supported setting.
 
 ## What This Borrows From Grok, And Where That Source Is
