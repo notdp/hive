@@ -2379,17 +2379,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
         height: 1,
     };
     // The composer box floats between the scrollback and the hint row with a
-    // one-row breather on BOTH sides (grok spacing); a pane too short for
-    // status + gap + one scroll row + breather + box + breather + hint drops
-    // the box.
-    let have_box = inner.height >= 2 + gap + COMPOSER_H + 3;
+    // one-row breather on BOTH sides (grok spacing), and the turn-status row
+    // sits between that breather and the box — always reserved, blank while
+    // idle, so a turn starting does not shove the transcript up a line. A
+    // pane too short for status + gap + one scroll row + breather + running +
+    // box + breather + hint drops the box.
+    let have_box = inner.height >= 2 + gap + COMPOSER_H + 4;
     let box_rect = have_box.then(|| Rect {
         x: inner.x,
         y: hint_rect.y - 1 - COMPOSER_H,
         width: inner.width,
         height: COMPOSER_H,
     });
-    let reserved = 2 + gap + if have_box { COMPOSER_H + 2 } else { 0 };
+    let reserved = 2 + gap + if have_box { COMPOSER_H + 3 } else { 0 };
     let scroll_h = inner.height.saturating_sub(reserved);
     let scroll_rect = Rect {
         x: inner.x,
@@ -2433,7 +2435,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         status_rect,
     );
     if let Some(bx) = box_rect {
-        // The breather above the box doubles as grok's turn-status row.
+        // The row directly above the box; the breather is the one above that.
         if let Some(line) = running_line(app, inner.width as usize) {
             frame.render_widget(
                 Paragraph::new(line).style(base),
@@ -3490,8 +3492,9 @@ mod tests {
         let mut app = App::new(&GROKNIGHT);
         app.push_raw(&assistant_text_row("done"));
         let buf = draw_to_buffer(&mut app, W, H);
-        // Idle: the breather above the composer stays empty.
+        // Idle: the status row is blank, and the breather above it too.
         assert_eq!(row_text(&buf, H - 7).trim(), "", "{:?}", row_text(&buf, H - 7));
+        assert_eq!(row_text(&buf, H - 8).trim(), "", "breather");
 
         // A user message opens a turn; the row shows the spinner and label.
         app.push_raw(&user_row("go"));
@@ -3509,8 +3512,10 @@ mod tests {
             "t1",
             json!({"command": "cargo build", "description": "Build"}),
         ));
-        let row = row_text(&draw_to_buffer(&mut app, W, H), H - 7);
-        assert!(row.contains("Build…"), "{row:?}");
+        let buf = draw_to_buffer(&mut app, W, H);
+        assert!(row_text(&buf, H - 7).contains("Build…"), "{:?}", row_text(&buf, H - 7));
+        // The blank breather keeps the row off the last transcript line.
+        assert_eq!(row_text(&buf, H - 8).trim(), "", "breather");
 
         // Assistant text closes it again.
         app.push_raw(&tool_result_row("t1", "ok", false));
