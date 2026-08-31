@@ -231,6 +231,34 @@ pub(crate) fn _discover_env_binding() -> Map<String, Value> {
     payload
 }
 
+/// Roster identity of the Claude session this process runs inside.
+///
+/// The last rung of the scope ladder: pane tags cover members with a
+/// display, `HIVE_TEAM`/`HIVE_MEMBER` cover spawned engines, but a session
+/// that created or joined a team headless carries neither — its scope lives
+/// only in the registry row keyed by its sessionId. This is the same
+/// authority `hive send` resolves guest senders by.
+pub(crate) fn _session_member_binding() -> Map<String, Value> {
+    let Some(session) = crate::adapters::claude_sessions::self_session() else {
+        return Map::new();
+    };
+    let Some((team, agent)) = _registry_member_for_session(&session.session_id) else {
+        return Map::new();
+    };
+    let workspace = crate::registry::load(&team)
+        .map(|entry| map_str(&entry, "workspace"))
+        .unwrap_or_default();
+    let mut payload = Map::new();
+    payload.insert("team".to_string(), Value::String(team));
+    payload.insert("workspace".to_string(), Value::String(workspace));
+    payload.insert("agent".to_string(), Value::String(agent));
+    payload.insert("role".to_string(), Value::String("agent".to_string()));
+    payload.insert("pane".to_string(), Value::String(String::new()));
+    payload.insert("tmuxSession".to_string(), Value::String(String::new()));
+    payload.insert("tmuxWindow".to_string(), Value::String(String::new()));
+    payload
+}
+
 pub(crate) fn _discover_tmux_binding() -> Map<String, Value> {
     if !tmux::is_inside_tmux() {
         return _discover_env_binding();
@@ -273,6 +301,11 @@ pub(crate) fn _discover_tmux_binding() -> Map<String, Value> {
 pub(crate) fn _default_team() -> Option<String> {
     let binding = _discover_tmux_binding();
     let team = map_str(&binding, "team");
+    if !team.is_empty() {
+        return Some(team);
+    }
+    let session = _session_member_binding();
+    let team = map_str(&session, "team");
     if team.is_empty() {
         None
     } else {
@@ -283,6 +316,11 @@ pub(crate) fn _default_team() -> Option<String> {
 pub(crate) fn _default_agent() -> Option<String> {
     let binding = _discover_tmux_binding();
     let agent = map_str(&binding, "agent");
+    if !agent.is_empty() {
+        return Some(agent);
+    }
+    let session = _session_member_binding();
+    let agent = map_str(&session, "agent");
     if agent.is_empty() {
         None
     } else {
@@ -706,10 +744,18 @@ pub(crate) fn _team_status_payload(t: &mut Team) -> Map<String, Value> {
     } else {
         Map::new()
     };
+    let session = _session_member_binding();
     if map_str(&discovered, "team") == t.name && !map_str(&discovered, "agent").is_empty() {
         payload.insert(
             "self".to_string(),
             Value::String(map_str(&discovered, "agent")),
+        );
+    } else if map_str(&session, "team") == t.name && !map_str(&session, "agent").is_empty() {
+        // A joined/creator session has no pane tags; its roster row is live
+        // truth, fresher than the saved context file below.
+        payload.insert(
+            "self".to_string(),
+            Value::String(map_str(&session, "agent")),
         );
     } else {
         let ctx = crate::context::load_current_context();
@@ -2760,6 +2806,99 @@ mod tests {
         assert_eq!(map_str(&binding, "agent"), "rex");
         assert_eq!(map_str(&binding, "workspace"), "/tmp/ws-h");
         assert_eq!(map_str(&binding, "pane"), "");
+    }
+
+    #[test]
+    fn test_default_team_falls_back_to_session_membership() {
+        // A session that created or joined a team headless has no pane tags
+        // and no spawn env; its scope lives in the registry row keyed by its
+        // sessionId — the same authority `hive send` resolves guests by.
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+        clear_tmux_env();
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("orch".to_string()));
+        member.insert("cli".to_string(), Value::String("claude".to_string()));
+        member.insert("sessionId".to_string(), Value::String("s-wasp".to_string()));
+        assert_eq!(
+            crate::registry::record_team("wasp", "/tmp/ws-w", "1.0", &[member], "").unwrap(),
+            "written"
+        );
+        let sessions = tmp.path().join(".claude").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("me.json"),
+            serde_json::json!({
+                "name": "me",
+                "pid": std::process::id(),
+                "messagingSocketPath": "/tmp/me.sock",
+                "sessionId": "s-wasp",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/me.sock");
+
+        assert_eq!(_default_team().as_deref(), Some("wasp"));
+        assert_eq!(_default_agent().as_deref(), Some("orch"));
+        let binding = _session_member_binding();
+        assert_eq!(map_str(&binding, "workspace"), "/tmp/ws-w");
+
+        // A session on no roster resolves nothing.
+        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
+        assert_eq!(_default_team(), None);
+        std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_spawn_env_outranks_session_membership() {
+        // HIVE_TEAM/HIVE_MEMBER is the explicit spawn identity; the session
+        // rung is the fallback, never an override.
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+        clear_tmux_env();
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("orch".to_string()));
+        member.insert("sessionId".to_string(), Value::String("s-wasp".to_string()));
+        assert_eq!(
+            crate::registry::record_team("wasp", "/tmp/ws-w", "1.0", &[member], "").unwrap(),
+            "written"
+        );
+        let sessions = tmp.path().join(".claude").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("me.json"),
+            serde_json::json!({
+                "name": "me",
+                "pid": std::process::id(),
+                "messagingSocketPath": "/tmp/me.sock",
+                "sessionId": "s-wasp",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/me.sock");
+        std::env::set_var("HIVE_TEAM", "honey");
+        std::env::set_var("HIVE_MEMBER", "rex");
+
+        assert_eq!(_default_team().as_deref(), Some("honey"));
+        assert_eq!(_default_agent().as_deref(), Some("rex"));
+
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
