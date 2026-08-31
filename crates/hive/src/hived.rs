@@ -2806,10 +2806,17 @@ pub fn _doctor_payload(
 /// - ``p<slug>`` — a raw ``hive grok`` pane outside any team keeps the old
 ///   pane lifecycle: pane gone, daemon reaped.
 ///
+/// The leader directory is global while a registry is scoped to one
+/// `$HIVE_HOME`, so a member key is only this hived's business when it names
+/// this hived's own team. A hived running against a disposable `$HIVE_HOME`
+/// (the acceptance lane, a dev sandbox) otherwise reads the live team's key,
+/// finds no entry for it in its own registry, and reaps a member that is
+/// serving someone.
+///
 /// Killing a leader takes its attached TUI down with it, so every reap is
 /// logged; ``is_pane_alive`` only reports dead panes from a successful tmux
 /// listing, never from a transient tmux failure.
-pub fn _cleanup_dead_daemons(workspace: &str) {
+pub fn _cleanup_dead_daemons(workspace: &str, team: &str) {
     for key in hooked_gl_list_daemon_keys() {
         let binding = crate::adapters::grok_leader::member_from_key(&key);
         match binding {
@@ -2823,12 +2830,16 @@ pub fn _cleanup_dead_daemons(workspace: &str) {
                     continue;
                 }
             }
-            Some((team, member)) => {
-                let Some(path) = crate::registry::entry_path(&team) else {
+            Some((key_team, member)) => {
+                if key_team != team {
+                    continue; // another team's engine, another hived's call
+                }
+                let Some(path) = crate::registry::entry_path(&key_team) else {
                     continue;
                 };
+
                 if path.is_file() {
-                    let Some(entry) = crate::registry::load(&team) else {
+                    let Some(entry) = crate::registry::load(&key_team) else {
                         continue; // unreadable is not proof of absence
                     };
                     let listed = entry
@@ -3395,7 +3406,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             last_daemon_cleanup = now;
             // Supervision must never take the hived down: every tick below
             // swallows its own errors internally.
-            _cleanup_dead_daemons(workspace);
+            _cleanup_dead_daemons(workspace, team);
             _codex_supervisor_tick(workspace, team);
             _claude_supervisor_tick(workspace);
             _write_registry_backfill(workspace, team);
@@ -6250,7 +6261,7 @@ mod tests {
         let env = reap_env(true);
         *env.keys.lock().unwrap() = vec!["p4".to_string()];
 
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
 
         assert!(env.calls.lock().unwrap().is_empty());
     }
@@ -6260,7 +6271,7 @@ mod tests {
         let env = reap_env(false);
         *env.keys.lock().unwrap() = vec!["p4".to_string()];
 
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
 
         assert_eq!(
             *env.calls.lock().unwrap(),
@@ -6287,7 +6298,7 @@ mod tests {
             "written"
         );
 
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
 
         assert_eq!(
             *env.calls.lock().unwrap(),
@@ -6312,7 +6323,7 @@ mod tests {
             "written"
         );
 
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
 
         assert!(env.calls.lock().unwrap().is_empty());
     }
@@ -6327,9 +6338,28 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{not json").unwrap();
 
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
 
         assert!(env.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_leaves_another_team_s_member_daemon_alone() {
+        // The leader directory is global; a registry is scoped to one
+        // $HIVE_HOME. A hived on a disposable home (the acceptance lane) sees
+        // the live team's key, finds no entry for that team in its own
+        // registry, and would otherwise reap a member that is serving
+        // someone. Reaping is per-team authority.
+        let env = reap_env(true);
+        *env.keys.lock().unwrap() = vec!["m-honey.sage".to_string()];
+        write_pidfile(env.tmp.path(), "m-honey.sage", 999.0);
+
+        _cleanup_dead_daemons("/tmp/ws", "acc-throwaway");
+
+        assert!(
+            env.calls.lock().unwrap().is_empty(),
+            "a hived must not reap a daemon belonging to a team it does not run"
+        );
     }
 
     #[test]
@@ -6340,12 +6370,12 @@ mod tests {
         // newborn: inside the grace window, spawn registration may be in
         // flight
         write_pidfile(env.tmp.path(), "m-honey.rex", 5.0);
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
         assert!(env.calls.lock().unwrap().is_empty());
 
         // past the grace window with no registry entry: orphan
         write_pidfile(env.tmp.path(), "m-honey.rex", 999.0);
-        _cleanup_dead_daemons("/tmp/ws");
+        _cleanup_dead_daemons("/tmp/ws", "honey");
         assert!(env
             .calls
             .lock()
