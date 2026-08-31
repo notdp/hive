@@ -885,9 +885,8 @@ fn _send_to_ccd_session(label: &str, message: &str, artifact: &str) {
 /// Show team overview.
 pub fn team_cmd(team_arg: &str) {
     _gc_dead_teams();
-    let discovered = _discover_tmux_binding();
     let scoped = if team_arg.is_empty() {
-        map_str(&discovered, "team")
+        _default_team().unwrap_or_default()
     } else {
         team_arg.to_string()
     };
