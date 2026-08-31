@@ -1,6 +1,6 @@
 [package]
 name = "hive"
-version = "0.15.2"
+version = "0.15.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "tmux-based multi-agent collaboration framework for droid, claude, and codex"
