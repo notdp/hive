@@ -88,13 +88,7 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 ## Upgrade
 
-Re-run the installer one-liner above, or from a checkout:
-
-```bash
-git pull && cargo install --path crates/hive
-```
-
-Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
+Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
 
 Plugin manifest versions are locked to the CLI version, so a release ships plugin updates with it. Claude Code auto-updates the marketplace once the bootstrap hook has written its `extraKnownMarketplaces` entry; it skips that write when `DISABLE_AUTOUPDATER` is set without `FORCE_AUTOUPDATE_PLUGINS`, and then `claude plugin update hive@hive` is manual. Codex snapshots the marketplace at add time and never refreshes on its own; refreshing it requires `codex plugin marketplace upgrade hive`.
 
