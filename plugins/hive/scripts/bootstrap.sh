@@ -5,7 +5,7 @@
 # ever installed from here.
 set -u
 
-INSTALL_HINT="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh"
+INSTALL_HINT="curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh"
 
 if ! command -v hive >/dev/null 2>&1; then
     echo "bootstrap: hive is not on PATH; install with: $INSTALL_HINT" >&2
