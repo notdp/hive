@@ -284,6 +284,9 @@ pub(crate) fn build_cli() -> Command {
                         .help("Explicit team (default: the pane's binding)"),
                 ),
         )
+        .subcommand(Command::new("bootstrap").about(
+            "Plugin SessionStart converge: enable the hive marketplace autoUpdate entry.",
+        ))
         .subcommand(
             Command::new("config")
                 .about("Read / write user-level settings (~/.hive/settings.json).")
@@ -798,6 +801,7 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "create",
     "delete",
     "spawn",
+    "bootstrap",
     "config",
     "inject",
     "compact",
@@ -1079,6 +1083,7 @@ fn dispatch(matches: &ArgMatches) {
                 arg_str(m, "team_arg"),
             )
         }
+        Some(("bootstrap", _)) => rest::bootstrap_cmd(),
         Some(("config", m)) => match m.subcommand() {
             Some(("get", m)) => rest::config_get(arg_str(m, "key")),
             Some(("set", m)) => rest::config_set(arg_str(m, "key"), arg_str(m, "value")),

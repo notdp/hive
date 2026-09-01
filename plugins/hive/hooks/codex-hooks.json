@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.py\" >/dev/null",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh\" >/dev/null",
             "timeout": 600,
             "statusMessage": "hive bootstrap check..."
           }

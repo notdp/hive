@@ -342,3 +342,92 @@ fn test_uuid4_shape() {
     assert_eq!(sid.as_bytes()[14], b'4');
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
+
+// ---------------------------------------------------------------------------
+// bootstrap: marketplace settings convergence
+// ---------------------------------------------------------------------------
+
+fn bootstrap_settings(dir: &tempfile::TempDir, content: Option<&str>) -> std::path::PathBuf {
+    let path = dir.path().join("settings.json");
+    if let Some(content) = content {
+        std::fs::write(&path, content).unwrap();
+    }
+    path
+}
+
+#[test]
+fn test_bootstrap_settings_fresh_file_written_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = bootstrap_settings(&dir, None);
+    let summary = admin::_ensure_marketplace_settings(&path).unwrap();
+    assert!(summary.contains("autoUpdate enabled"));
+    let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &data["extraKnownMarketplaces"]["hive"];
+    assert_eq!(entry["autoUpdate"], json!(true));
+    assert_eq!(
+        entry["source"],
+        json!({"source": "github", "repo": "notdp/hive"})
+    );
+    assert!(!dir
+        .path()
+        .join(format!(".settings-{}", std::process::id()))
+        .exists());
+}
+
+#[test]
+fn test_bootstrap_settings_already_converged_is_a_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = r#"{"extraKnownMarketplaces":{"hive":{"source":{"source":"github","repo":"notdp/hive"},"autoUpdate":true}}}"#;
+    let path = bootstrap_settings(&dir, Some(content));
+    let summary = admin::_ensure_marketplace_settings(&path).unwrap();
+    assert_eq!(summary, "settings already converged");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+}
+
+#[test]
+fn test_bootstrap_settings_refuses_foreign_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let content =
+        r#"{"extraKnownMarketplaces":{"hive":{"source":{"source":"github","repo":"evil/hive"}}}}"#;
+    let path = bootstrap_settings(&dir, Some(content));
+    let err = admin::_ensure_marketplace_settings(&path).unwrap_err();
+    assert!(err.contains("foreign source"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+}
+
+#[test]
+fn test_bootstrap_settings_refuses_invalid_json_and_non_object_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    for content in [
+        "not json",
+        "[1,2]",
+        r#"{"extraKnownMarketplaces":[]}"#,
+        r#"{"extraKnownMarketplaces":{"hive":7}}"#,
+    ] {
+        let path = bootstrap_settings(&dir, Some(content));
+        assert!(
+            admin::_ensure_marketplace_settings(&path).is_err(),
+            "accepted: {content}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+}
+
+#[test]
+fn test_bootstrap_settings_preserves_neighbor_keys_and_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = r#"{"zed":1,"alpha":2,"extraKnownMarketplaces":{"other":{"source":"x"},"hive":{"source":{"source":"github","repo":"notdp/hive"},"autoUpdate":false}}}"#;
+    let path = bootstrap_settings(&dir, Some(content));
+    admin::_ensure_marketplace_settings(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let data: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        data["extraKnownMarketplaces"]["hive"]["autoUpdate"],
+        json!(true)
+    );
+    assert_eq!(
+        data["extraKnownMarketplaces"]["other"],
+        json!({"source": "x"})
+    );
+    assert!(text.find("\"zed\"").unwrap() < text.find("\"alpha\"").unwrap());
+}
