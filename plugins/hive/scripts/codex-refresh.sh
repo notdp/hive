@@ -19,6 +19,6 @@ bin_version="$(hive --version 2>/dev/null | sed 's/^hive, version //')"
 cache="${CODEX_HOME:-$HOME/.codex}/plugins/cache/hive/hive"
 [ -n "$bin_version" ] && [ -d "$cache/$bin_version" ] && exit 0
 
-hive plugin path >/dev/null || exit 1
+hive plugin sync >/dev/null || exit 1
 codex plugin add hive@hive >/dev/null 2>&1 || true
 exit 0

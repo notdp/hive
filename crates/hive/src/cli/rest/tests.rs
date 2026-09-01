@@ -342,3 +342,48 @@ fn test_uuid4_shape() {
     assert_eq!(sid.as_bytes()[14], b'4');
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
+
+#[test]
+fn test_plugin_setup_drives_both_clis_in_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = tmp.path().join("calls.log");
+    for cli in ["claude", "codex"] {
+        let path = bin.join(cli);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"{cli} $*\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+
+    admin::plugin_setup();
+
+    let mp = tmp.path().join(".hive/core_assets/marketplace");
+    let calls: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            format!(
+                "claude plugin marketplace add {}",
+                mp.join("claude").display()
+            ),
+            "claude plugin install hive@hive --yes".to_string(),
+            "claude plugin update hive@hive --yes".to_string(),
+            format!(
+                "codex plugin marketplace add {}",
+                mp.join("codex").display()
+            ),
+            "codex plugin add hive@hive".to_string(),
+        ]
+    );
+}

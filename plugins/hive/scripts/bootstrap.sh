@@ -1,6 +1,6 @@
 #!/bin/sh
 # SessionStart hook (claude): presence check only. Skill content rides the
-# hive binary — the marketplace's command source re-runs `hive plugin path`
+# hive binary — the marketplace's command source re-runs `hive plugin sync`
 # once per session, so a present binary means current skills. Nothing is
 # ever installed from here.
 set -u

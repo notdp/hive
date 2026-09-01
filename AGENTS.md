@@ -30,7 +30,7 @@ behavior is documented in the modules themselves.
   is not a way to change behavior; change the embedded copy.
 - `plugins/hive/` is the Claude/Codex plugin payload, embedded into the
   binary and served from a local marketplace materialized under
-  `$HIVE_HOME/core_assets/marketplace/` by `hive plugin path`. Claude
+  `$HIVE_HOME/core_assets/marketplace/` by `hive plugin sync`. Claude
   consumes it as a command source (the command re-runs once per session, so
   skills track the binary); codex as a directory source whose cache is keyed
   by the manifest version. The two manifests (`.claude-plugin/plugin.json`,

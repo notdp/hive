@@ -643,9 +643,13 @@ pub(crate) fn build_cli() -> Command {
                         .about("Disable a plugin and remove its commands.")
                         .arg(Arg::new("name").required(true)),
                 ))
-                .subcommand(Command::new("path").about(
+                .subcommand(Command::new("sync").about(
                     "Materialize the embedded plugin marketplace and print the payload \
                      directory (the command source Claude re-runs each session).",
+                ))
+                .subcommand(Command::new("setup").about(
+                    "One-time install: sync the marketplace, then register and install \
+                     the hive plugin for every agent CLI on PATH.",
                 )),
         )
         .subcommand(passthrough_command(
@@ -838,7 +842,10 @@ const _HELP_GROUPS: &[(&str, &[&str])] = &[
     ("ccd", &["ls"]),
     ("config", &["get", "set", "unset"]),
     ("flow", &["run"]),
-    ("plugin", &["disable", "enable", "list", "ls", "path"]),
+    (
+        "plugin",
+        &["disable", "enable", "list", "ls", "setup", "sync"],
+    ),
     ("pr", &["clear", "set"]),
     ("worktree", &["done", "set-base", "start", "status"]),
 ];
@@ -1134,7 +1141,8 @@ fn dispatch(matches: &ArgMatches) {
             Some(("ls", m)) => rest::plugin_ls(m.get_flag("plain")),
             Some(("enable", m)) => rest::plugin_enable(arg_str(m, "name"), m.get_flag("plain")),
             Some(("disable", m)) => rest::plugin_disable(arg_str(m, "name"), m.get_flag("plain")),
-            Some(("path", _)) => rest::plugin_path(),
+            Some(("sync", _)) => rest::plugin_sync(),
+            Some(("setup", _)) => rest::plugin_setup(),
             _ => unreachable!("subcommand required"),
         },
         Some(("ccd", m)) => match m.subcommand() {
