@@ -38,7 +38,7 @@ hive plugin path   # one-time: materialize the marketplace (prints the payload d
 # Claude Code (2.1.229+): the marketplace entry is a command source, so Claude
 # re-runs `hive plugin path` once per session — skill updates ride the binary
 claude plugin marketplace add ~/.hive/core_assets/marketplace/claude
-claude plugin install hive@hive
+claude plugin install hive@hive --yes
 
 # Codex: directory marketplace over the same payload; the plugin's
 # SessionStart hook re-adds it when the binary version changes
