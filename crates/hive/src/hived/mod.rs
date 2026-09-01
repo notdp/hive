@@ -1,0 +1,101 @@
+//! Team-scoped hived: message transport, runtime signals, notify watcher.
+//!
+//! Delivery has exactly one state: the native transport (claude inbox /
+//! codex daemon / grok leader) either accepted the message or refused it.
+//! There is no tracked in-between and no confirmation oracle — acceptance
+//! means the target's own runtime owns it from there.
+
+use std::sync::OnceLock;
+use std::time::Instant;
+
+mod busy;
+mod client;
+mod idle_notify;
+mod lifecycle;
+mod paths;
+mod payloads;
+mod reexec;
+mod runtime;
+mod seams;
+mod server;
+mod state;
+mod supervisors;
+
+#[cfg(test)]
+pub(crate) mod testhook;
+#[cfg(test)]
+mod tests;
+
+pub use busy::*;
+pub use client::*;
+pub use idle_notify::*;
+pub use lifecycle::*;
+pub use paths::*;
+pub use payloads::*;
+pub use reexec::*;
+pub use runtime::*;
+pub use seams::*;
+pub use server::*;
+pub use state::*;
+pub use supervisors::*;
+
+#[allow(dead_code)]
+pub const ACTIVE_SLEEP: f64 = 0.5;
+pub const IDLE_NOTIFY_TICK_SECONDS: f64 = 1.0;
+pub const IDLE_NOTIFY_THRESHOLD_SECONDS: f64 = 5.0;
+pub const IDLE_NOTIFY_MESSAGE: &str = "Window idle 5s+ (all agents stopped). Return to review.";
+pub const IDLE_NOTIFY_MISSING_PRUNE_TICKS: i64 = 5;
+pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
+pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
+pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
+const _HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
+pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
+pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
+// The CLI's socket budget must be strictly longer than the work it asks the
+// hived to perform: worst-case native transport submission (claude inbox
+// connect+write / codex daemon RPC / grok leader prompt+ack) plus slack for
+// scheduling and payload plumbing.
+// A send blocks on nothing else — it returns queued the moment the transport
+// accepts; confirmation is asynchronous (background tracker / query-time).
+pub const REQUEST_SLACK: f64 = 5.0;
+pub const HIVED_API_VERSION: i64 = 5;
+pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;
+// A probed session id only speaks for the session it saw: nothing tells the
+// hived that the human typed `/new` in an unmanaged pane, so the snapshot
+// ages out and the adapter re-probes instead of pinning a dead id forever.
+const _SESSION_SNAPSHOT_FRESHNESS_S: f64 = 600.0;
+const _TRANSCRIPT_PATH_CACHE_TTL: f64 = 60.0;
+const _CLAUDE_JOBS_CACHE_TTL: f64 = 30.0;
+const _GROK_REAP_GRACE_SECONDS: f64 = 120.0;
+// One send_keys attempt per pane per cooldown window, so a slow-starting
+// codex is not typed at twice while the process check cannot see it yet.
+const _CODEX_REATTACH_COOLDOWN_SECONDS: f64 = 60.0;
+pub const FLOW_MAILBOX_AGENT: &str = "flow.run";
+
+// waitingFor values that do not gate a send: a /status-style dialog open in
+// an attached viewer parks the status on "waiting", but the inbox still
+// queues normally and the message shows the moment the dialog closes.
+const _SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
+
+// Near-zero process clock (runtime_snapshot's timestamps share the shape).
+// Python's monotonic is system uptime, so its "last seen at 0.0" defaults
+// mean "long ago" — the Rust ports of those stamps seed NEG_INFINITY instead.
+fn monotonic() -> f64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+fn _native_submit_timeout() -> f64 {
+    // claude's worst case is a delivery that has to wake a parked engine
+    // first (ledger check + tty-less attach + entry poll) before the inbox
+    // write itself.
+    let claude = crate::adapters::claude_sessions::SUBMIT_TIMEOUT
+        + crate::adapters::claude_bg::WAKE_SUBMIT_BUDGET;
+    claude
+        .max(crate::adapters::codex_app_server::SUBMIT_TIMEOUT)
+        .max(crate::adapters::grok_leader::SUBMIT_TIMEOUT)
+}
+
+pub fn _send_request_timeout() -> f64 {
+    _native_submit_timeout() + REQUEST_SLACK
+}

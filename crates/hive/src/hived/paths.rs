@@ -1,0 +1,179 @@
+// --------------------------------------------------------------------------
+// small helpers
+// --------------------------------------------------------------------------
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use crate::devlog;
+
+use super::*;
+
+pub fn _now_iso() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::gmtime_r(&secs, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        tm.tm_year as i64 + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    )
+}
+
+pub(super) fn getpid() -> i64 {
+    std::process::id() as i64
+}
+
+pub(super) fn _hived_metadata(started_at: &str) -> Map<String, Value> {
+    let mut meta = Map::new();
+    meta.insert("pid".to_string(), Value::from(getpid()));
+    meta.insert("started_at".to_string(), Value::from(started_at));
+    meta.insert("code_hash".to_string(), Value::from(hived_build_hash()));
+    meta
+}
+
+/// Python str(float) for registry createdAt round-trips.
+pub(super) fn py_float_str(value: f64) -> String {
+    if value == value.trunc() && value.is_finite() {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
+}
+
+pub(super) fn map_get_str(map: &Map<String, Value>, key: &str) -> String {
+    match map.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => match other {
+            Value::Bool(b) => {
+                if *b {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }
+            }
+            _ => other.to_string(),
+        },
+    }
+}
+
+// --------------------------------------------------------------------------
+// paths / owner file
+// --------------------------------------------------------------------------
+
+pub fn _run_dir_impl(workspace: &str) -> PathBuf {
+    devlog::run_dir(Path::new(workspace))
+}
+
+pub fn _socket_path(workspace: &str) -> PathBuf {
+    hooked_run_dir(workspace).join("hived.sock")
+}
+
+pub fn _lock_path(workspace: &str) -> PathBuf {
+    hooked_run_dir(workspace).join("hived.lock")
+}
+
+pub fn _owner_path(workspace: &str) -> PathBuf {
+    hooked_run_dir(workspace).join("hived.owner.json")
+}
+
+pub fn _write_hived_owner_impl(workspace: &str, pid: i64, started_at: &str, token: &str) {
+    let path = _owner_path(workspace);
+    let tmp = path.with_file_name(format!(
+        "{}.{pid}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    ));
+    let mut payload = Map::new();
+    payload.insert("pid".to_string(), Value::from(pid));
+    payload.insert("startedAt".to_string(), Value::from(started_at));
+    payload.insert("token".to_string(), Value::from(token));
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&tmp, serde_json::to_string(&payload).unwrap_or_default())?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    };
+    if write().is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+pub fn _read_hived_owner(workspace: &str) -> Option<Map<String, Value>> {
+    let text = fs::read_to_string(_owner_path(workspace)).ok()?;
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(map)) => Some(map),
+        _ => None,
+    }
+}
+
+fn owner_pid(owner: &Map<String, Value>) -> Option<i64> {
+    match owner.get("pid") {
+        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().map(|f| f.trunc() as i64)),
+        Some(Value::String(s)) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+pub fn _owner_matches_current_process(
+    owner: Option<&Map<String, Value>>,
+    owner_token: &str,
+) -> bool {
+    let Some(owner) = owner else { return true };
+    if owner.is_empty() {
+        return true;
+    }
+    // Python int(owner.get("pid", 0)): a missing pid is 0, an unparseable
+    // one raises → True (treated as matching, i.e. not a foreign owner).
+    let pid = match owner.get("pid") {
+        None => 0,
+        Some(_) => match owner_pid(owner) {
+            Some(pid) => pid,
+            None => return true,
+        },
+    };
+    pid == getpid() && owner.get("token").and_then(Value::as_str) == Some(owner_token)
+}
+
+pub fn _foreign_owner_pid(workspace: &str, owner_token: &str) -> Option<i64> {
+    let owner = _read_hived_owner(workspace);
+    if _owner_matches_current_process(owner.as_ref(), owner_token) {
+        return None;
+    }
+    Some(owner.as_ref().and_then(owner_pid).unwrap_or(0))
+}
+
+pub fn _cleanup_owner_if_current(workspace: &str, owner_token: &str) {
+    let owner = _read_hived_owner(workspace);
+    let Some(owner) = owner else { return };
+    if owner.is_empty() || !_owner_matches_current_process(Some(&owner), owner_token) {
+        return;
+    }
+    let _ = fs::remove_file(_owner_path(workspace));
+}
+
+pub fn _cleanup_socket_if_owner(workspace: &str, owner_token: &str) {
+    let owner = _read_hived_owner(workspace);
+    if let Some(owner) = owner.as_ref() {
+        if !owner.is_empty() && !_owner_matches_current_process(Some(owner), owner_token) {
+            return;
+        }
+    }
+    hooked_cleanup_socket(workspace);
+    _cleanup_owner_if_current(workspace, owner_token);
+}
+
+pub fn _cleanup_socket_impl(workspace: &str) {
+    let _ = fs::remove_file(_socket_path(workspace));
+}
