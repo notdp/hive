@@ -41,16 +41,6 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
         false,
     ),
     (
-        "hooks/hooks.json",
-        include_str!("../../../plugins/hive/hooks/hooks.json"),
-        false,
-    ),
-    (
-        "scripts/bootstrap.sh",
-        include_str!("../../../plugins/hive/scripts/bootstrap.sh"),
-        true,
-    ),
-    (
         "skills/hive/SKILL.md",
         include_str!("../../../plugins/hive/skills/hive/SKILL.md"),
         false,
@@ -599,14 +589,11 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["version"], json!(env!("CARGO_PKG_VERSION")));
 
-        // the hook script is executable; the codex side ships no hooks at all
-        // (its hook-review dialog is the reason), so only claude's remains
-        let mode = fs::metadata(payload.join("scripts/bootstrap.sh"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111, "bootstrap.sh not executable");
-        assert!(!payload.join("hooks/codex-hooks.json").exists());
+        // the plugin ships no hooks at all: codex gates plugin hooks behind a
+        // review dialog, and the claude side needs none — sync is the command
+        // source, presence hints died with the last hook
+        assert!(!payload.join("hooks").exists());
+        assert!(!payload.join("scripts").exists());
 
         // heal-on-drift: a tampered file is rewritten on the next call
         let skill = payload.join("skills/hive/SKILL.md");
