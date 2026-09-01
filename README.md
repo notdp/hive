@@ -19,7 +19,7 @@ Dispatching tasks, sending messages, and reading runtime state happen inside the
 Hive is one Rust binary. Prebuilt binaries ship on [GitHub Releases](https://github.com/notdp/hive/releases) for macOS and Linux (aarch64 and x86_64):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
+curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
 With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
