@@ -271,8 +271,9 @@ Options:
   -h, --help  Show this message and exit.
 
 Commands:
-  run   Run SCRIPT against the current team.
-  node  Blocking node verbs for external orchestrators (start / wait).
+  run    Run SCRIPT against the current team.
+  node   Blocking node verbs for external orchestrators (start / wait).
+  board  Live progress board for the team's flow nodes (run it in a pane).
 "#
         }
         ["fork"] => {

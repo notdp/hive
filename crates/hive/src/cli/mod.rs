@@ -421,6 +421,21 @@ pub(crate) fn build_cli() -> Command {
                         ),
                 )
                 .subcommand(
+                    Command::new("board")
+                        .about("Live progress board for the team's flow nodes (run it in a pane).")
+                        .long_about(
+                            "Live progress board for the team's flow nodes (run it in a pane).\n\n\
+                             Renders the registry roster and the flow.run mailbox as per-node\n\
+                             state (pending/spawned/working/done/gone) with elapsed times.\n\
+                             Serial/parallel phase grouping comes from an optional sidecar the\n\
+                             orchestrator writes: <workspace>/artifacts/flow/board.json\n\
+                             {\"workflow\": \"...\", \"phases\": [{\"title\": \"...\", \"nodes\": [...]}]}.\n\
+                             The pane tags itself @hive-role dock so the adaptive layout\n\
+                             leaves the strip alone.",
+                        )
+                        .arg(Arg::new("team").long("team")),
+                )
+                .subcommand(
                     Command::new("node")
                         .about("Blocking node verbs for external orchestrators.")
                         .long_about(
@@ -1157,6 +1172,9 @@ fn dispatch(matches: &ArgMatches) {
                 }
                 rest::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
             }
+            Some(("board", m)) => std::process::exit(crate::flow_board::board_cmd(
+                m.get_one::<String>("team").map(String::as_str),
+            )),
             Some(("node", m)) => match m.subcommand() {
                 Some(("start", m)) => rest::flow_node_start_cmd(
                     arg_str(m, "name"),

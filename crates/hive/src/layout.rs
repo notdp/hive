@@ -63,6 +63,7 @@ trait TmuxOps {
     fn window_zoomed(&mut self, target: &str) -> bool;
     fn window_size(&mut self, target: &str) -> (i64, i64);
     fn list_panes(&mut self, target: &str) -> Vec<String>;
+    fn has_dock_pane(&mut self, target: &str) -> bool;
     fn set_window_option(&mut self, target: &str, option: &str, value: &str);
     fn select_layout(&mut self, target: &str, layout: &str);
 }
@@ -79,6 +80,11 @@ impl TmuxOps for RealTmux {
     }
     fn list_panes(&mut self, target: &str) -> Vec<String> {
         crate::tmux::list_panes(target)
+    }
+    fn has_dock_pane(&mut self, target: &str) -> bool {
+        crate::tmux::list_panes_full(target)
+            .iter()
+            .any(|p| p.role == "dock")
     }
     fn set_window_option(&mut self, target: &str, option: &str, value: &str) {
         crate::tmux::set_window_option(target, option, value)
@@ -100,6 +106,12 @@ fn apply_adaptive_with(window_target: &str, tmux: &mut dyn TmuxOps) -> Option<La
     if tmux.window_zoomed(window_target) {
         // The human zoomed in on a member: a re-tile would both unzoom and
         // rearrange under them. Skip; the next unzoomed apply catches up.
+        return None;
+    }
+    if tmux.has_dock_pane(window_target) {
+        // A dock strip (`hive flow board`) would be flattened by any preset
+        // — presets re-tile the whole window. Leave the layout alone until
+        // a region-aware layout-string generator exists.
         return None;
     }
     let size = tmux.window_size(window_target);
@@ -136,6 +148,7 @@ mod tests {
     #[derive(Default)]
     struct FakeTmux {
         zoomed: bool,
+        dock: bool,
         size: (i64, i64),
         panes: Vec<String>,
         calls: Vec<(String, String, String, String)>,
@@ -157,6 +170,9 @@ mod tests {
         }
         fn list_panes(&mut self, _target: &str) -> Vec<String> {
             self.panes.clone()
+        }
+        fn has_dock_pane(&mut self, _target: &str) -> bool {
+            self.dock
         }
         fn set_window_option(&mut self, target: &str, option: &str, value: &str) {
             self.calls.push((
@@ -321,6 +337,19 @@ mod tests {
         .panes(2);
         assert_eq!(apply_adaptive_with("dev:0", &mut tmux), None);
         // a zoomed window is never re-tiled under the human
+        assert!(tmux.calls.is_empty());
+    }
+
+    #[test]
+    fn test_apply_adaptive_skips_windows_with_a_dock_pane() {
+        let mut tmux = FakeTmux {
+            dock: true,
+            size: (200, 50),
+            ..FakeTmux::default()
+        }
+        .panes(3);
+        assert_eq!(apply_adaptive_with("dev:0", &mut tmux), None);
+        // a preset would flatten the dock strip (`hive flow board`)
         assert!(tmux.calls.is_empty());
     }
 }
