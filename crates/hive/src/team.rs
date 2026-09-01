@@ -621,7 +621,11 @@ impl Team {
         if self.agent_named(name).is_some() {
             bail!("Agent '{name}' already exists in team '{}'", self.name);
         }
-        if !tmux::is_inside_tmux() {
+        // A team with a display window is addressable from outside tmux:
+        // the split targets the team's own window/panes by id, and targeted
+        // tmux commands need no $TMUX. Only a team with no display pins the
+        // caller to a tmux context.
+        if !tmux::is_inside_tmux() && self.tmux_window.is_empty() {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
 

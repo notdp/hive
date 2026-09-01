@@ -116,7 +116,11 @@ impl Agent {
         } else {
             opts.cwd.clone()
         };
-        if !hooked_is_inside_tmux() {
+        // Outside tmux, a concrete target pane still addresses the shared
+        // tmux server (targeted commands need no $TMUX) — that is how an
+        // external orchestrator (`hive flow node --team`) spawns visible
+        // members. Only an un-addressable spawn has to be inside tmux.
+        if !hooked_is_inside_tmux() && target_pane.is_empty() {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
 

@@ -107,16 +107,36 @@ fn err_of<T: std::fmt::Debug>(result: anyhow::Result<T>) -> String {
 // --- spawn -------------------------------------------------------------
 
 #[test]
-fn test_spawn_rejects_outside_tmux() {
+fn test_spawn_rejects_outside_tmux_without_a_target() {
     let _guard = setup();
     hook(|h| h.is_inside_tmux = false);
     let err = err_of(Agent::spawn(
         "w1",
         "t",
-        "%0",
+        "",
         spawn_opts(|o| o.skill = "none".into()),
     ));
     assert!(err.contains("requires tmux"), "{err}");
+}
+
+#[test]
+fn test_spawn_outside_tmux_with_target_pane_proceeds() {
+    // An external orchestrator (workflow proxy, desktop session) has no
+    // $TMUX and no member env markers, but a registry-known target pane
+    // addresses the tmux server fine.
+    let _guard = setup();
+    hook(|h| h.is_inside_tmux = false);
+    mock_claude_bg_up("abcd1234", "sess-registry");
+    Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.is_first = true;
+            o.skill = "none".into();
+        }),
+    )
+    .unwrap();
 }
 
 #[test]
