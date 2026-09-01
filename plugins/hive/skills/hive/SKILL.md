@@ -29,7 +29,7 @@ hive ls              # 全部 team（含没有窗口的）
 2. **你不在任何队，参数给了 team 名**（`/hive:hive wasp`）：`hive join wasp` 入队；报 not found 就 `hive create wasp` 建团——同一个入口幂等，建完你就是发起人，读「你要当派发人时」。
 3. **你不在任何队，无参数**：`hive create` 建新团（名字自动从池里挑）——tmux 内当前 pane 立为 orch，tmux 外是 headless 团，语义同一个。想加入已有团就带参数说队名，无参永远是要新团。
 
-入册之后，tmux 外的 Claude session（桌面或独立终端）要显化队籍：宿主提供修改 session 标题的工具时，把标题设为 `<team>.<member>`（orch 即 `<team>.orch`），human 和 `hive ccd ls` 由此识别你；退队或团删除时改回原标题。tmux pane 成员不用做——border 已带队籍。
+入册之后，tmux 外的 Claude session（桌面或独立终端）要显化队籍：宿主提供修改 session 标题的工具时，在原标题**前面插入**队籍前缀——原标题「项目进展检查」变成 `<team>.<member> 项目进展检查`（orch 前缀即 `<team>.orch`；原标题为空就只留前缀）。human 和 `hive ccd ls` 由此识别你；退队或团删除时去掉前缀，恢复原标题。tmux pane 成员不用做——border 已带队籍。
 
 处境只有两种，全文按此分章：**被派进来干活**（被 spawn、被 join 收编、收到 `<HIVE>` 任务）读「你是成员」；**要发起协作**（human 给了需求要拆给多人，或你自己判断要派人）成员章就是你的底座，再读「你要当派发人时」。
 
