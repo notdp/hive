@@ -42,13 +42,7 @@ pub(super) fn _hived_metadata(started_at: &str) -> Map<String, Value> {
 }
 
 /// Python str(float) for registry createdAt round-trips.
-pub(super) fn py_float_str(value: f64) -> String {
-    if value == value.trunc() && value.is_finite() {
-        format!("{value:.1}")
-    } else {
-        format!("{value}")
-    }
-}
+pub(super) use crate::team::py_float_str;
 
 pub(super) fn map_get_str(map: &Map<String, Value>, key: &str) -> String {
     match map.get(key) {

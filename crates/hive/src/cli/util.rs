@@ -82,13 +82,7 @@ pub(crate) fn getcwd() -> String {
 }
 
 /// Python `str(float)` for epoch timestamps: integral floats keep `.0`.
-pub(crate) fn py_float_str(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e16 {
-        format!("{value:.1}")
-    } else {
-        format!("{value}")
-    }
-}
+pub(crate) use crate::team::py_float_str;
 
 pub(crate) fn env_string(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
