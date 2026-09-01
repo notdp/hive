@@ -53,6 +53,135 @@ pub fn config_unset(key: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// bootstrap
+// ---------------------------------------------------------------------------
+
+// The plugin SessionStart hook's converge step. The hook's shell wrapper
+// proves phase 1 (a `hive` exists; a pre-bootstrap binary rejects this
+// subcommand and the wrapper maps that to the upgrade hint); this side is
+// phase 2: the Claude-side marketplace autoUpdate entry, failing closed on
+// any foreign shape with zero mutation.
+
+const _MARKETPLACE_REPO: &str = "notdp/hive";
+
+fn _bootstrap_settings_path() -> std::path::PathBuf {
+    let root = match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"),
+    };
+    root.join("settings.json")
+}
+
+fn _canonical_marketplace_source() -> Value {
+    let mut source = Map::new();
+    source.insert("source".into(), Value::from("github"));
+    source.insert("repo".into(), Value::from(_MARKETPLACE_REPO));
+    Value::Object(source)
+}
+
+pub(crate) fn _ensure_marketplace_settings(path: &Path) -> Result<String, String> {
+    let mut data = Map::new();
+    let mut mode: Option<u32> = None;
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        mode = std::fs::metadata(path).ok().map(|m| m.permissions().mode());
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let parsed: Value = serde_json::from_str(&raw)
+            .map_err(|_| format!("{} is not valid JSON; fix it manually", path.display()))?;
+        data = match parsed {
+            Value::Object(map) => map,
+            _ => return Err(format!("{} top level is not an object", path.display())),
+        };
+    }
+
+    let markets = data
+        .entry("extraKnownMarketplaces")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let markets = match markets {
+        Value::Object(map) => map,
+        _ => {
+            return Err(format!(
+                "{}: extraKnownMarketplaces is not an object",
+                path.display()
+            ))
+        }
+    };
+    match markets.get_mut("hive") {
+        Some(Value::Object(entry)) => {
+            if entry.get("source") != Some(&_canonical_marketplace_source()) {
+                return Err(format!(
+                    "{}: extraKnownMarketplaces.hive has a foreign source ({}); refusing to touch it",
+                    path.display(),
+                    entry.get("source").map_or("None".to_string(), |v| v.to_string()),
+                ));
+            }
+            if entry.get("autoUpdate") == Some(&Value::Bool(true)) {
+                return Ok("settings already converged".to_string());
+            }
+            entry.insert("autoUpdate".into(), Value::Bool(true));
+        }
+        Some(_) => {
+            return Err(format!(
+                "{}: extraKnownMarketplaces.hive is not an object",
+                path.display()
+            ))
+        }
+        None => {
+            let mut entry = Map::new();
+            entry.insert("source".into(), _canonical_marketplace_source());
+            entry.insert("autoUpdate".into(), Value::Bool(true));
+            markets.insert("hive".into(), Value::Object(entry));
+        }
+    }
+
+    let payload = serde_json::to_string_pretty(&Value::Object(data))
+        .map_err(|e| format!("cannot serialize settings: {e}"))?
+        + "\n";
+    let parent = path
+        .parent()
+        .ok_or_else(|| "settings path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    let tmp = parent.join(format!(".settings-{}", std::process::id()));
+    let write = || -> std::io::Result<()> {
+        std::fs::write(&tmp, &payload)?;
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+        }
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", path.display()));
+    }
+    Ok("settings updated: extraKnownMarketplaces.hive autoUpdate enabled".to_string())
+}
+
+pub fn bootstrap_cmd() {
+    println!("bootstrap: hive {}", env!("CARGO_PKG_VERSION"));
+    let disabled = std::env::var("DISABLE_AUTOUPDATER").is_ok_and(|v| !v.is_empty());
+    let forced = std::env::var("FORCE_AUTOUPDATE_PLUGINS").is_ok_and(|v| !v.is_empty());
+    if disabled && !forced {
+        println!(
+            "bootstrap: skipped: DISABLE_AUTOUPDATER is set without FORCE_AUTOUPDATE_PLUGINS, \
+             so Claude will not auto-update any plugin. To receive hive updates automatically, \
+             also set FORCE_AUTOUPDATE_PLUGINS=1; until then run `claude plugin update hive@hive` \
+             manually"
+        );
+        return;
+    }
+    match _ensure_marketplace_settings(&_bootstrap_settings_path()) {
+        Ok(summary) => println!("bootstrap: {summary}"),
+        Err(message) => {
+            eprintln!("bootstrap: {message}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // notify
 // ---------------------------------------------------------------------------
 

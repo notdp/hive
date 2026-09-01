@@ -22,9 +22,11 @@ Hive is one Rust binary. Prebuilt binaries ship on [GitHub Releases](https://git
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-Or build from source with a Rust toolchain:
+With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
 
 ```bash
+cargo binstall --git https://github.com/notdp/hive hive
+# or
 cargo install --git https://github.com/notdp/hive hive
 ```
 
@@ -40,19 +42,20 @@ codex plugin marketplace add https://github.com/notdp/hive.git
 codex plugin add hive@hive
 ```
 
-Install the CLI first. The plugin's `SessionStart` hook does not install it despite appearing to: its converge step still shells out to `pipx install` against this repo, which predates the Rust cutover and has shipped no `pyproject.toml` since, so that lane cannot produce a binary and the hook's second phase (enabling Claude's marketplace auto-update) is never reached. The only converging path is a new enough `hive` already on PATH: the check then installs nothing and falls through.
+Install the CLI first. The plugin's `SessionStart` hook installs nothing: it checks that a current `hive` is on PATH (printing the installer one-liner when the binary is missing or too old) and then runs `hive bootstrap`, which enables Claude's marketplace auto-update entry.
 
 Requires:
 
 - `tmux` 3.2+ — for the `hive cvim` / `hive vim` popups, and because a pane only answers the bare OSC 11 background query that `hive view` uses to pick a theme from 3.2 on
-- a Rust toolchain, to build
+- a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries
 - `python3` — `hive flow run` execs the interpreter against the embedded `hive.flow` client, and the notify popup is a python heredoc
 - at least one agent CLI: `claude`, `codex`, or `grok`
 
 ## Start in your agent session
 
 ```bash
-# one-time setup: eval "$(hive shell-init zsh)" in your shell rc
+# one-time setup: add eval "$(hive shell-init zsh)" to your shell rc,
+# after the PATH line the installer already wrote there
 # Inside tmux, start your agent through hive's launcher
 $ hclaude      # or: hcodex / hgrok
 
