@@ -36,7 +36,10 @@ behavior is documented in the modules themselves.
   by the manifest version. The two manifests (`.claude-plugin/plugin.json`,
   `.codex-plugin/plugin.json`) carry the crate version; nothing enforces the
   match, so bumps are manual — on codex a missed bump only costs an
-  idempotent re-add per session.
+  idempotent re-add at the next codex launch. The codex plugin ships no
+  hooks: codex gates plugin hooks behind a hook-review dialog that would
+  block headless members, so the re-add lives in hive's codex launch path
+  (`ensure_codex_plugin_current`), not in a SessionStart hook.
 - The viewer's markdown engine is the pinned git dependency
   `xai-grok-markdown` (`crates/hive/Cargo.toml`), and its chrome mirrors
   grok's own pager: doc comments cite grok files by bare name (`grok

@@ -305,6 +305,7 @@ fn _exec_codex_managed(args: &[String]) -> ! {
 }
 
 pub fn codex_cmd(args: &[String]) {
+    crate::plugin_manager::ensure_codex_plugin_current();
     _exec_codex_managed(args);
 }
 

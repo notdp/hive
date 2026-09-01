@@ -46,18 +46,8 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
         false,
     ),
     (
-        "hooks/codex-hooks.json",
-        include_str!("../../../plugins/hive/hooks/codex-hooks.json"),
-        false,
-    ),
-    (
         "scripts/bootstrap.sh",
         include_str!("../../../plugins/hive/scripts/bootstrap.sh"),
-        true,
-    ),
-    (
-        "scripts/codex-refresh.sh",
-        include_str!("../../../plugins/hive/scripts/codex-refresh.sh"),
         true,
     ),
     (
@@ -81,6 +71,30 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
 /// marketplace's directory source points at it, and `hive plugin sync`
 /// prints it for Claude's command source.
 const _PAYLOAD_SUBDIR: &str = "codex/plugins/hive";
+
+/// Codex has no command-source plugins and its plugin hooks sit behind a
+/// hook-review dialog, so the codex plugin ships no hooks at all; lockstep
+/// is re-established from hive's own codex launch path instead — before the
+/// engine starts, so the session being launched already loads the refreshed
+/// plugin. When the codex plugin cache has no entry for this binary's
+/// version, heal the local marketplace and re-add (re-adding is codex's
+/// upgrade verb). A codex that never registered the marketplace fails the
+/// add silently — setup stays explicit.
+pub fn ensure_codex_plugin_current() {
+    let home = std::env::var("CODEX_HOME")
+        .unwrap_or_else(|_| format!("{}/.codex", std::env::var("HOME").unwrap_or_default()));
+    let cache = Path::new(&home)
+        .join("plugins/cache/hive/hive")
+        .join(env!("CARGO_PKG_VERSION"));
+    if cache.is_dir() || materialize_marketplace().is_err() {
+        return;
+    }
+    let _ = std::process::Command::new("codex")
+        .args(["plugin", "add", "hive@hive"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
 
 /// Write the embedded marketplace tree under
 /// `$HIVE_HOME/core_assets/marketplace/` (heal-on-drift) and return the
@@ -585,20 +599,53 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["version"], json!(env!("CARGO_PKG_VERSION")));
 
-        // hook scripts are executable
-        for script in ["scripts/bootstrap.sh", "scripts/codex-refresh.sh"] {
-            let mode = fs::metadata(payload.join(script))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o111, 0o111, "{script} not executable");
-        }
+        // the hook script is executable; the codex side ships no hooks at all
+        // (its hook-review dialog is the reason), so only claude's remains
+        let mode = fs::metadata(payload.join("scripts/bootstrap.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "bootstrap.sh not executable");
+        assert!(!payload.join("hooks/codex-hooks.json").exists());
 
         // heal-on-drift: a tampered file is rewritten on the next call
         let skill = payload.join("skills/hive/SKILL.md");
         fs::write(&skill, "tampered").unwrap();
         materialize_marketplace().unwrap();
         assert_ne!(fs::read_to_string(&skill).unwrap(), "tampered");
+    }
+
+    #[test]
+    fn test_ensure_codex_plugin_current_readds_only_on_version_drift() {
+        let (tmp, _guard) = setup();
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = tmp.path().join("codex.log");
+        let stub = bin.join("codex");
+        fs::write(
+            &stub,
+            format!("#!/bin/sh\necho \"$*\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+
+        // cache missing -> marketplace healed + one re-add
+        ensure_codex_plugin_current();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "plugin add hive@hive\n");
+        assert!(crate::core_hooks::hive_home()
+            .join("core_assets/marketplace/codex/plugins/hive/.codex-plugin/plugin.json")
+            .is_file());
+
+        // cache present for this binary's version -> no-op
+        fs::create_dir_all(
+            PathBuf::from(std::env::var("CODEX_HOME").unwrap())
+                .join("plugins/cache/hive/hive")
+                .join(env!("CARGO_PKG_VERSION")),
+        )
+        .unwrap();
+        ensure_codex_plugin_current();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "plugin add hive@hive\n");
     }
 
     #[test]
