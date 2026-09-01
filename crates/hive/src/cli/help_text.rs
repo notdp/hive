@@ -442,6 +442,7 @@ Commands:
   disable  Disable a plugin and remove its commands.
   enable   Enable a plugin and materialize its commands.
   list     List available plugins and whether they are enabled.
+  path     Materialize the embedded plugin marketplace and print the payload directory.
 "#
         }
         ["pr"] => {

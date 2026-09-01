@@ -16,7 +16,6 @@ pub(crate) const _TMUX_REQUIRED_MESSAGE: &str =
 pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
-    "bootstrap",
     "shell-init",
     "codex",
     "claude",
