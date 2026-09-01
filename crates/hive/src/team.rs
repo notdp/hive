@@ -639,11 +639,20 @@ impl Team {
             tmux::get_current_window_target().unwrap_or_default()
         };
         let (target, split_horizontal) = if is_first {
-            let target = if !self.lead_pane_id.is_empty() {
+            let mut target = if !self.lead_pane_id.is_empty() {
                 self.lead_pane_id.clone()
             } else {
                 tmux::get_current_pane_id().unwrap_or_default()
             };
+            if target.is_empty() && !window_for_split.is_empty() {
+                // A registry-loaded team carries no lead pane and an
+                // out-of-tmux caller has no current pane — anchor the first
+                // split on the team window's own pane instead.
+                target = tmux::list_panes_full(&window_for_split)
+                    .first()
+                    .map(|p| p.pane_id.clone())
+                    .unwrap_or_default();
+            }
             (target, layout::split_horizontal(&window_for_split, 2))
         } else {
             (self.agents[self.agents.len() - 1].pane_id.clone(), false)
