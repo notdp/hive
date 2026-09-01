@@ -14,6 +14,94 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
+// ---------------------------------------------------------------------------
+// local marketplace (skills ride the binary)
+// ---------------------------------------------------------------------------
+
+// The Claude/Codex marketplace payload is embedded here and materialized under
+// `$HIVE_HOME/core_assets/marketplace/` heal-on-drift, like the cvim toolkit
+// and the flow pylib. `hive plugin path` is the command-source entry Claude
+// re-runs once per session: it heals the tree and prints the payload
+// directory, so the installed skill content always matches this binary —
+// there is no remote update channel and no version bookkeeping on the Claude
+// side. The codex marketplace is a directory source over the same payload;
+// its cache is keyed by the manifest version, which tracks the crate version.
+
+const _MP_CLAUDE: &str = include_str!("../assets/marketplace/claude-marketplace.json");
+const _MP_CODEX: &str = include_str!("../assets/marketplace/codex-marketplace.json");
+const _PAYLOAD: &[(&str, &str, bool)] = &[
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("../../../plugins/hive/.claude-plugin/plugin.json"),
+        false,
+    ),
+    (
+        ".codex-plugin/plugin.json",
+        include_str!("../../../plugins/hive/.codex-plugin/plugin.json"),
+        false,
+    ),
+    (
+        "hooks/hooks.json",
+        include_str!("../../../plugins/hive/hooks/hooks.json"),
+        false,
+    ),
+    (
+        "hooks/codex-hooks.json",
+        include_str!("../../../plugins/hive/hooks/codex-hooks.json"),
+        false,
+    ),
+    (
+        "scripts/bootstrap.sh",
+        include_str!("../../../plugins/hive/scripts/bootstrap.sh"),
+        true,
+    ),
+    (
+        "scripts/codex-refresh.sh",
+        include_str!("../../../plugins/hive/scripts/codex-refresh.sh"),
+        true,
+    ),
+    (
+        "skills/hive/SKILL.md",
+        include_str!("../../../plugins/hive/skills/hive/SKILL.md"),
+        false,
+    ),
+];
+
+/// Relative payload location inside the marketplace tree: the codex
+/// marketplace's directory source points at it, and `hive plugin path`
+/// prints it for Claude's command source.
+const _PAYLOAD_SUBDIR: &str = "codex/plugins/hive";
+
+/// Write the embedded marketplace tree under
+/// `$HIVE_HOME/core_assets/marketplace/` (heal-on-drift) and return the
+/// payload plugin directory.
+pub fn materialize_marketplace() -> Result<PathBuf> {
+    let root = crate::core_hooks::hive_home()
+        .join("core_assets")
+        .join("marketplace");
+    let mut files: Vec<(String, &str, bool)> = vec![
+        (
+            "claude/.claude-plugin/marketplace.json".to_string(),
+            _MP_CLAUDE,
+            false,
+        ),
+        (
+            "codex/.claude-plugin/marketplace.json".to_string(),
+            _MP_CODEX,
+            false,
+        ),
+    ];
+    for (rel, content, executable) in _PAYLOAD {
+        files.push((format!("{_PAYLOAD_SUBDIR}/{rel}"), content, *executable));
+    }
+    let borrowed: Vec<(&str, &str, bool)> = files
+        .iter()
+        .map(|(rel, content, executable)| (rel.as_str(), *content, *executable))
+        .collect();
+    crate::core_hooks::materialize_asset_tree(&root, &borrowed)?;
+    Ok(root.join(_PAYLOAD_SUBDIR))
+}
+
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
     pub name: String,
@@ -447,6 +535,60 @@ mod tests {
         std::env::set_var("CLAUDE_HOME", tmp.path().join(".claude"));
         std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
         (tmp, guard)
+    }
+
+    #[test]
+    fn test_materialize_marketplace_writes_and_heals_the_tree() {
+        let (_tmp, _guard) = setup();
+        let payload = materialize_marketplace().unwrap();
+        assert!(payload.ends_with("core_assets/marketplace/codex/plugins/hive"));
+        assert!(payload.join(".claude-plugin/plugin.json").is_file());
+        assert!(payload.join("skills/hive/SKILL.md").is_file());
+
+        // both marketplace manifests parse; the claude one is a command source
+        let root = payload
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let claude: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("claude/.claude-plugin/marketplace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claude["plugins"][0]["source"]["source"], json!("command"));
+        assert_eq!(
+            claude["plugins"][0]["source"]["command"],
+            json!("hive plugin path")
+        );
+        let codex: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("codex/.claude-plugin/marketplace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(codex["plugins"][0]["source"], json!("./plugins/hive"));
+
+        // the payload manifest version matches the crate version (codex cache key)
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(payload.join(".claude-plugin/plugin.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["version"], json!(env!("CARGO_PKG_VERSION")));
+
+        // hook scripts are executable
+        for script in ["scripts/bootstrap.sh", "scripts/codex-refresh.sh"] {
+            let mode = fs::metadata(payload.join(script))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{script} not executable");
+        }
+
+        // heal-on-drift: a tampered file is rewritten on the next call
+        let skill = payload.join("skills/hive/SKILL.md");
+        fs::write(&skill, "tampered").unwrap();
+        materialize_marketplace().unwrap();
+        assert_ne!(fs::read_to_string(&skill).unwrap(), "tampered");
     }
 
     #[test]

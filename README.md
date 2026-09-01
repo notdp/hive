@@ -30,19 +30,23 @@ cargo binstall --git https://github.com/notdp/hive hive
 cargo install --git https://github.com/notdp/hive hive
 ```
 
-The repo is also a plugin marketplace for both CLIs. The plugin ships the skill that teaches an agent the protocol:
+The plugin — the skill that teaches an agent the protocol — ships inside the binary and is served from a local marketplace that `hive` materializes under `$HIVE_HOME`. Skills always match the installed binary; nothing is fetched from a remote and no settings are touched:
 
 ```bash
-# Claude Code
-claude plugin marketplace add notdp/hive
+hive plugin path   # one-time: materialize the marketplace (prints the payload dir)
+
+# Claude Code (2.1.229+): the marketplace entry is a command source, so Claude
+# re-runs `hive plugin path` once per session — skill updates ride the binary
+claude plugin marketplace add ~/.hive/core_assets/marketplace/claude
 claude plugin install hive@hive
 
-# Codex
-codex plugin marketplace add https://github.com/notdp/hive.git
+# Codex: directory marketplace over the same payload; the plugin's
+# SessionStart hook re-adds it when the binary version changes
+codex plugin marketplace add ~/.hive/core_assets/marketplace/codex
 codex plugin add hive@hive
 ```
 
-Install the CLI first. The plugin's `SessionStart` hook installs nothing: it checks that a current `hive` is on PATH (printing the installer one-liner when the binary is missing or too old) and then runs `hive bootstrap`, which enables Claude's marketplace auto-update entry.
+Install the CLI first. The plugin's `SessionStart` hooks install nothing beyond that re-add: on claude the hook only checks that `hive` is on PATH (printing the installer one-liner when it is missing).
 
 Requires:
 
@@ -93,7 +97,7 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
 
-Plugin manifest versions are locked to the CLI version, so a release ships plugin updates with it. Claude Code auto-updates the marketplace once the bootstrap hook has written its `extraKnownMarketplaces` entry; it skips that write when `DISABLE_AUTOUPDATER` is set without `FORCE_AUTOUPDATE_PLUGINS`, and then `claude plugin update hive@hive` is manual. Codex snapshots the marketplace at add time and never refreshes on its own; refreshing it requires `codex plugin marketplace upgrade hive`.
+Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin path` each session and picks up changed content automatically; on codex the plugin's `SessionStart` hook re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
 
 ## Development
 

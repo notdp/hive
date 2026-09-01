@@ -1,0 +1,17 @@
+{
+  "name": "hive",
+  "owner": {
+    "name": "notdp",
+    "url": "https://github.com/notdp"
+  },
+  "plugins": [
+    {
+      "name": "hive",
+      "source": {
+        "source": "command",
+        "command": "hive plugin path"
+      },
+      "description": "Hive multi-agent collaboration entrypoint: member/orch protocol discovery for tmux teams."
+    }
+  ]
+}

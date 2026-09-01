@@ -284,9 +284,6 @@ pub(crate) fn build_cli() -> Command {
                         .help("Explicit team (default: the pane's binding)"),
                 ),
         )
-        .subcommand(Command::new("bootstrap").about(
-            "Plugin SessionStart converge: enable the hive marketplace autoUpdate entry.",
-        ))
         .subcommand(
             Command::new("config")
                 .about("Read / write user-level settings (~/.hive/settings.json).")
@@ -645,6 +642,10 @@ pub(crate) fn build_cli() -> Command {
                     Command::new("disable")
                         .about("Disable a plugin and remove its commands.")
                         .arg(Arg::new("name").required(true)),
+                ))
+                .subcommand(Command::new("path").about(
+                    "Materialize the embedded plugin marketplace and print the payload \
+                     directory (the command source Claude re-runs each session).",
                 )),
         )
         .subcommand(passthrough_command(
@@ -801,7 +802,6 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "create",
     "delete",
     "spawn",
-    "bootstrap",
     "config",
     "inject",
     "compact",
@@ -838,7 +838,7 @@ const _HELP_GROUPS: &[(&str, &[&str])] = &[
     ("ccd", &["ls"]),
     ("config", &["get", "set", "unset"]),
     ("flow", &["run"]),
-    ("plugin", &["disable", "enable", "list", "ls"]),
+    ("plugin", &["disable", "enable", "list", "ls", "path"]),
     ("pr", &["clear", "set"]),
     ("worktree", &["done", "set-base", "start", "status"]),
 ];
@@ -1083,7 +1083,6 @@ fn dispatch(matches: &ArgMatches) {
                 arg_str(m, "team_arg"),
             )
         }
-        Some(("bootstrap", _)) => rest::bootstrap_cmd(),
         Some(("config", m)) => match m.subcommand() {
             Some(("get", m)) => rest::config_get(arg_str(m, "key")),
             Some(("set", m)) => rest::config_set(arg_str(m, "key"), arg_str(m, "value")),
@@ -1135,6 +1134,7 @@ fn dispatch(matches: &ArgMatches) {
             Some(("ls", m)) => rest::plugin_ls(m.get_flag("plain")),
             Some(("enable", m)) => rest::plugin_enable(arg_str(m, "name"), m.get_flag("plain")),
             Some(("disable", m)) => rest::plugin_disable(arg_str(m, "name"), m.get_flag("plain")),
+            Some(("path", _)) => rest::plugin_path(),
             _ => unreachable!("subcommand required"),
         },
         Some(("ccd", m)) => match m.subcommand() {
