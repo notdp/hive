@@ -30,23 +30,13 @@ cargo binstall --git https://github.com/notdp/hive hive
 cargo install --git https://github.com/notdp/hive hive
 ```
 
-The plugin — the skill that teaches an agent the protocol — ships inside the binary and is served from a local marketplace that `hive` materializes under `$HIVE_HOME`. Skills always match the installed binary; nothing is fetched from a remote and no settings are touched:
+The plugin — the skill that teaches an agent the protocol — ships inside the binary and is served from a local marketplace that `hive` materializes under `$HIVE_HOME`. One command registers and installs it for every agent CLI on PATH (re-running it repairs an install):
 
 ```bash
-hive plugin path   # one-time: materialize the marketplace (prints the payload dir)
-
-# Claude Code (2.1.229+): the marketplace entry is a command source, so Claude
-# re-runs `hive plugin path` once per session — skill updates ride the binary
-claude plugin marketplace add ~/.hive/core_assets/marketplace/claude
-claude plugin install hive@hive --yes
-
-# Codex: directory marketplace over the same payload; the plugin's
-# SessionStart hook re-adds it when the binary version changes
-codex plugin marketplace add ~/.hive/core_assets/marketplace/codex
-codex plugin add hive@hive
+hive plugin setup
 ```
 
-Install the CLI first. The plugin's `SessionStart` hooks install nothing beyond that re-add: on claude the hook only checks that `hive` is on PATH (printing the installer one-liner when it is missing).
+Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin's `SessionStart` hook re-adds the plugin when the binary version changes. Nothing is fetched from a remote and no settings are touched.
 
 Requires:
 
@@ -97,7 +87,7 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
 
-Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin path` each session and picks up changed content automatically; on codex the plugin's `SessionStart` hook re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
+Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin sync` each session and picks up changed content automatically; on codex the plugin's `SessionStart` hook re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
 
 ## Development
 

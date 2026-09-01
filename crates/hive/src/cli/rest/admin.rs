@@ -166,11 +166,102 @@ pub fn plugin_enable(name: &str, plain: bool) {
     }
 }
 
-pub fn plugin_path() {
+pub fn plugin_sync() {
     match crate::plugin_manager::materialize_marketplace() {
         Ok(payload) => println!("{}", payload.display()),
         Err(e) => fail(&e.to_string()),
     }
+}
+
+// `hive plugin setup` — the one human-run install step. Registers the
+// materialized marketplace and installs the plugin for every agent CLI on
+// PATH; each sub-step tolerates "already done" failures so re-running is
+// safe, and re-running is also how an install is repaired.
+fn _setup_step(label: &str, argv: &[&str]) {
+    let out = match std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            println!("setup: {label}: failed to run ({e})");
+            return;
+        }
+    };
+    if out.status.success() {
+        println!("setup: {label}: ok");
+    } else {
+        let text = String::from_utf8_lossy(if out.stderr.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        })
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("")
+        .to_string();
+        println!("setup: {label}: {text}");
+    }
+}
+
+pub fn plugin_setup() {
+    let root = ok_or_fail(crate::plugin_manager::materialize_marketplace());
+    let marketplace = root
+        .ancestors()
+        .nth(3)
+        .expect("payload sits three levels under the marketplace root")
+        .to_path_buf();
+    println!("setup: marketplace synced at {}", marketplace.display());
+
+    if which_on_path("claude") {
+        let dir = marketplace.join("claude");
+        _setup_step(
+            "claude marketplace",
+            &[
+                "claude",
+                "plugin",
+                "marketplace",
+                "add",
+                &dir.to_string_lossy(),
+            ],
+        );
+        _setup_step(
+            "claude plugin",
+            &["claude", "plugin", "install", "hive@hive", "--yes"],
+        );
+        _setup_step(
+            "claude plugin refresh",
+            &["claude", "plugin", "update", "hive@hive", "--yes"],
+        );
+    } else {
+        println!("setup: claude: not on PATH, skipped");
+    }
+
+    if which_on_path("codex") {
+        let dir = marketplace.join("codex");
+        _setup_step(
+            "codex marketplace",
+            &[
+                "codex",
+                "plugin",
+                "marketplace",
+                "add",
+                &dir.to_string_lossy(),
+            ],
+        );
+        _setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
+    } else {
+        println!("setup: codex: not on PATH, skipped");
+    }
+}
+
+fn which_on_path(name: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub fn plugin_disable(name: &str, plain: bool) {
