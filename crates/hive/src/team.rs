@@ -45,7 +45,7 @@ fn getcwd() -> String {
 
 /// Python `str(float)`: integral floats keep a trailing `.0`.
 // ponytail: no scientific-notation branch — epoch timestamps never reach 1e16.
-fn py_float_str(value: f64) -> String {
+pub(crate) fn py_float_str(value: f64) -> String {
     if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e16 {
         format!("{value:.1}")
     } else {

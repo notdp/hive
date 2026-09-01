@@ -1,0 +1,301 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use super::grok_md;
+use super::model::{_clip, parse_hive_message, DisplayBlock, ToolOutcome};
+use super::parser::TranscriptParser;
+
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const CYAN: &str = "\x1b[36m";
+const GREEN: &str = "\x1b[32m";
+const MAGENTA: &str = "\x1b[35m";
+const YELLOW: &str = "\x1b[33m";
+const CLEAR_LINE: &str = "\x1b[2K\r";
+
+const _TAIL_EVENTS: usize = 40;
+const _POLL_SECONDS: f64 = 0.25;
+const _SPINNER: &str = "✻✼✢✽";
+/// Idle polls before the plain stream force-finalizes pending blocks.
+const _IDLE_FLUSH_TICKS: usize = 4;
+
+pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let projects = Path::new(&home).join(".claude").join("projects");
+    let entries = std::fs::read_dir(&projects).ok()?;
+    let mut matches: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(format!("{session_id}.jsonl"));
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            matches.push((mtime, candidate));
+        }
+    }
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.into_iter().next().map(|(_, p)| p)
+}
+
+fn _md(text: &str) -> String {
+    grok_md::render(text)
+}
+
+fn _indent_block(text: &str, first: &str, rest: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        lines.push("");
+    }
+    let mut out = format!("{}{}", first, lines[0]);
+    for line in &lines[1..] {
+        out.push('\n');
+        out.push_str(rest);
+        out.push_str(line);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Plain (non-tty) ANSI stream over the block model
+// ---------------------------------------------------------------------------
+
+fn _tool_line(name: &str, hint: &str) -> String {
+    let hint = _clip(hint.lines().next().unwrap_or(""), 140);
+    format!("{GREEN}⏺{RESET} {BOLD}{name}{RESET}({CYAN}{hint}{RESET})")
+}
+
+fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
+    let res = result.as_ref()?;
+    let first = res.first_line();
+    let first = first.trim();
+    if first.is_empty() {
+        return None;
+    }
+    Some(format!("\n  {DIM}⎿  {first}{RESET}"))
+}
+
+fn _user_line(text: &str) -> String {
+    if let Some(msg) = parse_hive_message(text) {
+        let sender = msg.from.as_deref().unwrap_or("peer");
+        let body = _clip(&msg.body, 160);
+        return format!("{MAGENTA}✉{RESET} {BOLD}{sender}{RESET} {DIM}▸{RESET} {body}");
+    }
+    let first = format!("{BOLD}❯{RESET} {BOLD}");
+    format!(
+        "{}{}",
+        _indent_block(&_clip(text, 1200), &first, "  "),
+        RESET
+    )
+}
+
+/// Print [`DisplayBlock`]s as the legacy plain ANSI stream (piped mode).
+pub(super) struct StreamPrinter {
+    pub(super) parser: TranscriptParser,
+    pub(super) state: &'static str, // idle | working
+    state_since: Instant,
+}
+
+impl StreamPrinter {
+    pub(super) fn new() -> Self {
+        StreamPrinter {
+            parser: TranscriptParser::new(),
+            state: "idle",
+            state_since: Instant::now(),
+        }
+    }
+
+    fn sync_state(&mut self) {
+        let state = if self.parser.busy() {
+            "working"
+        } else {
+            "idle"
+        };
+        if state != self.state {
+            self.state = state;
+            self.state_since = Instant::now();
+        }
+    }
+
+    pub(super) fn push_rendered(&mut self, raw: &str) -> Option<String> {
+        let blocks = self.parser.push(raw);
+        self.sync_state();
+        Self::render_blocks(&blocks)
+    }
+
+    pub(super) fn flush_rendered(&mut self) -> Option<String> {
+        let blocks = self.parser.flush();
+        Self::render_blocks(&blocks)
+    }
+
+    fn render_blocks(blocks: &[DisplayBlock]) -> Option<String> {
+        let mut out = String::new();
+        for block in blocks {
+            if let Some(s) = Self::render_block(block) {
+                out.push_str(&s);
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn render_block(block: &DisplayBlock) -> Option<String> {
+        match block {
+            DisplayBlock::User(u) => Some(format!("\n{}", _user_line(&u.text))),
+            DisplayBlock::Assistant(a) => Some(format!(
+                "\n{}",
+                _indent_block(&_md(&_clip(&a.markdown, 4000)), "⏺ ", "  ")
+            )),
+            DisplayBlock::ToolGroup(group) => {
+                let mut out = String::new();
+                for member in &group.members {
+                    out.push('\n');
+                    out.push_str(&_tool_line(&member.name, &member.hint));
+                    if let Some(res) = _result_line(&member.result) {
+                        out.push_str(&res);
+                    }
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            DisplayBlock::Run(run) => {
+                let mut out = format!("\n{}", _tool_line("Bash", &run.description));
+                if let Some(res) = _result_line(&run.result) {
+                    out.push_str(&res);
+                }
+                Some(out)
+            }
+            DisplayBlock::Tool(tool) => {
+                let mut out = format!("\n{}", _tool_line(&tool.name, &tool.hint));
+                if let Some(res) = _result_line(&tool.result) {
+                    out.push_str(&res);
+                }
+                Some(out)
+            }
+            // The plain stream never showed thinking or turn markers.
+            DisplayBlock::Thinking(_) | DisplayBlock::WorkedFor(_) => None,
+        }
+    }
+
+    pub(super) fn status_line(&self, tick: usize, session_id: &str) -> String {
+        let verb = if self.state == "working" {
+            let frames: Vec<char> = _SPINNER.chars().collect();
+            let frame = frames[tick % frames.len()];
+            let elapsed = self.state_since.elapsed().as_secs();
+            format!("{YELLOW}{frame}{RESET} Working… {DIM}({elapsed}s){RESET}")
+        } else {
+            format!("{GREEN}●{RESET} idle")
+        };
+        let sid: String = session_id.chars().take(8).collect();
+        format!(
+            "{verb} {DIM}· {sid} · {} tokens out · read-only mirror{RESET}",
+            self.parser.output_tokens()
+        )
+    }
+}
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigint(_sig: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+pub fn follow(session_id: &str) -> i32 {
+    let path = match transcript_path(session_id) {
+        Some(p) => p,
+        None => {
+            println!("no transcript for session '{}'", session_id);
+            return 1;
+        }
+    };
+    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+        return match crate::transcript_tui::run(&path) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{}: {}", path.display(), err);
+                1
+            }
+        };
+    }
+    follow_plain(session_id, &path)
+}
+
+/// Legacy plain ANSI stream, used when stdout is not a tty (pipes, logs).
+fn follow_plain(session_id: &str, path: &Path) -> i32 {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    println!("{DIM}── live mirror · {name} · keys go nowhere ──{RESET}");
+    let mut printer = StreamPrinter::new();
+    let mut tick: usize = 0;
+    let mut idle_ticks: usize = 0;
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(err) => {
+            eprintln!("{}: {}", path.display(), err);
+            return 1;
+        }
+    };
+    let mut reader = BufReader::new(file);
+    let mut backlog = String::new();
+    if let Err(err) = reader.read_to_string(&mut backlog) {
+        eprintln!("{}: {}", path.display(), err);
+        return 1;
+    }
+    let lines: Vec<&str> = backlog.lines().collect();
+    for raw in &lines[lines.len().saturating_sub(_TAIL_EVENTS)..] {
+        if let Some(rendered) = printer.push_rendered(raw) {
+            println!("{rendered}");
+        }
+    }
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+    }
+    let mut raw = String::new();
+    loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            print!("{CLEAR_LINE}");
+            let _ = std::io::stdout().flush();
+            return 0;
+        }
+        raw.clear();
+        match reader.read_line(&mut raw) {
+            Ok(0) => {
+                tick += 1;
+                idle_ticks += 1;
+                if idle_ticks == _IDLE_FLUSH_TICKS {
+                    if let Some(rendered) = printer.flush_rendered() {
+                        print!("{CLEAR_LINE}");
+                        println!("{rendered}");
+                    }
+                }
+                print!("{}{}", CLEAR_LINE, printer.status_line(tick, session_id));
+                let _ = std::io::stdout().flush();
+                std::thread::sleep(Duration::from_secs_f64(_POLL_SECONDS));
+            }
+            Ok(_) => {
+                idle_ticks = 0;
+                if let Some(rendered) = printer.push_rendered(&raw) {
+                    print!("{CLEAR_LINE}");
+                    println!("{rendered}");
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                eprintln!("{}: {}", path.display(), err);
+                return 1;
+            }
+        }
+    }
+}
