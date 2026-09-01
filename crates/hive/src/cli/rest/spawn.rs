@@ -344,3 +344,29 @@ pub fn flow_run_cmd(script: &str, resume: Option<&str>) {
         .unwrap_or_else(|_| script.to_string());
     std::process::exit(crate::flow_script::run_cmd(&script_path, resume));
 }
+
+pub fn flow_node_start_cmd(
+    name: &str,
+    task: &str,
+    cli: Option<&str>,
+    model: &str,
+    team: Option<&str>,
+) {
+    let env = crate::flow::RealEnv::for_team(team.map(str::to_string));
+    match crate::flow::node_start(&env, name, cli, model, task) {
+        Ok(result) => println!("{}", serde_json::Value::Object(result)),
+        Err(e) => fail(&e.0),
+    }
+}
+
+pub fn flow_node_wait_cmd(name: &str, msg_id: &str, timeout_seconds: &str, team: Option<&str>) {
+    let timeout: f64 = match timeout_seconds.parse() {
+        Ok(t) => t,
+        Err(_) => fail(&format!("bad --timeout-seconds '{timeout_seconds}'")),
+    };
+    let env = crate::flow::RealEnv::for_team(team.map(str::to_string));
+    match crate::flow::node_wait(&env, name, msg_id, timeout) {
+        Ok(result) => println!("{}", serde_json::Value::Object(result)),
+        Err(e) => fail(&e.0),
+    }
+}

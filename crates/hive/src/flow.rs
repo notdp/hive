@@ -350,6 +350,75 @@ pub(crate) fn run_op(
     Ok(result)
 }
 
+/// `hive flow node start`: spawn + ready + dispatch-task as one blocking
+/// verb. This is the seam an external orchestrator (a Claude Code workflow's
+/// hive-node proxy agent) drives: it runs this once, then polls `node_wait`
+/// in bounded slices, because its shell tool has a hard per-call timeout.
+pub fn node_start(
+    env: &dyn FlowEnv,
+    name: &str,
+    cli: Option<&str>,
+    model: &str,
+    task: &str,
+) -> Result<Map<String, Value>, FlowError> {
+    let spawned = run_op(
+        env,
+        "spawn",
+        &serde_json::json!({"name": name, "cli": cli, "model": model}),
+    )?;
+    let cli_resolved = spawned
+        .get("cli")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    run_op(
+        env,
+        "ready",
+        &serde_json::json!({"name": name, "cli": cli_resolved}),
+    )?;
+    let mut result = run_op(
+        env,
+        "dispatch-task",
+        &serde_json::json!({"name": name, "prompt": task}),
+    )?;
+    result.insert(
+        "pane".to_string(),
+        spawned.get("pane").cloned().unwrap_or(Value::Null),
+    );
+    result.insert("cli".to_string(), Value::String(cli_resolved));
+    Ok(result)
+}
+
+/// Bounded reply poll for `hive flow node wait`: `status: "replied"` with
+/// the reply row, or `status: "pending"` at the deadline — a timeout is not
+/// an error, the caller loops.
+pub fn node_wait(
+    env: &dyn FlowEnv,
+    name: &str,
+    msg_id: &str,
+    timeout_seconds: f64,
+) -> Result<Map<String, Value>, FlowError> {
+    let ctx = env.context()?;
+    let mut waited = 0.0;
+    loop {
+        if let Some(row) = env.find_reply_to(&ctx.workspace, msg_id, name)? {
+            let mut result = Map::new();
+            result.insert("status".to_string(), Value::String("replied".into()));
+            result.insert("body".to_string(), Value::String(row.body));
+            result.insert("artifact".to_string(), Value::String(row.artifact));
+            result.insert("msgId".to_string(), Value::String(row.msg_id));
+            return Ok(result);
+        }
+        if waited >= timeout_seconds {
+            let mut result = Map::new();
+            result.insert("status".to_string(), Value::String("pending".into()));
+            return Ok(result);
+        }
+        env.sleep(REPLY_POLL_SECONDS);
+        waited += REPLY_POLL_SECONDS;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Live wiring.
 // ---------------------------------------------------------------------------
@@ -363,6 +432,7 @@ struct RealCtx {
 /// Production `FlowEnv`: resolves the scoped team once and forwards every
 /// seam to the cli/bus/layout modules.
 pub struct RealEnv {
+    team_arg: Option<String>,
     ctx: Mutex<Option<RealCtx>>,
 }
 
@@ -374,7 +444,15 @@ impl Default for RealEnv {
 
 impl RealEnv {
     pub fn new() -> Self {
+        Self::for_team(None)
+    }
+
+    /// Scope to an explicit team name instead of the caller's pane identity
+    /// — the `--team` lane for callers outside tmux (a desktop CCD session,
+    /// a workflow proxy subagent).
+    pub fn for_team(team_arg: Option<String>) -> Self {
         RealEnv {
+            team_arg,
             ctx: Mutex::new(None),
         }
     }
@@ -382,8 +460,9 @@ impl RealEnv {
     fn with_ctx<R>(&self, f: impl FnOnce(&mut RealCtx) -> R) -> Result<R, FlowError> {
         let mut guard = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
         if guard.is_none() {
-            let (team_name, team) = crate::cli::resolve_scoped_team(None, true)
-                .map_err(|e| FlowError(e.to_string()))?;
+            let (team_name, team) =
+                crate::cli::resolve_scoped_team(self.team_arg.as_deref(), true)
+                    .map_err(|e| FlowError(e.to_string()))?;
             let team = team.ok_or_else(|| FlowError("no team resolved".to_string()))?;
             let workspace = crate::cli::resolve_workspace(Some(&team), true)
                 .map_err(|e| FlowError(e.to_string()))?;
@@ -910,6 +989,43 @@ mod tests {
         assert_ne!(p1, p2);
         assert_eq!(fs::read_to_string(&p1).unwrap(), "one");
         assert_eq!(fs::read_to_string(&p2).unwrap(), "two");
+    }
+
+    #[test]
+    fn test_node_start_spawns_gates_and_dispatches_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let r = node_start(&env, "impl", Some("codex"), "", "build the thing\nwith detail").unwrap();
+        assert_eq!(r.get("pane"), Some(&Value::String("%1".into())));
+        assert_eq!(r.get("cli"), Some(&Value::String("codex".into())));
+        assert_eq!(r.get("msgId"), Some(&Value::String("m1".into())));
+        let artifact = r.get("artifact").and_then(Value::as_str).unwrap();
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            "build the thing\nwith detail"
+        );
+        assert_eq!(env.spawns.lock().unwrap().len(), 1);
+        assert_eq!(env.dispatches.lock().unwrap()[0].sender_agent, "flow.run");
+    }
+
+    #[test]
+    fn test_node_wait_replied_and_pending() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+
+        let r = node_wait(&env, "impl", "m9", 6.0).unwrap();
+        assert_eq!(r.get("status"), Some(&Value::String("pending".into())));
+        // polled at least once before the deadline
+        assert!(!env.awaits.lock().unwrap().is_empty());
+
+        env.replies
+            .lock()
+            .unwrap()
+            .insert("m9".to_string(), reply_row("done", "/tmp/o.md", "r9"));
+        let r = node_wait(&env, "impl", "m9", 6.0).unwrap();
+        assert_eq!(r.get("status"), Some(&Value::String("replied".into())));
+        assert_eq!(r.get("body"), Some(&Value::String("done".into())));
+        assert_eq!(r.get("artifact"), Some(&Value::String("/tmp/o.md".into())));
     }
 
     #[test]

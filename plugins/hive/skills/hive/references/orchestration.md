@@ -116,6 +116,16 @@ return { verdict: v.data.verdict }
 - 确定性契约:`Date.now()`/`Math.random()`/无参 `new Date()` 在脚本里会 throw——因为每次 run 的 op 都记进 journal,`hive flow run workflow.js --resume <run-id>`(run id 在开跑第一行打出)会重放未变化的前缀:还活着的成员直接复用不重生,改了 prompt 就变成对活成员的追加派发,挂掉的成员才重 spawn。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
+**⑥b hive 节点进 Claude Code Workflow**——你在用 Claude Code 的 Workflow 工具编排时,可以让某个节点是活的 hive 成员(可见 pane,human 可介入),同时保留 Workflow 自己的进度树和 journal。写法:`agent(prompt, { agentType: 'hive-node' })`,prompt 以 `node:` 头行开始:
+
+```js
+const reply = await agent(`node: name=impl-auth cli=codex team=<你的队名>
+
+实现 auth 模块;交付 commit;完成后回报。`, { agentType: 'hive-node', schema: ... })
+```
+
+`hive-node` 是 hive 插件分发的代理 agent:它解析头行,跑 `hive flow node start`(spawn+原子派发,输出 msgId),再循环 `hive flow node wait --timeout-seconds 540` 直到成员回信,把回信作为自己的返回值交回 workflow。头行字段:`name` 必填,`cli`/`model`/`team` 可选(`team` 给不在 tmux pane 里的 session 用)。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的代理指令直接内联进 prompt 也一样跑(agentType 只是打包便利)。成员生命周期归你:workflow 结束后成员还活着,验收后自己 `hive kill`。
+
 ## git / 集成纪律
 
 单任务改动直接按 references/worktree.md 走。多个写码任务并行时,先建集成分支再派发:

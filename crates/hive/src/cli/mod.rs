@@ -419,6 +419,45 @@ pub(crate) fn build_cli() -> Command {
                                 .value_name("RUN_ID")
                                 .help("Resume a previous run from its journal"),
                         ),
+                )
+                .subcommand(
+                    Command::new("node")
+                        .about("Blocking node verbs for external orchestrators.")
+                        .long_about(
+                            "Blocking node verbs for external orchestrators (e.g. a Claude Code\n\
+                             workflow's hive-node proxy agent): `start` spawns a member and\n\
+                             dispatches its task atomically, `wait` polls for the reply in\n\
+                             bounded slices. Both print one JSON object.",
+                        )
+                        .subcommand_required(true)
+                        .arg_required_else_help(true)
+                        .subcommand(
+                            Command::new("start")
+                                .about("Spawn NAME, dispatch --task, print {msgId, pane, artifact}.")
+                                .arg(Arg::new("name").long("name").required(true))
+                                .arg(
+                                    Arg::new("task")
+                                        .long("task")
+                                        .required(true)
+                                        .allow_hyphen_values(true),
+                                )
+                                .arg(Arg::new("cli").long("cli"))
+                                .arg(Arg::new("model").long("model"))
+                                .arg(Arg::new("team").long("team")),
+                        )
+                        .subcommand(
+                            Command::new("wait")
+                                .about("Poll NAME's reply to --msg-id; print {status: replied|pending, ...}.")
+                                .arg(Arg::new("name").long("name").required(true))
+                                .arg(Arg::new("msg_id").long("msg-id").required(true))
+                                .arg(
+                                    Arg::new("timeout_seconds")
+                                        .long("timeout-seconds")
+                                        .value_name("SECONDS")
+                                        .default_value("540"),
+                                )
+                                .arg(Arg::new("team").long("team")),
+                        ),
                 ),
         )
         .subcommand(
@@ -1118,6 +1157,22 @@ fn dispatch(matches: &ArgMatches) {
                 }
                 rest::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
             }
+            Some(("node", m)) => match m.subcommand() {
+                Some(("start", m)) => rest::flow_node_start_cmd(
+                    arg_str(m, "name"),
+                    arg_str(m, "task"),
+                    m.get_one::<String>("cli").map(String::as_str),
+                    m.get_one::<String>("model").map(String::as_str).unwrap_or(""),
+                    m.get_one::<String>("team").map(String::as_str),
+                ),
+                Some(("wait", m)) => rest::flow_node_wait_cmd(
+                    arg_str(m, "name"),
+                    arg_str(m, "msg_id"),
+                    arg_str(m, "timeout_seconds"),
+                    m.get_one::<String>("team").map(String::as_str),
+                ),
+                _ => unreachable!("subcommand required"),
+            },
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {

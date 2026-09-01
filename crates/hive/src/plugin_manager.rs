@@ -55,6 +55,11 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
         include_str!("../../../plugins/hive/skills/hive/references/worktree.md"),
         false,
     ),
+    (
+        "agents/hive-node.md",
+        include_str!("../../../plugins/hive/agents/hive-node.md"),
+        false,
+    ),
 ];
 
 /// Relative payload location inside the marketplace tree: the codex
