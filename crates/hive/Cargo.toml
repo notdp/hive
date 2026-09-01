@@ -4,6 +4,7 @@ version = "0.15.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "tmux-based multi-agent collaboration framework for droid, claude, and codex"
+repository = "https://github.com/notdp/hive"
 
 [[bin]]
 name = "hive"

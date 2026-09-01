@@ -16,12 +16,16 @@ Dispatching tasks, sending messages, and reading runtime state happen inside the
 
 ## Install
 
-Hive is one Rust binary, built from a checkout:
+Hive is one Rust binary. Prebuilt binaries ship on [GitHub Releases](https://github.com/notdp/hive/releases) for macOS and Linux (aarch64 and x86_64):
 
 ```bash
-git clone https://github.com/notdp/hive.git
-cd hive
-cargo install --path crates/hive
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
+```
+
+Or build from source with a Rust toolchain:
+
+```bash
+cargo install --git https://github.com/notdp/hive hive
 ```
 
 The repo is also a plugin marketplace for both CLIs. The plugin ships the skill that teaches an agent the protocol:
@@ -84,9 +88,13 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 ## Upgrade
 
+Re-run the installer one-liner above, or from a checkout:
+
 ```bash
 git pull && cargo install --path crates/hive
 ```
+
+Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
 
 Plugin manifest versions are locked to the CLI version, so a release ships plugin updates with it. Claude Code auto-updates the marketplace once the bootstrap hook has written its `extraKnownMarketplaces` entry; it skips that write when `DISABLE_AUTOUPDATER` is set without `FORCE_AUTOUPDATE_PLUGINS`, and then `claude plugin update hive@hive` is manual. Codex snapshots the marketplace at add time and never refreshes on its own; refreshing it requires `codex plugin marketplace upgrade hive`.
 
