@@ -287,6 +287,51 @@ pub fn record_member(
     Ok("written")
 }
 
+/// Atomically claim a member name in the team's roster (CLI write lane).
+///
+/// The check-then-insert runs under the store lock, so two processes racing
+/// the same name get one `reserved` and one `exists` — the cross-process
+/// guard `Team::spawn`'s in-memory already-exists check cannot provide. The
+/// claiming row is a placeholder (no pane yet); the spawn's `record_member`
+/// replaces it, and a failed spawn removes it.
+pub fn reserve_member(
+    team: &str,
+    member: &Map<String, Value>,
+    created_at: &str,
+) -> Result<&'static str> {
+    let name = field_str(member, "name");
+    if name.is_empty() {
+        return Ok("rejected");
+    }
+    let path = match entry_path(team) {
+        Some(p) => p,
+        None => return Ok("rejected"),
+    };
+    let _lock = locked()?;
+    let mut entry = match load(team) {
+        Some(e) => e,
+        None => return Ok("missing"),
+    };
+    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
+        return Ok("missing");
+    }
+    let mut rows: Vec<Value> = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rows
+        .iter()
+        .any(|m| m.get("name").and_then(Value::as_str) == Some(name.as_str()))
+    {
+        return Ok("exists");
+    }
+    rows.push(Value::Object(_member_row(member)));
+    entry.insert("members".to_string(), Value::Array(rows));
+    _write_atomic(&path, &entry)?;
+    Ok("reserved")
+}
+
 /// Drop one member row from the team's roster (CLI write lane).
 pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'static str> {
     let path = match entry_path(team) {
@@ -774,5 +819,50 @@ mod tests {
         );
 
         assert_eq!(member_names(&load("honey").unwrap()), names(&["worker"]));
+    }
+
+    #[test]
+    fn test_reserve_member_lifecycle() {
+        let (_tmp, _store, _guard) = store();
+        assert_eq!(
+            reserve_member("ghost", &m(&[("name", "impl")]), "").unwrap(),
+            "missing"
+        );
+        record_team("honey", "/ws", "123.0", &[], "@1").unwrap();
+        assert_eq!(
+            reserve_member("honey", &m(&[("name", "impl"), ("cli", "codex")]), "123.0").unwrap(),
+            "reserved"
+        );
+        assert_eq!(
+            reserve_member("honey", &m(&[("name", "impl")]), "123.0").unwrap(),
+            "exists"
+        );
+        // a failed spawn removes the claim; the name is reservable again
+        remove_member("honey", "impl", "123.0").unwrap();
+        assert_eq!(
+            reserve_member("honey", &m(&[("name", "impl")]), "123.0").unwrap(),
+            "reserved"
+        );
+    }
+
+    #[test]
+    fn test_reserve_member_admits_exactly_one_concurrent_claimer() {
+        let (_tmp, _store, _guard) = store();
+        record_team("honey", "/ws", "123.0", &[], "@1").unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let outcomes: Vec<&'static str> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        reserve_member("honey", &m(&[("name", "impl")]), "123.0").unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(outcomes.iter().filter(|v| **v == "reserved").count(), 1);
+        assert_eq!(outcomes.iter().filter(|v| **v == "exists").count(), 7);
+        assert_eq!(member_names(&load("honey").unwrap()), names(&["impl"]));
     }
 }
