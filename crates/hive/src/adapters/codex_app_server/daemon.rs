@@ -74,6 +74,7 @@ pub fn _daemon_env() -> HashMap<String, String> {
 /// teams go away, and the hived re-spawns it if it dies while codex members
 /// live. Returns false if the daemon fails to bind or dies before ready.
 pub fn spawn_daemon() -> bool {
+    crate::plugin_manager::ensure_codex_plugin_current();
     spawn_daemon_with("codex", _DAEMON_START_TIMEOUT)
 }
 

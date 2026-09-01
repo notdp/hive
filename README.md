@@ -36,7 +36,7 @@ The plugin — the skill that teaches an agent the protocol — ships inside the
 hive plugin setup
 ```
 
-Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin's `SessionStart` hook re-adds the plugin when the binary version changes. Nothing is fetched from a remote and no settings are touched.
+Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. Nothing is fetched from a remote and no settings are touched.
 
 Requires:
 
@@ -87,7 +87,7 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
 
-Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin sync` each session and picks up changed content automatically; on codex the plugin's `SessionStart` hook re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
+Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin sync` each session and picks up changed content automatically; on codex hive's launch path re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
 
 ## Development
 
