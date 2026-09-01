@@ -638,24 +638,41 @@ impl Team {
         } else {
             tmux::get_current_window_target().unwrap_or_default()
         };
+        // Fallback for an anchor that resolved empty: the team window's own
+        // pane. A registry-loaded team carries no lead pane, and roster rows
+        // without a live pane (headless spawns, members whose pane died)
+        // keep an empty pane_id — `record_member` is retain+push, so such a
+        // row sitting *last* is the norm, not a corner.
+        let window_anchor = |target: String| -> String {
+            if !target.is_empty() || window_for_split.is_empty() {
+                return target;
+            }
+            tmux::list_panes_full(&window_for_split)
+                .first()
+                .map(|p| p.pane_id.clone())
+                .unwrap_or_default()
+        };
         let (target, split_horizontal) = if is_first {
-            let mut target = if !self.lead_pane_id.is_empty() {
+            let target = if !self.lead_pane_id.is_empty() {
                 self.lead_pane_id.clone()
             } else {
                 tmux::get_current_pane_id().unwrap_or_default()
             };
-            if target.is_empty() && !window_for_split.is_empty() {
-                // A registry-loaded team carries no lead pane and an
-                // out-of-tmux caller has no current pane — anchor the first
-                // split on the team window's own pane instead.
-                target = tmux::list_panes_full(&window_for_split)
-                    .first()
-                    .map(|p| p.pane_id.clone())
-                    .unwrap_or_default();
-            }
-            (target, layout::split_horizontal(&window_for_split, 2))
+            (
+                window_anchor(target),
+                layout::split_horizontal(&window_for_split, 2),
+            )
         } else {
-            (self.agents[self.agents.len() - 1].pane_id.clone(), false)
+            // The last member that still has a live pane — not the last
+            // roster row, which may be paneless.
+            let target = self
+                .agents
+                .iter()
+                .rev()
+                .find(|a| !a.pane_id.is_empty())
+                .map(|a| a.pane_id.clone())
+                .unwrap_or_default();
+            (window_anchor(target), false)
         };
         let split_size = "50%";
 

@@ -82,7 +82,7 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 **⑤ 集成验收**——所有任务 DONE 后,你自己拉集成分支、跑测试、核验收标准,过了才向 human 汇报。终验不外包。
 
-**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 JavaScript 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,所以这条只在 tmux 里跑得起来,headless 团用不了。
+**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 JavaScript 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,所以团必须有 tmux 窗口(headless 团用不了);跑脚本的人不必在 tmux 里。
 
 ```js
 // workflow.js

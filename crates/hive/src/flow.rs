@@ -354,7 +354,30 @@ pub(crate) fn run_op(
 /// verb. This is the seam an external orchestrator (a Claude Code workflow's
 /// hive-node proxy agent) drives: it runs this once, then polls `node_wait`
 /// in bounded slices, because its shell tool has a hard per-call timeout.
+///
+/// Failure rolls the spawn back: a member registered by a start that then
+/// died at the ready gate or dispatch is killed (pane and registry row) —
+/// the proxy is told never to re-run start, so a leaked row would deadlock
+/// the name until a human kills it.
 pub fn node_start(
+    env: &dyn FlowEnv,
+    name: &str,
+    cli: Option<&str>,
+    model: &str,
+    task: &str,
+) -> Result<Map<String, Value>, FlowError> {
+    match node_start_ops(env, name, cli, model, task) {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            if env.member_exists(name) {
+                let _ = kill_member(env, name);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn node_start_ops(
     env: &dyn FlowEnv,
     name: &str,
     cli: Option<&str>,
@@ -389,9 +412,12 @@ pub fn node_start(
     Ok(result)
 }
 
+
 /// Bounded reply poll for `hive flow node wait`: `status: "replied"` with
-/// the reply row, or `status: "pending"` at the deadline — a timeout is not
-/// an error, the caller loops.
+/// the reply row, `status: "gone"` when the member died without replying
+/// (the reply will never come — the caller must stop looping), or
+/// `status: "pending"` at the deadline — a timeout is not an error, the
+/// caller loops.
 pub fn node_wait(
     env: &dyn FlowEnv,
     name: &str,
@@ -401,12 +427,25 @@ pub fn node_wait(
     let ctx = env.context()?;
     let mut waited = 0.0;
     loop {
+        // Reply first: a member that replied and then retired still
+        // delivered.
         if let Some(row) = env.find_reply_to(&ctx.workspace, msg_id, name)? {
             let mut result = Map::new();
             result.insert("status".to_string(), Value::String("replied".into()));
             result.insert("body".to_string(), Value::String(row.body));
             result.insert("artifact".to_string(), Value::String(row.artifact));
             result.insert("msgId".to_string(), Value::String(row.msg_id));
+            return Ok(result);
+        }
+        if !env.member_exists(name) {
+            let mut result = Map::new();
+            result.insert("status".to_string(), Value::String("gone".into()));
+            result.insert(
+                "error".to_string(),
+                Value::String(format!(
+                    "member '{name}' is gone without replying; this dispatch will never resolve"
+                )),
+            );
             return Ok(result);
         }
         if waited >= timeout_seconds {
@@ -574,13 +613,40 @@ impl FlowEnv for RealEnv {
             if let Some(pos) = c.team.agents.iter().position(|a| a.name == name) {
                 c.team.agents[pos].kill();
                 c.team.agents.remove(pos);
+                // The registry row too — the CLI owns roster membership, and
+                // a row left behind poisons every later consumer (the resume
+                // liveness probe, the next-member spawn anchor, a plain
+                // rerun's name-collision check). Mirrors `hive kill`.
+                if !c.team.name.is_empty() {
+                    let created_at = if c.team.created_at == 0.0 {
+                        String::new()
+                    } else {
+                        crate::team::py_float_str(c.team.created_at)
+                    };
+                    let _ = crate::registry::remove_member(&c.team.name, name, &created_at);
+                }
             }
         });
     }
 
     fn member_exists(&self, name: &str) -> bool {
-        self.with_ctx(|c| c.team.agents.iter().any(|a| a.name == name))
-            .unwrap_or(false)
+        // A liveness probe, not a roster lookup: reload the team so a member
+        // that died after this process resolved its context is not reported
+        // alive, and require a bound pane — `Team::load` only fills pane_id
+        // from the window's live pane listing, so an empty pane_id means the
+        // pane is gone (or the member never had one, which flow never
+        // spawns).
+        let team_name = match self.context() {
+            Ok(ctx) => ctx.team_name,
+            Err(_) => return false,
+        };
+        match crate::team::Team::load(&team_name, "") {
+            Ok(team) => team
+                .agents
+                .iter()
+                .any(|a| a.name == name && !a.pane_id.is_empty()),
+            Err(_) => false,
+        }
     }
 
     fn apply_adaptive(&self, window: &str) {
@@ -1009,9 +1075,10 @@ mod tests {
     }
 
     #[test]
-    fn test_node_wait_replied_and_pending() {
+    fn test_node_wait_replied_pending_and_gone() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
+        env.agents.lock().unwrap().push("impl".to_string());
 
         let r = node_wait(&env, "impl", "m9", 6.0).unwrap();
         assert_eq!(r.get("status"), Some(&Value::String("pending".into())));
@@ -1026,6 +1093,38 @@ mod tests {
         assert_eq!(r.get("status"), Some(&Value::String("replied".into())));
         assert_eq!(r.get("body"), Some(&Value::String("done".into())));
         assert_eq!(r.get("artifact"), Some(&Value::String("/tmp/o.md".into())));
+
+        // A dead member whose reply never arrived terminates the wait: the
+        // caller must stop looping, this dispatch will never resolve.
+        env.replies.lock().unwrap().clear();
+        env.agents.lock().unwrap().clear();
+        let r = node_wait(&env, "impl", "m10", 600.0).unwrap();
+        assert_eq!(r.get("status"), Some(&Value::String("gone".into())));
+
+        // But a member that replied and then retired still delivered.
+        env.replies
+            .lock()
+            .unwrap()
+            .insert("m11".to_string(), reply_row("late", "", "r11"));
+        let r = node_wait(&env, "impl", "m11", 6.0).unwrap();
+        assert_eq!(r.get("status"), Some(&Value::String("replied".into())));
+    }
+
+    #[test]
+    fn test_node_start_failure_rolls_back_the_member() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        // codex hits the ready gate; make it fail after the spawn registered
+        env.ready = false;
+        let err = node_start(&env, "impl", Some("codex"), "", "task").unwrap_err();
+        assert!(err.0.contains("did not reach ready"), "{err}");
+        // the name is free again: pane killed, roster row gone
+        assert!(!env.member_exists("impl"));
+        assert!(env
+            .killed
+            .lock()
+            .unwrap()
+            .contains(&"impl".to_string()));
     }
 
     #[test]

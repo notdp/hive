@@ -94,6 +94,13 @@ pub struct Journal {
     cached: Mutex<HashMap<String, VecDeque<Value>>>,
     fresh: Mutex<HashSet<String>>,
     writer: Mutex<fs::File>,
+    /// On resume the rewritten journal streams to a sibling `.tmp` file and
+    /// only replaces the original in `finalize()` — a resume that dies
+    /// mid-replay (script error, Ctrl-C) leaves the prior journal intact
+    /// instead of truncating away the un-replayed suffix.
+    live_path: PathBuf,
+    tmp_path: Option<PathBuf>,
+    write_failed: std::sync::atomic::AtomicBool,
 }
 
 fn journal_key(op: &str, args_raw: &str) -> String {
@@ -102,9 +109,8 @@ fn journal_key(op: &str, args_raw: &str) -> String {
 
 impl Journal {
     /// Open the journal at `path`. With `resume`, prior records load as the
-    /// replay cache; the file is then rewritten from scratch so it always
-    /// holds the latest run's complete progress (cache hits are re-recorded
-    /// as they replay).
+    /// replay cache and the rewrite streams to a temp file (cache hits are
+    /// re-recorded as they replay); `finalize()` publishes it atomically.
     pub fn open(path: &Path, resume: bool) -> anyhow::Result<Journal> {
         let mut cached: HashMap<String, VecDeque<Value>> = HashMap::new();
         if resume {
@@ -121,12 +127,31 @@ impl Journal {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let writer = fs::File::create(path)?;
+        let tmp_path = resume.then(|| path.with_extension("jsonl.tmp"));
+        let writer = fs::File::create(tmp_path.as_deref().unwrap_or(path))?;
         Ok(Journal {
             cached: Mutex::new(cached),
             fresh: Mutex::new(HashSet::new()),
             writer: Mutex::new(writer),
+            live_path: path.to_path_buf(),
+            tmp_path,
+            write_failed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Publish a resumed run's rewritten journal over the original. Call
+    /// once the run has finished (successfully or not) — either way the
+    /// temp file holds every op that completed, a strict superset of what
+    /// dropping it would keep.
+    pub fn finalize(&self) {
+        if let Some(tmp) = &self.tmp_path {
+            if let Err(e) = fs::rename(tmp, &self.live_path) {
+                eprintln!(
+                    "[flow] warning: could not publish resumed journal {}: {e}",
+                    self.live_path.display()
+                );
+            }
+        }
     }
 
     fn take(&self, key: &str) -> Option<Value> {
@@ -137,8 +162,17 @@ impl Journal {
     fn record(&self, key: &str, result: &Value) {
         let line = serde_json::json!({"k": key, "r": result});
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = writeln!(writer, "{line}");
-        let _ = writer.flush();
+        let outcome = writeln!(writer, "{line}").and_then(|_| writer.flush());
+        if let Err(e) = outcome {
+            // Loud once: a journal that silently stops recording turns the
+            // next --resume into duplicate dispatches.
+            if !self
+                .write_failed
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                eprintln!("[flow] warning: journal write failed ({e}); this run may not resume cleanly");
+            }
+        }
     }
 
     fn is_fresh(&self, name: &str) -> bool {
@@ -262,6 +296,9 @@ const PRELUDE: &str = r###"
 {
   const RealDate = Date;
   globalThis.Date = new Proxy(RealDate, {
+    apply() {
+      throw new Error('Date() is banned in flow scripts (breaks resume)');
+    },
     construct(target, args) {
       if (args.length === 0) throw new Error('new Date() is banned in flow scripts (breaks resume)');
       return Reflect.construct(target, args);
@@ -272,6 +309,8 @@ const PRELUDE: &str = r###"
       return typeof v === 'function' ? v.bind(target) : v;
     },
   });
+  // Guardrail, not a sandbox: prototype-level escapes
+  // (new Date(0).constructor.now()) still reach the clock.
   Math.random = () => { throw new Error('Math.random() is banned in flow scripts (breaks resume)'); };
 }
 
@@ -333,6 +372,7 @@ const __absorb = (m, reply) => {
   m.summary = reply.body ?? '';
   m.artifact = reply.artifact ?? '';
   m.msgId = reply.msgId ?? '';
+  m.data = undefined; // stale structured data must not outlive its reply
 };
 
 const __settle = async (m, reply, schema) => {
@@ -351,7 +391,7 @@ const __settle = async (m, reply, schema) => {
       throw new Error(`member '${m.name}' 的回信连续 ${SCHEMA_REASKS + 1} 次不符合 schema: ${errs.join('; ')}`);
     }
     log(`${m.name} 回信不符合 schema(${errs.join('; ')}); 重新要求 (${attempt + 1}/${SCHEMA_REASKS})`);
-    const d = await __op('dispatch-ask', { name: m.name, prompt: `回信不符合要求: ${errs.join('; ')}。重发一条消息,body 为纯 JSON(不带 code fence),符合任务里给出的 JSON Schema。` });
+    const d = await __op('dispatch-ask', { name: m.name, prompt: `回信不符合要求: ${errs.join('; ')}。重发一条消息,body 为纯 JSON(不带 code fence),符合以下 JSON Schema。${__schemaClause(schema)}` });
     const r = await __op('wait-reply', { name: m.name, msgId: d.msgId });
     __absorb(m, r);
   }
@@ -448,6 +488,14 @@ pub async fn run_script(
     src: &str,
 ) -> anyhow::Result<RunOutcome> {
     let meta_src = extract_meta(src).ok_or_else(|| anyhow::anyhow!("{SCHEMA_JS_HELP}"))?;
+    // meta must be a pure literal: interpolation would break the static
+    // parse (the brace scanner cannot see `${}` nesting) and meta is
+    // evaluated standalone before the body runs.
+    if meta_src.contains("${") {
+        anyhow::bail!(
+            "meta must be a pure literal — no `${{}}` interpolation inside `export const meta`"
+        );
+    }
     let body = src.replacen("export const meta", "const meta", 1);
 
     let rt = AsyncRuntime::new()?;
@@ -565,7 +613,11 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
             return 1;
         }
     };
-    match rt.block_on(run_script(env, journal, &src)) {
+    let outcome = rt.block_on(run_script(env, journal.clone(), &src));
+    // Publish the rewritten journal even on error — it holds every op that
+    // completed, which is exactly what the next --resume needs.
+    journal.finalize();
+    match outcome {
         Ok(outcome) => {
             flow_log("result:");
             println!(
@@ -604,7 +656,9 @@ mod tests {
     }
 
     async fn run(env: Arc<FakeEnv>, journal: Arc<Journal>, src: &str) -> anyhow::Result<RunOutcome> {
-        run_script(env, journal, src).await
+        let outcome = run_script(env, journal.clone(), src).await;
+        journal.finalize();
+        outcome
     }
 
     #[tokio::test]
@@ -666,6 +720,7 @@ return { scout: scout.summary, reviews: ok.map((r) => ({ name: r.name })) }"#;
         let src = r#"export const meta = { name: 'torture', description: 'dialect contracts' }
 const checks = {}
 try { Date.now(); checks.dateNow = 'FAIL' } catch (e) { checks.dateNow = 'ok' }
+try { Date(); checks.dateCall = 'FAIL' } catch (e) { checks.dateCall = 'ok' }
 try { Math.random(); checks.mathRandom = 'FAIL' } catch (e) { checks.mathRandom = 'ok' }
 try { new Date(); checks.newDate = 'FAIL' } catch (e) { checks.newDate = 'ok' }
 checks.datedCtor = new Date(0).getTime() === 0 ? 'ok' : 'FAIL'
@@ -705,6 +760,7 @@ return checks"#;
                 "m2".into(),
                 reply_row("```json\n{\"verdict\": \"pass\", \"score\": 3}\n```", "", "r2"),
             );
+            replies.insert("m3".into(), reply_row("plain follow-up", "", "r3"));
         }
         let env = Arc::new(fake);
         let src = r#"export const meta = { name: 's', description: 'schema' }
@@ -713,18 +769,26 @@ const m = await agent('judge it', { name: 'judge', schema: {
   required: ['verdict', 'score'],
   properties: { verdict: { type: 'string', enum: ['pass', 'fail'] }, score: { type: 'integer' } },
 } })
-return m.data"#;
+const first = m.data
+await m.ask('thanks, one more note')
+return { verdict: first.verdict, score: first.score, dataCleared: m.data === undefined }"#;
         let out = run(env.clone(), scratch_journal(tmp.path()), src)
             .await
             .unwrap();
         assert_eq!(out.result["verdict"], "pass");
         assert_eq!(out.result["score"], 3);
-        // task dispatch + one schema re-ask
-        assert_eq!(env.dispatches.lock().unwrap().len(), 2);
-        // the task artifact carries the schema clause
+        // a schema-less reply must not leave stale structured data behind
+        assert_eq!(out.result["dataCleared"], true);
+        // task dispatch + one schema re-ask + one plain ask
         let dispatches = env.dispatches.lock().unwrap();
+        assert_eq!(dispatches.len(), 3);
+        // the task artifact and the re-ask both carry the schema clause
         let task_artifact = fs::read_to_string(&dispatches[0].artifact).unwrap();
         assert!(task_artifact.contains("JSON Schema"), "{task_artifact}");
+        assert!(dispatches[1].body.contains("JSON Schema") || {
+            let re_ask = fs::read_to_string(&dispatches[1].artifact).unwrap();
+            re_ask.contains("JSON Schema")
+        });
     }
 
     #[tokio::test]
@@ -827,6 +891,42 @@ return m.summary"#;
         assert_eq!(env2.spawn_calls.load(Ordering::SeqCst), 1);
         assert_eq!(env2.send_calls.load(Ordering::SeqCst), 1);
         assert_eq!(env2.awaits.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_resume_abandoned_before_finalize_preserves_the_original_journal() {
+        let tmp = TempDir::new().unwrap();
+        let journal_file = tmp.path().join("j.jsonl");
+        fs::write(
+            &journal_file,
+            "{\"k\":\"spawn\\u001f{}\",\"r\":{\"pane\":\"%1\"}}\n{\"k\":\"wait\\u001f{}\",\"r\":{\"body\":\"done\"}}\n",
+        )
+        .unwrap();
+        let original = fs::read_to_string(&journal_file).unwrap();
+
+        // A resume that records a prefix and then dies without finalize()
+        // (script error, Ctrl-C) must not have touched the original.
+        let j = Journal::open(&journal_file, true).unwrap();
+        j.record("spawn\u{1f}{}", &serde_json::json!({"pane": "%1"}));
+        drop(j);
+        assert_eq!(fs::read_to_string(&journal_file).unwrap(), original);
+
+        // finalize() publishes the rewrite atomically.
+        let j = Journal::open(&journal_file, true).unwrap();
+        j.record("spawn\u{1f}{}", &serde_json::json!({"pane": "%2"}));
+        j.finalize();
+        let published = fs::read_to_string(&journal_file).unwrap();
+        assert!(published.contains("%2"));
+        assert!(!published.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_meta_interpolation_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let env = Arc::new(fake_env(tmp.path()));
+        let src = "export const meta = { name: `run-${1}`, description: 'x' }\nreturn 1";
+        let err = run(env, scratch_journal(tmp.path()), src).await.unwrap_err();
+        assert!(err.to_string().contains("pure literal"), "{err}");
     }
 
     #[test]

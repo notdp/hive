@@ -13,9 +13,11 @@ pub(crate) const _TMUX_REQUIRED_MESSAGE: &str =
 
 // Verbs that never need a tmux context — plus the team verbs, which read the
 // registry (the truth layer) and only touch tmux when a display exists.
-// `flow` rides the same doctrine: its spawns fall back to engine-only for a
-// non-tmux caller, and `flow node --team` exists precisely for callers
-// without a pane identity (a workflow proxy subagent, a desktop session).
+// `flow` rides the same doctrine: it requires a team with a display window
+// (the non-tmux caller's real gate lives in Team/Agent::spawn, keyed on a
+// registry-addressable anchor), and `flow node --team` exists precisely for
+// callers without a pane identity (a workflow proxy subagent, a desktop
+// session).
 pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
