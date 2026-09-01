@@ -124,7 +124,7 @@ const reply = await agent(`node: name=impl-auth cli=codex team=<你的队名>
 实现 auth 模块;交付 commit;完成后回报。`, { agentType: 'hive-node', model: 'haiku', label: 'hive:impl-auth/codex', schema: ... })
 ```
 
-代理本身只做机械转发,`model: 'haiku'` 压住包装成本。注意 Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本,把成员身份全编进去:`hive:<name>/<cli>` ,指定了成员模型时再加一段,如 `hive:impl-auth/codex:gpt-5.4`。
+代理本身只做机械转发,`model: 'haiku'` 压住包装成本。注意 Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> · <cli>`,显式指定了成员模型时再补一段,如 `⬡ impl-auth · codex · gpt-5.4`(⬡ 标记 hive 节点,替代前缀)。
 
 `hive-node` 是 hive 插件分发的代理 agent:它解析头行,跑 `hive flow node start`(spawn+原子派发,输出 msgId),再循环 `hive flow node wait --timeout-seconds 540` 直到成员回信,把回信作为自己的返回值交回 workflow。头行字段:`name` 必填,`cli`/`model`/`team` 可选(`team` 给不在 tmux pane 里的 session 用)。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的代理指令直接内联进 prompt 也一样跑(agentType 只是打包便利)。成员生命周期归你:workflow 结束后成员还活着,验收后自己 `hive kill`。
 
