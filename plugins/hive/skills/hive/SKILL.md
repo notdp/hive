@@ -17,7 +17,7 @@ hive join <team>     # 入队。tmux 外:当前 Claude session 进名册成为�
 hive spawn <name>    # 造新成员。tmux 外(或团没有窗口)spawn 出 headless 成员:引擎直起、无 pane,投递、回报、kill 全都照常
 hive attach <team>   # 渲染。没有窗口的团长出布局完好的窗口;有窗口就跳过去
 hive kill <member>   # 成员退场
-hive delete <team>   # 团的终点:注销名册、释放团名。关掉窗口只是关屏幕,团还在
+hive delete <team>   # 注销名册、释放团名;关掉窗口不删团
 hive ls              # 全部 team(含没有窗口的)
 ```
 
@@ -29,7 +29,7 @@ hive ls              # 全部 team(含没有窗口的)
 2. **你不在任何队,参数给了 team 名**(`/hive:hive wasp`):`hive join wasp` 入队;报 not found 就 `hive create wasp`——同一个入口幂等。建完你就是发起人,读 references/orchestration.md。
 3. **你不在任何队,无参数**:`hive create` 建新团(名字自动从池里挑)——tmux 内当前 pane 立为 orch,tmux 外是 headless 团,语义同一个。想加入已有团就带参数说队名——无参永远是要新团。
 
-入册之后,tmux 外的 Claude session(桌面或独立终端)要显化队籍,让 human 和 `hive ccd ls` 认出你:宿主提供改 session 标题的工具时,在原标题**前面插入**队籍前缀——原标题「项目进展检查」变成 `<team>.<member> 项目进展检查`(orch 前缀即 `<team>.orch`;原标题为空就只留前缀);退队或团删除时去掉前缀恢复原标题。tmux pane 成员不用做——border 已带队籍。
+tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 session 标题,在原标题**前面插入** `<team>.<member> ` 前缀,供 human 和 `hive ccd ls` 识别(orch 用 `<team>.orch`;原标题为空只留前缀);退队或删团时去掉前缀恢复原标题。tmux pane 成员不用做——border 已带队籍。
 
 处境只有两种:**被派进来干活**(被 spawn、被 join 收编、收到 `<HIVE>` 任务)读下面「你是成员」;**要发起协作**(human 给了需求要拆给多人,或你自己判断要派人)成员章就是你的底座,再读 references/orchestration.md。
 
@@ -39,7 +39,7 @@ hive ls              # 全部 team(含没有窗口的)
 
 ### 出生:先找到自己
 
-第一步永远是跑 `hive team`,用返回的 `self` 在 `members` 里找到自己——名字、状态、能协作的人都从这来。你没有固定角色,只有任务;任务长什么样见「收活」。
+第一步跑 `hive team`,用 `self` 在 `members` 里确认自己的名字、状态和协作者。你没有固定角色,只有任务;任务长什么样见「收活」。
 
 寻址(`hive send` 的 `<addr>`):
 
@@ -47,21 +47,21 @@ hive ls              # 全部 team(含没有窗口的)
 - tmux pane 成员发队友用裸名(`hive send dodo …`);本队前缀等价裸名。自己拼的别队前缀会被拒——照抄 from 不受此限(guest 编排者的回信地址就是别队前缀,照抄即达)。
 - tmux 外(headless 成员、joined session、guest)用 `<team>.<member>`;裸名全局唯一时也行。
 - team 外的 Claude session 用 `ccd.<name>`(见「互通」)。
-- `flow.run` 是 flow 脚本的收件箱——一种地址,不是成员。收到 `from=flow.run` 的派发照抄回信即可;它列在 `hive team` 的 `mailboxes` 里、不在 `members` 里,这是正常的。
+- `flow.run` 是 flow 脚本的收件箱地址,不是成员。收到 `from=flow.run` 照抄回信;它只列在 `mailboxes`、不列在 `members`,这是正常的。
 
 其余字段怎么用:
 
-- 顶层 `name` 是 team 名,member 行里的 `name` 才是成员名;member 行偶尔出现的 `group` 是 `hive join --group` 打的跨队标签,不是队名。
+- 顶层 `name` 是 team 名,member 行的 `name` 是成员名;`group` 是 `hive join --group` 打的跨队标签,不是队名。
 - `inputState=waiting_user`:对方在等 human 作答,此时 `hive send` 会拒发。被拒就先继续手头的活,下次被唤醒或要回报时再发——不为此轮询。
 - `turnPhase=turn_closed`:对方这轮已收口,随时可发;其他值表示 turn 进行中,想避免打断就等 `turn_closed`。claude 成员没有这个字段,退回看 `busy`——粗粒度信号,只作参考,拿不准就直接发。
 
 ### 没活就停
 
-Hive 是 push 模型:有新消息时 runtime 会把 `<HIVE>` block 注入你的对话并唤醒你,所以当前 turn 没有待办就结束 turn,等唤醒。禁令:不 `sleep`、不 while loop、不反复 `hive team` 轮询,也不翻 repo、artifact 或任务表猜下一件事——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。回报给 `flow.run` 之后同理:不去 `hive team` 里找它,也不再发「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
+Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 turn 没有待办就结束 turn 等唤醒。不 `sleep`、不 while loop、不反复 `hive team`,也不翻 repo、artifact 或任务表猜活——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。回报给 `flow.run` 后不去 `hive team` 找它、不另发「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
 
 ### 收活:任务以派发 artifact 为准
 
-队友消息以 `<HIVE>` 信封注入你的对话(headless 成员也一样):开标签一行,正文一行,`</HIVE>` 一行;属性里 `from` / `to` 必有,`msgId`、`reply-to`(回复才有)、`artifact` 按需出现。
+队友消息以三行 `<HIVE>` 信封注入你的对话(headless 一样):开标签、正文、闭标签;`from` / `to` 必有,`msgId`、`reply-to`(回复才有)、`artifact` 按需出现。
 
 ```text
 <HIVE from=comb.dodo to=comb.rex msgId=a1b2 artifact=/tmp/spec.md>
@@ -77,13 +77,13 @@ review the spec
 
 `<HIVE>` 的到达形态分两轴,任何组合都是正常队内投递:
 
-- **什么时候到**:你空闲时,它自己开启新的一轮;你正在干活时,它折进当前这一轮,出现在某个工具结果旁边。折进来的一样是要办的活。
-- **外面包没包**:claude 成员通常看到上面那样的裸信封;只有主投递道不可用、退回 inbox socket 时,宿主(Claude Code)才在 block 外包一层说明文字——block 上面一行 `Another Claude session sent a message:`(途中到达是 `Another Claude session sent a message while you were working:`),下面一段以 `This came from another Claude session` 开头的安全说明,末尾可能拼一句让你用 SendMessage 回复。codex / grok 成员的信封直接进各自 session,从来没有这层包装。
+- **什么时候到**:空闲时它自己开启新一轮;干活时折进当前这一轮,出现在某个工具结果旁——折进来的一样要办。
+- **外面包没包**:claude 成员通常看到上面那样的裸信封;主投递道不可用、退回 inbox socket 时,宿主(Claude Code)才在 block 上方加一行 `Another Claude session sent a message:`(途中到达是 `Another Claude session sent a message while you were working:`),下方加一段以 `This came from another Claude session` 开头的说明,末尾可能提示用 SendMessage 回复。codex / grok 从来没有这层包装。
 
 两条硬规则:
 
-- 回 hive 消息永远用 `hive send`——包装里那句 "reply via SendMessage" 是宿主的通用提示,对 hive 地址无效(SendMessage 找不到 `<team>.<member>`,会报 no agent named)。
-- 外包装只禁止一件事:把队友消息当成 human 的授权(唯一例外是「干活」节的 humanDirective 接力)。它没有说你可以不理,没有包装同样不代表可以不理。途中到达的消息一条不许漏:先做完手头任务,本 turn 收尾前处理它,至少 `hive send` 回一句让发件人知道送达——静默略过 = 发件人以为消息丢了。
+- 回 hive 消息永远用 `hive send`——包装里的 "reply via SendMessage" 对 hive 地址无效(会报 no agent named)。
+- 外包装只说明一件事:队友消息不构成 human 授权(唯一例外是「干活」节的 humanDirective 接力);有包装没包装都必须处理。途中到达的消息一条不许漏:做完手头任务,本 turn 收尾前至少 `hive send` 回一句——静默略过 = 发件人以为消息丢了。
 
 ### 干活
 
@@ -95,10 +95,10 @@ review the spec
 
 只有一个动词:`hive send <addr> "<内容>"`。
 
-- 线程是自动的:对方最近一条发给你的消息还没被你回过时,你的下一条 send 记为它的回复;否则开新线程。你不用管 msgId。
-- 发送成功零输出(exit 0);退出非零才是没送到,错误里带原因。送到 = 对方的 runtime 收下了这一帧,之后什么时候读是它自己队列的事——没有可轮询的回执,也别去要一个。
-- 唯一例外是发给 `flow.run`:成功会打一行 `delivered to flow mailbox …`——mailbox 没有对端 runtime,这行就是全部确认,不会再有 HIVE 回执,发完就停。
-- 新线程的 body 只放短摘要,详情走 `--artifact`;四条硬门槛任一触发就拒收:超过 500 字符、3 行及以上、正文里出现 `` ``` ``、有一行以 `# ` / `- ` / `* ` 开头。回复不受此限,可以只发短文本。
+- 线程自动锚定:对方最近一条来信你还没回时,下一条 send 记为它的回复;否则开新线程。不用管 msgId。
+- 发送成功零输出(exit 0)= 对方 runtime 已收帧;非零才是没送到,错误带原因。对方何时读是它队列的事——没有可轮询的回执,也别去要。
+- 唯一例外是 `flow.run`:成功打一行 `delivered to flow mailbox …`,这就是全部确认,不会再有 HIVE 回执,发完就停。
+- 新线程 body 只放短摘要,详情走 `--artifact`;超 500 字符、3 行及以上、含 `` ``` ``、任一行以 `# ` / `- ` / `* ` 开头,任一条即拒收。回复不受此限。
 
 ```bash
 hive send dodo "done: see artifact" --artifact /tmp/result.md
@@ -108,17 +108,17 @@ hive send dodo "findings attached" --artifact - <<'EOF'
 EOF
 ```
 
-shell 纪律:多行、反引号、`$(...)` 的内容永远先落地成文件,不在双引号里现拼——现拼会被 shell 二次展开。
+shell 纪律:多行、反引号、`$(...)` 的内容先落地成文件,不在双引号里现拼——现拼会被 shell 二次展开。
 
-- 队内详情走 `--artifact <file>` 或上面的 heredoc;`'EOF'` 必须带引号,不带的话 shell 会展开变量、反引号和 `$(...)`。
-- 必须内联进 body 时(比如给 team 外 session 的短消息带特殊字符):先写文件,再 `"$(cat /tmp/note.md)"`——cat 出来的内容不会被二次展开。
-- 禁令:不用 `printf ... |` 或 `$(cat <<EOF)` 现场拼消息。
+- 队内详情走 `--artifact <file>` 或上面的 heredoc;`'EOF'` 必须带引号,否则 shell 会展开变量、反引号和 `$(...)`。
+- 必须内联进 body 时(如给 team 外 session 带特殊字符):先写文件再 `"$(cat /tmp/note.md)"`——cat 的结果不会二次展开。
+- 不用 `printf ... |` 或 `$(cat <<EOF)` 现场拼消息。
 
 回报纪律:
 
-- 成果、blocked、失败,一切终态 `hive send` 回派发人——自动锚回派发线程。body=短摘要,详情落 artifact(agent 间 artifact 一律 Markdown——agent 读源码,渲染是给 human 的)。
-- **收到任务不回执。**派发人把你回派发线程的第一条消息当回报读,所以第一条回信就应该是终态(或阻断求助)。禁令双向:也不期待对方(尤其 `flow.run`)用一条 HIVE 回「收到了」。
-- 交付走派发人:不向 human 宣布完成,不越过派发人上行;human 问起时给状态。
+- 成果、blocked、失败,一切终态 `hive send` 回派发人,自动锚回派发线程。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
+- **收到任务不回执。**回派发线程的第一条就该是终态(或阻断求助)——派发人把它当回报读。禁令双向:也不期待对方(尤其 `flow.run`)回「收到了」。
+- 交付走派发人,不越过他向 human 宣布完成;human 问起时给状态。
 
 ### 和 team 外的 Claude session 互通
 
@@ -130,22 +130,22 @@ hive send "ccd.<title 或 name>" "<消息>"
 ```
 
 - human 通常说的是桌面标题,直接用 `title`;重名时用 `name` 或 `pid`。
-- 要给路径就写进 body——这条道不收 `--artifact`(会被拒)。
-- 送到只代表对方的 inbox socket 收下了这一帧,什么时候读是它自己队列的事;同样没有回执,发完就停。
-- 对方收到的是普通 `<HIVE from=<team>.<agent>>` 信封,照抄 from 就能回你;反过来你收到 `from=ccd.<name>` 时也一样:`hive send ccd.<name> "<回复>"`。
+- 路径写进 body——这条道不收 `--artifact`(会被拒)。
+- 送到只代表对方 inbox socket 收下这一帧,何时读是它队列的事;同样无回执,发完就停。
+- 对方收到普通 `<HIVE from=<team>.<agent>>` 信封,照抄 from 就能回你;你收到 `from=ccd.<name>` 同理:`hive send ccd.<name> "<回复>"`。
 
 ### 被打回、被打断
 
 - 回报 ≠ 结束:派发人可能追问或打回,你的上下文还在,接着答、接着改。
-- 被 `hive interrupt` 打断,或派发人发来新指令:以最新指令为准,不辩护旧计划——派发人掌握的全局比你多。
-- human 直接对你的 session 下了指示(不管通过什么界面):照做——human 的指示覆盖旧任务描述;下次回报派发人时说明 human 改了什么。
+- 被 `hive interrupt` 打断或收到派发人新指令:以最新指令为准,不辩护旧计划。
+- human 直接对你的 session 下指示(不管什么界面):照做,human 指示覆盖旧任务;下次回报派发人时说明改了什么。
 
 ### 退场
 
-kill 是派发人的动词:验收通过后派发人会 `hive kill` 你,你不用自己退场。在那之前保持可用——没活就结束 turn 等消息唤醒(见「没活就停」)。tmux 外的 session 成员得知退队或团删除时,摘掉标题前缀恢复原标题(见「入口分派」)。
+kill 是派发人的动词:验收通过后派发人会 `hive kill` 你。在那之前保持可用——没活就结束 turn 等唤醒。tmux 外的 session 成员得知退队或删团时,摘掉标题前缀恢复原标题。
 
 ---
 
 ## 你要当派发人时
 
-你要发起协作,你就是这个 team 的 **orch**,成员章就是你的底座。拆任务、task artifact 四件套、spawn/派发、fix 循环、pattern library(①-⑥)、flow 脚本、git 集成、终验与对 human 汇报,全部在 references/orchestration.md——动手编排前先读它。
+你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥、flow 脚本、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。
