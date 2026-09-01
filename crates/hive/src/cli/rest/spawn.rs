@@ -335,47 +335,12 @@ pub fn spawn(
 // flow
 // ---------------------------------------------------------------------------
 
-/// The `python3 -c` shell around the script: runpy like the Python-era
-/// command, with FlowError surfaced as a clean CLI failure (`_fail`).
-const FLOW_RUNNER: &str = r#"import runpy, sys
-script = sys.argv[1]
-sys.argv = sys.argv[1:]
-try:
-    runpy.run_path(script, run_name="__main__")
-except SystemExit:
-    raise
-except Exception as exc:
-    from hive.flow import FlowError
-    if isinstance(exc, FlowError):
-        sys.stderr.write(f"Error: {exc}\n")
-        sys.exit(1)
-    raise
-"#;
-
-pub fn flow_run_cmd(script: &str) {
-    let _ = ok_or_fail(resolve_scoped_team(None, true));
+/// Flow scripts are trusted JavaScript (you or your orch wrote them),
+/// evaluated by the embedded engine in `crate::flow_script` — no external
+/// interpreter, no materialized client.
+pub fn flow_run_cmd(script: &str, resume: Option<&str>) {
     let script_path = std::fs::canonicalize(script)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| script.to_string());
-    // ponytail: flow scripts are trusted Python programs; the binary
-    // delegates to the interpreter instead of in-process runpy. Upgrade
-    // path: a Rust-native flow DSL. The script's `from hive.flow import
-    // agent` resolves against the materialized pylib client, which calls
-    // back into this binary (hidden `flow-op` subcommands via $HIVE_BIN)
-    // for every hive interaction.
-    let pylib = ok_or_fail(crate::flow::materialize_pylib())
-        .to_string_lossy()
-        .into_owned();
-    let pythonpath = match std::env::var("PYTHONPATH") {
-        Ok(existing) if !existing.is_empty() => format!("{pylib}:{existing}"),
-        _ => pylib,
-    };
-    std::env::set_var("PYTHONPATH", pythonpath);
-    if let Ok(exe) = std::env::current_exe() {
-        std::env::set_var("HIVE_BIN", exe);
-    }
-    execvp(
-        "python3",
-        &["-c".to_string(), FLOW_RUNNER.to_string(), script_path],
-    );
+    std::process::exit(crate::flow_script::run_cmd(&script_path, resume));
 }

@@ -1,10 +1,9 @@
 //! hive::flow — deterministic orchestration over live members.
 //!
-//! A flow script is written per task and run with `hive flow run`. `agent()`
-//! spawns a real member pane, waits until it is ready, dispatches the task as
-//! its first `<HIVE>` message, then blocks until the member replies — the
-//! visible counterpart of a headless subagent call. `parallel()` runs several
-//! of those at once.
+//! A flow script is written per task and run with `hive flow run`. Its
+//! `agent()` spawns a real member pane, waits until it is ready, dispatches
+//! the task as its first `<HIVE>` message, then blocks until the member
+//! replies — the visible counterpart of a headless subagent call.
 //!
 //! The runner never owns a pane: it dispatches as the reserved `flow`
 //! address, whose delivery is the durable bus row itself (the hived's
@@ -12,13 +11,12 @@
 //! with an ordinary `hive send flow` — auto-anchoring threads it back to
 //! the dispatch, no new addressing concepts.
 //!
-//! Deliberately not here: sandboxing (the script author is the orch),
-//! schema validation, resume journals, token budgets, progress UI — the
-//! panes are the progress display.
-//!
-//! Python seams (`hive.cli._spawn_team_agent`, `hive.cli._request_send_payload`,
-//! …) become the `FlowEnv` trait; `RealEnv` is the live wiring, tests inject a
-//! fake — the same seam the pytest suite monkeypatches.
+//! This module is the op core: the `FlowEnv` seam over cli/bus/layout and
+//! the `run_op` dispatch that the script engine calls once per hive
+//! interaction. The script surface — the embedded JavaScript dialect, its
+//! prelude, and the resume journal — lives in `crate::flow_script`.
+//! Deliberately not here: token budgets, progress UI — the panes are the
+//! progress display.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -53,8 +51,8 @@ impl fmt::Display for FlowError {
 
 impl std::error::Error for FlowError {}
 
-/// The resolved team context (Python `_Ctx`). The live `Team` object stays
-/// inside the env implementation; flow logic only needs these fields.
+/// The resolved team context. The live `Team` object stays inside the env
+/// implementation; flow logic only needs these fields.
 #[derive(Debug, Clone)]
 pub struct Ctx {
     pub team_name: String,
@@ -62,18 +60,18 @@ pub struct Ctx {
     pub tmux_window: String,
 }
 
-/// What flow reads off a freshly spawned agent (Python `Agent` attributes).
+/// What flow reads off a freshly spawned agent.
 #[derive(Debug, Clone)]
 pub struct SpawnedAgent {
     pub pane_id: String,
     pub cli: String,
 }
 
-/// The seams flow.py reaches through (`hive.cli.*`, `hive.bus.find_reply_to`,
-/// `hive.layout.apply_adaptive`). `Err(String)` on spawn/send is the transient
-/// exception message Python retries on (ValueError/RuntimeError).
-pub trait FlowEnv: Sync {
-    /// Resolve (and cache) the scoped team context — Python `flow._context()`.
+/// The seams flow reaches through (`hive::cli::*`, `hive::bus::find_reply_to`,
+/// `hive::layout::apply_adaptive`). `Err(String)` on spawn/send is the
+/// transient failure the retry loops absorb.
+pub trait FlowEnv: Send + Sync {
+    /// Resolve (and cache) the scoped team context.
     fn context(&self) -> Result<Ctx, FlowError>;
     fn spawn_team_agent(
         &self,
@@ -110,8 +108,11 @@ pub trait FlowEnv: Sync {
         from_agent: &str,
     ) -> Result<Option<Event>, FlowError>;
     /// Kill the named member's pane and drop it from the team roster
-    /// (Python: `agents[name].kill(); del agents[name]` — no-op when absent).
+    /// (no-op when absent).
     fn kill_team_agent(&self, name: &str);
+    /// Whether the named member is currently on the team roster — the
+    /// resume journal's liveness probe for spawn replay.
+    fn member_exists(&self, name: &str) -> bool;
     fn apply_adaptive(&self, window: &str);
     fn sleep(&self, seconds: f64);
 }
@@ -197,61 +198,8 @@ fn await_reply(env: &dyn FlowEnv, name: &str, msg_id: &str) -> Result<Event, Flo
     }
 }
 
-/// A live member the flow dispatched to. Fields hold its latest reply.
-#[derive(Debug, Clone)]
-pub struct Member {
-    pub name: String,
-    pub pane: String,
-    pub summary: String,
-    pub artifact: String,
-    pub msg_id: String,
-    dead: bool,
-}
-
-impl Member {
-    fn absorb(&mut self, reply: &Event) {
-        self.summary = reply.body.clone();
-        self.artifact = reply.artifact.clone();
-        self.msg_id = reply.msg_id.clone();
-    }
-
-    /// Send a follow-up (question, rework order) and block for the answer.
-    ///
-    /// The member keeps its full context — this is what a dead headless
-    /// subagent cannot do.
-    pub fn ask(&mut self, env: &dyn FlowEnv, prompt: &str) -> Result<&mut Member, FlowError> {
-        if self.dead {
-            return Err(FlowError(format!(
-                "member '{}' was killed; spawn a new one",
-                self.name
-            )));
-        }
-        let (body, artifact) = if prompt.contains('\n') || prompt.chars().count() > 200 {
-            let artifact = task_artifact(env, &format!("{}-ask", self.name), prompt)?;
-            ("follow-up: see artifact".to_string(), artifact)
-        } else {
-            (prompt.to_string(), String::new())
-        };
-        let msg_id = dispatch(env, &self.name, &body, &artifact)?;
-        log(&format!("{} asked ({msg_id}); waiting…", self.name));
-        let reply = await_reply(env, &self.name, &msg_id)?;
-        self.absorb(&reply);
-        log(&format!("{} answered ({})", self.name, self.msg_id));
-        Ok(self)
-    }
-
-    /// Retire the member's pane; the window re-tiles.
-    pub fn kill(&mut self, env: &dyn FlowEnv) -> Result<(), FlowError> {
-        kill_member(env, &self.name)?;
-        self.dead = true;
-        log(&format!("{} retired", self.name));
-        Ok(())
-    }
-}
-
 /// The spawn phase of `agent()`: flow/flow.* name guard plus the bounded
-/// retry loop, each attempt serialized under the process-local spawn lock
-/// (the script client adds cross-process serialization with its own lock).
+/// retry loop, each attempt serialized under the process-local spawn lock.
 fn spawn_member(
     env: &dyn FlowEnv,
     name: &str,
@@ -310,7 +258,7 @@ fn ready_gate(env: &dyn FlowEnv, name: &str, cli: &str) -> Result<(), FlowError>
     Ok(())
 }
 
-/// Retire a member's pane and re-tile the window (`Member::kill` body).
+/// Retire a member's pane and re-tile the window.
 fn kill_member(env: &dyn FlowEnv, name: &str) -> Result<(), FlowError> {
     let ctx = env.context()?;
     let _guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -321,108 +269,89 @@ fn kill_member(env: &dyn FlowEnv, name: &str) -> Result<(), FlowError> {
     Ok(())
 }
 
-/// Spawn a member, dispatch `prompt` as its task, block for its reply.
-///
-/// The prompt is the whole contract — write it self-contained (scope,
-/// deliverable path, acceptance, material paths). It is written to
-/// `<workspace>/artifacts/tasks/<name>.md` and dispatched with the
-/// same atomic skeleton as `hive spawn --task`.
-pub fn agent(
+/// One hive interaction on behalf of the script engine. Each `agent()` in a
+/// flow script decomposes into spawn → ready → dispatch-task → wait-reply;
+/// `Member.ask()` into dispatch-ask → wait-reply. The journal in
+/// `flow_script` caches these results by (op, args) — keep every op's args
+/// free of run-relative values (paths with counters, timestamps) so replay
+/// keys stay stable across resumes.
+pub(crate) fn run_op(
     env: &dyn FlowEnv,
-    prompt: &str,
-    name: &str,
-    cli: Option<&str>,
-    model: &str,
-) -> Result<Member, FlowError> {
-    let spawned = spawn_member(env, name, cli, model)?;
-    log(&format!("{name} spawned in {}", spawned.pane_id));
-    ready_gate(env, name, &spawned.cli)?;
-
-    let artifact = task_artifact(env, name, prompt)?;
-    let artifact_name = Path::new(&artifact)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let msg_id = dispatch(
-        env,
-        name,
-        &format!(
-            "flow-mailbox dispatch: {artifact_name} (not a member; hive send flow.run, then stop)"
-        ),
-        &artifact,
-    )?;
-    log(&format!("{name} dispatched ({msg_id}); waiting for reply…"));
-    let mut member = Member {
-        name: name.to_string(),
-        pane: spawned.pane_id,
-        summary: String::new(),
-        artifact: String::new(),
-        msg_id: String::new(),
-        dead: false,
+    op: &str,
+    args: &Value,
+) -> Result<Map<String, Value>, FlowError> {
+    let str_arg = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
     };
-    let reply = await_reply(env, name, &msg_id)?;
-    member.absorb(&reply);
-    log(&format!("{} replied ({})", member.name, member.msg_id));
-    Ok(member)
-}
-
-/// Run thunks concurrently; return their results in call order.
-///
-/// The first error propagates after every thread finishes — no silent
-/// partial results. (Python accepts heterogeneous return types; Rust
-/// callers unify on one `T`.)
-pub fn parallel<'a, T: Send + 'a>(
-    thunks: Vec<Box<dyn FnOnce() -> Result<T, FlowError> + Send + 'a>>,
-) -> Result<Vec<T>, FlowError> {
-    if thunks.is_empty() {
-        return Ok(Vec::new());
-    }
-    let outcomes: Vec<Result<T, FlowError>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = thunks.into_iter().map(|thunk| scope.spawn(thunk)).collect();
-        handles
-            .into_iter()
-            .map(|handle| match handle.join() {
-                Ok(outcome) => outcome,
-                Err(_) => Err(FlowError("flow thread panicked".to_string())),
-            })
-            .collect()
-    });
-    let mut results = Vec::with_capacity(outcomes.len());
-    let mut first_error: Option<FlowError> = None;
-    for outcome in outcomes {
-        match outcome {
-            Ok(value) => results.push(value),
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
+    let mut result = Map::new();
+    match op {
+        "context" => {
+            let ctx = env.context()?;
+            result.insert("teamName".to_string(), Value::String(ctx.team_name));
+            result.insert("workspace".to_string(), Value::String(ctx.workspace));
         }
+        "spawn" => {
+            let cli = args
+                .get("cli")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let spawned = spawn_member(env, &str_arg("name"), cli, &str_arg("model"))?;
+            result.insert("pane".to_string(), Value::String(spawned.pane_id));
+            result.insert("cli".to_string(), Value::String(spawned.cli));
+        }
+        "ready" => ready_gate(env, &str_arg("name"), &str_arg("cli"))?,
+        "dispatch-task" => {
+            // The prompt is the whole contract — the script writes it
+            // self-contained. It rides a task artifact; the body is the
+            // same atomic skeleton as `hive spawn --task`.
+            let name = str_arg("name");
+            let artifact = task_artifact(env, &name, &str_arg("prompt"))?;
+            let artifact_name = Path::new(&artifact)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let msg_id = dispatch(
+                env,
+                &name,
+                &format!(
+                    "flow-mailbox dispatch: {artifact_name} (not a member; hive send flow.run, then stop)"
+                ),
+                &artifact,
+            )?;
+            result.insert("msgId".to_string(), Value::String(msg_id));
+            result.insert("artifact".to_string(), Value::String(artifact));
+        }
+        "dispatch-ask" => {
+            // Follow-up (question, rework order): short single-line prompts
+            // ride the body, anything longer rides an artifact.
+            let name = str_arg("name");
+            let prompt = str_arg("prompt");
+            let (body, artifact) = if prompt.contains('\n') || prompt.chars().count() > 200 {
+                let artifact = task_artifact(env, &format!("{name}-ask"), &prompt)?;
+                ("follow-up: see artifact".to_string(), artifact)
+            } else {
+                (prompt, String::new())
+            };
+            let msg_id = dispatch(env, &name, &body, &artifact)?;
+            result.insert("msgId".to_string(), Value::String(msg_id));
+        }
+        "wait-reply" => {
+            let row = await_reply(env, &str_arg("name"), &str_arg("msgId"))?;
+            result.insert("body".to_string(), Value::String(row.body));
+            result.insert("artifact".to_string(), Value::String(row.artifact));
+            result.insert("msgId".to_string(), Value::String(row.msg_id));
+        }
+        "kill" => kill_member(env, &str_arg("name"))?,
+        _ => return Err(FlowError(format!("unknown flow op '{op}'"))),
     }
-    match first_error {
-        Some(err) => Err(err),
-        None => Ok(results),
-    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
-// Live wiring. Cross-module signatures for cli/team/agent are derived from the
-// Python definitions (those modules are still being ported); the integration
-// pass reconciles the seams. Derived assumptions:
-//   crate::cli::resolve_scoped_team(None, true)
-//       -> anyhow::Result<(Option<String>, Option<crate::team::Team>)>
-//   crate::cli::resolve_workspace(Some(&Team), true) -> anyhow::Result<String>
-//   crate::cli::spawn_team_agent(&mut Team, team_name, agent_name, model,
-//       prompt, cwd, skill, env_entries, cli_name) -> anyhow::Result<Agent>
-//       with Agent { pane_id: String, cli: String, fn kill(&self) }
-//   crate::cli::ensure_team_hived(&Team, &Path) (return ignored)
-//   crate::cli::wait_for_peer_ready(workspace, team_name, &HashSet<String>,
-//       30.0, 0.5) -> HashSet<String>
-//   crate::cli::request_send_payload(workspace, &Team, sender, target, body,
-//       artifact, reply_to, command_name, warn_on_long_body)
-//       -> anyhow::Result<serde_json::Map<String, Value>>
-//   crate::team::Team { name, tmux_window: String,
-//       agents: HashMap<String, crate::agent::Agent> }
+// Live wiring.
 // ---------------------------------------------------------------------------
 
 struct RealCtx {
@@ -431,8 +360,8 @@ struct RealCtx {
     team: crate::team::Team,
 }
 
-/// Production `FlowEnv`: resolves the scoped team once (Python module-level
-/// `_ctx` singleton) and forwards every seam to the cli/bus/layout modules.
+/// Production `FlowEnv`: resolves the scoped team once and forwards every
+/// seam to the cli/bus/layout modules.
 pub struct RealEnv {
     ctx: Mutex<Option<RealCtx>>,
 }
@@ -570,6 +499,11 @@ impl FlowEnv for RealEnv {
         });
     }
 
+    fn member_exists(&self, name: &str) -> bool {
+        self.with_ctx(|c| c.team.agents.iter().any(|a| a.name == name))
+            .unwrap_or(false)
+    }
+
     fn apply_adaptive(&self, window: &str) {
         let _ = crate::layout::apply_adaptive(window);
     }
@@ -580,157 +514,55 @@ impl FlowEnv for RealEnv {
 }
 
 // ---------------------------------------------------------------------------
-// script bridge: materialized python client + hidden `hive flow-op` surface
+// Shared test env: the pytest `_wire` seams as one fake, used by this
+// module's op tests and by the script-engine tests in `flow_script`.
 // ---------------------------------------------------------------------------
 
-const PYLIB_INIT: &str = include_str!("../assets/pylib/hive/__init__.py");
-const PYLIB_FLOW: &str = include_str!("../assets/pylib/hive/flow.py");
-
-/// Write the embedded flow-client python tree under
-/// `$HIVE_HOME/core_assets/pylib/` (heal-on-drift, like the cvim assets) and
-/// return the directory `hive flow run` prepends to PYTHONPATH.
-pub fn materialize_pylib() -> anyhow::Result<std::path::PathBuf> {
-    let root = crate::core_hooks::hive_home()
-        .join("core_assets")
-        .join("pylib");
-    crate::core_hooks::materialize_asset_tree(
-        &root,
-        &[
-            ("hive/__init__.py", PYLIB_INIT, false),
-            ("hive/flow.py", PYLIB_FLOW, false),
-        ],
-    )?;
-    Ok(root)
-}
-
-/// Hidden `hive flow-op <op> [json-args]` — the seams the materialized
-/// python client calls back into. stdout protocol: `[flow] …` progress
-/// lines stream through, the final line is one JSON object
-/// (`{"ok": true, …}` on success, `{"ok": false, "error": …}` + exit 1).
-pub fn op_main(args: &[String]) -> i32 {
-    let Some(op) = args.first() else {
-        eprintln!("usage: hive flow-op <op> [json-args]");
-        return 2;
-    };
-    let payload: Value = match args.get(1) {
-        Some(raw) => match serde_json::from_str(raw) {
-            Ok(value) => value,
-            Err(err) => {
-                println!(
-                    "{}",
-                    serde_json::json!({"ok": false, "error": format!("bad flow-op args: {err}")})
-                );
-                return 1;
-            }
-        },
-        None => Value::Object(Map::new()),
-    };
-    let env = RealEnv::new();
-    match run_op(&env, op, &payload) {
-        Ok(mut result) => {
-            result.insert("ok".to_string(), Value::Bool(true));
-            println!("{}", Value::Object(result));
-            0
-        }
-        Err(err) => {
-            println!("{}", serde_json::json!({"ok": false, "error": err.0}));
-            1
-        }
-    }
-}
-
-fn run_op(env: &dyn FlowEnv, op: &str, args: &Value) -> Result<Map<String, Value>, FlowError> {
-    let str_arg = |key: &str| {
-        args.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let mut result = Map::new();
-    match op {
-        "context" => {
-            let ctx = env.context()?;
-            result.insert("teamName".to_string(), Value::String(ctx.team_name));
-            result.insert("workspace".to_string(), Value::String(ctx.workspace));
-        }
-        "spawn" => {
-            let cli = args
-                .get("cli")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty());
-            let spawned = spawn_member(env, &str_arg("name"), cli, &str_arg("model"))?;
-            result.insert("pane".to_string(), Value::String(spawned.pane_id));
-            result.insert("cli".to_string(), Value::String(spawned.cli));
-        }
-        "ready" => ready_gate(env, &str_arg("name"), &str_arg("cli"))?,
-        "dispatch" => {
-            let msg_id = dispatch(
-                env,
-                &str_arg("name"),
-                &str_arg("body"),
-                &str_arg("artifact"),
-            )?;
-            result.insert("msgId".to_string(), Value::String(msg_id));
-        }
-        "wait-reply" => {
-            let row = await_reply(env, &str_arg("name"), &str_arg("msgId"))?;
-            result.insert("body".to_string(), Value::String(row.body));
-            result.insert("artifact".to_string(), Value::String(row.artifact));
-            result.insert("msgId".to_string(), Value::String(row.msg_id));
-        }
-        "kill" => kill_member(env, &str_arg("name"))?,
-        _ => return Err(FlowError(format!("unknown flow op '{op}'"))),
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_env {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use tempfile::TempDir;
 
     #[derive(Debug)]
-    struct SpawnCall {
-        agent_name: String,
-        prompt: String,
-        skill: String,
+    pub(crate) struct SpawnCall {
+        pub agent_name: String,
+        pub prompt: String,
+        pub skill: String,
     }
 
     #[derive(Debug)]
-    struct DispatchCall {
-        sender_agent: String,
-        target_agent: String,
-        body: String,
-        artifact: String,
+    pub(crate) struct DispatchCall {
+        pub sender_agent: String,
+        pub target_agent: String,
+        pub body: String,
+        pub artifact: String,
     }
 
-    /// The pytest `_wire` seams as one fake env; failure knobs replace the
-    /// per-test monkeypatched flaky seams. `sleep` is a no-op, standing in
-    /// for the `_REPLY_POLL_SECONDS` / `_DISPATCH_RETRY_GAP` monkeypatches.
-    struct FakeEnv {
-        workspace: PathBuf,
-        tmux_window: String,
-        ready: bool,
-        reply_any: bool,
-        spawn_fail_first: u32,
-        dispatch_fail_first: u32,
-        spawn_err: String,
-        dispatch_err: String,
-        spawns: Mutex<Vec<SpawnCall>>,
-        dispatches: Mutex<Vec<DispatchCall>>,
-        awaits: Mutex<Vec<(String, String)>>,
-        replies: Mutex<HashMap<String, Event>>,
-        msg_seq: AtomicU32,
-        spawn_calls: AtomicU32,
-        send_calls: AtomicU32,
-        agents: Mutex<Vec<String>>,
-        killed: Mutex<Vec<String>>,
+    /// Failure knobs replace the per-test monkeypatched flaky seams; `sleep`
+    /// is a no-op, standing in for the poll/retry-gap monkeypatches.
+    pub(crate) struct FakeEnv {
+        pub workspace: PathBuf,
+        pub tmux_window: String,
+        pub ready: bool,
+        pub reply_any: bool,
+        pub spawn_fail_first: u32,
+        pub dispatch_fail_first: u32,
+        pub spawn_err: String,
+        pub dispatch_err: String,
+        pub spawns: Mutex<Vec<SpawnCall>>,
+        pub dispatches: Mutex<Vec<DispatchCall>>,
+        pub awaits: Mutex<Vec<(String, String)>>,
+        pub replies: Mutex<HashMap<String, Event>>,
+        pub msg_seq: AtomicU32,
+        pub spawn_calls: AtomicU32,
+        pub send_calls: AtomicU32,
+        pub agents: Mutex<Vec<String>>,
+        pub killed: Mutex<Vec<String>>,
     }
 
-    fn fake_env(tmp: &Path) -> FakeEnv {
+    pub(crate) fn fake_env(tmp: &Path) -> FakeEnv {
         let ws = tmp.join("ws");
         fs::create_dir_all(&ws).unwrap();
         FakeEnv {
@@ -754,7 +586,7 @@ mod tests {
         }
     }
 
-    fn reply_row(body: &str, artifact: &str, msg_id: &str) -> Event {
+    pub(crate) fn reply_row(body: &str, artifact: &str, msg_id: &str) -> Event {
         Event {
             from: String::new(),
             to: String::new(),
@@ -796,6 +628,7 @@ mod tests {
                 prompt: prompt.to_string(),
                 skill: skill.to_string(),
             });
+            self.agents.lock().unwrap().push(agent_name.to_string());
             Ok(SpawnedAgent {
                 pane_id: format!("%{}", spawns.len()),
                 cli: cli_name.unwrap_or("claude").to_string(),
@@ -871,267 +704,28 @@ mod tests {
             }
         }
 
+        fn member_exists(&self, name: &str) -> bool {
+            self.agents.lock().unwrap().iter().any(|a| a == name)
+        }
+
         fn apply_adaptive(&self, window: &str) {
             self.killed.lock().unwrap().push(format!("layout {window}"));
         }
 
         fn sleep(&self, _seconds: f64) {}
     }
+}
 
-    #[test]
-    fn test_agent_spawns_dispatches_and_returns_reply() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        env.replies.lock().unwrap().insert(
-            "m1".to_string(),
-            reply_row("done, see file", "/tmp/f.md", "r1"),
-        );
-
-        let member = agent(&env, "explore auth\nwrite findings", "explore", None, "").unwrap();
-
-        assert_eq!(member.name, "explore");
-        assert_eq!(member.pane, "%1");
-        assert_eq!(member.summary, "done, see file");
-        assert_eq!(member.artifact, "/tmp/f.md");
-        // spawn boots the member-contract plugin skill, no prose prompt
-        let spawns = env.spawns.lock().unwrap();
-        assert_eq!(spawns[0].agent_name, "explore");
-        assert_eq!(spawns[0].prompt, "");
-        assert_eq!(spawns[0].skill, "hive:hive");
-        // dispatch rode an artifact carrying the full prompt, from the flow sender
-        let dispatches = env.dispatches.lock().unwrap();
-        assert_eq!(dispatches[0].sender_agent, "flow.run");
-        assert_eq!(dispatches[0].target_agent, "explore");
-        assert_eq!(
-            fs::read_to_string(&dispatches[0].artifact).unwrap(),
-            "explore auth\nwrite findings"
-        );
-        // the wait is scoped to the member: a row anchored to m1 by anyone else is not the reply
-        assert_eq!(
-            *env.awaits.lock().unwrap(),
-            vec![("explore".to_string(), "m1".to_string())]
-        );
-    }
-
-    #[test]
-    fn test_agent_ready_timeout_raises() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.ready = false;
-        let err = agent(&env, "task", "explore", Some("codex"), "").unwrap_err();
-        assert!(err.0.contains("did not reach ready"), "{err}");
-    }
-
-    #[test]
-    fn test_agent_claude_skips_ready_gate() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.ready = false; // gate would fail if consulted
-        env.replies
-            .lock()
-            .unwrap()
-            .insert("m1".to_string(), reply_row("done", "", "r1"));
-        let member = agent(&env, "task", "explore", Some("claude"), "").unwrap();
-        assert_eq!(member.summary, "done");
-    }
-
-    #[test]
-    fn test_agent_rejects_reserved_name() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        let err = agent(&env, "task", "flow", None, "").unwrap_err();
-        assert!(err.0.contains("mailbox address kind"), "{err}");
-    }
-
-    #[test]
-    fn test_ask_dispatches_followup_and_updates_member() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        {
-            let mut replies = env.replies.lock().unwrap();
-            replies.insert("m1".to_string(), reply_row("first", "", "r1"));
-            replies.insert("m2".to_string(), reply_row("fixed", "/tmp/v2.md", "r2"));
-        }
-
-        let mut member = agent(&env, "task", "impl", None, "").unwrap();
-        member.ask(&env, "rework: handle the null case").unwrap();
-
-        assert_eq!(member.summary, "fixed");
-        assert_eq!(member.artifact, "/tmp/v2.md");
-        // short single-line follow-up rides the body, no artifact file
-        let dispatches = env.dispatches.lock().unwrap();
-        assert_eq!(dispatches[1].body, "rework: handle the null case");
-        assert_eq!(dispatches[1].artifact, "");
-    }
-
-    #[test]
-    fn test_ask_long_prompt_rides_an_artifact() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        {
-            let mut replies = env.replies.lock().unwrap();
-            replies.insert("m1".to_string(), reply_row("first", "", "r1"));
-            replies.insert("m2".to_string(), reply_row("ok", "", "r2"));
-        }
-
-        let mut member = agent(&env, "task", "impl", None, "").unwrap();
-        member
-            .ask(&env, "line one\nline two of a long rework order")
-            .unwrap();
-
-        let dispatches = env.dispatches.lock().unwrap();
-        assert!(!dispatches[1].artifact.is_empty());
-        assert!(fs::read_to_string(&dispatches[1].artifact)
-            .unwrap()
-            .starts_with("line one"));
-    }
-
-    #[test]
-    fn test_kill_retires_pane_and_blocks_further_asks() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        env.replies
-            .lock()
-            .unwrap()
-            .insert("m1".to_string(), reply_row("done", "", "r1"));
-        env.agents.lock().unwrap().push("impl".to_string());
-
-        let mut member = agent(&env, "task", "impl", None, "").unwrap();
-        member.kill(&env).unwrap();
-
-        assert_eq!(
-            *env.killed.lock().unwrap(),
-            vec!["impl".to_string(), "layout dev:0".to_string()]
-        );
-        assert!(env.agents.lock().unwrap().is_empty());
-        let err = member.ask(&env, "more").unwrap_err();
-        assert!(err.0.contains("was killed"), "{err}");
-    }
-
-    #[test]
-    fn test_parallel_returns_in_call_order_and_serializes_spawns() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.reply_any = true;
-        let env = &env;
-
-        let thunks: Vec<Box<dyn FnOnce() -> Result<Member, FlowError> + Send + '_>> = vec![
-            Box::new(move || agent(env, "task a", "alpha", None, "")),
-            Box::new(move || agent(env, "task b", "beta", None, "")),
-        ];
-        let results = parallel(thunks).unwrap();
-        assert_eq!(results[0].name, "alpha");
-        assert_eq!(results[1].name, "beta");
-        assert!(results[0].summary.starts_with("done-"));
-        assert!(results[1].summary.starts_with("done-"));
-        let names: HashSet<String> = env
-            .spawns
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| s.agent_name.clone())
-            .collect();
-        assert_eq!(
-            names,
-            HashSet::from(["alpha".to_string(), "beta".to_string()])
-        );
-    }
-
-    #[test]
-    fn test_parallel_propagates_first_error() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.ready = false;
-        let env = &env;
-
-        let thunks: Vec<Box<dyn FnOnce() -> Result<i32, FlowError> + Send + '_>> = vec![
-            Box::new(move || agent(env, "t", "x", Some("codex"), "").map(|_| 0)),
-            Box::new(|| Ok(42)),
-        ];
-        let err = parallel(thunks).unwrap_err();
-        assert!(err.0.contains("did not reach ready"), "{err}");
-    }
-
-    #[test]
-    fn test_task_artifact_never_clobbers() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        let p1 = task_artifact(&env, "explore", "one").unwrap();
-        let p2 = task_artifact(&env, "explore", "two").unwrap();
-        assert_ne!(p1, p2);
-        assert_eq!(fs::read_to_string(&p1).unwrap(), "one");
-        assert_eq!(fs::read_to_string(&p2).unwrap(), "two");
-    }
-
-    #[test]
-    fn test_dispatch_retries_transient_refusal_then_succeeds() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.dispatch_fail_first = 1;
-        env.dispatch_err = "transport refused: leader RPC blip".to_string();
-        env.replies
-            .lock()
-            .unwrap()
-            .insert("m1".to_string(), reply_row("done", "", "r1"));
-
-        let member = agent(&env, "task", "impl", None, "").unwrap();
-        assert_eq!(member.summary, "done");
-        assert_eq!(env.send_calls.load(Ordering::SeqCst), 2); // one blip absorbed
-    }
-
-    #[test]
-    fn test_dispatch_exhaustion_stays_loud() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.dispatch_fail_first = u32::MAX;
-        let err = agent(&env, "task", "impl", None, "").unwrap_err();
-        assert!(err.0.contains("after 3 attempts"), "{err}");
-    }
-
-    #[test]
-    fn test_spawn_retries_transient_failure_then_succeeds() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.spawn_fail_first = 1;
-        env.spawn_err = "codex app-server refused to mint a thread".to_string();
-        env.replies
-            .lock()
-            .unwrap()
-            .insert("m1".to_string(), reply_row("done", "", "r1"));
-
-        let member = agent(&env, "task", "impl", Some("codex"), "").unwrap();
-        assert_eq!(member.summary, "done");
-        assert_eq!(env.spawn_calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn test_spawn_exhaustion_stays_loud() {
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.spawn_fail_first = u32::MAX;
-        env.spawn_err = "mint refused".to_string();
-        let err = agent(&env, "task", "impl", Some("codex"), "").unwrap_err();
-        assert!(err.0.contains("after 3 attempts"), "{err}");
-    }
-
-    #[test]
-    fn test_agent_rejects_the_whole_mailbox_name_family() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        for name in ["flow", "flow.run", "flow.anything"] {
-            let err = agent(&env, "task", name, None, "").unwrap_err();
-            assert!(err.0.contains("mailbox address kind"), "{err}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // flow-op bridge
-    // -----------------------------------------------------------------------
-
+#[cfg(test)]
+mod tests {
+    use super::test_env::*;
+    use super::*;
     use serde_json::json;
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_run_op_covers_the_script_client_protocol() {
+    fn test_run_op_covers_the_script_engine_protocol() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
 
@@ -1150,20 +744,36 @@ mod tests {
         .unwrap();
         assert_eq!(r.get("pane"), Some(&Value::String("%1".into())));
         assert_eq!(r.get("cli"), Some(&Value::String("claude".into())));
+        // spawn boots the member-contract plugin skill, no prose prompt
+        {
+            let spawns = env.spawns.lock().unwrap();
+            assert_eq!(spawns[0].agent_name, "impl");
+            assert_eq!(spawns[0].prompt, "");
+            assert_eq!(spawns[0].skill, "hive:hive");
+        }
 
         run_op(&env, "ready", &json!({"name": "impl", "cli": "claude"})).unwrap();
 
         let r = run_op(
             &env,
-            "dispatch",
-            &json!({"name": "impl", "body": "b", "artifact": ""}),
+            "dispatch-task",
+            &json!({"name": "impl", "prompt": "explore auth\nwrite findings"}),
         )
         .unwrap();
         assert_eq!(r.get("msgId"), Some(&Value::String("m1".into())));
-        let dispatches = env.dispatches.lock().unwrap();
-        assert_eq!(dispatches[0].sender_agent, "flow.run");
-        assert_eq!(dispatches[0].target_agent, "impl");
-        drop(dispatches);
+        let artifact = r.get("artifact").and_then(Value::as_str).unwrap();
+        // dispatch rode an artifact carrying the full prompt, from the flow sender
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            "explore auth\nwrite findings"
+        );
+        {
+            let dispatches = env.dispatches.lock().unwrap();
+            assert_eq!(dispatches[0].sender_agent, "flow.run");
+            assert_eq!(dispatches[0].target_agent, "impl");
+            assert_eq!(dispatches[0].artifact, artifact);
+            assert!(dispatches[0].body.starts_with("flow-mailbox dispatch: "));
+        }
 
         env.replies
             .lock()
@@ -1173,13 +783,51 @@ mod tests {
         assert_eq!(r.get("body"), Some(&Value::String("done".into())));
         assert_eq!(r.get("artifact"), Some(&Value::String("/tmp/f.md".into())));
         assert_eq!(r.get("msgId"), Some(&Value::String("r1".into())));
+        // the wait is scoped to the member: a row anchored to m1 by anyone
+        // else is not the reply
+        assert_eq!(
+            *env.awaits.lock().unwrap(),
+            vec![("impl".to_string(), "m1".to_string())]
+        );
 
-        env.agents.lock().unwrap().push("impl".to_string());
         run_op(&env, "kill", &json!({"name": "impl"})).unwrap();
         assert_eq!(
             *env.killed.lock().unwrap(),
             vec!["impl".to_string(), "layout dev:0".to_string()]
         );
+        assert!(!env.member_exists("impl"));
+    }
+
+    #[test]
+    fn test_dispatch_ask_short_prompt_rides_the_body() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        run_op(
+            &env,
+            "dispatch-ask",
+            &json!({"name": "impl", "prompt": "rework: handle the null case"}),
+        )
+        .unwrap();
+        let dispatches = env.dispatches.lock().unwrap();
+        assert_eq!(dispatches[0].body, "rework: handle the null case");
+        assert_eq!(dispatches[0].artifact, "");
+    }
+
+    #[test]
+    fn test_dispatch_ask_long_prompt_rides_an_artifact() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        run_op(
+            &env,
+            "dispatch-ask",
+            &json!({"name": "impl", "prompt": "line one\nline two of a long rework order"}),
+        )
+        .unwrap();
+        let dispatches = env.dispatches.lock().unwrap();
+        assert_eq!(dispatches[0].body, "follow-up: see artifact");
+        assert!(fs::read_to_string(&dispatches[0].artifact)
+            .unwrap()
+            .starts_with("line one"));
     }
 
     #[test]
@@ -1204,25 +852,71 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_retries_transient_failure_then_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.spawn_fail_first = 1;
+        env.spawn_err = "codex app-server refused to mint a thread".to_string();
+        let r = run_op(&env, "spawn", &json!({"name": "impl", "model": ""})).unwrap();
+        assert_eq!(r.get("pane"), Some(&Value::String("%1".into())));
+        assert_eq!(env.spawn_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_spawn_exhaustion_stays_loud() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.spawn_fail_first = u32::MAX;
+        let err = run_op(&env, "spawn", &json!({"name": "impl", "model": ""})).unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+    }
+
+    #[test]
+    fn test_dispatch_retries_transient_refusal_then_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.dispatch_fail_first = 1;
+        env.dispatch_err = "transport refused: leader RPC blip".to_string();
+        let r = run_op(
+            &env,
+            "dispatch-task",
+            &json!({"name": "impl", "prompt": "task"}),
+        )
+        .unwrap();
+        assert_eq!(r.get("msgId"), Some(&Value::String("m1".into())));
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 2); // one blip absorbed
+    }
+
+    #[test]
+    fn test_dispatch_exhaustion_stays_loud() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.dispatch_fail_first = u32::MAX;
+        let err = run_op(
+            &env,
+            "dispatch-task",
+            &json!({"name": "impl", "prompt": "task"}),
+        )
+        .unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+    }
+
+    #[test]
+    fn test_task_artifact_never_clobbers() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let p1 = task_artifact(&env, "explore", "one").unwrap();
+        let p2 = task_artifact(&env, "explore", "two").unwrap();
+        assert_ne!(p1, p2);
+        assert_eq!(fs::read_to_string(&p1).unwrap(), "one");
+        assert_eq!(fs::read_to_string(&p2).unwrap(), "two");
+    }
+
+    #[test]
     fn test_run_op_unknown_op_is_loud() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         let err = run_op(&env, "bogus", &json!({})).unwrap_err();
         assert_eq!(err.0, "unknown flow op 'bogus'");
-    }
-
-    #[test]
-    fn test_materialize_pylib_writes_and_heals_the_tree() {
-        let tmp = TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
-        let root = materialize_pylib().unwrap();
-        assert!(root.ends_with("core_assets/pylib"));
-        assert!(root.join("hive/__init__.py").exists());
-        let flow_py = root.join("hive/flow.py");
-        let embedded = fs::read_to_string(&flow_py).unwrap();
-        assert!(embedded.contains("FLOW_SENDER = \"flow.run\""));
-        fs::write(&flow_py, "drifted").unwrap();
-        materialize_pylib().unwrap();
-        assert_eq!(fs::read_to_string(&flow_py).unwrap(), embedded);
     }
 }

@@ -74,14 +74,13 @@ covers less than the Python did, or less than the general case. Each one names
 what it does not cover and what would justify widening it.
 
 Keep the prefix on a deliberate shortcut, and grep for it before treating a gap
-as an oversight. The marker is defined nowhere else in the repo, and it appears
-outside Rust: the embedded pylib carries one.
+as an oversight. The marker is defined nowhere else in the repo.
 
 ## Assets stay in their own language
 
 `crates/hive/assets/` ships as data and is embedded at compile time, never
-transliterated into Rust. The cvim toolkit, the flow pylib and the notify
-plugin manifest are executed or read by something that is not this binary, so
+transliterated into Rust. The cvim toolkit and the notify plugin manifest are
+executed or read by something that is not this binary, so
 rewriting them in Rust would mean reimplementing that interpreter's job; the
 two grok `.tmTheme` palettes are parsed in process by the linked-in markdown
 engine and stay byte-verbatim because that is the form it accepts. Embedding

@@ -82,29 +82,38 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 **⑤ 集成验收**——所有任务 DONE 后,你自己拉集成分支、跑测试、核验收标准,过了才向 human 汇报。终验不外包。
 
-**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 Python 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,所以这条只在 tmux 里跑得起来,headless 团用不了。
+**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 JavaScript 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,所以这条只在 tmux 里跑得起来,headless 团用不了。
 
-```python
-# workflow.py
-from hive.flow import agent, parallel
+```js
+// workflow.js
+export const meta = { name: 'auth-work', description: '探索认证模块并实现' }
 
-findings = agent("探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报", name="explore")
-a, b = parallel(
-    lambda: agent(f"实现 auth,材料见 {findings.artifact};交付 commit", name="impl-auth"),
-    lambda: agent("实现 db 层;交付 commit", name="impl-db", cli="codex"),
-)
-v = agent(f"验证 {a.artifact} {b.artifact};给 pass/fail verdict", name="verify", cli="codex")
-if "fail" in v.summary:
-    a.ask(f"打回:按 {v.artifact} 的 required-changes 修")   # 同成员带上下文修
+const findings = await agent('探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报', { name: 'explore' })
+const [a, b] = await parallel([
+  () => agent(`实现 auth,材料见 ${findings.artifact};交付 commit`, { name: 'impl-auth' }),
+  () => agent('实现 db 层;交付 commit', { name: 'impl-db', cli: 'codex' }),
+])
+const v = await agent(`验证 ${a.artifact} ${b.artifact};给 pass/fail verdict`, {
+  name: 'verify', cli: 'codex',
+  schema: { type: 'object', required: ['verdict'], properties: { verdict: { type: 'string', enum: ['pass', 'fail'] }, reasons: { type: 'array', items: { type: 'string' } } } },
+})
+if (v.data.verdict === 'fail') {
+  await a.ask(`打回:按 ${v.artifact} 的 required-changes 修`)   // 同成员带上下文修
+}
+return { verdict: v.data.verdict }
 ```
 
-- 跑法:后台 shell 跑 `hive flow run workflow.py`,结束当前 turn 等完成通知,完成后读输出;期间来消息照常处理。
+- 脚本必须以纯字面量 `export const meta = { name, description }` 开头;脚本体跑在 async 上下文里,顶层 `await` 和 `return` 都可用,`return` 的值就是 run 的最终输出。
+- 跑法:后台 shell 跑 `hive flow run workflow.js`,结束当前 turn 等完成通知,完成后读输出;期间来消息照常处理。
 - API 全貌(不需要读源码):
-  - `agent(prompt, *, name, cli=None, model="") -> Member`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套。
-  - `Member` 字段:`.summary`(回报 body)、`.artifact`(回报 artifact 路径)、`.name`、`.pane`。
-  - `member.ask(prompt) -> Member`——追问/打回,阻塞等回答,更新 `.summary`/`.artifact`。
+  - `agent(prompt, { name, cli, model, schema }) -> Member`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套;`name` 必填。
+  - `Member` 字段:`.summary`(回报 body)、`.artifact`(回报 artifact 路径)、`.name`、`.pane`;带 `schema` 时回信 body 必须是符合它的纯 JSON,校验通过的对象落在 `.data`(不合格自动打回重问两次,仍不合格才报错)。
+  - `member.ask(prompt, { schema? }) -> Member`——追问/打回,阻塞等回答,更新 `.summary`/`.artifact`/`.data`。
   - `member.kill()`——验收后退场。
-  - `parallel(*thunks) -> list`——并发跑,按调用顺序返回;任一失败等全员结束后抛 FlowError。
+  - `parallel(thunks) -> list`——并发跑,按调用顺序返回;失败的分支落为 `null`(不中断其他分支),用 `.filter(Boolean)` 收敛。
+  - `pipeline(items, ...stages) -> list`——逐 item 流水线,stage 间无 barrier;stage 回调拿 `(prev, item, i)`,某 stage 抛错该 item 落为 `null` 并跳过后续 stage。
+  - `log(msg)` / `phase(title)`——进度行,流式打给跑脚本的人。
+- 确定性契约:`Date.now()`/`Math.random()`/无参 `new Date()` 在脚本里会 throw——因为每次 run 的 op 都记进 journal,`hive flow run workflow.js --resume <run-id>`(run id 在开跑第一行打出)会重放未变化的前缀:还活着的成员直接复用不重生,改了 prompt 就变成对活成员的追加派发,挂掉的成员才重 spawn。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
 ## git / 集成纪律

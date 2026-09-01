@@ -38,7 +38,7 @@ Workflow:
   Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.
 
   attach    Render a team's display: jump to its window, or build one.
-  flow      Deterministic member orchestration from a Python script.
+  flow      Deterministic member orchestration from a JavaScript flow script.
   ls        List hive teams from the registry, with their display state.
   pr        Pin a PR number on the team window's status bar.
   view      Read-only viewer for a Claude session transcript (follows live).
@@ -258,12 +258,14 @@ Options:
         ["flow"] => {
             r#"Usage: hive flow [OPTIONS] COMMAND [ARGS]...
 
-  Deterministic member orchestration from a Python script.
+  Deterministic member orchestration from a JavaScript flow script.
 
-  A flow script uses the `hive.flow` library: `agent()` spawns a live member
-  pane, dispatches a task atomically, and blocks for the reply; `parallel()`
-  fans out. Every node is a visible pane — watch, type into, or interrupt any
-  of them while the flow runs.
+  A flow script starts with `export const meta = {...}` and uses the embedded
+  dialect: `agent()` spawns a live member pane, dispatches a task atomically,
+  and blocks for the reply; `parallel()` fans out; `pipeline()` runs per-item
+  stages. Every node is a visible pane — watch, type into, or interrupt any
+  of them while the flow runs. Runs journal their ops and can be resumed with
+  `hive flow run <script> --resume <run-id>`.
 
 Options:
   -h, --help  Show this message and exit.
@@ -727,22 +729,28 @@ Options:
 
   Run SCRIPT against the current team.
 
-  The script is trusted Python (you or your orch wrote it). Members it spawns
-  reply to the reserved `flow` mailbox; the runner blocks until the script
-  finishes. Typical use from an orch: run it in a background shell and read
-  the output when it completes.
+  The script is trusted JavaScript (you or your orch wrote it). Members it
+  spawns reply to the reserved `flow` mailbox; the runner blocks until the
+  script finishes. Typical use from an orch: run it in a background shell and
+  read the output when it completes.
+
+  Every run journals its ops under <workspace>/artifacts/flow/ and prints its
+  run id; `--resume <run-id>` replays the unchanged prefix — members still
+  alive are reused instead of respawned.
 
   Example script:
-    from hive.flow import agent, parallel
-    findings = agent("explore auth; write /tmp/f.md", name="explore")
-    a, b = parallel(
-        lambda: agent(f"impl auth, material: {findings.artifact}", name="impl-auth"),
-        lambda: agent("impl db layer", name="impl-db", cli="codex"),
-    )
-    agent(f"verify {a.artifact} {b.artifact}", name="verify", cli="codex")
+    export const meta = { name: 'auth-work', description: 'explore, then build' }
+    const findings = await agent('explore auth; write /tmp/f.md', { name: 'explore' })
+    const [a, b] = await parallel([
+      () => agent(`impl auth, material: ${findings.artifact}`, { name: 'impl-auth' }),
+      () => agent('impl db layer', { name: 'impl-db', cli: 'codex' }),
+    ])
+    await agent(`verify ${a.artifact} ${b.artifact}`, { name: 'verify', cli: 'codex' })
+    return { auth: a.summary, db: b.summary }
 
 Options:
-  -h, --help  Show this message and exit.
+  --resume <RUN_ID>  Resume a previous run from its journal
+  -h, --help         Show this message and exit.
 "#
         }
         ["plugin", "disable"] => {

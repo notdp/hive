@@ -42,7 +42,7 @@ CLI は先に自分でインストールしてください。プラグインの 
 
 - `tmux` 3.2 以上 — `hive cvim` / `hive vim` のポップアップのため。加えて `hive view` がテーマ判定に使う素の OSC 11 背景色クエリに pane が応答するのも 3.2 からです
 - ビルド用の Rust ツールチェイン
-- `python3` — `hive flow run` はインタプリタを exec してスクリプトを走らせ、対になる `hive.flow` クライアントは埋め込み済みです。notify のポップアップも python のヒアドキュメントです
+- `python3` — notify のポップアップが python のヒアドキュメントです（`hive flow run` にインタプリタは不要になりました。flow スクリプトは JavaScript で、バイナリ内蔵のエンジンが実行します）
 - 少なくとも 1 つのエージェント CLI: `claude` / `codex` / `grok`
 
 ## エージェントセッションで起動する

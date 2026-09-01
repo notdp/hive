@@ -387,13 +387,14 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("flow")
-                .about("Deterministic member orchestration from a Python script.")
+                .about("Deterministic member orchestration from a JavaScript flow script.")
                 .long_about(
-                    "Deterministic member orchestration from a Python script.\n\n\
-                     A flow script uses the `hive.flow` library: `agent()` spawns a live\n\
-                     member pane, dispatches a task atomically, and blocks for the reply;\n\
-                     `parallel()` fans out. Every node is a visible pane — watch, type\n\
-                     into, or interrupt any of them while the flow runs.",
+                    "Deterministic member orchestration from a JavaScript flow script.\n\n\
+                     A flow script starts with `export const meta = {...}` and uses the\n\
+                     embedded dialect: `agent()` spawns a live member pane, dispatches a\n\
+                     task atomically, and blocks for the reply; `parallel()` fans out;\n\
+                     `pipeline()` runs per-item stages. Every node is a visible pane —\n\
+                     watch, type into, or interrupt any of them while the flow runs.",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -402,12 +403,22 @@ pub(crate) fn build_cli() -> Command {
                         .about("Run SCRIPT against the current team.")
                         .long_about(
                             "Run SCRIPT against the current team.\n\n\
-                             The script is trusted Python (you or your orch wrote it). Members it\n\
-                             spawns reply to the reserved `flow` mailbox; the runner blocks until\n\
-                             the script finishes. Typical use from an orch: run it in a background\n\
-                             shell and read the output when it completes.",
+                             The script is trusted JavaScript (you or your orch wrote it). Members\n\
+                             it spawns reply to the reserved `flow` mailbox; the runner blocks\n\
+                             until the script finishes. Typical use from an orch: run it in a\n\
+                             background shell and read the output when it completes.\n\n\
+                             Every run journals its ops under <workspace>/artifacts/flow/ and\n\
+                             prints its run id; `--resume <run-id>` replays the unchanged prefix\n\
+                             from the journal — members still alive are reused instead of\n\
+                             respawned.",
                         )
-                        .arg(Arg::new("script").required(true)),
+                        .arg(Arg::new("script").required(true))
+                        .arg(
+                            Arg::new("resume")
+                                .long("resume")
+                                .value_name("RUN_ID")
+                                .help("Resume a previous run from its journal"),
+                        ),
                 ),
         )
         .subcommand(
@@ -942,11 +953,10 @@ pub fn main() {
     let tail: Vec<String> = args.iter().skip(1).cloned().collect();
 
     // Hidden helper subcommands, never listed in help: the cvim toolkit
-    // (called back into by the materialized `cvim-command` bash asset) and
-    // the flow-op bridge (called by the materialized pylib flow client),
-    // both via $HIVE_BIN. They replace standalone Python beside the old
-    // asset trees, so they dispatch before the known-command gate and skip
-    // the root gates.
+    // (called back into by the materialized `cvim-command` bash asset) via
+    // $HIVE_BIN. They replace standalone Python beside the old asset trees,
+    // so they dispatch before the known-command gate and skip the root
+    // gates.
     match invoked.as_str() {
         "cvim-sendback" => std::process::exit(crate::cvim::sendback_main(&tail)),
         "cvim-payload" => std::process::exit(crate::cvim::payload_main(&tail)),
@@ -954,7 +964,6 @@ pub fn main() {
         "cvim-seed" => std::process::exit(crate::cvim::seed_main(&tail)),
         "cvim-session" => std::process::exit(crate::cvim::session_main(&tail)),
         "cvim-profile" => std::process::exit(crate::cvim::profile_main(&tail)),
-        "flow-op" => std::process::exit(crate::flow::op_main(&tail)),
         // notify's tmux hook / flash-script callbacks (Python's
         // `-m hive.notify_ui` and the pane-attention middle layer).
         "notify-hook" => std::process::exit(crate::notify_ui::main(&tail)),
@@ -1107,7 +1116,7 @@ fn dispatch(matches: &ArgMatches) {
                     eprintln!("Error: Invalid value for 'SCRIPT': Path '{script}' does not exist.");
                     std::process::exit(2);
                 }
-                rest::flow_run_cmd(script)
+                rest::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
             }
             _ => unreachable!("subcommand required"),
         },

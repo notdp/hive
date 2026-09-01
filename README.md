@@ -42,7 +42,7 @@ Requires:
 
 - `tmux` 3.2+ — for the `hive cvim` / `hive vim` popups, and because a pane only answers the bare OSC 11 background query that `hive view` uses to pick a theme from 3.2 on
 - a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries
-- `python3` — `hive flow run` execs the interpreter against the embedded `hive.flow` client, and the notify popup is a python heredoc
+- `python3` — the notify popup is a python heredoc (`hive flow run` needs no interpreter: flow scripts are JavaScript, evaluated by the engine embedded in the binary)
 - at least one agent CLI: `claude`, `codex`, or `grok`
 
 ## Start in your agent session
