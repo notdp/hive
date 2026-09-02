@@ -425,53 +425,60 @@ pub(crate) fn build_cli() -> Command {
                         .about("Live progress board for the team's flow nodes (run it in a pane).")
                         .long_about(
                             "Live progress board for the team's flow nodes (run it in a pane).\n\n\
-                             Renders the registry roster and the flow.run mailbox as per-node\n\
-                             state (pending/spawned/working/done/gone) with elapsed times.\n\
-                             Serial/parallel phase grouping comes from an optional sidecar the\n\
-                             orchestrator writes: <workspace>/artifacts/flow/board.json\n\
-                             {\"workflow\": \"...\", \"phases\": [{\"title\": \"...\", \"nodes\": [...]}]}.\n\
-                             The pane tags itself @hive-role dock so the adaptive layout\n\
-                             leaves the strip alone.",
+                             Renders the roster and the flow.run mailbox as per-node state\n\
+                             (spawned/working/done/gone) with elapsed times. Phases come from\n\
+                             the members' pane groups (the --phase of `hive flow node run`,\n\
+                             the enclosing `phase()` of a flow script); nothing else to write.\n\
+                             The pane tags itself @hive-role dock: the adaptive layout keeps\n\
+                             it as a full-width strip at the bottom and tiles members above.",
                         )
                         .arg(Arg::new("team").long("team")),
                 )
                 .subcommand(
                     Command::new("node")
-                        .about("Blocking node verbs for external orchestrators.")
-                        .long_about(
-                            "Blocking node verbs for external orchestrators (e.g. a Claude Code\n\
-                             workflow's hive-node proxy agent): `start` spawns a member and\n\
-                             dispatches its task atomically, `wait` polls for the reply in\n\
-                             bounded slices. Both print one JSON object.",
-                        )
+                        .about("One task on one live member, as a single blocking call.")
                         .subcommand_required(true)
                         .arg_required_else_help(true)
                         .subcommand(
-                            Command::new("start")
-                                .about("Spawn NAME, dispatch --task, print {msgId, pane, artifact}.")
-                                .arg(Arg::new("name").long("name").required(true))
-                                .arg(
-                                    Arg::new("task")
-                                        .long("task")
-                                        .required(true)
-                                        .allow_hyphen_values(true),
+                            Command::new("run")
+                                .about("Place the task on stdin onto member NAME and block for its reply.")
+                                .long_about(
+                                    "Place the task on stdin onto member NAME and block for its reply.\n\n\
+                                     Spawns the member (or reuses one of that name that is still alive),\n\
+                                     dispatches the task atomically, waits without timeout, and prints one\n\
+                                     JSON object: {status: 'replied', body, artifact, msgId, name, pane}.\n\
+                                     A member that dies before replying ends the call with an error. This\n\
+                                     is the seam an external orchestrator's proxy (the hive-node agent)\n\
+                                     runs in the background.",
                                 )
+                                .arg(Arg::new("name").long("name").required(true))
                                 .arg(Arg::new("cli").long("cli"))
                                 .arg(Arg::new("model").long("model"))
-                                .arg(Arg::new("team").long("team")),
-                        )
-                        .subcommand(
-                            Command::new("wait")
-                                .about("Poll NAME's reply to --msg-id; print {status: replied|pending, ...}.")
-                                .arg(Arg::new("name").long("name").required(true))
-                                .arg(Arg::new("msg_id").long("msg-id").required(true))
                                 .arg(
-                                    Arg::new("timeout_seconds")
-                                        .long("timeout-seconds")
-                                        .value_name("SECONDS")
-                                        .default_value("540"),
+                                    Arg::new("phase")
+                                        .long("phase")
+                                        .help("Phase label; lands on the pane group for `hive flow board`"),
                                 )
                                 .arg(Arg::new("team").long("team")),
+                        ),
+                )
+                .subcommand(
+                    Command::new("rig")
+                        .about("Create (or tear down) a workflow team: tmux session, team, orch mirror, board.")
+                        .long_about(
+                            "Create a workflow team named RUN: a detached tmux session of the same\n\
+                             name, the team bound to its window, an orch mirror pane (`hive view`\n\
+                             of --orch's session) and a full-width `hive flow board` dock. Attach\n\
+                             with `hive attach RUN`. `--down` retires every member, deletes the\n\
+                             team and kills the session.",
+                        )
+                        .arg(Arg::new("run").required(true))
+                        .arg(Arg::new("orch").long("orch").value_name("SESSION_ID"))
+                        .arg(Arg::new("workspace").long("workspace").value_name("DIR"))
+                        .arg(
+                            Arg::new("down")
+                                .long("down")
+                                .action(clap::ArgAction::SetTrue),
                         ),
                 ),
         )
@@ -1176,21 +1183,25 @@ fn dispatch(matches: &ArgMatches) {
                 m.get_one::<String>("team").map(String::as_str),
             )),
             Some(("node", m)) => match m.subcommand() {
-                Some(("start", m)) => rest::flow_node_start_cmd(
+                Some(("run", m)) => rest::flow_node_run_cmd(
                     arg_str(m, "name"),
-                    arg_str(m, "task"),
                     m.get_one::<String>("cli").map(String::as_str),
-                    m.get_one::<String>("model").map(String::as_str).unwrap_or(""),
-                    m.get_one::<String>("team").map(String::as_str),
-                ),
-                Some(("wait", m)) => rest::flow_node_wait_cmd(
-                    arg_str(m, "name"),
-                    arg_str(m, "msg_id"),
-                    arg_str(m, "timeout_seconds"),
+                    m.get_one::<String>("model")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    m.get_one::<String>("phase")
+                        .map(String::as_str)
+                        .unwrap_or(""),
                     m.get_one::<String>("team").map(String::as_str),
                 ),
                 _ => unreachable!("subcommand required"),
             },
+            Some(("rig", m)) => std::process::exit(crate::flow_rig::rig_cmd(
+                arg_str(m, "run"),
+                m.get_one::<String>("orch").map(String::as_str),
+                m.get_one::<String>("workspace").map(String::as_str),
+                m.get_flag("down"),
+            )),
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {

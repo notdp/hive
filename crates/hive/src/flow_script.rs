@@ -4,23 +4,22 @@
 //! runtime. The dialect mirrors Claude Code's workflow scripts: the file
 //! starts with a pure-literal `export const meta = {...}`, the body runs in
 //! an async context (top-level `await` and `return` both work), and the
-//! surface is `agent()` / `Member.ask()/.kill()` / `parallel()` /
-//! `pipeline()` / `phase()` / `log()`. The whole dialect lives in the
-//! embedded prelude below; the only host primitive is `__flow_op(op, json)`,
-//! which crosses into `crate::flow::run_op` on a blocking thread — so
-//! concurrent `agent()` calls overlap while the JS side stays
-//! single-threaded (`parallel()` is `Promise.all`).
+//! surface is `agent()` / `ask()` / `kill()` / `parallel()` / `pipeline()`
+//! / `phase()` / `log()`. The whole dialect lives in the embedded prelude
+//! below; the only host primitive is `__flow_op(json)`, which parses into a
+//! typed `flow::FlowOp` and runs on a blocking thread — concurrent
+//! `agent()` calls overlap while the JS side stays single-threaded
+//! (`parallel()` is `Promise.all`).
 //!
 //! Determinism contract (same as Claude Code workflows): `Date.now()`,
-//! `Math.random()`, and argless `new Date()` throw inside the script, so a
-//! resumed run replays the same op sequence. Every run appends each
-//! successful op to a journal (`<workspace>/artifacts/flow/<runId>.jsonl`,
-//! keyed by op + args); `--resume <runId>` replays cached results for the
-//! unchanged prefix. Spawn replay probes the registry first: a member that
-//! is still alive is reused (a changed prompt then becomes a live dispatch
-//! to the surviving member — something a die-with-the-run subagent model
-//! cannot do); a dead member respawns, and every later op on that member
-//! bypasses the stale cache.
+//! `Math.random()`, argless `new Date()` and `Date()` throw inside the
+//! script, so a resumed run replays the same op sequence. Every run appends
+//! each successful op to a journal (`<workspace>/artifacts/flow/<runId>.jsonl`,
+//! keyed by the op's canonical serialization); `--resume <runId>` replays
+//! cached results for the unchanged prefix. Spawn replay probes liveness
+//! first: a member still alive is reused (a changed prompt then becomes a
+//! live dispatch to the surviving member); a dead member respawns, and
+//! every later op on that member bypasses the stale cache.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -32,16 +31,15 @@ use rquickjs::prelude::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Promise, Value as JsValue};
 use serde_json::{Map, Value};
 
-use crate::flow::{run_op, FlowEnv};
+use crate::flow::{run_op, FlowEnv, FlowOp};
 
-const SCHEMA_JS_HELP: &str =
+const DIALECT_HELP: &str =
     "flow scripts are JavaScript: start with `export const meta = { name: '...', description: '...' }` \
-     (the Python flow client is gone; see the hive skill's orchestration reference for the dialect)";
+     (see the hive skill's orchestration reference for the dialect)";
 
 // ---------------------------------------------------------------------------
 // meta: extracted without executing anything. Balanced-brace scan aware of
-// strings and escapes; meta must be a pure literal (no `${}` interpolation),
-// the same contract Claude Code imposes on workflow meta.
+// strings and escapes; meta must be a pure literal (no `${}` interpolation).
 // ---------------------------------------------------------------------------
 
 fn extract_meta(src: &str) -> Option<&str> {
@@ -85,10 +83,8 @@ fn extract_meta(src: &str) -> Option<&str> {
 // journal
 // ---------------------------------------------------------------------------
 
-/// Op-level resume journal. Keys are `op\x1f<raw args json>` — the prelude
-/// builds every args object with literal field order, so the raw string is
-/// stable across runs. Values queue per key in record order (the same op
-/// with identical args can legitimately repeat). Failed ops are never
+/// Op-level resume journal keyed by `FlowOp::key()`. Values queue per key in
+/// record order (the same op can legitimately repeat). Failed ops are never
 /// recorded: on resume they simply run again.
 pub struct Journal {
     cached: Mutex<HashMap<String, VecDeque<Value>>>,
@@ -96,21 +92,13 @@ pub struct Journal {
     writer: Mutex<fs::File>,
     /// On resume the rewritten journal streams to a sibling `.tmp` file and
     /// only replaces the original in `finalize()` — a resume that dies
-    /// mid-replay (script error, Ctrl-C) leaves the prior journal intact
-    /// instead of truncating away the un-replayed suffix.
+    /// mid-replay leaves the prior journal intact.
     live_path: PathBuf,
     tmp_path: Option<PathBuf>,
     write_failed: std::sync::atomic::AtomicBool,
 }
 
-fn journal_key(op: &str, args_raw: &str) -> String {
-    format!("{op}\x1f{args_raw}")
-}
-
 impl Journal {
-    /// Open the journal at `path`. With `resume`, prior records load as the
-    /// replay cache and the rewrite streams to a temp file (cache hits are
-    /// re-recorded as they replay); `finalize()` publishes it atomically.
     pub fn open(path: &Path, resume: bool) -> anyhow::Result<Journal> {
         let mut cached: HashMap<String, VecDeque<Value>> = HashMap::new();
         if resume {
@@ -120,7 +108,10 @@ impl Journal {
                 let row: Value = serde_json::from_str(line)
                     .map_err(|e| anyhow::anyhow!("corrupt journal line: {e}"))?;
                 if let (Some(k), Some(r)) = (row.get("k").and_then(Value::as_str), row.get("r")) {
-                    cached.entry(k.to_string()).or_default().push_back(r.clone());
+                    cached
+                        .entry(k.to_string())
+                        .or_default()
+                        .push_back(r.clone());
                 }
             }
         }
@@ -140,9 +131,8 @@ impl Journal {
     }
 
     /// Publish a resumed run's rewritten journal over the original. Call
-    /// once the run has finished (successfully or not) — either way the
-    /// temp file holds every op that completed, a strict superset of what
-    /// dropping it would keep.
+    /// once the run has finished, successfully or not — either way the temp
+    /// file holds every op that completed.
     pub fn finalize(&self) {
         if let Some(tmp) = &self.tmp_path {
             if let Err(e) = fs::rename(tmp, &self.live_path) {
@@ -164,13 +154,13 @@ impl Journal {
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let outcome = writeln!(writer, "{line}").and_then(|_| writer.flush());
         if let Err(e) = outcome {
-            // Loud once: a journal that silently stops recording turns the
-            // next --resume into duplicate dispatches.
             if !self
                 .write_failed
                 .swap(true, std::sync::atomic::Ordering::SeqCst)
             {
-                eprintln!("[flow] warning: journal write failed ({e}); this run may not resume cleanly");
+                eprintln!(
+                    "[flow] warning: journal write failed ({e}); this run may not resume cleanly"
+                );
             }
         }
     }
@@ -208,40 +198,27 @@ fn err_json(msg: &str) -> String {
 }
 
 fn flow_log(message: &str) {
-    println!("[flow] {message}");
-    let _ = std::io::stdout().flush();
+    eprintln!("[flow] {message}");
+    let _ = std::io::stderr().flush();
 }
 
 /// One `__flow_op` call from the script: journal replay when possible,
-/// otherwise `run_op` on a blocking thread (spawn/dispatch/wait-reply all
-/// block on real transports). `context` and `kill` always run live — kill is
-/// cheap and idempotent, and replaying it would hide a member someone
-/// revived between runs.
-async fn journaled_op(
-    env: Arc<dyn FlowEnv>,
-    journal: Arc<Journal>,
-    op: String,
-    args_raw: String,
-) -> String {
-    let args: Value = match serde_json::from_str(&args_raw) {
-        Ok(v) => v,
-        Err(e) => return err_json(&format!("bad op args: {e}")),
+/// otherwise `run_op` on a blocking thread.
+async fn journaled_op(env: Arc<dyn FlowEnv>, journal: Arc<Journal>, op_json: String) -> String {
+    let op: FlowOp = match serde_json::from_str(&op_json) {
+        Ok(op) => op,
+        Err(e) => return err_json(&format!("bad flow op {op_json}: {e}")),
     };
-    let name = args
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let key = journal_key(&op, &args_raw);
-    let journaled = op != "context" && op != "kill";
+    let name = op.member().to_string();
+    let key = op.key();
 
-    if journaled && !journal.is_fresh(&name) {
+    if op.journaled() && !journal.is_fresh(&name) {
         if let Some(rec) = journal.take(&key) {
-            if op == "spawn" {
+            if op.is_spawn() {
                 let alive = {
                     let env = env.clone();
                     let n = name.clone();
-                    tokio::task::spawn_blocking(move || env.member_exists(&n))
+                    tokio::task::spawn_blocking(move || env.alive(&n))
                         .await
                         .unwrap_or(false)
                 };
@@ -251,54 +228,49 @@ async fn journaled_op(
                     return ok_json(&rec);
                 }
                 flow_log(&format!("{name} from journal is gone; respawning"));
-                // fall through to a live spawn; the fresh mark below then
-                // keeps every later cached op for this member from replaying
-                // against a member that never saw it.
             } else {
                 journal.record(&key, &rec);
                 return ok_json(&rec);
             }
         }
     }
-
-    if op == "spawn" && !name.is_empty() {
+    // Any live spawn makes the member fresh: later cached ops for it must
+    // not replay against a member that never saw them.
+    if op.is_spawn() {
         journal.mark_fresh(&name);
     }
 
     let outcome = {
         let env = env.clone();
         let op = op.clone();
-        tokio::task::spawn_blocking(move || run_op(&*env, &op, &args)).await
+        tokio::task::spawn_blocking(move || run_op(&*env, &op)).await
     };
     match outcome {
         Ok(Ok(map)) => {
             let value = Value::Object(map);
-            if journaled {
+            if op.journaled() {
                 journal.record(&key, &value);
             }
             ok_json(&value)
         }
         Ok(Err(e)) => err_json(&e.0),
-        Err(join) => err_json(&format!("flow op '{op}' panicked: {join}")),
+        Err(join) => err_json(&format!("flow op panicked: {join}")),
     }
 }
 
 // ---------------------------------------------------------------------------
-// the dialect prelude — the entire script-facing API. The only host
-// primitives are `__flow_op(op, json)` and `__host_log(msg)`; everything a
-// script touches is defined here, ships inside the binary, and is covered
-// by the engine tests below (no two-sided client to keep in sync).
+// the dialect prelude — the entire script-facing API over two host
+// primitives (`__flow_op(json)`, `__host_log(msg)`).
 // ---------------------------------------------------------------------------
 
 const PRELUDE: &str = r###"
 'use strict';
-// -- determinism poisons: a resumed run must replay the same op sequence --
+// -- determinism poisons: a resumed run must replay the same op sequence.
+// A guardrail, not a sandbox: prototype-level escapes still reach the clock.
 {
   const RealDate = Date;
   globalThis.Date = new Proxy(RealDate, {
-    apply() {
-      throw new Error('Date() is banned in flow scripts (breaks resume)');
-    },
+    apply() { throw new Error('Date() is banned in flow scripts (breaks resume)'); },
     construct(target, args) {
       if (args.length === 0) throw new Error('new Date() is banned in flow scripts (breaks resume)');
       return Reflect.construct(target, args);
@@ -309,33 +281,35 @@ const PRELUDE: &str = r###"
       return typeof v === 'function' ? v.bind(target) : v;
     },
   });
-  // Guardrail, not a sandbox: prototype-level escapes
-  // (new Date(0).constructor.now()) still reach the clock.
   Math.random = () => { throw new Error('Math.random() is banned in flow scripts (breaks resume)'); };
 }
 
 globalThis.log = (m) => __host_log(String(m));
-globalThis.phase = (t) => __host_log('phase: ' + String(t));
 
-// Args objects below use literal field order on purpose: the raw JSON is
-// the journal key.
-const __op = async (op, args) => {
-  const r = JSON.parse(await __flow_op(op, JSON.stringify(args ?? {})));
-  if (!r.ok) throw new Error(r.error || (op + ' failed'));
+// The current phase rides every spawn as the pane group, so the board can
+// draw the topology from the roster instead of a hand-written sidecar.
+let __phase = '';
+globalThis.phase = (t) => { __phase = String(t); __host_log('phase: ' + __phase); };
+
+const __op = async (op) => {
+  const r = JSON.parse(await __flow_op(JSON.stringify(op)));
+  if (!r.ok) throw new Error(r.error || (op.op + ' failed'));
   return r;
 };
 
-// -- structured replies: subset JSON Schema validator (type / properties /
-// required / items / enum — what flow schemas actually use) --------------
+// -- structured replies: JSON Schema validator over the keywords flow
+// schemas use; anything else is refused loudly rather than ignored.
+const __KNOWN = new Set(['type', 'properties', 'required', 'items', 'enum', 'description', 'title', 'additionalProperties']);
 const __validate = (schema, value, path = '$') => {
   const errs = [];
   if (!schema || typeof schema !== 'object') return errs;
+  for (const k of Object.keys(schema)) {
+    if (!__KNOWN.has(k)) throw new Error(`schema keyword '${k}' at ${path} is not supported by flow (supported: ${[...__KNOWN].join(', ')})`);
+  }
   const typeOf = (v) => Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v;
   const t = schema.type;
   if (t) {
-    const ok = t === 'integer'
-      ? (typeof value === 'number' && Number.isInteger(value))
-      : typeOf(value) === t;
+    const ok = t === 'integer' ? (typeof value === 'number' && Number.isInteger(value)) : typeOf(value) === t;
     if (!ok) { errs.push(`${path}: expected ${t}, got ${typeOf(value)}`); return errs; }
   }
   if (Array.isArray(schema.enum) && !schema.enum.some((e) => e === value)) {
@@ -368,80 +342,62 @@ const __schemaClause = (schema) =>
 
 const SCHEMA_REASKS = 2;
 
-const __absorb = (m, reply) => {
-  m.summary = reply.body ?? '';
-  m.artifact = reply.artifact ?? '';
-  m.msgId = reply.msgId ?? '';
-  m.data = undefined; // stale structured data must not outlive its reply
-};
-
-const __settle = async (m, reply, schema) => {
-  __absorb(m, reply);
-  if (!schema) return m;
+// Wait for `name`'s reply to msgId. Without a schema the reply is
+// {body, artifact, msgId}; with one, the validated object (re-asked twice
+// on mismatch, then thrown). Fresh values every time — nothing to mutate.
+const __collect = async (name, msgId, schema) => {
+  let reply = await __op({ op: 'wait-reply', name, msg_id: msgId });
+  if (!schema) return { body: reply.body ?? '', artifact: reply.artifact ?? '', msgId: reply.msgId ?? '' };
   for (let attempt = 0; ; attempt++) {
     let errs;
     try {
-      const data = __parseReplyJson(m.summary);
+      const data = __parseReplyJson(reply.body);
       errs = __validate(schema, data);
-      if (errs.length === 0) { m.data = data; return m; }
+      if (errs.length === 0) return data;
     } catch (e) {
-      errs = ['body 不是可解析的 JSON: ' + e.message];
+      if (e instanceof SyntaxError) errs = ['body 不是可解析的 JSON: ' + e.message]; else throw e;
     }
     if (attempt >= SCHEMA_REASKS) {
-      throw new Error(`member '${m.name}' 的回信连续 ${SCHEMA_REASKS + 1} 次不符合 schema: ${errs.join('; ')}`);
+      throw new Error(`member '${name}' 的回信连续 ${SCHEMA_REASKS + 1} 次不符合 schema: ${errs.join('; ')}`);
     }
-    log(`${m.name} 回信不符合 schema(${errs.join('; ')}); 重新要求 (${attempt + 1}/${SCHEMA_REASKS})`);
-    const d = await __op('dispatch-ask', { name: m.name, prompt: `回信不符合要求: ${errs.join('; ')}。重发一条消息,body 为纯 JSON(不带 code fence),符合以下 JSON Schema。${__schemaClause(schema)}` });
-    const r = await __op('wait-reply', { name: m.name, msgId: d.msgId });
-    __absorb(m, r);
+    log(`${name} 回信不符合 schema(${errs.join('; ')}); 重新要求 (${attempt + 1}/${SCHEMA_REASKS})`);
+    const d = await __op({ op: 'dispatch-ask', name, prompt: `回信不符合要求: ${errs.join('; ')}。重发一条消息,body 为纯 JSON(不带 code fence),符合以下 JSON Schema。${__schemaClause(schema)}` });
+    reply = await __op({ op: 'wait-reply', name, msg_id: d.msgId });
   }
 };
 
 // Spawn a member, dispatch `prompt` as its task, block for its reply. The
-// prompt is the whole contract — write it self-contained (scope,
-// deliverable path, acceptance, material paths). With opts.schema the
-// reply body must be pure JSON matching it; the validated object lands on
-// `member.data` (invalid replies are re-asked, twice, then throw).
+// prompt is the whole contract — write it self-contained. Members are
+// addressed by name afterwards: ask(name, ...) / kill(name).
 globalThis.agent = async (prompt, opts = {}) => {
   const name = opts.name;
   if (!name) throw new Error('agent() requires opts.name — every flow member gets a stable name');
-  const fullPrompt = opts.schema ? prompt + __schemaClause(opts.schema) : prompt;
-  const spawned = await __op('spawn', { name, cli: opts.cli ?? null, model: opts.model ?? '' });
+  const spawned = await __op({ op: 'spawn', name, cli: opts.cli ?? null, model: opts.model ?? '', group: __phase });
   log(`${name} spawned in ${spawned.pane}`);
-  await __op('ready', { name, cli: spawned.cli });
-  const d = await __op('dispatch-task', { name, prompt: fullPrompt });
+  await __op({ op: 'ready', name, cli: spawned.cli });
+  const fullPrompt = opts.schema ? prompt + __schemaClause(opts.schema) : prompt;
+  const d = await __op({ op: 'dispatch-task', name, prompt: fullPrompt });
   log(`${name} dispatched (${d.msgId}); waiting for reply…`);
-  const m = {
-    name,
-    pane: spawned.pane,
-    summary: '',
-    artifact: '',
-    msgId: '',
-    data: undefined,
-    _dead: false,
-    // Follow-up (question, rework order); the member keeps its full
-    // context — this is what a dead headless subagent cannot do.
-    async ask(p, askOpts = {}) {
-      if (m._dead) throw new Error(`member '${name}' was killed; spawn a new one`);
-      const fp = askOpts.schema ? p + __schemaClause(askOpts.schema) : p;
-      const dd = await __op('dispatch-ask', { name, prompt: fp });
-      log(`${name} asked (${dd.msgId}); waiting…`);
-      const r = await __op('wait-reply', { name, msgId: dd.msgId });
-      await __settle(m, r, askOpts.schema);
-      log(`${name} answered (${m.msgId})`);
-      return m;
-    },
-    // Retire the member's pane; the window re-tiles.
-    async kill() {
-      await __op('kill', { name });
-      m._dead = true;
-      log(`${name} retired`);
-    },
-  };
-  const reply = await __op('wait-reply', { name, msgId: d.msgId });
-  await __settle(m, reply, opts.schema);
-  log(`${name} replied (${m.msgId})`);
-  return m;
+  const out = await __collect(name, d.msgId, opts.schema);
+  log(`${name} replied`);
+  return out;
+};
+
+// Follow-up to a living member (question, rework order); it keeps its full
+// context — what a dead headless subagent cannot do.
+globalThis.ask = async (name, prompt, opts = {}) => {
+  const fp = opts.schema ? prompt + __schemaClause(opts.schema) : prompt;
+  const d = await __op({ op: 'dispatch-ask', name, prompt: fp });
+  log(`${name} asked (${d.msgId}); waiting…`);
+  const out = await __collect(name, d.msgId, opts.schema);
+  log(`${name} answered`);
+  return out;
+};
+
+// Retire the member's pane; the window re-tiles.
+globalThis.kill = async (name) => {
+  await __op({ op: 'kill', name });
+  log(`${name} retired`);
 };
 
 // Run thunks concurrently; a failed branch resolves to null, never rejects.
@@ -453,7 +409,7 @@ globalThis.parallel = (thunks) => Promise.all((thunks ?? []).map((t) =>
 ));
 
 // Per-item pipeline, no barrier between stages; a throwing stage drops the
-// item to null and skips its remaining stages. Stage callbacks receive
+// item to null and skips its remaining stages. Stages receive
 // (prev, originalItem, index).
 globalThis.pipeline = (items, ...stages) => Promise.all((items ?? []).map(async (item, i) => {
   let prev = item;
@@ -487,10 +443,7 @@ pub async fn run_script(
     journal: Arc<Journal>,
     src: &str,
 ) -> anyhow::Result<RunOutcome> {
-    let meta_src = extract_meta(src).ok_or_else(|| anyhow::anyhow!("{SCHEMA_JS_HELP}"))?;
-    // meta must be a pure literal: interpolation would break the static
-    // parse (the brace scanner cannot see `${}` nesting) and meta is
-    // evaluated standalone before the body runs.
+    let meta_src = extract_meta(src).ok_or_else(|| anyhow::anyhow!("{DIALECT_HELP}"))?;
     if meta_src.contains("${") {
         anyhow::bail!(
             "meta must be a pure literal — no `${{}}` interpolation inside `export const meta`"
@@ -504,20 +457,19 @@ pub async fn run_script(
     let (meta_json, result_json) = ctx
         .async_with(async |ctx| -> anyhow::Result<(String, String)> {
             let globals = ctx.globals();
-            globals.set(
-                "__host_log",
-                Func::from(|msg: String| flow_log(&msg)),
-            )?;
+            globals.set("__host_log", Func::from(|msg: String| flow_log(&msg)))?;
             globals.set(
                 "__flow_op",
-                Func::from(Async(move |op: String, args: String| {
+                Func::from(Async(move |op_json: String| {
                     let env = env.clone();
                     let journal = journal.clone();
-                    async move { journaled_op(env, journal, op, args).await }
+                    async move { journaled_op(env, journal, op_json).await }
                 })),
             )?;
 
-            ctx.eval::<(), _>(PRELUDE).catch(&ctx).map_err(stringify_err)?;
+            ctx.eval::<(), _>(PRELUDE)
+                .catch(&ctx)
+                .map_err(stringify_err)?;
 
             let meta_json: String = ctx
                 .eval(format!("JSON.stringify(({meta_src}))"))
@@ -551,8 +503,7 @@ pub async fn run_script(
     })
 }
 
-/// `hive flow run` body: resolve the team, open the journal, evaluate the
-/// script, print the result JSON. Returns the process exit code.
+/// `hive flow run` body. Returns the process exit code.
 pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
     let src = match fs::read_to_string(script_path) {
         Ok(s) => s,
@@ -561,10 +512,8 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
             return 1;
         }
     };
-    // Fail on a non-dialect script before touching tmux or the registry —
-    // the likeliest authoring mistake is a Python-era script.
     if extract_meta(&src).is_none() {
-        eprintln!("Error: {SCHEMA_JS_HELP}");
+        eprintln!("Error: {DIALECT_HELP}");
         return 1;
     }
     let env: Arc<dyn FlowEnv> = Arc::new(crate::flow::RealEnv::new());
@@ -614,8 +563,6 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
         }
     };
     let outcome = rt.block_on(run_script(env, journal.clone(), &src));
-    // Publish the rewritten journal even on error — it holds every op that
-    // completed, which is exactly what the next --resume needs.
     journal.finalize();
     match outcome {
         Ok(outcome) => {
@@ -655,7 +602,11 @@ mod tests {
         Arc::new(Journal::open(&tmp.join("journal.jsonl"), false).unwrap())
     }
 
-    async fn run(env: Arc<FakeEnv>, journal: Arc<Journal>, src: &str) -> anyhow::Result<RunOutcome> {
+    async fn run(
+        env: Arc<FakeEnv>,
+        journal: Arc<Journal>,
+        src: &str,
+    ) -> anyhow::Result<RunOutcome> {
         let outcome = run_script(env, journal.clone(), src).await;
         journal.finalize();
         outcome
@@ -669,50 +620,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("export const meta"), "{err}");
-        assert!(err.to_string().contains("Python"), "{err}");
     }
 
     #[tokio::test]
-    async fn test_dialect_end_to_end_with_parallel_ask_and_kill() {
+    async fn test_meta_interpolation_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let env = Arc::new(fake_env(tmp.path()));
+        let src = "export const meta = { name: `run-${1}`, description: 'x' }\nreturn 1";
+        let err = run(env, scratch_journal(tmp.path()), src)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pure literal"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_dialect_end_to_end_with_phases_parallel_ask_and_kill() {
         let tmp = TempDir::new().unwrap();
         let mut fake = fake_env(tmp.path());
         fake.reply_any = true;
         let env = Arc::new(fake);
-        let src = r#"export const meta = {
-  name: 'demo-review',
-  description: 'scout, fan-out, follow-up ask',
-  phases: [{ title: 'Explore' }, { title: 'Review' }],
-}
+        let src = r#"export const meta = { name: 'demo-review', description: 'scout, fan-out, follow-up ask' }
 phase('Explore')
 const scout = await agent('探索认证模块,列出改动面', { name: 'scout' })
 phase('Review')
-const reviewers = await parallel([
-  () => agent(`复查安全面:\n${scout.summary}`, { name: 'sec' }),
-  () => agent(`复查性能面:\n${scout.summary}`, { name: 'perf' }),
-  () => agent(`复查测试面:\n${scout.summary}`, { name: 'tests', cli: 'codex' }),
+const reviews = await parallel([
+  () => agent(`复查安全面:\n${scout.body}`, { name: 'sec' }),
+  () => agent(`复查性能面:\n${scout.body}`, { name: 'perf' }),
+  () => agent(`复查测试面:\n${scout.body}`, { name: 'tests', cli: 'codex' }),
 ])
-const ok = reviewers.filter(Boolean)
-await ok[0].ask('第一条发现给出修复建议')
-await scout.kill()
-log(`review done: ${ok.length}/3`)
-return { scout: scout.summary, reviews: ok.map((r) => ({ name: r.name })) }"#;
+const ok = reviews.filter(Boolean)
+const followup = await ask('sec', '第一条发现给出修复建议')
+await kill('scout')
+return { scout: scout.body, reviews: ok.length, followup: followup.body }"#;
         let out = run(env.clone(), scratch_journal(tmp.path()), src)
             .await
             .unwrap();
         assert_eq!(out.meta["name"], "demo-review");
-        assert_eq!(out.result["reviews"].as_array().unwrap().len(), 3);
+        assert_eq!(out.result["reviews"], 3);
         assert!(out.result["scout"].as_str().unwrap().starts_with("done-"));
-        assert_eq!(env.spawns.lock().unwrap().len(), 4);
-        // 4 task dispatches + 1 ask
-        assert_eq!(env.dispatches.lock().unwrap().len(), 5);
-        assert_eq!(
-            *env.killed.lock().unwrap(),
-            vec!["scout".to_string(), "layout dev:0".to_string()]
-        );
+        assert!(out.result["followup"]
+            .as_str()
+            .unwrap()
+            .starts_with("done-"));
+        let spawns = env.spawns.lock().unwrap();
+        assert_eq!(spawns.len(), 4);
+        // the phase rides each spawn as its pane group
+        assert_eq!(spawns[0].group, "Explore");
+        assert!(spawns[1..].iter().all(|s| s.group == "Review"));
+        assert_eq!(env.dispatches.lock().unwrap().len(), 5); // 4 tasks + 1 ask
+        assert_eq!(*env.retired.lock().unwrap(), vec!["scout".to_string()]);
     }
 
     #[tokio::test]
-    async fn test_dialect_torture_poisons_and_null_contracts() {
+    async fn test_dialect_contracts_poisons_nulls_and_gone() {
         let tmp = TempDir::new().unwrap();
         let mut fake = fake_env(tmp.path());
         fake.reply_any = true;
@@ -735,22 +695,22 @@ const pl = await pipeline([1, 2, 3],
   async (prev, item, i) => `${item}:${prev}:${i}`,
 )
 checks.pipelineDrop = JSON.stringify(pl) === JSON.stringify(['1:10:0', null, '3:30:2']) ? 'ok' : 'FAIL'
-checks.thenChain = await agent('chain', { name: 'chain' }).then((m) => m.ask('more')).then((m) => m.summary.length > 0 ? 'ok' : 'FAIL')
-const victim = await agent('to be killed', { name: 'victim' })
-await victim.kill()
-try { await victim.ask('speak'); checks.deadGuard = 'FAIL' } catch (e) { checks.deadGuard = 'ok' }
+checks.thenChain = await agent('chain', { name: 'chain' }).then((r) => ask('chain', 'more')).then((r) => r.body.length > 0 ? 'ok' : 'FAIL')
+await kill('chain')
+try { await ask('chain', 'speak'); checks.deadGuard = 'FAIL' } catch (e) { checks.deadGuard = /gone/.test(e.message) ? 'ok' : 'FAIL:' + e.message }
+try { __validate({ type: 'object', minProperties: 1 }, {}); checks.strictSchema = 'FAIL' } catch (e) { checks.strictSchema = /not supported/.test(e.message) ? 'ok' : 'FAIL' }
 let rounds = 0, dry = 0
 while (dry < 2) { rounds++; if (rounds > 1) dry++; if (rounds > 10) break }
 checks.whileLoop = rounds === 3 ? 'ok' : 'FAIL'
 return checks"#;
         let out = run(env, scratch_journal(tmp.path()), src).await.unwrap();
         for (check, verdict) in out.result.as_object().unwrap() {
-            assert_eq!(verdict, "ok", "torture check '{check}': {:?}", out.result);
+            assert_eq!(verdict, "ok", "check '{check}': {:?}", out.result);
         }
     }
 
     #[tokio::test]
-    async fn test_schema_validates_and_reasks_until_valid() {
+    async fn test_schema_returns_the_validated_object_after_reasks() {
         let tmp = TempDir::new().unwrap();
         let fake = fake_env(tmp.path());
         {
@@ -758,37 +718,40 @@ return checks"#;
             replies.insert("m1".into(), reply_row("not json at all", "", "r1"));
             replies.insert(
                 "m2".into(),
-                reply_row("```json\n{\"verdict\": \"pass\", \"score\": 3}\n```", "", "r2"),
+                reply_row(
+                    "```json\n{\"verdict\": \"pass\", \"score\": 3}\n```",
+                    "",
+                    "r2",
+                ),
             );
             replies.insert("m3".into(), reply_row("plain follow-up", "", "r3"));
         }
         let env = Arc::new(fake);
         let src = r#"export const meta = { name: 's', description: 'schema' }
-const m = await agent('judge it', { name: 'judge', schema: {
+const verdict = await agent('judge it', { name: 'judge', schema: {
   type: 'object',
   required: ['verdict', 'score'],
   properties: { verdict: { type: 'string', enum: ['pass', 'fail'] }, score: { type: 'integer' } },
 } })
-const first = m.data
-await m.ask('thanks, one more note')
-return { verdict: first.verdict, score: first.score, dataCleared: m.data === undefined }"#;
+const note = await ask('judge', 'thanks, one more note')
+return { verdict, note }"#;
         let out = run(env.clone(), scratch_journal(tmp.path()), src)
             .await
             .unwrap();
-        assert_eq!(out.result["verdict"], "pass");
-        assert_eq!(out.result["score"], 3);
-        // a schema-less reply must not leave stale structured data behind
-        assert_eq!(out.result["dataCleared"], true);
-        // task dispatch + one schema re-ask + one plain ask
-        let dispatches = env.dispatches.lock().unwrap();
-        assert_eq!(dispatches.len(), 3);
-        // the task artifact and the re-ask both carry the schema clause
-        let task_artifact = fs::read_to_string(&dispatches[0].artifact).unwrap();
-        assert!(task_artifact.contains("JSON Schema"), "{task_artifact}");
-        assert!(dispatches[1].body.contains("JSON Schema") || {
-            let re_ask = fs::read_to_string(&dispatches[1].artifact).unwrap();
-            re_ask.contains("JSON Schema")
-        });
+        assert_eq!(out.result["verdict"]["verdict"], "pass");
+        assert_eq!(out.result["verdict"]["score"], 3);
+        assert_eq!(out.result["note"]["body"], "plain follow-up");
+        let d = env.dispatches.lock().unwrap();
+        assert_eq!(d.len(), 3); // task + re-ask + ask
+        assert!(fs::read_to_string(&d[0].artifact)
+            .unwrap()
+            .contains("JSON Schema"));
+        let re_ask = if d[1].artifact.is_empty() {
+            d[1].body.clone()
+        } else {
+            fs::read_to_string(&d[1].artifact).unwrap()
+        };
+        assert!(re_ask.contains("JSON Schema"));
     }
 
     #[tokio::test]
@@ -809,31 +772,38 @@ return 'unreachable'"#;
             .await
             .unwrap_err();
         assert!(err.to_string().contains("不符合 schema"), "{err}");
-        // initial task + 2 re-asks, then loud failure
         assert_eq!(env.dispatches.lock().unwrap().len(), 3);
     }
 
     const RESUME_SRC: &str = r#"export const meta = { name: 'resume', description: 'journal probe' }
-const m = await agent('solo task', { name: 'solo' })
-return m.summary"#;
+const r = await agent('solo task', { name: 'solo' })
+return r.body"#;
 
     #[tokio::test]
     async fn test_journal_replays_unchanged_run_without_new_ops() {
         let tmp = TempDir::new().unwrap();
         let journal_file = tmp.path().join("j.jsonl");
-
         let mut fake = fake_env(tmp.path());
         fake.reply_any = true;
         let env1 = Arc::new(fake);
-        let j1 = Arc::new(Journal::open(&journal_file, false).unwrap());
-        let out1 = run(env1.clone(), j1, RESUME_SRC).await.unwrap();
+        let out1 = run(
+            env1,
+            Arc::new(Journal::open(&journal_file, false).unwrap()),
+            RESUME_SRC,
+        )
+        .await
+        .unwrap();
 
         let fake2 = fake_env(tmp.path());
-        // the member survived; nothing may respawn or redispatch
-        fake2.agents.lock().unwrap().push("solo".to_string());
+        fake2.agents.lock().unwrap().push("solo".to_string()); // survived
         let env2 = Arc::new(fake2);
-        let j2 = Arc::new(Journal::open(&journal_file, true).unwrap());
-        let out2 = run(env2.clone(), j2, RESUME_SRC).await.unwrap();
+        let out2 = run(
+            env2.clone(),
+            Arc::new(Journal::open(&journal_file, true).unwrap()),
+            RESUME_SRC,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(out1.result, out2.result);
         assert_eq!(env2.spawn_calls.load(Ordering::SeqCst), 0);
@@ -845,48 +815,59 @@ return m.summary"#;
     async fn test_journal_changed_prompt_redispatches_to_living_member() {
         let tmp = TempDir::new().unwrap();
         let journal_file = tmp.path().join("j.jsonl");
-
         let mut fake = fake_env(tmp.path());
         fake.reply_any = true;
-        let env1 = Arc::new(fake);
-        let j1 = Arc::new(Journal::open(&journal_file, false).unwrap());
-        run(env1, j1, RESUME_SRC).await.unwrap();
+        run(
+            Arc::new(fake),
+            Arc::new(Journal::open(&journal_file, false).unwrap()),
+            RESUME_SRC,
+        )
+        .await
+        .unwrap();
 
         let mut fake2 = fake_env(tmp.path());
         fake2.reply_any = true;
         fake2.agents.lock().unwrap().push("solo".to_string());
         let env2 = Arc::new(fake2);
-        let j2 = Arc::new(Journal::open(&journal_file, true).unwrap());
         let changed = RESUME_SRC.replace("solo task", "revised task");
-        run(env2.clone(), j2, &changed).await.unwrap();
+        run(
+            env2.clone(),
+            Arc::new(Journal::open(&journal_file, true).unwrap()),
+            &changed,
+        )
+        .await
+        .unwrap();
 
-        // spawn replayed (member alive), the new task went out live
         assert_eq!(env2.spawn_calls.load(Ordering::SeqCst), 0);
         assert_eq!(env2.send_calls.load(Ordering::SeqCst), 1);
-        let dispatches = env2.dispatches.lock().unwrap();
-        assert_eq!(
-            fs::read_to_string(&dispatches[0].artifact).unwrap(),
-            "revised task"
-        );
+        let d = env2.dispatches.lock().unwrap();
+        assert_eq!(fs::read_to_string(&d[0].artifact).unwrap(), "revised task");
     }
 
     #[tokio::test]
     async fn test_journal_respawns_dead_member_and_bypasses_stale_cache() {
         let tmp = TempDir::new().unwrap();
         let journal_file = tmp.path().join("j.jsonl");
-
         let mut fake = fake_env(tmp.path());
         fake.reply_any = true;
-        let env1 = Arc::new(fake);
-        let j1 = Arc::new(Journal::open(&journal_file, false).unwrap());
-        run(env1, j1, RESUME_SRC).await.unwrap();
+        run(
+            Arc::new(fake),
+            Arc::new(Journal::open(&journal_file, false).unwrap()),
+            RESUME_SRC,
+        )
+        .await
+        .unwrap();
 
-        // member gone: same script must respawn and redispatch live
         let mut fake2 = fake_env(tmp.path());
-        fake2.reply_any = true;
+        fake2.reply_any = true; // member gone: respawn + redispatch live
         let env2 = Arc::new(fake2);
-        let j2 = Arc::new(Journal::open(&journal_file, true).unwrap());
-        run(env2.clone(), j2, RESUME_SRC).await.unwrap();
+        run(
+            env2.clone(),
+            Arc::new(Journal::open(&journal_file, true).unwrap()),
+            RESUME_SRC,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(env2.spawn_calls.load(Ordering::SeqCst), 1);
         assert_eq!(env2.send_calls.load(Ordering::SeqCst), 1);
@@ -899,34 +880,22 @@ return m.summary"#;
         let journal_file = tmp.path().join("j.jsonl");
         fs::write(
             &journal_file,
-            "{\"k\":\"spawn\\u001f{}\",\"r\":{\"pane\":\"%1\"}}\n{\"k\":\"wait\\u001f{}\",\"r\":{\"body\":\"done\"}}\n",
+            "{\"k\":\"{\\\"op\\\":\\\"spawn\\\"}\",\"r\":{\"pane\":\"%1\"}}\n{\"k\":\"w\",\"r\":{\"body\":\"done\"}}\n",
         )
         .unwrap();
         let original = fs::read_to_string(&journal_file).unwrap();
 
-        // A resume that records a prefix and then dies without finalize()
-        // (script error, Ctrl-C) must not have touched the original.
         let j = Journal::open(&journal_file, true).unwrap();
-        j.record("spawn\u{1f}{}", &serde_json::json!({"pane": "%1"}));
+        j.record("{\"op\":\"spawn\"}", &serde_json::json!({"pane": "%1"}));
         drop(j);
         assert_eq!(fs::read_to_string(&journal_file).unwrap(), original);
 
-        // finalize() publishes the rewrite atomically.
         let j = Journal::open(&journal_file, true).unwrap();
-        j.record("spawn\u{1f}{}", &serde_json::json!({"pane": "%2"}));
+        j.record("{\"op\":\"spawn\"}", &serde_json::json!({"pane": "%2"}));
         j.finalize();
         let published = fs::read_to_string(&journal_file).unwrap();
         assert!(published.contains("%2"));
         assert!(!published.contains("done"));
-    }
-
-    #[tokio::test]
-    async fn test_meta_interpolation_is_rejected() {
-        let tmp = TempDir::new().unwrap();
-        let env = Arc::new(fake_env(tmp.path()));
-        let src = "export const meta = { name: `run-${1}`, description: 'x' }\nreturn 1";
-        let err = run(env, scratch_journal(tmp.path()), src).await.unwrap_err();
-        assert!(err.to_string().contains("pure literal"), "{err}");
     }
 
     #[test]

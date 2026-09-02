@@ -10,6 +10,7 @@ pub mod devlog;
 pub mod draft_guard;
 pub mod flow;
 pub mod flow_board;
+pub mod flow_rig;
 pub mod flow_script;
 pub mod hived;
 pub mod layout;

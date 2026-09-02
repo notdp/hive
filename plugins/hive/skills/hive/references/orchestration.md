@@ -88,49 +88,50 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 // workflow.js
 export const meta = { name: 'auth-work', description: '探索认证模块并实现' }
 
-const findings = await agent('探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报', { name: 'explore' })
+phase('Explore')
+const f = await agent('探索认证模块;产出写 <workspace>/artifacts/f.md;完成后回报', { name: 'explore' })
+phase('Build')
 const [a, b] = await parallel([
-  () => agent(`实现 auth,材料见 ${findings.artifact};交付 commit`, { name: 'impl-auth' }),
+  () => agent(`实现 auth,材料见 ${f.artifact};交付 commit`, { name: 'impl-auth' }),
   () => agent('实现 db 层;交付 commit', { name: 'impl-db', cli: 'codex' }),
 ])
+phase('Verify')
 const v = await agent(`验证 ${a.artifact} ${b.artifact};给 pass/fail verdict`, {
   name: 'verify', cli: 'codex',
   schema: { type: 'object', required: ['verdict'], properties: { verdict: { type: 'string', enum: ['pass', 'fail'] }, reasons: { type: 'array', items: { type: 'string' } } } },
 })
-if (v.data.verdict === 'fail') {
-  await a.ask(`打回:按 ${v.artifact} 的 required-changes 修`)   // 同成员带上下文修
+if (v.verdict === 'fail') {
+  await ask('impl-auth', `打回:按 ${v.reasons.join('; ')} 修`)   // 同成员带上下文修
 }
-return { verdict: v.data.verdict }
+await kill('verify')
+return { verdict: v.verdict }
 ```
 
-- 脚本必须以纯字面量 `export const meta = { name, description }` 开头;脚本体跑在 async 上下文里,顶层 `await` 和 `return` 都可用,`return` 的值就是 run 的最终输出。
+- 脚本必须以纯字面量 `export const meta = { name, description }` 开头;脚本体跑在 async 上下文里,顶层 `await` 和 `return` 都可用,`return` 的值就是 run 的最终输出(stdout 最后一行;进度行走 stderr)。
 - 跑法:后台 shell 跑 `hive flow run workflow.js`,结束当前 turn 等完成通知,完成后读输出;期间来消息照常处理。
 - API 全貌(不需要读源码):
-  - `agent(prompt, { name, cli, model, schema }) -> Member`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套;`name` 必填。
-  - `Member` 字段:`.summary`(回报 body)、`.artifact`(回报 artifact 路径)、`.name`、`.pane`;带 `schema` 时回信 body 必须是符合它的纯 JSON,校验通过的对象落在 `.data`(不合格自动打回重问两次,仍不合格才报错)。
-  - `member.ask(prompt, { schema? }) -> Member`——追问/打回,阻塞等回答,更新 `.summary`/`.artifact`/`.data`。
-  - `member.kill()`——验收后退场。
+  - `agent(prompt, { name, cli, model, schema })`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套;`name` 必填,成员之后一律按名字引用。不带 `schema` 返回 `{ body, artifact, msgId }`;带 `schema` 时回信 body 必须是符合它的纯 JSON,返回校验过的对象(不合格自动打回重问两次,仍不合格才 throw)。
+  - `ask(name, prompt, { schema? })`——对活成员追问/打回,阻塞等回答,返回同上。
+  - `kill(name)`——验收后退场。
   - `parallel(thunks) -> list`——并发跑,按调用顺序返回;失败的分支落为 `null`(不中断其他分支),用 `.filter(Boolean)` 收敛。
   - `pipeline(items, ...stages) -> list`——逐 item 流水线,stage 间无 barrier;stage 回调拿 `(prev, item, i)`,某 stage 抛错该 item 落为 `null` 并跳过后续 stage。
-  - `log(msg)` / `phase(title)`——进度行,流式打给跑脚本的人。
+  - `phase(title)`——标一个阶段:之后 spawn 的成员都挂在这个阶段下,`hive flow board` 按它分组显示串并行;`log(msg)` 打进度行。
 - 确定性契约:`Date.now()`/`Math.random()`/无参 `new Date()` 在脚本里会 throw——因为每次 run 的 op 都记进 journal,`hive flow run workflow.js --resume <run-id>`(run id 在开跑第一行打出)会重放未变化的前缀:还活着的成员直接复用不重生,改了 prompt 就变成对活成员的追加派发,挂掉的成员才重 spawn。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
-**⑥b hive 节点进 Claude Code Workflow**——你在用 Claude Code 的 Workflow 工具编排时,可以让某个节点是活的 hive 成员(可见 pane,human 可介入),同时保留 Workflow 自己的进度树和 journal。写法:`agent(prompt, { agentType: 'hive-node' })`,prompt 以 `node:` 头行开始:
+**⑥b hive 节点进 Claude Code Workflow**——你在用 Claude Code 的 Workflow 工具编排时,可以让某个节点是活的 hive 成员(可见 pane,human 可介入),同时保留 Workflow 自己的进度树和 journal。节点就是一条阻塞命令:`hive flow node run --team <run> --name <member> [--cli] [--model] [--phase <阶段>]`,task 从 stdin 进,回信以一行 JSON 从 stdout 出。hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——后台跑这条命令,完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
 
 ```js
-const reply = await agent(`node: name=impl-auth cli=codex team=<你的队名>
+const reply = await agent(`hive flow node run --team ${run} --name impl-auth --cli codex --phase Build
 
-实现 auth 模块;交付 commit;完成后回报。`, { agentType: 'hive-node', model: 'haiku', label: '⬡ impl-auth 「codex」', schema: ... })
+实现 auth 模块;交付 commit;完成后回报。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
 ```
 
-代理本身只做机械转发,`model: 'haiku'` 压住包装成本。注意 Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> 「<cli>」`,显式指定了成员模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`(⬡ 标记 hive 节点,「」收纳 runtime 信息,名字独立)。
+`--phase` 写 workflow 自己的 phase 标题,看板就按它分组。代理定义里已固定 `model: haiku`,不用在调用处写。Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> 「<cli>」`,显式指定了成员模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`。
 
-**进度看板**:在团窗口劈一条(建议全宽底条 ~14 行)跑 `hive flow board --team <run>`,实时显示每个节点的状态(pending/spawned/working/done/gone)、耗时与 flow.run 邮箱尾巴。串并行分组来自你写的边车 `<workspace>/artifacts/flow/board.json`:`{"workflow": "<run>", "phases": [{"title": "Review", "nodes": ["audit-c", "audit-g"]}, ...]}`——编排前顺手写一份,没有它看板退化为平铺节点表。板 pane 自带 `@hive-role dock` 标签,自适应布局不会碾平它。
+**rig 约定**(workflow 专属 team):session=team=run 名。开工 `hive flow rig <run> [--orch <你的 session id>]`——一条命令建好 tmux session、同名 team、底部全宽 `hive flow board` 看板条,`--orch` 再挂一格 `hive view` 只读镜像;human `hive attach <run>` 看全场。看板的串并行分组直接来自节点的 `--phase`,不用另写任何文件。跑完 `hive flow rig <run> --down`(kill 全部成员 + 删 team + 杀 session),或留团供追问、拆时再清。
 
-**rig 约定**(workflow 专属 team):session=team=run 名;orch 不占执行席,orch 席 pane 挂 `hive view <orch session>` 只读镜像;跑完 kill 全部成员 + `hive delete <run>` 释放名字,或留团供追问、拆时再清。
-
-`hive-node` 是 hive 插件分发的代理 agent:它解析头行,跑 `hive flow node start`(spawn+原子派发,输出 msgId),再循环 `hive flow node wait --timeout-seconds 540` 直到成员回信,把回信作为自己的返回值交回 workflow。头行字段:`name` 必填,`cli`/`model`/`team` 可选(`team` 给不在 tmux pane 里的 session 用)。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的代理指令直接内联进 prompt 也一样跑(agentType 只是打包便利)。成员生命周期归你:workflow 结束后成员还活着,验收后自己 `hive kill`。
+成员生命周期归你:workflow 结束后成员还活着,同名节点再跑一次会复用活成员(带上下文);不要了就 `hive kill <name>` 或 `--down`。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的三步(后台跑命令、等完成、原样返回 JSON)直接内联进 prompt 也一样跑。
 
 ## git / 集成纪律
 

@@ -401,38 +401,12 @@ pub fn spawn_team_agent<'a>(
     if let Some(model_error) = crate::agent_cli::validate_spawn_model(&resolved_cli_name, model) {
         bail!("{model_error}");
     }
-    // Cross-process name claim: Team::spawn's already-exists check reads
-    // this process's snapshot and cannot see a concurrent spawner (a CCD
-    // workflow fans out one `hive flow node start` process per node). The
-    // reservation is a paneless placeholder row — replaced by the real row
-    // below on success, removed on failure. A hard crash in between leaves
-    // a paneless row, which the anchor fallback and the liveness probe both
-    // already treat as dead; `hive kill <name>` clears it.
-    let created_at = if t.created_at == 0.0 {
-        String::new()
-    } else {
-        py_float_str(t.created_at)
-    };
-    let claim: serde_json::Map<String, serde_json::Value> = [
-        ("name", agent_name),
-        ("cli", resolved_cli_name.as_str()),
-        ("model", model),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-    .collect();
-    let reserved = match crate::registry::reserve_member(team_name, &claim, &created_at) {
-        Ok("exists") => bail!("Agent '{agent_name}' already exists in team '{}'", t.name),
-        // "missing"/"rejected": no registry entry to race — fall through,
-        // the in-memory check below still guards the single-process case.
-        Ok(verdict) => verdict == "reserved",
-        Err(_) => false,
-    };
     let env_map: HashMap<String, String> = extra_env
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let spawned = t.spawn(
+    // Team::spawn owns the cross-process name claim and its rollback.
+    let agent = t.spawn(
         agent_name,
         model,
         prompt,
@@ -444,16 +418,7 @@ pub fn spawn_team_agent<'a>(
             Some(&env_map)
         },
         &resolved_cli_name,
-    );
-    let agent = match spawned {
-        Ok(agent) => agent,
-        Err(err) => {
-            if reserved {
-                let _ = crate::registry::remove_member(team_name, agent_name, &created_at);
-            }
-            return Err(err);
-        }
-    };
+    )?;
     let ws = resolve_workspace(Some(&*t), false).unwrap_or_default();
     let _ = crate::context::save_context_for_pane(&agent.pane_id, team_name, &ws, agent_name);
     _remember_context(team_name, &ws, LEAD_AGENT_NAME);

@@ -345,27 +345,30 @@ pub fn flow_run_cmd(script: &str, resume: Option<&str>) {
     std::process::exit(crate::flow_script::run_cmd(&script_path, resume));
 }
 
-pub fn flow_node_start_cmd(
+/// `hive flow node run`: the task is stdin (no shell quoting to get wrong),
+/// progress goes to stderr, the single JSON result to stdout.
+pub fn flow_node_run_cmd(
     name: &str,
-    task: &str,
     cli: Option<&str>,
     model: &str,
+    phase: &str,
     team: Option<&str>,
 ) {
-    let env = crate::flow::RealEnv::for_team(team.map(str::to_string));
-    match crate::flow::node_start(&env, name, cli, model, task) {
-        Ok(result) => println!("{}", serde_json::Value::Object(result)),
-        Err(e) => fail(&e.0),
+    let mut task = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut task).is_err()
+        || task.trim().is_empty()
+    {
+        fail("flow node run reads the task from stdin — pipe or heredoc the task text");
     }
-}
-
-pub fn flow_node_wait_cmd(name: &str, msg_id: &str, timeout_seconds: &str, team: Option<&str>) {
-    let timeout: f64 = match timeout_seconds.parse() {
-        Ok(t) => t,
-        Err(_) => fail(&format!("bad --timeout-seconds '{timeout_seconds}'")),
-    };
     let env = crate::flow::RealEnv::for_team(team.map(str::to_string));
-    match crate::flow::node_wait(&env, name, msg_id, timeout) {
+    let spec = crate::flow::NodeSpec {
+        name: name.to_string(),
+        cli: cli.map(str::to_string),
+        model: model.to_string(),
+        phase: phase.to_string(),
+        task: task.trim_end().to_string(),
+    };
+    match crate::flow::run_node(&env, &spec) {
         Ok(result) => println!("{}", serde_json::Value::Object(result)),
         Err(e) => fail(&e.0),
     }

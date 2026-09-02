@@ -1,43 +1,39 @@
 //! hive::flow_board — `hive flow board`: a live progress board for a flow
-//! team, made to sit in a tmux pane next to the members it describes.
+//! team, made to sit in a dock pane next to the members it describes.
 //!
-//! It renders only truth the flow machinery already writes: the registry
-//! roster with live-pane binding (`Team::load`) and the `flow.run` mailbox
-//! rows on the team bus — dispatch and reply timestamps give each node its
-//! state and elapsed time. Serial/parallel topology cannot be derived from
-//! either, so it comes from an optional sidecar the orchestrator writes:
-//! `<workspace>/artifacts/flow/board.json`,
-//! `{"workflow": "...", "phases": [{"title": "...", "nodes": ["..."]}]}`.
-//! Without it the board falls back to a flat node list.
+//! Everything it shows is truth the flow machinery already writes: the
+//! roster (`Team::load`, whose pane groups carry each node's phase), the
+//! hived's liveness answer, and the `flow.run` mailbox on the team bus —
+//! a dispatch row and the reply anchored to it by `in_reply_to` give each
+//! node its state and elapsed time. Phases come from the pane groups the
+//! spawns set, so serial/parallel structure needs no sidecar.
 //!
-//! The pane tags itself `@hive-role dock` so the adaptive layout leaves the
-//! strip alone (see `layout.rs`), and paints on the alternate screen —
-//! in-place repaint, no scrollback pollution.
+//! The pane tags itself `@hive-role dock`; `layout::apply_adaptive` keeps
+//! the strip at the bottom and tiles the members above it.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 
-use serde_json::Value;
-
 use unicode_width::UnicodeWidthChar;
+
+use crate::bus::Event;
+use crate::flow::FLOW_SENDER;
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
-const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeState {
-    /// Planned in the sidecar, not yet on the roster or bus.
-    Pending,
-    /// On the roster with a live pane, no task dispatched yet.
+    /// On the roster, no task dispatched yet.
     Spawned,
-    /// Dispatched, pane alive, no reply yet.
+    /// Dispatched, alive, no reply yet.
     Working,
-    /// Replied to flow.run — delivered, whatever happened to the pane since.
+    /// Replied to the dispatch — delivered, whatever happened to it since.
     Done,
-    /// Dispatched, pane gone, no reply: this node will never resolve.
+    /// Dispatched, dead, no reply: will never resolve.
     Gone,
 }
 
@@ -45,6 +41,7 @@ pub enum NodeState {
 pub struct NodeRow {
     pub name: String,
     pub runtime: String,
+    pub phase: String,
     pub state: NodeState,
     pub elapsed: Option<u64>,
 }
@@ -54,11 +51,11 @@ pub struct RosterRow {
     pub name: String,
     pub cli: String,
     pub model: String,
-    pub has_pane: bool,
+    pub phase: String,
+    pub alive: bool,
 }
 
-/// Minutes-grade ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SS...`) to epoch seconds —
-/// the bus's `now_iso` shape; anything else is None.
+/// `YYYY-MM-DDTHH:MM:SS…` (the bus's `now_iso` shape) to epoch seconds.
 pub fn iso_to_epoch(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
@@ -67,7 +64,6 @@ pub fn iso_to_epoch(s: &str) -> Option<u64> {
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    // days-from-civil (Howard Hinnant), valid for the Gregorian calendar
     let y_adj = if mo <= 2 { y - 1 } else { y };
     let era = y_adj.div_euclid(400);
     let yoe = y_adj - era * 400;
@@ -78,69 +74,62 @@ pub fn iso_to_epoch(s: &str) -> Option<u64> {
     u64::try_from(days * 86_400 + h * 3_600 + mi * 60 + sec).ok()
 }
 
-/// Join roster liveness with the flow.run mailbox into per-node rows. Pure —
-/// the whole state machine lives here and under test.
-pub fn derive_rows(
-    roster: &[RosterRow],
-    events: &[crate::bus::Event],
-    planned: &[String],
-    now_epoch: u64,
-) -> Vec<NodeRow> {
-    use std::collections::HashMap;
-    let mut dispatch: HashMap<&str, u64> = HashMap::new();
-    let mut reply: HashMap<&str, u64> = HashMap::new();
+/// Join the roster with the flow.run mailbox into per-node rows, in roster
+/// order. Pure — the state machine lives here and under test.
+pub fn derive_rows(roster: &[RosterRow], events: &[Event], now_epoch: u64) -> Vec<NodeRow> {
+    // latest dispatch per member, and the reply anchored to that dispatch
+    let mut dispatch: HashMap<&str, (&str, u64)> = HashMap::new();
+    let mut replied: HashMap<&str, u64> = HashMap::new(); // by dispatch msg_id
     for ev in events {
         let ts = iso_to_epoch(&ev.created_at).unwrap_or(now_epoch);
-        if ev.from == crate::flow::FLOW_SENDER {
-            dispatch.entry(ev.to.as_str()).or_insert(ts);
-        } else if ev.to == crate::flow::FLOW_SENDER {
-            reply.entry(ev.from.as_str()).or_insert(ts);
+        if ev.from == FLOW_SENDER {
+            dispatch.insert(ev.to.as_str(), (ev.msg_id.as_str(), ts));
+        } else if ev.to == FLOW_SENDER && !ev.in_reply_to.is_empty() {
+            replied.entry(ev.in_reply_to.as_str()).or_insert(ts);
         }
     }
-
-    let mut names: Vec<String> = Vec::new();
-    for n in planned {
-        if !names.contains(n) {
-            names.push(n.clone());
-        }
-    }
-    for r in roster {
-        if !names.contains(&r.name) {
-            names.push(r.name.clone());
-        }
-    }
-
-    names
-        .into_iter()
-        .map(|name| {
-            let row = roster.iter().find(|r| r.name == name);
-            let runtime = row
-                .map(|r| {
-                    if r.model.is_empty() {
-                        r.cli.clone()
-                    } else {
-                        format!("{} · {}", r.cli, r.model)
-                    }
-                })
-                .unwrap_or_else(|| "-".to_string());
-            let sent = dispatch.get(name.as_str()).copied();
-            let got = reply.get(name.as_str()).copied();
-            let alive = row.map(|r| r.has_pane).unwrap_or(false);
-            let (state, elapsed) = match (sent, got) {
-                (Some(s), Some(g)) => (NodeState::Done, Some(g.saturating_sub(s))),
-                (Some(s), None) if alive => (NodeState::Working, Some(now_epoch.saturating_sub(s))),
-                (Some(s), None) => (NodeState::Gone, Some(now_epoch.saturating_sub(s))),
-                (None, _) if row.is_some() => (NodeState::Spawned, None),
-                (None, _) => (NodeState::Pending, None),
+    roster
+        .iter()
+        .map(|r| {
+            let runtime = if r.model.is_empty() {
+                r.cli.clone()
+            } else {
+                format!("{} · {}", r.cli, r.model)
+            };
+            let (state, elapsed) = match dispatch.get(r.name.as_str()) {
+                Some((msg_id, sent)) => match replied.get(msg_id) {
+                    Some(got) => (NodeState::Done, Some(got.saturating_sub(*sent))),
+                    None if r.alive => (NodeState::Working, Some(now_epoch.saturating_sub(*sent))),
+                    None => (NodeState::Gone, Some(now_epoch.saturating_sub(*sent))),
+                },
+                None => (NodeState::Spawned, None),
             };
             NodeRow {
-                name,
+                name: r.name.clone(),
                 runtime,
+                phase: r.phase.clone(),
                 state,
                 elapsed,
             }
         })
         .collect()
+}
+
+/// Phases in first-seen order; a node without a group falls under "nodes".
+pub fn group_phases(rows: &[NodeRow]) -> Vec<(String, Vec<&NodeRow>)> {
+    let mut phases: Vec<(String, Vec<&NodeRow>)> = Vec::new();
+    for r in rows {
+        let title = if r.phase.is_empty() {
+            "nodes"
+        } else {
+            &r.phase
+        };
+        match phases.iter_mut().find(|(t, _)| t == title) {
+            Some((_, nodes)) => nodes.push(r),
+            None => phases.push((title.to_string(), vec![r])),
+        }
+    }
+    phases
 }
 
 fn fmt_dur(sec: u64) -> String {
@@ -156,8 +145,7 @@ fn wcw(s: &str) -> usize {
 }
 
 fn pad(s: &str, width: usize) -> String {
-    let gap = width.saturating_sub(wcw(s));
-    format!("{s}{}", " ".repeat(gap))
+    format!("{s}{}", " ".repeat(width.saturating_sub(wcw(s))))
 }
 
 fn clip(s: &str, width: usize) -> String {
@@ -174,55 +162,7 @@ fn clip(s: &str, width: usize) -> String {
     out
 }
 
-#[derive(Debug, Default)]
-struct BoardSpec {
-    workflow: String,
-    phases: Vec<(String, Vec<String>)>,
-}
-
-fn load_spec(workspace: &str) -> BoardSpec {
-    let path = std::path::Path::new(workspace)
-        .join("artifacts")
-        .join("flow")
-        .join("board.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BoardSpec::default();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return BoardSpec::default();
-    };
-    let phases = v["phases"]
-        .as_array()
-        .map(|ps| {
-            ps.iter()
-                .filter_map(|p| {
-                    let title = p["title"].as_str()?.to_string();
-                    let nodes = p["nodes"]
-                        .as_array()?
-                        .iter()
-                        .filter_map(|n| n.as_str().map(str::to_string))
-                        .collect();
-                    Some((title, nodes))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    BoardSpec {
-        workflow: v["workflow"].as_str().unwrap_or("").to_string(),
-        phases,
-    }
-}
-
-extern "C" fn _restore_and_exit(_: libc::c_int) {
-    const RESTORE: &[u8] = b"\x1b[?1049l\x1b[?25h";
-    unsafe {
-        libc::write(1, RESTORE.as_ptr() as *const libc::c_void, RESTORE.len());
-        libc::_exit(0);
-    }
-}
-
-fn render(
-    spec: &BoardSpec,
+pub fn render(
     team: &str,
     rows: &[NodeRow],
     mail: &[(String, String, String)],
@@ -230,92 +170,63 @@ fn render(
     lines_budget: usize,
     tick: u64,
 ) -> String {
-    let phases: Vec<(String, Vec<String>)> = if spec.phases.is_empty() {
-        vec![("nodes".to_string(), rows.iter().map(|r| r.name.clone()).collect())]
-    } else {
-        let planned: Vec<&String> = spec.phases.iter().flat_map(|(_, ns)| ns).collect();
-        let stray: Vec<String> = rows
-            .iter()
-            .map(|r| r.name.clone())
-            .filter(|n| !planned.contains(&n))
-            .collect();
-        let mut phases = spec.phases.clone();
-        if !stray.is_empty() {
-            phases.push(("nodes".to_string(), stray));
-        }
-        phases
-    };
-
-    let by_name = |n: &str| rows.iter().find(|r| r.name == n);
-    let name_w = rows
+    let phases = group_phases(rows);
+    let name_w = rows.iter().map(|r| wcw(&r.name)).max().unwrap_or(8).max(8);
+    let rt_w = rows
         .iter()
-        .map(|r| wcw(&r.name))
-        .chain(phases.iter().flat_map(|(_, ns)| ns.iter().map(|n| wcw(n))))
+        .map(|r| wcw(&r.runtime))
         .max()
-        .unwrap_or(8)
-        .max(8);
-    let rt_w = rows.iter().map(|r| wcw(&r.runtime)).max().unwrap_or(10).max(10);
-
-    let mut out: Vec<String> = Vec::new();
+        .unwrap_or(10)
+        .max(10);
     let clock = {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        format!("{:02}:{:02}:{:02}Z", secs / 3600 % 24, secs / 60 % 60, secs % 60)
+        format!(
+            "{:02}:{:02}:{:02}Z",
+            secs / 3600 % 24,
+            secs / 60 % 60,
+            secs % 60
+        )
     };
-    out.push(format!(
-        "{DIM}{}{}team={team}  {clock}{RESET}",
-        spec.workflow,
-        if spec.workflow.is_empty() { "" } else { "  " },
-    ));
-    for (title, node_names) in &phases {
-        let done = node_names
-            .iter()
-            .filter(|n| by_name(n).map(|r| r.state == NodeState::Done).unwrap_or(false))
-            .count();
-        let tag = if node_names.len() > 1 { "∥" } else { "→" };
-        out.push(format!("{BOLD} {tag} {title}  {done}/{}{RESET}", node_names.len()));
-        for n in node_names {
-            let Some(r) = by_name(n) else {
-                out.push(format!(
-                    "{DIM}     · {}  {}  {:>7}  pending{RESET}",
-                    pad(n, name_w),
-                    pad("-", rt_w),
-                    ""
-                ));
-                continue;
-            };
+    let mut out: Vec<String> = vec![format!("{DIM}team={team}  {clock}{RESET}")];
+    if rows.is_empty() {
+        out.push(format!("{DIM}   no nodes yet{RESET}"));
+    }
+    for (title, nodes) in &phases {
+        let done = nodes.iter().filter(|r| r.state == NodeState::Done).count();
+        let tag = if nodes.len() > 1 { "∥" } else { "→" };
+        out.push(format!(
+            "{BOLD} {tag} {title}  {done}/{}{RESET}",
+            nodes.len()
+        ));
+        for r in nodes {
             let dur = r.elapsed.map(fmt_dur).unwrap_or_default();
-            let plain = format!(
-                "{}  {}  {:>7}  {}",
-                pad(&r.name, name_w),
-                pad(&r.runtime, rt_w),
-                dur,
-                match r.state {
-                    NodeState::Pending => "pending",
-                    NodeState::Spawned => "spawned",
-                    NodeState::Working => "working",
-                    NodeState::Done => "done",
-                    NodeState::Gone => "gone",
-                }
+            let plain = clip(
+                &format!(
+                    "{}  {}  {:>7}  {}",
+                    pad(&r.name, name_w),
+                    pad(&r.runtime, rt_w),
+                    dur,
+                    match r.state {
+                        NodeState::Spawned => "spawned",
+                        NodeState::Working => "working",
+                        NodeState::Done => "done",
+                        NodeState::Gone => "gone",
+                    }
+                ),
+                cols.saturating_sub(7),
             );
-            let plain = clip(&plain, cols.saturating_sub(7));
-            let line = match r.state {
+            out.push(match r.state {
                 NodeState::Done => format!("     {DIM}✔{RESET} {DIM}{plain}{RESET}"),
                 NodeState::Gone => format!("     {RED}✖{RESET} {RED}{plain}{RESET}"),
                 NodeState::Working => {
-                    let mark = if tick % 2 == 0 {
-                        format!("{YELLOW}●{RESET}")
-                    } else {
-                        format!("{DIM}{YELLOW}●{RESET}")
-                    };
-                    format!("     {mark} {plain}")
+                    let mark = if tick % 2 == 0 { YELLOW } else { "\x1b[2;33m" };
+                    format!("     {mark}●{RESET} {plain}")
                 }
                 NodeState::Spawned => format!("     ○ {plain}"),
-                NodeState::Pending => format!("     {DIM}· {plain}{RESET}"),
-            };
-            out.push(line);
+            });
         }
     }
     if !mail.is_empty() {
@@ -343,83 +254,105 @@ fn render(
     format!("\x1b[H\x1b[J{}", out.join("\n"))
 }
 
-/// `hive flow board` body: resolve the team, tag this pane as a dock, paint
-/// until interrupted. Returns the process exit code.
+extern "C" fn _restore_and_exit(_: libc::c_int) {
+    const RESTORE: &[u8] = b"\x1b[?1049l\x1b[?25h";
+    unsafe {
+        libc::write(1, RESTORE.as_ptr() as *const libc::c_void, RESTORE.len());
+        libc::_exit(0);
+    }
+}
+
+/// Roster + liveness in one hived round-trip (pane-bound fallback).
+fn roster_snapshot(team_name: &str) -> Vec<RosterRow> {
+    let Ok(team) = crate::team::Team::load(team_name, "") else {
+        return Vec::new();
+    };
+    let runtime_alive: Option<HashSet<String>> = if team.workspace.is_empty() {
+        None
+    } else {
+        crate::hived::request_team_runtime(&team.workspace, &team.name).map(|rt| {
+            rt.get("members")
+                .and_then(serde_json::Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter(|(_, v)| {
+                            v.get("cliAlive").and_then(serde_json::Value::as_bool) == Some(true)
+                        })
+                        .map(|(k, _)| k.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    };
+    team.agents
+        .iter()
+        .map(|a| RosterRow {
+            name: a.name.clone(),
+            cli: a.cli.clone(),
+            model: a.model.clone(),
+            phase: team.member_groups.get(&a.name).cloned().unwrap_or_default(),
+            alive: match &runtime_alive {
+                Some(set) => set.contains(&a.name),
+                None => !a.pane_id.is_empty(),
+            },
+        })
+        .collect()
+}
+
+/// `hive flow board` body: resolve the team, dock this pane, paint until
+/// interrupted. Returns the process exit code.
 pub fn board_cmd(team: Option<&str>) -> i32 {
-    let (team_name, team) =
-        match crate::cli::resolve_scoped_team(team, true) {
-            Ok((Some(name), Some(team))) => (name, team),
-            Ok(_) | Err(_) => {
-                eprintln!("Error: no Hive team in scope — pass --team <team> (see `hive ls`)");
-                return 1;
-            }
-        };
+    let (team_name, team) = match crate::cli::resolve_scoped_team(team, true) {
+        Ok((Some(name), Some(team))) => (name, team),
+        Ok(_) | Err(_) => {
+            eprintln!("Error: no Hive team in scope — pass --team <team> (see `hive ls`)");
+            return 1;
+        }
+    };
     let workspace = crate::cli::resolve_workspace(Some(&team), true).unwrap_or_default();
     if workspace.is_empty() {
         eprintln!("Error: team '{team_name}' has no workspace");
         return 1;
     }
-
     if let Ok(pane) = std::env::var("TMUX_PANE") {
-        // A dock pane: the adaptive layout must not fold this strip into a
-        // member preset.
-        let _ = std::process::Command::new("tmux")
-            .args(["set-option", "-p", "-t", &pane, "@hive-role", "dock"])
-            .status();
-        let _ = std::process::Command::new("tmux")
-            .args(["select-pane", "-t", &pane, "-T", "⬡ flow board"])
-            .status();
+        crate::tmux::set_pane_option(&pane, "hive-role", "dock");
+        crate::tmux::set_pane_title(&pane, "⬡ flow board");
+        if !team.tmux_window.is_empty() {
+            let _ = crate::layout::apply_adaptive(&team.tmux_window);
+        }
     }
 
     print!("\x1b[?1049h\x1b[?25l");
     let _ = std::io::stdout().flush();
     unsafe {
-        libc::signal(libc::SIGINT, _restore_and_exit as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, _restore_and_exit as libc::sighandler_t);
+        let handler = _restore_and_exit as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
     }
 
     let mut tick: u64 = 0;
     loop {
-        let spec = load_spec(&workspace);
-        let roster: Vec<RosterRow> = match crate::team::Team::load(&team_name, "") {
-            Ok(t) => t
-                .agents
-                .iter()
-                .map(|a| RosterRow {
-                    name: a.name.clone(),
-                    cli: a.cli.clone(),
-                    model: a.model.clone(),
-                    has_pane: !a.pane_id.is_empty(),
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+        let roster = roster_snapshot(&team_name);
         let events = crate::bus::read_all_events(&workspace).unwrap_or_default();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let planned: Vec<String> = spec
-            .phases
-            .iter()
-            .flat_map(|(_, ns)| ns.iter().cloned())
-            .collect();
-        let rows = derive_rows(&roster, &events, &planned, now);
+        let rows = derive_rows(&roster, &events, now);
         let mail: Vec<(String, String, String)> = events
             .iter()
             .rev()
-            .filter(|e| e.from == crate::flow::FLOW_SENDER || e.to == crate::flow::FLOW_SENDER)
+            .filter(|e| e.from == FLOW_SENDER || e.to == FLOW_SENDER)
             .take(3)
             .map(|e| (e.from.clone(), e.to.clone(), e.body.clone()))
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
-
         let (cols, lines) = crossterm::terminal::size()
             .map(|(c, l)| (c as usize, l as usize))
             .unwrap_or((120, 14));
-        print!("{}", render(&spec, &team_name, &rows, &mail, cols, lines, tick));
+        print!("{}", render(&team_name, &rows, &mail, cols, lines, tick));
         let _ = std::io::stdout().flush();
         tick += 1;
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -429,29 +362,29 @@ pub fn board_cmd(team: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::Event;
     use serde_json::Map;
 
-    fn ev(from: &str, to: &str, created_at: &str) -> Event {
+    fn ev(from: &str, to: &str, msg_id: &str, in_reply_to: &str, created_at: &str) -> Event {
         Event {
             from: from.to_string(),
             to: to.to_string(),
             intent: "send".to_string(),
             metadata: Map::new(),
             created_at: created_at.to_string(),
-            msg_id: String::new(),
-            in_reply_to: String::new(),
+            msg_id: msg_id.to_string(),
+            in_reply_to: in_reply_to.to_string(),
             body: String::new(),
             artifact: String::new(),
         }
     }
 
-    fn roster(name: &str, has_pane: bool) -> RosterRow {
+    fn roster(name: &str, phase: &str, alive: bool) -> RosterRow {
         RosterRow {
             name: name.to_string(),
             cli: "claude".to_string(),
             model: "opus".to_string(),
-            has_pane,
+            phase: phase.to_string(),
+            alive,
         }
     }
 
@@ -463,61 +396,73 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_rows_full_state_machine() {
+    fn test_derive_rows_uses_in_reply_to_and_liveness() {
         let t0 = "2026-09-02T00:00:00Z";
         let t1 = "2026-09-02T00:05:00Z";
         let now = iso_to_epoch("2026-09-02T00:10:00Z").unwrap();
         let events = vec![
-            ev("flow.run", "done-node", t0),
-            ev("done-node", "flow.run", t1),
-            ev("flow.run", "working-node", t0),
-            ev("flow.run", "gone-node", t0),
+            ev("flow.run", "done-node", "d1", "", t0),
+            ev("done-node", "flow.run", "r1", "d1", t1),
+            ev("flow.run", "working-node", "d2", "", t0),
+            ev("flow.run", "gone-node", "d3", "", t0),
+            // a bystander row to flow.run not anchored to a dispatch counts for nothing
+            ev("working-node", "flow.run", "x", "", t1),
         ];
         let roster = vec![
-            roster("done-node", false), // retired after replying: still done
-            roster("working-node", true),
-            roster("gone-node", false),
-            roster("spawned-node", true),
+            roster("done-node", "Review", false), // retired after replying: still done
+            roster("working-node", "Review", true),
+            roster("gone-node", "Verify", false),
+            roster("spawned-node", "", true),
         ];
-        let planned = vec!["pending-node".to_string()];
-        let rows = derive_rows(&roster, &events, &planned, now);
+        let rows = derive_rows(&roster, &events, now);
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
-
         assert_eq!(get("done-node").state, NodeState::Done);
         assert_eq!(get("done-node").elapsed, Some(300));
         assert_eq!(get("working-node").state, NodeState::Working);
         assert_eq!(get("working-node").elapsed, Some(600));
         assert_eq!(get("gone-node").state, NodeState::Gone);
         assert_eq!(get("spawned-node").state, NodeState::Spawned);
-        assert_eq!(get("pending-node").state, NodeState::Pending);
-        assert_eq!(get("pending-node").runtime, "-");
-        // planned nodes come first, roster-only nodes after
-        assert_eq!(rows[0].name, "pending-node");
+
+        let phases = group_phases(&rows);
+        let titles: Vec<&str> = phases.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(titles, vec!["Review", "Verify", "nodes"]);
+        assert_eq!(phases[0].1.len(), 2);
     }
 
     #[test]
-    fn test_render_groups_phases_and_folds_dispatch_bodies() {
-        let spec = BoardSpec {
-            workflow: "review".to_string(),
-            phases: vec![
-                ("Review".to_string(), vec!["a".to_string(), "b".to_string()]),
-                ("Verify".to_string(), vec!["v".to_string()]),
-            ],
-        };
+    fn test_render_marks_parallel_phases_and_folds_dispatch_bodies() {
         let rows = vec![
-            NodeRow { name: "a".into(), runtime: "claude · opus".into(), state: NodeState::Done, elapsed: Some(65) },
-            NodeRow { name: "b".into(), runtime: "grok · 4.6".into(), state: NodeState::Working, elapsed: Some(10) },
+            NodeRow {
+                name: "a".into(),
+                runtime: "claude · opus".into(),
+                phase: "Review".into(),
+                state: NodeState::Done,
+                elapsed: Some(65),
+            },
+            NodeRow {
+                name: "b".into(),
+                runtime: "grok · 4.6".into(),
+                phase: "Review".into(),
+                state: NodeState::Working,
+                elapsed: Some(10),
+            },
+            NodeRow {
+                name: "v".into(),
+                runtime: "claude · opus".into(),
+                phase: "Verify".into(),
+                state: NodeState::Spawned,
+                elapsed: None,
+            },
         ];
         let mail = vec![(
             "flow.run".to_string(),
             "v".to_string(),
             "flow-mailbox dispatch: v.md (not a member; hive send flow.run, then stop)".to_string(),
         )];
-        let s = render(&spec, "t", &rows, &mail, 120, 40, 0);
+        let s = render("t", &rows, &mail, 120, 40, 0);
         assert!(s.contains("∥ Review  1/2"), "{s}");
         assert!(s.contains("→ Verify  0/1"), "{s}");
         assert!(s.contains("1m05s"), "{s}");
-        assert!(s.contains("pending"), "{s}"); // v planned but absent
         assert!(s.contains("[dispatch] v.md"), "{s}");
         assert!(!s.contains("not a member"), "{s}");
     }

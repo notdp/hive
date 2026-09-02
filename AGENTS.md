@@ -26,7 +26,11 @@ behavior is documented in the modules themselves.
   are deterministic by contract (`Date.now()`/`Math.random()`/argless
   `new Date()` throw) so a run's op journal can replay on
   `hive flow run --resume`; keep op args free of run-relative values (paths
-  with counters, timestamps), because the raw args JSON is the journal key.
+  with counters, timestamps), because the typed op's serialization
+  (`flow.rs::FlowOp`) is the journal key. `hive flow node run` is the same
+  op core as one blocking command; the plugin's `hive-node` agent is only a
+  relay for it, and `hive flow board` reads phases off the members' pane
+  groups (`@hive-group`), never a sidecar file.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
   differs from the embedded bytes is rewritten. Editing a materialized asset
