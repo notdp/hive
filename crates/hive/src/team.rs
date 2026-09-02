@@ -334,7 +334,10 @@ impl Team {
         workspace: &str,
         tag_lead: bool,
     ) -> Result<Team> {
-        if !tmux::is_inside_tmux() {
+        // An explicit window target is addressable from anywhere (`hive
+        // flow rig` binds a team to a session it just created, from outside
+        // tmux); only the implicit "the window I am in" needs a client.
+        if window_target.is_empty() && !tmux::is_inside_tmux() {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
         let error = validate_team_name(name);
@@ -621,32 +624,27 @@ impl Team {
         if self.agent_named(name).is_some() {
             bail!("Agent '{name}' already exists in team '{}'", self.name);
         }
-        if !tmux::is_inside_tmux() {
+        // Addressability is the gate, not $TMUX: a spawn lands on an anchor
+        // pane resolved from registry-known state, and targeted tmux
+        // commands need no client context. No anchor means no display to
+        // land on — that is the only reason to refuse.
+        let target = self.anchor_pane();
+        if target.is_empty() {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
+        // Cross-process name claim under the registry lock: the in-memory
+        // check above cannot see a concurrent spawner (a workflow fanning out
+        // one `hive flow node run` process per node). The claim is a paneless
+        // placeholder row — replaced by the real row after the spawn, removed
+        // if the spawn fails.
+        let claimed = self.claim_name(name, cli, model)?;
 
         let is_first = self.agents.is_empty();
-        // The team's own window, never the caller's focused one — a spawn
-        // issued from another window must land and re-tile where the team
-        // lives (kill already resolves the same way).
-        let window_for_split = if !self.tmux_window.is_empty() {
-            self.tmux_window.clone()
-        } else {
-            tmux::get_current_window_target().unwrap_or_default()
-        };
-        let (target, split_horizontal) = if is_first {
-            let target = if !self.lead_pane_id.is_empty() {
-                self.lead_pane_id.clone()
-            } else {
-                tmux::get_current_pane_id().unwrap_or_default()
-            };
-            (target, layout::split_horizontal(&window_for_split, 2))
-        } else {
-            (self.agents[self.agents.len() - 1].pane_id.clone(), false)
-        };
+        let window_for_split = self.display_window();
+        let split_horizontal = is_first && layout::split_horizontal(&window_for_split, 2);
         let split_size = "50%";
 
-        let agent = agent_spawn(SpawnCall {
+        let spawned = agent_spawn(SpawnCall {
             name: name.to_string(),
             team_name: self.name.clone(),
             target_pane: target,
@@ -663,22 +661,130 @@ impl Team {
             skill: skill.to_string(),
             extra_env: extra_env.cloned(),
             cli: cli.to_string(),
-        })?;
+        });
+        let agent = match spawned {
+            Ok(agent) => agent,
+            Err(err) => {
+                if claimed {
+                    let _ =
+                        crate::registry::remove_member(&self.name, name, &self.created_at_key());
+                }
+                return Err(err);
+            }
+        };
 
         tmux::tag_pane(&agent.pane_id, "agent", name, &self.name, cli, "");
         self.upsert_agent(agent.clone());
-
-        let window_target = if !self.tmux_window.is_empty() {
-            Some(self.tmux_window.clone())
-        } else {
-            tmux::get_current_window_target()
-        };
-        if let Some(window_target) = window_target.filter(|w| !w.is_empty()) {
-            tmux::configure_hive_window(&window_target);
-            let _ = layout::apply_adaptive(&window_target);
+        if !window_for_split.is_empty() {
+            tmux::configure_hive_window(&window_for_split);
+            let _ = layout::apply_adaptive(&window_for_split);
         }
 
         Ok(agent)
+    }
+
+    /// The team's display window: its own bound window, or — for a team
+    /// without one — the caller's focused window.
+    fn display_window(&self) -> String {
+        if !self.tmux_window.is_empty() {
+            self.tmux_window.clone()
+        } else {
+            tmux::get_current_window_target().unwrap_or_default()
+        }
+    }
+
+    /// Where the next spawn splits from — the one answer to "is this team
+    /// addressable right now". In order: the last member that still has a
+    /// live pane, the lead pane, the display window's own first pane (a
+    /// registry-loaded team carries no lead pane, and roster rows without a
+    /// live pane are the norm under `record_member`'s retain+push), and
+    /// finally the caller's current pane. Empty means nothing to land on.
+    pub fn anchor_pane(&self) -> String {
+        if let Some(a) = self.agents.iter().rev().find(|a| !a.pane_id.is_empty()) {
+            return a.pane_id.clone();
+        }
+        if !self.lead_pane_id.is_empty() {
+            return self.lead_pane_id.clone();
+        }
+        if !self.tmux_window.is_empty() {
+            if let Some(p) = tmux::list_panes_full(&self.tmux_window).first() {
+                return p.pane_id.clone();
+            }
+        }
+        tmux::get_current_pane_id().unwrap_or_default()
+    }
+
+    /// Whether a member can still receive a dispatch and answer. The hived's
+    /// team runtime is the authority (`cliAlive` — an engine that is gone
+    /// reads offline even if a pane still shows its last screen); without a
+    /// hived answer, a bound live pane stands in.
+    pub fn member_alive(&self, name: &str) -> bool {
+        let Some(agent) = self.agent_named(name) else {
+            return false;
+        };
+        if !self.workspace.is_empty() {
+            if let Some(runtime) = crate::hived::request_team_runtime(&self.workspace, &self.name) {
+                if let Some(member) = runtime
+                    .get("members")
+                    .and_then(Value::as_object)
+                    .and_then(|m| m.get(name))
+                    .and_then(Value::as_object)
+                {
+                    return member
+                        .get("cliAlive")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                }
+                return false;
+            }
+        }
+        !agent.pane_id.is_empty()
+    }
+
+    /// Retire a member: kill its engine/pane, drop the roster row here and
+    /// in the registry, re-tile the display. The one retirement path —
+    /// `hive kill`, flow's `kill()`, and a failed node start all come here.
+    /// Returns whether the member was on the roster.
+    pub fn retire(&mut self, name: &str) -> bool {
+        let Some(pos) = self.agents.iter().position(|a| a.name == name) else {
+            return false;
+        };
+        self.agents[pos].kill();
+        self.agents.remove(pos);
+        if !self.name.is_empty() {
+            let _ = crate::registry::remove_member(&self.name, name, &self.created_at_key());
+        }
+        let window = self.display_window();
+        if !window.is_empty() {
+            let _ = layout::apply_adaptive(&window);
+        }
+        true
+    }
+
+    pub fn created_at_key(&self) -> String {
+        if self.created_at == 0.0 {
+            String::new()
+        } else {
+            py_float_str(self.created_at)
+        }
+    }
+
+    /// Reserve `name` in the registry roster (paneless placeholder). Ok(true)
+    /// when this call made the claim, Ok(false) when the team has no registry
+    /// entry to race on, Err when another process holds the name.
+    fn claim_name(&self, name: &str, cli: &str, model: &str) -> Result<bool> {
+        if self.name.is_empty() {
+            return Ok(false);
+        }
+        let claim: Map<String, Value> = [("name", name), ("cli", cli), ("model", model)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect();
+        match crate::registry::reserve_member(&self.name, &claim, &self.created_at_key()) {
+            Ok("exists") => bail!("Agent '{name}' already exists in team '{}'", self.name),
+            Ok(verdict) => Ok(verdict == "reserved"),
+            Err(_) => Ok(false),
+        }
     }
 
     pub fn get(&self, name: &str) -> Result<Agent> {

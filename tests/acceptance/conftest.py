@@ -128,18 +128,26 @@ def rig():
                 raise RuntimeError("hive create never finished in the rig pane")
             time.sleep(1)
 
-        wf = r.root / "workflow.py"
+        wf = r.root / "workflow.js"
+        task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
+        # agent() resolves to the reply ({body, artifact, msgId}); the
+        # member's name is the script's own knowledge.
         thunk_lines = "".join(
-            f"    lambda: agent(TASK.format(cli={c!r}, path='{r.root}/{c}.txt', "
-            f"nonce={r.want(c)!r}), name={r.member(c)!r}, cli={c!r}),\n"
+            "  () => agent("
+            + json.dumps(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)), ensure_ascii=False)
+            + ", { name: " + json.dumps(r.member(c))
+            + ", cli: " + json.dumps(c) + " })"
+            + ".then((reply) => ({ name: " + json.dumps(r.member(c)) + ", summary: reply.body })),\n"
             for c in r.clis
         )
         wf.write_text(
-            "from hive.flow import agent, parallel\n"
-            'TASK = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"\n'
-            "thunks = [\n" + thunk_lines + "]\n"
-            "for m in parallel(*thunks):\n"
-            "    print('RESULT', m.name, (m.summary or '')[:100])\n"
+            "export const meta = { name: 'acceptance', description: 'one member per CLI, nonce causality' }\n"
+            "const members = await parallel([\n" + thunk_lines + "])\n"
+            # parallel() drops a failed branch to null instead of rejecting;
+            # the rc-0 oracle needs the failure back.
+            "if (members.some((m) => !m)) throw new Error('a member failed: ' + JSON.stringify(members))\n"
+            "for (const m of members) log(`RESULT ${m.name} ${(m.summary || '').slice(0, 100)}`)\n"
+            "return members.map((m) => ({ name: m.name, summary: m.summary }))\n"
         )
         # Reproduce the honest parentage: an orch's flow runner lives inside
         # a headless engine — no $TMUX. Only the pinned pane identity rides
@@ -155,7 +163,9 @@ def rig():
             timeout=int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420")),
             env=env,
         )
-        r.flow_stdout, r.flow_rc = proc.stdout + proc.stderr[-500:], proc.returncode
+        # progress ([flow] lines, RESULT logs) rides stderr; stdout is the
+        # script's return value
+        r.flow_stdout, r.flow_rc = proc.stdout + proc.stderr[-3000:], proc.returncode
 
         db = r.workspace / "hive.db"
         if db.exists():

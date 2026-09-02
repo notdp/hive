@@ -19,8 +19,8 @@ use serde_json::{json, Map, Value};
 // ---------------------------------------------------------------------------
 
 // The Claude/Codex marketplace payload is embedded here and materialized under
-// `$HIVE_HOME/core_assets/marketplace/` heal-on-drift, like the cvim toolkit
-// and the flow pylib. `hive plugin sync` is the command-source entry Claude
+// `$HIVE_HOME/core_assets/marketplace/` heal-on-drift, like the cvim
+// toolkit. `hive plugin sync` is the command-source entry Claude
 // re-runs once per session: it heals the tree and prints the payload
 // directory, so the installed skill content always matches this binary —
 // there is no remote update channel and no version bookkeeping on the Claude
@@ -53,6 +53,11 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
     (
         "skills/hive/references/worktree.md",
         include_str!("../../../plugins/hive/skills/hive/references/worktree.md"),
+        false,
+    ),
+    (
+        "agents/hive-node.md",
+        include_str!("../../../plugins/hive/agents/hive-node.md"),
         false,
     ),
 ];

@@ -387,13 +387,14 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("flow")
-                .about("Deterministic member orchestration from a Python script.")
+                .about("Deterministic member orchestration from a JavaScript flow script.")
                 .long_about(
-                    "Deterministic member orchestration from a Python script.\n\n\
-                     A flow script uses the `hive.flow` library: `agent()` spawns a live\n\
-                     member pane, dispatches a task atomically, and blocks for the reply;\n\
-                     `parallel()` fans out. Every node is a visible pane — watch, type\n\
-                     into, or interrupt any of them while the flow runs.",
+                    "Deterministic member orchestration from a JavaScript flow script.\n\n\
+                     A flow script starts with `export const meta = {...}` and uses the\n\
+                     embedded dialect: `agent()` spawns a live member pane, dispatches a\n\
+                     task atomically, and blocks for the reply; `parallel()` fans out;\n\
+                     `pipeline()` runs per-item stages. Every node is a visible pane —\n\
+                     watch, type into, or interrupt any of them while the flow runs.",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
@@ -402,12 +403,83 @@ pub(crate) fn build_cli() -> Command {
                         .about("Run SCRIPT against the current team.")
                         .long_about(
                             "Run SCRIPT against the current team.\n\n\
-                             The script is trusted Python (you or your orch wrote it). Members it\n\
-                             spawns reply to the reserved `flow` mailbox; the runner blocks until\n\
-                             the script finishes. Typical use from an orch: run it in a background\n\
-                             shell and read the output when it completes.",
+                             The script is trusted JavaScript (you or your orch wrote it). Members\n\
+                             it spawns reply to the reserved `flow` mailbox; the runner blocks\n\
+                             until the script finishes. Typical use from an orch: run it in a\n\
+                             background shell and read the output when it completes.\n\n\
+                             Every run journals its ops under <workspace>/artifacts/flow/ and\n\
+                             prints its run id; `--resume <run-id>` replays the unchanged prefix\n\
+                             from the journal — members still alive are reused instead of\n\
+                             respawned.",
                         )
-                        .arg(Arg::new("script").required(true)),
+                        .arg(Arg::new("script").required(true))
+                        .arg(
+                            Arg::new("resume")
+                                .long("resume")
+                                .value_name("RUN_ID")
+                                .help("Resume a previous run from its journal"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("board")
+                        .about("Live progress board for the team's flow nodes (run it in a pane).")
+                        .long_about(
+                            "Live progress board for the team's flow nodes (run it in a pane).\n\n\
+                             Renders the roster and the flow.run mailbox as per-node state\n\
+                             (spawned/working/done/gone) with elapsed times. Phases come from\n\
+                             the members' pane groups (the --phase of `hive flow node run`,\n\
+                             the enclosing `phase()` of a flow script); nothing else to write.\n\
+                             The pane tags itself @hive-role dock: the adaptive layout keeps\n\
+                             it as a full-width strip at the bottom and tiles members above.",
+                        )
+                        .arg(Arg::new("team").long("team")),
+                )
+                .subcommand(
+                    Command::new("node")
+                        .about("One task on one live member, as a single blocking call.")
+                        .subcommand_required(true)
+                        .arg_required_else_help(true)
+                        .subcommand(
+                            Command::new("run")
+                                .about("Place the task on stdin onto member NAME and block for its reply.")
+                                .long_about(
+                                    "Place the task on stdin onto member NAME and block for its reply.\n\n\
+                                     Spawns the member (or reuses one of that name that is still alive),\n\
+                                     dispatches the task atomically, waits without timeout, and prints one\n\
+                                     JSON object: {status: 'replied', body, artifact, msgId, name, pane}.\n\
+                                     A member that dies before replying ends the call with an error. This\n\
+                                     is the seam an external orchestrator's proxy (the hive-node agent)\n\
+                                     runs in the background.",
+                                )
+                                .arg(Arg::new("name").long("name").required(true))
+                                .arg(Arg::new("cli").long("cli"))
+                                .arg(Arg::new("model").long("model"))
+                                .arg(
+                                    Arg::new("phase")
+                                        .long("phase")
+                                        .help("Phase label; lands on the pane group for `hive flow board`"),
+                                )
+                                .arg(Arg::new("team").long("team")),
+                        ),
+                )
+                .subcommand(
+                    Command::new("rig")
+                        .about("Create (or tear down) a workflow team: tmux session, team, orch mirror, board.")
+                        .long_about(
+                            "Create a workflow team named RUN: a detached tmux session of the same\n\
+                             name, the team bound to its window, an orch mirror pane (`hive view`\n\
+                             of --orch's session) and a full-width `hive flow board` dock. Attach\n\
+                             with `hive attach RUN`. `--down` retires every member, deletes the\n\
+                             team and kills the session.",
+                        )
+                        .arg(Arg::new("run").required(true))
+                        .arg(Arg::new("orch").long("orch").value_name("SESSION_ID"))
+                        .arg(Arg::new("workspace").long("workspace").value_name("DIR"))
+                        .arg(
+                            Arg::new("down")
+                                .long("down")
+                                .action(clap::ArgAction::SetTrue),
+                        ),
                 ),
         )
         .subcommand(
@@ -942,11 +1014,10 @@ pub fn main() {
     let tail: Vec<String> = args.iter().skip(1).cloned().collect();
 
     // Hidden helper subcommands, never listed in help: the cvim toolkit
-    // (called back into by the materialized `cvim-command` bash asset) and
-    // the flow-op bridge (called by the materialized pylib flow client),
-    // both via $HIVE_BIN. They replace standalone Python beside the old
-    // asset trees, so they dispatch before the known-command gate and skip
-    // the root gates.
+    // (called back into by the materialized `cvim-command` bash asset) via
+    // $HIVE_BIN. They replace standalone Python beside the old asset trees,
+    // so they dispatch before the known-command gate and skip the root
+    // gates.
     match invoked.as_str() {
         "cvim-sendback" => std::process::exit(crate::cvim::sendback_main(&tail)),
         "cvim-payload" => std::process::exit(crate::cvim::payload_main(&tail)),
@@ -954,7 +1025,6 @@ pub fn main() {
         "cvim-seed" => std::process::exit(crate::cvim::seed_main(&tail)),
         "cvim-session" => std::process::exit(crate::cvim::session_main(&tail)),
         "cvim-profile" => std::process::exit(crate::cvim::profile_main(&tail)),
-        "flow-op" => std::process::exit(crate::flow::op_main(&tail)),
         // notify's tmux hook / flash-script callbacks (Python's
         // `-m hive.notify_ui` and the pane-attention middle layer).
         "notify-hook" => std::process::exit(crate::notify_ui::main(&tail)),
@@ -1107,8 +1177,31 @@ fn dispatch(matches: &ArgMatches) {
                     eprintln!("Error: Invalid value for 'SCRIPT': Path '{script}' does not exist.");
                     std::process::exit(2);
                 }
-                rest::flow_run_cmd(script)
+                rest::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
             }
+            Some(("board", m)) => std::process::exit(crate::flow_board::board_cmd(
+                m.get_one::<String>("team").map(String::as_str),
+            )),
+            Some(("node", m)) => match m.subcommand() {
+                Some(("run", m)) => rest::flow_node_run_cmd(
+                    arg_str(m, "name"),
+                    m.get_one::<String>("cli").map(String::as_str),
+                    m.get_one::<String>("model")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    m.get_one::<String>("phase")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    m.get_one::<String>("team").map(String::as_str),
+                ),
+                _ => unreachable!("subcommand required"),
+            },
+            Some(("rig", m)) => std::process::exit(crate::flow_rig::rig_cmd(
+                arg_str(m, "run"),
+                m.get_one::<String>("orch").map(String::as_str),
+                m.get_one::<String>("workspace").map(String::as_str),
+                m.get_flag("down"),
+            )),
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {

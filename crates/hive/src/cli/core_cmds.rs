@@ -1422,27 +1422,11 @@ pub fn kill(agent_name: &str) {
         Ok(agent) => agent,
         Err(_) => fail(&format!("agent '{agent_name}' not found")),
     };
-    let removed_from_team = t.agent_named(&agent_name).is_some();
-    agent.kill();
-    if removed_from_team {
-        t.agents.retain(|a| a.name != agent_name);
-        let team_name = t.name.clone();
-        if !team_name.is_empty() {
-            let created_at = if t.created_at == 0.0 {
-                String::new()
-            } else {
-                py_float_str(t.created_at)
-            };
-            let _ = crate::registry::remove_member(&team_name, &agent_name, &created_at);
-        }
-    }
-    let layout_window = if !t.tmux_window.is_empty() {
-        t.tmux_window.clone()
-    } else {
-        tmux::get_current_window_target().unwrap_or_default()
-    };
-    if !layout_window.is_empty() {
-        let _ = crate::layout::apply_adaptive(&layout_window);
+    // Team::retire is the one retirement path (roster + registry + layout);
+    // the lead is not on the roster, so it is killed directly.
+    let removed_from_team = t.retire(&agent_name);
+    if !removed_from_team {
+        agent.kill();
     }
     let mut result = Map::new();
     result.insert("member".to_string(), Value::String(agent_name));

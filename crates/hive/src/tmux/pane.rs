@@ -272,3 +272,14 @@ pub fn list_panes(target: &str) -> Vec<String> {
         Err(_) => Vec::new(),
     }
 }
+
+/// Replace whatever runs in `pane_id` with `command` (a shell line).
+pub fn respawn_pane(pane_id: &str, command: &str) -> anyhow::Result<()> {
+    _run(&["respawn-pane", "-k", "-t", pane_id, command], true, 5)?;
+    Ok(())
+}
+
+/// Swap two panes' positions in the window (and in its pane order).
+pub fn swap_pane(src: &str, dst: &str) {
+    let _ = _run(&["swap-pane", "-d", "-s", src, "-t", dst], false, 5);
+}

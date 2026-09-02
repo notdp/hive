@@ -405,6 +405,7 @@ pub fn spawn_team_agent<'a>(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // Team::spawn owns the cross-process name claim and its rollback.
     let agent = t.spawn(
         agent_name,
         model,

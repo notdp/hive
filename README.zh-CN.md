@@ -42,7 +42,7 @@ CLI 请先自行安装。插件的 `SessionStart` hook 看起来会代为安装�
 
 - `tmux` 3.2+ —— `hive cvim` / `hive vim` 的弹窗要 3.2+；`hive view` 选主题时发的裸 OSC 11 背景色查询，也要 3.2 起才会在 pane 里被应答
 - Rust 工具链（编译用）
-- `python3` —— `hive flow run` 会 exec 解释器运行脚本，配套的 `hive.flow` 客户端是内嵌的；notify 弹窗也是一段 python heredoc
+- `python3` —— notify 弹窗是一段 python heredoc（`hive flow run` 不再需要解释器：flow 脚本是 JavaScript，由二进制内嵌的引擎执行）
 - 至少一种 agent CLI：`claude`、`codex` 或 `grok`
 
 ## 在 agent 会话中开始

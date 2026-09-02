@@ -335,47 +335,41 @@ pub fn spawn(
 // flow
 // ---------------------------------------------------------------------------
 
-/// The `python3 -c` shell around the script: runpy like the Python-era
-/// command, with FlowError surfaced as a clean CLI failure (`_fail`).
-const FLOW_RUNNER: &str = r#"import runpy, sys
-script = sys.argv[1]
-sys.argv = sys.argv[1:]
-try:
-    runpy.run_path(script, run_name="__main__")
-except SystemExit:
-    raise
-except Exception as exc:
-    from hive.flow import FlowError
-    if isinstance(exc, FlowError):
-        sys.stderr.write(f"Error: {exc}\n")
-        sys.exit(1)
-    raise
-"#;
-
-pub fn flow_run_cmd(script: &str) {
-    let _ = ok_or_fail(resolve_scoped_team(None, true));
+/// Flow scripts are trusted JavaScript (you or your orch wrote them),
+/// evaluated by the embedded engine in `crate::flow_script` — no external
+/// interpreter, no materialized client.
+pub fn flow_run_cmd(script: &str, resume: Option<&str>) {
     let script_path = std::fs::canonicalize(script)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| script.to_string());
-    // ponytail: flow scripts are trusted Python programs; the binary
-    // delegates to the interpreter instead of in-process runpy. Upgrade
-    // path: a Rust-native flow DSL. The script's `from hive.flow import
-    // agent` resolves against the materialized pylib client, which calls
-    // back into this binary (hidden `flow-op` subcommands via $HIVE_BIN)
-    // for every hive interaction.
-    let pylib = ok_or_fail(crate::flow::materialize_pylib())
-        .to_string_lossy()
-        .into_owned();
-    let pythonpath = match std::env::var("PYTHONPATH") {
-        Ok(existing) if !existing.is_empty() => format!("{pylib}:{existing}"),
-        _ => pylib,
-    };
-    std::env::set_var("PYTHONPATH", pythonpath);
-    if let Ok(exe) = std::env::current_exe() {
-        std::env::set_var("HIVE_BIN", exe);
+    std::process::exit(crate::flow_script::run_cmd(&script_path, resume));
+}
+
+/// `hive flow node run`: the task is stdin (no shell quoting to get wrong),
+/// progress goes to stderr, the single JSON result to stdout.
+pub fn flow_node_run_cmd(
+    name: &str,
+    cli: Option<&str>,
+    model: &str,
+    phase: &str,
+    team: Option<&str>,
+) {
+    let mut task = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut task).is_err()
+        || task.trim().is_empty()
+    {
+        fail("flow node run reads the task from stdin — pipe or heredoc the task text");
     }
-    execvp(
-        "python3",
-        &["-c".to_string(), FLOW_RUNNER.to_string(), script_path],
-    );
+    let env = crate::flow::RealEnv::for_team(team.map(str::to_string));
+    let spec = crate::flow::NodeSpec {
+        name: name.to_string(),
+        cli: cli.map(str::to_string),
+        model: model.to_string(),
+        phase: phase.to_string(),
+        task: task.trim_end().to_string(),
+    };
+    match crate::flow::run_node(&env, &spec) {
+        Ok(result) => println!("{}", serde_json::Value::Object(result)),
+        Err(e) => fail(&e.0),
+    }
 }
