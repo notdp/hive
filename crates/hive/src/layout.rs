@@ -200,8 +200,42 @@ impl TmuxOps for RealTmux {
     }
 }
 
+/// Cross-process lock for one window's apply. Two appliers racing (a
+/// board starting while the rig splits its mirror, two `hive flow node
+/// run` spawns landing together) would each see the dock out of place and
+/// both swap it — a double swap puts it back where it was.
+struct WindowLock(std::fs::File);
+
+impl Drop for WindowLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn window_lock(window_target: &str) -> Option<WindowLock> {
+    use std::os::unix::io::AsRawFd;
+    let dir = crate::team::hive_home().join("state").join("locks");
+    std::fs::create_dir_all(&dir).ok()?;
+    let key: String = window_target
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(dir.join(format!("layout-{key}.lock")))
+        .ok()?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    Some(WindowLock(file))
+}
+
 /// Read window size + pane count from tmux, apply the matching preset.
 pub fn apply_adaptive(window_target: &str) -> Option<LayoutChoice> {
+    let _lock = window_lock(window_target);
     apply_adaptive_with(window_target, &mut RealTmux)
 }
 
@@ -225,7 +259,10 @@ fn apply_adaptive_with(window_target: &str, tmux: &mut dyn TmuxOps) -> Option<La
         ) {
             if at != last {
                 tmux.swap_pane(&dock, &order[last]);
-                order.swap(at, last);
+                // Re-read rather than trust the swap: the layout string is
+                // applied by window order, so it must describe what tmux
+                // has now.
+                order = tmux.list_panes(window_target);
             }
         }
         let members: Vec<String> = order.into_iter().filter(|p| *p != dock).collect();
@@ -306,6 +343,11 @@ mod tests {
                 dst.to_string(),
                 String::new(),
             ));
+            let a = self.panes.iter().position(|p| p == src);
+            let b = self.panes.iter().position(|p| p == dst);
+            if let (Some(a), Some(b)) = (a, b) {
+                self.panes.swap(a, b);
+            }
         }
         fn set_window_option(&mut self, target: &str, option: &str, value: &str) {
             self.calls.push((
