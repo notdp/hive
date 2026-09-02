@@ -424,10 +424,12 @@ fn _claim_team_name(team_name: &str, this_window: &str, explicit: bool) {
 /// Refuse to let an unmanaged codex join; point to the fix.
 fn _require_daemon_backed(pane: &str) {
     if _is_codex_tool_env() {
-        // Running from inside the codex TUI's own tool: the thread record is
-        // the identity, and the shared daemon must answer.
-        if !_codex_pane_from_thread_env().is_empty()
-            && crate::adapters::codex_app_server::daemon_alive()
+        // Running from inside the codex TUI's own tool: pane record or
+        // registry membership is the identity, and the shared daemon must
+        // answer.
+        if crate::cli::team_ops::_codex_thread_is_hive_managed(&crate::cli::util::env_string(
+            "CODEX_THREAD_ID",
+        )) && crate::adapters::codex_app_server::daemon_alive()
         {
             return;
         }

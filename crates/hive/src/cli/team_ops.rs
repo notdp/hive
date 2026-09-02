@@ -102,13 +102,22 @@ pub(crate) fn _is_codex_tool_env() -> bool {
     !env_string("CODEX_THREAD_ID").trim().is_empty()
 }
 
-/// Pane recorded for this codex tool's own thread, or "".
-pub(crate) fn _codex_pane_from_thread_env() -> String {
-    let thread_id = env_string("CODEX_THREAD_ID").trim().to_string();
+/// Hive-managed identity for a codex tool thread: a pane record (display
+/// bound), or a registry member whose sessionId is this thread (a headless
+/// member has no pane until `hive attach` materializes one — the registry,
+/// not the pane record, is the truth layer).
+pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
+    let thread_id = thread_id.trim();
     if thread_id.is_empty() {
-        return String::new();
+        return false;
     }
-    crate::adapters::codex_app_server::pane_for_thread(&thread_id).unwrap_or_default()
+    if crate::adapters::codex_app_server::pane_for_thread(thread_id)
+        .filter(|p| !p.is_empty())
+        .is_some()
+    {
+        return true;
+    }
+    _registry_member_for_session(thread_id).is_some()
 }
 
 pub(crate) fn _codex_relaunch_message() -> String {
@@ -126,7 +135,7 @@ pub(crate) fn _require_codex_native(invoked: Option<&str>) {
             return;
         }
     }
-    if !_is_codex_tool_env() || !_codex_pane_from_thread_env().is_empty() {
+    if !_is_codex_tool_env() || _codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID")) {
         return;
     }
     fail(&_codex_relaunch_message());
@@ -824,5 +833,46 @@ mod tests {
         let sorted = _sorted_member_rows(vec![row("zed"), row("orch"), row("abe")]);
         let names: Vec<String> = sorted.iter().map(|m| map_str(m, "name")).collect();
         assert_eq!(names, vec!["orch", "abe", "zed"]);
+    }
+
+    // --- codex-native gate: headless members are hive-managed via the registry ---
+
+    fn _iso(tmp: &std::path::Path) {
+        std::env::set_var("HIVE_HOME", tmp.join("hive"));
+        std::env::set_var("CODEX_HOME", tmp.join("codex"));
+    }
+
+    #[test]
+    fn test_codex_thread_unknown_everywhere_is_unmanaged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        _iso(tmp.path());
+        assert!(!_codex_thread_is_hive_managed("01aa-unknown"));
+        assert!(!_codex_thread_is_hive_managed(""));
+    }
+
+    #[test]
+    fn test_codex_thread_with_pane_record_is_managed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        _iso(tmp.path());
+        crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp").unwrap();
+        assert!(_codex_thread_is_hive_managed("01aa-pane"));
+    }
+
+    #[test]
+    fn test_codex_thread_matching_registry_member_is_managed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        _iso(tmp.path());
+        let member: Map<String, Value> = [
+            ("name", "review"),
+            ("cli", "codex"),
+            ("sessionId", "01aa-headless"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+        .collect();
+        crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
+        // no pane record: a headless member's identity is the registry row
+        assert!(_codex_thread_is_hive_managed(" 01aa-headless "));
+        assert!(!_codex_thread_is_hive_managed("01aa-other"));
     }
 }
