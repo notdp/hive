@@ -82,6 +82,8 @@ pub trait FlowEnv: Send + Sync {
     /// Runtime liveness (`Team::member_alive`): can this member still take a
     /// dispatch and answer.
     fn alive(&self, name: &str) -> bool;
+    /// Pane of a roster member ("" when it has none).
+    fn pane_of(&self, name: &str) -> String;
     /// `Team::retire`: no-op when the member is not on the roster.
     fn retire(&self, name: &str);
     fn sleep(&self, seconds: f64);
@@ -369,7 +371,8 @@ pub fn run_node(env: &dyn FlowEnv, spec: &NodeSpec) -> Result<Map<String, Value>
     let reused = env.alive(&spec.name);
     let mut pane = String::new();
     if reused {
-        log(&format!("{} alive; reusing", spec.name));
+        pane = env.pane_of(&spec.name);
+        log(&format!("{} alive in {pane}; reusing", spec.name));
     } else {
         env.retire(&spec.name);
         let spawned = run_op(
@@ -590,6 +593,12 @@ impl FlowEnv for RealEnv {
             .unwrap_or(false)
     }
 
+    fn pane_of(&self, name: &str) -> String {
+        self.fresh_team()
+            .and_then(|t| t.agent_named(name).map(|a| a.pane_id.clone()))
+            .unwrap_or_default()
+    }
+
     fn retire(&self, name: &str) {
         let _ = self.with_ctx(|c| {
             c.team.retire(name);
@@ -757,6 +766,14 @@ pub(crate) mod test_env {
 
         fn alive(&self, name: &str) -> bool {
             self.agents.lock().unwrap().iter().any(|a| a == name)
+        }
+
+        fn pane_of(&self, name: &str) -> String {
+            if self.alive(name) {
+                format!("%{name}")
+            } else {
+                String::new()
+            }
         }
 
         fn retire(&self, name: &str) {
@@ -1083,6 +1100,11 @@ mod tests {
         env.agents.lock().unwrap().push("audit".to_string());
         let r = run_node(&env, &node("audit", None, "follow-up task")).unwrap();
         assert_eq!(r["reused"], true);
+        // a reused member reports the pane it already sits in
+        assert!(
+            r["pane"].as_str().is_some_and(|p| p.starts_with('%')),
+            "{r:?}"
+        );
         assert!(env.spawns.lock().unwrap().is_empty());
         assert_eq!(env.dispatches.lock().unwrap().len(), 1);
     }

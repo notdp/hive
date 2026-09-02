@@ -119,7 +119,7 @@ return { verdict: v.verdict }
 - 确定性契约:`Date.now()`/`Math.random()`/无参 `new Date()` 在脚本里会 throw——因为每次 run 的 op 都记进 journal,`hive flow run workflow.js --resume <run-id>`(run id 在开跑第一行打出)会重放未变化的前缀:还活着的成员直接复用不重生,改了 prompt 就变成对活成员的追加派发,挂掉的成员才重 spawn。
 - 动态判断仍然手工编排;脚本只接机械流程。
 
-**⑥b hive 节点进 Claude Code Workflow**——你在用 Claude Code 的 Workflow 工具编排时,可以让某个节点是活的 hive 成员(可见 pane,human 可介入),同时保留 Workflow 自己的进度树和 journal。节点就是一条阻塞命令:`hive flow node run --team <run> --name <member> [--cli] [--model] [--phase <阶段>]`,task 从 stdin 进,回信以一行 JSON 从 stdout 出。hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——后台跑这条命令,完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
+**⑥b hive 节点进 Claude Code Workflow**——你在用 Claude Code 的 Workflow 工具编排时,可以让某个节点是活的 hive 成员(可见 pane,human 可介入),同时保留 Workflow 自己的进度树和 journal。节点就是一条阻塞命令:`hive flow node run --team <run> --name <member> [--cli] [--model] [--phase <阶段>]`,task 从 stdin 进,回信以一行 JSON 从 stdout 出。hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——把这条命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
 
 ```js
 const reply = await agent(`hive flow node run --team ${run} --name impl-auth --cli codex --phase Build
@@ -131,7 +131,7 @@ const reply = await agent(`hive flow node run --team ${run} --name impl-auth --c
 
 **rig 约定**(workflow 专属 team):session=team=run 名。开工 `hive flow rig <run> [--orch <你的 session id>]`——一条命令建好 tmux session、同名 team、底部全宽 `hive flow board` 看板条,`--orch` 再挂一格 `hive view` 只读镜像;human `hive attach <run>` 看全场。看板的串并行分组直接来自节点的 `--phase`,不用另写任何文件。跑完 `hive flow rig <run> --down`(kill 全部成员 + 删 team + 杀 session),或留团供追问、拆时再清。
 
-成员生命周期归你:workflow 结束后成员还活着,同名节点再跑一次会复用活成员(带上下文);不要了就 `hive kill <name>` 或 `--down`。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的三步(后台跑命令、等完成、原样返回 JSON)直接内联进 prompt 也一样跑。
+成员生命周期归你:workflow 结束后成员还活着,同名节点再跑一次会复用活成员(带上下文);不要了就 `hive kill <name>` 或 `--down`。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的三步(后台起命令、循环等 exit 文件、原样返回 JSON)直接内联进 prompt 也一样跑。
 
 ## git / 集成纪律
 
