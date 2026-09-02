@@ -130,11 +130,14 @@ def rig():
 
         wf = r.root / "workflow.js"
         task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
+        # agent() resolves to the reply ({body, artifact, msgId}); the
+        # member's name is the script's own knowledge.
         thunk_lines = "".join(
             "  () => agent("
             + json.dumps(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)), ensure_ascii=False)
             + ", { name: " + json.dumps(r.member(c))
-            + ", cli: " + json.dumps(c) + " }),\n"
+            + ", cli: " + json.dumps(c) + " })"
+            + ".then((reply) => ({ name: " + json.dumps(r.member(c)) + ", summary: reply.body })),\n"
             for c in r.clis
         )
         wf.write_text(
@@ -160,7 +163,9 @@ def rig():
             timeout=int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420")),
             env=env,
         )
-        r.flow_stdout, r.flow_rc = proc.stdout + proc.stderr[-500:], proc.returncode
+        # progress ([flow] lines, RESULT logs) rides stderr; stdout is the
+        # script's return value
+        r.flow_stdout, r.flow_rc = proc.stdout + proc.stderr[-3000:], proc.returncode
 
         db = r.workspace / "hive.db"
         if db.exists():
