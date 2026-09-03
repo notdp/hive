@@ -42,7 +42,10 @@ pub fn request_send_payload(
     );
     let payload = match payload {
         Some(p) if !p.is_empty() => p,
-        _ => bail!("hived unavailable"),
+        _ => bail!(
+            "{}",
+            crate::devlog::hived_unavailable_message(Path::new(workspace))
+        ),
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
         let error = match payload.get("error") {

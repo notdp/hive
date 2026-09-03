@@ -69,8 +69,18 @@ pub fn _run_dir_impl(workspace: &str) -> PathBuf {
     devlog::run_dir(Path::new(workspace))
 }
 
+/// The socket hived binds and clients connect to. Relocates out of the
+/// workspace when the in-tree path would overflow `sun_path`
+/// (`devlog::hived_socket_path_in`); `_socket_link_path` is the in-tree
+/// name either way.
 pub fn _socket_path(workspace: &str) -> PathBuf {
-    hooked_run_dir(workspace).join("hived.sock")
+    devlog::hived_socket_path_in(&hooked_run_dir(workspace))
+}
+
+/// `<run dir>/hived.sock`: the socket itself when it fits, a symlink to the
+/// relocated socket when it does not.
+pub fn _socket_link_path(workspace: &str) -> PathBuf {
+    devlog::hived_socket_link_path(&hooked_run_dir(workspace))
 }
 
 pub fn _lock_path(workspace: &str) -> PathBuf {
@@ -169,5 +179,15 @@ pub fn _cleanup_socket_if_owner(workspace: &str, owner_token: &str) {
 }
 
 pub fn _cleanup_socket_impl(workspace: &str) {
-    let _ = fs::remove_file(_socket_path(workspace));
+    let sock = _socket_path(workspace);
+    let link = _socket_link_path(workspace);
+    let _ = fs::remove_file(&sock);
+    if link != sock {
+        let _ = fs::remove_file(&link);
+        // the per-workspace directory under /tmp/hive-<uid> is ours alone;
+        // remove_dir only succeeds once it is empty
+        if let Some(dir) = sock.parent() {
+            let _ = fs::remove_dir(dir);
+        }
+    }
 }

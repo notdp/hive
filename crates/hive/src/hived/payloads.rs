@@ -218,7 +218,15 @@ pub fn _send_payload(
     // tracked in-between, no confirmation oracle, and nothing to poll. A
     // claude member mid-turn queues the message itself (`priority: next`
     // folds it in at the next tool boundary) — no hived hold on top.
-    if let Err(exc) = hooked_agent_send(&target, &envelope) {
+    // The transport's origin label is the message author, qualified so a
+    // Claude session outside the team can address it back verbatim. A guest
+    // or ccd sender already carries its prefix.
+    let sender_label = if sender_agent.contains('.') {
+        sender_agent.to_string()
+    } else {
+        format!("{team_name}.{sender_agent}")
+    };
+    if let Err(exc) = hooked_agent_send(&target, &envelope, &sender_label) {
         let mut refused = Map::new();
         refused.insert("ok".to_string(), Value::Bool(false));
         refused.insert(

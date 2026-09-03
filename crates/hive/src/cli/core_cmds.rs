@@ -33,6 +33,14 @@ pub fn create(
     if reset_workspace && workspace.is_empty() {
         fail("--reset-workspace requires --workspace");
     }
+    // Before the registry row exists: a workspace whose hived socket path
+    // cannot bind would otherwise leave a registered team nobody can reach.
+    if !workspace.is_empty() {
+        if let Err(reason) = crate::devlog::check_socket_path_len(Path::new(&expanduser(workspace)))
+        {
+            fail(&reason);
+        }
+    }
     if !tmux::is_inside_tmux() {
         let team_name = if name.is_empty() {
             _pick_team_name("", "", "0")
@@ -1360,7 +1368,7 @@ pub fn doctor(agent_name: &str) {
     let payload = crate::hived::request_doctor(&ws, &t.name, &target_name, true);
     let mut payload = match payload {
         Some(payload) if !payload.is_empty() => payload,
-        _ => fail("hived unavailable"),
+        _ => fail(&crate::devlog::hived_unavailable_message(Path::new(&ws))),
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
         let error = match payload.get("error") {

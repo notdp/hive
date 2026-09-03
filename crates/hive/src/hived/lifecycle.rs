@@ -188,8 +188,27 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         ],
     );
     let mut inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env();
-    let Ok(mut server) = hooked_open_server_socket(workspace) else {
-        return;
+    let mut server = match hooked_open_server_socket(workspace) {
+        Ok(server) => server,
+        Err(err) => {
+            // stderr is the hived.stderr log; the notify line is what
+            // `hive spawn` / `hive send` surface behind "hived unavailable".
+            // A silent exit here once cost hours: an over-long workspace
+            // path failed `bind` and every command just said unavailable.
+            let socket = _socket_path(workspace).display().to_string();
+            eprintln!("hived: cannot open server socket {socket}: {err}");
+            hooked_notify_debug_emit(
+                workspace,
+                "hived.socket_bind_failed",
+                &[
+                    ("team", Value::from(team)),
+                    ("socket", Value::from(socket)),
+                    ("error", Value::from(err.to_string())),
+                ],
+            );
+            hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
+            return;
+        }
     };
     hooked_write_hived_owner(workspace, getpid(), &hived_started_at, &owner_token);
     hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);

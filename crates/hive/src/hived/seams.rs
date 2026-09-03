@@ -579,12 +579,13 @@ pub(super) fn hooked_agent_is_alive(agent: &Agent) -> bool {
 pub(super) fn hooked_agent_send(
     agent: &Agent,
     text: &str,
+    sender: &str,
 ) -> std::result::Result<String, DeliveryError> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.agent_send.clone()).flatten() {
-        return f(agent, text);
+        return f(agent, text, sender);
     }
-    agent.send(text)
+    agent.send_from(text, sender)
 }
 
 // --- self seams (Python monkeypatches on hive.hived itself) ---------------

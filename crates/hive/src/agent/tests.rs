@@ -1060,16 +1060,36 @@ fn test_send_claude_writes_to_the_engine_inbox_as_the_member_address() {
     // the engine's own session id rides the frame: claude drops a
     // mismatching one, so a recycled socket cannot take a dead session's
     // mail
+    // no author named: the frame's origin is the team, never the recipient
     assert_eq!(
         hook(|h| h.inbox_writes.clone()),
         vec![(
             engine.socket_path.clone(),
             "hi".to_string(),
-            "t.w".to_string(),
+            "t".to_string(),
             engine.session_id.clone()
         )]
     );
     assert!(calls().is_empty()); // native transport only — the composer is never touched
+}
+
+#[test]
+fn test_send_from_labels_the_inbox_frame_with_the_author_not_the_recipient() {
+    // The frame's `from` is what the human's message card shows. It used to
+    // be the recipient's own address, so every card read "Message from
+    // <me>" whoever wrote it.
+    let _guard = setup();
+    pin_cli_probe("claude");
+    let engine = fake_engine(4321, "abcd1234", "sess-registry");
+    pin_job(&engine.job_id.clone(), engine.clone());
+    hook(|h| h.sessions_send = Some(claude_sessions::ACCEPTED_UDS_WRITE));
+    member("w", "t", "%3", "claude")
+        .send_from("hi", "t.author")
+        .unwrap();
+    let writes = hook(|h| h.inbox_writes.clone());
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].2, "t.author");
+    assert_ne!(writes[0].2, "t.w");
 }
 
 #[test]
@@ -1141,7 +1161,7 @@ fn test_send_claude_asleep_engine_is_woken_then_delivered() {
         vec![(
             engine.socket_path.clone(),
             "hi".to_string(),
-            "t.w".to_string(),
+            "t".to_string(), // no author named: the team is the origin
             engine.session_id.clone()
         )]
     );
@@ -1876,12 +1896,15 @@ fn test_headless_claude_session_send_uses_inbox_socket_fallback() {
         h.sessions_send = Some("accepted");
     });
     assert_eq!(
-        headless("claude", Some("ccd-sid-1")).send("hi").unwrap(),
+        headless("claude", Some("ccd-sid-1"))
+            .send_from("hi", "t.orch")
+            .unwrap(),
         "accepted"
     );
     let writes = hook(|h| h.inbox_writes.clone());
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].0, "/tmp/ccd.sock");
+    assert_eq!(writes[0].2, "t.orch"); // the author, not the headless recipient
     assert_eq!(writes[0].3, "ccd-sid-1");
 }
 
