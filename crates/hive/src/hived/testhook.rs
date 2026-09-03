@@ -103,7 +103,7 @@ pub struct Hook {
     pub agent_is_alive: Option<Arc<dyn Fn(&Agent) -> bool + Send + Sync>>,
     #[allow(clippy::type_complexity)]
     pub agent_send:
-        Option<Arc<dyn Fn(&Agent, &str) -> Result<String, DeliveryError> + Send + Sync>>,
+        Option<Arc<dyn Fn(&Agent, &str, &str) -> Result<String, DeliveryError> + Send + Sync>>,
     // hived self-seams
     #[allow(clippy::type_complexity)]
     pub resolve_live_agent:

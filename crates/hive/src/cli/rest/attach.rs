@@ -416,7 +416,9 @@ pub fn thread(message_id: &str) {
     let payload = crate::hived::request_thread(&ws, message_id);
     let mut payload = match payload {
         Some(payload) if !payload.is_empty() => payload,
-        _ => fail("hived unavailable"),
+        _ => fail(&crate::devlog::hived_unavailable_message(
+            std::path::Path::new(&ws),
+        )),
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
         let error = match payload.get("error") {

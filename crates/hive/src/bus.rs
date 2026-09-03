@@ -227,6 +227,9 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
 
 pub fn init_workspace(workspace: impl AsRef<Path>) -> Result<PathBuf> {
     let ws = expanduser(workspace.as_ref());
+    if let Err(reason) = crate::devlog::check_socket_path_len(&ws) {
+        bail!("{reason}");
+    }
     for name in WORKSPACE_DIRS {
         fs::create_dir_all(ws.join(name))?;
     }
@@ -236,6 +239,9 @@ pub fn init_workspace(workspace: impl AsRef<Path>) -> Result<PathBuf> {
 
 pub fn reset_workspace(workspace: impl AsRef<Path>) -> Result<PathBuf> {
     let ws = expanduser(workspace.as_ref());
+    if let Err(reason) = crate::devlog::check_socket_path_len(&ws) {
+        bail!("{reason}");
+    }
     fs::create_dir_all(&ws)?;
     for name in WORKSPACE_DIRS.iter().chain(LEGACY_WORKSPACE_DIRS.iter()) {
         let root = ws.join(name);
@@ -470,6 +476,20 @@ mod tests {
     fn assert_created_at_shape(created_at: &str) {
         assert_eq!(created_at.len(), 20, "createdAt = {created_at}");
         assert!(created_at.ends_with('Z'), "createdAt = {created_at}");
+    }
+
+    #[test]
+    fn test_init_workspace_accepts_a_path_too_long_for_an_in_tree_socket() {
+        // the hived socket relocates for such a workspace; init must not
+        // turn a deep scratch directory into a refusal
+        let tmp = TempDir::new().unwrap();
+        let long = tmp
+            .path()
+            .join("x".repeat(crate::devlog::max_socket_path_len()));
+        let ws = init_workspace(&long).unwrap();
+        assert!(ws.join("run").is_dir());
+        assert!(crate::devlog::hived_socket_is_relocated(&ws.join("run")));
+        reset_workspace(&long).unwrap();
     }
 
     #[test]

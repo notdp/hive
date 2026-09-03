@@ -23,6 +23,18 @@ impl Agent {
     /// agent processed the message — that final confirmation only ever comes
     /// from the target's transcript.
     pub fn send(&self, text: &str) -> Result<String, DeliveryError> {
+        // No sender known: the origin label falls back to the team, never to
+        // the target's own address (see `send_from`).
+        self.send_from(text, "")
+    }
+
+    /// `send` with the message's real origin. *sender* is what a claude
+    /// inbox frame shows as `from` — the human's message card reads it —
+    /// so it must be the message's author (`<team>.<member>`), not the
+    /// recipient. Empty falls back to the bare team name: a truthful
+    /// origin when hive itself speaks (join notices, spawn prompts).
+    pub fn send_from(&self, text: &str, sender: &str) -> Result<String, DeliveryError> {
+        let sender = self.origin_label(sender);
         // A claude member's engine is not on the pane TTY at all: the pane's
         // job record is its address, and a parked engine (supervisor idles
         // jobs after ~1h) is woken in-line — so a probe that sees nothing is
@@ -32,7 +44,7 @@ impl Agent {
         // never route into a stale `hive-pane-<n>.job`, whichever way the
         // probe happens to read that pane.
         if self.pane_id.is_empty() {
-            return self._send_headless(text);
+            return self._send_headless(text, &sender);
         }
         let probe = hooked_detect_cli_process_for_pane(&self.pane_id);
         let profile_name = probe.as_ref().map(|p| p.name).unwrap_or_default();
@@ -47,7 +59,7 @@ impl Agent {
         }
         if claude_member {
             if let Some(job_id) = hooked_job_id_for_pane(&self.pane_id).filter(|j| !j.is_empty()) {
-                return self._deliver_claude_job(&job_id, text);
+                return self._deliver_claude_job(&job_id, text, &sender);
             }
         }
         if profile_name == "codex" {
@@ -80,7 +92,7 @@ impl Agent {
             // address, only the picture.
             let sid = self.session_id.clone().unwrap_or_default();
             if !sid.is_empty() && hooked_job_row(&sid).is_none() {
-                return self._deliver_claude_session(&sid, text);
+                return self._deliver_claude_session(&sid, text, &sender);
             }
             return Err(DeliveryError(format!(
                 "claude pane {} has no bg job record; a hive \
@@ -110,7 +122,23 @@ impl Agent {
         )))
     }
 
-    fn _deliver_claude_job(&self, job_id: &str, text: &str) -> Result<String, DeliveryError> {
+    /// Origin label for a claude inbox frame: the sender as given, or the
+    /// team name when nobody is named. Never `self` — this agent is the
+    /// recipient.
+    fn origin_label(&self, sender: &str) -> String {
+        if sender.is_empty() {
+            self.team_name.clone()
+        } else {
+            sender.to_string()
+        }
+    }
+
+    fn _deliver_claude_job(
+        &self,
+        job_id: &str,
+        text: &str,
+        sender: &str,
+    ) -> Result<String, DeliveryError> {
         let where_ = if !self.pane_id.is_empty() {
             format!("pane {}", self.pane_id)
         } else {
@@ -136,12 +164,8 @@ impl Agent {
         if let Some(accepted) = hooked_daemon_reply(&engine.session_id, text) {
             return Ok(accepted.to_string());
         }
-        let accepted = hooked_claude_sessions_send(
-            &engine.socket_path,
-            text,
-            &format!("{}.{}", self.team_name, self.name),
-            &engine.session_id,
-        );
+        let accepted =
+            hooked_claude_sessions_send(&engine.socket_path, text, sender, &engine.session_id);
         match accepted {
             Some(a) if a == claude_sessions::WRITE_TIMED_OUT => Err(DeliveryError(format!(
                 "claude job '{job_id}' ({where_}) accepted the connection \
@@ -163,6 +187,7 @@ impl Agent {
         &self,
         session_id: &str,
         text: &str,
+        sender: &str,
     ) -> Result<String, DeliveryError> {
         if let Some(accepted) = hooked_daemon_reply(session_id, text) {
             return Ok(accepted.to_string());
@@ -178,12 +203,7 @@ impl Agent {
                 self.name
             )));
         };
-        let accepted = hooked_claude_sessions_send(
-            &live.socket_path,
-            text,
-            &format!("{}.{}", self.team_name, self.name),
-            session_id,
-        );
+        let accepted = hooked_claude_sessions_send(&live.socket_path, text, sender, session_id);
         match accepted {
             Some(a) if a != claude_sessions::WRITE_TIMED_OUT => Ok(a.to_string()),
             _ => Err(DeliveryError(format!(
@@ -199,7 +219,7 @@ impl Agent {
     /// Identity comes from the registry row (claude jobId / codex threadId /
     /// grok member key) — there is no pane to probe, and nothing to guard
     /// against pane-id recycling.
-    fn _send_headless(&self, text: &str) -> Result<String, DeliveryError> {
+    fn _send_headless(&self, text: &str, sender: &str) -> Result<String, DeliveryError> {
         if self.cli == "claude" {
             let sid = self.session_id.clone().unwrap_or_default();
             if sid.is_empty() {
@@ -210,9 +230,9 @@ impl Agent {
                 )));
             }
             if hooked_job_row(&sid).is_some() {
-                return self._deliver_claude_job(&sid, text);
+                return self._deliver_claude_job(&sid, text, sender);
             }
-            return self._deliver_claude_session(&sid, text);
+            return self._deliver_claude_session(&sid, text, sender);
         }
         if self.cli == "codex" {
             let thread_id = self.session_id.clone().unwrap_or_default();

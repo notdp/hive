@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
@@ -58,7 +59,21 @@ impl HivedServerApi for ServerSocket {
 pub fn _open_server_socket(workspace: &str) -> Result<ServerSocket> {
     fs::create_dir_all(hooked_run_dir(workspace))?;
     _cleanup_socket_impl(workspace);
-    let listener = UnixListener::bind(_socket_path(workspace))?;
+    let sock = _socket_path(workspace);
+    let link = _socket_link_path(workspace);
+    if sock != link {
+        // Relocated socket: its directory is ours alone (0700), and the
+        // in-tree name points at it so a human looking in run/ still
+        // finds the socket.
+        if let Some(dir) = sock.parent() {
+            fs::create_dir_all(dir)?;
+            let _ = fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let listener = UnixListener::bind(&sock)?;
+    if sock != link {
+        let _ = std::os::unix::fs::symlink(&sock, &link);
+    }
     listener.set_nonblocking(true)?;
     Ok(ServerSocket {
         listener: Mutex::new(Some(listener)),

@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -3373,6 +3374,123 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
 }
 
 #[test]
+fn test_open_server_socket_relocates_and_links_for_a_long_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp
+        .path()
+        .join("w".repeat(crate::devlog::max_socket_path_len()));
+    let workspace = workspace.to_string_lossy().to_string();
+    let sock = _socket_path(&workspace);
+    let link = _socket_link_path(&workspace);
+    assert_ne!(
+        sock, link,
+        "a workspace this deep cannot host its socket in tree"
+    );
+    assert!(sock.as_os_str().len() <= crate::devlog::max_socket_path_len());
+
+    let server = _open_server_socket(&workspace).unwrap();
+    assert!(sock.exists(), "real socket bound at {}", sock.display());
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        sock,
+        "run/hived.sock points at it"
+    );
+    let mode = fs::metadata(sock.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    // a client derives the same path from the workspace alone and gets through
+    let ws_client = workspace.clone();
+    let client = thread::spawn(move || _request_hived(&ws_client, &action_payload("ping"), 5.0));
+    let conn = server
+        .accept_timeout(5.0)
+        .expect("client connected to the relocated socket");
+    let mut conn = conn;
+    let mut buf = [0u8; 65536];
+    loop {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue, // drain until the client half-closes
+        }
+    }
+    (&conn).write_all(b"{\"ok\": true}\n").unwrap();
+    drop(conn);
+    let response = client
+        .join()
+        .unwrap()
+        .expect("ping answered over the relocated socket");
+    assert_eq!(response.get("ok"), Some(&Value::Bool(true)));
+
+    server.close();
+    _cleanup_socket_impl(&workspace);
+    assert!(!sock.exists());
+    assert!(
+        fs::symlink_metadata(&link).is_err(),
+        "the symlink is cleaned up too"
+    );
+    assert!(
+        !sock.parent().unwrap().exists(),
+        "the relocated directory does not linger under /tmp"
+    );
+}
+
+#[test]
+fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    std::env::set_var(_HIVED_REEXEC_LOCK_ENV, "78");
+    let workspace = tmp.path().to_string_lossy().to_string();
+    let events: Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let released: Arc<Mutex<Vec<Option<i32>>>> = Arc::new(Mutex::new(Vec::new()));
+    let release_sink = Arc::clone(&released);
+    let hook = Hook {
+        open_server_socket: Some(Arc::new(|_workspace| {
+            Err(anyhow::anyhow!("File name too long (os error 63)"))
+        })),
+        release_reexec_lock_fd: Some(Arc::new(move |fd| release_sink.lock().unwrap().push(fd))),
+        cleanup_socket: Some(Arc::new(|_workspace| {})),
+        is_tmux_window_alive: Some(Arc::new(|_id| false)),
+        make_busy_monitor: Some(Arc::new(|_session| None)),
+        notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
+            sink.lock().unwrap().push((
+                event.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    _hived_loop(&workspace, "team-a", "", "");
+
+    let events = events.lock().unwrap();
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(names, vec!["hived.start", "hived.socket_bind_failed"]);
+    let fields = &events[1].1;
+    let get = |k: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(get("team"), Some(Value::from("team-a")));
+    assert!(get("socket")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .ends_with("run/hived.sock"));
+    assert!(get("error").unwrap().as_str().unwrap().contains("too long"));
+    // the inherited reexec lock is not leaked on the failure path either
+    assert_eq!(*released.lock().unwrap(), vec![Some(78)]);
+}
+
+#[test]
 fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
@@ -3585,7 +3703,9 @@ fn test_accepted_send_returns_identity_only() {
     bus::init_workspace(&workspace).unwrap();
     let mut hook = Hook::default();
     wire_send(&mut hook, &workspace);
-    hook.agent_send = Some(Arc::new(|_agent, _text| Ok("udsWriteAccepted".to_string())));
+    hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
+        Ok("udsWriteAccepted".to_string())
+    }));
     let _guard = testhook::install(hook);
 
     let payload = send_payload_for_test(&workspace, "a", "b", "hi", "", "");
@@ -3604,13 +3724,44 @@ fn test_accepted_send_returns_identity_only() {
 }
 
 #[test]
+fn test_send_hands_the_transport_the_qualified_author() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.agent_send = Some(Arc::new(move |_agent, _text, sender| {
+        sink.lock().unwrap().push(sender.to_string());
+        Ok("udsWriteAccepted".to_string())
+    }));
+    let _guard = testhook::install(hook);
+
+    send_payload_for_test(&workspace, "yoyo", "orch", "hi", "", "");
+    send_payload_for_test(&workspace, "other.guest", "orch", "hi", "", "");
+    send_payload_for_test(&workspace, "ccd.desk", "orch", "hi", "", "");
+
+    // bare member names get the team prefix; guests and ccd senders are
+    // already qualified and travel as-is
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "team-x.yoyo".to_string(),
+            "other.guest".to_string(),
+            "ccd.desk".to_string()
+        ]
+    );
+}
+
+#[test]
 fn test_refused_send_fails_synchronously() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     bus::init_workspace(&workspace).unwrap();
     let mut hook = Hook::default();
     wire_send(&mut hook, &workspace);
-    hook.agent_send = Some(Arc::new(|_agent, _text| {
+    hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
         Err(DeliveryError("no channel".to_string()))
     }));
     let _guard = testhook::install(hook);
@@ -3635,7 +3786,7 @@ fn test_three_message_busy_incident_regression() {
     let sink = Arc::clone(&delivered);
     let mut hook = Hook::default();
     wire_send(&mut hook, &workspace);
-    hook.agent_send = Some(Arc::new(move |_agent, text| {
+    hook.agent_send = Some(Arc::new(move |_agent, text, _sender| {
         sink.lock().unwrap().push(text.to_string());
         Ok("udsWriteAccepted".to_string())
     }));

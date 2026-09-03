@@ -230,10 +230,13 @@ impl Agent {
                     // Resume carries no launch prompt; hand it over on the
                     // daemon reply lane, inbox as fallback (best-effort).
                     if hooked_daemon_reply(&engine.session_id, &initial_prompt).is_none() {
+                        // The frame's `from` is the human's message-card
+                        // label: hive is speaking here, not the member
+                        // being resumed, so the team is the origin.
                         hooked_claude_sessions_send(
                             &engine.socket_path,
                             &initial_prompt,
-                            &format!("{team_name}.{name}"),
+                            team_name,
                             &engine.session_id,
                         );
                     }
