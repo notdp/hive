@@ -145,6 +145,17 @@ fn map_entry_str(value: &Value) -> String {
     }
 }
 
+/// The protocol asks a tmux-less Claude session to badge its own title so
+/// the human and `hive ccd ls` can tell it apart; there is no API hive can
+/// call for that, so the command output carries the reminder — an orch that
+/// skipped it was the first thing a human noticed.
+fn _title_badge_hint(badge: &str) -> String {
+    format!(
+        "Rename this session now: prefix its title with `{badge}` (set_session_title \
+         or your host's rename), and drop the prefix when you leave the team."
+    )
+}
+
 /// Create a team with no display: a registry entry plus its workspace.
 ///
 /// The registry is the team's existence; a tmux window is a later, optional
@@ -218,6 +229,7 @@ fn _create_headless_team(
     println!("Team '{name}' created (headless — `hive attach {name}` renders it).");
     if orch_member.is_some() {
         println!("You are {name}.{LEAD_AGENT_NAME}.");
+        println!("{}", _title_badge_hint(&format!("[{name}] ")));
     } else if let Some(creator) = creator.as_ref().filter(|c| !c.session_id.is_empty()) {
         if let Some((e_team, e_name)) = _registry_member_for_session(&creator.session_id) {
             println!("You are already {e_team}.{e_name} — orchestrating '{name}' as a guest.");
@@ -694,6 +706,10 @@ fn _join_as_ccd(team_name: &str, name_override: &str) {
     row.insert("cwd".to_string(), Value::String(getcwd()));
     let _ = crate::registry::record_member(team_name, &row, "");
     println!("joined: {team_name}.{member_name}");
+    println!(
+        "{}",
+        _title_badge_hint(&format!("[{team_name}.{member_name}] "))
+    );
 }
 
 // ---------------------------------------------------------------------------
