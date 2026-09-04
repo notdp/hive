@@ -354,10 +354,19 @@ reverse-engineering it from the transcript.
   every thread, so identity is the threadId and not the process env; codex
   injects the thread's own id into tool subprocesses instead, and per-pane
   records map threads to panes both ways.
-- **Flushing a minted thread.** A minted thread must be flushed before it is
-  resumable: `thread/start` alone leaves the thread unpersisted and a later
-  resume fails with no rollout found; the follow-up name write flushes it to
-  disk. An unflushed thread is treated as a spawn failure.
+- **Flushing a minted thread.** A minted thread must have its rollout on
+  disk before the pane TUI can resume it. The daemon writes the rollout
+  lazily (deferred until the first turn), and the TUI resumes in
+  paginated-history mode (`thread/resume {excludeTurns}`), which reads the
+  source rollout from disk and fails on a thread that has none — while the
+  daemon's own bare `thread/resume` on the same loaded thread succeeds. The
+  name write is state-DB metadata and never materializes the file; a
+  `thread/section/move` to the null section does (the daemon materializes
+  and flushes before any placement so placement works ahead of the first
+  turn), and leaves only the session header in the file. Hive's contract is
+  the file itself: after the flush it checks the path `thread/start`
+  reported, and a missing file is a spawn failure. Verified on codex 0.153.2;
+  which call materializes has not been stable across codex versions.
 - **Trust in remote mode.** It is read from the daemon's config on disk, not
   from the client, so every new cwd gets its trust entry written before its
   thread starts.

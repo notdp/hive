@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
@@ -377,16 +378,44 @@ fn test_runtime_or_backfill_returns_backfilled_state() {
 
 // --- mint / fork protocol -----------------------------------------------
 
-#[test]
-fn test_start_thread_mints_and_flushes() {
-    let client = _bare_client();
-    let calls = recording_override(&client, |method| {
-        if method == "thread/start" {
-            json!({"result": {"thread": {"id": "tid-new", "status": {"type": "idle"}}}})
+/// A fake daemon for the mint: `thread/start` (or `thread/fork`) answers
+/// with a thread whose rollout path is *rollout*, and `thread/section/move`
+/// materializes that file the way the real daemon does. Everything else is
+/// an empty success.
+fn _minting_daemon(
+    start_method: &'static str,
+    thread: Value,
+    rollout: PathBuf,
+    materializes: bool,
+) -> impl Fn(&str) -> Value + Send + 'static {
+    move |method| {
+        if method == start_method {
+            let mut thread = thread.clone();
+            thread["path"] = json!(rollout.to_string_lossy());
+            json!({"result": {"thread": thread}})
         } else {
+            if method == "thread/section/move" && materializes {
+                fs::write(&rollout, "{}\n").unwrap();
+            }
             json!({"result": {}})
         }
-    });
+    }
+}
+
+#[test]
+fn test_start_thread_mints_and_flushes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rollout = tmp.path().join("rollout-tid-new.jsonl");
+    let client = _bare_client();
+    let calls = recording_override(
+        &client,
+        _minting_daemon(
+            "thread/start",
+            json!({"id": "tid-new", "status": {"type": "idle"}}),
+            rollout.clone(),
+            true,
+        ),
+    );
     assert_eq!(
         client
             .start_thread("/work", "honey.val", "gpt-x")
@@ -401,8 +430,9 @@ fn test_start_thread_mints_and_flushes() {
             json!({"cwd": "/work", "model": "gpt-x"})
         )
     );
-    // name/set is the rollout flush: without it the TUI's `codex resume
-    // <tid>` fails with `no rollout found` (0.149.0 real-machine verified).
+    // the flush: name (metadata only), then a null-section placement, which
+    // is what makes the daemon write the rollout ahead of the first turn —
+    // the pane TUI's paginated resume reads that file (real-machine verified)
     assert_eq!(
         calls[1],
         (
@@ -410,20 +440,82 @@ fn test_start_thread_mints_and_flushes() {
             json!({"threadId": "tid-new", "name": "honey.val"})
         )
     );
+    assert_eq!(
+        calls[2],
+        (
+            "thread/section/move".to_string(),
+            json!({"threadId": "tid-new", "sectionId": null})
+        )
+    );
+    assert_eq!(calls.len(), 3);
+    assert!(rollout.is_file());
     // the mint seeds the runtime so a fresh member reads idle, not unknown
     assert!(client.runtime_for("tid-new").is_some());
 }
 
 #[test]
-fn test_start_thread_without_model_omits_param() {
+fn test_start_thread_fails_when_the_placement_is_refused() {
+    // a thread whose rollout never materialized is not attachable: the
+    // spawn must fail rather than hand out a thread id the TUI cannot resume
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rollout = tmp.path().join("rollout-tid-new.jsonl");
     let client = _bare_client();
-    let calls = recording_override(&client, |method| {
+    let _calls = recording_override(&client, move |method| match method {
+        "thread/start" => json!({"result": {"thread": {
+            "id": "tid-new", "status": {"type": "idle"}, "path": rollout.to_string_lossy()
+        }}}),
+        "thread/section/move" => {
+            json!({"__error__": "ephemeral thread does not support section moves"})
+        }
+        _ => json!({"result": {}}),
+    });
+    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+}
+
+#[test]
+fn test_start_thread_fails_when_the_rollout_never_appears() {
+    // every call succeeds but no file lands: whichever call is supposed to
+    // materialize the rollout, the file on disk is the contract the TUI needs
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rollout = tmp.path().join("rollout-tid-new.jsonl");
+    let client = _bare_client();
+    let _calls = recording_override(
+        &client,
+        _minting_daemon(
+            "thread/start",
+            json!({"id": "tid-new", "status": {"type": "idle"}}),
+            rollout.clone(),
+            false,
+        ),
+    );
+    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+    assert!(!rollout.exists());
+}
+
+#[test]
+fn test_start_thread_fails_without_a_rollout_path() {
+    // a daemon that reports no path leaves nothing to verify: refuse rather
+    // than trust a thread the TUI may not find
+    let client = _bare_client();
+    let _calls = recording_override(&client, |method| {
         if method == "thread/start" {
-            json!({"result": {"thread": {"id": "t"}}})
+            json!({"result": {"thread": {"id": "tid-new", "status": {"type": "idle"}}}})
         } else {
             json!({"result": {}})
         }
     });
+    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+}
+
+#[test]
+fn test_start_thread_without_model_omits_param() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rollout = tmp.path().join("rollout-t.jsonl");
+    let client = _bare_client();
+    let calls = recording_override(
+        &client,
+        _minting_daemon("thread/start", json!({"id": "t"}), rollout, true),
+    );
     assert_eq!(client.start_thread("/work", "n", "").as_deref(), Some("t"));
     let calls = calls.lock().unwrap();
     let (_, start_params) = calls
@@ -440,7 +532,7 @@ fn test_start_thread_fails_when_flush_fails() {
     let client = _bare_client();
     client.set_call_override(|method, _params| {
         if method == "thread/start" {
-            json!({"result": {"thread": {"id": "t"}}})
+            json!({"result": {"thread": {"id": "t", "path": "/nonexistent/rollout-t.jsonl"}}})
         } else {
             json!({"__error__": "boom"})
         }
@@ -457,14 +549,18 @@ fn test_start_thread_fails_on_rpc_error() {
 
 #[test]
 fn test_fork_thread_returns_fork_id_and_flushes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rollout = tmp.path().join("rollout-tid-fork.jsonl");
     let client = _bare_client();
-    let calls = recording_override(&client, |method| {
-        if method == "thread/fork" {
-            json!({"result": {"thread": {"id": "tid-fork", "forkedFromId": "tid-src"}}})
-        } else {
-            json!({"result": {}})
-        }
-    });
+    let calls = recording_override(
+        &client,
+        _minting_daemon(
+            "thread/fork",
+            json!({"id": "tid-fork", "forkedFromId": "tid-src"}),
+            rollout.clone(),
+            true,
+        ),
+    );
     assert_eq!(
         client.fork_thread("tid-src", "clone").as_deref(),
         Some("tid-fork")
@@ -481,6 +577,14 @@ fn test_fork_thread_returns_fork_id_and_flushes() {
             json!({"threadId": "tid-fork", "name": "clone"})
         )
     );
+    assert_eq!(
+        calls[2],
+        (
+            "thread/section/move".to_string(),
+            json!({"threadId": "tid-fork", "sectionId": null})
+        )
+    );
+    assert!(rollout.is_file());
 }
 
 #[test]
