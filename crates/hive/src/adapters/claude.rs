@@ -82,19 +82,22 @@ impl SessionAdapter for ClaudeAdapter {
         }
         let candidate = format!("{session_id}.jsonl");
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            // Claude projects slug replaces path separators with "-".
             let direct = root.join(_cwd_slug(cwd)).join(&candidate);
             if direct.exists() {
                 return Some(direct);
             }
         }
-        let mut matches: Vec<PathBuf> = Vec::new();
-        _walk_files(&root, &mut |path| {
-            if path.file_name().and_then(|n| n.to_str()) == Some(candidate.as_str()) {
-                matches.push(path.to_path_buf());
-            }
-        });
-        matches.into_iter().next()
+        // Per-send gate path: one stat per project dir before the deep walk,
+        // which is the last resort for a session nested below a project dir.
+        _stat_project_dirs(&root, &candidate).or_else(|| {
+            let mut matches: Vec<PathBuf> = Vec::new();
+            _walk_files(&root, &mut |path| {
+                if path.file_name().and_then(|n| n.to_str()) == Some(candidate.as_str()) {
+                    matches.push(path.to_path_buf());
+                }
+            });
+            matches.into_iter().next()
+        })
     }
 
     fn list_sessions(&self, cwd: Option<&str>, limit: Option<usize>) -> Vec<SessionMeta> {
@@ -347,8 +350,27 @@ fn _is_claude_process(command: &str, argv: &str) -> bool {
         && _CLAUDE_TOKENS.contains(&normalize_command_token(parts[1]).as_str())
 }
 
+/// Claude's project-dir slug for a cwd. Observed rule (from real
+/// `~/.claude/projects` dirs against the `cwd` their transcripts record):
+/// every character outside `[A-Za-z0-9]` becomes `-`, so `/`, `.` and `_`
+/// all collapse — `/Users/x/.dotfiles/a_b` is `-Users-x--dotfiles-a-b`.
 fn _cwd_slug(cwd: &str) -> String {
-    cwd.replace('/', "-")
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Stat `<root>/<project>/<candidate>` for each top-level project dir; no
+/// recursion, so a miss costs one readdir plus one stat per project.
+fn _stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path().join(candidate))
+        .filter(|p| p.is_file())
+        .collect();
+    paths.sort();
+    paths.into_iter().next()
 }
 
 /// Recursive file walk standing in for `Path.rglob`.
@@ -494,20 +516,68 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("CLAUDE_HOME", tmp.path());
+        let cwd = "/Users/notdp/Developer/hive/.claude/worktrees/wt_1";
         let projects = tmp
             .path()
             .join("projects")
-            .join("-Users-notdp-Developer-hive");
+            .join("-Users-notdp-Developer-hive--claude-worktrees-wt-1");
         fs::create_dir_all(&projects).unwrap();
         let target = projects.join("cafe-babe.jsonl");
-        _write_claude_jsonl(&target, "cafe-babe", "/Users/notdp/Developer/hive");
+        _write_claude_jsonl(&target, "cafe-babe", cwd);
 
         let adapter = ClaudeAdapter;
-        let resolved = adapter.find_session_file("cafe-babe", Some("/Users/notdp/Developer/hive"));
-        assert_eq!(resolved, Some(target.clone()));
+        assert_eq!(
+            adapter.find_session_file("cafe-babe", Some(cwd)),
+            Some(target.clone())
+        );
 
-        // Also resolves via rglob when no cwd hint.
+        // Also resolves via the per-project stat when no cwd hint.
         assert_eq!(adapter.find_session_file("cafe-babe", None), Some(target));
+    }
+
+    #[test]
+    fn test_claude_cwd_slug_collapses_non_alphanumerics() {
+        assert_eq!(
+            _cwd_slug("/Users/notdp/Developer/hive"),
+            "-Users-notdp-Developer-hive"
+        );
+        assert_eq!(
+            _cwd_slug("/Users/notdp/.github-runners/ordo_ai/_work"),
+            "-Users-notdp--github-runners-ordo-ai--work"
+        );
+    }
+
+    #[test]
+    fn test_claude_find_session_file_dotted_cwd_hits_direct_without_walk() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAUDE_HOME", tmp.path());
+        let root = tmp.path().join("projects");
+        let cwd = "/Users/notdp/Developer/hive/.claude/worktrees/wt-1";
+        let projects = root.join("-Users-notdp-Developer-hive--claude-worktrees-wt-1");
+        fs::create_dir_all(&projects).unwrap();
+        let target = projects.join("cafe-babe.jsonl");
+        _write_claude_jsonl(&target, "cafe-babe", cwd);
+        // A same-named file nested deeper under another project sorts first
+        // for the walk; the direct hit must win without ever reaching it.
+        let decoy_dir = root.join("-Users-notdp-Developer-hive").join("nested");
+        fs::create_dir_all(&decoy_dir).unwrap();
+        let decoy = decoy_dir.join("cafe-babe.jsonl");
+        _write_claude_jsonl(&decoy, "cafe-babe", "/Users/notdp/Developer/hive/nested");
+
+        let adapter = ClaudeAdapter;
+        assert_eq!(
+            adapter.find_session_file("cafe-babe", Some(cwd)),
+            Some(target)
+        );
+        // Without a cwd hint the per-project stat still skips the nested decoy.
+        assert_eq!(
+            adapter.find_session_file("cafe-babe", None),
+            Some(projects.join("cafe-babe.jsonl"))
+        );
+        // The deep walk remains the last resort for a nested-only session.
+        fs::remove_file(projects.join("cafe-babe.jsonl")).unwrap();
+        assert_eq!(adapter.find_session_file("cafe-babe", None), Some(decoy));
     }
 
     #[test]

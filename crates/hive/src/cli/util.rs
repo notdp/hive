@@ -218,18 +218,17 @@ pub(crate) fn _discover_env_binding() -> Map<String, Value> {
     payload
 }
 
-/// Roster identity of the Claude session this process runs inside.
+/// Roster identity of the engine session this process runs inside.
 ///
 /// The last rung of the scope ladder: pane tags cover members with a
 /// display, `HIVE_TEAM`/`HIVE_MEMBER` cover spawned engines, but a session
 /// that created or joined a team headless carries neither — its scope lives
-/// only in the registry row keyed by its sessionId. This is the same
-/// authority `hive send` resolves guest senders by.
+/// only in the registry row keyed by its sessionId. Two engines key that
+/// row: a codex tool by its `CODEX_THREAD_ID` (restricted to codex rows),
+/// a Claude session by its messaging socket. This is the same authority
+/// `hive send` resolves guest senders and the codex-native gate by.
 pub(crate) fn _session_member_binding() -> Map<String, Value> {
-    let Some(session) = crate::adapters::claude_sessions::self_session() else {
-        return Map::new();
-    };
-    let Some((team, agent)) = _registry_member_for_session(&session.session_id) else {
+    let Some((team, agent)) = _codex_thread_member_env().or_else(_claude_session_member) else {
         return Map::new();
     };
     let workspace = crate::registry::load(&team)
@@ -244,6 +243,11 @@ pub(crate) fn _session_member_binding() -> Map<String, Value> {
     payload.insert("tmuxSession".to_string(), Value::String(String::new()));
     payload.insert("tmuxWindow".to_string(), Value::String(String::new()));
     payload
+}
+
+fn _claude_session_member() -> Option<(String, String)> {
+    let session = crate::adapters::claude_sessions::self_session()?;
+    _registry_member_for_session(&session.session_id)
 }
 
 pub(crate) fn _discover_tmux_binding() -> Map<String, Value> {
@@ -320,7 +324,36 @@ pub(crate) fn _resolve_sender(agent_name: Option<&str>) -> String {
         .filter(|n| !n.is_empty())
         .map(str::to_string)
         .or_else(_default_agent)
-        .unwrap_or_else(|| LEAD_AGENT_NAME.to_string())
+        .or_else(_unresolved_sender_fallback)
+        .unwrap_or_else(|| {
+            fail(
+                "cannot resolve own member identity: this engine is on no roster \
+                 (a codex thread or Claude session not recorded by any team) — \
+                 join a team first, or run from a bound pane",
+            )
+        })
+}
+
+/// Sender when the identity ladder resolves nothing.
+///
+/// Only a human in a plain tmux shell speaks as orch: the shell carries no
+/// engine marker and sits in a real tmux client. A process carrying an
+/// engine's marker (codex thread, Claude messaging socket, spawn env) or
+/// running with no tmux client at all is a member context, and an unresolved
+/// member must not sign as orch.
+fn _unresolved_sender_fallback() -> Option<String> {
+    let engine_marker = [
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "HIVE_TEAM",
+        "HIVE_MEMBER",
+    ]
+    .iter()
+    .any(|key| !env_string(key).trim().is_empty());
+    if engine_marker || env_string("TMUX").is_empty() {
+        return None;
+    }
+    Some(LEAD_AGENT_NAME.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -653,13 +686,11 @@ pub(crate) fn _augment_team_payload_with_runtime(
         return payload;
     }
     let _ = _ensure_team_hived(t, &ws);
-    let runtime = match crate::hived::request_team_runtime(&ws, &t.name) {
-        Some(r) if !r.is_empty() => r,
-        _ => return payload,
-    };
-    if runtime.get("ok") == Some(&Value::Bool(false)) {
+    let Some(runtime) =
+        crate::team::usable_runtime(crate::hived::request_team_runtime(&ws, &t.name))
+    else {
         return payload;
-    }
+    };
     let members_runtime = match runtime.get("members").and_then(Value::as_object) {
         Some(m) => m.clone(),
         None => return payload,
@@ -961,6 +992,104 @@ mod tests {
         std::env::remove_var("HIVE_MEMBER");
         std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_default_team_resolves_headless_codex_member() {
+        // A codex member spawned headless has no pane record, no spawn env,
+        // and no Claude socket; its CODEX_THREAD_ID keys a codex roster row.
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+        clear_tmux_env();
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("review".to_string()));
+        member.insert("cli".to_string(), Value::String("codex".to_string()));
+        member.insert(
+            "sessionId".to_string(),
+            Value::String("01aa-headless".to_string()),
+        );
+        assert_eq!(
+            crate::registry::record_team("rr", "/tmp/ws-rr", "1.0", &[member], "").unwrap(),
+            "written"
+        );
+        std::env::set_var("CODEX_THREAD_ID", "01aa-headless");
+
+        assert_eq!(_default_team().as_deref(), Some("rr"));
+        assert_eq!(_default_agent().as_deref(), Some("review"));
+        assert_eq!(_resolve_sender(None), "review");
+        let binding = _session_member_binding();
+        assert_eq!(map_str(&binding, "workspace"), "/tmp/ws-rr");
+        assert_eq!(map_str(&binding, "pane"), "");
+
+        // A thread on no roster resolves nothing.
+        std::env::set_var("CODEX_THREAD_ID", "01aa-ghost");
+        assert_eq!(_default_team(), None);
+        assert_eq!(_default_agent(), None);
+        std::env::remove_var("CODEX_THREAD_ID");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_codex_thread_ignores_claude_row_with_same_session_id() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+        clear_tmux_env();
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("orch".to_string()));
+        member.insert("cli".to_string(), Value::String("claude".to_string()));
+        member.insert(
+            "sessionId".to_string(),
+            Value::String("01aa-shared".to_string()),
+        );
+        crate::registry::record_team("wasp", "/tmp/ws-w", "1.0", &[member], "").unwrap();
+        std::env::set_var("CODEX_THREAD_ID", "01aa-shared");
+
+        assert_eq!(_default_team(), None);
+        assert_eq!(_default_agent(), None);
+        assert!(_session_member_binding().is_empty());
+        std::env::remove_var("CODEX_THREAD_ID");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_unresolved_sender_defaults_to_orch_only_for_tmux_shell() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_tmux_env();
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        // no tmux client, no engine marker: nothing to sign as
+        assert_eq!(_unresolved_sender_fallback(), None);
+        // a human shell inside a tmux client speaks as orch
+        std::env::set_var("TMUX", "/tmp/tmux-0/default,1,0");
+        assert_eq!(_unresolved_sender_fallback().as_deref(), Some("orch"));
+        // an engine marker makes it a member context even inside tmux
+        for key in [
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "HIVE_TEAM",
+            "HIVE_MEMBER",
+        ] {
+            std::env::set_var(key, "x");
+            assert_eq!(_unresolved_sender_fallback(), None, "{key}");
+            std::env::remove_var(key);
+        }
+        std::env::remove_var("TMUX");
     }
 
     #[test]

@@ -975,3 +975,89 @@ fn test_user_blocks_start_turns() {
     assert!(!out[0].block.starts_turn());
     assert!(out[1].block.starts_turn());
 }
+
+// ---- line accumulator: partial rows across reads ---------------------
+
+#[test]
+fn test_line_accumulator_row_written_in_two_chunks_parses_once() {
+    let row = format!("{}\n", _text("assistant", "two chunks"));
+    let (head, tail) = row.as_bytes().split_at(row.len() / 2);
+    let mut lines = LineAccumulator::new();
+    let mut p = TranscriptParser::new();
+    assert_eq!(lines.push(head), None);
+    let whole = lines.push(tail).expect("row completes on the newline");
+    let entries = p.push_entries(&whole);
+    assert_eq!(entries.len(), 1, "{whole}");
+    assert_eq!(whole, row.trim_end());
+}
+
+#[test]
+fn test_line_accumulator_row_cut_inside_a_multibyte_char_parses_once() {
+    let row = format!("{}\n", _text("assistant", "你好世界"));
+    let cut = row.find('好').unwrap() + 1;
+    assert!(!row.is_char_boundary(cut));
+    let (head, tail) = row.as_bytes().split_at(cut);
+    let mut lines = LineAccumulator::new();
+    assert_eq!(lines.push(head), None);
+    let whole = lines.push(tail).expect("row completes on the newline");
+    assert_eq!(whole, row.trim_end());
+    let mut p = TranscriptParser::new();
+    let entries = p.push_entries(&whole);
+    assert_eq!(entries.len(), 1, "{whole}");
+    match &entries[0].block {
+        DisplayBlock::Assistant(a) => assert_eq!(a.markdown, "你好世界"),
+        other => panic!("expected Assistant, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_line_accumulator_backlog_holds_trailing_partial_row() {
+    let first = _text("user", "first");
+    let second = _text("assistant", "second");
+    let cut = second.len() / 2;
+    let backlog = format!("{first}\n{}", &second[..cut]);
+    let mut lines = LineAccumulator::new();
+    let whole = lines.split_backlog(backlog.as_bytes());
+    assert_eq!(whole, vec![first.clone()]);
+    let mut p = TranscriptParser::new();
+    for raw in &whole {
+        p.push_entries(raw);
+    }
+    let rest = format!("{}\n", &second[cut..]);
+    let completed = lines
+        .push(rest.as_bytes())
+        .expect("remainder completes the row");
+    assert_eq!(completed, second);
+    assert_eq!(p.push_entries(&completed).len(), 1);
+}
+
+#[test]
+fn test_line_accumulator_backlog_holds_partial_row_cut_inside_a_char() {
+    let second = _text("assistant", "尾行");
+    let cut = second.find('尾').unwrap() + 2;
+    assert!(!second.is_char_boundary(cut));
+    let mut backlog = format!("{}\n", _text("user", "head")).into_bytes();
+    backlog.extend_from_slice(&second.as_bytes()[..cut]);
+    let mut lines = LineAccumulator::new();
+    let whole = lines.split_backlog(&backlog);
+    assert_eq!(whole.len(), 1);
+    let mut rest = second.as_bytes()[cut..].to_vec();
+    rest.push(b'\n');
+    assert_eq!(lines.push(&rest).as_deref(), Some(second.as_str()));
+}
+
+#[test]
+fn test_line_accumulator_complete_row_emits_immediately() {
+    let mut lines = LineAccumulator::new();
+    let row = _text("assistant", "whole");
+    assert_eq!(
+        lines.push(format!("{row}\n").as_bytes()).as_deref(),
+        Some(row.as_str())
+    );
+    assert_eq!(
+        lines.push(format!("{row}\r\n").as_bytes()).as_deref(),
+        Some(row.as_str())
+    );
+    let mut p = StreamPrinter::new();
+    assert!(p.push_rendered(&row).unwrap().contains("whole"));
+}

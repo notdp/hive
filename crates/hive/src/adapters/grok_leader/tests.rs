@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -29,6 +29,8 @@ thread_local! {
     static STDIO_SPAWN_OVERRIDE: RefCell<Option<StdioSpawn>> = RefCell::new(None);
     static DAEMON_SPAWN_OVERRIDE: RefCell<Option<DaemonSpawn>> = RefCell::new(None);
     static TERMINATE_PG_OVERRIDE: RefCell<Option<Box<dyn FnMut(libc::pid_t)>>> =
+        RefCell::new(None);
+    static PROCESS_ARGS_OVERRIDE: RefCell<Option<Box<dyn Fn(libc::pid_t) -> Option<String>>>> =
         RefCell::new(None);
     static ACK_TIMEOUT_OVERRIDE: Cell<Option<f64>> = const { Cell::new(None) };
 }
@@ -73,6 +75,11 @@ pub(super) fn terminate_pg_override(pid: libc::pid_t) -> bool {
     })
 }
 
+/// Outer None: no override, the real `ps` answers.
+pub(super) fn process_args_override(pid: libc::pid_t) -> Option<Option<String>> {
+    PROCESS_ARGS_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|f| f(pid)))
+}
+
 pub(super) fn ack_timeout_override() -> Option<f64> {
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.get())
 }
@@ -100,6 +107,30 @@ fn set_terminate_pg(record: impl FnMut(libc::pid_t) + 'static) {
     TERMINATE_PG_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(record)));
 }
 
+fn set_process_args(args: impl Fn(libc::pid_t) -> Option<String> + 'static) {
+    PROCESS_ARGS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(args)));
+}
+
+/// The command line of the leader that binds *sock*, as `ps` would print it.
+fn leader_args(sock: &std::path::Path) -> String {
+    format!(
+        "grok agent leader --leader-socket {} --no-auto-update --no-exit-on-disconnect",
+        sock.display()
+    )
+}
+
+/// Make *pid* look like the leader of *sock* to the identity check.
+fn set_leader_identity(pid: libc::pid_t, sock: &std::path::Path) {
+    let args = leader_args(sock);
+    set_process_args(move |seen| (seen == pid).then(|| args.clone()));
+}
+
+/// A live listener on *sock*, dropped when the guard goes.
+fn bind_leader_socket(sock: &std::path::Path) -> UnixListener {
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    UnixListener::bind(sock).unwrap()
+}
+
 /// Serialized test bed: env lock held, GROK_HOME pinned to a tempdir,
 /// key cache and every thread-local seam reset.
 struct TestBed {
@@ -114,6 +145,7 @@ fn setup() -> TestBed {
     STDIO_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     DAEMON_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     TERMINATE_PG_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    PROCESS_ARGS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.set(None));
     let tmp = tempfile::tempdir().unwrap();
     env::set_var("GROK_HOME", tmp.path());
@@ -1063,18 +1095,21 @@ fn test_list_daemon_keys_missing_dir() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn test_probe_socket_needs_socket_and_live_pid() {
+fn test_probe_socket_needs_a_listener() {
     let _bed = setup();
     let sock = pane_socket_path("%19");
     fs::create_dir_all(sock.parent().unwrap()).unwrap();
     assert!(!probe_socket(&sock)); // no socket
     fs::write(&sock, "").unwrap();
-    assert!(!probe_socket(&sock)); // no pidfile
+    assert!(!probe_socket(&sock)); // a plain file, not a socket
     fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
+    assert!(!probe_socket(&sock)); // a live pid does not make a listener
+    fs::remove_file(&sock).unwrap();
+    let listener = bind_leader_socket(&sock);
     assert!(probe_socket(&sock));
-    // Python monkeypatches os.kill to raise; a guaranteed-dead pid is the
-    // seamless equivalent (same convention as the dead-leader pool test).
-    fs::write(pane_pidfile_path("%19"), "999999").unwrap();
+    drop(listener);
+    // the socket file outlives its listener: connect refuses, probe false
+    assert!(sock.exists());
     assert!(!probe_socket(&sock));
 }
 
@@ -1168,11 +1203,40 @@ fn test_spawn_daemon_false_when_leader_exits_early() {
 fn test_spawn_daemon_reuses_a_live_daemon() {
     let _bed = setup();
     let sock = pane_socket_path("%19");
+    let _listener = bind_leader_socket(&sock);
+    set_daemon_spawn(|_argv, _env| panic!("must not respawn a live leader"));
+    set_terminate_pg(|pid| panic!("terminated {pid} under a live leader"));
+    assert!(spawn_daemon("%19"));
+}
+
+#[test]
+fn test_spawn_daemon_relaunches_when_the_socket_has_no_listener() {
+    // pidfile names a live pid, the socket file is there, nothing listens:
+    // the pid is not this key's leader, so the files are stale and go
+    let _bed = setup();
+    let sock = pane_socket_path("%19");
     fs::create_dir_all(sock.parent().unwrap()).unwrap();
     fs::write(&sock, "").unwrap();
     fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
-    set_daemon_spawn(|_argv, _env| panic!("must not respawn a live leader"));
+    set_terminate_pg(|pid| panic!("signalled {pid}, which is not a leader"));
+    let existed: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    let existed_spawn = existed.clone();
+    let sock_spawn = sock.clone();
+    set_daemon_spawn(move |argv, _env| {
+        *existed_spawn.lock().unwrap() = Some(sock_spawn.exists());
+        touch_leader_socket(argv);
+        Ok(Box::new(FakeDaemonChild {
+            pid: 7780,
+            returncode: None,
+            panic_on_terminate: true,
+        }))
+    });
     assert!(spawn_daemon("%19"));
+    assert_eq!(*existed.lock().unwrap(), Some(false));
+    assert_eq!(
+        fs::read_to_string(pane_pidfile_path("%19")).unwrap(),
+        "7780"
+    );
 }
 
 #[test]
@@ -1186,6 +1250,7 @@ fn test_spawn_daemon_reclaims_a_key_a_live_leader_still_locks() {
     let sock = pane_socket_path("%19");
     fs::create_dir_all(sock.parent().unwrap()).unwrap();
     fs::write(sock.with_extension("lock"), std::process::id().to_string()).unwrap();
+    set_leader_identity(std::process::id() as libc::pid_t, &sock);
     let killed: Arc<Mutex<Vec<libc::pid_t>>> = Arc::new(Mutex::new(Vec::new()));
     let killed_record = killed.clone();
     set_terminate_pg(move |pid| killed_record.lock().unwrap().push(pid));
@@ -1234,6 +1299,32 @@ fn test_spawn_daemon_leaves_a_dead_holder_alone() {
 }
 
 #[test]
+fn test_spawn_daemon_refuses_to_reclaim_a_holder_that_is_not_a_leader() {
+    // grok's lock file names a pid that is alive but is not a leader (here:
+    // this test process, checked through the real `ps`). Signalling it
+    // would kill an unrelated process; the stale lock is dropped instead.
+    let _bed = setup();
+    let sock = pane_socket_path("%19");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(sock.with_extension("lock"), std::process::id().to_string()).unwrap();
+    set_terminate_pg(|pid| panic!("signalled {pid}, which is not a leader"));
+    let lock_at_spawn: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    let lock_probe = lock_at_spawn.clone();
+    let lock_path = sock.with_extension("lock");
+    set_daemon_spawn(move |argv, _env| {
+        *lock_probe.lock().unwrap() = Some(lock_path.exists());
+        touch_leader_socket(argv);
+        Ok(Box::new(FakeDaemonChild {
+            pid: 4244,
+            returncode: None,
+            panic_on_terminate: true,
+        }))
+    });
+    assert!(spawn_daemon("%19"));
+    assert_eq!(*lock_at_spawn.lock().unwrap(), Some(false));
+}
+
+#[test]
 fn test_spawn_daemon_clears_a_stale_socket() {
     let _bed = setup();
     let sock = pane_socket_path("%19");
@@ -1262,6 +1353,7 @@ fn test_kill_pane_daemon_removes_socket_pid_and_session() {
     write_pane_session("%19", SID, CWD).unwrap();
     fs::write(pane_socket_path("%19"), "").unwrap();
     fs::write(pane_pidfile_path("%19"), "4321").unwrap();
+    set_leader_identity(4321, &pane_socket_path("%19"));
     let killed: Arc<Mutex<Vec<libc::pid_t>>> = Arc::new(Mutex::new(Vec::new()));
     let killed_record = killed.clone();
     set_terminate_pg(move |pid| killed_record.lock().unwrap().push(pid));
@@ -1270,6 +1362,49 @@ fn test_kill_pane_daemon_removes_socket_pid_and_session() {
     assert!(!pane_socket_path("%19").exists());
     assert!(!pane_pidfile_path("%19").exists());
     assert!(!pane_session_path("%19").exists());
+}
+
+#[test]
+fn test_kill_daemon_key_refuses_a_pid_that_is_not_a_leader() {
+    // the pidfile names this test process — alive, but no grok leader as
+    // the real `ps` reports it: never signalled, and the stale files go
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("pid"), std::process::id().to_string()).unwrap();
+    fs::write(sock.with_extension("lock"), std::process::id().to_string()).unwrap();
+    set_terminate_pg(|pid| panic!("signalled {pid}, which is not a leader"));
+    kill_daemon_key("m-honey.rex");
+    assert!(!sock.exists());
+    assert!(!sock.with_extension("pid").exists());
+    assert!(!sock.with_extension("lock").exists());
+}
+
+#[test]
+fn test_kill_daemon_key_refuses_a_leader_of_another_key() {
+    // a recycled pid now runs the leader of a different socket: still not
+    // ours to signal
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("pid"), "4321").unwrap();
+    set_leader_identity(4321, &socket_path_for_key("m-honey.ada"));
+    set_terminate_pg(|pid| panic!("signalled {pid}, another key's leader"));
+    kill_daemon_key("m-honey.rex");
+    assert!(!sock.with_extension("pid").exists());
+}
+
+#[test]
+fn test_kill_daemon_key_ignores_a_dead_pid() {
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(sock.with_extension("pid"), "999999").unwrap();
+    set_terminate_pg(|pid| panic!("signalled dead pid {pid}"));
+    kill_daemon_key("m-honey.rex");
+    assert!(!sock.with_extension("pid").exists());
 }
 
 // ----------------------------------------------------------------------
@@ -1415,12 +1550,13 @@ fn test_pool_skips_panes_without_socket_or_session() {
 }
 
 #[test]
-fn test_pool_skips_a_pane_whose_leader_pid_is_dead() {
-    // a socket file outlives the leader that bound it: connecting to it hangs
+fn test_pool_skips_a_pane_whose_socket_has_no_listener() {
+    // a socket file outlives the leader that bound it, and the pidfile still
+    // names a live pid: nothing listens, so no client
     let _bed = setup();
     write_pane_session("%19", SID, CWD).unwrap();
     fs::write(pane_socket_path("%19"), "").unwrap();
-    fs::write(pane_pidfile_path("%19"), "999999").unwrap();
+    fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
     set_stdio_spawn(|_argv| panic!("no client without a live leader"));
     assert!(GrokClientPool::new()._client_for_key("p19").is_none());
 }
@@ -1431,8 +1567,7 @@ fn test_pool_rebinds_when_the_pane_session_record_rotates() {
     // to the old one would report a stale session forever
     let _bed = setup();
     write_pane_session("%19", SID, CWD).unwrap();
-    fs::write(pane_socket_path("%19"), "").unwrap();
-    fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
+    let _listener = bind_leader_socket(&pane_socket_path("%19"));
     let procs: Arc<Mutex<Vec<Arc<FakeProc>>>> = Arc::new(Mutex::new(Vec::new()));
     let procs_spawn = procs.clone();
     set_stdio_spawn(move |_argv| {
@@ -1567,6 +1702,7 @@ fn test_kill_daemon_key_removes_socket_pid_and_session() {
         "{\"sessionId\": \"s\", \"cwd\": \"/c\"}",
     )
     .unwrap();
+    set_leader_identity(4321, &sock);
     let killed: Arc<Mutex<Vec<libc::pid_t>>> = Arc::new(Mutex::new(Vec::new()));
     let killed_record = killed.clone();
     set_terminate_pg(move |pid| killed_record.lock().unwrap().push(pid));

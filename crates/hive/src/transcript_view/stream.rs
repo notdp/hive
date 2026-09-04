@@ -97,6 +97,52 @@ pub(super) struct StreamPrinter {
     state_since: Instant,
 }
 
+/// Reassembles whole JSONL rows from a follow loop's reads. A read at EOF
+/// hands back whatever bytes have landed so far — possibly cut inside a
+/// multi-byte char — and a row the parser cannot decode is dropped for
+/// good. So the accumulator owns raw bytes, releases a row only once its
+/// `'\n'` arrives, and decodes it only then.
+#[derive(Default)]
+pub struct LineAccumulator {
+    partial: Vec<u8>,
+}
+
+impl LineAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one `read_until(b'\n')` result; returns the row it completed,
+    /// newline stripped, or `None` while the row is still partial.
+    pub fn push(&mut self, chunk: &[u8]) -> Option<String> {
+        self.partial.extend_from_slice(chunk);
+        if self.partial.last() != Some(&b'\n') {
+            return None;
+        }
+        let mut bytes = std::mem::take(&mut self.partial);
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Split an initial-load backlog into its whole rows; a trailing row
+    /// without `'\n'` is held back until the follow loop reads the rest.
+    pub fn split_backlog(&mut self, backlog: &[u8]) -> Vec<String> {
+        let cut = backlog
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        let (whole, rest) = backlog.split_at(cut);
+        self.partial.extend_from_slice(rest);
+        String::from_utf8_lossy(whole)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
 impl StreamPrinter {
     pub(super) fn new() -> Self {
         StreamPrinter {
@@ -245,13 +291,14 @@ fn follow_plain(session_id: &str, path: &Path) -> i32 {
         }
     };
     let mut reader = BufReader::new(file);
-    let mut backlog = String::new();
-    if let Err(err) = reader.read_to_string(&mut backlog) {
+    let mut backlog = Vec::new();
+    if let Err(err) = reader.read_to_end(&mut backlog) {
         eprintln!("{}: {}", path.display(), err);
         return 1;
     }
-    let lines: Vec<&str> = backlog.lines().collect();
-    for raw in &lines[lines.len().saturating_sub(_TAIL_EVENTS)..] {
+    let mut lines = LineAccumulator::new();
+    let whole = lines.split_backlog(&backlog);
+    for raw in &whole[whole.len().saturating_sub(_TAIL_EVENTS)..] {
         if let Some(rendered) = printer.push_rendered(raw) {
             println!("{rendered}");
         }
@@ -262,7 +309,7 @@ fn follow_plain(session_id: &str, path: &Path) -> i32 {
             on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t,
         );
     }
-    let mut raw = String::new();
+    let mut raw = Vec::new();
     loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             print!("{CLEAR_LINE}");
@@ -270,7 +317,7 @@ fn follow_plain(session_id: &str, path: &Path) -> i32 {
             return 0;
         }
         raw.clear();
-        match reader.read_line(&mut raw) {
+        match reader.read_until(b'\n', &mut raw) {
             Ok(0) => {
                 tick += 1;
                 idle_ticks += 1;
@@ -285,8 +332,11 @@ fn follow_plain(session_id: &str, path: &Path) -> i32 {
                 std::thread::sleep(Duration::from_secs_f64(_POLL_SECONDS));
             }
             Ok(_) => {
+                let Some(line) = lines.push(&raw) else {
+                    continue;
+                };
                 idle_ticks = 0;
-                if let Some(rendered) = printer.push_rendered(&raw) {
+                if let Some(rendered) = printer.push_rendered(&line) {
                     print!("{CLEAR_LINE}");
                     println!("{rendered}");
                 }

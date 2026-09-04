@@ -17,22 +17,85 @@ use super::{grok_home, _DAEMON_START_TIMEOUT};
 // daemon lifecycle
 // --------------------------------------------------------------------------
 
-/// True when the socket exists and its recorded daemon pid is alive.
+/// Connect budget for a liveness probe: a unix connect to a listening
+/// socket completes in microseconds; anything longer is not a live leader.
+const _PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// True when a listener accepts a connection on the socket.
 ///
-/// No ACP traffic: the leader's socket protocol is private, so liveness is the
-/// pidfile plus `kill(pid, 0)` rather than a handshake.
+/// No ACP traffic: the leader's socket protocol is private, so the probe is
+/// the connect alone. A socket file whose leader died refuses; a pidfile is
+/// not consulted, because a pid can be dead or reused by an unrelated
+/// process while the file still names it.
 pub fn probe_socket(socket_path: &Path) -> bool {
-    if !socket_path.exists() {
-        return false;
+    socket_path.exists() && _connect_within(socket_path, _PROBE_TIMEOUT).is_ok()
+}
+
+/// Non-blocking unix connect that gives up after *timeout*.
+fn _connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{FromRawFd, OwnedFd};
+
+    let bytes = socket_path.as_os_str().as_bytes();
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket path too long",
+        ));
     }
-    let pid: libc::pid_t = match fs::read_to_string(socket_path.with_extension("pid")) {
-        Ok(text) => match text.trim().parse() {
-            Ok(pid) => pid,
-            Err(_) => return false,
-        },
-        Err(_) => return false,
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+        *dst = *src as libc::c_char;
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _fd = unsafe { OwnedFd::from_raw_fd(raw) }; // closed on every return
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let rc = unsafe { libc::connect(raw, &addr as *const _ as *const libc::sockaddr, len) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::EINPROGRESS) {
+        return Err(err);
+    }
+    let mut pfd = libc::pollfd {
+        fd: raw,
+        events: libc::POLLOUT,
+        revents: 0,
     };
-    unsafe { libc::kill(pid, 0) == 0 }
+    let ready = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ready == 0 {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"));
+    }
+    let mut so_err: libc::c_int = 0;
+    let mut so_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            raw,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            &mut so_err as *mut _ as *mut libc::c_void,
+            &mut so_len,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if so_err != 0 {
+        return Err(io::Error::from_raw_os_error(so_err));
+    }
+    Ok(())
 }
 
 /// The spawned leader as `_spawn_daemon_key` sees it (Python `Popen` handle).
@@ -153,32 +216,53 @@ pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     )
 }
 
-/// The pid recorded for this key's leader, alive or not.
+/// The pid's command line as `ps` reports it; None once the pid is gone.
+fn _process_args(pid: libc::pid_t) -> Option<String> {
+    #[cfg(test)]
+    {
+        if let Some(args) = super::tests::process_args_override(pid) {
+            return args;
+        }
+    }
+    let out = Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let args = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!args.is_empty()).then_some(args)
+}
+
+/// True when the pid runs the leader of *sock*: `grok agent leader
+/// --leader-socket <sock>`. Neither the TUI nor hive's stdio client, which
+/// both carry the socket path but not the `agent leader` verb.
+fn _is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let sock = sock.to_string_lossy();
+    _process_args(pid)
+        .map(|args| args.contains("agent leader") && args.contains(sock.as_ref()))
+        .unwrap_or(false)
+}
+
+/// The pid of the leader still running on this key, verified by identity.
 ///
 /// Two files can name it: our own pidfile, written once a spawn binds, and
-/// grok's `<sock>.lock`, which the leader writes with its pid and holds an
-/// flock on for as long as it runs. Only the second one exists after a spawn
-/// that never bound, which is exactly the case that needs reclaiming.
-fn _recorded_pid(sock: &Path) -> Option<libc::pid_t> {
+/// grok's `<sock>.lock`, which the leader writes with its pid. Only the
+/// second one exists after a spawn that never bound, which is exactly the
+/// case that needs reclaiming. Nothing clears either file when a leader
+/// crashes, so a recorded pid is only trusted when the process behind it
+/// is the leader of this socket — a dead or recycled pid is never signalled.
+fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
     [sock.with_extension("pid"), sock.with_extension("lock")]
         .iter()
         .filter_map(|path| fs::read_to_string(path).ok())
         .filter_map(|text| text.trim().parse::<libc::pid_t>().ok())
-        .find(|pid| *pid > 0)
-}
-
-/// The recorded pid, only while that process is still running.
-fn _holder_pid(sock: &Path) -> Option<libc::pid_t> {
-    for path in [sock.with_extension("pid"), sock.with_extension("lock")] {
-        let pid: Option<libc::pid_t> = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| text.trim().parse().ok());
-        match pid {
-            Some(pid) if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 => return Some(pid),
-            _ => continue,
-        }
-    }
-    None
+        .find(|pid| _is_leader_of(*pid, sock))
 }
 
 /// Start (or reuse) the leader daemon on *key*'s socket.
@@ -198,15 +282,17 @@ fn _spawn_daemon_key(
             return false;
         }
     }
-    if sock.exists() && probe_socket(&sock) {
+    if probe_socket(&sock) {
         return true;
     }
     // Nothing answers, but a leader may still be alive holding grok's flock
     // for this key (`<sock>.lock`, written with its pid). While it holds it,
     // a replacement cannot bind, and deleting the socket only makes the pair
     // permanent: no socket to probe, no pidfile of ours to reclaim by, and
-    // every later spawn times out into plain grok. Reclaim the key first.
-    if let Some(pid) = _holder_pid(&sock) {
+    // every later spawn times out into plain grok. Reclaim the key first;
+    // a recorded pid that is not this key's leader is stale and only its
+    // files go.
+    if let Some(pid) = _leader_pid(&sock) {
         _terminate_process_group(pid);
     }
     for path in [
@@ -303,10 +389,13 @@ fn _terminate_process_group(pid: libc::pid_t) {
 }
 
 /// Stop a key's leader and remove its socket, pidfile and session record.
+///
+/// Only a pid verified as this key's leader is signalled; a stale record
+/// naming a dead or recycled pid is removed without touching the process.
 pub fn kill_daemon_key(key: &str) {
     let sock = socket_path_for_key(key);
     let pidfile = sock.with_extension("pid");
-    if let Some(pid) = _recorded_pid(&sock) {
+    if let Some(pid) = _leader_pid(&sock) {
         _terminate_process_group(pid);
     }
     for path in [

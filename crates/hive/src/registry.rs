@@ -251,9 +251,10 @@ pub fn record_team(
 
 /// Add or replace one member row in the team's roster (CLI write lane).
 ///
-/// *created_at*, when given, must match the stored instance — a stale entry
-/// left by a recycled name is never edited into (returns `missing` so the
-/// caller can seed a fresh entry).
+/// Returns `written`, `missing` (no entry: the team was deleted), or `stale`
+/// (*created_at*, when given, does not match the stored instance: a
+/// recycled name's successor is never edited into). Neither refusal is a
+/// cue to seed an entry — only `record_team` creates one.
 pub fn record_member(
     team: &str,
     member: &Map<String, Value>,
@@ -273,7 +274,7 @@ pub fn record_member(
         None => return Ok("missing"),
     };
     if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("missing");
+        return Ok("stale");
     }
     let mut rows: Vec<Value> = entry
         .get("members")
@@ -293,7 +294,8 @@ pub fn record_member(
 /// the same name get one `reserved` and one `exists` — the cross-process
 /// guard `Team::spawn`'s in-memory already-exists check cannot provide. The
 /// claiming row is a placeholder (no pane yet); the spawn's `record_member`
-/// replaces it, and a failed spawn removes it.
+/// replaces it, and a failed spawn removes it. `missing`/`stale` refuse as
+/// in `record_member`.
 pub fn reserve_member(
     team: &str,
     member: &Map<String, Value>,
@@ -313,7 +315,7 @@ pub fn reserve_member(
         None => return Ok("missing"),
     };
     if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("missing");
+        return Ok("stale");
     }
     let mut rows: Vec<Value> = entry
         .get("members")
@@ -333,6 +335,7 @@ pub fn reserve_member(
 }
 
 /// Drop one member row from the team's roster (CLI write lane).
+/// `missing`/`stale` refuse as in `record_member`.
 pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'static str> {
     let path = match entry_path(team) {
         Some(p) => p,
@@ -344,7 +347,7 @@ pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'stati
         None => return Ok("missing"),
     };
     if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("missing");
+        return Ok("stale");
     }
     let mut rows: Vec<Value> = entry
         .get("members")
@@ -679,7 +682,7 @@ mod tests {
             ("cli", "codex"),
             ("sessionId", "sid-v"),
         ]);
-        assert_eq!(record_member("honey", &row, "999.0").unwrap(), "missing");
+        assert_eq!(record_member("honey", &row, "999.0").unwrap(), "stale");
         assert_eq!(record_member("honey", &row, "123.0").unwrap(), "written");
         assert_eq!(
             member_names(&load("honey").unwrap()),
@@ -687,13 +690,30 @@ mod tests {
         );
         assert_eq!(
             remove_member("honey", "validator", "999.0").unwrap(),
-            "missing"
+            "stale"
         );
         assert_eq!(
             remove_member("honey", "validator", "123.0").unwrap(),
             "written"
         );
         assert_eq!(member_names(&load("honey").unwrap()), names(&["worker"]));
+    }
+
+    #[test]
+    fn test_record_member_tells_a_deleted_team_from_a_recycled_one() {
+        let (_tmp, _store, _guard) = store();
+        let row = m(&[("name", "worker"), ("cli", "claude")]);
+        assert_eq!(record_member("honey", &row, "123.0").unwrap(), "missing");
+        assert_eq!(record_member("honey", &row, "").unwrap(), "missing");
+        assert!(!entry_path("honey").unwrap().exists());
+
+        record_team("honey", "/ws", "123.0", &[], "").unwrap();
+        assert_eq!(record_member("honey", &row, "999.0").unwrap(), "stale");
+        assert_eq!(reserve_member("honey", &row, "999.0").unwrap(), "stale");
+        assert_eq!(remove_member("honey", "worker", "999.0").unwrap(), "stale");
+        assert_eq!(load("honey").unwrap()["members"], Value::Array(vec![]));
+        // an unchecked write (no created_at) still lands
+        assert_eq!(record_member("honey", &row, "").unwrap(), "written");
     }
 
     #[test]
