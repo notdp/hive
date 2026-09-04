@@ -333,10 +333,12 @@ impl CodexDaemonClient {
 
     /// Mint a new thread for *cwd*; return its threadId (== sessionId).
     ///
-    /// `thread/start` alone leaves the thread unpersisted — `thread/resume`
-    /// (and therefore the TUI's `codex resume <tid>`) fails with `no rollout
-    /// found`. The follow-up `thread/name/set` flushes the rollout to disk
-    /// (0.149.0 verified), so a minted thread is immediately resumable.
+    /// `thread/start` alone leaves the thread unpersisted: the daemon writes
+    /// the rollout lazily, and the pane TUI resumes in paginated-history mode
+    /// (`thread/resume {excludeTurns}`), which reads the source rollout from
+    /// disk and fails on a thread that has none. The name write is metadata
+    /// only (state DB) and never materializes the file, so the flush is
+    /// [`_flush_thread`], and the rollout's presence on disk is the oracle.
     /// *name* must be non-empty (the daemon rejects empty names).
     pub fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
         let mut params = Map::new();
@@ -352,11 +354,36 @@ impl CodexDaemonClient {
             .and_then(Value::as_object)?;
         let tid = _thread_id_from(thread)?;
         self._seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let flush = self.call("thread/name/set", json!({"threadId": tid, "name": name}));
-        if flush.get("result").is_none() {
-            return None; // unflushed thread is not attachable; treat as failure
+        let rollout = _thread_path_from(thread);
+        self._flush_thread(&tid, name, rollout.as_deref())
+            .then_some(tid)
+    }
+
+    /// Name the thread and force its rollout onto disk; false when any step
+    /// fails, because an unflushed thread is not attachable and must be
+    /// treated as a spawn failure.
+    ///
+    /// `thread/section/move` with a null section is the materialization
+    /// trigger: the daemon materializes and flushes the rollout before a
+    /// placement so it works ahead of the first turn, and a null section is a
+    /// no-op placement that leaves only the session header in the file —
+    /// nothing the model sees (0.153.2 verified). The check is the file
+    /// itself, at the path `thread/start` reported: which call materializes
+    /// has changed across codex versions, the file's presence is what the
+    /// TUI's resume actually needs.
+    fn _flush_thread(&self, tid: &str, name: &str, rollout: Option<&Path>) -> bool {
+        let named = self.call("thread/name/set", json!({"threadId": tid, "name": name}));
+        if named.get("result").is_none() {
+            return false;
         }
-        Some(tid)
+        let placed = self.call(
+            "thread/section/move",
+            json!({"threadId": tid, "sectionId": Value::Null}),
+        );
+        if placed.get("result").is_none() {
+            return false;
+        }
+        rollout.is_some_and(hooked_rollout_exists)
     }
 
     /// Fork a rolled-out thread server-side; return the fork's threadId.
@@ -369,11 +396,9 @@ impl CodexDaemonClient {
             .and_then(Value::as_object)?;
         let tid = _thread_id_from(thread)?;
         self._seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let flush = self.call("thread/name/set", json!({"threadId": tid, "name": name}));
-        if flush.get("result").is_none() {
-            return None;
-        }
-        Some(tid)
+        let rollout = _thread_path_from(thread);
+        self._flush_thread(&tid, name, rollout.as_deref())
+            .then_some(tid)
     }
 
     pub fn turn_start(&self, thread_id: &str, text: &str) -> Value {
@@ -455,6 +480,19 @@ impl CodexDaemonClient {
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
+}
+
+/// The rollout path the daemon precomputed for the thread (`Thread.path`),
+/// present before the file exists.
+fn _thread_path_from(thread: &Map<String, Value>) -> Option<std::path::PathBuf> {
+    match thread.get("path") {
+        Some(Value::String(path)) if !path.is_empty() => Some(std::path::PathBuf::from(path)),
+        _ => None,
+    }
+}
+
+fn hooked_rollout_exists(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn _thread_id_from(thread: &Map<String, Value>) -> Option<String> {
