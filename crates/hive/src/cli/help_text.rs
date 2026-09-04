@@ -37,10 +37,11 @@ Panes:
 Workflow:
   Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.
 
-  attach    Render a team's display: jump to its window, or build one.
+  attach    Jump to a team's tmux window. Read-only: never builds one.
   flow      Deterministic member orchestration from a JavaScript flow script.
   ls        List hive teams from the registry, with their display state.
   pr        Pin a PR number on the team window's status bar.
+  render    Render a team's display: build its window, then jump to it.
   view      Read-only viewer for a Claude session transcript (follows live).
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
             state.
@@ -116,12 +117,12 @@ Examples:
         ["attach"] => {
             r#"Usage: hive attach [OPTIONS] TEAM_NAME
 
-  Render a team's display: jump to its window, or build one.
+  Jump to a team's tmux window. Read-only: never builds one.
 
-  The registry is the team's existence; this materializes (or finds) its tmux
-  window — one attach pane per member, each riding its engine's own viewer
-  (claude attach loop / codex thread resume / grok session resume). Run from
-  outside tmux it finishes by exec'ing `tmux attach`.
+  A team with no window is still alive — it is a registry roster, not a
+  display — so this fails instead of rendering one behind your back. `hive
+  render` builds the window. Run from outside tmux this finishes by exec'ing
+  `tmux attach`.
 
 Options:
   -h, --help  Show this message and exit.
@@ -202,9 +203,9 @@ Commands:
   Create a team.
 
   NAME is optional everywhere (pool-picked by default). Outside tmux: a
-  headless team — `hive attach` renders it. Inside tmux on an agent pane: that
-  pane becomes the orch. Inside tmux on a shell pane: the window binds the
-  team without an orch.
+  headless team — `hive render` builds its window. Inside tmux on an agent
+  pane: that pane becomes the orch. Inside tmux on a shell pane: the window
+  binds the team without an orch.
 
 Options:
   -d, --desc TEXT       Team description
@@ -463,7 +464,8 @@ Options:
     hive kill worker1
 
 Options:
-  -h, --help  Show this message and exit.
+  -t, --team TEXT  Explicit team (default: the pane's binding)
+  -h, --help       Show this message and exit.
 "#
         }
         ["layout"] => {
@@ -537,6 +539,21 @@ Options:
 Commands:
   clear  Clear the current team window's PR number stamp.
   set    Label the current team window with its PR number.
+"#
+        }
+        ["render"] => {
+            r#"Usage: hive render [OPTIONS] TEAM_NAME
+
+  Render a team's display: build its window, then jump to it.
+
+  The registry is the team's existence; this materializes its tmux window —
+  one attach pane per member, each riding its engine's own viewer (claude
+  attach loop / codex thread resume / grok session resume). An existing
+  window gains panes for members spawned since it was built. Ends by jumping
+  to the window, like `hive attach`.
+
+Options:
+  -h, --help  Show this message and exit.
 "#
         }
         ["resume-hint"] => {

@@ -179,9 +179,6 @@ fn _member_attach_command(cli_name: &str, session_id: &str, cwd: &str) -> String
     )
 }
 
-/// Build a window for the team: one attach pane per member, tiled.
-///
-/// Returns (window_target, attached_member_names, skipped_member_names).
 /// Title + tags + context + viewer launcher for one member's display pane.
 fn _bind_member_viewer(pane: &str, member: &Map<String, Value>, team: &str, ws: &str) {
     let name = map_str(member, "name");
@@ -268,6 +265,9 @@ fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> V
     added
 }
 
+/// Build a window for the team: one attach pane per member, tiled.
+///
+/// Returns (window_target, attached_member_names, skipped_member_names).
 fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>, Vec<String>) {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
@@ -333,7 +333,6 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
     for (i, index) in attachable_idx.iter().enumerate() {
         let member = &members[*index];
         let name = map_str(member, "name");
-        let cli_name = map_str(member, "cli");
         let cwd = map_str(member, "cwd");
         let pane = if i == 0 {
             first_pane.clone()
@@ -361,15 +360,77 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
     (window, attached, skipped)
 }
 
-pub fn attach_cmd(team_name: &str) {
-    let entry = match crate::registry::load(team_name) {
-        Some(entry) => entry,
-        None => fail(&format!("team '{team_name}' not found (see `hive ls`)")),
-    };
+/// The registry entry for *team_name*, or the `hive ls` refusal.
+fn _team_entry(team_name: &str) -> Result<Map<String, Value>, String> {
+    crate::registry::load(team_name)
+        .ok_or_else(|| format!("team '{team_name}' not found (see `hive ls`)"))
+}
 
-    let mut window = crate::team::_find_team_window(team_name, "")
+fn _team_window(team_name: &str) -> String {
+    crate::team::_find_team_window(team_name, "")
         .map(|(window, _)| window)
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Why `hive attach` has nothing to jump to: the team is alive in the
+/// registry, tmux just has no window for it. Names the verb that builds one.
+fn _no_display_message(team_name: &str, entry: &Map<String, Value>) -> String {
+    let members = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let display = map_str(entry, "display");
+    let last = if display.is_empty() {
+        "no display window recorded".to_string()
+    } else {
+        format!("last display window {display}")
+    };
+    format!(
+        "team '{team_name}' has no tmux window — it is alive in the registry \
+({members} member(s), {last}); `hive render {team_name}` builds one"
+    )
+}
+
+/// The jump both verbs end on. Inside tmux, `switch-client` moves *this*
+/// client — `select-window` would only retarget the window's own session and
+/// leave a client attached elsewhere untouched.
+fn _jump_to_window(window: &str, verdict: &str) {
+    if tmux::is_inside_tmux() {
+        tmux::switch_client(window);
+        println!("{verdict} {window}");
+        return;
+    }
+    let session = match window.split_once(':') {
+        Some((session, _)) => session.to_string(),
+        None => window.to_string(),
+    };
+    ok_or_fail(tmux::exec_attach(&session, window));
+}
+
+/// Read-only: the team's display window, or the message saying there is
+/// none. Writes nothing — no window, no pane, no hived, no `set_display`.
+pub(super) fn _attach_target(team_name: &str) -> Result<String, String> {
+    let entry = _team_entry(team_name)?;
+    let window = _team_window(team_name);
+    if window.is_empty() {
+        return Err(_no_display_message(team_name, &entry));
+    }
+    Ok(window)
+}
+
+pub fn attach_cmd(team_name: &str) {
+    match _attach_target(team_name) {
+        Ok(window) => _jump_to_window(&window, "found"),
+        Err(message) => fail(&message),
+    }
+}
+
+pub fn render_cmd(team_name: &str) {
+    let entry = match _team_entry(team_name) {
+        Ok(entry) => entry,
+        Err(message) => fail(&message),
+    };
+    let mut window = _team_window(team_name);
     let mut built = false;
     if window.is_empty() {
         let (materialized, _attached, skipped) = _materialize_team_display(&entry);
@@ -391,17 +452,7 @@ pub fn attach_cmd(team_name: &str) {
             let _ = _ensure_team_hived(&mut t, &ws);
         }
     }
-
-    if tmux::is_inside_tmux() {
-        tmux::select_window(&window);
-        println!("{} {window}", if built { "built" } else { "found" });
-        return;
-    }
-    let session = match window.split_once(':') {
-        Some((session, _)) => session.to_string(),
-        None => window.clone(),
-    };
-    ok_or_fail(tmux::exec_attach(&session, &window));
+    _jump_to_window(&window, if built { "built" } else { "found" });
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 
 # Hive 协作协议
 
-一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口只是可选的显示器:headless 成员照常收发消息、被派活、被 kill,`hive attach` 只是把团画出来。
+一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口只是可选的显示器:headless 成员照常收发消息、被派活、被 kill,`hive render` 只是把团画出来。
 
 主线动词(`worktree` 见 references/worktree.md,编排与 `flow` 见 references/orchestration.md):
 
@@ -15,7 +15,8 @@ hive send <addr> "<内容>"   # 唯一投递动词。成功零输出,自动锚�
 hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外:headless 团(你以 <team>.orch 入册);tmux 内 agent pane:当前 pane 立为 orch;shell 建的团无 orch
 hive join <team>     # 入队。tmux 外:当前 Claude session 进名册成为正式成员;tmux 内:当前 pane 注册进窗口的 team
 hive spawn <name>    # 造新成员。tmux 外(或团没有窗口)spawn 出 headless 成员:引擎直起、无 pane,投递、回报、kill 全都照常
-hive attach <team>   # 渲染。没有窗口的团长出布局完好的窗口;有窗口就跳过去
+hive attach <team>   # 跳到团的窗口(只跳,不建)
+hive render <team>   # 把注册表里的团画成窗口:没有窗口就建,有窗口就补后来 spawn 的成员,然后跳过去
 hive kill <member>   # 成员退场
 hive delete <team>   # 注销名册、释放团名;关掉窗口不删团
 hive ls              # 全部 team(含没有窗口的)

@@ -151,8 +151,9 @@ pub fn window_zoomed(window_target: &str) -> bool {
 
 /// Replace this process with `tmux attach` focused on *window_target*.
 ///
-/// The outside-tmux tail of `hive attach`: attach to the session and select
-/// the team's window in one tmux command chain. Only returns on exec failure.
+/// The outside-tmux tail of `hive attach` / `hive render`: attach to the
+/// session and select the team's window in one tmux command chain. Only
+/// returns on exec failure.
 pub fn exec_attach(session: &str, window_target: &str) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     let err = Command::new("tmux")
@@ -171,4 +172,13 @@ pub fn exec_attach(session: &str, window_target: &str) -> anyhow::Result<()> {
 
 pub fn select_window(window_target: &str) {
     let _ = _run(&["select-window", "-t", window_target], false, 5);
+}
+
+/// Move the *calling client* to *window_target*.
+///
+/// The inside-tmux jump of `hive attach` / `hive render`. `select_window`
+/// cannot do this job: it sets the current window of the window's own
+/// session, so a client attached to another session stays where it is.
+pub fn switch_client(window_target: &str) {
+    let _ = _run(&["switch-client", "-t", window_target], false, 5);
 }

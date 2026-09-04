@@ -1114,7 +1114,7 @@ fn test_send_claude_resolves_the_engine_from_the_pane_job_record() {
 
 #[test]
 fn test_send_claude_pane_without_job_delivers_to_interactive_session() {
-    // hive attach renders an interactive member (a joined ccd) as a
+    // hive render draws an interactive member (a joined ccd) as a
     // read-only mirror pane tagged with the member's name; the roster
     // sessionId — not the mirror pane — is the delivery address.
     let _guard = setup();
@@ -1906,6 +1906,48 @@ fn test_headless_claude_session_send_uses_inbox_socket_fallback() {
     assert_eq!(writes[0].0, "/tmp/ccd.sock");
     assert_eq!(writes[0].2, "t.orch"); // the author, not the headless recipient
     assert_eq!(writes[0].3, "ccd-sid-1");
+}
+
+#[test]
+fn test_grok_kill_takes_the_pane_down_before_the_leader() {
+    // The pane's TUI is a leader client: kill the leader first and the
+    // dying TUI raises a replacement on the same socket. The pid is read
+    // ahead of the kill because tmux has no pane to answer about after it.
+    let _guard = setup();
+    member("bee", "hornet", "%3", "grok").kill();
+    assert_eq!(
+        hook(|h| h.event_order.clone()),
+        vec![
+            "pid:%3".to_string(),
+            "pane:%3".to_string(),
+            "wait:%3".to_string(),
+            "pool:p3".to_string(),
+            "daemon:p3".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_grok_kill_terminates_a_leader_that_reappeared_on_the_key() {
+    let _guard = setup();
+    hook(|h| h.grok_leader_present = vec![true]);
+    member("bee", "hornet", "%3", "grok").kill();
+    assert_eq!(
+        hook(|h| h.grok_killed_keys.clone()),
+        vec!["p3".to_string(), "p3".to_string()]
+    );
+}
+
+#[test]
+fn test_headless_grok_kill_addresses_the_member_key_without_a_pane() {
+    let _guard = setup();
+    headless("grok", None).kill();
+    assert!(hook(|h| h.killed.clone()).is_empty());
+    assert!(hook(|h| h.waited_pane_gone.clone()).is_empty());
+    assert_eq!(
+        hook(|h| h.grok_killed_keys.clone()),
+        vec!["m-honey.rex".to_string()]
+    );
 }
 
 #[test]

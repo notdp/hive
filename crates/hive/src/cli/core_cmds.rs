@@ -18,8 +18,8 @@ use crate::tmux;
 /// Create a team.
 ///
 /// NAME is optional everywhere (pool-picked by default). Outside tmux:
-/// a headless team — `hive attach` renders it. Inside tmux on an agent
-/// pane: that pane becomes the orch. Inside tmux on a shell pane: the
+/// a headless team — `hive render` builds its window. Inside tmux on an
+/// agent pane: that pane becomes the orch. Inside tmux on a shell pane: the
 /// window binds the team without an orch.
 pub fn create(
     name: &str,
@@ -48,7 +48,13 @@ pub fn create(
         } else {
             name.to_string()
         };
-        _create_headless_team(&team_name, workspace, reset_workspace, state_entries);
+        _create_headless_team(
+            _AUTO_WORKSPACE_ROOT.as_ref(),
+            &team_name,
+            workspace,
+            reset_workspace,
+            state_entries,
+        );
         return;
     }
     let current_pane = tmux::get_current_pane_id().unwrap_or_default();
@@ -157,11 +163,35 @@ fn _title_badge_hint(badge: &str) -> String {
     )
 }
 
+/// Where auto workspaces live. A parameter at the two functions below so a
+/// test can point them somewhere it owns instead of the real `/tmp`.
+pub(crate) const _AUTO_WORKSPACE_ROOT: &str = "/tmp";
+
+/// Workspace of a headless team: the caller's, else an auto one under *root*.
+///
+/// A team without a workspace has no bus, so `hive spawn --task` and every
+/// runtime read fail on it. The in-tmux orch create never leaves one empty —
+/// it derives `/tmp/hive-<session>-w<id>` from its window — so the headless
+/// lane derives the same shape from the only identity it has, the team name.
+/// The suffix is `headless`, not a `w<id>` slug: both paths `reset_workspace`
+/// what they resolve to, and a headless team named after a tmux session would
+/// otherwise wipe that session's window-0 workspace.
+pub(crate) fn _headless_create_workspace(root: &Path, name: &str, workspace: &str) -> String {
+    if workspace.is_empty() {
+        return root
+            .join(format!("hive-{name}-headless"))
+            .to_string_lossy()
+            .into_owned();
+    }
+    expanduser(workspace)
+}
+
 /// Create a team with no display: a registry entry plus its workspace.
 ///
 /// The registry is the team's existence; a tmux window is a later, optional
-/// rendering (`hive attach`). Members join through headless spawn.
+/// rendering (`hive render`). Members join through headless spawn.
 fn _create_headless_team(
+    workspace_root: &Path,
     name: &str,
     workspace: &str,
     reset_workspace: bool,
@@ -176,11 +206,7 @@ fn _create_headless_team(
             "team '{name}' already exists (hive delete removes it)"
         ));
     }
-    let ws_str = if workspace.is_empty() {
-        String::new()
-    } else {
-        expanduser(workspace)
-    };
+    let ws_str = _headless_create_workspace(workspace_root, name, workspace);
     // The creator is the orch when it is an agent: a Claude session outside
     // tmux joins its own roster, same as an agent pane does inside tmux.
     // A session already on another team's roster stays a guest here.
@@ -213,8 +239,16 @@ fn _create_headless_team(
     let members: Vec<Map<String, Value>> = orch_member.clone().into_iter().collect();
     // py_float_str is the createdAt key every later record_member compares.
     let _ = crate::registry::record_team(name, &ws_str, &py_float_str(now), &members, "");
-    if !ws_str.is_empty() {
-        let ws = Path::new(&ws_str);
+    let ws = Path::new(&ws_str);
+    if workspace.is_empty() {
+        // The auto workspace, same treatment the in-tmux orch create gives
+        // it: a team name reused after a delete must not inherit the old
+        // team's event log or artifacts.
+        crate::hived::stop_hived(&ws_str);
+        if let Err(e) = crate::bus::reset_workspace(&ws_str) {
+            fail(&e.to_string());
+        }
+    } else {
         if ws.exists() && reset_workspace {
             if let Err(e) = std::fs::remove_dir_all(ws) {
                 fail(&e.to_string());
@@ -223,12 +257,12 @@ fn _create_headless_team(
         if let Err(e) = crate::bus::init_workspace(ws) {
             fail(&e.to_string());
         }
-        for (key, value) in _parse_entries(state_entries) {
-            let _ = std::fs::write(ws.join("state").join(&key), map_entry_str(&value));
-        }
+    }
+    for (key, value) in _parse_entries(state_entries) {
+        let _ = std::fs::write(ws.join("state").join(&key), map_entry_str(&value));
     }
     _remember_context(name, &ws_str, LEAD_AGENT_NAME);
-    println!("Team '{name}' created (headless — `hive attach {name}` renders it).");
+    println!("Team '{name}' created (headless — `hive render {name}` builds its window).");
     if orch_member.is_some() {
         println!("You are {name}.{LEAD_AGENT_NAME}.");
         println!("{}", _title_badge_hint(&format!("[{name}] ")));
@@ -719,14 +753,20 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
     // resolution across pane tags.
     let (explicit_team, to_agent) = _split_team_address(to_agent);
     let mut guest = None;
+    let mut env_sender = String::new();
     if !tmux::is_inside_tmux() {
         // The root gate admitted this call because the process runs inside a
         // Claude session (that session is the sender and its inbox socket is
-        // its identity) or a headless codex member (its thread keys the
-        // roster row, so it takes the member lane below).
+        // its identity), a headless codex member (its thread keys the roster
+        // row) or a headless engine carrying its member identity in env (a
+        // grok member's leader daemon). The last two take the member lane.
         guest = crate::adapters::claude_sessions::self_session();
         if guest.is_none() && _codex_thread_member_env().is_none() {
-            fail(_TMUX_REQUIRED_MESSAGE);
+            // The root gate already refused an env that names nobody, so
+            // whatever is left here is a listed member.
+            if let Some((_, member)) = _env_roster_member() {
+                env_sender = member;
+            }
         }
     }
     let (t, sender) = if let Some(guest) = guest {
@@ -753,7 +793,12 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
             );
         }
         let (_team_name, t) = _resolve_send_target_team(&to_agent);
-        (t, _resolve_sender(None))
+        let sender = if env_sender.is_empty() {
+            _resolve_sender(None)
+        } else {
+            env_sender
+        };
+        (t, sender)
     };
     let ws = ok_or_fail(resolve_workspace(Some(&t), true));
     // Auto-anchor: the latest unanswered inbound from the recipient makes
@@ -1428,9 +1473,22 @@ pub fn interrupt(agent_name: &str) {
 // kill
 // ---------------------------------------------------------------------------
 
+/// (team, bare member) a kill addresses; empty team means "the pane's".
+///
+/// `-t` is the caller's own intent, so it outranks a team prefix in the
+/// address; without it the `<team>.<member>` form still names its own team.
+pub(crate) fn _kill_address(agent_name: &str, team_arg: &str) -> (String, String) {
+    let (address_team, bare_name) = _split_team_address(agent_name);
+    if team_arg.is_empty() {
+        (address_team, bare_name)
+    } else {
+        (team_arg.to_string(), bare_name)
+    }
+}
+
 /// Kill an agent pane and remove it from the team.
-pub fn kill(agent_name: &str) {
-    let (explicit_team, bare_name) = _split_team_address(agent_name);
+pub fn kill(agent_name: &str, team_arg: &str) {
+    let (explicit_team, bare_name) = _kill_address(agent_name, team_arg);
     let (mut t, agent_name) = if !explicit_team.is_empty() {
         (ok_or_fail(_load_team(&explicit_team, "")), bare_name)
     } else {
@@ -1462,6 +1520,28 @@ pub fn kill(agent_name: &str) {
 // ---------------------------------------------------------------------------
 // delete
 // ---------------------------------------------------------------------------
+
+/// Grok leader keys serving *team*, as the leader directory has them.
+pub(crate) fn _team_grok_daemon_keys(team: &str) -> Vec<String> {
+    let mut keys: Vec<String> = crate::adapters::grok_leader::list_daemon_keys()
+        .into_iter()
+        .filter(|key| {
+            crate::adapters::grok_leader::member_from_key(key)
+                .map(|(key_team, _)| key_team == team)
+                .unwrap_or(false)
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Stop every grok leader that served *team* and clear its key files.
+pub(crate) fn _sweep_team_grok_daemons(team: &str) {
+    for key in _team_grok_daemon_keys(team) {
+        crate::adapters::grok_leader::pool().drop_key(&key);
+        crate::adapters::grok_leader::kill_daemon_key(&key);
+    }
+}
 
 /// Delete a team and clean up.
 pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspace: bool) {
@@ -1539,6 +1619,11 @@ fn _delete_team(name: &str, workspace: &str, delete_workspace: bool) -> Result<(
     // is what makes the team deleted (readers and the hived's registry-gone
     // exit key on it).
     crate::registry::delete_team(name)?;
+
+    // Last, because it is the point of no return for the engines: the hived
+    // reaps orphan leaders only for its own team, and a deleted team has no
+    // hived — an unswept leader would outlive every trace of who it served.
+    _sweep_team_grok_daemons(name);
 
     println!("Team '{name}' deleted.");
     Ok(())
@@ -1653,5 +1738,142 @@ mod tests {
             ]
         }));
         assert_eq!(_ls_roster(&entry), "claude+dodo+?");
+    }
+
+    #[test]
+    fn test_headless_create_workspace_defaults_outside_the_window_slug_namespace() {
+        let root = Path::new(_AUTO_WORKSPACE_ROOT);
+        let auto = _headless_create_workspace(root, "hornet", "");
+        assert_eq!(auto, "/tmp/hive-hornet-headless");
+        // never a window slug: the in-tmux orch create resets those paths
+        for window in ["", "@7"] {
+            assert_ne!(
+                auto,
+                _default_auto_workspace_path("hornet", window, "0")
+                    .to_string_lossy()
+                    .into_owned()
+            );
+        }
+        assert_eq!(
+            _headless_create_workspace(root, "hornet", "/w/given"),
+            "/w/given"
+        );
+    }
+
+    #[test]
+    fn test_headless_create_records_a_usable_workspace() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join("hive"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        for key in [
+            "TMUX",
+            "TMUX_PANE",
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+        ] {
+            std::env::remove_var(key);
+        }
+        // an owned workspace root: the auto path must never land in real /tmp
+        let root = tmp.path().join("ws-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let team = "hivetest-headless-ws";
+        let ws = _headless_create_workspace(&root, team, "");
+
+        _create_headless_team(&root, team, "", false, &["k=v".to_string()]);
+
+        let entry = crate::registry::load(team).expect("team recorded");
+        assert_eq!(map_str(&entry, "workspace"), ws);
+        // usable, not just recorded: the bus a dispatch rides exists
+        assert!(Path::new(&ws).join("hive.db").is_file(), "{ws}");
+        assert!(Path::new(&ws).join("artifacts").is_dir(), "{ws}");
+        // --state lands on the auto workspace too, not only an explicit one
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&ws).join("state").join("k")).unwrap(),
+            "v"
+        );
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_team_grok_daemon_keys_selects_only_this_teams_members() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("GROK_HOME", tmp.path());
+        let hive = tmp.path().join("hive");
+        std::fs::create_dir_all(&hive).unwrap();
+        for name in [
+            "m-hornet.ant.sock",
+            "m-hornet.bee.sock",
+            "m-comb.ant.sock",
+            "p19.sock",
+        ] {
+            std::fs::write(hive.join(name), "").unwrap();
+        }
+
+        assert_eq!(
+            _team_grok_daemon_keys("hornet"),
+            vec!["m-hornet.ant".to_string(), "m-hornet.bee".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sweep_team_grok_daemons_clears_only_this_teams_keys() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("GROK_HOME", tmp.path());
+        let hive = tmp.path().join("hive");
+        std::fs::create_dir_all(&hive).unwrap();
+        for name in [
+            "m-hornet.ant.sock",
+            "m-hornet.ant.pid",
+            "m-hornet.ant.lock",
+            "m-hornet.ant.session",
+            "m-comb.ant.sock",
+            "p19.sock",
+        ] {
+            std::fs::write(hive.join(name), "").unwrap();
+        }
+
+        _sweep_team_grok_daemons("hornet");
+
+        for gone in [
+            "m-hornet.ant.sock",
+            "m-hornet.ant.pid",
+            "m-hornet.ant.lock",
+            "m-hornet.ant.session",
+        ] {
+            assert!(!hive.join(gone).exists(), "{gone} survived the sweep");
+        }
+        assert!(hive.join("m-comb.ant.sock").exists());
+        assert!(hive.join("p19.sock").exists());
+    }
+
+    #[test]
+    fn test_kill_address_prefers_the_explicit_team_over_the_prefix() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join("hive"));
+        crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[], "").unwrap();
+
+        // bare name: the pane's team decides, unless -t names one
+        assert_eq!(_kill_address("ant", ""), (String::new(), "ant".to_string()));
+        assert_eq!(
+            _kill_address("ant", "hornet"),
+            ("hornet".to_string(), "ant".to_string())
+        );
+        // the qualified form keeps working on its own
+        assert_eq!(
+            _kill_address("hornet.ant", ""),
+            ("hornet".to_string(), "ant".to_string())
+        );
     }
 }

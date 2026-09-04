@@ -257,6 +257,17 @@ pub(crate) fn usable_runtime(response: Option<Map<String, Value>>) -> Option<Map
         .filter(|r| r.get("ok") != Some(&Value::Bool(false)))
 }
 
+/// Test seam for callers outside this module: `_find_team_window` resolves
+/// tmux through `tests::fake_tmux` in test builds, so a command-layer test
+/// that needs a window listing has to answer *this* double, not
+/// `crate::tmux`'s.
+#[cfg(test)]
+pub(crate) fn _set_fake_tmux_run(
+    f: impl Fn(&[String], bool) -> Result<crate::tmux::Run, crate::tmux::TmuxError> + 'static,
+) {
+    tests::with_state(|st| st.run_fn = Some(Box::new(f)));
+}
+
 #[cfg(not(test))]
 fn find_team_window_for_load(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
     _find_team_window(name, prefer_pane)

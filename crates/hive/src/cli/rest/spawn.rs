@@ -184,6 +184,22 @@ fn _spawn_headless_member(
     _record_headless_member(t, agent)
 }
 
+/// Workspace the `--task` dispatch will ride, or None without `--task`.
+///
+/// Split out so the requirement is checked before the spawn: the dispatch
+/// needs a workspace, and discovering that after `_spawn_headless_member`
+/// has claimed the name and minted the engine leaves a half-born member on
+/// the roster.
+pub(crate) fn _task_dispatch_workspace(
+    t: &Team,
+    task_artifact: Option<&str>,
+) -> Result<Option<String>> {
+    match task_artifact {
+        Some(_) => resolve_workspace(Some(t), true).map(Some),
+        None => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     agent_name: &str,
@@ -202,6 +218,10 @@ pub fn spawn(
     let (team_name, t) = ok_or_fail(resolve_scoped_team(Some(team_arg), true));
     let team_name = team_name.expect("required resolve returned no team");
     let mut t = t.expect("required resolve returned no team");
+    // Before any spawn side effect: a `--task` spawn that cannot resolve its
+    // workspace must fail while the roster is still clean, not after the
+    // member is registered and its engine minted.
+    let task_workspace = ok_or_fail(_task_dispatch_workspace(&t, task_artifact));
     // A live display and a tmux-resident caller get a pane; anything else —
     // a ccd orch outside tmux, a team with no window — spawns engine-only.
     let headless = !(!t.tmux_window.is_empty() && tmux::is_inside_tmux());
@@ -243,13 +263,13 @@ pub fn spawn(
             println!("Agent '{agent_name}' spawned in pane {}", agent.pane_id);
         } else {
             println!(
-                "Agent '{agent_name}' spawned headless (engine only — `hive attach {team_name}` renders it)"
+                "Agent '{agent_name}' spawned headless (engine only — `hive render {team_name}` renders it)"
             );
         }
         return;
     };
 
-    let workspace = ok_or_fail(resolve_workspace(Some(&t), true));
+    let workspace = task_workspace.expect("--task resolved its workspace before spawning");
     let _ = _ensure_team_hived(&mut t, &workspace);
     if agent.cli != "claude" {
         // A claude member's inbox is a queue: the task can land while the

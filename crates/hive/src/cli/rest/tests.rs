@@ -35,6 +35,253 @@ fn test_attach_backfills_only_missing_attachable_members() {
     assert_eq!(names, vec!["sage".to_string()]);
 }
 
+// --- attach (jump only) / render (build, backfill, then jump) ---
+
+/// Temp `$HIVE_HOME` + an inside-tmux env, held for the test's lifetime.
+struct DisplayEnv {
+    _tmp: tempfile::TempDir,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+fn display_env() -> DisplayEnv {
+    let guard = crate::registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    // Inside tmux: the jump must never reach exec_attach, which would
+    // replace the test process with `tmux attach`.
+    std::env::set_var("TMUX", "/tmp/hive-test-tmux,1,0");
+    std::env::set_var("TMUX_PANE", "%0");
+    DisplayEnv {
+        _tmp: tmp,
+        _guard: guard,
+    }
+}
+
+fn member_row(name: &str, cli: &str, session_id: &str) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("name".to_string(), Value::from(name));
+    m.insert("cli".to_string(), Value::from(cli));
+    m.insert("sessionId".to_string(), Value::from(session_id));
+    m.insert("cwd".to_string(), Value::from("/tmp"));
+    m
+}
+
+type Argv = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
+
+/// A tmux double that answers everything `attach`/`render` ask and records
+/// every argv. `windows` is the `list-windows -a` stdout; `panes` the pane
+/// rows the team window already has (`_PANE_BASE_FMT` order, tab-joined).
+///
+/// Two seams, because `_find_team_window` resolves tmux through `team.rs`'s
+/// own fake in test builds while `attach.rs` calls the real module. Only the
+/// real module's argv is recorded — which is the half that writes.
+fn fake_tmux(windows: &'static str, panes: &'static [&'static str]) -> Argv {
+    crate::team::_set_fake_tmux_run(move |_args, _check| {
+        Ok(crate::tmux::Run {
+            returncode: 0,
+            stdout: windows.to_string(),
+            stderr: String::new(),
+        })
+    });
+    let argv: Argv = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = std::rc::Rc::clone(&argv);
+    let mut live: Vec<String> = panes
+        .iter()
+        .map(|row| row.split('\t').next().unwrap_or_default().to_string())
+        .collect();
+    let mut extra_rows: Vec<String> = Vec::new();
+    let mut next_pane = 1;
+    crate::tmux::_set_run_override(move |args, _check, _timeout| {
+        recorded.borrow_mut().push(args.to_vec());
+        let out = match args[0].as_str() {
+            "list-windows" => windows.to_string(),
+            "has-session" => String::new(),
+            "new-window" => {
+                let pane = format!("%{next_pane}");
+                next_pane += 1;
+                live.push(pane.clone());
+                format!("dev:2\t{pane}")
+            }
+            "split-window" => {
+                let pane = format!("%{next_pane}");
+                next_pane += 1;
+                live.push(pane.clone());
+                extra_rows.push(format!("{pane}\t\t\t\t\t\t\t"));
+                pane
+            }
+            "list-panes" => {
+                let fmt = args.last().cloned().unwrap_or_default();
+                if fmt == "#{pane_id}" {
+                    live.join("\n")
+                } else {
+                    let mut rows: Vec<String> = panes.iter().map(|r| (*r).to_string()).collect();
+                    rows.extend(extra_rows.iter().cloned());
+                    rows.join("\n")
+                }
+            }
+            "display-message" => match args.last().map(String::as_str).unwrap_or_default() {
+                "#{session_name}" => "dev".to_string(),
+                "#{window_id}" => "@7".to_string(),
+                "#{window_width}\t#{window_height}" => "200\t50".to_string(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        Ok(crate::tmux::Run {
+            returncode: 0,
+            stdout: format!("{out}\n"),
+            stderr: String::new(),
+        })
+    });
+    argv
+}
+
+fn verbs(argv: &Argv) -> Vec<String> {
+    argv.borrow().iter().map(|a| a[0].clone()).collect()
+}
+
+#[test]
+fn test_attach_without_a_window_refuses_and_writes_nothing() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[
+            member_row("orch", "grok", "sid-orch"),
+            member_row("sage", "grok", "sid-sage"),
+        ],
+        "@3",
+    )
+    .unwrap();
+    let argv = fake_tmux("", &[]);
+
+    let message = _attach_target("honey").unwrap_err();
+
+    // The team is alive; the message says so and names the verb that builds.
+    assert!(message.contains("hive render honey"), "{message}");
+    assert!(message.contains("2 member(s)"), "{message}");
+    assert!(message.contains("@3"), "{message}");
+    // Read-only: not one tmux command beyond the window lookup.
+    assert_eq!(verbs(&argv), Vec::<String>::new());
+    // And the registry's display cache is untouched.
+    assert_eq!(
+        crate::registry::load("honey").unwrap()["display"],
+        Value::from("@3")
+    );
+}
+
+#[test]
+fn test_attach_names_the_missing_team_before_looking_at_tmux() {
+    let _env = display_env();
+    let argv = fake_tmux("", &[]);
+
+    let message = _attach_target("ghost").unwrap_err();
+
+    assert!(message.contains("hive ls"), "{message}");
+    assert!(argv.borrow().is_empty());
+}
+
+#[test]
+fn test_attach_with_a_window_switches_the_client() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "grok", "sid-orch")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux("dev:2\t@7\thoney\t\t\t\n", &[]);
+
+    attach_cmd("honey");
+
+    let recorded = argv.borrow();
+    // switch-client moves *this* client; select-window would only retarget
+    // the window's own session and leave the caller where it was.
+    assert!(recorded
+        .iter()
+        .any(|a| a[..] == ["switch-client", "-t", "dev:2"]));
+    assert!(recorded.iter().all(|a| a[0] != "select-window"));
+    // Still read-only.
+    assert!(recorded
+        .iter()
+        .all(|a| !matches!(a[0].as_str(), "new-window" | "split-window" | "send-keys")));
+}
+
+#[test]
+fn test_render_without_a_window_builds_one_and_records_the_display() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[
+            member_row("orch", "grok", "sid-orch"),
+            member_row("sage", "grok", "sid-sage"),
+            member_row("ghost", "grok", ""),
+        ],
+        "",
+    )
+    .unwrap();
+    let argv = fake_tmux("", &[]);
+
+    render_cmd("honey");
+
+    let recorded = argv.borrow();
+    let verbs: Vec<&str> = recorded.iter().map(|a| a[0].as_str()).collect();
+    // One window, and one split for the second attachable member; the
+    // member with no engine identity gets no pane.
+    assert_eq!(verbs.iter().filter(|v| **v == "new-window").count(), 1);
+    assert_eq!(verbs.iter().filter(|v| **v == "split-window").count(), 1);
+    assert!(recorded
+        .iter()
+        .any(|a| a[..] == ["switch-client", "-t", "dev:2"]));
+    // The freshly built window id lands in the registry's display cache.
+    assert_eq!(
+        crate::registry::load("honey").unwrap()["display"],
+        Value::from("@7")
+    );
+}
+
+#[test]
+fn test_render_with_a_window_backfills_without_a_second_window() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[
+            member_row("orch", "grok", "sid-orch"),
+            member_row("sage", "grok", "sid-sage"),
+        ],
+        "@7",
+    )
+    .unwrap();
+    // The window renders `orch` only — `sage` was spawned after it was built.
+    let argv = fake_tmux(
+        "dev:2\t@7\thoney\t\t\t\n",
+        &["%1\t[orch]\tgrok\tagent\torch\thoney\tgrok\t"],
+    );
+
+    render_cmd("honey");
+
+    let recorded = argv.borrow();
+    let verbs: Vec<&str> = recorded.iter().map(|a| a[0].as_str()).collect();
+    assert!(!verbs.contains(&"new-window"));
+    assert_eq!(verbs.iter().filter(|v| **v == "split-window").count(), 1);
+    // The new pane runs sage's own viewer, not orch's.
+    assert!(recorded
+        .iter()
+        .any(|a| a[0] == "send-keys" && a.last().is_some_and(|text| text.contains("sid-sage"))));
+    assert!(recorded
+        .iter()
+        .any(|a| a[..] == ["switch-client", "-t", "dev:2"]));
+}
+
 // --- tests/unit/test_launcher_opt_values.py ---
 
 #[test]
@@ -385,5 +632,44 @@ fn test_plugin_setup_drives_both_clis_in_order() {
             ),
             "codex plugin add hive@hive".to_string(),
         ]
+    );
+}
+
+// --- spawn --task preflight (the workspace gate runs before any side effect) ---
+
+#[test]
+fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
+    let _guard = crate::registry::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    std::env::remove_var("TMUX");
+    std::env::remove_var("TMUX_PANE");
+    std::env::remove_var("CODEX_THREAD_ID");
+    std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+    let workspaceless = crate::team::Team {
+        name: "hornet".to_string(),
+        ..Default::default()
+    };
+
+    // no --task: nothing is required, nothing is resolved
+    assert_eq!(
+        spawn::_task_dispatch_workspace(&workspaceless, None).unwrap(),
+        None
+    );
+
+    let err = spawn::_task_dispatch_workspace(&workspaceless, Some("/tmp/task.md"))
+        .expect_err("a task dispatch with no workspace must refuse");
+    assert!(err.to_string().contains("workspace not found"), "{err}");
+
+    let with_workspace = crate::team::Team {
+        name: "hornet".to_string(),
+        workspace: "/tmp/ws-hn".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        spawn::_task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
+        Some("/tmp/ws-hn".to_string())
     );
 }
