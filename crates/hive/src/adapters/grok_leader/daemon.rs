@@ -388,6 +388,17 @@ fn _terminate_process_group(pid: libc::pid_t) {
     }
 }
 
+/// True while a leader still holds *key*: a socket that answers, or a
+/// pidfile/lock naming a process that is this socket's leader.
+///
+/// The re-check after a kill: grok's stdio clients auto-spawn a leader when
+/// they find none, so a TUI still exiting can raise a fresh one on the key
+/// just after it was killed.
+pub fn leader_present(key: &str) -> bool {
+    let sock = socket_path_for_key(key);
+    probe_socket(&sock) || _leader_pid(&sock).is_some()
+}
+
 /// Stop a key's leader and remove its socket, pidfile and session record.
 ///
 /// Only a pid verified as this key's leader is signalled; a stale record

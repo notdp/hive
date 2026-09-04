@@ -110,6 +110,19 @@ pub fn delete_buffer(name: &str) {
     let _ = _run(&["delete-buffer", "-b", name], false, 5);
 }
 
+/// The pid of the process tmux runs in *pane_id*, when tmux answers.
+///
+/// The pane is a display record and disappears the instant kill-pane runs;
+/// the process it hosted takes longer to go. A caller that must know the
+/// process is really gone reads this first and waits on the pid.
+pub fn pane_pid(pane_id: &str) -> Option<u32> {
+    display_value(pane_id, "#{pane_pid}")?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|pid| *pid > 0)
+}
+
 pub fn is_pane_in_mode(pane_id: &str) -> bool {
     display_value(pane_id, "#{pane_in_mode}").as_deref() == Some("1")
 }

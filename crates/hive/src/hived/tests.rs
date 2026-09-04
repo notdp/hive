@@ -4071,6 +4071,72 @@ fn test_doctor_payload_exposes_cli_alive() {
     assert_eq!(diag["cliAlive"], Value::Bool(false));
 }
 
+/// A live interactive Claude session as the sessions registry lists it.
+fn live_session(session_id: &str, pid: i32) -> crate::adapters::claude_sessions::ClaudeSession {
+    crate::adapters::claude_sessions::ClaudeSession {
+        name: "desk".to_string(),
+        pid,
+        cwd: "/repo".to_string(),
+        kind: String::new(),
+        socket_path: "/tmp/desk.sock".to_string(),
+        session_id: session_id.to_string(),
+        title: String::new(),
+    }
+}
+
+/// `hive render` renders a joined desktop Claude as a read-only viewer pane:
+/// no CLI on the tty, so the pane probe says cli_exited while the member's
+/// engine — its session — is alive and reachable.
+fn mirror_pane_hook(member: Agent) -> Hook {
+    Hook {
+        team_load: Some(Arc::new(move |_name| {
+            Ok(fake_team("t", vec![member.clone()]))
+        })),
+        member_runtime_payload: Some(Arc::new(|_p, _r| {
+            json_obj(&[
+                ("alive", Value::Bool(true)),
+                ("cliAlive", Value::Bool(false)),
+                ("busy", Value::Bool(false)),
+                ("inputState", Value::from("offline")),
+                ("inputReason", Value::from("cli_exited")),
+            ])
+        })),
+        cs_list_sessions: Some(Arc::new(|| vec![live_session("sess-desk", 4242)])),
+        cs_session_status: Some(Arc::new(|_pid| None)),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_team_runtime_reads_a_mirror_pane_member_off_its_live_session() {
+    let mut member = fake_agent("orch", "%1", "claude");
+    member.session_id = Some("sess-desk".to_string());
+    let _guard = testhook::install(mirror_pane_hook(member));
+
+    let payload = _team_runtime_payload("t").unwrap();
+    let rt = payload["members"]["orch"].as_object().unwrap();
+
+    assert_eq!(rt["cliAlive"], Value::Bool(true));
+    assert_eq!(rt["inputState"], Value::from("ready"));
+    assert_eq!(rt["inputReason"], Value::from(""));
+    assert_eq!(rt["sessionId"], Value::from("sess-desk"));
+    assert_eq!(rt["_runtimeSource"], Value::from("claude_session"));
+    assert_eq!(rt["alive"], Value::Bool(true)); // still the pane's own fact
+}
+
+#[test]
+fn test_team_runtime_leaves_a_pane_member_with_no_live_session_dead() {
+    let mut member = fake_agent("orch", "%1", "claude");
+    member.session_id = Some("sess-gone".to_string());
+    let _guard = testhook::install(mirror_pane_hook(member));
+
+    let payload = _team_runtime_payload("t").unwrap();
+    let rt = payload["members"]["orch"].as_object().unwrap();
+
+    assert_eq!(rt["cliAlive"], Value::Bool(false));
+    assert_eq!(rt["inputReason"], Value::from("cli_exited"));
+}
+
 // ---- test_agent_headless.py (the two hived-owned tests) ----------------
 
 fn headless_member(cli: &str, session_id: Option<&str>) -> Agent {

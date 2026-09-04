@@ -167,7 +167,7 @@ gh pr merge <PR号> --match-head-commit <验过的head> --squash
 
 ## 窗口相关(可选显示层)
 
-以下命令只在 `hive attach` 出窗口后有意义,headless 团忽略:
+以下命令只在 `hive render` 出窗口后有意义,headless 团忽略:
 
 - 布局拖乱了跑 `hive layout`。
 - PR 号钉窗口状态栏:`hive pr set <PR号>` / `hive pr clear`。

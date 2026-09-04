@@ -141,7 +141,63 @@ pub fn save_context_for_pane(
     agent: &str,
 ) -> Result<PathBuf> {
     let path = context_dir().join(format!("{}.json", pane_slug(pane_id)));
-    write_context(path, team, workspace, agent)
+    let written = write_context(path, team, workspace, agent)?;
+    _prune_dead_pane_contexts(&written, _live_pane_ids());
+    Ok(written)
+}
+
+/// The live pane listing the prune trusts, or None when there is none to
+/// trust.
+///
+/// The one seam of the prune, so a test drives `save_context_for_pane`
+/// itself rather than the private prune underneath it. A test that installs
+/// no listing gets None — a unit test never queries the real tmux server,
+/// and "no listing" is the answer that prunes nothing.
+fn _live_pane_ids() -> Option<Vec<String>> {
+    #[cfg(test)]
+    {
+        tests::mocked_live_pane_ids()
+    }
+    #[cfg(not(test))]
+    {
+        let (panes, status) = crate::tmux::list_panes_all_status();
+        if status != "ok" {
+            return None;
+        }
+        Some(panes?.into_iter().map(|p| p.pane_id).collect())
+    }
+}
+
+/// Drop `pane-*.json` siblings whose pane tmux no longer lists.
+///
+/// One write leaves one file per pane forever otherwise — a long-lived
+/// `$HIVE_HOME` accumulates thousands. The listing is the only authority:
+/// a failed or empty one proves no pane dead and prunes nothing, and the
+/// file just written is kept whatever it says.
+fn _prune_dead_pane_contexts(keep: &Path, live_panes: Option<Vec<String>>) {
+    let Some(live) = live_panes.filter(|panes| !panes.is_empty()) else {
+        return;
+    };
+    let live: std::collections::HashSet<String> = live.into_iter().collect();
+    let Ok(entries) = fs::read_dir(context_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(slug) = name
+            .strip_suffix(".json")
+            .and_then(|s| s.strip_prefix("pane-"))
+        else {
+            continue; // default.json and anything not a pane context
+        };
+        if !live.contains(&format!("%{slug}")) {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 /// Remove a pane's saved context (registration rollback).
@@ -167,6 +223,7 @@ pub fn clear_current_context() -> Result<()> {
 mod tests {
     use super::*;
     use crate::registry::TEST_ENV_LOCK;
+    use std::cell::RefCell;
     use std::sync::MutexGuard;
 
     /// Pin the env inputs of `crate::tmux::get_current_pane_id` so no member
@@ -184,6 +241,20 @@ mod tests {
             None => std::env::remove_var("TMUX_PANE"),
         }
         (tmp, guard)
+    }
+
+    thread_local! {
+        static LIVE_PANES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// The listing `_live_pane_ids` answers with under test.
+    pub(super) fn mocked_live_pane_ids() -> Option<Vec<String>> {
+        LIVE_PANES.with(|p| p.borrow().clone())
+    }
+
+    fn set_live_panes(panes: &[&str]) {
+        let panes: Vec<String> = panes.iter().map(|p| p.to_string()).collect();
+        LIVE_PANES.with(|p| *p.borrow_mut() = Some(panes));
     }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -297,5 +368,56 @@ mod tests {
 
         assert!(!pane_file.exists());
         assert!(!tmp.path().join("current.json").exists());
+    }
+
+    #[test]
+    fn test_save_context_for_pane_prunes_the_dead_siblings_it_writes_next_to() {
+        // The whole wiring: the write goes through the public entry point
+        // and the prune rides along on the listing the seam answers with.
+        let (tmp, _guard) = setup(None);
+        let dir = tmp.path().join("contexts");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pane-1.json"), "{}").unwrap();
+        fs::write(dir.join("pane-2.json"), "{}").unwrap();
+        set_live_panes(&["%1", "%77"]);
+
+        let written = save_context_for_pane("%77", "team-a", "/tmp/ws", "alpha").unwrap();
+
+        assert!(written.exists());
+        assert!(dir.join("pane-1.json").exists(), "live sibling pruned");
+        assert!(!dir.join("pane-2.json").exists(), "dead sibling kept");
+    }
+
+    #[test]
+    fn test_prune_dead_pane_contexts_removes_only_panes_tmux_no_longer_lists() {
+        let (tmp, _guard) = setup(None);
+        let dir = tmp.path().join("contexts");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["pane-1.json", "pane-2.json", "pane-99.json", "default.json"] {
+            fs::write(dir.join(name), "{}").unwrap();
+        }
+        let keep = dir.join("pane-99.json");
+
+        _prune_dead_pane_contexts(&keep, Some(vec!["%1".to_string(), "%7".to_string()]));
+
+        assert!(dir.join("pane-1.json").exists()); // live
+        assert!(!dir.join("pane-2.json").exists()); // gone
+        assert!(keep.exists()); // just written, whatever the listing says
+        assert!(dir.join("default.json").exists()); // not a pane context
+    }
+
+    #[test]
+    fn test_prune_dead_pane_contexts_keeps_everything_without_a_listing() {
+        let (tmp, _guard) = setup(None);
+        let dir = tmp.path().join("contexts");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pane-2.json"), "{}").unwrap();
+        let keep = dir.join("pane-99.json");
+
+        // failed listing, then a listing of nothing: neither proves a pane dead
+        _prune_dead_pane_contexts(&keep, None);
+        assert!(dir.join("pane-2.json").exists());
+        _prune_dead_pane_contexts(&keep, Some(Vec::new()));
+        assert!(dir.join("pane-2.json").exists());
     }
 }

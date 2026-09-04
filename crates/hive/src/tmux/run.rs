@@ -46,6 +46,16 @@ thread_local! {
     > = const { std::cell::RefCell::new(None) };
 }
 
+/// Test seam: route every `_run` through *f*, which sees `(argv, check,
+/// timeout)`. Crate-visible because the command-layer tests drive whole
+/// handlers and assert on the tmux argv those handlers issue.
+#[cfg(test)]
+pub(crate) fn _set_run_override(
+    f: impl FnMut(&[String], bool, u64) -> Result<Run, TmuxError> + 'static,
+) {
+    RUN_OVERRIDE.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+}
+
 /// Low-level subprocess execution with capture + timeout (the
 /// `subprocess.run(capture_output=True, timeout=...)` seam).
 pub(super) fn exec_capture(

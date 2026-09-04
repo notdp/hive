@@ -76,10 +76,77 @@ pub(super) fn hooked_tag_pane(pane_id: &str, role: &str, agent: &str, team: &str
 
 pub(super) fn hooked_kill_pane(pane_id: &str) {
     #[cfg(test)]
-    if testhook::with(|h| h.killed.push(pane_id.to_string())).is_some() {
+    if testhook::with(|h| {
+        h.event_order.push(format!("pane:{pane_id}"));
+        h.killed.push(pane_id.to_string())
+    })
+    .is_some()
+    {
         return;
     }
     crate::tmux::kill_pane(pane_id);
+}
+
+/// The pid tmux runs in the pane, read while the pane still exists.
+pub(super) fn hooked_pane_pid(pane_id: &str) -> Option<u32> {
+    #[cfg(test)]
+    if let Some(pid) = testhook::with(|h| {
+        h.event_order.push(format!("pid:{pane_id}"));
+        h.pane_pid
+    }) {
+        return pid;
+    }
+    crate::tmux::pane_pid(pane_id)
+}
+
+/// Block until the pane's process is gone, or *timeout* passes.
+///
+/// Waiting on tmux's listing is not enough: `is_pane_alive` answers no the
+/// instant kill-pane drops the pane record, while the TUI it hosted is
+/// still on its way out — and a dying grok TUI still raises a leader. So
+/// the caller reads `#{pane_pid}` before the kill and this waits on that
+/// process. Without a pid (tmux never answered) the listing is all there
+/// is, and it is used as the weaker signal it is.
+pub(super) fn hooked_wait_pane_exit(pane_id: &str, pid: Option<u32>, timeout: f64) {
+    #[cfg(test)]
+    if testhook::with(|h| {
+        h.event_order.push(format!("wait:{pane_id}"));
+        h.waited_pane_gone.push(pane_id.to_string())
+    })
+    .is_some()
+    {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
+    loop {
+        let gone = match pid {
+            Some(pid) => !_process_alive(pid),
+            None => !crate::tmux::is_pane_alive(pane_id),
+        };
+        if gone || std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// True while the pid names a process, signal 0 being the "is it there"
+/// probe. `EPERM` is a live process this user may not signal, not an
+/// absence; only `ESRCH` says it is gone.
+fn _process_alive(pid: u32) -> bool {
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// One poll interval of a wait loop, free under a test hook.
+pub(super) fn hooked_sleep_ms(ms: u64) {
+    #[cfg(test)]
+    if testhook::with(|_| ()).is_some() {
+        return;
+    }
+    std::thread::sleep(Duration::from_millis(ms));
 }
 
 pub(super) fn hooked_clear_pane_tags(pane_id: &str) {
@@ -651,6 +718,41 @@ pub(super) fn hooked_grok_interrupt_key(key: &str) -> Option<&'static str> {
         return v;
     }
     crate::adapters::grok_leader::interrupt_key(key)
+}
+
+pub(super) fn hooked_grok_pool_drop_key(key: &str) {
+    #[cfg(test)]
+    if testhook::with(|h| h.event_order.push(format!("pool:{key}"))).is_some() {
+        return;
+    }
+    crate::adapters::grok_leader::pool().drop_key(key);
+}
+
+pub(super) fn hooked_grok_kill_daemon_key(key: &str) {
+    #[cfg(test)]
+    if testhook::with(|h| {
+        h.event_order.push(format!("daemon:{key}"));
+        h.grok_killed_keys.push(key.to_string());
+    })
+    .is_some()
+    {
+        return;
+    }
+    crate::adapters::grok_leader::kill_daemon_key(key);
+}
+
+pub(super) fn hooked_grok_leader_present(key: &str) -> bool {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        if h.grok_leader_present.is_empty() {
+            false
+        } else {
+            h.grok_leader_present.remove(0)
+        }
+    }) {
+        return v;
+    }
+    crate::adapters::grok_leader::leader_present(key)
 }
 
 pub(super) fn hooked_grok_probe_socket(socket_path: &std::path::Path) -> bool {

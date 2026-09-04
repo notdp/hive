@@ -156,7 +156,7 @@ pub(crate) fn build_cli() -> Command {
                 .long_about(
                     "Create a team.\n\n\
                      NAME is optional everywhere (pool-picked by default). Outside tmux:\n\
-                     a headless team — `hive attach` renders it. Inside tmux on an agent\n\
+                     a headless team — `hive render` builds its window. Inside tmux on an agent\n\
                      pane: that pane becomes the orch. Inside tmux on a shell pane: the\n\
                      window binds the team without an orch.",
                 )
@@ -513,13 +513,26 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("attach")
-                .about("Render a team's display: jump to its window, or build one.")
+                .about("Jump to a team's tmux window. Read-only: never builds one.")
                 .long_about(
-                    "Render a team's display: jump to its window, or build one.\n\n\
-                     The registry is the team's existence; this materializes (or finds) its\n\
-                     tmux window — one attach pane per member, each riding its engine's own\n\
-                     viewer (claude attach loop / codex thread resume / grok session resume).\n\
-                     Run from outside tmux it finishes by exec'ing `tmux attach`.",
+                    "Jump to a team's tmux window. Read-only: never builds one.\n\n\
+                     A team with no window is still alive — it is a registry roster, not a\n\
+                     display — so this fails instead of rendering one behind your back.\n\
+                     `hive render` builds the window. Run from outside tmux this finishes\n\
+                     by exec'ing `tmux attach`.",
+                )
+                .arg(Arg::new("team_name").required(true)),
+        )
+        .subcommand(
+            Command::new("render")
+                .about("Render a team's display: build its window, then jump to it.")
+                .long_about(
+                    "Render a team's display: build its window, then jump to it.\n\n\
+                     The registry is the team's existence; this materializes its tmux window —\n\
+                     one attach pane per member, each riding its engine's own viewer (claude\n\
+                     attach loop / codex thread resume / grok session resume). An existing\n\
+                     window gains panes for members spawned since it was built. Ends by\n\
+                     jumping to the window, like `hive attach`.",
                 )
                 .arg(Arg::new("team_name").required(true)),
         )
@@ -645,7 +658,14 @@ pub(crate) fn build_cli() -> Command {
                      against the caller's scoped team.\n\n\
                      Example:\n  hive kill worker1",
                 )
-                .arg(Arg::new("agent_name").required(true)),
+                .arg(Arg::new("agent_name").required(true))
+                .arg(
+                    Arg::new("team_arg")
+                        .long("team")
+                        .short('t')
+                        .default_value("")
+                        .help("Explicit team (default: the pane's binding)"),
+                ),
         )
         .subcommand(passthrough_command(
             "cvim",
@@ -887,6 +907,7 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "pr",
     "view",
     "attach",
+    "render",
     "ls",
     "send",
     "thread",
@@ -977,19 +998,40 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Why a no-tmux call is refused, or None when it is admitted.
+///
+/// Outside tmux only `send` has identity lanes: a Claude session sending
+/// into hive as a guest (its messaging socket), a headless codex member
+/// (its thread keys its roster row) or a headless engine carrying its
+/// member identity in env (a grok leader's subprocess). A spawn env that
+/// names nobody on the roster is told so by name — that is the shape a
+/// killed member's leftover subprocess arrives in, and the tmux line would
+/// send it hunting for a terminal it is never going to have.
+fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
+    if _TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
+        return None;
+    }
+    if invoked != "send" {
+        return Some(_TMUX_REQUIRED_MESSAGE);
+    }
+    if crate::adapters::claude_sessions::self_session().is_some()
+        || _codex_thread_member_env().is_some()
+        || _env_roster_member().is_some()
+    {
+        return None;
+    }
+    if _discover_env_binding().is_empty() {
+        Some(_TMUX_REQUIRED_MESSAGE)
+    } else {
+        Some(_STALE_ENV_MESSAGE)
+    }
+}
+
 /// Root-group gates from the Python `cli()` callback.
 fn run_root_gates(invoked: &str) {
     _require_codex_native(Some(invoked));
-    if !_TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) && !tmux::is_inside_tmux() {
-        // A Claude session sending into hive as a guest, or a headless codex
-        // member whose thread keys its roster row.
-        if invoked == "send"
-            && (crate::adapters::claude_sessions::self_session().is_some()
-                || _codex_thread_member_env().is_some())
-        {
-            return;
-        }
-        fail(_TMUX_REQUIRED_MESSAGE);
+    if let Some(message) = _no_tmux_refusal(invoked) {
+        fail(message);
     }
 }
 
@@ -1219,6 +1261,7 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("view", m)) => core_cmds::view_cmd(arg_str(m, "session_id")),
         Some(("attach", m)) => rest::attach_cmd(arg_str(m, "team_name")),
+        Some(("render", m)) => rest::render_cmd(arg_str(m, "team_name")),
         Some(("ls", m)) => core_cmds::ls_cmd(m.get_flag("plain")),
         Some(("send", m)) => core_cmds::send(
             arg_str(m, "to_agent"),
@@ -1232,7 +1275,7 @@ fn dispatch(matches: &ArgMatches) {
             *m.get_one::<i64>("lines").unwrap_or(&30),
         ),
         Some(("interrupt", m)) => core_cmds::interrupt(arg_str(m, "agent_name")),
-        Some(("kill", m)) => core_cmds::kill(arg_str(m, "agent_name")),
+        Some(("kill", m)) => core_cmds::kill(arg_str(m, "agent_name"), arg_str(m, "team_arg")),
         Some(("notify", m)) => rest::notify_cmd(arg_str(m, "message")),
         Some(("plugin", m)) => match m.subcommand() {
             Some(("list", m)) => rest::plugin_list(m.get_flag("plain")),
@@ -1308,6 +1351,53 @@ mod tests {
                 "missing command {name}"
             );
         }
+    }
+
+    /// A headless engine subprocess: no tmux, no socket, no codex thread.
+    fn headless_gate_env(tmp: &std::path::Path) {
+        std::env::set_var("HIVE_HOME", tmp.join(".hive"));
+        for key in [
+            "TMUX",
+            "TMUX_PANE",
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "HIVE_TEAM",
+            "HIVE_MEMBER",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn test_no_tmux_refusal_admits_a_rostered_env_member_and_names_a_stale_one() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        headless_gate_env(tmp.path());
+        let mut member = serde_json::Map::new();
+        member.insert("name".to_string(), serde_json::Value::String("bee".into()));
+        crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
+
+        // no identity at all: the generic tmux refusal
+        assert_eq!(_no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
+
+        std::env::set_var("HIVE_TEAM", "hornet");
+        std::env::set_var("HIVE_MEMBER", "bee");
+        assert_eq!(_no_tmux_refusal("send"), None);
+
+        // the env outlived the member it names
+        std::env::set_var("HIVE_MEMBER", "ant");
+        assert_eq!(_no_tmux_refusal("send"), Some(_STALE_ENV_MESSAGE));
+
+        // the env lane is a send lane only; other verbs still need tmux
+        std::env::set_var("HIVE_MEMBER", "bee");
+        assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
+        // ... and the tmux-optional verbs never reach the gate
+        assert_eq!(_no_tmux_refusal("config"), None);
+
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
     }
 
     #[test]

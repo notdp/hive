@@ -6,6 +6,17 @@ use super::seams::*;
 use super::spawn::Agent;
 use super::support::DeliveryError;
 
+/// How long a kill waits for a pane's process to be gone before moving on
+/// to the engine behind it. A tmux pane teardown is milliseconds; this is
+/// the ceiling, not the expected cost.
+const _PANE_EXIT_TIMEOUT: f64 = 2.0;
+
+/// How long the kill keeps watching a grok key for a leader raised by the
+/// exiting TUI, as a poll count × `_LEADER_REAP_POLL_MS`. A single probe
+/// races the respawn; the watch stops the moment it catches one.
+const _LEADER_REAP_POLLS: u32 = 10;
+const _LEADER_REAP_POLL_MS: u64 = 100;
+
 impl Agent {
     // --- Control ---
 
@@ -84,7 +95,7 @@ impl Agent {
             };
         }
         if claude_member {
-            // The pane may be a display-only mirror (hive attach renders an
+            // The pane may be a display-only mirror (hive render draws an
             // interactive member — a joined ccd — as a read-only viewer and
             // tags the pane with the member's name). The engine identity is
             // the roster sessionId; when it names a live interactive session
@@ -416,20 +427,52 @@ impl Agent {
                 crate::adapters::claude_bg::clear_pane_job(&self.pane_id);
             }
         } else if self.cli == "grok" {
-            // The member's leader daemon is the engine; a kill removes the
-            // member, so the engine goes with it — deterministically, not on
-            // the hived's next orphan sweep. Resolve while the pane tags
-            // still exist; a pane-less member is addressed by its member key.
-            let key = if !self.pane_id.is_empty() {
-                crate::adapters::grok_leader::resolve_pane_key(&self.pane_id)
-            } else {
-                crate::adapters::grok_leader::member_key(&self.team_name, &self.name)
-            };
-            crate::adapters::grok_leader::pool().drop_key(&key);
-            crate::adapters::grok_leader::kill_daemon_key(&key);
+            return self._kill_grok();
         }
         if !self.pane_id.is_empty() {
             hooked_kill_pane(&self.pane_id);
+        }
+    }
+
+    /// Kill order for a grok member: the pane first, the leader after.
+    ///
+    /// The member's leader daemon is the engine, so a kill takes it with the
+    /// member — deterministically, not on the hived's next orphan sweep. But
+    /// the pane's grok TUI is a leader client, and a client that finds its
+    /// leader gone auto-spawns a replacement on the same socket: killing the
+    /// daemon first resurrects it as an orphan nobody owns, and the pane kill
+    /// then takes only the TUI. So the TUI goes down and is waited out, the
+    /// pool's own client is dropped, and the leader is killed last — then the
+    /// key is watched for a moment, because a TUI still exiting can raise one.
+    fn _kill_grok(&self) {
+        // Resolve while the pane tags still exist; a pane-less member is
+        // addressed by its member key.
+        let key = if !self.pane_id.is_empty() {
+            crate::adapters::grok_leader::resolve_pane_key(&self.pane_id)
+        } else {
+            crate::adapters::grok_leader::member_key(&self.team_name, &self.name)
+        };
+        if !self.pane_id.is_empty() {
+            // The pid must be read before the kill: afterwards tmux has no
+            // pane left to answer about, and the process is what the leader
+            // race is against.
+            let pane_pid = hooked_pane_pid(&self.pane_id);
+            hooked_kill_pane(&self.pane_id);
+            hooked_wait_pane_exit(&self.pane_id, pane_pid, _PANE_EXIT_TIMEOUT);
+        }
+        hooked_grok_pool_drop_key(&key);
+        hooked_grok_kill_daemon_key(&key);
+        self._reap_resurrected_leader(&key);
+    }
+
+    /// Take down a leader that came back on *key* after the kill.
+    fn _reap_resurrected_leader(&self, key: &str) {
+        for _ in 0.._LEADER_REAP_POLLS {
+            if hooked_grok_leader_present(key) {
+                hooked_grok_kill_daemon_key(key);
+                return;
+            }
+            hooked_sleep_ms(_LEADER_REAP_POLL_MS);
         }
     }
 }

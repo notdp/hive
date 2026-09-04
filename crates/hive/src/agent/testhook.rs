@@ -76,6 +76,8 @@ pub struct Hook {
     pub grok_sent_key: Vec<(String, String)>,
     pub grok_interrupted_panes: Vec<String>,
     pub grok_interrupted_keys: Vec<String>,
+    pub grok_killed_keys: Vec<String>,
+    pub waited_pane_gone: Vec<String>,
 
     pub inbox_writes: Vec<(String, String, String, String)>,
     pub daemon_replies: Vec<(String, String)>,
@@ -129,6 +131,10 @@ pub struct Hook {
     pub grok_interrupt_pane: Option<&'static str>,
     pub grok_interrupt_key: Option<&'static str>,
     pub grok_probe_socket: Option<bool>,
+    /// `#{pane_pid}` a kill reads before tearing the pane down.
+    pub pane_pid: Option<u32>,
+    /// Answers of successive `leader_present` checks (missing → false).
+    pub grok_leader_present: Vec<bool>,
 }
 
 impl Hook {

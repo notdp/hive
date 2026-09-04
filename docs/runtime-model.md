@@ -52,7 +52,7 @@ Consequences across modules:
   still lists, so no create lane reuses a name until `hive delete` releases
   it.
 
-`hive attach` renders and does not define membership. Only a member with a
+`hive render` renders and does not define membership. Only a member with a
 recorded engine identity and an attachable cli gets a pane; the rest are named
 on stderr and left headless. A claude member whose sessionId names an
 interactive session (a joined desktop/ccd session, not a bg job) is rendered
@@ -157,6 +157,14 @@ stop` rather than destroying it, so the next resume or delivery wakes it. The
 hived's supervisor prunes job records whose pane died and parks those orphaned
 engines the same way. It does not reattach a viewer: a viewer the user closed
 deliberately must not be typed at.
+
+Not every claude member is a bg job. A joined interactive session — a desktop
+Claude that ran `hive create` or `hive join` — is a member whose engine is that
+session, and `hive render` gives it a read-only `hive view` mirror pane. No CLI
+process runs on that pane's tty, so the pane-keyed probe alone would report the
+member dead; the roster sessionId is the engine identity, and while it names a
+live session that session's registry status is the member's `cliAlive`, `busy`
+and `inputState`. `alive` stays the pane's own fact.
 
 ### What the viewer is showing
 

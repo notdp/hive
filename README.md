@@ -8,9 +8,9 @@ _This README is maintained in English. Translations may lag behind the canonical
 
 ## What is Hive
 
-Hive is a runtime for agents, not a hand-driven CLI. A team is a roster in the registry (one JSON file per team under `$HIVE_HOME/state/teams/`) plus one engine per member. The tmux window is a display that `hive attach` renders on top of that.
+Hive is a runtime for agents, not a hand-driven CLI. A team is a roster in the registry (one JSON file per team under `$HIVE_HOME/state/teams/`) plus one engine per member. The tmux window is a display that `hive render` draws on top of that.
 
-The split is enforced in the implementation. `hive create` outside tmux registers a headless team, `hive spawn` with no display brings up engine-only members that still receive, report, and get killed normally, and `hive attach <team>` materializes the window later, one pane per member. Nothing tmux holds is truth, so closing the window discards no state.
+The split is enforced in the implementation. `hive create` outside tmux registers a headless team, `hive spawn` with no display brings up engine-only members that still receive, report, and get killed normally, and `hive render <team>` materializes the window later, one pane per member. Nothing tmux holds is truth, so closing the window discards no state.
 
 Dispatching tasks, sending messages, and reading runtime state happen inside the agent session, and the agent runs the commands. The human entry point is the plugin skill `/hive:hive [team]`: no argument creates or joins by circumstance, a name joins that team and creates it if it does not exist. A small set of commands is run by hand: installing plugins, reading a session transcript (`hive view`), the popup editor (`hive cvim` / `hive vim`), split forks, and local dev setup.
 
@@ -81,7 +81,7 @@ wrong source.
 
 An interactive Claude session has no attachable pty (`claude attach` is job-only), but its transcript is appended event by event as the turn unfolds, so a renderer over that file is a live mirror that cannot type back. `hive view` is that renderer.
 
-`hive attach` binds it automatically for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume, and the pane is read-only. Delivery is unaffected: the same missing job row routes `hive send` to the live interactive session instead of the pane. Nobody can type at that member except the app that owns the session.
+`hive render` binds it automatically for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume, and the pane is read-only. Delivery is unaffected: the same missing job row routes `hive send` to the live interactive session instead of the pane. Nobody can type at that member except the app that owns the session.
 
 ## Upgrade
 

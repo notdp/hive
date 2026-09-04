@@ -407,6 +407,36 @@ pub fn _agent_runtime_payload(
     runtime
 }
 
+/// Runtime of a claude member whose engine is a live interactive session
+/// (a joined desktop Claude), or None when *session_id* names none.
+///
+/// Such a member has no bg job: its registry status is the runtime and its
+/// channel liveness is the pulse.
+pub fn _claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
+    let live = hooked_cs_list_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id)?;
+    let mut fields = Map::new();
+    fields.insert("cliAlive".to_string(), Value::Bool(true));
+    fields.insert("sessionId".to_string(), Value::from(session_id));
+    fields.insert("_runtimeSource".to_string(), Value::from("claude_session"));
+    match hooked_cs_session_status(Some(live.pid)) {
+        Some((status, waiting_for)) => {
+            for (key, value) in
+                crate::adapters::claude_sessions::runtime_from_status(&status, &waiting_for)
+            {
+                fields.insert(key, value);
+            }
+        }
+        None => {
+            fields.insert("busy".to_string(), Value::Bool(false));
+            fields.insert("inputState".to_string(), Value::from("ready"));
+            fields.insert("inputReason".to_string(), Value::from(""));
+        }
+    }
+    Some(fields)
+}
+
 /// Runtime for a registry member with no pane: the engine IS the member.
 ///
 /// ``alive`` mirrors engine liveness (there is no pane to be alive), and
@@ -422,32 +452,7 @@ pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     if cli == "claude" && !sid.is_empty() {
         let mut job_rt = _claude_job_runtime(&sid, "");
         if job_rt.get("cliAlive") != Some(&Value::Bool(true)) {
-            let live = hooked_cs_list_sessions()
-                .into_iter()
-                .find(|s| s.session_id == sid);
-            if let Some(live) = live {
-                // A joined interactive session: its registry status is the
-                // runtime, its channel liveness is the pulse.
-                let status = hooked_cs_session_status(Some(live.pid));
-                let mut session_rt = Map::new();
-                session_rt.insert("cliAlive".to_string(), Value::Bool(true));
-                session_rt.insert("sessionId".to_string(), Value::from(sid.clone()));
-                session_rt.insert("_runtimeSource".to_string(), Value::from("claude_session"));
-                match status {
-                    Some((status, waiting_for)) => {
-                        for (key, value) in crate::adapters::claude_sessions::runtime_from_status(
-                            &status,
-                            &waiting_for,
-                        ) {
-                            session_rt.insert(key, value);
-                        }
-                    }
-                    None => {
-                        session_rt.insert("busy".to_string(), Value::Bool(false));
-                        session_rt.insert("inputState".to_string(), Value::from("ready"));
-                        session_rt.insert("inputReason".to_string(), Value::from(""));
-                    }
-                }
+            if let Some(session_rt) = _claude_session_runtime(&sid) {
                 job_rt = session_rt;
             }
         }
@@ -555,6 +560,33 @@ pub fn _member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Va
     _agent_runtime_payload(pane_id, snapshot.as_ref())
 }
 
+/// Overlay the engine's own runtime on a claude member whose pane is only a
+/// mirror of it.
+///
+/// `hive render` renders an interactive claude member — a joined desktop
+/// session — as a read-only `hive view` pane. No CLI process runs on that
+/// tty, so the pane-keyed probe reports `cli_exited`; but for claude the
+/// pane tty is never the evidence (see docs/runtime-model.md), the engine
+/// is. The roster sessionId is that engine's identity: while it names a live
+/// session, that session's runtime is the member's. `alive` stays the pane's
+/// own fact.
+fn _mirror_pane_runtime(agent: &Agent, mut runtime: Map<String, Value>) -> Map<String, Value> {
+    if agent.cli != "claude" || runtime.get("cliAlive") == Some(&Value::Bool(true)) {
+        return runtime;
+    }
+    let sid = agent.session_id.clone().unwrap_or_default();
+    if sid.is_empty() {
+        return runtime;
+    }
+    let Some(session_rt) = _claude_session_runtime(&sid) else {
+        return runtime;
+    };
+    for (key, value) in session_rt {
+        runtime.insert(key, value);
+    }
+    runtime
+}
+
 pub fn _team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
     let team = hooked_team_load(team_name)?;
     let mut members = Map::new();
@@ -573,7 +605,10 @@ pub fn _team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
     sorted_agents.sort_by(|a, b| a.name.cmp(&b.name));
     for agent in sorted_agents {
         let runtime = if !agent.pane_id.is_empty() {
-            hooked_member_runtime_payload(&agent.pane_id, "agent")
+            _mirror_pane_runtime(
+                agent,
+                hooked_member_runtime_payload(&agent.pane_id, "agent"),
+            )
         } else {
             _headless_member_runtime(agent)
         };

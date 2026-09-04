@@ -9,10 +9,6 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 type Calls = Rc<RefCell<Vec<(Vec<String>, bool, u64)>>>;
 
-fn set_run_override(f: impl FnMut(&[String], bool, u64) -> Result<Run, TmuxError> + 'static) {
-    RUN_OVERRIDE.with(|o| *o.borrow_mut() = Some(Box::new(f)));
-}
-
 fn set_exec_override(
     f: impl FnMut(&[String], u64, Option<&str>) -> Result<Run, TmuxError> + 'static,
 ) {
@@ -38,7 +34,7 @@ fn _timeout_run() {
 fn _capture_run(rc: i32, out: &'static str) -> Calls {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    set_run_override(move |args, check, timeout| {
+    _set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         Ok(ok_run(rc, out, ""))
     });
@@ -46,7 +42,7 @@ fn _capture_run(rc: i32, out: &'static str) -> Calls {
 }
 
 fn _raising_run() {
-    set_run_override(|_args, _check, _timeout| Err(TmuxError::Os("no tmux".to_string())));
+    _set_run_override(|_args, _check, _timeout| Err(TmuxError::Os("no tmux".to_string())));
 }
 
 fn is_timeout(err: &anyhow::Error) -> bool {
@@ -92,7 +88,7 @@ fn test_load_buffer_timeout_raises() {
 fn test_session_helpers_delegate_to_tmux() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    set_run_override(move |args, check, timeout| {
+    _set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         if args[0] == "has-session" {
             return Ok(ok_run(0, "", ""));
@@ -111,6 +107,26 @@ fn test_session_helpers_delegate_to_tmux() {
     assert_eq!(calls[0].0[..3], v(&["has-session", "-t", "dev"]));
     assert_eq!(calls[1].0[0], "new-session");
     assert_eq!(calls[2].0, v(&["kill-session", "-t", "dev"]));
+}
+
+#[test]
+fn test_window_jump_helpers_issue_expected_tmux_commands() {
+    // `attach`/`render` jump with switch-client: select-window would only
+    // retarget the window's own session, leaving this client where it is.
+    let calls = _capture_run(0, "");
+
+    select_window("dev:2");
+    switch_client("dev:2");
+
+    let calls = calls.borrow();
+    let got: Vec<Vec<String>> = calls.iter().map(|c| c.0.clone()).collect();
+    assert_eq!(
+        got,
+        vec![
+            v(&["select-window", "-t", "dev:2"]),
+            v(&["switch-client", "-t", "dev:2"]),
+        ]
+    );
 }
 
 #[test]
@@ -138,7 +154,7 @@ fn test_send_keys_and_send_key_issue_expected_tmux_commands() {
 fn test_pane_mode_helpers_use_tmux_display_and_copy_mode() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    set_run_override(move |args, check, timeout| {
+    _set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         let stdout = if args.len() >= 3 && args[..3] == v(&["display-message", "-t", "%1"]) {
             "1\n"
@@ -167,7 +183,7 @@ fn test_pane_mode_helpers_use_tmux_display_and_copy_mode() {
 
 #[test]
 fn test_capture_and_list_parsers() {
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         if args[0] == "capture-pane" {
             return Ok(ok_run(0, "line1\nline2\n", ""));
         }
@@ -183,7 +199,7 @@ fn test_capture_and_list_parsers() {
 
 #[test]
 fn test_is_pane_alive_parses_tmux_output() {
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "%1 0\n%2 1\n", "")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "%1 0\n%2 1\n", "")));
 
     assert!(is_pane_alive("%1"));
     assert!(!is_pane_alive("%2"));
@@ -192,7 +208,7 @@ fn test_is_pane_alive_parses_tmux_output() {
 
 #[test]
 fn test_is_pane_alive_treats_tmux_failure_as_alive() {
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
 
     assert!(is_pane_alive("%1"));
 }
@@ -204,7 +220,7 @@ fn test_context_helpers_use_environment_and_display_message() {
     std::env::set_var("TMUX_PANE", "%7");
     std::env::remove_var("CODEX_THREAD_ID");
     std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         let stdout = if args.iter().any(|a| a == "#{session_name}:#{window_index}") {
             "dev:2\n"
         } else if args.iter().any(|a| a == "#{session_name}") {
@@ -231,7 +247,7 @@ fn test_context_helpers_use_environment_and_display_message() {
 
 #[test]
 fn test_client_mode_and_popup_support_helpers() {
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         let stdout = if args.iter().any(|a| a == "#{client_control_mode}") {
             "1\n"
         } else {
@@ -246,17 +262,17 @@ fn test_client_mode_and_popup_support_helpers() {
 
 #[test]
 fn test_client_mode_returns_terminal_or_unknown() {
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
     assert_eq!(get_client_mode(Some("%8")), "terminal");
     assert!(!is_control_mode_client(Some("%8")));
 
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
     assert_eq!(get_client_mode(Some("%8")), "unknown");
 }
 
 #[test]
 fn test_client_window_helpers_resolve_most_recent_client() {
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         if args[0] == "list-clients" {
             return Ok(ok_run(
                 0,
@@ -287,7 +303,7 @@ fn test_client_window_helpers_resolve_most_recent_client() {
 
 #[test]
 fn test_client_helpers_ignore_control_mode_clients() {
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         if args[0] == "list-clients" {
             return Ok(ok_run(
                 0,
@@ -362,7 +378,7 @@ fn test_current_window_helpers_return_none_without_tmux_pane() {
 
 #[test]
 fn test_list_panes_with_titles_and_full_parse_rows() {
-    set_run_override(|args, _check, _timeout| {
+    _set_run_override(|args, _check, _timeout| {
         let fmt = args.last().map(String::as_str).unwrap_or("");
         let stdout = if fmt == "#{pane_id}\t#{pane_title}" {
             "%1\tmain\n%2\tworker\n"
@@ -411,7 +427,7 @@ fn test_list_panes_with_titles_and_full_parse_rows() {
 fn test_pane_option_helpers_and_tagging() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    set_run_override(move |args, check, timeout| {
+    _set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         let stdout = if args[0] == "show-options" {
             "value\n"
@@ -461,7 +477,7 @@ fn test_tagging_a_pane_onto_another_cli_drops_the_claude_view() {
     // panes — an in-place retag must clear it or the suffix is stale forever.
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    set_run_override(move |args, check, timeout| {
+    _set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         Ok(ok_run(0, "", ""))
     });
@@ -693,13 +709,13 @@ fn test_get_global_window_option_is_read_only_global_scope() {
 
 #[test]
 fn test_get_global_window_option_returns_none_when_unset() {
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "\n", "")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "\n", "")));
     assert_eq!(get_global_window_option("window-status-format"), None);
 }
 
 #[test]
 fn test_list_panes_full_or_none_is_status_aware() {
-    set_run_override(|_args, _check, _timeout| {
+    _set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             0,
             "%1\t[w]\tzsh\tagent\tworker\tt1\tclaude\tduo\t\n",
@@ -711,11 +727,11 @@ fn test_list_panes_full_or_none_is_status_aware() {
     assert_eq!(panes.unwrap()[0].pane_id, "%1");
     assert_eq!(list_panes_full("dev:0")[0].pane_id, "%1");
 
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
     assert_eq!(list_panes_full_or_none("dev:0"), None);
     assert_eq!(list_panes_full("dev:0"), Vec::new());
 
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
     assert_eq!(list_panes_full_or_none("dev:0"), Some(Vec::new()));
 }
 
@@ -725,19 +741,19 @@ fn test_pane_scan_status_maps_no_server_variants() {
         "no server running on /tmp/tmux-501/default",
         "error connecting to /x/tmux-501/default (No such file or directory)",
     ] {
-        set_run_override(move |_args, _check, _timeout| Ok(ok_run(1, "", stderr)));
+        _set_run_override(move |_args, _check, _timeout| Ok(ok_run(1, "", stderr)));
         assert_eq!(list_panes_all_status(), (None, "no-server"));
         assert_eq!(list_team_windows_status(), (None, "no-server"));
     }
 
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
     assert_eq!(list_panes_all_status(), (None, "unknown"));
     assert_eq!(list_team_windows_status(), (None, "unknown"));
 }
 
 #[test]
 fn test_pane_scan_status_keeps_permission_denied_unknown() {
-    set_run_override(|_args, _check, _timeout| {
+    _set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             1,
             "",
@@ -750,7 +766,7 @@ fn test_pane_scan_status_keeps_permission_denied_unknown() {
 
 #[test]
 fn test_team_window_scan_parses_pr_and_tolerates_short_lines() {
-    set_run_override(|_args, _check, _timeout| {
+    _set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             0,
             // second line is an old 6-field line: pr backfills ""

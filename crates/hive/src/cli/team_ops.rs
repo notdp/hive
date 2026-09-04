@@ -107,7 +107,7 @@ pub(crate) fn _is_codex_tool_env() -> bool {
 
 /// Hive-managed identity for a codex tool thread: a pane record (display
 /// bound), or a codex roster row whose sessionId is this thread (a headless
-/// member has no pane until `hive attach` materializes one — the registry,
+/// member has no pane until `hive render` materializes one — the registry,
 /// not the pane record, is the truth layer).
 pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
     let thread_id = thread_id.trim();

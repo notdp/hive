@@ -11,6 +11,13 @@ use crate::tmux;
 pub(crate) const _TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
+/// Refusal for a spawn env that outlived the member it names. Told apart
+/// from `_TMUX_REQUIRED_MESSAGE` because the caller has no terminal to go
+/// find: it is an engine subprocess, and its identity is the broken part.
+pub(crate) const _STALE_ENV_MESSAGE: &str =
+    "HIVE_TEAM/HIVE_MEMBER names nobody on that team's roster \
+     (the member was killed, or the team deleted)";
+
 // Verbs that never need a tmux context — plus the team verbs, which read the
 // registry (the truth layer) and only touch tmux when a display exists.
 // `flow` rides the same doctrine: it requires a team with a display window
@@ -37,6 +44,7 @@ pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "kill",
     "delete",
     "attach",
+    "render",
     "view",
     "flow",
 ];
@@ -216,6 +224,25 @@ pub(crate) fn _discover_env_binding() -> Map<String, Value> {
     payload.insert("tmuxSession".to_string(), Value::String(String::new()));
     payload.insert("tmuxWindow".to_string(), Value::String(String::new()));
     payload
+}
+
+/// (team, member) of this process's spawn env, verified against the roster.
+///
+/// The identity rung for an engine that has no other one: a grok member's
+/// leader daemon carries no messaging socket, no thread id and no pane, only
+/// `HIVE_TEAM`/`HIVE_MEMBER`. The registry is the arbiter — an env left
+/// behind by a killed member names nobody and must never sign as them.
+pub(crate) fn _env_roster_member() -> Option<(String, String)> {
+    let binding = _discover_env_binding();
+    let team = map_str(&binding, "team");
+    let agent = map_str(&binding, "agent");
+    if team.is_empty() || agent.is_empty() {
+        return None;
+    }
+    let entry = crate::registry::load(&team)?;
+    _roster_names(&entry)
+        .contains(&agent)
+        .then_some((team, agent))
 }
 
 /// Roster identity of the engine session this process runs inside.
@@ -757,34 +784,45 @@ pub(crate) fn _team_status_payload(t: &mut Team) -> Map<String, Value> {
     if !_should_show_description(payload.get("description")) {
         payload.shift_remove("description");
     }
-    let discovered = if tmux::is_inside_tmux() {
-        _discover_tmux_binding()
-    } else {
-        Map::new()
-    };
-    let session = _session_member_binding();
-    if map_str(&discovered, "team") == t.name && !map_str(&discovered, "agent").is_empty() {
-        payload.insert(
-            "self".to_string(),
-            Value::String(map_str(&discovered, "agent")),
-        );
-    } else if map_str(&session, "team") == t.name && !map_str(&session, "agent").is_empty() {
-        // A joined/creator session has no pane tags; its roster row is live
-        // truth, fresher than the saved context file below.
-        payload.insert(
-            "self".to_string(),
-            Value::String(map_str(&session, "agent")),
-        );
-    } else {
-        let ctx = crate::context::load_current_context();
-        let ctx_team = ctx.get("team").cloned().unwrap_or_default();
-        let ctx_agent = ctx.get("agent").cloned().unwrap_or_default();
-        if ctx_team == t.name && !ctx_agent.is_empty() {
-            payload.insert("self".to_string(), Value::String(ctx_agent));
-        }
+    let me = _self_member_for_team(&t.name);
+    if !me.is_empty() {
+        payload.insert("self".to_string(), Value::String(me));
     }
     _add_runtime_location_fields(&mut payload);
     payload
+}
+
+/// Which member of *team* this process is, or "" when it is none of them.
+///
+/// The scope ladder, strongest evidence first: the pane's own tags, the
+/// engine's env identity, the roster row keyed by this session/thread, and
+/// only then the saved context file. The env rung matters outside tmux,
+/// where a headless member has neither pane nor session row: the context
+/// file there was written by whoever spawned it and answers with the orch.
+pub(crate) fn _self_member_for_team(team: &str) -> String {
+    if tmux::is_inside_tmux() {
+        let discovered = _discover_tmux_binding();
+        let agent = map_str(&discovered, "agent");
+        if map_str(&discovered, "team") == team && !agent.is_empty() {
+            return agent;
+        }
+    }
+    if let Some((_, member)) = _env_roster_member().filter(|(t, _)| t == team) {
+        return member;
+    }
+    let session = _session_member_binding();
+    let agent = map_str(&session, "agent");
+    if map_str(&session, "team") == team && !agent.is_empty() {
+        // A joined/creator session has no pane tags; its roster row is live
+        // truth, fresher than the saved context file below.
+        return agent;
+    }
+    let ctx = crate::context::load_current_context();
+    let ctx_agent = ctx.get("agent").cloned().unwrap_or_default();
+    if ctx.get("team").map(String::as_str) == Some(team) && !ctx_agent.is_empty() {
+        return ctx_agent;
+    }
+    String::new()
 }
 
 pub(crate) fn _resolve_target_pane() -> String {
@@ -1090,6 +1128,75 @@ mod tests {
             std::env::remove_var(key);
         }
         std::env::remove_var("TMUX");
+    }
+
+    #[test]
+    fn test_env_roster_member_admits_only_a_listed_name() {
+        // The gate a headless grok member passes: no tmux, no socket, no
+        // thread — only HIVE_TEAM/HIVE_MEMBER, arbitrated by the roster.
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        clear_tmux_env();
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("bee".to_string()));
+        member.insert("cli".to_string(), Value::String("grok".to_string()));
+        crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
+
+        std::env::set_var("HIVE_TEAM", "hornet");
+        std::env::set_var("HIVE_MEMBER", "bee");
+        assert_eq!(
+            _env_roster_member(),
+            Some(("hornet".to_string(), "bee".to_string()))
+        );
+        assert_eq!(_resolve_sender(None), "bee");
+
+        // killed member: the env survives it, the roster does not
+        std::env::set_var("HIVE_MEMBER", "ant");
+        assert_eq!(_env_roster_member(), None);
+
+        // unknown team
+        std::env::set_var("HIVE_TEAM", "ghost");
+        std::env::set_var("HIVE_MEMBER", "bee");
+        assert_eq!(_env_roster_member(), None);
+
+        // no env at all
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        assert_eq!(_env_roster_member(), None);
+    }
+
+    #[test]
+    fn test_self_member_for_team_prefers_env_over_saved_context() {
+        // The saved context file was written by the spawner and names the
+        // orch; a headless member's own env must outrank it.
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+        clear_tmux_env();
+        let mut member = Map::new();
+        member.insert("name".to_string(), Value::String("bee".to_string()));
+        member.insert("cli".to_string(), Value::String("grok".to_string()));
+        crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
+        crate::context::save_context_for_pane("", "hornet", "/tmp/ws-hn", LEAD_AGENT_NAME).unwrap();
+
+        // context file alone: the orch answers
+        assert_eq!(_self_member_for_team("hornet"), LEAD_AGENT_NAME);
+
+        std::env::set_var("HIVE_TEAM", "hornet");
+        std::env::set_var("HIVE_MEMBER", "bee");
+        assert_eq!(_self_member_for_team("hornet"), "bee");
+        // another team's status payload is not this member's identity
+        assert_eq!(_self_member_for_team("honey"), "");
+
+        std::env::remove_var("HIVE_TEAM");
+        std::env::remove_var("HIVE_MEMBER");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
