@@ -276,20 +276,48 @@ fn _create_headless_team(
     }
 }
 
+/// Whether `hive create` should hand back *existing* instead of creating.
+///
+/// A tagged pane is idempotent whatever *name* says: the pane is the team's
+/// display and cannot be two teams. A binding that came from the session
+/// row or spawn env (no pane) is the engine's identity; reusing it for a
+/// different *name* would silently answer with a team the caller did not
+/// ask for, so that case is refused by name.
+pub(crate) fn _reuse_existing_binding(
+    existing: &Map<String, Value>,
+    name: &str,
+) -> Result<bool, String> {
+    let team = map_str(existing, "team");
+    if team.is_empty() {
+        return Ok(false);
+    }
+    if !map_str(existing, "pane").is_empty() || name.is_empty() || name == team {
+        return Ok(true);
+    }
+    Err(format!(
+        "this session is already {team}.{} — `hive create {name}` needs a session on no team",
+        map_str(existing, "agent")
+    ))
+}
+
 /// Bind the current pane as the orch of a fresh team.
 ///
 /// Spawns nobody — members come later via `hive spawn`, driven by the orch.
 /// Placement: a lone pane binds its window in place; a crowded window
 /// breaks the orch pane out to a fresh one first, so team identity
 /// derives from the final window (Bug A). *name* overrides the pool pick.
-/// Idempotent: an already-bound pane returns its existing binding.
+/// Idempotent: an already-bound pane returns its existing binding; a
+/// session bound by its own row or env is refused when *name* asks for
+/// another team (see [`_reuse_existing_binding`]).
 fn _create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     _gc_dead_teams();
     let _ = crate::plugin_manager::cleanup_retired_plugins();
 
     let existing = _discover_tmux_binding();
-    if !map_str(&existing, "team").is_empty() {
-        return existing;
+    match _reuse_existing_binding(&existing, name) {
+        Ok(true) => return existing,
+        Ok(false) => {}
+        Err(message) => fail(&message),
     }
 
     let session_name = tmux::get_current_session_name().unwrap_or_else(|| "hive".to_string());
@@ -1853,6 +1881,22 @@ mod tests {
         }
         assert!(hive.join("m-comb.ant.sock").exists());
         assert!(hive.join("p19.sock").exists());
+    }
+
+    #[test]
+    fn test_reuse_existing_binding_refuses_another_name_for_a_paneless_session() {
+        let mut bound = Map::new();
+        bound.insert("team".to_string(), Value::String("honey".to_string()));
+        bound.insert("agent".to_string(), Value::String("rex".to_string()));
+        bound.insert("pane".to_string(), Value::String(String::new()));
+        assert_eq!(_reuse_existing_binding(&Map::new(), "wasp"), Ok(false));
+        assert_eq!(_reuse_existing_binding(&bound, ""), Ok(true));
+        assert_eq!(_reuse_existing_binding(&bound, "honey"), Ok(true));
+        let refused = _reuse_existing_binding(&bound, "wasp").unwrap_err();
+        assert!(refused.contains("honey.rex") && refused.contains("wasp"));
+        // a tagged pane is the team's display: idempotent whatever the name
+        bound.insert("pane".to_string(), Value::String("%7".to_string()));
+        assert_eq!(_reuse_existing_binding(&bound, "wasp"), Ok(true));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use anyhow::Result;
 use super::client::{GrokStdioClient, SessionRuntime};
 use super::daemon::{probe_socket, spawn_member_daemon};
 use super::keys::{
-    member_key, read_pane_session, read_session_key, resolve_pane_key, socket_path_for_key,
-    write_session_key,
+    member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
+    socket_path_for_key, write_session_key,
 };
 use super::{CANCEL_SENT, PROMPT_QUEUED, _CONNECT_COOLDOWN};
 
@@ -51,6 +51,29 @@ impl LeaderClient for GrokStdioClient {
     fn runtime(&self) -> Option<SessionRuntime> {
         GrokStdioClient::runtime(self)
     }
+}
+
+/// True unless *key* names a member the registry no longer lists.
+///
+/// A grok client raises a leader of its own the moment it finds none on the
+/// socket, so binding one for a killed member resurrects the engine the kill
+/// just took down — in the hived, whose pool outlives every kill hive runs.
+/// The roster is the arbiter, as it is for the hived's own orphan reap. A
+/// pane key answers to its pane, not to a roster, and is always live here;
+/// an unreadable entry reads as gone, which only postpones a reconnect to
+/// the next tick.
+fn _key_is_rostered(key: &str) -> bool {
+    let Some((team, member)) = member_from_key(key) else {
+        return true;
+    };
+    crate::registry::load(&team)
+        .and_then(|entry| {
+            let members = entry.get("members")?.as_array()?.clone();
+            Some(members.iter().any(|m| {
+                m.get("name").and_then(serde_json::Value::as_str) == Some(member.as_str())
+            }))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Default)]
@@ -161,7 +184,7 @@ impl GrokClientPool {
             }
         }
 
-        if record.is_none() || !probe_socket(&socket_path_for_key(key)) {
+        if record.is_none() || !probe_socket(&socket_path_for_key(key)) || !_key_is_rostered(key) {
             self._set_cooldown(key);
             return None;
         }

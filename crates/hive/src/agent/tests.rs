@@ -1913,6 +1913,8 @@ fn test_grok_kill_takes_the_pane_down_before_the_leader() {
     // The pane's TUI is a leader client: kill the leader first and the
     // dying TUI raises a replacement on the same socket. The pid is read
     // ahead of the kill because tmux has no pane to answer about after it.
+    // Nothing follows the daemon kill — clearing the key of its remaining
+    // clients belongs to `kill_daemon_key`, not to a watch out here.
     let _guard = setup();
     member("bee", "hornet", "%3", "grok").kill();
     assert_eq!(
@@ -1924,17 +1926,6 @@ fn test_grok_kill_takes_the_pane_down_before_the_leader() {
             "pool:p3".to_string(),
             "daemon:p3".to_string(),
         ]
-    );
-}
-
-#[test]
-fn test_grok_kill_terminates_a_leader_that_reappeared_on_the_key() {
-    let _guard = setup();
-    hook(|h| h.grok_leader_present = vec![true]);
-    member("bee", "hornet", "%3", "grok").kill();
-    assert_eq!(
-        hook(|h| h.grok_killed_keys.clone()),
-        vec!["p3".to_string(), "p3".to_string()]
     );
 }
 

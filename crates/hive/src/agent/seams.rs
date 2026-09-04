@@ -140,15 +140,6 @@ fn _process_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// One poll interval of a wait loop, free under a test hook.
-pub(super) fn hooked_sleep_ms(ms: u64) {
-    #[cfg(test)]
-    if testhook::with(|_| ()).is_some() {
-        return;
-    }
-    std::thread::sleep(Duration::from_millis(ms));
-}
-
 pub(super) fn hooked_clear_pane_tags(pane_id: &str) {
     #[cfg(test)]
     if testhook::with(|h| h.cleared_tags.push(pane_id.to_string())).is_some() {
@@ -739,20 +730,6 @@ pub(super) fn hooked_grok_kill_daemon_key(key: &str) {
         return;
     }
     crate::adapters::grok_leader::kill_daemon_key(key);
-}
-
-pub(super) fn hooked_grok_leader_present(key: &str) -> bool {
-    #[cfg(test)]
-    if let Some(v) = testhook::with(|h| {
-        if h.grok_leader_present.is_empty() {
-            false
-        } else {
-            h.grok_leader_present.remove(0)
-        }
-    }) {
-        return v;
-    }
-    crate::adapters::grok_leader::leader_present(key)
 }
 
 pub(super) fn hooked_grok_probe_socket(socket_path: &std::path::Path) -> bool {

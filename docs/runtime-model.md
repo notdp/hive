@@ -42,9 +42,17 @@ Consequences across modules:
   The rest of the surface is display work and refuses to run outside tmux.
 - **Engine key scope.** A member's daemon is keyed by `<team>.<member>`, so it
   survives the pane; a raw non-team pane keeps a pane key and pane lifecycle.
-  Engines also carry their member identity in env, so a tool subprocess can
-  resolve who it is with no pane at all: the fallback behind a live pane
-  binding.
+  With no pane to ask, an engine still resolves who it is, by a ladder that
+  ranks evidence by how hard it is to inherit: the pane's own tags, then the
+  roster row the engine keys itself by (a codex thread id, a Claude messaging
+  socket), then `HIVE_TEAM`/`HIVE_MEMBER` from the spawn env, then the saved
+  context file. Env ranks below the session row because it is inherited, not
+  minted: Claude's machine-level bg supervisor daemon freezes the pair of
+  whichever member first started it and hands that pair to every engine it
+  forks afterwards, so a live team's member can arrive carrying a stranger's
+  name. The env rung is roster-verified, and it is the only rung a grok member
+  has — its leader daemon keys no session row. The first rung that resolves
+  settles the identity, including when it names a different team.
 - **Reaping on failed reads.** Daemon reaping does not fire on an unreadable
   registry read, and a young pidfile gets a grace window so a spawn
   mid-registration is not mistaken for an orphan.

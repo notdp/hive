@@ -22,6 +22,7 @@ const CWD: &str = "/w/project";
 type StdioSpawn = Box<dyn FnMut(&[String]) -> io::Result<Arc<dyn LeaderProc>>>;
 type DaemonSpawn =
     Box<dyn FnMut(&[String], &HashMap<String, String>) -> io::Result<Box<dyn DaemonChild>>>;
+type ProcessListing = Box<dyn Fn() -> Vec<(libc::pid_t, String)>>;
 
 thread_local! {
     static PANE_OPTION_OVERRIDE: RefCell<Option<Box<dyn Fn(&str, &str) -> Option<String>>>> =
@@ -32,6 +33,7 @@ thread_local! {
         RefCell::new(None);
     static PROCESS_ARGS_OVERRIDE: RefCell<Option<Box<dyn Fn(libc::pid_t) -> Option<String>>>> =
         RefCell::new(None);
+    static PROCESS_LISTING_OVERRIDE: RefCell<Option<ProcessListing>> = RefCell::new(None);
     static ACK_TIMEOUT_OVERRIDE: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
@@ -80,6 +82,15 @@ pub(super) fn process_args_override(pid: libc::pid_t) -> Option<Option<String>> 
     PROCESS_ARGS_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|f| f(pid)))
 }
 
+/// The whole process table as the reap sees it — empty unless a test
+/// scripts one, so no test ever reads the machine's real `ps`.
+pub(super) fn process_listing_override() -> Vec<(libc::pid_t, String)> {
+    PROCESS_LISTING_OVERRIDE.with(|slot| match slot.borrow().as_ref() {
+        Some(listing) => listing(),
+        None => Vec::new(),
+    })
+}
+
 pub(super) fn ack_timeout_override() -> Option<f64> {
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.get())
 }
@@ -111,6 +122,39 @@ fn set_process_args(args: impl Fn(libc::pid_t) -> Option<String> + 'static) {
     PROCESS_ARGS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(args)));
 }
 
+fn set_process_listing(listing: impl Fn() -> Vec<(libc::pid_t, String)> + 'static) {
+    PROCESS_LISTING_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(listing)));
+}
+
+/// A fake process table: `ps` lists it, a terminate logs the pid and drops
+/// it, and an identity read answers from it. Returns the table and the log.
+type ProcessTable = Arc<Mutex<Vec<(libc::pid_t, String)>>>;
+
+fn set_process_table(procs: Vec<(libc::pid_t, String)>) -> (ProcessTable, KillLog) {
+    let procs: ProcessTable = Arc::new(Mutex::new(procs));
+    let killed: KillLog = Arc::new(Mutex::new(Vec::new()));
+    let listed = procs.clone();
+    set_process_listing(move || listed.lock().unwrap().clone());
+    let named = procs.clone();
+    set_process_args(move |pid| {
+        named
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(seen, _args)| *seen == pid)
+            .map(|(_pid, args)| args.clone())
+    });
+    let reaped = procs.clone();
+    let log = killed.clone();
+    set_terminate_pg(move |pid| {
+        log.lock().unwrap().push(pid);
+        reaped.lock().unwrap().retain(|(seen, _args)| *seen != pid);
+    });
+    (procs, killed)
+}
+
+type KillLog = Arc<Mutex<Vec<libc::pid_t>>>;
+
 /// The command line of the leader that binds *sock*, as `ps` would print it.
 fn leader_args(sock: &std::path::Path) -> String {
     format!(
@@ -123,6 +167,22 @@ fn leader_args(sock: &std::path::Path) -> String {
 fn set_leader_identity(pid: libc::pid_t, sock: &std::path::Path) {
     let args = leader_args(sock);
     set_process_args(move |seen| (seen == pid).then(|| args.clone()));
+}
+
+/// The pane TUI's command line: a leader client, not a leader.
+fn tui_args(sock: &std::path::Path) -> String {
+    format!(
+        "grok --leader --leader-socket {} --session-id {SID}",
+        sock.display()
+    )
+}
+
+/// A stdio client's command line (hive's own, the hived's pool client).
+fn stdio_args(sock: &std::path::Path) -> String {
+    format!(
+        "grok agent --leader stdio --leader-socket {}",
+        sock.display()
+    )
 }
 
 /// A live listener on *sock*, dropped when the guard goes.
@@ -146,6 +206,7 @@ fn setup() -> TestBed {
     DAEMON_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     TERMINATE_PG_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     PROCESS_ARGS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    PROCESS_LISTING_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.set(None));
     let tmp = tempfile::tempdir().unwrap();
     env::set_var("GROK_HOME", tmp.path());
@@ -1397,6 +1458,92 @@ fn test_kill_daemon_key_refuses_a_leader_of_another_key() {
 }
 
 #[test]
+fn test_kill_daemon_key_kills_every_client_of_the_socket_before_the_leader() {
+    // A client outliving its leader raises a replacement on the same socket,
+    // so the clients go first — all of them, whoever started them, and only
+    // the ones naming THIS socket.
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    let foreign = socket_path_for_key("m-honey.ada");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("pid"), "4321").unwrap();
+    fs::write(sock.with_extension("session"), "{}").unwrap();
+    let (_procs, killed) = set_process_table(vec![
+        (11, tui_args(&sock)),
+        (12, stdio_args(&sock)),
+        (13, stdio_args(&foreign)),
+        (4321, leader_args(&sock)),
+    ]);
+
+    kill_daemon_key("m-honey.rex");
+
+    assert_eq!(*killed.lock().unwrap(), vec![11, 12, 4321]);
+    assert!(!sock.exists());
+    assert!(!sock.with_extension("pid").exists());
+    assert!(!sock.with_extension("session").exists());
+}
+
+#[test]
+fn test_kill_daemon_key_reaps_a_leader_a_dying_client_raised() {
+    // grok raises the replacement itself, so its argv names no socket at
+    // all — only the lock file it writes ties it to the key. The second
+    // pass is what catches it; the key files go after both.
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(&sock, "").unwrap();
+    let (procs, killed) = set_process_table(vec![(11, stdio_args(&sock))]);
+    let respawn_lock = sock.with_extension("lock");
+    let reaped = procs.clone();
+    let log = killed.clone();
+    set_terminate_pg(move |pid| {
+        log.lock().unwrap().push(pid);
+        reaped.lock().unwrap().retain(|(seen, _args)| *seen != pid);
+        if pid == 11 {
+            fs::write(&respawn_lock, "22").unwrap();
+            reaped
+                .lock()
+                .unwrap()
+                .push((22, "grok agent leader".to_string()));
+        }
+    });
+
+    kill_daemon_key("m-honey.rex");
+
+    assert_eq!(*killed.lock().unwrap(), vec![11, 22]);
+    assert!(!sock.exists());
+    assert!(!sock.with_extension("lock").exists());
+}
+
+#[test]
+fn test_kill_daemon_key_trusts_a_bare_leader_only_through_the_lock_file() {
+    // hive's own `.pid` is never cleared by a crash: a recycled pid running
+    // some other key's grok-raised leader (bare argv) must not pass through
+    // it, while grok's `.lock` — written by this socket's flock holder —
+    // vouches for the same bare shape.
+    let _bed = setup();
+    let sock = socket_path_for_key("m-honey.rex");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("pid"), "4321").unwrap();
+    let (_procs, killed) = set_process_table(vec![(4321, "grok agent leader".to_string())]);
+
+    kill_daemon_key("m-honey.rex");
+    assert!(
+        killed.lock().unwrap().is_empty(),
+        "pidfile vouched for a bare leader"
+    );
+    assert!(!sock.with_extension("pid").exists());
+
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("lock"), "4321").unwrap();
+    kill_daemon_key("m-honey.rex");
+    assert_eq!(*killed.lock().unwrap(), vec![4321]);
+    assert!(!sock.with_extension("lock").exists());
+}
+
+#[test]
 fn test_kill_daemon_key_ignores_a_dead_pid() {
     let _bed = setup();
     let sock = socket_path_for_key("m-honey.rex");
@@ -1559,6 +1706,54 @@ fn test_pool_skips_a_pane_whose_socket_has_no_listener() {
     fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
     set_stdio_spawn(|_argv| panic!("no client without a live leader"));
     assert!(GrokClientPool::new()._client_for_key("p19").is_none());
+}
+
+#[test]
+fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
+    // The hived's pool outlives every kill: a client bound after the member
+    // is gone raises a fresh leader on the dead member's socket.
+    let bed = setup();
+    env::set_var("HIVE_HOME", bed.tmp.path().join(".hive"));
+    let key = member_key("honey", "rex");
+    write_session_key(&key, SID, CWD).unwrap();
+    let _listener = bind_leader_socket(&socket_path_for_key(&key));
+    let spawned: Arc<Mutex<Vec<Arc<FakeProc>>>> = Arc::new(Mutex::new(Vec::new()));
+    let spawn_log = spawned.clone();
+    set_stdio_spawn(move |_argv| {
+        let proc = FakeProc::new(Some(responder(None, vec![])));
+        spawn_log.lock().unwrap().push(proc.clone());
+        Ok(proc as Arc<dyn LeaderProc>)
+    });
+
+    // team file missing entirely: the member is gone with its team
+    let grok_pool = GrokClientPool::new();
+    assert!(grok_pool._client_for_key(&key).is_none());
+    assert!(spawned.lock().unwrap().is_empty());
+
+    // team back, but the roster does not list rex
+    let mut other = serde_json::Map::new();
+    other.insert("name".to_string(), Value::String("ada".to_string()));
+    crate::registry::record_team("honey", CWD, "1.0", &[other], "").unwrap();
+    grok_pool.state.lock().unwrap().cooldown.clear();
+    assert!(grok_pool._client_for_key(&key).is_none());
+    assert!(spawned.lock().unwrap().is_empty());
+
+    // listed again: the client binds
+    let mut rex = serde_json::Map::new();
+    rex.insert("name".to_string(), Value::String("rex".to_string()));
+    crate::registry::record_team("honey", CWD, "1.0", &[rex], "").unwrap();
+    grok_pool.state.lock().unwrap().cooldown.clear();
+    let client = grok_pool._client_for_key(&key).unwrap();
+    assert_eq!(spawned.lock().unwrap().len(), 1);
+
+    grok_pool.drop_key(&key);
+    for proc in spawned.lock().unwrap().iter() {
+        proc.eof();
+    }
+    if let Some(handle) = client.reader.lock().unwrap().take() {
+        let _ = handle.join();
+    }
+    env::remove_var("HIVE_HOME");
 }
 
 #[test]
