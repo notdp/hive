@@ -88,8 +88,6 @@ fn _spawn_headless_member(
             extra_args.push(model.to_string());
         }
         let mut env: HashMap<String, String> = HashMap::new();
-        env.insert("HIVE_TEAM".to_string(), team_name.to_string());
-        env.insert("HIVE_MEMBER".to_string(), agent_name.to_string());
         for (key, value) in &extra_env {
             env.insert(key.clone(), value_as_env_string(value));
         }

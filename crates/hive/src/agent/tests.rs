@@ -196,22 +196,23 @@ fn test_spawn_passes_extra_env() {
     let startup_cmd = calls()[0].clone();
     assert!(startup_cmd.contains("CR_WORKSPACE="));
     assert!(startup_cmd.contains("/tmp/cr-test"));
-    assert!(!startup_cmd.contains("HIVE_TEAM_NAME="));
-    assert!(!startup_cmd.contains("HIVE_AGENT_NAME="));
-    // The engine runs outside the pane, so the env must reach the bg spawn,
-    // alongside the member identity its tools resolve without a pane.
-    let expected: HashMap<String, String> = [
-        ("HIVE_TEAM".to_string(), "t".to_string()),
-        ("HIVE_MEMBER".to_string(), "w1".to_string()),
-        ("CR_WORKSPACE".to_string(), "/tmp/cr-test".to_string()),
-    ]
-    .into_iter()
-    .collect();
-    assert_eq!(hook(|h| h.spawns[0].extra_env.clone()), expected);
+    // The engine runs outside the pane, so the env must reach the bg spawn —
+    // and carry nothing else: identity is the engine's own session id, never
+    // a variable hive hands it.
+    let env_map = hook(|h| h.spawns[0].extra_env.clone());
+    assert!(
+        env_map.keys().all(|key| !key.starts_with("HIVE_")),
+        "{env_map:?}"
+    );
+    let expected: HashMap<String, String> =
+        [("CR_WORKSPACE".to_string(), "/tmp/cr-test".to_string())]
+            .into_iter()
+            .collect();
+    assert_eq!(env_map, expected);
 }
 
 #[test]
-fn test_spawn_without_extra_env_does_not_export_default_hive_vars() {
+fn test_spawn_without_extra_env_exports_nothing_in_the_pane() {
     let _guard = setup();
     Agent::spawn(
         "w1",
@@ -224,8 +225,6 @@ fn test_spawn_without_extra_env_does_not_export_default_hive_vars() {
     )
     .unwrap();
     let startup_cmd = calls()[0].clone();
-    assert!(!startup_cmd.contains("HIVE_TEAM_NAME="));
-    assert!(!startup_cmd.contains("HIVE_AGENT_NAME="));
     assert!(!startup_cmd.contains("export "));
 }
 

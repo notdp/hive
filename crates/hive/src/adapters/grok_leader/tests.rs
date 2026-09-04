@@ -1,7 +1,9 @@
 use super::*;
 use crate::registry::TEST_ENV_LOCK;
+use anyhow::Result;
+use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -11,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use serde_json::{json, Value};
+/// The (argv, env) one faked daemon spawn was called with.
+type SeenDaemonSpawn = Arc<Mutex<Option<(Vec<String>, HashMap<String, String>)>>>;
 
 const SID: &str = "11111111-2222-3333-4444-555555555555";
 const CWD: &str = "/w/project";
@@ -1209,8 +1211,7 @@ fn touch_leader_socket(argv: &[String]) {
 fn test_spawn_daemon_builds_leader_argv_and_pane_env() {
     let _bed = setup();
     env::set_var("TMUX_PANE", "%old");
-    let seen: Arc<Mutex<Option<(Vec<String>, HashMap<String, String>)>>> =
-        Arc::new(Mutex::new(None));
+    let seen: SeenDaemonSpawn = Arc::new(Mutex::new(None));
     let seen_spawn = seen.clone();
     set_daemon_spawn(move |argv, env| {
         *seen_spawn.lock().unwrap() = Some((argv.to_vec(), env.clone()));
@@ -1816,6 +1817,7 @@ fn test_daemon_env_washes_inherited_identity_markers() {
     env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/999.sock");
     env::set_var("CLAUDE_CONFIG_DIR", "/tmp/elsewhere");
     env::set_var("CODEX_THREAD_ID", "tid-1");
+    env::set_var("GROK_SESSION_ID", "spawner-session");
     env::set_var("TMUX_PANE", "%stale");
 
     let env_map = _daemon_env_for_pane("%42");
@@ -1824,19 +1826,31 @@ fn test_daemon_env_washes_inherited_identity_markers() {
     assert!(!env_map.contains_key("CLAUDE_CODE_MESSAGING_SOCKET"));
     assert!(!env_map.contains_key("CLAUDE_CONFIG_DIR"));
     assert!(!env_map.contains_key("CODEX_THREAD_ID"));
+    assert!(!env_map.contains_key("GROK_SESSION_ID"));
+    // identity never rides the env: the pane is the only key pinned, and
+    // the leader mints its own session id for the tools it runs
+    let inherited: HashSet<String> = env::vars()
+        .map(|(key, _)| key)
+        .filter(|key| key != "TMUX_PANE")
+        .collect();
+    let pinned: Vec<&String> = env_map
+        .keys()
+        .filter(|key| !inherited.contains(*key))
+        .collect();
+    assert_eq!(pinned, vec!["TMUX_PANE"]);
 
     env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
     env::remove_var("CLAUDE_CONFIG_DIR");
     env::remove_var("CODEX_THREAD_ID");
+    env::remove_var("GROK_SESSION_ID");
 }
 
 #[test]
-fn test_spawn_daemon_member_pane_gets_member_socket_and_identity_env() {
-    // A tagged member pane spawns a member-keyed daemon whose env carries the
-    // member identity — and never the spawner's inherited one.
+fn test_spawn_daemon_member_pane_gets_the_member_socket() {
+    // A tagged member pane spawns a member-keyed daemon: the member identity
+    // lives in the socket key, never in the env handed to the leader.
     let bed = setup();
-    env::set_var("HIVE_TEAM", "spawner-team");
-    env::set_var("HIVE_MEMBER", "spawner");
+    env::set_var("GROK_SESSION_ID", "spawner-session");
     let mut tags = HashMap::new();
     tags.insert(
         ("%19".to_string(), "hive-team".to_string()),
@@ -1847,8 +1861,7 @@ fn test_spawn_daemon_member_pane_gets_member_socket_and_identity_env() {
         "rex".to_string(),
     );
     set_pane_options(tags);
-    let seen: Arc<Mutex<Option<(Vec<String>, HashMap<String, String>)>>> =
-        Arc::new(Mutex::new(None));
+    let seen: SeenDaemonSpawn = Arc::new(Mutex::new(None));
     let seen_spawn = seen.clone();
     set_daemon_spawn(move |argv, env| {
         *seen_spawn.lock().unwrap() = Some((argv.to_vec(), env.clone()));
@@ -1868,8 +1881,10 @@ fn test_spawn_daemon_member_pane_gets_member_socket_and_identity_env() {
         .unwrap()
         + 1];
     assert!(sock.ends_with("m-honey.rex.sock"));
-    assert_eq!(env_map.get("HIVE_TEAM").map(String::as_str), Some("honey"));
-    assert_eq!(env_map.get("HIVE_MEMBER").map(String::as_str), Some("rex"));
+    assert!(!env_map.contains_key("GROK_SESSION_ID"));
+    assert!(!env_map
+        .values()
+        .any(|value| value == "honey" || value == "rex"));
     assert_eq!(env_map.get("TMUX_PANE").map(String::as_str), Some("%19"));
     assert_eq!(
         fs::read_to_string(bed.tmp.path().join("hive").join("m-honey.rex.pid")).unwrap(),
@@ -1881,8 +1896,61 @@ fn test_spawn_daemon_member_pane_gets_member_socket_and_identity_env() {
             .to_string_lossy()
             .into_owned()
     );
-    env::remove_var("HIVE_TEAM");
-    env::remove_var("HIVE_MEMBER");
+    env::remove_var("GROK_SESSION_ID");
+}
+
+#[test]
+fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
+    // The headless lane: no pane, and nothing of the spawner's identity —
+    // its GROK_SESSION_ID would make every hive call in this member sign as
+    // the spawner.
+    let _bed = setup();
+    env::set_var("GROK_SESSION_ID", "spawner-session");
+    env::set_var("CODEX_THREAD_ID", "tid-1");
+    env::set_var("TMUX_PANE", "%stale");
+    let seen: SeenDaemonSpawn = Arc::new(Mutex::new(None));
+    let seen_spawn = seen.clone();
+    set_daemon_spawn(move |argv, env| {
+        *seen_spawn.lock().unwrap() = Some((argv.to_vec(), env.clone()));
+        touch_leader_socket(argv);
+        Ok(Box::new(FakeDaemonChild {
+            pid: 7778,
+            returncode: None,
+            panic_on_terminate: false,
+        }))
+    });
+
+    assert!(spawn_member_daemon("honey", "rex"));
+
+    let seen = seen.lock().unwrap();
+    let (argv, env_map) = seen.as_ref().unwrap();
+    let sock = &argv[argv
+        .iter()
+        .position(|arg| arg == "--leader-socket")
+        .unwrap()
+        + 1];
+    assert_eq!(
+        *sock,
+        socket_path_for_key("m-honey.rex")
+            .to_string_lossy()
+            .into_owned()
+    );
+    assert!(!env_map.contains_key("GROK_SESSION_ID"));
+    assert!(!env_map.contains_key("CODEX_THREAD_ID"));
+    assert!(!env_map.contains_key("TMUX_PANE"));
+    // the member's name is in the socket key, never in the leader's env
+    assert!(!env_map
+        .values()
+        .any(|value| value == "honey" || value == "rex"));
+    let inherited: HashSet<String> = env::vars().map(|(key, _)| key).collect();
+    assert!(
+        env_map.keys().all(|key| inherited.contains(key)),
+        "{env_map:?}"
+    );
+
+    env::remove_var("GROK_SESSION_ID");
+    env::remove_var("CODEX_THREAD_ID");
+    env::remove_var("TMUX_PANE");
 }
 
 #[test]

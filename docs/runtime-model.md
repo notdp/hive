@@ -42,17 +42,21 @@ Consequences across modules:
   The rest of the surface is display work and refuses to run outside tmux.
 - **Engine key scope.** A member's daemon is keyed by `<team>.<member>`, so it
   survives the pane; a raw non-team pane keeps a pane key and pane lifecycle.
-  With no pane to ask, an engine still resolves who it is, by a ladder that
-  ranks evidence by how hard it is to inherit: the pane's own tags, then the
-  roster row the engine keys itself by (a codex thread id, a Claude messaging
-  socket), then `HIVE_TEAM`/`HIVE_MEMBER` from the spawn env, then the saved
-  context file. Env ranks below the session row because it is inherited, not
-  minted: Claude's machine-level bg supervisor daemon freezes the pair of
-  whichever member first started it and hands that pair to every engine it
-  forks afterwards, so a live team's member can arrive carrying a stranger's
-  name. The env rung is roster-verified, and it is the only rung a grok member
-  has — its leader daemon keys no session row. The first rung that resolves
-  settles the identity, including when it names a different team.
+  With no pane to ask, an engine still resolves who it is, by a three-rung
+  ladder: the pane's own tags, then the roster row keyed by the session id
+  the engine mints for itself and exports to its own tool subprocesses (a
+  `CODEX_THREAD_ID` or a `GROK_SESSION_ID`, each matched only against rows of
+  that cli; a Claude messaging socket, through the session it names), then
+  the saved context file. Hive hands an engine no identity of its own in env,
+  and no rung reads one: a variable hive sets is inherited, not minted, and
+  Claude's machine-level bg supervisor daemon freezes the launch env of
+  whichever `claude --bg` first started it and hands that env to every engine
+  it forks afterwards, so a member could arrive carrying a stranger's name.
+  Each spawn env is washed of the *other* engines' markers for the same
+  reason. The first rung that resolves settles the identity, including when
+  it names a different team; an engine whose session matches no row is
+  nobody, and `hive send` tells it so rather than letting it sign as the
+  orch.
 - **Reaping on failed reads.** Daemon reaping does not fire on an unreadable
   registry read, and a young pidfile gets a grace window so a spawn
   mid-registration is not mistaken for an orphan.
@@ -151,9 +155,12 @@ from the ledger, or a failed wake, is a delivery error.
 
 Two spawn-time requirements, neither visible at the call site:
 
-- The spawn env is washed of `CLAUDE*`/`ANTHROPIC*`. An inherited
-  `CLAUDE_CODE_CHILD_SESSION` makes the engine skip registration entirely,
-  which produces a member that exists and cannot be seen.
+- The spawn env is washed of `CLAUDE*`/`ANTHROPIC*` and of the other engines'
+  session markers. An inherited `CLAUDE_CODE_CHILD_SESSION` makes the engine
+  skip registration entirely, which produces a member that exists and cannot
+  be seen; an inherited `CODEX_THREAD_ID` or `GROK_SESSION_ID` keys the
+  *spawner's* roster row, so every hive call the new member makes would sign
+  as whoever spawned it.
 - Path-valued spawn flags must be absolute: they persist verbatim as the job's
   respawn flags.
 

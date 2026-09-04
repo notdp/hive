@@ -280,9 +280,9 @@ fn _create_headless_team(
 ///
 /// A tagged pane is idempotent whatever *name* says: the pane is the team's
 /// display and cannot be two teams. A binding that came from the session
-/// row or spawn env (no pane) is the engine's identity; reusing it for a
-/// different *name* would silently answer with a team the caller did not
-/// ask for, so that case is refused by name.
+/// row (no pane) is the engine's identity; reusing it for a different
+/// *name* would silently answer with a team the caller did not ask for, so
+/// that case is refused by name.
 pub(crate) fn _reuse_existing_binding(
     existing: &Map<String, Value>,
     name: &str,
@@ -780,23 +780,16 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
     // (`honey.worker`); otherwise the address stays whole for qualified-name
     // resolution across pane tags.
     let (explicit_team, to_agent) = _split_team_address(to_agent);
-    let mut guest = None;
-    let mut env_sender = String::new();
-    if !tmux::is_inside_tmux() {
-        // The root gate admitted this call because the process runs inside a
-        // Claude session (that session is the sender and its inbox socket is
-        // its identity), a headless codex member (its thread keys the roster
-        // row) or a headless engine carrying its member identity in env (a
-        // grok member's leader daemon). The last two take the member lane.
-        guest = crate::adapters::claude_sessions::self_session();
-        if guest.is_none() && _codex_thread_member_env().is_none() {
-            // The root gate already refused an env that names nobody, so
-            // whatever is left here is a listed member.
-            if let Some((_, member)) = _env_roster_member() {
-                env_sender = member;
-            }
-        }
-    }
+    // The root gate admitted this call because the process runs inside a
+    // Claude session (that session is the sender and its inbox socket is its
+    // identity), or a headless codex/grok member whose own session id keys
+    // its roster row. The latter take the member lane, where the identity
+    // ladder's session rung resolves them.
+    let guest = if tmux::is_inside_tmux() {
+        None
+    } else {
+        crate::adapters::claude_sessions::self_session()
+    };
     let (t, sender) = if let Some(guest) = guest {
         let (_team_name, t) = _resolve_guest_send_target(&to_agent, &explicit_team);
         let sender = match _registry_member_for_session(&guest.session_id) {
@@ -821,12 +814,7 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
             );
         }
         let (_team_name, t) = _resolve_send_target_team(&to_agent);
-        let sender = if env_sender.is_empty() {
-            _resolve_sender(None)
-        } else {
-            env_sender
-        };
-        (t, sender)
+        (t, _resolve_sender(None))
     };
     let ws = ok_or_fail(resolve_workspace(Some(&t), true));
     // Auto-anchor: the latest unanswered inbound from the recipient makes

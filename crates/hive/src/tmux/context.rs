@@ -30,9 +30,10 @@ pub fn is_inside_tmux() -> bool {
 ///   interactive claude session's tools carry the socket too, but have no
 ///   bg registry entry (and no job record), so they fall through.
 ///
-/// A headless member (codex thread or claude session with no pane yet)
-/// resolves nothing here; its identity is the registry row keyed by its
-/// sessionId, the ladder's last rung (`cli::util::_session_member_binding`).
+/// A headless member (a codex thread, grok session or claude session with
+/// no pane yet) resolves nothing here; its identity is the registry row
+/// keyed by its sessionId — the ladder's headless rung
+/// (`cli::util::_session_member_binding`).
 fn _member_env_pane() -> Option<String> {
     let thread_id = env_string("CODEX_THREAD_ID").trim().to_string();
     if !thread_id.is_empty() {

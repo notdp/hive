@@ -1659,8 +1659,7 @@ mod tests {
         std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("claude-env-isolation"));
         std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
         std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("HIVE_TEAM");
-        std::env::remove_var("HIVE_MEMBER");
+        std::env::remove_var("GROK_SESSION_ID");
         with_state(|st| {
             *st = FakeState::default();
             st.tmux_inside = tmux_inside;
