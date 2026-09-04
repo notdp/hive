@@ -236,17 +236,135 @@ fn _process_args(pid: libc::pid_t) -> Option<String> {
     (!args.is_empty()).then_some(args)
 }
 
-/// True when the pid runs the leader of *sock*: `grok agent leader
-/// --leader-socket <sock>`. Neither the TUI nor hive's stdio client, which
-/// both carry the socket path but not the `agent leader` verb.
-fn _is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
-    if pid <= 0 {
-        return false;
+/// Every process and the command line `ps` reports for it, in one listing.
+///
+/// The reap needs every process bound to a socket, and nothing records
+/// their pids: only the machine's own process table names them.
+fn _process_listing() -> Vec<(libc::pid_t, String)> {
+    #[cfg(test)]
+    {
+        super::tests::process_listing_override()
     }
-    let sock = sock.to_string_lossy();
+    #[cfg(not(test))]
+    {
+        _process_listing_real()
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn _process_listing_real() -> Vec<(libc::pid_t, String)> {
+    // `-ww`: an argv cut off at the terminal width would hide the socket.
+    let Ok(out) = Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,args="])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, args) = line.trim_start().split_once(char::is_whitespace)?;
+            Some((pid.parse::<libc::pid_t>().ok()?, args.trim().to_string()))
+        })
+        .collect()
+}
+
+/// True when *args* passes `--leader-socket <sock>` — that exact path, never
+/// another key's socket and never one this path is a prefix of.
+fn _names_leader_socket(args: &str, sock: &str) -> bool {
+    let mut tokens = args.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--leader-socket" {
+            if tokens.next() == Some(sock) {
+                return true;
+            }
+        } else if token.strip_prefix("--leader-socket=") == Some(sock) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when *args* is the leader of *sock*, never a client of it (the TUI
+/// and hive's stdio client both carry the socket but not the `agent leader`
+/// verb).
+///
+/// Two argv shapes bind a key. Hive's own spawn names the socket
+/// (`grok agent leader --leader-socket <sock>`); the leader a grok client
+/// raises for itself when it finds none names nothing, because grok passes
+/// the path in `GROK_LEADER_SOCKET`, which `ps` does not print. A bare
+/// `grok agent leader` is therefore trusted only for coming out of grok's
+/// own `<sock>.lock`, which the holder of *this* socket's flock writes —
+/// see [`_leader_pid`] — while one naming a *different* socket is a
+/// stranger a stale record points at and is never signalled.
+fn _is_leader_args(args: &str, sock: &str) -> bool {
+    args.contains("agent leader")
+        && (_names_leader_socket(args, sock) || !args.contains("--leader-socket"))
+}
+
+/// True when the pid runs a leader that may hold *sock*: either shape of
+/// [`_is_leader_args`].
+fn _is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
+    _leader_args_of(pid).is_some_and(|args| _is_leader_args(&args, &sock.to_string_lossy()))
+}
+
+/// True when the pid runs the leader hive itself spawned on *sock*: the
+/// exact socket in argv, never the bare shape. Hive's `.pid` is never
+/// cleared by a crash, so a recycled pid running some other key's
+/// grok-raised leader (bare argv too) must not pass through it.
+fn _is_spawned_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
+    _leader_args_of(pid).is_some_and(|args| {
+        args.contains("agent leader") && _names_leader_socket(&args, &sock.to_string_lossy())
+    })
+}
+
+fn _leader_args_of(pid: libc::pid_t) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
     _process_args(pid)
-        .map(|args| args.contains("agent leader") && args.contains(sock.as_ref()))
-        .unwrap_or(false)
+}
+
+/// Pids of every client attached to *sock*, whoever started them: the pane's
+/// grok TUI (`grok --leader --leader-socket <sock>`) and each stdio client
+/// (`grok agent --leader stdio --leader-socket <sock>`) — hive's own, the
+/// hived's pool client, one a member engine's `hive` call left behind.
+fn _socket_clients(sock: &Path) -> Vec<libc::pid_t> {
+    let sock = sock.to_string_lossy();
+    _process_listing()
+        .into_iter()
+        .filter(|(pid, args)| {
+            *pid > 0
+                && !_is_leader_args(args, sock.as_ref())
+                && _names_leader_socket(args, sock.as_ref())
+        })
+        .map(|(pid, _args)| pid)
+        .collect()
+}
+
+/// Clear the socket once: every client first, then the leader itself.
+///
+/// *signalled* carries across the passes of one kill — a pid already
+/// terminated has had SIGTERM and SIGKILL both, so seeing it again means
+/// only that a stale record still names it.
+fn _reap_socket_once(sock: &Path, signalled: &mut Vec<libc::pid_t>) {
+    let mut terminate = |pid: libc::pid_t| {
+        if !signalled.contains(&pid) {
+            signalled.push(pid);
+            _terminate_process_group(pid);
+        }
+    };
+    for pid in _socket_clients(sock) {
+        terminate(pid);
+    }
+    // Read after the clients are down: killing one can raise a leader.
+    if let Some(pid) = _leader_pid(sock) {
+        terminate(pid);
+    }
 }
 
 /// The pid of the leader still running on this key, verified by identity.
@@ -258,11 +376,19 @@ fn _is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
 /// crashes, so a recorded pid is only trusted when the process behind it
 /// is the leader of this socket — a dead or recycled pid is never signalled.
 fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
-    [sock.with_extension("pid"), sock.with_extension("lock")]
-        .iter()
-        .filter_map(|path| fs::read_to_string(path).ok())
-        .filter_map(|text| text.trim().parse::<libc::pid_t>().ok())
-        .find(|pid| _is_leader_of(*pid, sock))
+    let recorded = |ext: &str| {
+        fs::read_to_string(sock.with_extension(ext))
+            .ok()?
+            .trim()
+            .parse::<libc::pid_t>()
+            .ok()
+    };
+    // Hive's own pidfile only ever names a leader hive spawned, so it must
+    // pass on the exact socket; grok's lock names whichever leader holds
+    // this socket's flock, including one a client raised with a bare argv.
+    recorded("pid")
+        .filter(|pid| _is_spawned_leader_of(*pid, sock))
+        .or_else(|| recorded("lock").filter(|pid| _is_leader_of(*pid, sock)))
 }
 
 /// Start (or reuse) the leader daemon on *key*'s socket.
@@ -388,31 +514,29 @@ fn _terminate_process_group(pid: libc::pid_t) {
     }
 }
 
-/// True while a leader still holds *key*: a socket that answers, or a
-/// pidfile/lock naming a process that is this socket's leader.
+/// Stop everything holding a key and remove its socket, lock, pidfile and
+/// session record.
 ///
-/// The re-check after a kill: grok's stdio clients auto-spawn a leader when
-/// they find none, so a TUI still exiting can raise a fresh one on the key
-/// just after it was killed.
-pub fn leader_present(key: &str) -> bool {
-    let sock = socket_path_for_key(key);
-    probe_socket(&sock) || _leader_pid(&sock).is_some()
-}
-
-/// Stop a key's leader and remove its socket, pidfile and session record.
-///
-/// Only a pid verified as this key's leader is signalled; a stale record
-/// naming a dead or recycled pid is removed without touching the process.
+/// Clients before the leader: a grok client that finds its leader gone
+/// raises a replacement on the same socket, so killing the leader while any
+/// client lives only trades it for an orphan nobody owns — which is what
+/// killing just the pane's TUI and this process's own pool client left
+/// behind, since the hived's client and any a member engine started are
+/// other processes entirely. The pass runs twice because a client killed
+/// mid-respawn can leave a leader that appeared after the first one; grok's
+/// `<sock>.lock` names it, so the key files go only once both passes are
+/// done. Only a pid verified as this key's leader is signalled; a stale
+/// record naming a dead or recycled pid is removed without touching the
+/// process.
 pub fn kill_daemon_key(key: &str) {
     let sock = socket_path_for_key(key);
-    let pidfile = sock.with_extension("pid");
-    if let Some(pid) = _leader_pid(&sock) {
-        _terminate_process_group(pid);
-    }
+    let mut signalled: Vec<libc::pid_t> = Vec::new();
+    _reap_socket_once(&sock, &mut signalled);
+    _reap_socket_once(&sock, &mut signalled);
     for path in [
         sock.clone(),
         sock.with_extension("lock"),
-        pidfile,
+        sock.with_extension("pid"),
         sock.with_extension("session"),
     ] {
         let _ = fs::remove_file(path);

@@ -11,12 +11,6 @@ use super::support::DeliveryError;
 /// the ceiling, not the expected cost.
 const _PANE_EXIT_TIMEOUT: f64 = 2.0;
 
-/// How long the kill keeps watching a grok key for a leader raised by the
-/// exiting TUI, as a poll count × `_LEADER_REAP_POLL_MS`. A single probe
-/// races the respawn; the watch stops the moment it catches one.
-const _LEADER_REAP_POLLS: u32 = 10;
-const _LEADER_REAP_POLL_MS: u64 = 100;
-
 impl Agent {
     // --- Control ---
 
@@ -441,9 +435,11 @@ impl Agent {
     /// the pane's grok TUI is a leader client, and a client that finds its
     /// leader gone auto-spawns a replacement on the same socket: killing the
     /// daemon first resurrects it as an orphan nobody owns, and the pane kill
-    /// then takes only the TUI. So the TUI goes down and is waited out, the
-    /// pool's own client is dropped, and the leader is killed last — then the
-    /// key is watched for a moment, because a TUI still exiting can raise one.
+    /// then takes only the TUI. So the TUI goes down and is waited out and
+    /// the pool's own client is dropped — the cleanest exit for each — before
+    /// `kill_daemon_key`, which is the authority on the rest: it takes down
+    /// every remaining client of the socket, in this process or any other,
+    /// ahead of the leader.
     fn _kill_grok(&self) {
         // Resolve while the pane tags still exist; a pane-less member is
         // addressed by its member key.
@@ -462,17 +458,5 @@ impl Agent {
         }
         hooked_grok_pool_drop_key(&key);
         hooked_grok_kill_daemon_key(&key);
-        self._reap_resurrected_leader(&key);
-    }
-
-    /// Take down a leader that came back on *key* after the kill.
-    fn _reap_resurrected_leader(&self, key: &str) {
-        for _ in 0.._LEADER_REAP_POLLS {
-            if hooked_grok_leader_present(key) {
-                hooked_grok_kill_daemon_key(key);
-                return;
-            }
-            hooked_sleep_ms(_LEADER_REAP_POLL_MS);
-        }
     }
 }

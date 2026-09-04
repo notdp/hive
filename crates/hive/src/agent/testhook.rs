@@ -133,8 +133,6 @@ pub struct Hook {
     pub grok_probe_socket: Option<bool>,
     /// `#{pane_pid}` a kill reads before tearing the pane down.
     pub pane_pid: Option<u32>,
-    /// Answers of successive `leader_present` checks (missing → false).
-    pub grok_leader_present: Vec<bool>,
 }
 
 impl Hook {
