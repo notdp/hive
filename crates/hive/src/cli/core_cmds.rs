@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
 use super::*;
@@ -210,7 +211,8 @@ fn _create_headless_team(
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
     let members: Vec<Map<String, Value>> = orch_member.clone().into_iter().collect();
-    let _ = crate::registry::record_team(name, &ws_str, &format!("{now}"), &members, "");
+    // py_float_str is the createdAt key every later record_member compares.
+    let _ = crate::registry::record_team(name, &ws_str, &py_float_str(now), &members, "");
     if !ws_str.is_empty() {
         let ws = Path::new(&ws_str);
         if ws.exists() && reset_workspace {
@@ -445,8 +447,8 @@ fn _claim_team_name(team_name: &str, this_window: &str, explicit: bool) {
 fn _require_daemon_backed(pane: &str) {
     if _is_codex_tool_env() {
         // Running from inside the codex TUI's own tool: pane record or
-        // registry membership is the identity, and the shared daemon must
-        // answer.
+        // codex roster membership is the identity, and the shared daemon
+        // must answer.
         if crate::cli::team_ops::_codex_thread_is_hive_managed(&crate::cli::util::env_string(
             "CODEX_THREAD_ID",
         )) && crate::adapters::codex_app_server::daemon_alive()
@@ -677,17 +679,7 @@ fn _join_as_ccd(team_name: &str, name_override: &str) {
             "this session is already {e_team}.{e_name}; leave with `hive kill {e_team}.{e_name}` first"
         ));
     }
-    let mut seen: std::collections::HashSet<String> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(Value::as_object)
-                .map(|m| map_str(m, "name"))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut seen = _roster_names(&entry);
     seen.insert(LEAD_AGENT_NAME.to_string());
     _claim_member_name(name_override, &mut seen);
     let member_name = if name_override.is_empty() {
@@ -729,10 +721,11 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
     let mut guest = None;
     if !tmux::is_inside_tmux() {
         // The root gate admitted this call because the process runs inside a
-        // Claude session; that session is the sender and its inbox socket is
-        // its identity.
+        // Claude session (that session is the sender and its inbox socket is
+        // its identity) or a headless codex member (its thread keys the
+        // roster row, so it takes the member lane below).
         guest = crate::adapters::claude_sessions::self_session();
-        if guest.is_none() {
+        if guest.is_none() && _codex_thread_member_env().is_none() {
             fail(_TMUX_REQUIRED_MESSAGE);
         }
     }
@@ -1472,6 +1465,16 @@ pub fn kill(agent_name: &str) {
 
 /// Delete a team and clean up.
 pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspace: bool) {
+    ok_or_fail(_delete_team(name, workspace, delete_workspace));
+}
+
+/// The delete body; refuses an unsafe name before touching anything, since
+/// the legacy dirs below are joined onto hive_home() from it.
+fn _delete_team(name: &str, workspace: &str, delete_workspace: bool) -> Result<()> {
+    let error = crate::team::validate_team_name(name);
+    if !error.is_empty() {
+        bail!("cannot delete: {error}");
+    }
     let mut team_workspace = String::new();
     let mut team_window = String::new();
     if let Ok(t) = Team::load(name, "") {
@@ -1494,15 +1497,11 @@ pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspa
 
     let legacy_team_dir = crate::team::hive_home().join("teams").join(name);
     if legacy_team_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&legacy_team_dir) {
-            fail(&e.to_string());
-        }
+        std::fs::remove_dir_all(&legacy_team_dir)?;
     }
     let legacy_tasks_dir = crate::team::hive_home().join("tasks").join(name);
     if legacy_tasks_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&legacy_tasks_dir) {
-            fail(&e.to_string());
-        }
+        std::fs::remove_dir_all(&legacy_tasks_dir)?;
     }
 
     let resolved_workspace = if !workspace.is_empty() {
@@ -1526,9 +1525,7 @@ pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspa
     if !resolved_workspace.is_empty() && delete_workspace {
         let ws = expanduser(&resolved_workspace);
         if Path::new(&ws).exists() {
-            if let Err(e) = std::fs::remove_dir_all(&ws) {
-                fail(&e.to_string());
-            }
+            std::fs::remove_dir_all(&ws)?;
             println!("Workspace removed: {ws}");
         }
     }
@@ -1541,11 +1538,10 @@ pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspa
     // The registry entry is the team's authoritative existence: removing it
     // is what makes the team deleted (readers and the hived's registry-gone
     // exit key on it).
-    if let Err(e) = crate::registry::delete_team(name) {
-        fail(&e.to_string());
-    }
+    crate::registry::delete_team(name)?;
 
     println!("Team '{name}' deleted.");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,6 +1558,30 @@ mod tests {
             Value::Object(map) => map,
             _ => panic!("expected object"),
         }
+    }
+
+    #[test]
+    fn test_delete_refuses_unsafe_names_before_touching_disk() {
+        let _guard = crate::registry::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hive_home = tmp.path().join("hive");
+        std::env::set_var("HIVE_HOME", &hive_home);
+        // what `teams/../evil` and an absolute name would have resolved to
+        let sibling = hive_home.join("evil");
+        let outside = tmp.path().join("outside");
+        for dir in [&sibling, &outside] {
+            std::fs::create_dir_all(dir.join("marker")).unwrap();
+        }
+
+        for name in ["../evil", outside.to_str().unwrap(), "a.b", ""] {
+            let err = _delete_team(name, "", true).unwrap_err().to_string();
+            assert!(err.starts_with("cannot delete:"), "{name}: {err}");
+        }
+
+        assert!(sibling.join("marker").is_dir());
+        assert!(outside.join("marker").is_dir());
     }
 
     #[test]

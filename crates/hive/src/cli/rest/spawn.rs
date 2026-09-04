@@ -179,11 +179,9 @@ fn _spawn_headless_member(
             .unwrap_or(0.0),
         cli: resolved_cli,
     };
-    t.upsert_agent(agent.clone());
     let ws = resolve_workspace(Some(&*t), false).unwrap_or_default();
     _remember_context(team_name, &ws, LEAD_AGENT_NAME);
-    _registry_record_member(t, &agent);
-    Ok(agent)
+    _record_headless_member(t, agent)
 }
 
 #[allow(clippy::too_many_arguments)]

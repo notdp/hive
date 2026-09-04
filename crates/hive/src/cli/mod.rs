@@ -981,8 +981,13 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 fn run_root_gates(invoked: &str) {
     _require_codex_native(Some(invoked));
     if !_TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) && !tmux::is_inside_tmux() {
-        if invoked == "send" && crate::adapters::claude_sessions::self_session().is_some() {
-            return; // a Claude session sending into hive as a guest
+        // A Claude session sending into hive as a guest, or a headless codex
+        // member whose thread keys its roster row.
+        if invoked == "send"
+            && (crate::adapters::claude_sessions::self_session().is_some()
+                || _codex_thread_member_env().is_some())
+        {
+            return;
         }
         fail(_TMUX_REQUIRED_MESSAGE);
     }

@@ -1,5 +1,6 @@
 use super::interact::Density;
 use super::*;
+use crate::transcript_view::LineAccumulator;
 use crate::view_theme::{GROKDAY, GROKNIGHT};
 use ratatui::backend::TestBackend;
 use serde_json::json;
@@ -1165,4 +1166,73 @@ fn test_markdown_table_relayouts_on_resize() {
     check(&draw_to_buffer(&mut app, 200, H), "200 cols");
     check(&draw_to_buffer(&mut app, 120, H), "120 cols");
     check(&draw_to_buffer(&mut app, 200, H), "back to 200 cols");
+}
+
+#[test]
+fn test_drain_reader_holds_a_partial_row_until_its_newline_lands() {
+    let row = format!("{}\n", assistant_text_row("split across reads"));
+    let (head, tail) = row.as_bytes().split_at(row.len() / 2);
+    let mut app = App::new(&GROKNIGHT);
+    let mut lines = LineAccumulator::new();
+    drain_reader(&mut app, &mut lines, &mut std::io::Cursor::new(head)).unwrap();
+    let before = buffer_text(&draw_to_buffer(&mut app, W, H));
+    assert!(!before.contains("split across reads"), "{before}");
+    drain_reader(&mut app, &mut lines, &mut std::io::Cursor::new(tail)).unwrap();
+    let after = buffer_text(&draw_to_buffer(&mut app, W, H));
+    assert!(after.contains("split across reads"), "{after}");
+}
+
+#[test]
+fn test_drain_reader_survives_a_row_cut_inside_a_multibyte_char() {
+    let row = format!("{}\n", assistant_text_row("中文正文"));
+    let cut = row.find('文').unwrap() + 1;
+    assert!(!row.is_char_boundary(cut));
+    let (head, tail) = row.as_bytes().split_at(cut);
+    let mut app = App::new(&GROKNIGHT);
+    let mut lines = LineAccumulator::new();
+    drain_reader(&mut app, &mut lines, &mut std::io::Cursor::new(head)).unwrap();
+    drain_reader(&mut app, &mut lines, &mut std::io::Cursor::new(tail)).unwrap();
+    // Wide glyphs take two cells, so the buffer pads each with a space.
+    let text: String = buffer_text(&draw_to_buffer(&mut app, W, H))
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(text.contains("中文正文"), "{text}");
+}
+
+#[test]
+fn test_load_backlog_defers_a_trailing_partial_row_to_the_follow_loop() {
+    let second = assistant_text_row("landed later");
+    let cut = second.len() / 2;
+    let backlog = format!("{}\n{}", user_row("hello"), &second[..cut]);
+    let mut app = App::new(&GROKNIGHT);
+    let mut lines = LineAccumulator::new();
+    load_backlog(&mut app, &mut lines, backlog.as_bytes());
+    let before = buffer_text(&draw_to_buffer(&mut app, W, H));
+    assert!(before.contains("hello"), "{before}");
+    assert!(!before.contains("landed later"), "{before}");
+    let rest = format!("{}\n", &second[cut..]);
+    drain_reader(
+        &mut app,
+        &mut lines,
+        &mut std::io::Cursor::new(rest.as_bytes()),
+    )
+    .unwrap();
+    let after = buffer_text(&draw_to_buffer(&mut app, W, H));
+    assert!(after.contains("landed later"), "{after}");
+}
+
+#[test]
+fn test_drain_reader_parses_a_whole_row_at_once() {
+    let mut app = App::new(&GROKNIGHT);
+    let mut lines = LineAccumulator::new();
+    let row = format!("{}\n", assistant_text_row("whole row"));
+    drain_reader(
+        &mut app,
+        &mut lines,
+        &mut std::io::Cursor::new(row.as_bytes()),
+    )
+    .unwrap();
+    let text = buffer_text(&draw_to_buffer(&mut app, W, H));
+    assert!(text.contains("whole row"), "{text}");
 }

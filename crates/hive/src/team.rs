@@ -236,6 +236,28 @@ fn resolve_member_cli(pane: &PaneInfo) -> String {
 }
 
 #[cfg(not(test))]
+fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
+    crate::hived::request_team_runtime(workspace, team_name)
+}
+
+#[cfg(test)]
+fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
+    tests::fake_hived::request_team_runtime(workspace, team_name)
+}
+
+/// The hived's team-runtime answer, or None when there is nothing to trust:
+/// no socket, an empty body, or an `{ok: false, error}` envelope (the hived
+/// failed to load the team — that says nothing about the members). Every
+/// reader that turns the answer into per-member state — `Team::member_alive`,
+/// the flow board's roster, the `cli/util.rs` payload augmenter — goes
+/// through this so an error never reads as "everyone offline".
+pub(crate) fn usable_runtime(response: Option<Map<String, Value>>) -> Option<Map<String, Value>> {
+    response
+        .filter(|r| !r.is_empty())
+        .filter(|r| r.get("ok") != Some(&Value::Bool(false)))
+}
+
+#[cfg(not(test))]
 fn find_team_window_for_load(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
     _find_team_window(name, prefer_pane)
 }
@@ -717,13 +739,14 @@ impl Team {
     /// Whether a member can still receive a dispatch and answer. The hived's
     /// team runtime is the authority (`cliAlive` — an engine that is gone
     /// reads offline even if a pane still shows its last screen); without a
-    /// hived answer, a bound live pane stands in.
+    /// usable hived answer (`usable_runtime`), a bound live pane stands in.
     pub fn member_alive(&self, name: &str) -> bool {
         let Some(agent) = self.agent_named(name) else {
             return false;
         };
         if !self.workspace.is_empty() {
-            if let Some(runtime) = crate::hived::request_team_runtime(&self.workspace, &self.name) {
+            if let Some(runtime) = usable_runtime(request_team_runtime(&self.workspace, &self.name))
+            {
                 if let Some(member) = runtime
                     .get("members")
                     .and_then(Value::as_object)
@@ -1192,6 +1215,7 @@ mod tests {
         pub spawn_calls: Vec<SpawnCall>,
         pub spawn_fn: Option<Box<dyn Fn(usize, &SpawnCall) -> Agent>>,
         pub killed: Vec<String>,
+        pub team_runtime: Option<Box<dyn Fn(&str, &str) -> Option<Map<String, Value>>>>,
     }
 
     impl Default for FakeState {
@@ -1223,6 +1247,7 @@ mod tests {
                 spawn_calls: Vec::new(),
                 spawn_fn: None,
                 killed: Vec::new(),
+                team_runtime: None,
             }
         }
     }
@@ -1539,6 +1564,22 @@ mod tests {
 
         pub fn kill(agent: &Agent) {
             with_state(|st| st.killed.push(agent.name.clone()));
+        }
+    }
+
+    pub mod fake_hived {
+        use super::with_state;
+        use serde_json::{Map, Value};
+
+        pub fn request_team_runtime(
+            workspace: &str,
+            team_name: &str,
+        ) -> Option<Map<String, Value>> {
+            with_state(|st| {
+                st.team_runtime
+                    .as_ref()
+                    .and_then(|f| f(workspace, team_name))
+            })
         }
     }
 
@@ -2367,5 +2408,68 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
 
         assert!(validate_team_name("flow").contains("flow"));
+    }
+
+    fn team_with_pane_member(pane_id: &str) -> Team {
+        let mut team = Team {
+            name: "team-a".to_string(),
+            workspace: "/ws".to_string(),
+            ..Default::default()
+        };
+        team.agents.push(new_agent(
+            "worker", "team-a", pane_id, "claude", "", "", None,
+        ));
+        team
+    }
+
+    fn stub_team_runtime(response: Value) {
+        with_state(|st| {
+            st.team_runtime = Some(Box::new(move |_, _| response.as_object().cloned()))
+        });
+    }
+
+    #[test]
+    fn test_usable_runtime_rejects_error_envelope_and_empty_body() {
+        assert!(usable_runtime(None).is_none());
+        assert!(usable_runtime(Some(Map::new())).is_none());
+        let err = json!({"ok": false, "error": "team not found"});
+        assert!(usable_runtime(err.as_object().cloned()).is_none());
+        let ok = json!({"ok": true, "members": {}});
+        assert_eq!(
+            usable_runtime(ok.as_object().cloned()),
+            ok.as_object().cloned()
+        );
+    }
+
+    #[test]
+    fn test_member_alive_hived_error_falls_back_to_pane_liveness() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        stub_team_runtime(json!({"ok": false, "error": "load failed"}));
+
+        assert!(team_with_pane_member("%1").member_alive("worker"));
+        assert!(!team_with_pane_member("").member_alive("worker"));
+    }
+
+    #[test]
+    fn test_member_alive_hived_answer_is_authoritative() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        let team = team_with_pane_member("%1");
+
+        stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": false}}}));
+        assert!(!team.member_alive("worker"));
+
+        stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": true}}}));
+        assert!(team.member_alive("worker"));
+
+        stub_team_runtime(json!({"ok": true, "members": {}}));
+        assert!(!team.member_alive("worker"));
+    }
+
+    #[test]
+    fn test_member_alive_no_hived_uses_pane_liveness() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+
+        assert!(team_with_pane_member("%1").member_alive("worker"));
+        assert!(!team_with_pane_member("").member_alive("worker"));
     }
 }

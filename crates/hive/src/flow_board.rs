@@ -267,23 +267,35 @@ fn roster_snapshot(team_name: &str) -> Vec<RosterRow> {
     let Ok(team) = crate::team::Team::load(team_name, "") else {
         return Vec::new();
     };
-    let runtime_alive: Option<HashSet<String>> = if team.workspace.is_empty() {
+    let runtime = if team.workspace.is_empty() {
         None
     } else {
-        crate::hived::request_team_runtime(&team.workspace, &team.name).map(|rt| {
-            rt.get("members")
-                .and_then(serde_json::Value::as_object)
-                .map(|m| {
-                    m.iter()
-                        .filter(|(_, v)| {
-                            v.get("cliAlive").and_then(serde_json::Value::as_bool) == Some(true)
-                        })
-                        .map(|(k, _)| k.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
+        crate::hived::request_team_runtime(&team.workspace, &team.name)
     };
+    roster_rows(&team, runtime_alive_set(runtime))
+}
+
+/// The members the hived reports `cliAlive`, or None when its answer is not
+/// usable (`team::usable_runtime`) and pane liveness has to stand in.
+fn runtime_alive_set(
+    runtime: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Option<HashSet<String>> {
+    crate::team::usable_runtime(runtime).map(|rt| {
+        rt.get("members")
+            .and_then(serde_json::Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, v)| {
+                        v.get("cliAlive").and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn roster_rows(team: &crate::team::Team, runtime_alive: Option<HashSet<String>>) -> Vec<RosterRow> {
     team.agents
         .iter()
         .map(|a| RosterRow {
@@ -386,6 +398,66 @@ mod tests {
             phase: phase.to_string(),
             alive,
         }
+    }
+
+    fn team_with(members: &[(&str, &str)]) -> crate::team::Team {
+        let mut team = crate::team::Team {
+            name: "t".to_string(),
+            workspace: "/ws".to_string(),
+            ..Default::default()
+        };
+        for (name, pane) in members {
+            team.agents.push(crate::agent::Agent {
+                name: name.to_string(),
+                team_name: "t".to_string(),
+                pane_id: pane.to_string(),
+                model: "opus".to_string(),
+                prompt: String::new(),
+                cwd: String::new(),
+                session_id: None,
+                spawned_at: 0.0,
+                cli: "claude".to_string(),
+            });
+        }
+        team
+    }
+
+    fn alive_by_name(rows: &[RosterRow]) -> Vec<(String, bool)> {
+        rows.iter().map(|r| (r.name.clone(), r.alive)).collect()
+    }
+
+    #[test]
+    fn test_runtime_alive_set_error_envelope_is_unknown_not_offline() {
+        let err = serde_json::json!({"ok": false, "error": "load failed"});
+        assert_eq!(runtime_alive_set(err.as_object().cloned()), None);
+        assert_eq!(runtime_alive_set(None), None);
+        assert_eq!(runtime_alive_set(Some(Map::new())), None);
+
+        let ok = serde_json::json!({"ok": true, "members": {"a": {"cliAlive": true}, "b": {"cliAlive": false}}});
+        let set = runtime_alive_set(ok.as_object().cloned()).unwrap();
+        assert_eq!(set, HashSet::from(["a".to_string()]));
+    }
+
+    #[test]
+    fn test_roster_rows_hived_error_keeps_pane_liveness() {
+        let team = team_with(&[("a", "%1"), ("b", "")]);
+        let err = serde_json::json!({"ok": false, "error": "load failed"});
+        let rows = roster_rows(&team, runtime_alive_set(err.as_object().cloned()));
+        assert_eq!(
+            alive_by_name(&rows),
+            vec![("a".to_string(), true), ("b".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn test_roster_rows_hived_answer_overrides_pane() {
+        let team = team_with(&[("a", "%1"), ("b", "")]);
+        let ok = serde_json::json!({"ok": true, "members": {"b": {"cliAlive": true}}});
+        let rows = roster_rows(&team, runtime_alive_set(ok.as_object().cloned()));
+        assert_eq!(
+            alive_by_name(&rows),
+            vec![("a".to_string(), false), ("b".to_string(), true)]
+        );
     }
 
     #[test]

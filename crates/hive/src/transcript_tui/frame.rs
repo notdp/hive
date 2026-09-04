@@ -1,4 +1,5 @@
 use super::*;
+use crate::transcript_view::LineAccumulator;
 
 // ---------------------------------------------------------------------------
 // Frame chrome
@@ -691,19 +692,11 @@ pub fn run(path: &Path) -> anyhow::Result<i32> {
     let theme = crate::view_theme::active_theme_kind().theme();
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
-    let mut backlog = String::new();
-    reader.read_to_string(&mut backlog)?;
+    let mut backlog = Vec::new();
+    reader.read_to_end(&mut backlog)?;
     let mut app = App::new(theme);
-    {
-        let lines: Vec<&str> = backlog.lines().collect();
-        let tail_from = lines.len().saturating_sub(TAIL_EVENTS);
-        for raw in &lines[..tail_from] {
-            app.parser.note_session_state(raw);
-        }
-        for raw in &lines[tail_from..] {
-            app.push_raw(raw);
-        }
-    }
+    let mut lines = LineAccumulator::new();
+    load_backlog(&mut app, &mut lines, &backlog);
 
     enable_raw_mode()?;
     crossterm::execute!(
@@ -718,27 +711,56 @@ pub fn run(path: &Path) -> anyhow::Result<i32> {
         hook(info);
     }));
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let result = event_loop(&mut terminal, &mut app, &mut reader);
+    let result = event_loop(&mut terminal, &mut app, &mut lines, &mut reader);
     restore_terminal();
     result.map(|_| 0)
+}
+
+/// Seed the app from the backlog read at open: whole rows before the tail
+/// only feed session state, the tail is parsed, a trailing partial row waits
+/// in `lines` for the follow loop.
+pub(super) fn load_backlog(app: &mut App, lines: &mut LineAccumulator, backlog: &[u8]) {
+    let whole = lines.split_backlog(backlog);
+    let tail_from = whole.len().saturating_sub(TAIL_EVENTS);
+    for raw in &whole[..tail_from] {
+        app.parser.note_session_state(raw);
+    }
+    for raw in &whole[tail_from..] {
+        app.push_raw(raw);
+    }
+}
+
+/// Read everything appended since the last poll; only whole rows reach the
+/// parser.
+pub(super) fn drain_reader<R: BufRead>(
+    app: &mut App,
+    lines: &mut LineAccumulator,
+    reader: &mut R,
+) -> io::Result<()> {
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                if let Some(line) = lines.push(&raw) {
+                    app.push_raw(&line);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    lines: &mut LineAccumulator,
     reader: &mut BufReader<File>,
 ) -> anyhow::Result<()> {
-    let mut raw = String::new();
     loop {
-        loop {
-            raw.clear();
-            match reader.read_line(&mut raw) {
-                Ok(0) => break,
-                Ok(_) => app.push_raw(&raw),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => break,
-                Err(err) => return Err(err.into()),
-            }
-        }
+        drain_reader(app, lines, reader)?;
         terminal.draw(|frame| draw(frame, app))?;
         if !event::poll(Duration::from_millis(POLL_MS))? {
             continue;
