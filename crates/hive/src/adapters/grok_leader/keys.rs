@@ -156,30 +156,24 @@ pub fn read_pane_session(pane: &str) -> Option<(String, String)> {
     read_session_key(&resolve_pane_key(pane))
 }
 
-/// Leader env: the member's identity, nothing inherited that lies.
+/// Leader env: this pane, and nothing inherited that lies about identity.
 ///
 /// The spawner may itself run inside another member's engine (an orch's
 /// flow runner), whose env carries that engine's identity markers —
-/// CLAUDE_CODE_MESSAGING_SOCKET would make every hive call inside this
-/// grok member resolve to the *orch's* pane, and inherited HIVE_TEAM /
-/// HIVE_MEMBER would name the spawner. Wash them; pin our own.
+/// CLAUDE_CODE_MESSAGING_SOCKET, CODEX_THREAD_ID or the spawner's own
+/// GROK_SESSION_ID would each make every hive call inside this grok member
+/// resolve to the *spawner*. Wash them: the leader exports its own session
+/// id into the tools it runs, and that is the only identity they need.
 pub(super) fn _daemon_env_for_pane(pane: &str) -> HashMap<String, String> {
     let mut env: HashMap<String, String> = env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(key, _)| {
             !(key.starts_with("CLAUDE")
                 || key.starts_with("ANTHROPIC")
-                || matches!(
-                    key.as_str(),
-                    "CODEX_THREAD_ID" | "HIVE_TEAM" | "HIVE_MEMBER"
-                ))
+                || matches!(key.as_str(), "CODEX_THREAD_ID" | "GROK_SESSION_ID"))
         })
         .collect();
     env.insert("TMUX_PANE".to_string(), pane.to_string());
-    if let Some((team, member)) = member_from_key(&resolve_pane_key(pane)) {
-        env.insert("HIVE_TEAM".to_string(), team);
-        env.insert("HIVE_MEMBER".to_string(), member);
-    }
     env
 }
 

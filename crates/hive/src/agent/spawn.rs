@@ -253,11 +253,10 @@ impl Agent {
                     extra_args.push(sid.clone());
                     extra_args.push("--fork-session".to_string());
                 }
-                // The engine's env carries the member identity so its tool
-                // subprocesses can resolve who they are without a pane.
+                // Identity is never handed to the engine in env: it mints
+                // its own session id, and the roster row keyed by it says
+                // who the engine is.
                 let mut env_map: HashMap<String, String> = HashMap::new();
-                env_map.insert("HIVE_TEAM".to_string(), team_name.to_string());
-                env_map.insert("HIVE_MEMBER".to_string(), name.to_string());
                 if let Some(extra) = &opts.extra_env {
                     for (k, v) in extra {
                         env_map.insert(k.clone(), v.clone());

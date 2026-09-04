@@ -1000,13 +1000,14 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 
 /// Why a no-tmux call is refused, or None when it is admitted.
 ///
-/// Outside tmux only `send` has identity lanes: a Claude session sending
-/// into hive as a guest (its messaging socket), a headless codex member
-/// (its thread keys its roster row) or a headless engine carrying its
-/// member identity in env (a grok leader's subprocess). A spawn env that
-/// names nobody on the roster is told so by name — that is the shape a
-/// killed member's leftover subprocess arrives in, and the tmux line would
-/// send it hunting for a terminal it is never going to have.
+/// Outside tmux only `send` has identity lanes, and every one of them is the
+/// engine's own minted session: a Claude session sending into hive as a
+/// guest (its messaging socket), a headless codex member (its thread keys
+/// its roster row) or a headless grok member (its leader's session id keys
+/// one). An engine whose session names nobody on the roster is told so by
+/// name — that is the shape a killed member's leftover subprocess arrives
+/// in, and the tmux line would send it hunting for a terminal it is never
+/// going to have.
 fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
     if _TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
         return None;
@@ -1015,15 +1016,14 @@ fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
         return Some(_TMUX_REQUIRED_MESSAGE);
     }
     if crate::adapters::claude_sessions::self_session().is_some()
-        || _codex_thread_member_env().is_some()
-        || _env_roster_member().is_some()
+        || !_session_member_binding().is_empty()
     {
         return None;
     }
-    if _discover_env_binding().is_empty() {
-        Some(_TMUX_REQUIRED_MESSAGE)
+    if _engine_marker_env() {
+        Some(_UNROSTERED_ENGINE_MESSAGE)
     } else {
-        Some(_STALE_ENV_MESSAGE)
+        Some(_TMUX_REQUIRED_MESSAGE)
     }
 }
 
@@ -1353,23 +1353,23 @@ mod tests {
         }
     }
 
-    /// A headless engine subprocess: no tmux, no socket, no codex thread.
+    /// A headless engine subprocess: no tmux, no socket, no engine session.
     fn headless_gate_env(tmp: &std::path::Path) {
         std::env::set_var("HIVE_HOME", tmp.join(".hive"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.join(".claude"));
         for key in [
             "TMUX",
             "TMUX_PANE",
             "CODEX_THREAD_ID",
+            "GROK_SESSION_ID",
             "CLAUDE_CODE_MESSAGING_SOCKET",
-            "HIVE_TEAM",
-            "HIVE_MEMBER",
         ] {
             std::env::remove_var(key);
         }
     }
 
     #[test]
-    fn test_no_tmux_refusal_admits_a_rostered_env_member_and_names_a_stale_one() {
+    fn test_no_tmux_refusal_admits_a_rostered_grok_session_and_names_a_stale_one() {
         let _guard = crate::registry::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1377,27 +1377,31 @@ mod tests {
         headless_gate_env(tmp.path());
         let mut member = serde_json::Map::new();
         member.insert("name".to_string(), serde_json::Value::String("bee".into()));
+        member.insert("cli".to_string(), serde_json::Value::String("grok".into()));
+        member.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String("s-bee".into()),
+        );
         crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
 
         // no identity at all: the generic tmux refusal
         assert_eq!(_no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
 
-        std::env::set_var("HIVE_TEAM", "hornet");
-        std::env::set_var("HIVE_MEMBER", "bee");
+        std::env::set_var("GROK_SESSION_ID", "s-bee");
         assert_eq!(_no_tmux_refusal("send"), None);
 
-        // the env outlived the member it names
-        std::env::set_var("HIVE_MEMBER", "ant");
-        assert_eq!(_no_tmux_refusal("send"), Some(_STALE_ENV_MESSAGE));
+        // the leader's env outlived the member it names
+        std::env::set_var("GROK_SESSION_ID", "s-ant");
+        assert_eq!(_no_tmux_refusal("send"), Some(_UNROSTERED_ENGINE_MESSAGE));
 
-        // the env lane is a send lane only; other verbs still need tmux
-        std::env::set_var("HIVE_MEMBER", "bee");
+        // the session lane is a send lane only; other verbs still need tmux
+        std::env::set_var("GROK_SESSION_ID", "s-bee");
         assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(_no_tmux_refusal("config"), None);
 
-        std::env::remove_var("HIVE_TEAM");
-        std::env::remove_var("HIVE_MEMBER");
+        std::env::remove_var("GROK_SESSION_ID");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]

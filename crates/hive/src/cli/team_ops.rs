@@ -139,6 +139,17 @@ pub(crate) fn _codex_thread_member_env() -> Option<(String, String)> {
     _codex_thread_member(&env_string("CODEX_THREAD_ID"))
 }
 
+/// The grok member this process's own leader session belongs to, or None.
+///
+/// A grok leader exports `GROK_SESSION_ID` into every tool subprocess it
+/// runs, and that id is the one hive minted for the member and recorded in
+/// its roster row — the same shape as the codex rung, and narrowed to grok
+/// rows for the same reason: another cli's row carrying the same id is a
+/// stranger.
+pub(crate) fn _grok_session_member_env() -> Option<(String, String)> {
+    _registry_member_matching(env_string("GROK_SESSION_ID").trim(), Some("grok"))
+}
+
 pub(crate) fn _codex_relaunch_message() -> String {
     "this codex isn't hive-managed — hive runtime is degraded.\n\
      for future launches use hcodex (one-time setup, any shell):\n  \

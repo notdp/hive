@@ -29,16 +29,17 @@ use super::testhook;
 /// `CLAUDE_CODE_CHILD_SESSION` makes the engine skip registration — invisible
 /// and undeliverable. The config-tree override survives as
 /// `CLAUDE_CONFIG_DIR` so a sandboxed lane's engine registers in the same
-/// tree hive reads.
+/// tree hive reads. The other engines' session markers go the same way: the
+/// spawner may be a codex or grok member, and its session id keys *its*
+/// roster row — inherited into this job, every hive call the job makes would
+/// sign as the spawner.
 pub fn bg_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
     let mut env: HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {
             !(k.starts_with("CLAUDE")
                 || k.starts_with("ANTHROPIC")
-                // the spawner may be another member's engine: its identity must
-                // not leak into this job (members get their own via extra)
-                || k == "HIVE_TEAM"
-                || k == "HIVE_MEMBER")
+                || k == "CODEX_THREAD_ID"
+                || k == "GROK_SESSION_ID")
         })
         .collect();
     let config = _config_dir();

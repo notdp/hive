@@ -537,6 +537,34 @@ fn test_pipe_env_is_washed_of_claude_vars() {
     assert!(!env.contains_key("ANTHROPIC_API_KEY"));
 }
 
+#[test]
+fn test_bg_env_carries_no_identity_of_the_spawner_or_of_hive() {
+    // The spawner may be a codex or grok member; its session id keys *its*
+    // roster row, so a job inheriting it would sign as the spawner. Hive
+    // hands the job no identity of its own either — the engine mints one.
+    let _home = claude_home();
+    let _thread = VarGuard::set("CODEX_THREAD_ID", "tid-1");
+    let _grok = VarGuard::set("GROK_SESSION_ID", "s-spawner");
+    let env = bg_env(Some(&HashMap::from([(
+        "CR_WORKSPACE".to_string(),
+        "/tmp/cr".to_string(),
+    )])));
+    assert!(!env.contains_key("CODEX_THREAD_ID"));
+    assert!(!env.contains_key("GROK_SESSION_ID"));
+    // and hive pins nothing of its own beyond the config tree and the
+    // caller's extras: the engine's identity is the sessionId it mints
+    let inherited: std::collections::HashSet<String> =
+        std::env::vars().map(|(key, _)| key).collect();
+    let mut pinned: Vec<&str> = env
+        .keys()
+        .filter(|key| !inherited.contains(*key))
+        .map(String::as_str)
+        .collect();
+    pinned.sort_unstable();
+    assert_eq!(pinned, ["CLAUDE_CONFIG_DIR", "CR_WORKSPACE"]);
+    assert_eq!(env.get("CR_WORKSPACE").map(String::as_str), Some("/tmp/cr"));
+}
+
 // --- typing -------------------------------------------------------------
 
 #[test]

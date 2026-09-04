@@ -179,8 +179,7 @@ fn _spawn_leader(
 ///
 /// Idempotent: a live daemon on the resolved key's socket is reused (a tagged
 /// member pane and its spawner reach the same member daemon). The daemon env
-/// carries `TMUX_PANE` (shell tools report the right pane) and, for a
-/// member key, `HIVE_TEAM`/`HIVE_MEMBER`.
+/// carries `TMUX_PANE`, so shell tools report the right pane.
 pub fn spawn_daemon(pane: &str) -> bool {
     _spawn_daemon_key(
         &resolve_pane_key(pane),
@@ -192,22 +191,21 @@ pub fn spawn_daemon(pane: &str) -> bool {
 
 /// Ensure the member's leader daemon is listening — no pane involved.
 ///
-/// The headless spawn lane: env carries the member identity only (no
-/// `TMUX_PANE` — there is no pane to report).
+/// The headless spawn lane: the leader mints the member's identity itself
+/// (see [`_daemon_env_for_pane`] for what is washed and why), and there is
+/// no pane to report, so no `TMUX_PANE` is pinned either.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
-    let mut env: HashMap<String, String> = env::vars_os()
+    let env: HashMap<String, String> = env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(key, _)| {
             !(key.starts_with("CLAUDE")
                 || key.starts_with("ANTHROPIC")
                 || matches!(
                     key.as_str(),
-                    "CODEX_THREAD_ID" | "HIVE_TEAM" | "HIVE_MEMBER" | "TMUX_PANE" | "TMUX"
+                    "CODEX_THREAD_ID" | "GROK_SESSION_ID" | "TMUX_PANE" | "TMUX"
                 ))
         })
         .collect();
-    env.insert("HIVE_TEAM".to_string(), team.to_string());
-    env.insert("HIVE_MEMBER".to_string(), member.to_string());
     _spawn_daemon_key(
         &member_key(team, member),
         env,
