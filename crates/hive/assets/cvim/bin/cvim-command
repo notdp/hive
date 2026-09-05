@@ -57,7 +57,6 @@ src_cwd="$(tmux display-message -p -t "$src_pane" '#{pane_current_path}')"
 src_session="$(tmux display-message -p -t "$src_pane" '#{session_id}')"
 src_window="$(tmux display-message -p -t "$src_pane" '#{window_id}')"
 src_client_tty="$(tmux display-message -p -t "$src_pane" '#{client_tty}')"
-src_client_pid="$(tmux display-message -p -t "$src_pane" '#{client_pid}')"
 src_workspace="$(tmux display-message -p -t "$src_pane" '#{@hive-workspace}' 2>/dev/null || true)"
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 resources_dir="$(CDPATH= cd -- "$script_dir/../resources" && pwd 2>/dev/null || true)"
@@ -160,7 +159,7 @@ case "$(printf '%s' "$clear_input_before_paste_default" | tr '[:upper:]' '[:lowe
 esac
 
 build_helper_cmd() {
-  printf '%q ' "$helper_file" "$reply_pane" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$paste_delay_default" "$interrupt_before_paste_default" "$interrupt_after_paste_default" "$interrupt_settle_delay_default" "$submit_delay_default" "$clear_input_before_paste_default" "$cursor_mode" "$hive_bin" "$src_profile" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib"
+  printf '%q ' "$helper_file" "$editor_bin" "$msg_file" "$orig_file" "$tmpdir" "$output_mode" "$cursor_mode" "$hive_bin" "$debug_log_file" "$src_workspace" "$debug_run_id" "$debug_lib"
 }
 
 queue_post_run() {
@@ -213,35 +212,8 @@ fit_popup_to_region() {
   local region_y="$2"
   local region_w="$3"
   local region_h="$4"
-  local align="$5"
-  local width="$region_w"
-  local height="$region_h"
-  local x y
 
-  case "$align" in
-    right)
-      x=$(( region_x + region_w - width ))
-      y=$(( region_y + (region_h + height) / 2 ))
-      ;;
-    left)
-      x="$region_x"
-      y=$(( region_y + (region_h + height) / 2 ))
-      ;;
-    bottom)
-      x=$(( region_x + (region_w - width) / 2 ))
-      y=$(( region_y + region_h ))
-      ;;
-    top)
-      x=$(( region_x + (region_w - width) / 2 ))
-      y=$(( region_y + height ))
-      ;;
-    *)
-      x=$(( region_x + (region_w - width) / 2 ))
-      y=$(( region_y + (region_h + height) / 2 ))
-      ;;
-  esac
-
-  printf '%s %s %s %s\n' "$x" "$y" "$width" "$height"
+  printf '%s %s %s %s\n' "$region_x" "$(( region_y + region_h ))" "$region_w" "$region_h"
 }
 
 resolve_tmux_popup_geometry() {
@@ -267,7 +239,7 @@ resolve_tmux_popup_geometry() {
     local region_x=$(( client_width / 2 ))
     local region_w=$(( client_width - region_x ))
     read -r popup_x popup_y popup_w popup_h < <(
-      fit_popup_to_region "$region_x" 0 "$region_w" "$client_height" "right"
+      fit_popup_to_region "$region_x" 0 "$region_w" "$client_height"
     )
     printf '%s %s %s %s\n' "$popup_x" "$popup_y" "$popup_w" "$popup_h"
     return 0
@@ -370,14 +342,13 @@ resolve_tmux_popup_geometry() {
   if (( found )); then
     read -r popup_x popup_y popup_w popup_h < <(
       fit_popup_to_region \
-        "$bb_left" "$bb_top" "$(( bb_right - bb_left ))" "$(( bb_bottom - bb_top ))" \
-        "$selected_side"
+        "$bb_left" "$bb_top" "$(( bb_right - bb_left ))" "$(( bb_bottom - bb_top ))"
     )
   else
     local region_x=$(( client_width / 2 ))
     local region_w=$(( client_width - region_x ))
     read -r popup_x popup_y popup_w popup_h < <(
-      fit_popup_to_region "$region_x" 0 "$region_w" "$client_height" "right"
+      fit_popup_to_region "$region_x" 0 "$region_w" "$client_height"
     )
   fi
 
@@ -388,25 +359,17 @@ cat > "$helper_file" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-reply_pane="$1"
-editor_bin="$2"
-msg_file="$3"
-orig_file="$4"
-tmpdir="$5"
-send_mode="$6"
-paste_delay="$7"
-interrupt_before_paste="$8"
-interrupt_after_paste="$9"
-interrupt_settle_delay="${10}"
-submit_delay="${11}"
-clear_input_before_paste="${12}"
-cursor_mode="${13}"
-hive_bin="${14}"
-reply_profile="${15}"
-debug_log_file="${16}"
-debug_workspace="${17}"
-debug_run_id="${18}"
-debug_lib="${19}"
+editor_bin="$1"
+msg_file="$2"
+orig_file="$3"
+tmpdir="$4"
+send_mode="$5"
+cursor_mode="$6"
+hive_bin="$7"
+debug_log_file="$8"
+debug_workspace="$9"
+debug_run_id="${10}"
+debug_lib="${11}"
 send_file="$tmpdir/send.txt"
 post_file="$tmpdir/post.sh"
 content_state_file="$tmpdir/content_changed"
@@ -734,11 +697,11 @@ maybe_prepare_menu() {
   # message or to stage the menu.
   local transcript_path="$1"
   if [[ $# -gt 1 && "$2" -ne 0 ]]; then
-    "$hive_bin" cvim-seed "$src_cwd" "$msg_file" "$transcript_path" "$2"
+    "$hive_bin" cvim-seed "$msg_file" "$transcript_path" "$2"
     return 0
   fi
   if [[ -z "$menu_vim_template" || ! -f "$menu_vim_template" ]]; then
-    "$hive_bin" cvim-seed "$src_cwd" "$msg_file" "$transcript_path" "0"
+    "$hive_bin" cvim-seed "$msg_file" "$transcript_path" "0"
     return 0
   fi
   # cvim-list prints the entry count; a failed run (empty capture) and a
@@ -746,7 +709,7 @@ maybe_prepare_menu() {
   local entry_count
   entry_count="$("$hive_bin" cvim-list "$transcript_path" "$tmpdir/seeds" "$tmpdir/menu.json" 2>/dev/null || true)"
   if [[ -z "$entry_count" || "$entry_count" == "0" ]]; then
-    "$hive_bin" cvim-seed "$src_cwd" "$msg_file" "$transcript_path" "0"
+    "$hive_bin" cvim-seed "$msg_file" "$transcript_path" "0"
     return 0
   fi
   cp "$menu_vim_template" "$tmpdir/menu.vim"
@@ -756,7 +719,7 @@ maybe_prepare_menu() {
   # empty buffer. When popup_menu does come up and the user picks an entry,
   # menu.vim's HiveCvimMenuPick rewrites both msg_file and orig_file before
   # `:edit!`, so this seed is harmlessly overwritten.
-  "$hive_bin" cvim-seed "$src_cwd" "$msg_file" "$transcript_path" "0" \
+  "$hive_bin" cvim-seed "$msg_file" "$transcript_path" "0" \
     || : > "$msg_file"
   menu_mode=1
   debug_log "seed.menu transcript_path=$transcript_path entries=$entry_count"

@@ -52,83 +52,32 @@ fn _spawn_headless_member(
         _parse_entries(env_entries)
     };
 
-    let profile = crate::agent_cli::get_profile(&resolved_cli);
-    let mut initial_prompt = String::new();
-    if !skill.is_empty() && skill != "none" {
-        let skill_ref = if resolved_cli == "claude" {
-            skill.to_string()
-        } else {
-            skill
-                .rsplit_once(':')
-                .map(|(_, rest)| rest.to_string())
-                .unwrap_or_else(|| skill.to_string())
-        };
-        initial_prompt = match profile {
-            Some(profile) => profile.skill_cmd_for(&skill_ref),
-            None => format!("/{skill_ref}"),
-        };
-        // The skill takes the team as its argument — one entry form for
-        // spawn bootstrap and manual joins alike.
-        initial_prompt = format!("{initial_prompt} {team_name}");
-    }
-    if !prompt.is_empty() {
-        initial_prompt = if initial_prompt.is_empty() {
-            prompt.to_string()
-        } else {
-            format!("{initial_prompt}\n\n{prompt}")
-        };
-    }
+    let initial_prompt =
+        crate::agent::compose_initial_prompt(&resolved_cli, skill, prompt, team_name);
+    let label = format!("{team_name}.{agent_name}");
 
     let mut session_id = String::new();
     if resolved_cli == "claude" {
-        use crate::adapters::claude_bg;
         let mut extra_args: Vec<String> = Vec::new();
         if !model.is_empty() {
             extra_args.push("--model".to_string());
             extra_args.push(model.to_string());
         }
-        let mut env: HashMap<String, String> = HashMap::new();
-        for (key, value) in &extra_env {
-            env.insert(key.clone(), value_as_env_string(value));
-        }
-        let job_id = claude_bg::spawn_job(
+        let env: HashMap<String, String> = extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value_as_env_string(value)))
+            .collect();
+        let (job_id, _engine) = crate::agent::mint_claude_job(
             &resolved_cwd,
-            &format!("{team_name}.{agent_name}"),
+            &label,
             &initial_prompt,
             &extra_args,
-            Some(&env),
-            "claude",
-        );
-        let job_id = match job_id {
-            Some(job_id) if !job_id.is_empty() => job_id,
-            _ => bail!(
-                "`claude --bg` returned no usable job id for '{agent_name}'; \
-                 refusing to register a member without a job identity"
-            ),
-        };
-        if claude_bg::wait_engine_entry(&job_id, crate::agent::AGENT_STARTUP_TIMEOUT).is_none() {
-            claude_bg::stop_job(&job_id, "claude");
-            bail!(
-                "claude job '{job_id}' started but its engine never \
-                 registered an inbox; refusing an undeliverable member"
-            );
-        }
+            &env,
+        )?;
         session_id = job_id;
     } else if resolved_cli == "codex" {
         use crate::adapters::codex_app_server;
-        if !codex_app_server::spawn_daemon() {
-            bail!("codex shared app-server daemon failed to start");
-        }
-        let _ = codex_app_server::ensure_dir_trusted(&resolved_cwd);
-        let thread_id = codex_app_server::start_member_thread(
-            &resolved_cwd,
-            &format!("{team_name}.{agent_name}"),
-            model,
-        );
-        let thread_id = match thread_id {
-            Some(thread_id) if !thread_id.is_empty() => thread_id,
-            _ => bail!("codex app-server refused to mint a thread for '{agent_name}'"),
-        };
+        let thread_id = crate::agent::mint_codex_thread(&resolved_cwd, &label, model)?;
         if !initial_prompt.is_empty()
             && codex_app_server::send_to_thread(&thread_id, &initial_prompt).is_none()
         {
@@ -164,17 +113,12 @@ fn _spawn_headless_member(
         team_name: team_name.to_string(),
         pane_id: String::new(),
         model: model.to_string(),
-        prompt: String::new(),
         cwd: resolved_cwd,
         session_id: if session_id.is_empty() {
             None
         } else {
             Some(session_id)
         },
-        spawned_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0),
         cli: resolved_cli,
     };
     let ws = resolve_workspace(Some(&*t), false).unwrap_or_default();
@@ -222,7 +166,7 @@ pub fn spawn(
     let task_workspace = ok_or_fail(_task_dispatch_workspace(&t, task_artifact));
     // A live display and a tmux-resident caller get a pane; anything else —
     // a ccd orch outside tmux, a team with no window — spawns engine-only.
-    let headless = !(!t.tmux_window.is_empty() && tmux::is_inside_tmux());
+    let headless = t.tmux_window.is_empty() || !tmux::is_inside_tmux();
     let use_prompt = if task_artifact.is_some() { "" } else { prompt };
     let use_skill = if task_artifact.is_some() {
         "hive:hive"
@@ -246,7 +190,7 @@ pub fn spawn(
         spawn_team_agent(
             &mut t, &team_name, agent_name, model, use_prompt, cwd, use_skill, &pairs, cli_name,
         )
-        .map(|agent| agent.clone())
+        .cloned()
     };
     let agent = match spawned {
         Ok(agent) => agent,

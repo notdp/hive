@@ -76,16 +76,6 @@ pub fn parse_control_mode_output(line: &str) -> (String, String) {
     )
 }
 
-/// Return the pane id for a control mode output line, if any.
-pub fn parse_control_mode_output_pane(line: &str) -> Option<String> {
-    let (pane_id, _) = parse_control_mode_output(line);
-    if pane_id.is_empty() {
-        None
-    } else {
-        Some(pane_id)
-    }
-}
-
 /// Hand-rolled `_ANSI_ESCAPE_RE.sub("", s)`: CSI, OSC (BEL/ST terminated),
 /// DCS (ST terminated), and 2-char escapes are removed; anything else is kept.
 fn strip_ansi_escapes(s: &str) -> String {

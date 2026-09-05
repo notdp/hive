@@ -1,7 +1,8 @@
 //! The remaining command handlers — port of the non-core half of
 //! `src/hive/cli.py`: fork, spawn, config, inject, compact, layout, pr, flow,
-//! attach, thread, capture, cvim/vim/vfork/hfork, notify, plugin, the
-//! claude/codex/grok launchers, ccd, resume-hint, shell-init, and worktree.
+//! attach, render, thread, capture, cvim/vim/vfork/hfork, notify, plugin,
+//! the claude/codex/grok launchers, ccd, resume-hint, shell-init, and
+//! worktree.
 
 use super::*;
 

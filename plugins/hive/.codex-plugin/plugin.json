@@ -6,6 +6,5 @@
     "name": "notdp",
     "url": "https://github.com/notdp"
   },
-  "skills": "./skills/",
-  "hooks": "./hooks/codex-hooks.json"
+  "skills": "./skills/"
 }

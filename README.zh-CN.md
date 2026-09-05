@@ -16,33 +16,33 @@ Hive 是面向 agent 的 runtime，不是靠人手动驱动的 CLI。一个 team
 
 ## 安装
 
-Hive 是单个 Rust 二进制，从 checkout 编译：
+Hive 是单个 Rust 二进制。[GitHub Releases](https://github.com/notdp/hive/releases) 提供 macOS 和 Linux（aarch64 与 x86_64）的预编译二进制：
 
 ```bash
-git clone https://github.com/notdp/hive.git
-cd hive
-cargo install --path crates/hive
+curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-仓库同时是两个 CLI 的插件 marketplace，插件分发的是教 agent 协议的 skill：
+有 Rust 工具链的话还有两条路：[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) 拉取同一份预编译 release（不编译），`cargo install` 从源码编译：
 
 ```bash
-# Claude Code
-claude plugin marketplace add notdp/hive
-claude plugin install hive@hive
-
-# Codex
-codex plugin marketplace add https://github.com/notdp/hive.git
-codex plugin add hive@hive
+cargo binstall --git https://github.com/notdp/hive hive
+# 或
+cargo install --git https://github.com/notdp/hive hive
 ```
 
-CLI 请先自行安装。插件的 `SessionStart` hook 看起来会代为安装，实际不会：它的收敛步骤仍然对这个仓库调用 `pipx install`，而该路径早于 Rust 改写，仓库从那以后就没有 `pyproject.toml` 了，因此这条路装不出二进制，hook 的后半段（打开 Claude 侧的 marketplace 自动更新）也不会执行。唯一能收敛的路径是 PATH 上已有足够新的 `hive`：此时该检查不安装任何东西，直接放行。
+插件——教 agent 协议的那份 skill——内嵌在二进制里，由 `hive` 在 `$HIVE_HOME` 下物化出一个本地 marketplace 来提供。一条命令就为 PATH 上的每个 agent CLI 注册并安装它（重跑可修复安装）：
+
+```bash
+hive plugin setup
+```
+
+它在底下物化 marketplace，再对 claude（2.1.229+）和 codex 各执行 `plugin marketplace add` + install。claude 侧的 marketplace 条目是 command source——Claude 每个 session 重跑一次 `hive plugin sync`，所以 skill 更新随二进制走；codex 侧插件不带任何 hook（hook 会卡在 codex 的 hook 审阅对话框后面）——hive 自己的 codex 启动路径在二进制版本变化时、引擎启动前重新 add 插件。不从远端拉取任何东西，也不改任何 settings。
 
 依赖：
 
 - `tmux` 3.2+ —— `hive cvim` / `hive vim` 的弹窗要 3.2+；`hive view` 选主题时发的裸 OSC 11 背景色查询，也要 3.2 起才会在 pane 里被应答
-- Rust 工具链（编译用）
-- `python3` —— notify 弹窗是一段 python heredoc（`hive flow run` 不再需要解释器：flow 脚本是 JavaScript，由二进制内嵌的引擎执行）
+- Rust 工具链 —— 仅源码编译这条路需要；installer 装的是预编译二进制
+- `python3` —— notify 弹窗是一段 python heredoc（`hive flow run` 不需要解释器：flow 脚本是 JavaScript，由二进制内嵌的引擎执行）
 - 至少一种 agent CLI：`claude`、`codex` 或 `grok`
 
 ## 在 agent 会话中开始
@@ -82,11 +82,9 @@ bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 
 ## 升级
 
-```bash
-git pull && cargo install --path crates/hive
-```
+重跑[安装](#安装)里的 installer 一行命令，它总是拉取最新 release。发版方式是推一个与 crate 版本一致的 `v*` tag；CI（cargo-dist）编译各平台二进制并发布 GitHub Release。
 
-插件 manifest 的版本号与 CLI 版本锁在一起，因此一次发版同时带上插件更新。Claude Code 这边，bootstrap hook 写入 `extraKnownMarketplaces` 那条记录之后 marketplace 就自动更新；如果只设了 `DISABLE_AUTOUPDATER` 而没设 `FORCE_AUTOUPDATE_PLUGINS`，这一步会被跳过，此时需要手动执行 `claude plugin update hive@hive`。Codex 在 add 时对 marketplace 取快照，之后不会自行刷新；刷新需执行 `codex plugin marketplace upgrade hive`。
+skill 更新随二进制走：claude 侧 marketplace 的 command source 每个 session 重跑 `hive plugin sync`，自动拿到变更内容；codex 侧当缓存里没有当前二进制版本的条目时，hive 的启动路径会重新 add 插件。插件 manifest 的版本号与 CLI 版本锁在一起——codex 缓存正是以这把锁为键。
 
 ## 开发
 
@@ -95,6 +93,7 @@ git pull && cargo install --path crates/hive
 ## 文档
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) —— 注册表与显示层的身份之分、各 CLI 的原生 runtime 来源，以及 `busy` / `inputState` / `turnPhase`
+- [`docs/transcript-view.md`](docs/transcript-view.md) —— `hive view` 画的是什么：JSONL → `DisplayBlock` 的解析模型、viewer 的 chrome、主题解析
 - [`docs/daemon-control-socket.md`](docs/daemon-control-socket.md) —— Claude supervisor daemon 的控制协议，其 `op:"reply"` 是 hive 的投递主道
 - [`plugins/hive/skills/hive/SKILL.md`](plugins/hive/skills/hive/SKILL.md) —— `/hive:hive` 载入 agent 的协作协议
 

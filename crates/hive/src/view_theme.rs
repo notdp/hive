@@ -555,7 +555,7 @@ fn last_errno_is_eintr() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::TEST_ENV_LOCK;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
 
     // ---- palette spot checks -------------------------------------------
@@ -695,12 +695,9 @@ mod tests {
 
     #[test]
     fn test_active_theme_kind_reads_env_then_config_then_falls_light() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
-        std::env::remove_var("HIVE_VIEW_THEME");
-        std::env::remove_var("HIVE_APPEARANCE");
-        std::env::remove_var("COLORFGBG");
+        env.set("HIVE_HOME", tmp.path());
         // No setting, no detection signal (stdin is not a tty under the
         // test runner) → light fallback.
         assert_eq!(active_theme_kind(), ThemeKind::Light);
@@ -713,32 +710,30 @@ mod tests {
         );
         assert_eq!(active_theme_kind(), ThemeKind::Dark);
         // Env overrides the config file.
-        std::env::set_var("HIVE_VIEW_THEME", "light");
+        env.set("HIVE_VIEW_THEME", "light");
         assert_eq!(active_theme_kind(), ThemeKind::Light);
         // Invalid env falls through to config.
-        std::env::set_var("HIVE_VIEW_THEME", "bogus");
+        env.set("HIVE_VIEW_THEME", "bogus");
         assert_eq!(active_theme_kind(), ThemeKind::Dark);
         // auto in config + explicit appearance stamp.
         crate::settings::set_setting("view.theme", json!("auto")).unwrap();
-        std::env::remove_var("HIVE_VIEW_THEME");
-        std::env::set_var("HIVE_APPEARANCE", "dark");
+        env.remove("HIVE_VIEW_THEME");
+        env.set("HIVE_APPEARANCE", "dark");
         assert_eq!(active_theme_kind(), ThemeKind::Dark);
-        std::env::set_var("HIVE_APPEARANCE", "light");
+        env.set("HIVE_APPEARANCE", "light");
         assert_eq!(active_theme_kind(), ThemeKind::Light);
     }
 
     #[test]
     fn test_colorfgbg_feeds_auto_detection() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE"]);
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
-        std::env::remove_var("HIVE_VIEW_THEME");
-        std::env::remove_var("HIVE_APPEARANCE");
-        std::env::set_var("COLORFGBG", "15;0");
+        env.set("HIVE_HOME", tmp.path());
+        env.set("COLORFGBG", "15;0");
         assert_eq!(active_theme_kind(), ThemeKind::Dark);
-        std::env::set_var("COLORFGBG", "0;15");
+        env.set("COLORFGBG", "0;15");
         assert_eq!(active_theme_kind(), ThemeKind::Light);
-        std::env::set_var("COLORFGBG", "15;default");
+        env.set("COLORFGBG", "15;default");
         assert_eq!(active_theme_kind(), ThemeKind::Light, "unknown → light");
     }
 

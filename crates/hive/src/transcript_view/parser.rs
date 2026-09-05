@@ -173,6 +173,16 @@ fn run_description(input: &Value) -> String {
     "…".to_string()
 }
 
+/// The one-shot `ultra_effort_enter` attachment row.
+fn is_ultra_enter(row: &Value) -> bool {
+    row.get("type").and_then(Value::as_str) == Some("attachment")
+        && row
+            .get("attachment")
+            .and_then(|a| a.get("type"))
+            .and_then(Value::as_str)
+            == Some("ultra_effort_enter")
+}
+
 /// Fold transcript JSONL lines into [`DisplayBlock`]s, streaming.
 ///
 /// `push_entries` returns the blocks *finalized* by that line — with their
@@ -262,17 +272,12 @@ impl TranscriptParser {
         self.tokens
     }
 
-    /// True between a user message / tool_use and the next assistant text.
     /// Epoch ms of the running turn's opening message, for a live timer.
     pub fn turn_started_ms(&self) -> Option<i64> {
         self.turn_start_ms
     }
 
-    /// Output tokens counted so far.
-    pub fn tokens(&self) -> i64 {
-        self.tokens
-    }
-
+    /// True between a user message / tool_use and the next assistant text.
     pub fn busy(&self) -> bool {
         self.busy
     }
@@ -307,21 +312,16 @@ impl TranscriptParser {
         let Ok(row) = serde_json::from_str::<Value>(raw) else {
             return;
         };
-        if row.get("type").and_then(Value::as_str) == Some("attachment")
-            && row
-                .get("attachment")
-                .and_then(|a| a.get("type"))
-                .and_then(Value::as_str)
-                == Some("ultra_effort_enter")
-        {
+        if is_ultra_enter(&row) {
             self.ultra = true;
         }
     }
 
     /// Reasoning-effort level from the most recent row carrying one — or
     /// `ultra`, which the assistant rows never say: it arrives once as an
-    /// `ultra_effort_enter` attachment and has no recorded counterpart for
-    /// leaving, so it holds for the rest of the transcript.
+    /// `ultra_effort_enter` attachment. Transcripts also record an
+    /// `ultra_effort_exit`, which nothing here reads, so the badge latches
+    /// for the rest of the transcript.
     pub fn effort(&self) -> Option<&str> {
         if self.ultra {
             return Some("ultra");
@@ -409,8 +409,9 @@ impl TranscriptParser {
     /// envelopes and the human's own mid-turn messages both land here, so a
     /// viewer that reads only `user` rows silently drops them.
     ///
-    /// System plumbing (task notifications, which carry no origin) stays out
-    /// of the transcript.
+    /// System plumbing (task notifications, which carry no origin) stays off
+    /// the screen: a `queued_command` with neither a HIVE envelope nor
+    /// `origin.kind: human` is dropped here.
     fn push_queued_command(&mut self, row: &Value, out: &mut Vec<Entry>) {
         let att = match row.get("attachment") {
             Some(a) if a.get("type").and_then(Value::as_str) == Some("queued_command") => a,
@@ -490,8 +491,8 @@ impl TranscriptParser {
     }
 
     /// Close the assistant's turn with its `Worked for` marker and start the
-    /// human's. Idempotent within a row: the second content block of the same
-    /// message finds the turn already open.
+    /// human's. Called once per `user` row that carries text or image parts,
+    /// after they are assembled; a tool_result-only row never opens a turn.
     fn open_user_turn(&mut self, ts: &Option<Timestamp>, out: &mut Vec<Entry>) {
         if self.turn_has_assistant_text {
             let duration_secs = match (self.turn_start_ms, self.last_assistant_text_ms) {
@@ -518,26 +519,27 @@ impl TranscriptParser {
 
     /// Feed one raw JSONL line; returns the entries it finalized, in order.
     pub fn push_entries(&mut self, raw: &str) -> Vec<Entry> {
+        match serde_json::from_str::<Value>(raw) {
+            Ok(row) => self.push_row(&row),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Feed one already-parsed row; returns the entries it finalized, in
+    /// order. The TUI parses each line once and shares the row with its
+    /// chrome scraper.
+    pub fn push_row(&mut self, row: &Value) -> Vec<Entry> {
         let mut out = Vec::new();
-        let row: Value = match serde_json::from_str(raw) {
-            Ok(v) => v,
-            Err(_) => return out,
-        };
         let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "attachment" {
-            if row
-                .get("attachment")
-                .and_then(|a| a.get("type"))
-                .and_then(Value::as_str)
-                == Some("ultra_effort_enter")
-            {
+            if is_ultra_enter(row) {
                 self.ultra = true;
             }
-            self.push_queued_command(&row, &mut out);
+            self.push_queued_command(row, &mut out);
             return out;
         }
         if kind == "queue-operation" {
-            self.push_absorbed_queue_row(&row, &mut out);
+            self.push_absorbed_queue_row(row, &mut out);
             return out;
         }
         if kind != "user" && kind != "assistant" {

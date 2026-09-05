@@ -20,8 +20,6 @@ pub const NOTIFY_TOKEN_OPTION: &str = "@hive-notify-token";
 pub const ORIGINAL_NAME_OPTION: &str = "@hive-notify-original-name";
 pub const ORIGINAL_NAME_KEY: &str = "hive-notify-original-name";
 pub const HOOK_NAME_OPTION: &str = "@hive-notify-hook";
-#[allow(dead_code)]
-pub const HOOK_NAME_KEY: &str = "hive-notify-hook";
 pub const ATTENTION_SCRIPT_OPTION: &str = "@hive-notify-attention";
 pub const ATTENTION_SCRIPT_KEY: &str = "hive-notify-attention";
 pub const PANE_NOTIFY_ACTIVE_KEY: &str = "hive-notify-active";
@@ -31,8 +29,8 @@ pub const NOTIFY_BADGE: &str = "\u{1F916}";
 // instead of installing per-notify hook/script pairs that can go stale.
 pub const SELECT_HOOK_NAME: &str = "after-select-window[900001]";
 
-/// The popup animation: pure-stdlib Python delivered as a heredoc into
-/// the popup pane (the only Python left in the notify path).
+/// The popup animation: pure-stdlib Python delivered as a heredoc to
+/// `python3 -` inside the popup pane.
 pub const POPUP_CODE: &str = r##"
 from __future__ import annotations
 
@@ -144,7 +142,7 @@ sys.stdout.write("\033[?25h")
 sys.stdout.flush()
 "##;
 
-/// Serialized form matches the Python `notify()` return dict exactly.
+/// What `notify` reports back; `hive notify` prints it as JSON.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NotifyPayload {
     pub agent: String,
@@ -169,7 +167,8 @@ fn or_null(value: &str) -> Value {
     }
 }
 
-/// Python `shlex.quote` (POSIX single-quote quoting, ASCII-safe charset).
+/// POSIX single-quote shell quoting: alphanumerics and `_@%+=:,./-` pass
+/// through bare, anything else is wrapped in single quotes.
 fn shlex_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -179,22 +178,6 @@ fn shlex_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-/// The hive binary tmux hooks and helper scripts call back into (Python's
-/// `sys.executable -m hive.notify_ui` becomes hidden subcommands here).
-fn self_exe() -> String {
-    // HIVE_BIN is the same override the cvim/flow assets honour; it also
-    // lets integration tests (whose current_exe is the test harness) point
-    // hooks at the real binary.
-    let overridden = std::env::var("HIVE_BIN").unwrap_or_default();
-    if !overridden.is_empty() {
-        return overridden;
-    }
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "hive".to_string())
 }
 
 /// Hidden `hive notify-attention` entrypoint: the middle layer between the
@@ -247,7 +230,7 @@ pub fn attention_main() -> i32 {
     );
     // Numeric tmux popup -y anchors the popup bottom edge; use tmux's
     // pane-aware popup formats so a lower split starts at the target pane top.
-    let _ = tmux::display_popup(
+    tmux::display_popup(
         &pane,
         &payload,
         &client,
@@ -298,7 +281,7 @@ sleep 0.18
         qp = shlex_quote(pane_id),
         tok = shlex_quote(token),
         active_key = PANE_NOTIFY_ACTIVE_KEY,
-        exe = shlex_quote(&self_exe()),
+        exe = shlex_quote(&crate::cli::util::self_exe()),
     );
     let dir = std::env::temp_dir();
     // ponytail: NamedTemporaryFile stand-in — pid+nanos+attempt is unique
@@ -340,7 +323,7 @@ fn _select_hook_command() -> String {
         "{} notify-hook \
          --cleanup-selected '#{{session_name}}:#{{window_index}}' \
          --client '#{{client_tty}}'",
-        shlex_quote(&self_exe())
+        shlex_quote(&crate::cli::util::self_exe())
     );
     // This string is parsed by tmux's hook command parser, then by run-shell.
     // Keep the attached-client e2e test in sync if this quoting changes.
@@ -790,7 +773,8 @@ pub fn notify(message: &str, pane_id: &str, workspace: &str) -> anyhow::Result<N
     })
 }
 
-/// `python -m hive.notify_ui` equivalent entrypoint.
+/// The `hive notify-hook` entry point: the after-select-window tmux hook
+/// runs it with `--cleanup-selected <window> --client <tty>`.
 pub fn main(argv: &[String]) -> i32 {
     let mut cleanup_selected = String::new();
     let mut client = String::new();
@@ -822,7 +806,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Test stand-in for `crate::tmux` (monkeypatch equivalent).
+    /// Test stand-in for `crate::tmux`.
     pub mod fake_tmux {
         use std::cell::RefCell;
         use std::collections::HashMap;
@@ -1013,12 +997,21 @@ mod tests {
             with_state(|state| state.pane_session_name.clone())
         }
 
-        pub fn _run(args: &[&str], _check: bool, _timeout: u64) {
+        pub fn _run(
+            args: &[&str],
+            _check: bool,
+            _timeout: u64,
+        ) -> Result<crate::tmux::Run, crate::tmux::TmuxError> {
             with_state(|state| {
                 state
                     .run_calls
                     .push(args.iter().map(|arg| arg.to_string()).collect())
             });
+            Ok(crate::tmux::Run {
+                returncode: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         }
     }
 
@@ -1427,8 +1420,9 @@ mod tests {
             state.pane_agent = Some("red".to_string());
             state.pane_window_target = Some("dev:1".to_string());
         });
-        std::env::set_var("HIVE_NOTIFY_PANE", "%7");
-        std::env::set_var("HIVE_NOTIFY_CLIENT", "");
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("HIVE_NOTIFY_PANE", "%7");
+        env.set("HIVE_NOTIFY_CLIENT", "");
         assert_eq!(attention_main(), 0);
         fake_tmux::with_state(|state| {
             let popup: Vec<_> = state
@@ -1467,8 +1461,9 @@ mod tests {
         fake_tmux::with_state(|state| {
             state.pane_window_target = Some("dev:1".to_string());
         });
-        std::env::set_var("HIVE_NOTIFY_PANE", "%7");
-        std::env::set_var("HIVE_NOTIFY_CLIENT", "");
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("HIVE_NOTIFY_PANE", "%7");
+        env.set("HIVE_NOTIFY_CLIENT", "");
         assert_eq!(attention_main(), 0);
         fake_tmux::with_state(|state| {
             let popup: Vec<_> = state

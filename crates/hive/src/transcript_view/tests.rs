@@ -38,7 +38,7 @@ fn _text(kind: &str, body: &str) -> String {
     _row(kind, json!([{"type": "text", "text": body}]), None)
 }
 
-// ---- ported plain-stream tests -------------------------------------
+// ---- plain-stream tests ---------------------------------------------
 
 #[test]
 fn test_assistant_text_renders_with_marker_and_markdown() {
@@ -50,7 +50,7 @@ fn test_assistant_text_renders_with_marker_and_markdown() {
     // grok markdown engine: bold content survives, markers are hidden
     assert!(out.contains("all green"), "{out}");
     assert!(!out.contains("**"), "{out}");
-    assert_eq!(p.state, "idle");
+    assert!(!p.working);
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn test_tool_use_prefers_the_human_readable_hint() {
         json!({"command": "ls", "description": "List files"}),
     ));
     assert!(pushed.is_none(), "runs finalize late");
-    assert_eq!(p.state, "working");
+    assert!(p.working);
     let out = p.flush_rendered().unwrap();
     assert!(out.contains("Bash") && out.contains("List files"));
     assert!(!out.replace("List files", "").contains("ls"));
@@ -415,16 +415,16 @@ fn test_hive_envelope_collapses_to_a_tagged_line() {
     let out = p.push_rendered(&_row("user", json!(body), None)).unwrap();
     assert!(out.contains("✉") && out.contains("comb.dodo") && out.contains("review the spec"));
     assert!(!out.contains("<HIVE"));
-    assert_eq!(p.state, "working");
+    assert!(p.working);
 }
 
 #[test]
 fn test_user_turn_flips_working_and_final_text_flips_idle() {
     let mut p = StreamPrinter::new();
     p.push_rendered(&_row("user", json!("hi"), None));
-    assert_eq!(p.state, "working");
+    assert!(p.working);
     p.push_rendered(&_text("assistant", "hello"));
-    assert_eq!(p.state, "idle");
+    assert!(!p.working);
 }
 
 #[test]
@@ -735,7 +735,8 @@ fn test_worked_for_duration_formats() {
 
 #[test]
 fn test_timestamps_render_local_clock() {
-    std::env::set_var("TZ", "UTC");
+    let mut env = crate::testenv::EnvGuard::new();
+    env.set("TZ", "UTC");
     let epoch = parse_timestamp("1970-01-01T00:00:00.000Z").unwrap();
     assert_eq!(epoch.epoch_ms, 0);
     assert_eq!(epoch.clock, "12:00 AM");
@@ -747,7 +748,8 @@ fn test_timestamps_render_local_clock() {
 
 #[test]
 fn test_user_and_assistant_blocks_carry_timestamps() {
-    std::env::set_var("TZ", "UTC");
+    let mut env = crate::testenv::EnvGuard::new();
+    env.set("TZ", "UTC");
     let mut p = TranscriptParser::new();
     let out = p.push(&_row_at(
         "user",

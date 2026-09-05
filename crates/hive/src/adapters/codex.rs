@@ -10,9 +10,10 @@
 //! carrying the session id, cwd, model provider and base instructions. Subsequent
 //! lines are `response_item` records whose `payload` mirrors the OpenAI
 //! Responses API shape; we currently normalize `message` items and surface
-//! `reasoning` / `function_call` / `function_call_output` as best-effort
-//! parts, everything else degrades to `kind="unknown"` with the raw payload
-//! preserved.
+//! `reasoning`, tool calls (`function_call` / `custom_tool_call`) and their
+//! outputs (`function_call_output` / `custom_tool_call_output`) as
+//! best-effort parts, everything else degrades to `kind="unknown"` with the
+//! raw payload preserved.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -21,22 +22,15 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::base::{
-    parse_iso_timestamp, safe_json_loads, safe_mtime, str_or_none, DateTime, Message, MessagePart,
+    parse_iso_timestamp, safe_json_loads, str_or_none, DateTime, Message, MessagePart,
     SessionAdapter, SessionMeta,
 };
-
-fn _codex_home() -> PathBuf {
-    match std::env::var("CODEX_HOME") {
-        Ok(home) => PathBuf::from(home),
-        Err(_) => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex"),
-    }
-}
 
 pub struct CodexAdapter;
 
 impl CodexAdapter {
     fn _sessions_root(&self) -> PathBuf {
-        _codex_home().join("sessions")
+        crate::adapters::codex_app_server::codex_home().join("sessions")
     }
 }
 
@@ -76,42 +70,6 @@ impl SessionAdapter for CodexAdapter {
         matches.into_iter().next()
     }
 
-    fn list_sessions(&self, cwd: Option<&str>, limit: Option<usize>) -> Vec<SessionMeta> {
-        let root = self._sessions_root();
-        if !root.is_dir() {
-            return Vec::new();
-        }
-        let mut files: Vec<(f64, PathBuf)> = Vec::new();
-        _walk_files(&root, &mut |path| {
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map_or(false, _is_rollout_name)
-            {
-                files.push((safe_mtime(path), path.to_path_buf()));
-            }
-        });
-        files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut out: Vec<SessionMeta> = Vec::new();
-        for (_, path) in files {
-            let Some(meta) = self.read_meta(&path) else {
-                continue;
-            };
-            if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-                if meta.cwd.as_deref() != Some(cwd) {
-                    continue;
-                }
-            }
-            out.push(meta);
-            if let Some(limit) = limit {
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
     // --- reading ---
 
     fn read_meta(&self, path: &Path) -> Option<SessionMeta> {
@@ -121,6 +79,13 @@ impl SessionAdapter for CodexAdapter {
         if reader.read_line(&mut first_line).is_err() {
             return None;
         }
+        let payload = safe_json_loads(first_line.trim())?;
+        if payload.get("type").and_then(Value::as_str) != Some("session_meta") {
+            return None;
+        }
+        let Some(Value::Object(body)) = payload.get("payload") else {
+            return None;
+        };
         let mut model: Option<String> = None;
         let mut line = String::new();
         for _ in 0..20 {
@@ -142,24 +107,10 @@ impl SessionAdapter for CodexAdapter {
                 }
             }
         }
-        let payload = safe_json_loads(first_line.trim())?;
-        if payload.get("type").and_then(Value::as_str) != Some("session_meta") {
-            return None;
-        }
-        let Some(Value::Object(body)) = payload.get("payload") else {
-            return None;
-        };
         let session_id = str_or_none(body.get("id"))?;
         Some(SessionMeta {
             session_id,
-            cli_name: self.name().to_string(),
             cwd: str_or_none(body.get("cwd")),
-            title: None,
-            started_at: parse_iso_timestamp(_py_or(
-                payload.get("timestamp"),
-                body.get("timestamp"),
-            )),
-            jsonl_path: path.to_path_buf(),
             model: model.or_else(|| str_or_none(body.get("model"))),
         })
     }
@@ -207,17 +158,6 @@ impl SessionAdapter for CodexAdapter {
             }
             return Some(_codex_message_from_body(body, timestamp, raw_payload));
         }))
-    }
-
-    fn message_from_record(&self, payload: &Map<String, Value>) -> Option<Message> {
-        if payload.get("type").and_then(Value::as_str) != Some("response_item") {
-            return None;
-        }
-        let Some(Value::Object(body)) = payload.get("payload") else {
-            return None;
-        };
-        let timestamp = parse_iso_timestamp(payload.get("timestamp"));
-        Some(_codex_message_from_body(body, timestamp, payload.clone()))
     }
 }
 
@@ -273,7 +213,7 @@ fn _codex_message_from_body(
         "function_call_output" | "custom_tool_call_output" => {
             let output_text = match body.get("output") {
                 Some(Value::Object(output)) => {
-                    str_or_none(_py_or(output.get("content"), output.get("text")))
+                    str_or_none(_first_truthy(output.get("content"), output.get("text")))
                 }
                 other => str_or_none(other),
             };
@@ -346,7 +286,10 @@ fn _iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
                     }),
                     "tool_result" => parts.push(MessagePart {
                         kind: "tool_result".to_string(),
-                        tool_output: str_or_none(_py_or(map.get("content"), map.get("text"))),
+                        tool_output: str_or_none(_first_truthy(
+                            map.get("content"),
+                            map.get("text"),
+                        )),
                         raw: Some(block.clone()),
                         ..Default::default()
                     }),
@@ -384,22 +327,13 @@ fn _extract_reasoning_text(body: &Map<String, Value>) -> Option<String> {
     }
 }
 
-/// Python `a or b` over JSON values: `a` when truthy, else `b`.
-fn _py_or<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
+/// `a` when it is present and truthy (non-null, not `false`, `0`, or empty),
+/// else `b`. Callers read a tool result's `content` and fall back to its
+/// `text` when `content` is absent or empty.
+fn _first_truthy<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
     match a {
-        Some(value) if _is_truthy(value) => a,
+        Some(value) if crate::pyval::truthy(Some(value)) => a,
         _ => b,
-    }
-}
-
-fn _is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map_or(true, |f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
     }
 }
 
@@ -428,17 +362,15 @@ fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn _write_jsonl(path: &Path, lines: &[Value]) {
         let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
         fs::write(path, text).unwrap();
     }
 
-    // --- from tests/unit/test_adapters_iter_messages.py ---
+    // --- iter_messages ---
 
     #[test]
     fn test_codex_iter_messages_normalizes_message_reasoning_function_call() {
@@ -593,13 +525,13 @@ mod tests {
         assert_eq!(messages[1].message_id.as_deref(), Some("call-2"));
     }
 
-    // --- from tests/unit/test_adapters_find_and_meta.py ---
+    // --- find_session_file / meta ---
 
     #[test]
     fn test_codex_find_session_file_ignores_cwd_hint() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CODEX_HOME", tmp.path());
+        env.set("CODEX_HOME", tmp.path());
         let root = tmp
             .path()
             .join("sessions")
@@ -649,7 +581,6 @@ mod tests {
         let meta = CodexAdapter.read_meta(&path).expect("meta");
         assert_eq!(meta.session_id, "deadbeef-dead-beef-dead-beefdeadbeef");
         assert_eq!(meta.cwd.as_deref(), Some("/work"));
-        assert!(meta.started_at.is_some());
         assert_eq!(meta.model.as_deref(), Some("gpt-5.4"));
     }
 
@@ -659,26 +590,5 @@ mod tests {
         let path = tmp.path().join("rollout.jsonl");
         _write_jsonl(&path, &[json!({"type": "response_item", "payload": {}})]);
         assert!(CodexAdapter.read_meta(&path).is_none());
-    }
-
-    #[test]
-    fn test_codex_list_sessions_walks_tree() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CODEX_HOME", tmp.path());
-        for (date, sid) in [("2026/03/01", "a-a-a-a-a"), ("2026/03/02", "b-b-b-b-b")] {
-            let root = tmp.path().join("sessions").join(date);
-            fs::create_dir_all(&root).unwrap();
-            _write_jsonl(
-                &root.join(format!("rollout-{}-{sid}.jsonl", date.replace('/', "-"))),
-                &[json!({"type": "session_meta", "payload": {"id": sid, "cwd": "/work"}})],
-            );
-        }
-
-        let hits = CodexAdapter.list_sessions(None, None);
-        let ids: std::collections::HashSet<&str> =
-            hits.iter().map(|m| m.session_id.as_str()).collect();
-        assert_eq!(ids, ["a-a-a-a-a", "b-b-b-b-b"].into_iter().collect());
-        assert!(hits.iter().all(|m| m.cli_name == "codex"));
     }
 }

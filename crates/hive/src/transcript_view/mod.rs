@@ -12,7 +12,7 @@
 //! stays open until a non-read event arrives — so the parser exposes both the
 //! finalized stream (`push`/`flush`) and a live snapshot (`pending_blocks`).
 //! The TUI renders the blocks; the plain non-tty stream below renders the
-//! same blocks to the legacy ANSI line format.
+//! same blocks as ANSI lines.
 
 /// Grok Build's markdown engine (xai-grok-markdown, Apache-2.0) with the
 /// palette derived from the active [`ViewTheme`] (groknight or grokday) —

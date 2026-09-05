@@ -20,8 +20,9 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use crate::adapters::base::read_json_object;
 use crate::adapters::claude_sessions::{_config_dir, _pid_alive};
 
 const _VIEWER_SUBCOMMANDS: [&str; 2] = ["attach", "agents"];
@@ -48,8 +49,8 @@ pub struct PaneView {
 }
 
 // --------------------------------------------------------------------------
-// tmux inputs (thin seams so the probe's unit tests can drive them, the way
-// the Python tests monkeypatch hive.adapters.claude_view.tmux.*)
+// tmux inputs (thin seams so the probe's unit tests can drive them through
+// the testhook without a tmux server)
 // --------------------------------------------------------------------------
 fn pane_tty(pane_id: &str) -> Option<String> {
     #[cfg(test)]
@@ -133,8 +134,8 @@ pub fn journal_signature() -> Vec<String> {
     names
 }
 
-/// Parse a `%a %b %d %H:%M:%S %Y` timestamp the way Python's time.strptime
-/// does (whole string must match; C locale month/day names).
+/// Parse a `%a %b %d %H:%M:%S %Y` timestamp with libc `strptime`: the whole
+/// string must match, and the month/day names are the C locale's.
 fn strptime_lstart(text: &str) -> Option<libc::tm> {
     let c_text = CString::new(text).ok()?;
     let c_fmt = CString::new(_PROC_START_FORMAT).ok()?;
@@ -143,7 +144,7 @@ fn strptime_lstart(text: &str) -> Option<libc::tm> {
     if end.is_null() || unsafe { *end } != 0 {
         return None;
     }
-    tm.tm_isdst = -1; // let mktime decide DST, like Python's struct_time
+    tm.tm_isdst = -1; // let mktime decide DST
     Some(tm)
 }
 
@@ -201,7 +202,7 @@ fn _start_matches(claimed: &str, pid: i32) -> bool {
 /// Dead viewers leave their entries behind, so an entry only counts when its
 /// pid is alive *and* started when the entry recorded it (a recycled pid
 /// must never read as an open session).
-pub fn attach_entry_for_pid(pid: i32) -> Option<Value> {
+pub fn attach_entry_for_pid(pid: i32) -> Option<Map<String, Value>> {
     let entries = fs::read_dir(journal_dir()).ok()?;
     let paths: Vec<PathBuf> = entries
         .flatten()
@@ -209,13 +210,10 @@ pub fn attach_entry_for_pid(pid: i32) -> Option<Value> {
         .map(|e| e.path())
         .collect();
     for path in paths {
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(data) = read_json_object(&path) else {
             continue;
         };
-        let Ok(data) = serde_json::from_slice::<Value>(text.as_bytes()) else {
-            continue;
-        };
-        if !data.is_object() || data.get("pid").and_then(Value::as_i64) != Some(pid as i64) {
+        if data.get("pid").and_then(Value::as_i64) != Some(pid as i64) {
             continue;
         }
         if !_pid_alive(pid) {
@@ -235,7 +233,7 @@ pub fn attach_entry_for_pid(pid: i32) -> Option<Value> {
 // --------------------------------------------------------------------------
 /// argv[0] is the resolved binary path: `~/.local/bin/claude` normally, but
 /// the install is a version-named symlink tree, so a bare version basename
-/// counts too (Python `^\d+(\.\d+)+$`).
+/// counts too (`^\d+(\.\d+)+$`).
 fn version_basename(base: &str) -> bool {
     let parts: Vec<&str> = base.split('.').collect();
     parts.len() >= 2
@@ -246,7 +244,7 @@ fn version_basename(base: &str) -> bool {
 
 /// Minimal POSIX shlex: whitespace-separated words with quote and backslash
 /// handling; None on an unterminated quote/escape (the caller then falls
-/// back to a plain whitespace split, like Python does on ValueError).
+/// back to a plain whitespace split).
 fn shlex_split(s: &str) -> Option<Vec<String>> {
     let mut parts: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -431,11 +429,11 @@ fn _title_names(title: &str, name: &str) -> bool {
         let before_ok = title[..at]
             .chars()
             .next_back()
-            .map_or(true, |c| !is_name_char(c));
+            .is_none_or(|c| !is_name_char(c));
         let after_ok = title[at + name.len()..]
             .chars()
             .next()
-            .map_or(true, |c| !is_name_char(c));
+            .is_none_or(|c| !is_name_char(c));
         if before_ok && after_ok {
             return true;
         }
@@ -599,7 +597,7 @@ mod testhook {
     }
 
     thread_local! {
-        pub static PROBE: RefCell<Option<Probe>> = RefCell::new(None);
+        pub static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
     }
 
     pub fn with<T>(f: impl FnOnce(&Probe) -> T) -> Option<T> {
@@ -610,7 +608,7 @@ mod testhook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::claude_sessions::test_env;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
 
     const PANE: &str = "%7";
@@ -638,13 +636,13 @@ mod tests {
     /// An isolated claude config tree: pane job records and attach journal.
     struct Home {
         dir: tempfile::TempDir,
-        _env: test_env::EnvGuard,
+        _env: EnvGuard,
     }
 
     fn claude_home() -> Home {
-        let env_guard = test_env::EnvGuard::new();
+        let mut env_guard = EnvGuard::cleared(&crate::testenv::CLAUDE_VARS);
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("CLAUDE_HOME", dir.path());
+        env_guard.set("CLAUDE_HOME", dir.path());
         fs::create_dir_all(dir.path().join("daemon").join("attach-journal")).unwrap();
         let _ = crate::adapters::claude_bg::write_pane_job(PANE, JOB, "session-1", "/tmp");
         Home {

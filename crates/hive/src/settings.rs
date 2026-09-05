@@ -10,14 +10,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context as _, Result};
 use serde_json::{Map, Value};
 
-fn _hive_home() -> PathBuf {
-    let home = std::env::var("HIVE_HOME")
-        .unwrap_or_else(|_| format!("{}/.hive", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home)
-}
-
 fn _settings_path() -> PathBuf {
-    _hive_home().join("settings.json")
+    crate::team::hive_home().join("settings.json")
 }
 
 fn key_parts(key: &str) -> Vec<&str> {
@@ -61,7 +55,7 @@ pub fn set_setting(key: &str, value: Value) -> Result<()> {
     {
         let mut node: &mut Map<String, Value> = &mut data;
         for part in &parts[..parts.len() - 1] {
-            if !node.get(*part).map_or(false, Value::is_object) {
+            if !node.get(*part).is_some_and(Value::is_object) {
                 node.insert((*part).to_string(), Value::Object(Map::new()));
             }
             node = node
@@ -121,19 +115,15 @@ fn _write_atomic(data: &Map<String, Value>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::TEST_ENV_LOCK;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
-    use std::sync::MutexGuard;
 
-    fn setup() -> (tempfile::TempDir, MutexGuard<'static, ()>) {
-        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn setup() -> (tempfile::TempDir, EnvGuard) {
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
-        (tmp, guard)
+        env.set("HIVE_HOME", tmp.path());
+        (tmp, env)
     }
-
-    // No Python unit tests exist for settings (only cli-level config tests);
-    // these are minimal self-checks of the dot-path logic.
 
     #[test]
     fn test_set_get_unset_round_trip() {

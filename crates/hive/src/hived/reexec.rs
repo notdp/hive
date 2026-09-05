@@ -6,14 +6,16 @@ use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
 use super::*;
 
-/// The Rust build's code identity is the binary on disk (the Python port
-/// hashed every .py under src/hive; the compiled binary is the same truth).
+/// SHA-256 of the binary at `current_exe()` as it sits on disk right now.
+/// `hived_build_hash` caches the first result for the process lifetime (the
+/// running build); `_stale_disk_build_hash_for_reexec` recomputes it, which
+/// is how an install that replaced the file shows up as a different hash.
 pub fn _compute_build_hash() -> String {
     let inner = || -> std::io::Result<String> {
         let exe = std::env::current_exe()?;
@@ -29,9 +31,20 @@ pub fn _compute_build_hash() -> String {
     inner().unwrap_or_else(|_| "unknown".to_string())
 }
 
+#[cfg(not(test))]
 pub fn hived_build_hash() -> &'static str {
-    static CELL: OnceLock<String> = OnceLock::new();
+    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CELL.get_or_init(_compute_build_hash)
+}
+
+/// Hashing the multi-megabyte test binary costs seconds per test process
+/// (nextest runs one per test) and no test depends on the real digest: the
+/// running build's identity is a constant under test, and
+/// `hooked_compute_build_hash` still supplies whatever "disk" hash a reexec
+/// test wants to contrast it with.
+#[cfg(test)]
+pub fn hived_build_hash() -> &'static str {
+    "test-build"
 }
 
 pub fn _hived_reexec_argv(
@@ -50,7 +63,7 @@ pub fn _hived_reexec_argv(
     ]
 }
 
-/// Per-loop reexec bookkeeping (the Python `code_reexec_state` dict).
+/// Per-loop reexec bookkeeping.
 #[derive(Debug)]
 pub struct ReexecState {
     pub last_code_check_at: f64,
@@ -60,8 +73,8 @@ pub struct ReexecState {
 impl Default for ReexecState {
     fn default() -> Self {
         ReexecState {
-            // Python `state.get("last_code_check_at", 0.0)` against a large
-            // uptime clock: the first check always runs.
+            // `monotonic()` starts near zero, so a 0.0 seed would skip the
+            // first check; negative infinity makes it run on the first tick.
             last_code_check_at: f64::NEG_INFINITY,
             candidate_hash: None,
         }
@@ -110,7 +123,7 @@ pub fn _try_acquire_reexec_lock_impl(workspace: &str) -> Option<i32> {
         _release_reexec_lock_fd_impl(Some(fd));
         return None;
     }
-    // Python os.set_inheritable(fd, True): clear FD_CLOEXEC.
+    // The lock fd rides through execv into the new build: clear FD_CLOEXEC.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
         _release_reexec_lock_fd_impl(Some(fd));
@@ -184,7 +197,8 @@ pub fn _reexec_hived(
     }
     let argv = _hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
     let outcome = hooked_execv(&argv);
-    // Python's `finally`: runs whether execv returned or "raised".
+    // Only reached when execv came back (live: it failed; under test: the
+    // hook reports Replaced) — undo the env and drop the lock either way.
     match previous_lock_env {
         None => std::env::remove_var(_HIVED_REEXEC_LOCK_ENV),
         Some(previous) => std::env::set_var(_HIVED_REEXEC_LOCK_ENV, previous),
@@ -201,8 +215,8 @@ pub fn _reexec_hived(
     }
 
     // Only reached when execv failed. Rebinding is the recovery; if it too
-    // fails the loop must die through its own teardown (Python's raised
-    // OSError) — signal shutdown so the next serve tick retires it.
+    // fails the loop must die through its own teardown — signal shutdown so
+    // the next serve tick retires it.
     let replacement = match hooked_open_server_socket(workspace) {
         Ok(replacement) => replacement,
         Err(_) => {

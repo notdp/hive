@@ -49,18 +49,17 @@ pub fn _apply_status(rt: &mut ThreadRuntime, status: &Value) {
         Some("active") => {
             rt.busy = true;
             rt.turn_phase = "tool_open".to_string();
-            let waiting =
-                status
-                    .get("activeFlags")
-                    .and_then(Value::as_array)
-                    .map_or(false, |flags| {
-                        flags.iter().any(|flag| {
-                            matches!(
-                                flag.as_str(),
-                                Some("waitingOnApproval") | Some("waitingOnUserInput")
-                            )
-                        })
-                    });
+            let waiting = status
+                .get("activeFlags")
+                .and_then(Value::as_array)
+                .is_some_and(|flags| {
+                    flags.iter().any(|flag| {
+                        matches!(
+                            flag.as_str(),
+                            Some("waitingOnApproval") | Some("waitingOnUserInput")
+                        )
+                    })
+                });
             rt.input_state = if waiting { "waiting_user" } else { "ready" }.to_string();
         }
         Some("idle") => {
@@ -93,13 +92,14 @@ struct ClientState {
 struct Inner {
     state: Mutex<ClientState>,
     pending: Mutex<HashMap<u64, Arc<Slot>>>,
-    /// Doubles as the Python `_send_lock`: id mint + frame write are atomic.
+    /// Held across id mint, pending insert and the frame write, so ids reach
+    /// the wire in mint order.
     next_id: Mutex<u64>,
     stream: Option<Arc<UnixStream>>,
     closed: AtomicBool,
     reader: Mutex<Option<thread::JoinHandle<()>>>,
-    /// Test seam standing in for Python's per-instance `c.call = ...`
-    /// monkeypatch; always None in production.
+    /// Test seam: a scripted `call` in place of the socket round trip;
+    /// always None in production.
     call_override: Mutex<Option<CallOverride>>,
 }
 
@@ -338,7 +338,7 @@ impl CodexDaemonClient {
     /// (`thread/resume {excludeTurns}`), which reads the source rollout from
     /// disk and fails on a thread that has none. The name write is metadata
     /// only (state DB) and never materializes the file, so the flush is
-    /// [`_flush_thread`], and the rollout's presence on disk is the oracle.
+    /// `_flush_thread`, and the rollout's presence on disk is the oracle.
     /// *name* must be non-empty (the daemon rejects empty names).
     pub fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
         let mut params = Map::new();
@@ -383,7 +383,7 @@ impl CodexDaemonClient {
         if placed.get("result").is_none() {
             return false;
         }
-        rollout.is_some_and(hooked_rollout_exists)
+        rollout.is_some_and(Path::is_file)
     }
 
     /// Fork a rolled-out thread server-side; return the fork's threadId.
@@ -470,7 +470,7 @@ impl CodexDaemonClient {
             .lock()
             .unwrap()
             .as_ref()
-            .map_or(false, |handle| !handle.is_finished())
+            .is_some_and(|handle| !handle.is_finished())
     }
 
     pub fn close(&self) {
@@ -491,10 +491,6 @@ fn _thread_path_from(thread: &Map<String, Value>) -> Option<std::path::PathBuf> 
     }
 }
 
-fn hooked_rollout_exists(path: &Path) -> bool {
-    path.is_file()
-}
-
 fn _thread_id_from(thread: &Map<String, Value>) -> Option<String> {
     match thread.get("id") {
         Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
@@ -503,9 +499,10 @@ fn _thread_id_from(thread: &Map<String, Value>) -> Option<String> {
     }
 }
 
-/// The client surface the pane-keyed API dials through `_shared_client`.
-/// Python duck-types this; the trait is the Rust seam for the same fakes.
-/// Methods returning `Result` model Python's "RPC raised" transport failures.
+/// The client surface the pane-keyed API dials through `_shared_client`,
+/// and the seam tests substitute fakes through. `Err` is a transport
+/// failure a fake raises; the real client never errs here — `call` folds
+/// its failures into an `__error__` payload.
 pub trait DaemonClient: Send + Sync {
     fn turn_start(&self, _thread_id: &str, _text: &str) -> Result<Value, String> {
         unimplemented!("turn_start")
@@ -560,8 +557,7 @@ impl DaemonClient for CodexDaemonClient {
 
 #[cfg(test)]
 impl CodexDaemonClient {
-    /// Python `_bare_client()`: a client without a socket connection, for
-    /// state-logic tests.
+    /// A client without a socket connection, for state-logic tests.
     pub(super) fn bare() -> CodexDaemonClient {
         CodexDaemonClient {
             inner: Arc::new(Inner {
@@ -576,7 +572,7 @@ impl CodexDaemonClient {
         }
     }
 
-    /// Python `c.call = lambda ...` monkeypatch equivalent.
+    /// Script `call`, so state logic runs without a daemon.
     pub(super) fn set_call_override(&self, call: impl Fn(&str, &Value) -> Value + Send + 'static) {
         *self.inner.call_override.lock().unwrap() = Some(Box::new(call));
     }

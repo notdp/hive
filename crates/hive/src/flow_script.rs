@@ -31,7 +31,7 @@ use rquickjs::prelude::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Promise, Value as JsValue};
 use serde_json::{Map, Value};
 
-use crate::flow::{run_op, FlowEnv, FlowOp};
+use crate::flow::{log, run_op, FlowEnv, FlowOp};
 
 const DIALECT_HELP: &str =
     "flow scripts are JavaScript: start with `export const meta = { name: '...', description: '...' }` \
@@ -197,11 +197,6 @@ fn err_json(msg: &str) -> String {
     serde_json::json!({"ok": false, "error": msg}).to_string()
 }
 
-fn flow_log(message: &str) {
-    eprintln!("[flow] {message}");
-    let _ = std::io::stderr().flush();
-}
-
 /// One `__flow_op` call from the script: journal replay when possible,
 /// otherwise `run_op` on a blocking thread.
 async fn journaled_op(env: Arc<dyn FlowEnv>, journal: Arc<Journal>, op_json: String) -> String {
@@ -223,11 +218,11 @@ async fn journaled_op(env: Arc<dyn FlowEnv>, journal: Arc<Journal>, op_json: Str
                         .unwrap_or(false)
                 };
                 if alive {
-                    flow_log(&format!("{name} alive from previous run; reusing"));
+                    log(&format!("{name} alive from previous run; reusing"));
                     journal.record(&key, &rec);
                     return ok_json(&rec);
                 }
-                flow_log(&format!("{name} from journal is gone; respawning"));
+                log(&format!("{name} from journal is gone; respawning"));
             } else {
                 journal.record(&key, &rec);
                 return ok_json(&rec);
@@ -259,8 +254,9 @@ async fn journaled_op(env: Arc<dyn FlowEnv>, journal: Arc<Journal>, op_json: Str
 }
 
 // ---------------------------------------------------------------------------
-// the dialect prelude — the entire script-facing API over two host
-// primitives (`__flow_op(json)`, `__host_log(msg)`).
+// the dialect prelude — the entire script-facing API over the one host
+// primitive `__flow_op(json)`; `__host_log(msg)` is only the stderr sink
+// (`log()`, `phase()`, and the parallel/pipeline failure notices).
 // ---------------------------------------------------------------------------
 
 const PRELUDE: &str = r###"
@@ -457,7 +453,7 @@ pub async fn run_script(
     let (meta_json, result_json) = ctx
         .async_with(async |ctx| -> anyhow::Result<(String, String)> {
             let globals = ctx.globals();
-            globals.set("__host_log", Func::from(|msg: String| flow_log(&msg)))?;
+            globals.set("__host_log", Func::from(|msg: String| log(&msg)))?;
             globals.set(
                 "__flow_op",
                 Func::from(Async(move |op_json: String| {
@@ -512,6 +508,9 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
             return 1;
         }
     };
+    // Checked again inside run_script; here it runs before a run id is
+    // minted and a journal file is created, so a bad script leaves nothing
+    // on disk that looks resumable.
     if extract_meta(&src).is_none() {
         eprintln!("Error: {DIALECT_HELP}");
         return 1;
@@ -550,7 +549,7 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
             return 1;
         }
     };
-    flow_log(&format!(
+    log(&format!(
         "run {run_id}{} — resume with: hive flow run {script_path} --resume {run_id}",
         if resume.is_some() { " (resumed)" } else { "" }
     ));
@@ -566,7 +565,7 @@ pub fn run_cmd(script_path: &str, resume: Option<&str>) -> i32 {
     journal.finalize();
     match outcome {
         Ok(outcome) => {
-            flow_log("result:");
+            log("result:");
             println!(
                 "{}",
                 serde_json::to_string_pretty(&outcome.result).unwrap_or_else(|_| "null".into())

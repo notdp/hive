@@ -26,6 +26,9 @@ use serde_json::{Map, Value};
 use crate::bus::Event;
 
 pub const FLOW_SENDER: &str = "flow.run";
+/// Body prefix of a task dispatch; `flow_board` strips it to render the
+/// mailbox row as `[dispatch] <artifact>`.
+pub const DISPATCH_BODY_PREFIX: &str = "flow-mailbox dispatch: ";
 const REPLY_POLL_SECONDS: f64 = 2.0;
 const ATTEMPTS: usize = 3;
 const RETRY_GAP: f64 = 3.0;
@@ -91,7 +94,7 @@ pub trait FlowEnv: Send + Sync {
 
 /// Progress goes to stderr so stdout carries only results (the JSON line
 /// of `hive flow node run`, the return value of `hive flow run`).
-fn log(message: &str) {
+pub(crate) fn log(message: &str) {
     eprintln!("[flow] {message}");
     let _ = std::io::stderr().flush();
 }
@@ -316,7 +319,7 @@ pub fn run_op(env: &dyn FlowEnv, op: &FlowOp) -> Result<Map<String, Value>, Flow
                 env,
                 name,
                 &format!(
-                    "flow-mailbox dispatch: {artifact_name} (not a member; hive send flow.run, then stop)"
+                    "{DISPATCH_BODY_PREFIX}{artifact_name} (not a member; hive send flow.run, then stop)"
                 ),
                 &artifact,
             )?;
@@ -369,10 +372,10 @@ pub struct NodeSpec {
 /// the task is dispatched, so the name never stays occupied by a corpse.
 pub fn run_node(env: &dyn FlowEnv, spec: &NodeSpec) -> Result<Map<String, Value>, FlowError> {
     let reused = env.alive(&spec.name);
-    let mut pane = String::new();
-    if reused {
-        pane = env.pane_of(&spec.name);
+    let pane = if reused {
+        let pane = env.pane_of(&spec.name);
         log(&format!("{} alive in {pane}; reusing", spec.name));
+        pane
     } else {
         env.retire(&spec.name);
         let spawned = run_op(
@@ -384,7 +387,7 @@ pub fn run_node(env: &dyn FlowEnv, spec: &NodeSpec) -> Result<Map<String, Value>
                 group: spec.phase.clone(),
             },
         )?;
-        pane = spawned
+        let pane = spawned
             .get("pane")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -405,7 +408,8 @@ pub fn run_node(env: &dyn FlowEnv, spec: &NodeSpec) -> Result<Map<String, Value>
             env.retire(&spec.name);
             return Err(err);
         }
-    }
+        pane
+    };
     let dispatched = match run_op(
         env,
         &FlowOp::DispatchTask {
@@ -860,7 +864,7 @@ mod tests {
             let d = env.dispatches.lock().unwrap();
             assert_eq!(d[0].target, "impl");
             assert_eq!(d[0].artifact, artifact);
-            assert!(d[0].body.starts_with("flow-mailbox dispatch: "));
+            assert!(d[0].body.starts_with(DISPATCH_BODY_PREFIX));
         }
 
         env.replies
@@ -1009,6 +1013,11 @@ mod tests {
         env.dispatch_fail_first = 1;
         run_op(&env, &spawn("impl", Some("codex"))).unwrap();
         assert_eq!(env.spawn_calls.load(Ordering::SeqCst), 2);
+        {
+            let spawns = env.spawns.lock().unwrap();
+            assert_eq!(spawns[0].name, "impl");
+            assert_eq!(spawns[0].cli.as_deref(), Some("codex"));
+        }
         run_op(
             &env,
             &FlowOp::DispatchTask {
@@ -1129,5 +1138,192 @@ mod tests {
         let err = run_node(&env, &node("audit", None, "t")).unwrap_err();
         assert!(err.0.contains("after 3 attempts"), "{err}");
         assert!(env.alive("audit"));
+    }
+
+    // -- RealEnv over the live wiring ------------------------------------------
+    //
+    // The production env resolves the team from the registry, asks the hived
+    // over its socket, and reads replies off the bus. Everything below is
+    // real except what needs a live member: the hived's member lookup
+    // (`resolve_live_agent`), send gate (`check_send_gate`) and transport
+    // hand-off (`agent_send`) answer through the hived test hook, and tmux is
+    // the fake `team.rs` uses in test builds.
+
+    #[test]
+    fn test_real_env_send_and_find_reply_are_anchored_by_msg_id() {
+        use crate::hived::testhook::Hook as HivedHook;
+        use crate::hived::HivedServerApi;
+        use std::sync::{Arc, Mutex};
+
+        let mut env = crate::testenv::EnvGuard::new();
+        let home = TempDir::new().unwrap();
+        env.set("HIVE_HOME", home.path().join(".hive"));
+        // A short workspace path keeps the hived socket in-tree; an overlong
+        // one is relocated under /tmp/hive-<uid>/ and would outlive the TempDir.
+        let ws_tmp = tempfile::Builder::new()
+            .prefix("hive-fl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let workspace = ws_tmp.path().to_string_lossy().to_string();
+        crate::bus::init_workspace(&workspace).unwrap();
+
+        // The registry row RealEnv::for_team resolves; the fake tmux answers
+        // list-windows with the window that claims it, so the team loads
+        // with its window identity and ensure_hived never asks tmux.
+        let team = "flowt";
+        let member = Map::from_iter([
+            ("name".to_string(), Value::from("b")),
+            ("cli".to_string(), Value::from("claude")),
+        ]);
+        assert_eq!(
+            crate::registry::record_team(team, &workspace, "1700000000", &[member], "dev:1")
+                .unwrap(),
+            "written"
+        );
+        let window_row = format!("dev:1\t@7\t{team}\t{workspace}\t\t1700000000\n");
+        crate::team::_set_fake_tmux_run(move |args, _check| {
+            let stdout = if args.first().map(String::as_str) == Some("list-windows") {
+                window_row.clone()
+            } else {
+                String::new()
+            };
+            Ok(crate::tmux::Run {
+                returncode: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        });
+        // The real tmux module must stay untouched on the RealEnv (this
+        // thread's) path; the override is thread-local, so the serve thread
+        // is not covered by this recorder.
+        let real_tmux_argv: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+        let recorded = std::rc::Rc::clone(&real_tmux_argv);
+        crate::tmux::_set_run_override(move |args, _check, _timeout| {
+            recorded.borrow_mut().push(args.to_vec());
+            Err(crate::tmux::TmuxError::Os(
+                "no tmux in this test".to_string(),
+            ))
+        });
+
+        // A hived on a real socket: the send arm writes the bus row itself
+        // and hands the envelope to the hooked transport.
+        let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let handed_sink = Arc::clone(&handed);
+        let ws_hook = workspace.clone();
+        let _hived_guard = crate::hived::testhook::install(HivedHook {
+            resolve_live_agent: Some(Arc::new(move |team_name, agent| {
+                let team = crate::team::Team {
+                    name: team_name.to_string(),
+                    workspace: ws_hook.clone(),
+                    tmux_session: "dev".to_string(),
+                    tmux_window: "dev:1".to_string(),
+                    tmux_window_id: "@7".to_string(),
+                    ..Default::default()
+                };
+                Ok((
+                    team,
+                    crate::agent::testhook::fake_agent(agent, team_name, "%9", "claude"),
+                ))
+            })),
+            check_send_gate: Some(Arc::new(|_target| Ok(()))),
+            agent_send: Some(Arc::new(move |_agent, text, sender| {
+                handed_sink
+                    .lock()
+                    .unwrap()
+                    .push((text.to_string(), sender.to_string()));
+                Ok("udsWriteAccepted".to_string())
+            })),
+            ..Default::default()
+        });
+        let server = Arc::new(crate::hived::_open_server_socket(&workspace).unwrap());
+        let serve_thread = {
+            let server = Arc::clone(&server);
+            let workspace = workspace.clone();
+            std::thread::spawn(move || {
+                crate::hived::_serve_requests(
+                    server.as_ref(),
+                    &workspace,
+                    team,
+                    "dev:1",
+                    "@7",
+                    "2026-04-17T00:00:00Z",
+                    2.0,
+                )
+            })
+        };
+
+        let env = RealEnv::for_team(Some(team.to_string()));
+        let ctx = env.context().unwrap();
+        assert_eq!(ctx.team_name, team);
+        assert_eq!(ctx.workspace, workspace);
+
+        let first = env.send("b", "first task", "/art/1").unwrap();
+        let second = env.send("b", "second task", "/art/2").unwrap();
+        assert!(!first.is_empty());
+        assert_ne!(first, second);
+        let events = crate::bus::read_all_events(&workspace).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].msg_id, first);
+        assert_eq!(events[0].from, FLOW_SENDER);
+        assert_eq!(events[0].to, "b");
+        assert_eq!(events[0].body, "first task");
+        assert_eq!(events[0].artifact, "/art/1");
+        assert_eq!(events[0].in_reply_to, "");
+        assert_eq!(events[1].msg_id, second);
+        {
+            let handed = handed.lock().unwrap();
+            assert_eq!(handed.len(), 2);
+            assert!(handed[0].0.contains(&first), "{}", handed[0].0);
+            assert_eq!(handed[0].1, FLOW_SENDER);
+        }
+
+        // No reply yet: neither dispatch resolves.
+        assert!(env.find_reply(&first, "b").unwrap().is_none());
+        assert!(env.find_reply(&second, "b").unwrap().is_none());
+
+        // A reply anchored to the second dispatch resolves only that one.
+        let nonce = format!("nonce-{}-{}", std::process::id(), second);
+        let reply = crate::bus::write_send_event(
+            &workspace,
+            "b",
+            FLOW_SENDER,
+            &format!("done {nonce}"),
+            "",
+            None,
+            &second,
+        )
+        .unwrap();
+        assert!(env.find_reply(&first, "b").unwrap().is_none());
+        let found = env
+            .find_reply(&second, "b")
+            .unwrap()
+            .expect("reply to second");
+        assert_eq!(found.msg_id, reply.msg_id);
+        assert_eq!(found.in_reply_to, second);
+        assert_eq!(found.from, "b");
+        assert_eq!(found.body, format!("done {nonce}"));
+        // `from` scopes the match: another member's name finds nothing.
+        assert!(env.find_reply(&second, "c").unwrap().is_none());
+
+        assert!(
+            real_tmux_argv.borrow().is_empty(),
+            "real tmux reached: {:?}",
+            real_tmux_argv.borrow()
+        );
+
+        let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);
+        let bye =
+            crate::hived::_request_hived(&workspace, &shutdown, crate::hived::SOCKET_READY_TIMEOUT);
+        assert_eq!(
+            bye.and_then(|m| m.get("ok").cloned()),
+            Some(Value::Bool(true))
+        );
+        // The loop is parked in accept: one more client wakes it to notice
+        // the shutdown flag instead of waiting out the accept timeout.
+        let ping = Map::from_iter([("action".to_string(), Value::from("ping"))]);
+        let _ = crate::hived::_request_hived(&workspace, &ping, crate::hived::SOCKET_READY_TIMEOUT);
+        assert!(!serve_thread.join().unwrap());
+        server.close();
+        crate::hived::_cleanup_socket_impl(&workspace);
     }
 }

@@ -34,9 +34,9 @@ pub(super) fn hooked_split_window(
     if let Some(v) = testhook::with(|h| {
         h.split_window_result
             .clone()
-            .unwrap_or_else(|| target.to_string())
+            .unwrap_or_else(|| Ok(target.to_string()))
     }) {
-        return Ok(v);
+        return v.map_err(|msg| anyhow::anyhow!(msg));
     }
     crate::tmux::split_window(target, horizontal, size, true, None)
 }
@@ -549,8 +549,14 @@ pub(super) fn hooked_codex_spawn_daemon() -> bool {
 
 pub(super) fn hooked_ensure_dir_trusted(cwd: &str) -> anyhow::Result<()> {
     #[cfg(test)]
-    if testhook::with(|h| h.codex_trusted.push(cwd.to_string())).is_some() {
-        return Ok(());
+    if let Some(err) = testhook::with(|h| {
+        h.codex_trusted.push(cwd.to_string());
+        h.ensure_dir_trusted_error.clone()
+    }) {
+        return match err {
+            Some(msg) => bail!(msg),
+            None => Ok(()),
+        };
     }
     crate::adapters::codex_app_server::ensure_dir_trusted(cwd)
 }

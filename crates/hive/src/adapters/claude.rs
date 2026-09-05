@@ -1,6 +1,7 @@
 //! Claude Code session adapter.
 //!
-//! Claude stores session history under `$CLAUDE_HOME/projects/<cwd-slug>/<id>.jsonl`.
+//! Claude stores session history under `<claude-config>/projects/<cwd-slug>/<id>.jsonl`
+//! (the tree `claude_sessions::_config_dir` resolves).
 //! Every record carries `sessionId`, `cwd`, `parentUuid`, `timestamp` and
 //! `gitBranch`; the `message.content` field is an Anthropic-style list of blocks
 //! or (rarely) a plain string.
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::base::{
-    normalize_command_token, parse_iso_timestamp, safe_json_loads, safe_mtime, str_or_none,
+    normalize_command_token, parse_iso_timestamp, read_json_object, safe_json_loads, str_or_none,
     Message, MessagePart, SessionAdapter, SessionMeta,
 };
 
@@ -60,11 +61,11 @@ impl SessionAdapter for ClaudeAdapter {
             if !_is_claude_process(&process.command, &process.argv) {
                 continue;
             }
-            let payload = match _read_json_file(&sessions_dir.join(format!("{}.json", process.pid)))
-            {
-                Some(payload) if !payload.is_empty() => payload,
-                _ => continue,
-            };
+            let payload =
+                match read_json_object(&sessions_dir.join(format!("{}.json", process.pid))) {
+                    Some(payload) if !payload.is_empty() => payload,
+                    _ => continue,
+                };
             if let Some(session_id) = str_or_none(payload.get("sessionId")) {
                 return Some(session_id);
             }
@@ -100,42 +101,6 @@ impl SessionAdapter for ClaudeAdapter {
         })
     }
 
-    fn list_sessions(&self, cwd: Option<&str>, limit: Option<usize>) -> Vec<SessionMeta> {
-        let root = self._projects_root();
-        if !root.is_dir() {
-            return Vec::new();
-        }
-        let mut files: Vec<(f64, PathBuf)> = Vec::new();
-        _walk_files(&root, &mut |path| {
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map_or(false, |n| n.ends_with(".jsonl"))
-            {
-                files.push((safe_mtime(path), path.to_path_buf()));
-            }
-        });
-        files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut out: Vec<SessionMeta> = Vec::new();
-        for (_, path) in files {
-            let Some(meta) = self.read_meta(&path) else {
-                continue;
-            };
-            if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-                if meta.cwd.as_deref() != Some(cwd) {
-                    continue;
-                }
-            }
-            out.push(meta);
-            if let Some(limit) = limit {
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
     // --- reading ---
 
     fn read_meta(&self, path: &Path) -> Option<SessionMeta> {
@@ -143,7 +108,6 @@ impl SessionAdapter for ClaudeAdapter {
         let mut reader = BufReader::new(file);
         let mut session_id: Option<String> = None;
         let mut cwd: Option<String> = None;
-        let mut timestamp = None;
         let mut model: Option<String> = None;
         let mut line = String::new();
         for _ in 0.._META_SCAN_LIMIT {
@@ -162,9 +126,6 @@ impl SessionAdapter for ClaudeAdapter {
             if cwd.is_none() {
                 cwd = str_or_none(payload.get("cwd"));
             }
-            if timestamp.is_none() {
-                timestamp = parse_iso_timestamp(payload.get("timestamp"));
-            }
             if model.is_none() {
                 if let Some(Value::Object(msg)) = payload.get("message") {
                     model = str_or_none(msg.get("model"));
@@ -177,11 +138,7 @@ impl SessionAdapter for ClaudeAdapter {
         let session_id = session_id?;
         Some(SessionMeta {
             session_id,
-            cli_name: self.name().to_string(),
             cwd,
-            title: None,
-            started_at: timestamp,
-            jsonl_path: path.to_path_buf(),
             model,
         })
     }
@@ -208,10 +165,6 @@ impl SessionAdapter for ClaudeAdapter {
                 return Some(message);
             }
         }))
-    }
-
-    fn message_from_record(&self, payload: &Map<String, Value>) -> Option<Message> {
-        _claude_message_from_payload(payload)
     }
 }
 
@@ -319,14 +272,6 @@ fn _iter_claude_parts(content: Option<&Value>) -> Vec<MessagePart> {
     parts
 }
 
-fn _read_json_file(path: &Path) -> Option<Map<String, Value>> {
-    let data = fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&data) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
-}
-
 const _CLAUDE_TOKENS: [&str; 2] = ["claude", "claude.exe"];
 
 /// Match the executable itself (ps comm / argv[0]), or the script-runtime
@@ -362,10 +307,13 @@ fn _cwd_slug(cwd: &str) -> String {
 
 /// Stat `<root>/<project>/<candidate>` for each top-level project dir; no
 /// recursion, so a miss costs one readdir plus one stat per project.
-fn _stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf> {
+/// Dot-dirs are skipped: project dirs are cwd slugs (`_cwd_slug`, never a
+/// leading dot), so a dot-dir under `projects/` is foreign to Claude Code.
+pub(crate) fn _stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(root).ok()?;
     let mut paths: Vec<PathBuf> = entries
         .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .map(|e| e.path().join(candidate))
         .filter(|p| p.is_file())
         .collect();
@@ -393,17 +341,15 @@ fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn _write_jsonl(path: &Path, lines: &[Value]) {
         let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
         fs::write(path, text).unwrap();
     }
 
-    // --- from tests/unit/test_adapters_iter_messages.py ---
+    // --- iter_messages ---
 
     #[test]
     fn test_claude_iter_messages_normalizes_text_and_tool_use() {
@@ -491,7 +437,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
     }
 
-    // --- from tests/unit/test_adapters_find_and_meta.py ---
+    // --- find_session_file / session_meta ---
 
     fn _write_claude_jsonl(path: &Path, session_id: &str, cwd: &str) {
         fs::write(
@@ -512,10 +458,28 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_find_session_file_uses_cwd_slug() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn test_stat_project_dirs_skips_dot_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CLAUDE_HOME", tmp.path());
+        let root = tmp.path().join("projects");
+        let hidden = root.join(".trash");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("sid.jsonl"), "").unwrap();
+        assert_eq!(_stat_project_dirs(&root, "sid.jsonl"), None);
+
+        let real = root.join("-work-hive");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("sid.jsonl"), "").unwrap();
+        assert_eq!(
+            _stat_project_dirs(&root, "sid.jsonl"),
+            Some(real.join("sid.jsonl"))
+        );
+    }
+
+    #[test]
+    fn test_claude_find_session_file_uses_cwd_slug() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("CLAUDE_HOME", tmp.path());
         let cwd = "/Users/notdp/Developer/hive/.claude/worktrees/wt_1";
         let projects = tmp
             .path()
@@ -549,9 +513,9 @@ mod tests {
 
     #[test]
     fn test_claude_find_session_file_dotted_cwd_hits_direct_without_walk() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CLAUDE_HOME", tmp.path());
+        env.set("CLAUDE_HOME", tmp.path());
         let root = tmp.path().join("projects");
         let cwd = "/Users/notdp/Developer/hive/.claude/worktrees/wt-1";
         let projects = root.join("-Users-notdp-Developer-hive--claude-worktrees-wt-1");
@@ -611,7 +575,6 @@ mod tests {
         let meta = ClaudeAdapter.read_meta(&path).expect("meta");
         assert_eq!(meta.session_id, "sess-c");
         assert_eq!(meta.cwd.as_deref(), Some("/work"));
-        assert!(meta.started_at.is_some());
         assert_eq!(meta.model.as_deref(), Some("claude-opus-4-6"));
     }
 

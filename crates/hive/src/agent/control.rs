@@ -18,15 +18,16 @@ impl Agent {
     ///
     /// Delivery is native-transport-only: codex goes through the shared
     /// daemon's `turn/start` RPC on the member's recorded thread, grok
-    /// through its per-pane leader's `session/prompt`, claude through its
-    /// session's own inbox socket. None of them touches the composer, and
-    /// there is no keystroke fallback on any failure — a transport that did
-    /// not accept the message raises `DeliveryError` (callers surface it as
-    /// an explicit submit failure). The returned classification names which
-    /// transport boundary was crossed (`turnStartAccepted` /
-    /// `sessionPromptQueued` / `udsWriteAccepted`); none of them proves the
-    /// agent processed the message — that final confirmation only ever comes
-    /// from the target's transcript.
+    /// through its per-pane leader's `session/prompt`, claude through the
+    /// supervisor daemon's reply channel with the session's own inbox socket
+    /// as fallback. None of them touches the composer, and there is no
+    /// keystroke fallback on any failure — a transport that did not accept
+    /// the message raises `DeliveryError` (callers surface it as an explicit
+    /// submit failure). The returned classification names which transport
+    /// boundary was crossed (`turnStartAccepted` / `sessionPromptQueued` /
+    /// `daemonReplyAccepted`, or `udsWriteAccepted` on the inbox fallback);
+    /// none of them proves the agent processed the message — that final
+    /// confirmation only ever comes from the target's transcript.
     pub fn send(&self, text: &str) -> Result<String, DeliveryError> {
         // No sender known: the origin label falls back to the team, never to
         // the target's own address (see `send_from`).
@@ -162,61 +163,44 @@ impl Agent {
                  job ledger, or the wake failed); the message stays on the bus"
             )));
         };
-        // Primary lane: the supervisor daemon's reply channel — the
-        // typed-keystroke lane, no peer wrapper in any state. Any
-        // failure falls back to the inbox socket, which still
-        // delivers (wrapped) with today's error semantics.
-        if let Some(accepted) = hooked_daemon_reply(&engine.session_id, text) {
-            return Ok(accepted.to_string());
-        }
-        let accepted =
-            hooked_claude_sessions_send(&engine.socket_path, text, sender, &engine.session_id);
-        match accepted {
-            Some(a) if a == claude_sessions::WRITE_TIMED_OUT => Err(DeliveryError(format!(
-                "claude job '{job_id}' ({where_}) accepted the connection \
-                 but did not drain the message in time"
-            ))),
-            Some(a) => Ok(a.to_string()),
-            None => Err(DeliveryError(format!(
-                "claude job '{job_id}' ({where_}) is not listening on its \
-                 inbox; the message stays on the bus"
-            ))),
-        }
+        _deliver_claude_two_lanes(
+            &engine.session_id,
+            || Ok(engine.socket_path.clone()),
+            text,
+            sender,
+            &format!("claude job '{job_id}' ({where_})"),
+        )
     }
 
     /// Deliver to a joined interactive Claude session (no bg job).
     ///
-    /// Same two lanes as a job engine: the supervisor reply channel first,
-    /// the session's own inbox socket as fallback.
+    /// Same two lanes as a job engine; the inbox socket is looked up in the
+    /// live session list only once the daemon lane has refused.
     fn _deliver_claude_session(
         &self,
         session_id: &str,
         text: &str,
         sender: &str,
     ) -> Result<String, DeliveryError> {
-        if let Some(accepted) = hooked_daemon_reply(session_id, text) {
-            return Ok(accepted.to_string());
-        }
         let sid8: String = session_id.chars().take(8).collect();
-        let live = hooked_list_sessions()
-            .into_iter()
-            .find(|s| s.session_id == session_id);
-        let Some(live) = live else {
-            return Err(DeliveryError(format!(
-                "claude member '{}' (session {sid8}) has no \
-                 live session; the message stays on the bus",
-                self.name
-            )));
-        };
-        let accepted = hooked_claude_sessions_send(&live.socket_path, text, sender, session_id);
-        match accepted {
-            Some(a) if a != claude_sessions::WRITE_TIMED_OUT => Ok(a.to_string()),
-            _ => Err(DeliveryError(format!(
-                "claude member '{}' (session {sid8}) did not \
-                 accept the frame; the message stays on the bus",
-                self.name
-            ))),
-        }
+        let who = format!("claude member '{}' (session {sid8})", self.name);
+        _deliver_claude_two_lanes(
+            session_id,
+            || {
+                hooked_list_sessions()
+                    .into_iter()
+                    .find(|s| s.session_id == session_id)
+                    .map(|live| live.socket_path)
+                    .ok_or_else(|| {
+                        DeliveryError(format!(
+                            "{who} has no live session; the message stays on the bus"
+                        ))
+                    })
+            },
+            text,
+            sender,
+            &who,
+        )
     }
 
     /// Deliver to a member with no pane: the engine is the only address.
@@ -316,10 +300,10 @@ impl Agent {
             };
             if accepted.is_none() {
                 bail!(
-                    "codex pane {} did not accept turn/interrupt \
+                    "codex {} did not accept turn/interrupt \
                      (no recorded thread, daemon down, RPC error, or \
                      connection failure)",
-                    self.pane_id
+                    self._address()
                 );
             }
             return Ok(());
@@ -335,9 +319,9 @@ impl Agent {
             };
             if accepted.is_none() {
                 bail!(
-                    "grok pane {} did not accept session/cancel \
+                    "grok {} did not accept session/cancel \
                      (no leader/session, or connection failure)",
-                    self.pane_id
+                    self._address()
                 );
             }
             return Ok(());
@@ -348,6 +332,16 @@ impl Agent {
             self.name,
             self.cli
         );
+    }
+
+    /// How an error names this member: its pane when it has one, else the
+    /// member itself.
+    fn _address(&self) -> String {
+        if !self.pane_id.is_empty() {
+            format!("pane {}", self.pane_id)
+        } else {
+            format!("member '{}'", self.name)
+        }
     }
 
     /// Capture pane output.
@@ -458,5 +452,32 @@ impl Agent {
         }
         hooked_grok_pool_drop_key(&key);
         hooked_grok_kill_daemon_key(&key);
+    }
+}
+
+/// The two claude delivery lanes, in order: the supervisor daemon's reply
+/// channel (the typed-keystroke lane, no peer wrapper in any state), then the
+/// session's own inbox socket, which still delivers (wrapped) with today's
+/// error semantics. *socket_path* is resolved only when the daemon lane
+/// refused; *who* names the target in every failure.
+fn _deliver_claude_two_lanes(
+    session_id: &str,
+    socket_path: impl FnOnce() -> Result<String, DeliveryError>,
+    text: &str,
+    sender: &str,
+    who: &str,
+) -> Result<String, DeliveryError> {
+    if let Some(accepted) = hooked_daemon_reply(session_id, text) {
+        return Ok(accepted.to_string());
+    }
+    let socket_path = socket_path()?;
+    match hooked_claude_sessions_send(&socket_path, text, sender, session_id) {
+        Some(a) if a == claude_sessions::WRITE_TIMED_OUT => Err(DeliveryError(format!(
+            "{who} accepted the connection but did not drain the message in time"
+        ))),
+        Some(a) => Ok(a.to_string()),
+        None => Err(DeliveryError(format!(
+            "{who} is not listening on its inbox; the message stays on the bus"
+        ))),
     }
 }

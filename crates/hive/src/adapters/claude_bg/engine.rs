@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::adapters::claude_sessions::{_config_dir, _pid_alive, _registry_dir};
+use crate::adapters::base::read_json_object;
+use crate::adapters::claude_sessions::{_config_dir, _pid_alive, _registry_dir, truthy_str};
 
-use super::{now_epoch, str_of, STATUS_STALE_AFTER_SECONDS};
+use super::{now_epoch, STATUS_STALE_AFTER_SECONDS};
 
 #[cfg(test)]
 use super::testhook;
@@ -44,22 +45,30 @@ pub fn write_pane_job(
     fs::write(path, Value::Object(doc).to_string())
 }
 
-/// (job_id, session_id, cwd) recorded for *pane*, or None.
-pub fn read_pane_job(pane: &str) -> Option<(String, String, String)> {
-    let text = fs::read_to_string(pane_job_path(pane)).ok()?;
-    let data: Value = serde_json::from_str(&text).ok()?;
-    if !data.is_object() {
-        return None;
-    }
-    let job_id = str_of(data.get("jobId"));
+/// The pane→job binding hive writes when it puts a job behind a pane (spawn,
+/// or a `--resume <job>` relaunch): the job, and the session id and cwd known
+/// at that moment. The session id is empty when no engine entry answered
+/// then — a `--resume` of a job whose wake failed, or a launcher spawn whose
+/// entry never showed up inside the launcher's wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneJob {
+    pub job_id: String,
+    pub session_id: String,
+    pub cwd: String,
+}
+
+/// The binding recorded for *pane*, or None.
+pub fn read_pane_job(pane: &str) -> Option<PaneJob> {
+    let data = read_json_object(&pane_job_path(pane))?;
+    let job_id = truthy_str(data.get("jobId"));
     if job_id.is_empty() {
         return None;
     }
-    Some((
+    Some(PaneJob {
         job_id,
-        str_of(data.get("sessionId")),
-        str_of(data.get("cwd")),
-    ))
+        session_id: truthy_str(data.get("sessionId")),
+        cwd: truthy_str(data.get("cwd")),
+    })
 }
 
 pub fn clear_pane_job(pane: &str) {
@@ -67,7 +76,7 @@ pub fn clear_pane_job(pane: &str) {
 }
 
 pub fn job_id_for_pane(pane: &str) -> Option<String> {
-    read_pane_job(pane).map(|record| record.0)
+    read_pane_job(pane).map(|record| record.job_id)
 }
 
 /// Inverse of [`pane_job_path`]: `hive-pane-19.job` -> `%19`.
@@ -108,7 +117,7 @@ pub fn pane_for_job(job_id: &str) -> Option<String> {
     }
     for pane in list_recorded_panes() {
         if let Some(record) = read_pane_job(&pane) {
-            if record.0 == job_id {
+            if record.job_id == job_id {
                 return Some(pane);
             }
         }
@@ -132,13 +141,13 @@ pub struct EngineSession {
     pub name: String,           // the job's label, as the panel and ledger show it
 }
 
-pub(super) fn _entry_to_engine(data: &Value) -> Option<EngineSession> {
+pub(super) fn _entry_to_engine(data: &Map<String, Value>) -> Option<EngineSession> {
     if data.get("kind").and_then(Value::as_str) != Some("bg") {
         return None;
     }
     let pid = data.get("pid").and_then(Value::as_i64)?;
-    let job_id = str_of(data.get("jobId"));
-    let sock = str_of(data.get("messagingSocketPath"));
+    let job_id = truthy_str(data.get("jobId"));
+    let sock = truthy_str(data.get("messagingSocketPath"));
     if job_id.is_empty() || sock.is_empty() {
         return None;
     }
@@ -153,13 +162,13 @@ pub(super) fn _entry_to_engine(data: &Value) -> Option<EngineSession> {
     Some(EngineSession {
         pid: pid as i32,
         job_id,
-        session_id: str_of(data.get("sessionId")),
+        session_id: truthy_str(data.get("sessionId")),
         socket_path: sock,
-        cwd: str_of(data.get("cwd")),
-        status: str_of(data.get("status")),
-        waiting_for: str_of(data.get("waitingFor")),
+        cwd: truthy_str(data.get("cwd")),
+        status: truthy_str(data.get("status")),
+        waiting_for: truthy_str(data.get("waitingFor")),
         status_updated_at: updated,
-        name: str_of(data.get("name")),
+        name: truthy_str(data.get("name")),
     })
 }
 
@@ -167,7 +176,7 @@ pub(super) fn _entry_to_engine(data: &Value) -> Option<EngineSession> {
 ///
 /// The engine registers under its own (unstable) pid, so the jobId is found
 /// by scanning the registry for the `kind:"bg"` entry naming it. None means
-/// no live engine — asleep or dead; [`job_row`] tells them apart.
+/// no live engine — asleep or dead; [`job_row`](super::job_row) tells them apart.
 pub fn engine_session_for_job(job_id: &str) -> Option<EngineSession> {
     if job_id.is_empty() {
         return None;
@@ -179,15 +188,9 @@ pub fn engine_session_for_job(job_id: &str) -> Option<EngineSession> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(data) = read_json_object(&path) else {
             continue;
         };
-        let Ok(data) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if !data.is_object() {
-            continue;
-        }
         if let Some(engine) = _entry_to_engine(&data) {
             if engine.job_id == job_id {
                 return Some(engine);
@@ -197,7 +200,7 @@ pub fn engine_session_for_job(job_id: &str) -> Option<EngineSession> {
     None
 }
 
-/// The seam the Python tests monkeypatch as `m.engine_session_for_job`; every
+/// The seam `claude_bg/tests.rs` drives through `Hook::engine_for_job`; every
 /// in-module caller routes through it so a hooked lookup behaves the same.
 pub(super) fn hooked_engine_for_job(job_id: &str) -> Option<EngineSession> {
     #[cfg(test)]
@@ -223,11 +226,7 @@ pub(super) fn hooked_engine_for_job(job_id: &str) -> Option<EngineSession> {
 /// The bg engine entry registered under *pid*, or None (viewer pids and
 /// interactive sessions have no bg entry).
 pub fn engine_session_for_pid(pid: u32) -> Option<EngineSession> {
-    let text = fs::read_to_string(_registry_dir().join(format!("{pid}.json"))).ok()?;
-    let data: Value = serde_json::from_str(&text).ok()?;
-    if !data.is_object() {
-        return None;
-    }
+    let data = read_json_object(&_registry_dir().join(format!("{pid}.json")))?;
     _entry_to_engine(&data)
 }
 
@@ -235,7 +234,7 @@ pub fn engine_session_for_pid(pid: u32) -> Option<EngineSession> {
 ///
 /// False also covers a parked (asleep) engine — asleep is not dead, but the
 /// cheap per-tick probes must not pay the `agents --all` cost; callers that
-/// need the third state use [`job_row`].
+/// need the third state use [`job_row`](super::job_row).
 pub fn pane_engine_alive(pane: &str) -> bool {
     match job_id_for_pane(pane) {
         Some(job_id) if !job_id.is_empty() => hooked_engine_for_job(&job_id).is_some(),
@@ -250,15 +249,15 @@ pub fn pane_engine_alive(pane: &str) -> bool {
 /// — wake preserves the sessionId, so the snapshot stays valid.
 pub fn session_id_for_pane(pane: &str) -> Option<String> {
     let record = read_pane_job(pane)?;
-    if let Some(engine) = hooked_engine_for_job(&record.0) {
+    if let Some(engine) = hooked_engine_for_job(&record.job_id) {
         if !engine.session_id.is_empty() {
             return Some(engine.session_id);
         }
     }
-    if record.1.is_empty() {
+    if record.session_id.is_empty() {
         None
     } else {
-        Some(record.1)
+        Some(record.session_id)
     }
 }
 

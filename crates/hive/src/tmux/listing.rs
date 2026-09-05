@@ -12,43 +12,8 @@ pub struct PaneInfo {
     pub group: String,
 }
 
-/// List all panes in a window with their IDs and titles.
-pub fn list_panes_with_titles(target: &str) -> Vec<PaneInfo> {
-    let r = match _run(
-        &[
-            "list-panes",
-            "-t",
-            target,
-            "-F",
-            "#{pane_id}\t#{pane_title}",
-        ],
-        false,
-        5,
-    ) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut result = Vec::new();
-    for line in r.stdout.trim().split('\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let (pane_id, title) = match line.split_once('\t') {
-            Some((p, t)) => (p, t),
-            None => (line, ""),
-        };
-        result.push(PaneInfo {
-            pane_id: pane_id.to_string(),
-            title: title.to_string(),
-            ..Default::default()
-        });
-    }
-    result
-}
-
-// Field tables drive both the tmux format string and the parser: adding a
-// column means adding one entry to the format and one field to the parse —
-// no count literals to keep in sync beyond the field count consts.
+// Adding a column means touching three places: the format string, its field
+// count const, and the positional `p[n]` reads in the parser below.
 pub const _PANE_BASE_FMT: &str = concat!(
     "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{@hive-role}\t",
     "#{@hive-agent}\t#{@hive-team}\t#{@hive-cli}\t#{@hive-group}"
@@ -108,10 +73,7 @@ pub fn list_panes_full_or_none(target: &str) -> Option<Vec<PaneInfo>> {
 
 /// List every pane across all sessions/windows with hive identity tags.
 pub fn list_panes_all() -> Vec<PaneInfo> {
-    match _run(&["list-panes", "-a", "-F", _PANE_BASE_FMT], false, 5) {
-        Ok(r) => _parse_panes_full(&r.stdout),
-        Err(_) => Vec::new(),
-    }
+    list_panes_all_status().0.unwrap_or_default()
 }
 
 /// True only when tmux stderr proves there is no server to talk to.
@@ -184,53 +146,6 @@ pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
         });
     }
     (Some(out), "ok")
-}
-
-/// Return tmux window indices in *session*, ignoring non-numeric output.
-pub fn list_window_indices(session: &str) -> Vec<u32> {
-    let r = match _run(
-        &["list-windows", "-t", session, "-F", "#{window_index}"],
-        false,
-        5,
-    ) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut out: Vec<u32> = Vec::new();
-    for line in r.stdout.trim().split('\n') {
-        let line = line.trim();
-        if line.is_empty() || !line.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        if let Ok(idx) = line.parse() {
-            out.push(idx);
-        }
-    }
-    out
-}
-
-/// Return `(window_target, window_name)` for every window across sessions.
-pub fn list_window_names() -> Vec<(String, String)> {
-    let r = match _run(
-        &[
-            "list-windows",
-            "-a",
-            "-F",
-            "#{session_name}:#{window_index}\t#{window_name}",
-        ],
-        false,
-        5,
-    ) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut out: Vec<(String, String)> = Vec::new();
-    for line in r.stdout.trim().split('\n') {
-        if let Some((target, name)) = line.split_once('\t') {
-            out.push((target.to_string(), name.to_string()));
-        }
-    }
-    out
 }
 
 fn _parse_panes_full(stdout: &str) -> Vec<PaneInfo> {

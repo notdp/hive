@@ -4,9 +4,9 @@ Gated behind HIVE_ACCEPTANCE=1 — these tests spawn real agents (real tmux
 panes, real claude/codex/grok sessions) against the live install, so they
 never run from a plain `pytest tests/`. Run after every install:
 
-    HIVE_ACCEPTANCE=1 PYTHONPATH=src python -m pytest tests/acceptance -q
+    HIVE_ACCEPTANCE=1 python -m pytest tests/acceptance -q
     HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok \
-        PYTHONPATH=src python -m pytest tests/acceptance -q
+        python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
 scratch team, one naturally-worded nonce task per CLI dispatched through a
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import time
@@ -30,8 +29,6 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.acceptance
-
-SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def pytest_collection_modifyitems(config, items):

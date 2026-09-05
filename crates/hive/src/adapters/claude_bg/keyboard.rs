@@ -32,8 +32,9 @@ pub(super) const _CLEAR_LINE: &str = "\u{15}"; // C-u: drop whatever is in the c
 pub(super) const _RESTORE_KILL: &str = "\u{19}"; // C-y: paste the kill ring back into the composer
 const _SUBMIT: &str = "\r";
 const _ESCAPE: &str = "\u{1b}"; // interrupts the running turn
-                                // Only used when the job is on nobody's screen: claude's own pty host
-                                // starts at this size, so it is the least surprising thing to wear.
+
+// Only used when the job is on nobody's screen: claude's own pty host
+// starts at this size, so it is the least surprising thing to wear.
 pub(super) const _DEFAULT_PTY_COLS: u16 = 200;
 pub(super) const _DEFAULT_PTY_ROWS: u16 = 50;
 
@@ -42,11 +43,12 @@ pub(super) const _CLIENT_READY_TIMEOUT: f64 = 15.0; // observed ~0.3s to the jou
 const _TYPE_READY_TIMEOUT: f64 = 25.0; // total budget for "the client is forwarding stdin"
 const _TYPE_RETRY_AFTER: f64 = 5.0; // re-type (C-u first, so it is idempotent) after this
 const _SUBMIT_CONFIRM_TIMEOUT: f64 = 20.0; // the user turn is written the moment it lands
-                                           // A slash command's `<command-name>` record is written when the command
-                                           // *finishes* (a /compact can take a minute), so waiting for it would block the
-                                           // caller on work it does not need to see. This window only has to be long
-                                           // enough for the failure shape — the command submitted as plain text, which
-                                           // writes its turn immediately.
+
+// A slash command's `<command-name>` record is written when the command
+// *finishes* (a /compact can take a minute), so waiting for it would block the
+// caller on work it does not need to see. This window only has to be long
+// enough for the failure shape — the command submitted as plain text, which
+// writes its turn immediately.
 const _SLASH_CONFIRM_TIMEOUT: f64 = 5.0;
 const _INTERRUPT_CONFIRM_TIMEOUT: f64 = 12.0;
 const _KEY_POLL_INTERVAL: f64 = 0.4;
@@ -205,8 +207,9 @@ pub(super) fn _strip_ansi(text: &str) -> String {
     out
 }
 
-/// `claude logs` replays the raw pty stream: the layout lives in cursor moves,
-/// not in spaces, so whitespace and box drawing are noise for a substring test.
+/// The attach client's own pty stream (`Client::text_since`) is raw terminal
+/// output: the layout lives in cursor moves, not in spaces, so whitespace and
+/// box drawing are noise for a substring test.
 fn _squash(text: &str) -> String {
     text.chars()
         .filter(|c| !(c.is_whitespace() || ('\u{2500}'..='\u{259f}').contains(c)))
@@ -392,20 +395,26 @@ fn _is_slash_command(text: &str) -> bool {
     stripped.starts_with('/') && !stripped.contains('\n')
 }
 
-/// What the transcript says about the submit: `landed`, `corrupted` or
-/// `none` (nothing yet — keep waiting).
+enum SubmitVerdict {
+    Landed,
+    Corrupted,
+    /// Nothing yet — keep waiting.
+    None,
+}
+
+/// What the transcript says about the submit.
 ///
 /// A slash command lands as a `<command-name>` entry: the engine ran the
 /// command instead of sending its literal text to the model. Anything else
 /// lands as a user turn whose content equals what was typed *exactly*.
-/// `corrupted` is the case exact matching exists for: a turn that ends with
+/// `Corrupted` is the case exact matching exists for: a turn that ends with
 /// the typed text but carries something in front of it is a leftover
 /// composer draft that got submitted along with the delivery — the one thing
 /// a substring match would wave through.
-fn _submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> &'static str {
+fn _submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> SubmitVerdict {
     let chunk = _transcript_since(path, offset);
     if chunk.is_empty() {
-        return "none";
+        return SubmitVerdict::None;
     }
     let mut turns: Vec<String> = Vec::new();
     for line in chunk.lines() {
@@ -419,20 +428,20 @@ fn _submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> &'static str
         }
     }
     if _is_slash_command(text) {
-        let command = text.trim().split_whitespace().next().unwrap_or("");
+        let command = text.split_whitespace().next().unwrap_or("");
         if chunk.contains(&format!("<command-name>{command}</command-name>")) {
-            return "landed";
+            return SubmitVerdict::Landed;
         }
     } else if turns.iter().any(|turn| turn == text) {
-        return "landed";
+        return SubmitVerdict::Landed;
     }
     if turns
         .iter()
         .any(|turn| turn != text && turn.ends_with(text) && !turn.contains("<command-name>"))
     {
-        return "corrupted";
+        return SubmitVerdict::Corrupted;
     }
-    "none"
+    SubmitVerdict::None
 }
 
 /// Type *text* into the engine's composer and press Enter.
@@ -491,7 +500,7 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     let mut echoed = false;
     let mut mark = proc.mark();
     while start.elapsed() < ready {
-        if next_retype.map_or(true, |t| Instant::now() >= t) {
+        if next_retype.is_none_or(|t| Instant::now() >= t) {
             mark = proc.mark(); // only output after this counts as our echo
             if !_clear_composer(proc) || !_feed(proc, text) {
                 return KeyResult::failure("the attach client closed its stdin");
@@ -533,18 +542,18 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     let confirm_start = Instant::now();
     while confirm_start.elapsed() < confirm {
         match _submit_verdict(transcript.as_deref(), offset, text) {
-            "landed" => {
+            SubmitVerdict::Landed => {
                 if restore {
                     _restore_draft(proc);
                 }
                 return KeyResult::success("transcript", "");
             }
-            "corrupted" => {
+            SubmitVerdict::Corrupted => {
                 return KeyResult::failure(format!(
                     "job {job_id} submitted the text with a leftover draft in front of it"
                 ));
             }
-            _ => {}
+            SubmitVerdict::None => {}
         }
         sleep_s(_KEY_POLL_INTERVAL);
     }
@@ -584,9 +593,9 @@ fn hooked_rename(sock: &str, name: &str, session_id: &str) -> bool {
 /// Make the job's own label read *name*; true when it already did or now does.
 ///
 /// A job minted before hive knew whose pane it was on carries a placeholder
-/// (`hive-<pane>`): every path that adopts an existing pane into a team —
-/// init, spawn, resume — tags the pane after its CLI is already running, and
-/// the mint cannot see a tag that does not exist yet. The rename is a
+/// (`hive-<pane>`): `hive create` and `hive join` tag the pane the human's
+/// claude already runs in, and a `--resume` relaunch keeps the job's old
+/// label, so the mint cannot see a tag that does not exist yet. The rename is a
 /// `control/rename` frame on the engine's inbox socket: the dispatcher
 /// handles it immediately — mid-turn included — and it never touches the
 /// composer, so a human's draft and a running turn are left alone. The

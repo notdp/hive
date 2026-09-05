@@ -16,8 +16,9 @@ use std::io::Write as _;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::adapters::base::parse_iso_timestamp;
 use crate::bus::Event;
-use crate::flow::FLOW_SENDER;
+use crate::flow::{DISPATCH_BODY_PREFIX, FLOW_SENDER};
 
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -56,22 +57,9 @@ pub struct RosterRow {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS…` (the bus's `now_iso` shape) to epoch seconds.
-pub fn iso_to_epoch(s: &str) -> Option<u64> {
-    let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
-    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    let y_adj = if mo <= 2 { y - 1 } else { y };
-    let era = y_adj.div_euclid(400);
-    let yoe = y_adj - era * 400;
-    let mp = (mo + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    u64::try_from(days * 86_400 + h * 3_600 + mi * 60 + sec).ok()
+fn iso_to_epoch(s: &str) -> Option<u64> {
+    let dt = parse_iso_timestamp(Some(&serde_json::Value::String(s.to_string())))?;
+    u64::try_from(dt.timestamp() as i64).ok()
 }
 
 /// Join the roster with the flow.run mailbox into per-node rows, in roster
@@ -165,7 +153,7 @@ fn clip(s: &str, width: usize) -> String {
 pub fn render(
     team: &str,
     rows: &[NodeRow],
-    mail: &[(String, String, String)],
+    mail: &[&Event],
     cols: usize,
     lines_budget: usize,
     tick: u64,
@@ -222,7 +210,11 @@ pub fn render(
                 NodeState::Done => format!("     {DIM}✔{RESET} {DIM}{plain}{RESET}"),
                 NodeState::Gone => format!("     {RED}✖{RESET} {RED}{plain}{RESET}"),
                 NodeState::Working => {
-                    let mark = if tick % 2 == 0 { YELLOW } else { "\x1b[2;33m" };
+                    let mark = if tick.is_multiple_of(2) {
+                        YELLOW
+                    } else {
+                        "\x1b[2;33m"
+                    };
                     format!("     {mark}●{RESET} {plain}")
                 }
                 NodeState::Spawned => format!("     ○ {plain}"),
@@ -231,9 +223,10 @@ pub fn render(
     }
     if !mail.is_empty() {
         out.push(format!("{BOLD} mailbox{RESET}"));
-        for (from, to, body) in mail {
-            let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            let body = match body.strip_prefix("flow-mailbox dispatch: ") {
+        for e in mail {
+            let (from, to) = (&e.from, &e.to);
+            let body = e.body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let body = match body.strip_prefix(DISPATCH_BODY_PREFIX) {
                 Some(rest) => format!(
                     "[dispatch] {}",
                     rest.split_whitespace().next().unwrap_or(rest)
@@ -351,12 +344,11 @@ pub fn board_cmd(team: Option<&str>) -> i32 {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let rows = derive_rows(&roster, &events, now);
-        let mail: Vec<(String, String, String)> = events
+        let mail: Vec<&Event> = events
             .iter()
             .rev()
             .filter(|e| e.from == FLOW_SENDER || e.to == FLOW_SENDER)
             .take(3)
-            .map(|e| (e.from.clone(), e.to.clone(), e.body.clone()))
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -408,15 +400,9 @@ mod tests {
         };
         for (name, pane) in members {
             team.agents.push(crate::agent::Agent {
-                name: name.to_string(),
-                team_name: "t".to_string(),
-                pane_id: pane.to_string(),
                 model: "opus".to_string(),
-                prompt: String::new(),
                 cwd: String::new(),
-                session_id: None,
-                spawned_at: 0.0,
-                cli: "claude".to_string(),
+                ..crate::agent::testhook::fake_agent(name, "t", pane, "claude")
             });
         }
         team
@@ -526,12 +512,10 @@ mod tests {
                 elapsed: None,
             },
         ];
-        let mail = vec![(
-            "flow.run".to_string(),
-            "v".to_string(),
-            "flow-mailbox dispatch: v.md (not a member; hive send flow.run, then stop)".to_string(),
-        )];
-        let s = render("t", &rows, &mail, 120, 40, 0);
+        let mut dispatch = ev("flow.run", "v", "d1", "", "2026-09-02T00:00:00Z");
+        dispatch.body =
+            format!("{DISPATCH_BODY_PREFIX}v.md (not a member; hive send flow.run, then stop)");
+        let s = render("t", &rows, &[&dispatch], 120, 40, 0);
         assert!(s.contains("∥ Review  1/2"), "{s}");
         assert!(s.contains("→ Verify  0/1"), "{s}");
         assert!(s.contains("1m05s"), "{s}");

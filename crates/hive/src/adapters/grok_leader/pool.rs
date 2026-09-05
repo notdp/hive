@@ -17,9 +17,9 @@ use super::{CANCEL_SENT, PROMPT_QUEUED, _CONNECT_COOLDOWN};
 // --------------------------------------------------------------------------
 
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
-/// only production implementation; tests substitute fakes (the Python
-/// per-instance `_client_for_key` monkeypatch). `Err` models a raising
-/// client — any client failure is a transport failure.
+/// only production implementation; tests substitute fakes through
+/// `_acting_client`'s override. `Err` is a transport failure: the client
+/// could not reach its leader at all.
 pub trait LeaderClient: Send + Sync {
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
@@ -147,7 +147,8 @@ impl GrokClientPool {
         }
     }
 
-    /// The Python per-instance `_client_for_key` monkeypatch seam.
+    /// `_client_for_key` behind the test override, so delivery paths can
+    /// run against a fake client.
     fn _acting_client(&self, key: &str) -> Option<Arc<dyn LeaderClient>> {
         #[cfg(test)]
         {
@@ -170,7 +171,7 @@ impl GrokClientPool {
                 if client.is_alive()
                     && record.is_some()
                     && client.session_id().as_deref()
-                        == record.as_ref().map(|(sid, _cwd)| sid.as_str())
+                        == record.as_ref().map(|r| r.session_id.as_str())
                 {
                     return Some(client);
                 }
@@ -215,7 +216,7 @@ impl GrokClientPool {
         );
     }
 
-    pub fn drop(&self, pane: &str) {
+    pub fn drop_pane(&self, pane: &str) {
         self.drop_key(&resolve_pane_key(pane));
     }
 
@@ -239,8 +240,8 @@ impl GrokClientPool {
         }
     }
 
-    /// `create_member_session`'s adopt path: Python pokes `pool()._clients`
-    /// directly under `pool()._lock`.
+    /// `create_member_session`'s adopt path: the creating client takes the
+    /// key's slot, and whatever client held it before is closed.
     fn _adopt_client(&self, key: &str, client: Arc<GrokStdioClient>) {
         let existing = {
             let mut state = self.state.lock().unwrap();
@@ -278,10 +279,6 @@ pub fn connect_pane(pane: &str) -> bool {
     pool().connect_key(&resolve_pane_key(pane))
 }
 
-pub fn connect_key(key: &str) -> bool {
-    pool().connect_key(key)
-}
-
 pub fn send_to_pane(pane: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(&resolve_pane_key(pane), text)
 }
@@ -304,7 +301,7 @@ pub fn compact_pane(pane: &str) -> &'static str {
 
 /// Session id hive minted for this pane, from its session record.
 pub fn session_id_for_pane(pane: &str) -> Option<String> {
-    read_pane_session(pane).map(|(session_id, _cwd)| session_id)
+    read_pane_session(pane).map(|record| record.session_id)
 }
 
 /// Materialize the member's session on its leader — the headless spawn.

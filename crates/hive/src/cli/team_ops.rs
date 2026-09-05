@@ -34,7 +34,6 @@ pub fn request_send_payload(
         workspace,
         &team.name,
         sender_agent,
-        &tmux::get_current_pane_id().unwrap_or_default(),
         target_agent,
         body,
         artifact,
@@ -363,13 +362,8 @@ pub(crate) fn _register_agent_member(
         team_name: team_name.to_string(),
         pane_id: pane_id.to_string(),
         model: String::new(),
-        prompt: String::new(),
         cwd: cwd.to_string(),
         session_id: None,
-        spawned_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0),
         cli: pane_cli.to_string(),
     };
     t.upsert_agent(agent.clone());
@@ -406,6 +400,21 @@ pub(crate) fn _register_agent_member(
         ));
     }
     agent
+}
+
+/// Registry roster row keyed by engine session rather than pane — the orch
+/// at create, a Claude session that joins — with the caller's cwd.
+pub(crate) fn _session_member_row(name: &str, cli: &str, session_id: &str) -> Map<String, Value> {
+    let mut row = Map::new();
+    row.insert("name".to_string(), Value::String(name.to_string()));
+    row.insert("cli".to_string(), Value::String(cli.to_string()));
+    row.insert("model".to_string(), Value::String(String::new()));
+    row.insert(
+        "sessionId".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    row.insert("cwd".to_string(), Value::String(getcwd()));
+    row
 }
 
 /// Registry roster row for *agent*, resolving its engine identity.
@@ -714,7 +723,7 @@ pub(crate) fn _resolve_guest_send_target(to_agent: &str, team: &str) -> (String,
     let mut teams: Vec<String> = candidates
         .iter()
         .map(|p| p.team.clone())
-        .chain(registry_teams.into_iter())
+        .chain(registry_teams)
         .collect::<HashSet<String>>()
         .into_iter()
         .collect();
@@ -775,6 +784,7 @@ pub(crate) fn _sorted_member_rows(rows: Vec<Map<String, Value>>) -> Vec<Map<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
 
     fn _pane(agent: &str, team: &str, group: &str, pane_id: &str) -> PaneInfo {
         PaneInfo {
@@ -952,15 +962,8 @@ mod tests {
 
     fn _headless_agent(name: &str, cli: &str) -> Agent {
         Agent {
-            name: name.to_string(),
-            team_name: "honey".to_string(),
-            pane_id: String::new(),
-            model: String::new(),
-            prompt: String::new(),
-            cwd: "/repo".to_string(),
             session_id: Some("sid-1".to_string()),
-            spawned_at: 0.0,
-            cli: cli.to_string(),
+            ..crate::agent::testhook::fake_agent(name, "honey", "", cli)
         }
     }
 
@@ -976,11 +979,8 @@ mod tests {
 
     #[test]
     fn test_seen_names_include_registry_only_members() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         let pool: Vec<&str> = _RANDOM_AGENT_NAMES.to_vec();
         let t = _registry_team("honey", 100.0, &pool);
 
@@ -998,11 +998,8 @@ mod tests {
 
     #[test]
     fn test_record_member_never_resurrects_a_deleted_team() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         let t = _registry_team("honey", 100.0, &[]);
         crate::registry::delete_team("honey").unwrap();
         let agent = _headless_agent("worker", "claude");
@@ -1014,11 +1011,8 @@ mod tests {
 
     #[test]
     fn test_headless_spawn_into_a_deleted_team_stops_the_engine() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         let mut hook = crate::agent::testhook::Hook::new();
         hook.job_row_ids.push("sid-1".to_string());
         let _hook = crate::agent::testhook::install(hook);
@@ -1038,11 +1032,8 @@ mod tests {
 
     #[test]
     fn test_record_member_leaves_a_recreated_team_alone() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         let stale = _registry_team("honey", 100.0, &["old"]);
         let _fresh = _registry_team("honey", 200.0, &["new"]);
         let agent = _headless_agent("worker", "claude");
@@ -1059,11 +1050,8 @@ mod tests {
 
     #[test]
     fn test_headless_created_at_round_trips_through_record_member() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         // an integral epoch is the case `format!("{now}")` got wrong
         let t = _registry_team("honey", 1_700_000_000.0, &[]);
         let agent = _headless_agent("worker", "codex");
@@ -1087,15 +1075,18 @@ mod tests {
 
     // --- codex-native gate: headless members are hive-managed via the registry ---
 
-    fn _iso(tmp: &std::path::Path) {
-        std::env::set_var("HIVE_HOME", tmp.join("hive"));
-        std::env::set_var("CODEX_HOME", tmp.join("codex"));
+    /// Isolated HIVE_HOME and CODEX_HOME under *tmp*, for the test's lifetime.
+    fn _iso(tmp: &std::path::Path) -> EnvGuard {
+        let mut env = EnvGuard::new();
+        env.set("HIVE_HOME", tmp.join("hive"));
+        env.set("CODEX_HOME", tmp.join("codex"));
+        env
     }
 
     #[test]
     fn test_codex_thread_unknown_everywhere_is_unmanaged() {
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         assert!(!_codex_thread_is_hive_managed("01aa-unknown"));
         assert!(!_codex_thread_is_hive_managed(""));
     }
@@ -1103,7 +1094,7 @@ mod tests {
     #[test]
     fn test_codex_thread_with_pane_record_is_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp").unwrap();
         assert!(_codex_thread_is_hive_managed("01aa-pane"));
     }
@@ -1111,7 +1102,7 @@ mod tests {
     #[test]
     fn test_codex_thread_matching_registry_member_is_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let _env = _iso(tmp.path());
         let member: Map<String, Value> = [
             ("name", "review"),
             ("cli", "codex"),
@@ -1132,11 +1123,8 @@ mod tests {
 
     #[test]
     fn test_codex_thread_matching_claude_row_is_not_managed() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        _iso(tmp.path());
+        let mut env = _iso(tmp.path());
         let member: Map<String, Value> = [
             ("name", "orch"),
             ("cli", "claude"),
@@ -1151,8 +1139,7 @@ mod tests {
         assert_eq!(_codex_thread_member("01aa-claude"), None);
         assert!(!_codex_thread_is_hive_managed("01aa-claude"));
         assert!(_registry_member_for_session("01aa-claude").is_some());
-        std::env::set_var("CODEX_THREAD_ID", "01aa-claude");
+        env.set("CODEX_THREAD_ID", "01aa-claude");
         assert_eq!(_codex_thread_member_env(), None);
-        std::env::remove_var("CODEX_THREAD_ID");
     }
 }

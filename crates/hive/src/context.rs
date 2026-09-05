@@ -1,8 +1,9 @@
 //! Persisted Hive CLI context for standalone skill usage.
 //!
 //! Context is stored **per tmux pane** so that multiple agents in the same
-//! window don't overwrite each other's identity. When TMUX_PANE is not set
-//! (e.g. outside tmux) the file falls back to `default.json`.
+//! window don't overwrite each other's identity. Pane identity resolves
+//! through the tmux facade (see `_context_file`); with no pane the file is
+//! `default.json`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,20 +12,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-// Python module constants HIVE_HOME / CONTEXT_DIR / CURRENT_CONTEXT_FILE are
-// env-derived, so they are functions here (read per call, not frozen at import).
-
-pub fn hive_home() -> PathBuf {
-    let home = std::env::var("HIVE_HOME")
-        .unwrap_or_else(|_| format!("{}/.hive", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home)
-}
+use crate::team::hive_home;
 
 pub fn context_dir() -> PathBuf {
     hive_home().join("contexts")
 }
 
-/// Legacy single-file path kept for `clear_current_context` cleanup.
+/// Legacy single-file path: read as a fallback whenever no per-pane file
+/// exists (never migrated into one); removed by `clear_current_context`.
 pub fn current_context_file() -> PathBuf {
     hive_home().join("current.json")
 }
@@ -222,25 +217,21 @@ pub fn clear_current_context() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::TEST_ENV_LOCK;
+    use crate::testenv::EnvGuard;
     use std::cell::RefCell;
-    use std::sync::MutexGuard;
 
     /// Pin the env inputs of `crate::tmux::get_current_pane_id` so no member
     /// marker or live tmux server is consulted: with $TMUX set, the pinned
     /// TMUX_PANE probe is skipped and the env var is the answer.
-    fn setup(pane: Option<&str>) -> (tempfile::TempDir, MutexGuard<'static, ()>) {
-        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn setup(pane: Option<&str>) -> (tempfile::TempDir, EnvGuard) {
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
-        std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-        std::env::set_var("TMUX", "test-isolation");
-        match pane {
-            Some(p) => std::env::set_var("TMUX_PANE", p),
-            None => std::env::remove_var("TMUX_PANE"),
+        env.set("HIVE_HOME", tmp.path());
+        env.set("TMUX", "test-isolation");
+        if let Some(p) = pane {
+            env.set("TMUX_PANE", p);
         }
-        (tmp, guard)
+        (tmp, env)
     }
 
     thread_local! {

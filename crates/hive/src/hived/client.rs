@@ -114,7 +114,6 @@ pub fn request_send(
     workspace: &str,
     team: &str,
     sender_agent: &str,
-    sender_pane: &str,
     target_agent: &str,
     body: &str,
     artifact: &str,
@@ -124,7 +123,6 @@ pub fn request_send(
     let mut payload = action_payload("send");
     payload.insert("team".to_string(), Value::from(team));
     payload.insert("senderAgent".to_string(), Value::from(sender_agent));
-    payload.insert("senderPane".to_string(), Value::from(sender_pane));
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));

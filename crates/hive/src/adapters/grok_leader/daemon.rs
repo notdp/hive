@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -7,6 +6,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::adapters::base::washed_spawner_env;
 
 use super::keys::{
     _daemon_env_for_pane, _key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
@@ -98,7 +99,7 @@ fn _connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     Ok(())
 }
 
-/// The spawned leader as `_spawn_daemon_key` sees it (Python `Popen` handle).
+/// The spawned leader as `_spawn_daemon_key` sees it: pid, exit poll, terminate.
 pub(super) trait DaemonChild: Send {
     fn pid(&self) -> u32;
     fn poll(&self) -> Option<i32>;
@@ -150,7 +151,8 @@ fn _spawn_leader_real(
         .stderr(Stdio::null());
     unsafe {
         use std::os::unix::process::CommandExt;
-        // Python start_new_session=True: detach from the short-lived CLI.
+        // setsid: a session of its own, so the leader outlives the
+        // short-lived CLI and its controlling terminal.
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
@@ -192,23 +194,15 @@ pub fn spawn_daemon(pane: &str) -> bool {
 /// Ensure the member's leader daemon is listening — no pane involved.
 ///
 /// The headless spawn lane: the leader mints the member's identity itself
-/// (see [`_daemon_env_for_pane`] for what is washed and why), and there is
-/// no pane to report, so no `TMUX_PANE` is pinned either.
+/// (see `_daemon_env_for_pane` for what is washed and why), and there is
+/// no pane to report, so no `TMUX_PANE` is pinned. `TMUX` goes too: it
+/// names the spawner's tmux server and session, and `tmux::is_inside_tmux`
+/// takes any non-empty `TMUX` as running inside a tmux client, which a
+/// headless member's tool shells are not.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
-    let env: HashMap<String, String> = env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| {
-            !(key.starts_with("CLAUDE")
-                || key.starts_with("ANTHROPIC")
-                || matches!(
-                    key.as_str(),
-                    "CODEX_THREAD_ID" | "GROK_SESSION_ID" | "TMUX_PANE" | "TMUX"
-                ))
-        })
-        .collect();
     _spawn_daemon_key(
         &member_key(team, member),
-        env,
+        washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]),
         "grok",
         _DAEMON_START_TIMEOUT,
     )
@@ -391,7 +385,8 @@ fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
 
 /// Start (or reuse) the leader daemon on *key*'s socket.
 ///
-/// `start_new_session` detaches it from the short-lived CLI; the hived
+/// `setsid()` gives it a session of its own, detaching it from the
+/// short-lived CLI; the hived
 /// reaps member daemons the registry no longer lists, and pane-keyed ones
 /// when their pane dies.
 fn _spawn_daemon_key(
@@ -445,6 +440,9 @@ fn _spawn_daemon_key(
             return false; // died before binding
         }
         if sock.exists() {
+            // Names only a leader hive spawned: `_leader_pid` trusts it after
+            // an identity check, and the hived reads its mtime as the newborn
+            // grace. Liveness is the socket connect, never this pid.
             let _ = fs::write(sock.with_extension("pid"), child.pid().to_string());
             return true;
         }
@@ -473,10 +471,14 @@ pub fn list_daemon_keys() -> Vec<String> {
     keys
 }
 
-/// SIGTERM the pid's process group, escalating to SIGKILL if it lingers.
+/// SIGTERM the pid, escalating to SIGKILL if it lingers.
 ///
-/// spawn_daemon uses `start_new_session`, so the leader is a process-group
-/// leader and its children share the group; `killpg` reaps them together.
+/// A leader hive spawned is `setsid()`'d in `_spawn_leader_real`, so it
+/// leads a group of
+/// itself and whatever it forked, and `killpg` reaps them together. A holder
+/// adopted from grok's lock file may sit in the pane shell's group instead,
+/// where `killpg` would take the shell out with it, so a pid that is not its
+/// own group leader is signalled alone.
 fn _terminate_process_group(pid: libc::pid_t) {
     #[cfg(test)]
     {
@@ -484,10 +486,6 @@ fn _terminate_process_group(pid: libc::pid_t) {
             return;
         }
     }
-    // Our own leaders are start_new_session'd, so the group is the daemon and
-    // whatever it forked. A holder we adopted from grok's lock file may not be:
-    // signalling its group could then take out the pane's shell with it, so a
-    // pid that is not its own group leader is signalled alone.
     let pgid = unsafe { libc::getpgid(pid) };
     if pgid < 0 {
         return;
@@ -539,9 +537,4 @@ pub fn kill_daemon_key(key: &str) {
     ] {
         let _ = fs::remove_file(path);
     }
-}
-
-/// Stop the leader the pane addresses (member daemon for a tagged pane).
-pub fn kill_pane_daemon(pane: &str) {
-    kill_daemon_key(&resolve_pane_key(pane));
 }

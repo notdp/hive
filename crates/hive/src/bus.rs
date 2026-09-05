@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -30,21 +30,7 @@ fn msg_id_space() -> i64 {
 }
 
 fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::gmtime_r(&secs, &mut tm) };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        tm.tm_year as i64 + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec
-    )
+    format!("{}Z", crate::devlog::utc_now_iso_seconds())
 }
 
 /// Python `Path(workspace).expanduser()`: expand only a leading bare `~`.
@@ -372,7 +358,7 @@ pub fn read_all_events(workspace: impl AsRef<Path>) -> Result<Vec<Event>> {
 }
 
 /// Return sorted list of (monotonic sequence, event_data) tuples.
-pub fn read_events_with_ns(workspace: impl AsRef<Path>) -> Result<Vec<(i64, Event)>> {
+pub fn read_events_with_seq(workspace: impl AsRef<Path>) -> Result<Vec<(i64, Event)>> {
     let conn = connect(workspace.as_ref())?;
     let mut stmt = conn.prepare("SELECT * FROM messages ORDER BY seq ASC")?;
     let rows = stmt.query_map([], |row| {

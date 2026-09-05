@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions::ClaudeSession;
+use crate::agent::Agent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnRecord {
@@ -16,6 +17,20 @@ pub struct SpawnRecord {
     pub prompt: String,
     pub extra_args: Vec<String>,
     pub extra_env: HashMap<String, String>,
+}
+
+/// A member row with the fields every unit suite leaves blank; callers
+/// override the rest with struct update syntax.
+pub fn fake_agent(name: &str, team: &str, pane: &str, cli: &str) -> Agent {
+    Agent {
+        name: name.to_string(),
+        team_name: team.to_string(),
+        pane_id: pane.to_string(),
+        model: String::new(),
+        cwd: "/repo".to_string(),
+        session_id: None,
+        cli: cli.to_string(),
+    }
 }
 
 /// A bg engine registry entry as engine_session_for_job would return it.
@@ -89,7 +104,8 @@ pub struct Hook {
 
     // behaviors (Hook::new sets the `_setup_tmux_mocks` defaults)
     pub is_inside_tmux: bool,
-    pub split_window_result: Option<String>, // None → echo the target pane
+    /// None → echo the target pane; Some(Err(msg)) → the split fails with msg.
+    pub split_window_result: Option<Result<String, String>>,
     pub pane_window_target: String,
     pub is_pane_in_mode: bool,
     pub supported_profile: bool,
@@ -118,6 +134,8 @@ pub struct Hook {
     pub list_sessions: Vec<ClaudeSession>,
 
     pub codex_spawn_daemon: bool,
+    /// Some(msg) → ensure_dir_trusted fails with msg (the cwd is still recorded).
+    pub ensure_dir_trusted_error: Option<String>,
     pub start_member_thread: Option<String>,
     pub codex_send_to_pane: Option<&'static str>,
     pub codex_send_to_thread: Option<&'static str>,

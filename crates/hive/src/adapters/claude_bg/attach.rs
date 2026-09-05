@@ -4,13 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::engine::{hooked_engine_for_job, pane_for_job, EngineSession};
+use super::engine::{pane_for_job, EngineSession};
 use super::keyboard::{
     _ATTACH_EXIT_TIMEOUT, _BUF_CAP, _CLEAR_LINE, _CLIENT_READY_TIMEOUT, _CONTROL_KEY_GAP,
     _DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS, _ENGINE_READY_TIMEOUT, _RESTORE_KILL,
 };
-use super::lifecycle::bg_env;
-use super::{sleep_s, _ENTRY_POLL_INTERVAL};
+use super::lifecycle::{bg_env, wait_engine_entry_until};
+use super::sleep_s;
 
 #[cfg(test)]
 use super::testhook;
@@ -152,8 +152,8 @@ impl RealClient {
     }
 }
 
-/// The keystroke path's view of an attach client; the fake variant is what
-/// the Python tests' FakePipe stood in for.
+/// The keystroke path's view of an attach client; the fake variant is the
+/// scripted pipe `claude_bg/tests.rs` types into.
 pub(crate) enum Client {
     Real(RealClient),
     #[cfg(test)]
@@ -235,7 +235,7 @@ impl Client {
 /// matching it means the attach changes nothing. With no pane on record (or
 /// no tmux answer) the engine is not on anyone's screen and any size is
 /// harmless; the fallback is the size claude's own pty host starts at.
-fn _engine_screen_size(job_id: &str) -> (u16, u16) {
+pub(super) fn _engine_screen_size(job_id: &str) -> (u16, u16) {
     if let Some(pane) = pane_for_job(job_id) {
         if let Some(raw) = crate::tmux::display_value(&pane, "#{pane_width}\t#{pane_height}") {
             let mut parts = raw.splitn(2, '\t');
@@ -332,17 +332,28 @@ pub(super) fn _feed(proc: &mut Client, payload: &str) -> bool {
 /// The engine the pipe is typing into — the attach itself wakes a parked one,
 /// so this is also the wake wait. A client that exits first says the job is
 /// gone; there is nothing left to wait for.
-fn _wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
-    let deadline = Instant::now() + Duration::from_secs_f64(_ENGINE_READY_TIMEOUT);
-    loop {
-        if let Some(engine) = hooked_engine_for_job(job_id) {
-            return Some(engine);
+pub(super) fn _wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
+    wait_engine_entry_until(job_id, engine_ready_timeout(), || proc.poll().is_some())
+}
+
+fn engine_ready_timeout() -> f64 {
+    #[cfg(test)]
+    {
+        if let Some(Some(v)) = testhook::with(|h| h.engine_ready_timeout) {
+            return v;
         }
-        if proc.poll().is_some() || Instant::now() >= deadline {
-            return None;
-        }
-        sleep_s(_ENTRY_POLL_INTERVAL);
     }
+    _ENGINE_READY_TIMEOUT
+}
+
+fn client_ready_timeout() -> f64 {
+    #[cfg(test)]
+    {
+        if let Some(Some(v)) = testhook::with(|h| h.client_ready_timeout) {
+            return v;
+        }
+    }
+    _CLIENT_READY_TIMEOUT
 }
 
 pub(super) fn hooked_wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
@@ -361,8 +372,8 @@ pub(super) fn hooked_wait_engine_behind(job_id: &str, proc: &mut Client) -> Opti
 /// control bytes: a `\x15` written into a client that is not in raw key mode
 /// yet is inserted into the composer as a literal character instead of
 /// clearing it — observed once on 2.1.240, and silent when it happens.
-fn _wait_client_ready(proc: &mut Client) -> bool {
-    let deadline = Instant::now() + Duration::from_secs_f64(_CLIENT_READY_TIMEOUT);
+pub(super) fn _wait_client_ready(proc: &mut Client) -> bool {
+    let deadline = Instant::now() + Duration::from_secs_f64(client_ready_timeout());
     while Instant::now() < deadline {
         if proc.poll().is_some() {
             return false;

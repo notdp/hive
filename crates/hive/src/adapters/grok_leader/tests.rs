@@ -1,5 +1,5 @@
 use super::*;
-use crate::registry::TEST_ENV_LOCK;
+use crate::testenv::EnvGuard;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
@@ -9,9 +9,13 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+fn pane_pidfile_path(pane: &str) -> PathBuf {
+    pane_socket_path(pane).with_extension("pid")
+}
 
 /// The (argv, env) one faked daemon spawn was called with.
 type SeenDaemonSpawn = Arc<Mutex<Option<(Vec<String>, HashMap<String, String>)>>>;
@@ -39,8 +43,8 @@ thread_local! {
     static ACK_TIMEOUT_OVERRIDE: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
-/// Panes resolve to their raw pane key unless a test tags them — the
-/// Python autouse `_untagged_panes` fixture (never the real tmux).
+/// Panes resolve to their raw pane key unless a test tags them; the real
+/// tmux is never asked.
 pub(super) fn pane_option_override(pane: &str, key: &str) -> Option<String> {
     PANE_OPTION_OVERRIDE.with(|slot| slot.borrow().as_ref().and_then(|f| f(pane, key)))
 }
@@ -193,15 +197,15 @@ fn bind_leader_socket(sock: &std::path::Path) -> UnixListener {
     UnixListener::bind(sock).unwrap()
 }
 
-/// Serialized test bed: env lock held, GROK_HOME pinned to a tempdir,
+/// Serialized test bed: env guard held, GROK_HOME pinned to a tempdir,
 /// key cache and every thread-local seam reset.
 struct TestBed {
-    _guard: MutexGuard<'static, ()>,
+    env: EnvGuard,
     tmp: tempfile::TempDir,
 }
 
 fn setup() -> TestBed {
-    let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let mut env = EnvGuard::new();
     _key_cache().lock().unwrap().clear();
     PANE_OPTION_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     STDIO_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
@@ -211,8 +215,8 @@ fn setup() -> TestBed {
     PROCESS_LISTING_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.set(None));
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("GROK_HOME", tmp.path());
-    TestBed { _guard: guard, tmp }
+    env.set("GROK_HOME", tmp.path());
+    TestBed { env, tmp }
 }
 
 // ---- fake subprocess -------------------------------------------------
@@ -327,7 +331,8 @@ fn responder(extra: Option<Responder>, replay: Vec<Value>) -> Responder {
     )
 }
 
-/// The Python grok_client fixture factory for pane %19.
+/// A client on a fake leader for *pane*, its session record written first
+/// when *session* is given.
 fn make(
     respond: Option<Responder>,
     session: Option<(&str, &str)>,
@@ -586,11 +591,17 @@ fn test_tool_call_phases_survive_streamed_chunks() {
         "agent_message_chunk",
         json!({"content": {"type": "text", "text": "done"}}),
     ));
-    thread::sleep(Duration::from_millis(50));
-    assert_eq!(
-        client.runtime().unwrap().turn_phase,
-        "tool_result_pending_reply"
-    );
+    // The reader applies lines in order: once this permission request has
+    // landed (input_state moves off "ready"), the chunk before it has been
+    // applied too.
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "id": 79,
+        "method": "session/request_permission",
+        "params": {"sessionId": SID, "toolCall": {"toolCallId": "c2"}, "options": []},
+    }));
+    let runtime = _settle(&client, |rt| rt.input_state == "waiting_user");
+    assert_eq!(runtime.turn_phase, "tool_result_pending_reply");
     teardown(&client, &proc);
 }
 
@@ -1019,9 +1030,6 @@ fn test_stdio_argv_targets_the_pane_socket() {
             pane_socket_path("%19").to_string_lossy().into_owned(),
         ]
     );
-    // Python also asserts Popen kwargs (text=True, bufsize=1,
-    // stderr=DEVNULL); those are subprocess-construction details baked
-    // into RealProc::spawn and not observable through the spawn seam.
     teardown(&client, &proc);
 }
 
@@ -1039,16 +1047,20 @@ fn test_pane_socket_path_under_grok_home() {
 
 #[test]
 fn test_pane_socket_path_stays_under_unix_limit() {
-    let _bed = setup();
-    env::remove_var("GROK_HOME");
+    let mut bed = setup();
+    bed.env.remove("GROK_HOME");
     assert!(pane_socket_path("%19").to_string_lossy().len() < 104);
 }
 
 #[test]
-fn test_sibling_paths_share_the_socket_stem() {
+fn test_pane_session_path_shares_the_socket_stem() {
     let _bed = setup();
-    assert_eq!(pane_pidfile_path("%19").file_name().unwrap(), "p19.pid");
+    assert_eq!(pane_socket_path("%19").file_name().unwrap(), "p19.sock");
     assert_eq!(pane_session_path("%19").file_name().unwrap(), "p19.session");
+    assert_eq!(
+        pane_session_path("%19").parent(),
+        pane_socket_path("%19").parent()
+    );
 }
 
 #[test]
@@ -1057,7 +1069,10 @@ fn test_pane_session_round_trip() {
     write_pane_session("%19", SID, CWD).unwrap();
     assert_eq!(
         read_pane_session("%19"),
-        Some((SID.to_string(), CWD.to_string()))
+        Some(SessionRecord {
+            session_id: SID.to_string(),
+            cwd: CWD.to_string(),
+        })
     );
     assert_eq!(session_id_for_pane("%19").as_deref(), Some(SID));
 }
@@ -1209,8 +1224,8 @@ fn touch_leader_socket(argv: &[String]) {
 
 #[test]
 fn test_spawn_daemon_builds_leader_argv_and_pane_env() {
-    let _bed = setup();
-    env::set_var("TMUX_PANE", "%old");
+    let mut bed = setup();
+    bed.env.set("TMUX_PANE", "%old");
     let seen: SeenDaemonSpawn = Arc::new(Mutex::new(None));
     let seen_spawn = seen.clone();
     set_daemon_spawn(move |argv, env| {
@@ -1238,11 +1253,9 @@ fn test_spawn_daemon_builds_leader_argv_and_pane_env() {
         ]
     );
     assert_eq!(env.get("TMUX_PANE").map(String::as_str), Some("%19"));
-    // Python also asserts Popen kwargs (start_new_session=True,
-    // stdin=DEVNULL); those live in _spawn_leader_real and are not
-    // observable through the spawn seam.
+    // the pidfile is the socket's sibling, written by the spawn itself
     assert_eq!(
-        fs::read_to_string(pane_pidfile_path("%19")).unwrap(),
+        fs::read_to_string(bed.tmp.path().join("hive/p19.pid")).unwrap(),
         "7777"
     );
 }
@@ -1410,23 +1423,6 @@ fn test_spawn_daemon_clears_a_stale_socket() {
 }
 
 #[test]
-fn test_kill_pane_daemon_removes_socket_pid_and_session() {
-    let _bed = setup();
-    write_pane_session("%19", SID, CWD).unwrap();
-    fs::write(pane_socket_path("%19"), "").unwrap();
-    fs::write(pane_pidfile_path("%19"), "4321").unwrap();
-    set_leader_identity(4321, &pane_socket_path("%19"));
-    let killed: Arc<Mutex<Vec<libc::pid_t>>> = Arc::new(Mutex::new(Vec::new()));
-    let killed_record = killed.clone();
-    set_terminate_pg(move |pid| killed_record.lock().unwrap().push(pid));
-    kill_pane_daemon("%19");
-    assert_eq!(*killed.lock().unwrap(), vec![4321]);
-    assert!(!pane_socket_path("%19").exists());
-    assert!(!pane_pidfile_path("%19").exists());
-    assert!(!pane_session_path("%19").exists());
-}
-
-#[test]
 fn test_kill_daemon_key_refuses_a_pid_that_is_not_a_leader() {
     // the pidfile names this test process — alive, but no grok leader as
     // the real `ps` reports it: never signalled, and the stale files go
@@ -1571,7 +1567,7 @@ impl LeaderClient for FakePromptClient {
 }
 
 #[test]
-fn test_pool_send_to_pane_returns_prompt_queued() {
+fn test_pool_send_to_key_returns_prompt_queued() {
     let grok_pool = GrokClientPool::new();
     let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sent_client = sent.clone();
@@ -1585,7 +1581,7 @@ fn test_pool_send_to_pane_returns_prompt_queued() {
 }
 
 #[test]
-fn test_pool_send_to_pane_none_without_client() {
+fn test_pool_send_to_key_none_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
     assert_eq!(grok_pool.send_to_key("p19", "hi"), None);
@@ -1600,7 +1596,7 @@ impl LeaderClient for FakeRaisingPromptClient {
 }
 
 #[test]
-fn test_pool_send_to_pane_none_when_client_raises() {
+fn test_pool_send_to_key_none_when_client_raises() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() =
         Some(Box::new(|_key| Some(Arc::new(FakeRaisingPromptClient))));
@@ -1623,7 +1619,7 @@ impl LeaderClient for FakeCancelClient {
 }
 
 #[test]
-fn test_pool_interrupt_pane_returns_cancel_sent() {
+fn test_pool_interrupt_key_returns_cancel_sent() {
     let grok_pool = GrokClientPool::new();
     let cancelled: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let cancelled_client = cancelled.clone();
@@ -1638,14 +1634,14 @@ fn test_pool_interrupt_pane_returns_cancel_sent() {
 }
 
 #[test]
-fn test_pool_interrupt_pane_none_without_client() {
+fn test_pool_interrupt_key_none_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
     assert_eq!(grok_pool.interrupt_key("p19"), None);
 }
 
 #[test]
-fn test_pool_interrupt_pane_none_when_the_write_fails() {
+fn test_pool_interrupt_key_none_when_the_write_fails() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| {
         Some(Arc::new(FakeCancelClient {
@@ -1657,7 +1653,7 @@ fn test_pool_interrupt_pane_none_when_the_write_fails() {
 }
 
 #[test]
-fn test_pool_interrupt_pane_none_when_client_raises() {
+fn test_pool_interrupt_key_none_when_client_raises() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| {
         Some(Arc::new(FakeCancelClient {
@@ -1669,14 +1665,14 @@ fn test_pool_interrupt_pane_none_when_client_raises() {
 }
 
 #[test]
-fn test_pool_compact_pane_unavailable_without_client() {
+fn test_pool_compact_key_unavailable_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
     assert_eq!(grok_pool.compact_key("p19"), "unavailable");
 }
 
 #[test]
-fn test_pool_runtime_for_pane_none_without_client() {
+fn test_pool_runtime_for_key_none_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
     assert_eq!(grok_pool.runtime_for_key("p19"), None);
@@ -1713,8 +1709,8 @@ fn test_pool_skips_a_pane_whose_socket_has_no_listener() {
 fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
     // The hived's pool outlives every kill: a client bound after the member
     // is gone raises a fresh leader on the dead member's socket.
-    let bed = setup();
-    env::set_var("HIVE_HOME", bed.tmp.path().join(".hive"));
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join(".hive"));
     let key = member_key("honey", "rex");
     write_session_key(&key, SID, CWD).unwrap();
     let _listener = bind_leader_socket(&socket_path_for_key(&key));
@@ -1754,7 +1750,7 @@ fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
     if let Some(handle) = client.reader.lock().unwrap().take() {
         let _ = handle.join();
     }
-    env::remove_var("HIVE_HOME");
+    drop(client);
 }
 
 #[test]
@@ -1797,7 +1793,7 @@ fn test_pool_rebinds_when_the_pane_session_record_rotates() {
     assert_eq!(second.session_id().as_deref(), Some(rotated));
     assert!(!first.is_alive()); // the stale client is closed, not leaked
 
-    grok_pool.drop("%19");
+    grok_pool.drop_pane("%19");
     for proc in procs.lock().unwrap().iter() {
         proc.eof();
     }
@@ -1813,12 +1809,13 @@ fn test_daemon_env_washes_inherited_identity_markers() {
     // Regression: a leader spawned from inside another member's engine
     // inherited that engine's CLAUDE_CODE_MESSAGING_SOCKET, so every hive call
     // in this grok member resolved to the orch's pane (replies came from=orch).
-    let _bed = setup();
-    env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/999.sock");
-    env::set_var("CLAUDE_CONFIG_DIR", "/tmp/elsewhere");
-    env::set_var("CODEX_THREAD_ID", "tid-1");
-    env::set_var("GROK_SESSION_ID", "spawner-session");
-    env::set_var("TMUX_PANE", "%stale");
+    let mut bed = setup();
+    bed.env
+        .set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/999.sock");
+    bed.env.set("CLAUDE_CONFIG_DIR", "/tmp/elsewhere");
+    bed.env.set("CODEX_THREAD_ID", "tid-1");
+    bed.env.set("GROK_SESSION_ID", "spawner-session");
+    bed.env.set("TMUX_PANE", "%stale");
 
     let env_map = _daemon_env_for_pane("%42");
 
@@ -1838,19 +1835,14 @@ fn test_daemon_env_washes_inherited_identity_markers() {
         .filter(|key| !inherited.contains(*key))
         .collect();
     assert_eq!(pinned, vec!["TMUX_PANE"]);
-
-    env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-    env::remove_var("CLAUDE_CONFIG_DIR");
-    env::remove_var("CODEX_THREAD_ID");
-    env::remove_var("GROK_SESSION_ID");
 }
 
 #[test]
 fn test_spawn_daemon_member_pane_gets_the_member_socket() {
     // A tagged member pane spawns a member-keyed daemon: the member identity
     // lives in the socket key, never in the env handed to the leader.
-    let bed = setup();
-    env::set_var("GROK_SESSION_ID", "spawner-session");
+    let mut bed = setup();
+    bed.env.set("GROK_SESSION_ID", "spawner-session");
     let mut tags = HashMap::new();
     tags.insert(
         ("%19".to_string(), "hive-team".to_string()),
@@ -1896,7 +1888,6 @@ fn test_spawn_daemon_member_pane_gets_the_member_socket() {
             .to_string_lossy()
             .into_owned()
     );
-    env::remove_var("GROK_SESSION_ID");
 }
 
 #[test]
@@ -1904,10 +1895,11 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
     // The headless lane: no pane, and nothing of the spawner's identity —
     // its GROK_SESSION_ID would make every hive call in this member sign as
     // the spawner.
-    let _bed = setup();
-    env::set_var("GROK_SESSION_ID", "spawner-session");
-    env::set_var("CODEX_THREAD_ID", "tid-1");
-    env::set_var("TMUX_PANE", "%stale");
+    let mut bed = setup();
+    bed.env.set("GROK_SESSION_ID", "spawner-session");
+    bed.env.set("CODEX_THREAD_ID", "tid-1");
+    bed.env.set("TMUX_PANE", "%stale");
+    bed.env.set("TMUX", "/tmp/tmux-0/default,4242,0");
     let seen: SeenDaemonSpawn = Arc::new(Mutex::new(None));
     let seen_spawn = seen.clone();
     set_daemon_spawn(move |argv, env| {
@@ -1938,6 +1930,8 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
     assert!(!env_map.contains_key("GROK_SESSION_ID"));
     assert!(!env_map.contains_key("CODEX_THREAD_ID"));
     assert!(!env_map.contains_key("TMUX_PANE"));
+    // no TMUX either: tmux::is_inside_tmux takes any non-empty TMUX as a client
+    assert!(!env_map.contains_key("TMUX"));
     // the member's name is in the socket key, never in the leader's env
     assert!(!env_map
         .values()
@@ -1947,10 +1941,6 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
         env_map.keys().all(|key| inherited.contains(key)),
         "{env_map:?}"
     );
-
-    env::remove_var("GROK_SESSION_ID");
-    env::remove_var("CODEX_THREAD_ID");
-    env::remove_var("TMUX_PANE");
 }
 
 #[test]

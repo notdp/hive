@@ -1,5 +1,6 @@
 // --------------------------------------------------------------------------
-// test seams (the Rust shape of the Python tests' monkeypatching)
+// test seams: what a hooked_* function in claude_bg reads before falling
+// through to the real thing
 // --------------------------------------------------------------------------
 use super::EngineSession;
 use serde_json::{Map, Value};
@@ -25,11 +26,13 @@ pub struct FakeState {
     pub killed: bool,
     pub hang_wait: bool,
     pub poll: Option<i32>,
+    /// The pid the fake client claims; None reads as a pid nothing runs under.
+    pub pid: Option<i32>,
 }
 
 impl FakePipe {
     pub fn pid(&self) -> i32 {
-        4242
+        self.state.lock().unwrap().pid.unwrap_or(4242)
     }
 
     pub fn mark(&self) -> usize {
@@ -84,8 +87,8 @@ pub struct Hook {
     pub attach_pipe: Option<FakePipe>,
     pub client_ready: Option<bool>,
     pub wait_engine_behind: Option<Option<EngineSession>>,
-    /// Pop per call; the last value repeats (a constant monkeypatch is a
-    /// one-element sequence, `iter([...])` a longer one).
+    /// Pop per call; the last value repeats (one element for a constant
+    /// answer, more for a scripted sequence).
     pub engine_for_job: Option<VecDeque<Option<EngineSession>>>,
     pub forbid_engine_lookup: bool,
     pub transcript_cursor: Option<(Option<PathBuf>, u64)>,
@@ -101,6 +104,8 @@ pub struct Hook {
     pub renames: Vec<(String, String, String)>,
     pub list_jobs_rows: Option<Option<Vec<Map<String, Value>>>>,
     pub no_sleep: bool,
+    pub engine_ready_timeout: Option<f64>,
+    pub client_ready_timeout: Option<f64>,
     pub type_retry_after: Option<f64>,
     pub type_ready_timeout: Option<f64>,
     pub slash_confirm_timeout: Option<f64>,
@@ -111,7 +116,7 @@ pub struct Hook {
 }
 
 thread_local! {
-    static HOOK: RefCell<Option<Hook>> = RefCell::new(None);
+    static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
 }
 
 pub fn with<T>(f: impl FnOnce(&mut Hook) -> T) -> Option<T> {

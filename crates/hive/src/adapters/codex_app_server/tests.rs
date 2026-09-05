@@ -1,15 +1,14 @@
 use super::transport::_find;
 use super::*;
-use crate::registry::TEST_ENV_LOCK;
+use crate::testenv::EnvGuard;
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ thread_local! {
         RefCell::new(None);
 }
 
-/// Some(...) when this test thread monkeypatched `_shared_client`.
+/// Some(...) when this test thread overrode `_shared_client`.
 pub(super) fn shared_client_override() -> Option<Option<Arc<dyn DaemonClient>>> {
     SHARED_CLIENT_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|factory| factory()))
 }
@@ -32,10 +31,6 @@ fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
         let client: Arc<dyn DaemonClient> = fake.clone();
         Some(client)
     });
-}
-
-fn env_guard() -> MutexGuard<'static, ()> {
-    TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 fn _bare_client() -> CodexDaemonClient {
@@ -63,8 +58,7 @@ fn recording_override(
 
 #[test]
 fn test_shared_socket_path_under_app_server_control() {
-    let _guard = env_guard();
-    env::remove_var("CODEX_HOME");
+    let _guard = EnvGuard::cleared(&["CODEX_HOME"]);
     let path = shared_socket_path();
     assert_eq!(path.file_name().unwrap(), "hive-shared.sock");
     assert_eq!(
@@ -77,7 +71,7 @@ fn test_shared_socket_path_under_app_server_control() {
 
 #[test]
 fn test_shared_pidfile_path() {
-    let _guard = env_guard();
+    let _guard = EnvGuard::new();
     assert_eq!(
         shared_pidfile_path().file_name().unwrap(),
         "hive-shared.pid"
@@ -86,13 +80,16 @@ fn test_shared_pidfile_path() {
 
 #[test]
 fn test_pane_thread_record_roundtrip() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     write_pane_thread("%19", "tid-1", "/work").unwrap();
     assert_eq!(
         read_pane_thread("%19"),
-        Some(("tid-1".to_string(), "/work".to_string()))
+        Some(PaneThread {
+            thread_id: "tid-1".to_string(),
+            cwd: "/work".to_string(),
+        })
     );
     assert_eq!(thread_id_for_pane("%19").as_deref(), Some("tid-1"));
     assert_eq!(session_id_for_pane("%19").as_deref(), Some("tid-1")); // threadId == sessionId
@@ -103,9 +100,9 @@ fn test_pane_thread_record_roundtrip() {
 
 #[test]
 fn test_read_pane_thread_rejects_garbage() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let path = pane_thread_path("%3");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "not json").unwrap();
@@ -116,9 +113,9 @@ fn test_read_pane_thread_rejects_garbage() {
 
 #[test]
 fn test_pane_for_thread_reverse_lookup() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     write_pane_thread("%19", "tid-a", "/work").unwrap();
     write_pane_thread("%7", "tid-b", "/work").unwrap();
     assert_eq!(pane_for_thread("tid-b").as_deref(), Some("%7"));
@@ -129,9 +126,9 @@ fn test_pane_for_thread_reverse_lookup() {
 
 #[test]
 fn test_list_recorded_panes() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     write_pane_thread("%19", "t1", "/w").unwrap();
     write_pane_thread("%7", "t2", "/w").unwrap();
     fs::write(
@@ -148,9 +145,9 @@ fn test_list_recorded_panes() {
 
 #[test]
 fn test_list_recorded_panes_missing_dir() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     assert!(list_recorded_panes().is_empty());
 }
 
@@ -161,13 +158,13 @@ fn test_daemon_env_strips_pane_identity() {
     // it. CLAUDE*/ANTHROPIC* go too: an inherited
     // CLAUDE_CODE_MESSAGING_SOCKET resolves a codex tool shell to the
     // spawning claude engine's pane.
-    let _guard = env_guard();
-    env::set_var("TMUX_PANE", "%old");
-    env::set_var("HIVE_CODEX_PANE", "%old");
-    env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/321.sock");
-    env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
-    env::set_var("ANTHROPIC_API_KEY", "sk-nope");
-    env::set_var("CODEX_HOME", "/tmp/codex-home");
+    let mut guard = EnvGuard::new();
+    guard.set("TMUX_PANE", "%old");
+    guard.set("HIVE_CODEX_PANE", "%old");
+    guard.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/321.sock");
+    guard.set("CLAUDE_CODE_ENTRYPOINT", "cli");
+    guard.set("ANTHROPIC_API_KEY", "sk-nope");
+    guard.set("CODEX_HOME", "/tmp/codex-home");
     let env_map = _daemon_env();
     assert!(!env_map.contains_key("TMUX_PANE"));
     assert!(!env_map.contains_key("HIVE_CODEX_PANE"));
@@ -178,11 +175,6 @@ fn test_daemon_env_strips_pane_identity() {
         env_map.get("CODEX_HOME").map(String::as_str),
         Some("/tmp/codex-home")
     );
-    env::remove_var("TMUX_PANE");
-    env::remove_var("HIVE_CODEX_PANE");
-    env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-    env::remove_var("CLAUDE_CODE_ENTRYPOINT");
-    env::remove_var("ANTHROPIC_API_KEY");
 }
 
 // --- status mapping -----------------------------------------------------
@@ -596,8 +588,8 @@ fn test_fork_thread_fails_on_rpc_error() {
 
 // --- pane-keyed API over the shared client ------------------------------
 
-fn _record(tmp: &Path, pane: &str, tid: &str) {
-    env::set_var("CODEX_HOME", tmp);
+fn _record(guard: &mut EnvGuard, tmp: &Path, pane: &str, tid: &str) {
+    guard.set("CODEX_HOME", tmp);
     write_pane_thread(pane, tid, "/work").unwrap();
 }
 
@@ -607,9 +599,9 @@ fn test_send_to_pane_turn_starts_even_when_busy() {
     // semantics in core, so hive hands a busy thread straight to the RPC.
     // The fake deliberately omits runtime methods: send_to_pane must not
     // consult them.
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         sent: Mutex<Vec<(String, String)>>,
@@ -636,9 +628,9 @@ fn test_send_to_pane_turn_starts_even_when_busy() {
 
 #[test]
 fn test_send_to_pane_fails_without_record() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     set_shared_client_override(|| -> Option<Arc<dyn DaemonClient>> {
         panic!("no record -> the daemon must not even be dialed")
     });
@@ -647,18 +639,18 @@ fn test_send_to_pane_fails_without_record() {
 
 #[test]
 fn test_send_to_pane_fails_without_daemon() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
     set_shared_client_override(|| None);
     assert_eq!(send_to_pane("%1", "hi"), None);
 }
 
 #[test]
 fn test_send_to_pane_fails_on_rpc_error_response() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -672,9 +664,9 @@ fn test_send_to_pane_fails_on_rpc_error_response() {
 
 #[test]
 fn test_send_to_pane_fails_on_rpc_exception() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -688,9 +680,9 @@ fn test_send_to_pane_fails_on_rpc_exception() {
 
 #[test]
 fn test_runtime_for_pane_reads_recorded_thread() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -709,9 +701,9 @@ fn test_runtime_for_pane_reads_recorded_thread() {
 
 #[test]
 fn test_runtime_for_pane_none_without_record() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     set_shared_client_override(|| -> Option<Arc<dyn DaemonClient>> {
         panic!("no record -> no daemon dial")
     });
@@ -720,9 +712,9 @@ fn test_runtime_for_pane_none_without_record() {
 
 #[test]
 fn test_compact_pane_compacts_when_idle() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         started: Mutex<Vec<String>>,
@@ -748,9 +740,9 @@ fn test_compact_pane_compacts_when_idle() {
 fn test_compact_pane_busy_defers_without_aborting_turn() {
     // A Compact turn aborts any running turn, so a busy agent must never
     // be compacted out from under its in-flight work.
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -770,9 +762,9 @@ fn test_compact_pane_busy_defers_without_aborting_turn() {
 
 #[test]
 fn test_compact_pane_unavailable_without_record() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     assert_eq!(compact_pane("%1"), "unavailable");
 }
 
@@ -839,9 +831,9 @@ fn test_turn_interrupt_carries_thread_and_turn_id() {
 
 #[test]
 fn test_interrupt_pane_aborts_the_running_turn() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         aborted: Mutex<Vec<(String, String)>>,
@@ -872,9 +864,9 @@ fn test_interrupt_pane_aborts_the_running_turn() {
 
 #[test]
 fn test_interrupt_pane_reports_an_idle_thread_without_interrupting() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -891,9 +883,9 @@ fn test_interrupt_pane_reports_an_idle_thread_without_interrupting() {
 
 #[test]
 fn test_interrupt_pane_fails_without_record() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     set_shared_client_override(|| -> Option<Arc<dyn DaemonClient>> {
         panic!("no record -> the daemon must not even be dialed")
     });
@@ -902,18 +894,18 @@ fn test_interrupt_pane_fails_without_record() {
 
 #[test]
 fn test_interrupt_pane_fails_without_daemon() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
     set_shared_client_override(|| None);
     assert_eq!(interrupt_pane("%1"), None);
 }
 
 #[test]
 fn test_interrupt_pane_fails_on_rpc_error_response() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -930,9 +922,9 @@ fn test_interrupt_pane_fails_on_rpc_error_response() {
 
 #[test]
 fn test_interrupt_pane_fails_on_rpc_exception() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(tmp.path(), "%1", "t1");
+    _record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -960,9 +952,9 @@ fn test_connect_false_when_no_daemon() {
 
 #[test]
 fn test_start_member_thread_delegates_to_client() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path()); // freshen must not touch the real cache
+    guard.set("CODEX_HOME", tmp.path()); // freshen must not touch the real cache
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -985,9 +977,9 @@ fn test_start_member_thread_delegates_to_client() {
 
 #[test]
 fn test_fork_member_thread_delegates_to_client() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -1009,9 +1001,9 @@ fn test_fork_member_thread_delegates_to_client() {
 
 #[test]
 fn test_ensure_dir_trusted_creates_config() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     ensure_dir_trusted("/work/dir").unwrap();
     let text = fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(text.contains("[projects.\"/work/dir\"]"));
@@ -1020,9 +1012,9 @@ fn test_ensure_dir_trusted_creates_config() {
 
 #[test]
 fn test_ensure_dir_trusted_appends_to_existing_config() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let config = tmp.path().join("config.toml");
     fs::write(&config, "model = \"gpt-x\"\n").unwrap();
     ensure_dir_trusted("/work/dir").unwrap();
@@ -1033,9 +1025,9 @@ fn test_ensure_dir_trusted_appends_to_existing_config() {
 
 #[test]
 fn test_ensure_dir_trusted_idempotent() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let config = tmp.path().join("config.toml");
     ensure_dir_trusted("/work/dir").unwrap();
     let first = fs::read_to_string(&config).unwrap();
@@ -1047,9 +1039,9 @@ fn test_ensure_dir_trusted_idempotent() {
 
 #[test]
 fn test_ensure_dir_trusted_upgrades_existing_entry() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let config = tmp.path().join("config.toml");
     fs::write(
         &config,
@@ -1066,9 +1058,9 @@ fn test_ensure_dir_trusted_upgrades_existing_entry() {
 
 #[test]
 fn test_ensure_dir_trusted_adds_missing_key_to_existing_section() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let config = tmp.path().join("config.toml");
     fs::write(&config, "[projects.\"/work/dir\"]\nother = 1\n").unwrap();
     ensure_dir_trusted("/work/dir").unwrap();
@@ -1080,9 +1072,9 @@ fn test_ensure_dir_trusted_adds_missing_key_to_existing_section() {
 
 #[test]
 fn test_ensure_dir_trusted_escapes_quotes() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     ensure_dir_trusted("/work/we\"ird").unwrap();
     let text = fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(text.contains("[projects.\"/work/we\\\"ird\"]"));
@@ -1092,9 +1084,9 @@ fn test_ensure_dir_trusted_escapes_quotes() {
 fn test_ensure_dir_trusted_matches_literal_string_header() {
     // A hand-edited literal-string header must not gain a duplicate table
     // — duplicate tables make the whole config.toml unparsable.
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let config = tmp.path().join("config.toml");
     fs::write(
         &config,
@@ -1109,7 +1101,7 @@ fn test_ensure_dir_trusted_matches_literal_string_header() {
 // --- transport: reader must survive daemon silence ----------------------
 
 #[test]
-fn test_wsconn_read_survives_silence_longer_than_handshake_timeout() {
+fn test_wsconn_disarms_the_handshake_timeout_once_connected() {
     // The handshake timeout must not stay armed on post-handshake reads.
     //
     // Guards the mint-hang regression: the daemon legally goes silent for
@@ -1119,6 +1111,7 @@ fn test_wsconn_read_survives_silence_longer_than_handshake_timeout() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ws.sock");
     let listener = UnixListener::bind(&path).unwrap();
+    let (release, gate) = mpsc::channel::<()>();
     let server = thread::spawn(move || {
         let (mut conn, _addr) = listener.accept().unwrap();
         let mut data: Vec<u8> = Vec::new();
@@ -1129,13 +1122,17 @@ fn test_wsconn_read_survives_silence_longer_than_handshake_timeout() {
         }
         conn.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
             .unwrap();
-        thread::sleep(Duration::from_millis(800)); // silence > the 0.3s handshake timeout
+        gate.recv().unwrap(); // stay silent until the client has been inspected
         let payload = br#"{"id":1,"result":{}}"#;
         let mut frame = vec![0x81u8, payload.len() as u8];
         frame.extend_from_slice(payload);
         conn.write_all(&frame).unwrap();
     });
     let mut conn = WsConn::connect(&path, Duration::from_millis(300)).unwrap();
+    // connect armed the timeout for the handshake and disarmed it after
+    assert_eq!(conn.stream.read_timeout().unwrap(), None);
+    assert_eq!(conn.stream.write_timeout().unwrap(), None);
+    release.send(()).unwrap();
     let txt = conn.recv_text().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&txt).unwrap(),
@@ -1149,9 +1146,9 @@ fn test_wsconn_read_survives_silence_longer_than_handshake_timeout() {
 
 #[test]
 fn test_freshen_models_cache_renews_stamp_and_keeps_data() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     let path = tmp.path().join("models_cache.json");
     fs::write(
         &path,
@@ -1174,9 +1171,9 @@ fn test_freshen_models_cache_renews_stamp_and_keeps_data() {
 
 #[test]
 fn test_freshen_models_cache_tolerates_missing_and_garbage() {
-    let _guard = env_guard();
+    let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    env::set_var("CODEX_HOME", tmp.path());
+    guard.set("CODEX_HOME", tmp.path());
     assert!(!freshen_models_cache()); // no file
     fs::write(tmp.path().join("models_cache.json"), "not json").unwrap();
     assert!(!freshen_models_cache());

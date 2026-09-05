@@ -3,7 +3,6 @@
 // --------------------------------------------------------------------------
 
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -11,14 +10,18 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime};
 use super::records::{codex_home, shared_pidfile_path, shared_socket_path, thread_id_for_pane};
-use super::transport::{WsConn, NO_RUNNING_TURN, TURN_INTERRUPT_ACCEPTED, TURN_START_ACCEPTED};
-use super::{_CONNECT_COOLDOWN, _DAEMON_START_TIMEOUT};
+use super::transport::WsConn;
+use super::{
+    NO_RUNNING_TURN, TURN_INTERRUPT_ACCEPTED, TURN_START_ACCEPTED, _CONNECT_COOLDOWN,
+    _DAEMON_START_TIMEOUT,
+};
+use crate::adapters::base::washed_spawner_env;
 
 /// True when a live daemon answers initialize on this socket.
 pub fn probe_socket(socket_path: &Path) -> bool {
@@ -56,13 +59,7 @@ pub fn daemon_alive() -> bool {
 /// CLAUDE_CODE_MESSAGING_SOCKET makes every hive call from a codex tool shell
 /// resolve to *that* engine's pane whenever the thread lookup misses.
 pub fn _daemon_env() -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| !(key.starts_with("CLAUDE") || key.starts_with("ANTHROPIC")))
-        .collect();
-    env.remove("TMUX_PANE");
-    env.remove("HIVE_CODEX_PANE");
-    env
+    washed_spawner_env(&["TMUX_PANE", "HIVE_CODEX_PANE"])
 }
 
 /// Ensure the shared app-server daemon is listening; return true if ready.
@@ -75,10 +72,6 @@ pub fn _daemon_env() -> HashMap<String, String> {
 /// live. Returns false if the daemon fails to bind or dies before ready.
 pub fn spawn_daemon() -> bool {
     crate::plugin_manager::ensure_codex_plugin_current();
-    spawn_daemon_with("codex", _DAEMON_START_TIMEOUT)
-}
-
-pub fn spawn_daemon_with(codex_bin: &str, timeout: f64) -> bool {
     let sock = shared_socket_path();
     if let Some(parent) = sock.parent() {
         if fs::create_dir_all(parent).is_err() {
@@ -102,7 +95,7 @@ pub fn spawn_daemon_with(codex_bin: &str, timeout: f64) -> bool {
         Ok(file) => file,
         Err(_) => return false,
     };
-    let mut cmd = Command::new(codex_bin);
+    let mut cmd = Command::new("codex");
     cmd.arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", sock.display()))
@@ -112,7 +105,8 @@ pub fn spawn_daemon_with(codex_bin: &str, timeout: f64) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file));
     unsafe {
-        // Python start_new_session=True: detach from the short-lived caller.
+        // setsid: a session of its own, so the daemon outlives the
+        // short-lived caller and its controlling terminal.
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
@@ -124,7 +118,7 @@ pub fn spawn_daemon_with(codex_bin: &str, timeout: f64) -> bool {
         Ok(child) => child,
         Err(_) => return false,
     };
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    let deadline = Instant::now() + Duration::from_secs_f64(_DAEMON_START_TIMEOUT);
     while Instant::now() < deadline {
         if let Ok(Some(_status)) = child.try_wait() {
             return false; // died before binding
@@ -341,24 +335,6 @@ pub fn session_id_for_pane(pane: &str) -> Option<String> {
 // spawn-flow helpers
 // --------------------------------------------------------------------------
 
-fn _utc_stamp_seconds() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::gmtime_r(&secs, &mut tm) };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        tm.tm_year as i64 + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec
-    )
-}
-
 /// Renew ~/.codex/models_cache.json's fetched_at so a mint stays warm.
 ///
 /// thread/start synchronously refetches /models when the cache is older than
@@ -374,7 +350,7 @@ pub fn freshen_models_cache() -> bool {
         let obj = entry.as_object_mut()?;
         obj.insert(
             "fetched_at".to_string(),
-            Value::String(format!("{}.000000Z", _utc_stamp_seconds())),
+            Value::String(format!("{}.000000Z", crate::devlog::utc_now_iso_seconds())),
         );
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_string(&entry).ok()?).ok()?;

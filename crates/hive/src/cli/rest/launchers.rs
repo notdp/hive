@@ -150,7 +150,7 @@ pub(crate) fn _pane_member_label_via(
 }
 
 fn _pane_member_label(pane: &str) -> Option<String> {
-    _pane_member_label_via(|target, key| tmux::get_window_option(target, key), pane)
+    _pane_member_label_via(tmux::get_pane_option, pane)
 }
 
 /// Launcher-minted job/thread name: member identity, or a pane placeholder.
@@ -562,7 +562,7 @@ pub(crate) fn _grok_opt_value(args: &[String], names: &[&str]) -> Option<String>
 /// (session id this launch will run, whether hive must pass --session-id).
 pub(crate) fn _grok_launch_session(args: &[String]) -> (Option<String>, bool) {
     let explicit = _grok_opt_value(args, &["--session-id", "-s"]);
-    if explicit.as_deref().map_or(false, |value| !value.is_empty()) {
+    if explicit.as_deref().is_some_and(|value| !value.is_empty()) {
         return (explicit, false);
     }
     if args
@@ -675,7 +675,7 @@ pub fn resume_hint_cmd(cli_name: &str) {
     }
 }
 
-fn _resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
+pub(super) fn _resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
     let (pane, _team, _agent) = _pane_team_identity()?;
     let (session_id, resume_cmd) = match cli_name {
         "codex" => (
@@ -683,7 +683,7 @@ fn _resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
             "hive codex resume",
         ),
         "grok" => (
-            crate::adapters::grok_leader::read_pane_session(&pane).map(|record| record.0),
+            crate::adapters::grok_leader::read_pane_session(&pane).map(|record| record.session_id),
             "hive grok --resume",
         ),
         _ => (

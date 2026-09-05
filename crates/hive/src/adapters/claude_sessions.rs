@@ -18,6 +18,8 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::adapters::base::read_json_object;
+
 pub const ACCEPTED_UDS_WRITE: &str = "udsWriteAccepted";
 pub const ACCEPTED_DAEMON_REPLY: &str = "daemonReplyAccepted";
 // The listener accepted the connection but did not read the whole frame in
@@ -38,7 +40,9 @@ const _DAEMON_RETRY_CODES: [&str; 3] = ["ESTARTING", "ENOREPLY", "ERESPAWNING"];
 const _DAEMON_RETRY_LIMIT: u32 = 24;
 const _DAEMON_RETRY_DELAY: f64 = 0.2;
 // The hived submit budget must cover a daemon_reply retry run plus a full
-// fallback send() worst case.
+// fallback send() worst case. The retry run is costed as prompt answers
+// (a retry code comes back immediately); a daemon that stalls mid-roundtrip
+// is bounded by that attempt's own read timeout, not by this budget.
 pub const SUBMIT_TIMEOUT: f64 =
     _CONNECT_TIMEOUT + _WRITE_TIMEOUT + _DAEMON_RETRY_LIMIT as f64 * _DAEMON_RETRY_DELAY + 2.0;
 
@@ -76,9 +80,10 @@ impl ClaudeSession {
 
 pub fn _config_dir() -> PathBuf {
     // CLAUDE_HOME is hive's own sandbox lever (tests and dev lanes point it at
-    // a disposable tree, see adapters/claude.rs); CLAUDE_CONFIG_DIR is Claude
-    // Code's relocation knob. Honour both so a sandboxed run never reads — or
-    // messages — the developer's real sessions.
+    // a disposable tree); CLAUDE_CONFIG_DIR is Claude Code's relocation knob.
+    // Honour both so a sandboxed run never reads — or messages — the
+    // developer's real sessions. Every other reader of the tree
+    // (`claude::_claude_home`, `core_hooks::claude_home`) delegates here.
     for key in ["CLAUDE_HOME", "CLAUDE_CONFIG_DIR"] {
         if let Ok(v) = env::var(key) {
             if !v.is_empty() {
@@ -93,9 +98,10 @@ pub fn _registry_dir() -> PathBuf {
     _config_dir().join("sessions")
 }
 
-/// Python's `str(value or "")` for the scalar fields these registry documents
-/// carry (containers never appear on them).
-fn truthy_str(v: Option<&Value>) -> String {
+/// Python's `str(value or "")` for the scalar fields the claude registry,
+/// job ledger and pane records carry (containers never appear on them):
+/// a string as-is, a non-zero number rendered, `true` as "True", else "".
+pub(crate) fn truthy_str(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => {
@@ -107,17 +113,6 @@ fn truthy_str(v: Option<&Value>) -> String {
         }
         Some(Value::Bool(true)) => "True".to_string(),
         _ => String::new(),
-    }
-}
-
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
     }
 }
 
@@ -151,21 +146,9 @@ pub fn session_title(session_id: &str) -> String {
         return String::new();
     }
     let fname = format!("{session_id}.jsonl");
-    let Ok(entries) = fs::read_dir(_config_dir().join("projects")) else {
-        return String::new();
-    };
-    let mut found: Option<PathBuf> = None;
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with('.') {
-            continue; // glob's `*` never matches a dot-dir
-        }
-        let cand = entry.path().join(&fname);
-        if cand.is_file() {
-            found = Some(cand);
-            break;
-        }
-    }
-    let Some(path) = found else {
+    let Some(path) =
+        crate::adapters::claude::_stat_project_dirs(&_config_dir().join("projects"), &fname)
+    else {
         return String::new();
     };
     read_title(&path).unwrap_or_default()
@@ -215,13 +198,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
         if fname.starts_with('.') || !fname.ends_with(".json") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok(data) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let Some(obj) = data.as_object() else {
+        let Some(obj) = read_json_object(&entry.path()) else {
             continue;
         };
         let name = truthy_str(obj.get("name"));
@@ -233,7 +210,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
         let (Some(pid), false, false) = (pid, name.is_empty(), sock.is_empty()) else {
             continue;
         };
-        if truthy(obj.get("spare")) {
+        if crate::pyval::truthy(obj.get("spare")) {
             continue; // a warm spare claude pre-started; nobody is behind it yet
         }
         if !_pid_alive(pid) {
@@ -265,9 +242,7 @@ pub fn session_status(pid: Option<i32>) -> Option<(String, String)> {
     if pid == 0 {
         return None;
     }
-    let text = fs::read_to_string(_registry_dir().join(format!("{pid}.json"))).ok()?;
-    let data: Value = serde_json::from_str(&text).ok()?;
-    let obj = data.as_object()?;
+    let obj = read_json_object(&_registry_dir().join(format!("{pid}.json")))?;
     if !_pid_alive(pid) {
         return None;
     }
@@ -535,50 +510,9 @@ fn daemon_reply_via(
 }
 
 #[cfg(test)]
-pub(crate) mod test_env {
-    //! Serialize env-mutating tests and restore the claude env knobs. Shared
-    //! with sibling adapter test modules (env vars are process-global).
-    use std::sync::{Mutex, MutexGuard};
-
-    pub static LOCK: Mutex<()> = Mutex::new(());
-
-    const VARS: [&str; 3] = [
-        "CLAUDE_HOME",
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-    ];
-
-    pub struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        pub fn new() -> Self {
-            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = VARS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-            for k in VARS {
-                std::env::remove_var(k);
-            }
-            EnvGuard { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.saved {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::{EnvGuard, CLAUDE_VARS};
     use std::os::unix::net::UnixListener;
     use std::thread::JoinHandle;
 
@@ -628,9 +562,9 @@ mod tests {
 
     #[test]
     fn test_list_sessions_keeps_only_live_entries_with_an_inbox() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -691,9 +625,9 @@ mod tests {
         // the desktop title lives in the transcript as a `custom-title`
         // record; the registry only knows the sessionId — join them so
         // `hive msg` accepts what the human actually sees in the sidebar
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -747,21 +681,21 @@ mod tests {
 
     #[test]
     fn test_session_title_scans_a_long_transcript_from_the_tail() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let filler =
             json!({"type": "assistant", "message": {"content": "x".repeat(4000)}}).to_string();
         let mut lines = vec![
             json!({"type": "custom-title", "customTitle": "first", "sessionId": "sid-l"})
                 .to_string(),
         ];
-        lines.extend(std::iter::repeat(filler.clone()).take(300)); // ~1.2 MB, well past the tail window
+        lines.extend(std::iter::repeat_n(filler.clone(), 300)); // ~1.2 MB, well past the tail window
         lines.push(
             json!({"type": "custom-title", "customTitle": "current", "sessionId": "sid-l"})
                 .to_string(),
         );
-        lines.extend(std::iter::repeat(filler.clone()).take(3));
+        lines.extend(std::iter::repeat_n(filler.clone(), 3));
         write_transcript(tmp.path(), "-w-l", "sid-l", &lines);
         assert_eq!(session_title("sid-l"), "current");
         // a title set only at the start of a long session is still found
@@ -769,7 +703,7 @@ mod tests {
             json!({"type": "custom-title", "customTitle": "early", "sessionId": "sid-e"})
                 .to_string(),
         ];
-        lines2.extend(std::iter::repeat(filler).take(300));
+        lines2.extend(std::iter::repeat_n(filler, 300));
         write_transcript(tmp.path(), "-w-e", "sid-e", &lines2);
         assert_eq!(session_title("sid-e"), "early");
         assert_eq!(session_title(""), "");
@@ -778,9 +712,9 @@ mod tests {
 
     #[test]
     fn test_list_sessions_without_registry_dir_is_empty() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("missing"));
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path().join("missing"));
         assert!(list_sessions().is_empty());
     }
 
@@ -788,10 +722,10 @@ mod tests {
     fn test_registry_follows_claude_home_first() {
         // CLAUDE_HOME is hive's sandbox lever: a dev lane must never
         // enumerate (or message) the developer's real sessions
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_HOME", tmp.path().join("lane"));
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("real"));
+        guard.set("CLAUDE_HOME", tmp.path().join("lane"));
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path().join("real"));
         write_entry(
             &tmp.path().join("real"),
             "1.json",
@@ -809,7 +743,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["lane"]
         );
-        env::remove_var("CLAUDE_HOME");
+        guard.remove("CLAUDE_HOME");
         assert_eq!(
             list_sessions()
                 .iter()
@@ -821,9 +755,9 @@ mod tests {
 
     #[test]
     fn test_sessions_answer_to_their_pid() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -841,9 +775,9 @@ mod tests {
 
     #[test]
     fn test_a_cleared_desktop_title_is_forgotten() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         write_entry(
             tmp.path(),
             "1.json",
@@ -866,9 +800,9 @@ mod tests {
 
     #[test]
     fn test_resolve_returns_every_live_session_sharing_a_name() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -995,9 +929,9 @@ mod tests {
     fn test_self_session_is_identified_by_its_own_socket() {
         // identity is the socket, never a saved slot: whichever live
         // registration names this process's own inbox is us
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -1009,19 +943,19 @@ mod tests {
             "2.json",
             json!({"name": "other", "pid": me, "messagingSocketPath": "/tmp/other.sock"}),
         );
-        env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/mine.sock");
+        guard.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/mine.sock");
         assert_eq!(self_session().unwrap().name, "mine");
-        env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
+        guard.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
         assert!(self_session().is_none());
-        env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+        guard.remove("CLAUDE_CODE_MESSAGING_SOCKET");
         assert!(self_session().is_none());
     }
 
     #[test]
     fn test_session_status_reports_only_live_tui_vocabulary() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        guard.set("CLAUDE_CONFIG_DIR", tmp.path());
         let me = me();
         write_entry(
             tmp.path(),
@@ -1137,19 +1071,14 @@ mod tests {
 
     fn wire_daemon(
         replies: Vec<Value>,
-    ) -> (
-        test_env::EnvGuard,
-        tempfile::TempDir,
-        PathBuf,
-        JoinHandle<Vec<Value>>,
-    ) {
-        let env_guard = test_env::EnvGuard::new();
+    ) -> (EnvGuard, tempfile::TempDir, PathBuf, JoinHandle<Vec<Value>>) {
+        let mut env_guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = short_tmp();
         let sock_path = tmp.path().join("control.sock");
         let key = tmp.path().join("daemon").join("control.key");
         fs::create_dir_all(key.parent().unwrap()).unwrap();
         fs::write(&key, "k3y\n").unwrap();
-        env::set_var("CLAUDE_HOME", tmp.path());
+        env_guard.set("CLAUDE_HOME", tmp.path());
         let handle = control_server(&sock_path, replies);
         (env_guard, tmp, sock_path, handle)
     }
@@ -1215,11 +1144,11 @@ mod tests {
 
     #[test]
     fn test_daemon_reply_without_a_daemon_is_none() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = short_tmp();
         fs::create_dir_all(tmp.path().join("daemon")).unwrap();
         fs::write(tmp.path().join("daemon").join("control.key"), "k3y").unwrap();
-        env::set_var("CLAUDE_HOME", tmp.path());
+        guard.set("CLAUDE_HOME", tmp.path());
         assert_eq!(
             daemon_reply_via(
                 "a65300e6-0000",
@@ -1239,9 +1168,9 @@ mod tests {
 
     #[test]
     fn test_daemon_control_sock_derives_from_the_config_dir() {
-        let _env = test_env::EnvGuard::new();
+        let mut guard = EnvGuard::cleared(&CLAUDE_VARS);
         let tmp = tempfile::tempdir().unwrap();
-        env::set_var("CLAUDE_HOME", tmp.path());
+        guard.set("CLAUDE_HOME", tmp.path());
         let mut hasher = Sha256::new();
         hasher.update(tmp.path().to_string_lossy().as_bytes());
         let ns: String = hasher

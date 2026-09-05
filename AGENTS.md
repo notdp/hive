@@ -41,11 +41,13 @@ behavior is documented in the modules themselves.
   consumes it as a command source (the command re-runs once per session, so
   skills track the binary); codex as a directory source whose cache is keyed
   by the manifest version. The two manifests (`.claude-plugin/plugin.json`,
-  `.codex-plugin/plugin.json`) carry the crate version; nothing enforces the
-  match, so bumps are manual — on codex a missed bump only costs an
-  idempotent re-add at the next codex launch. The plugin ships no hooks at
-  all: codex gates plugin hooks behind a hook-review dialog that would block
-  headless members, so the codex re-add lives in hive's launch path
+  `.codex-plugin/plugin.json`) carry the crate version. Bumps are manual;
+  `cargo nextest run` fails when the claude manifest drifts from
+  `CARGO_PKG_VERSION` (`plugin_manager.rs`), the codex manifest is not
+  checked, and a missed codex bump only costs an idempotent re-add at the
+  next codex launch. The plugin ships no hooks at all: codex gates plugin
+  hooks behind a hook-review dialog that would block headless members, so
+  the codex re-add lives in hive's launch path
   (`ensure_codex_plugin_current`), and the claude side needs none — the
   command source is the sync.
 - The viewer's markdown engine is the pinned git dependency
@@ -73,6 +75,9 @@ Design truth lives in these docs, one question each:
   protocol. Every claim there is pinned to one Claude Code build and must be
   re-verified on upgrade. Hive consumes only `op: "reply"`; the rest is
   recorded, not used.
+- `docs/notify-effects-hacker-lock.md` — the notify attention effect
+  (`notify_ui.rs`): why it plays on window select rather than at fire
+  time, and which parts are allowed to be lost.
 
 ## Build, test, and development commands
 
@@ -82,8 +87,8 @@ Design truth lives in these docs, one question each:
   (`cargo install --path crates/hive`); the live install never points at a
   dirty worktree.
 - `cargo nextest run` — the whole Rust suite. nextest (one process per test)
-  is required: tests mutate env vars freely, and plain `cargo test` shares one
-  process and cross-contaminates.
+  is required: the hived test hooks (`hived/testhook.rs`) are process-global
+  state, not per-test, and plain `cargo test` races them in one process.
 - `python -m pytest tests/e2e -q` — black-box tmux flows against
   `target/debug/hive` (`cargo build` first, or point `HIVE_E2E_BIN` elsewhere).
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok python -m pytest tests/acceptance -q`
@@ -115,8 +120,16 @@ with all call sites instead of leaving an empty body.
 Every CLI command should have test coverage at some layer; complex flows also
 get e2e coverage. Add unit tests for pure logic before relying on higher-level
 tests. Rust tests must not touch the real tmux server, real `~/.hive`, or the
-network — integration tests in `crates/hive/tests/` that need tmux create
-their own detached sessions and kill them.
+network. A unit test that rewrites process env holds `testenv::EnvGuard` (the
+one crate-wide env lock, restoring every variable it touched on drop), so env
+state never leaks between tests; nextest stays required for the reason above.
+Integration tests in `crates/hive/tests/` that need tmux create their own
+detached sessions and kill them. Those tests treat tmux as a hard
+requirement: with no tmux binary reachable they panic (via
+`common::require_tmux`) rather than pass silently, so a missing tmux is a
+loud failure, not green. The Python e2e suite (`tests/e2e/`) is the same
+kind of black-box coverage against the built binary, but skips when tmux is
+absent — CI without tmux still collects it.
 
 Do not test hand-written prose by locking exact words. Forbidden: tests that
 read repo-authored docs, specs, prompts, or skill text (`AGENTS.md`,

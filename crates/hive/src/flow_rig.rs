@@ -33,13 +33,6 @@ pub fn rig_cmd(run: &str, orch: Option<&str>, workspace: Option<&str>, down: boo
     }
 }
 
-fn hive_binary() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "hive".to_string())
-}
-
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -76,7 +69,6 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
         &dock,
         LEAD_AGENT_NAME,
         "workflow rig",
-        "",
         &workspace,
         false,
     ) {
@@ -97,7 +89,7 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     crate::bus::init_workspace(Path::new(&workspace))
         .with_context(|| format!("initializing workspace {workspace}"))?;
 
-    let hive = shell_quote(&hive_binary());
+    let hive = shell_quote(&crate::cli::util::self_exe());
     // The board tags its own pane (@hive-role dock) and re-tiles the window
     // as it starts; tagging here too keeps the first spawn's layout right
     // even before the board's first tick.
@@ -137,7 +129,7 @@ fn rig_down(run: &str) -> Result<()> {
         }
     }
     if crate::registry::load(run).is_some() {
-        crate::cli::core_cmds::delete(run, "", false, false);
+        crate::cli::core_cmds::delete(run, "", false);
     }
     if tmux::has_session(run) {
         tmux::kill_session(run);

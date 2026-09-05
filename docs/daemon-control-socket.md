@@ -10,11 +10,14 @@ hand-rolls, and because what they actually do rules most of them out.
 
 ## The pin
 
-Pinned to **2.1.240**, still the installed version, and the running supervisor
-agrees: `{"proto":1,"op":"ping"}` answers `{"version":"2.1.240","proto":1}`.
-The surveyed bundle is `~/.local/share/claude/versions/2.1.240` (Mach-O,
+Pinned to **2.1.259**: the supervisor surveyed answered
+`{"proto":1,"op":"ping"}` with `{"version":"2.1.259","proto":1}`. The
+surveyed bundle is `~/.local/share/claude/versions/2.1.259` (Mach-O,
 bun-compiled, JS bundle embedded as plain text), `BUILD_TIME
-2026-08-22T05:07:39Z`, `GIT_SHA d235569e3f61fc4d9aacd7c85e6d1b6253e03f52`.
+2026-09-02T18:43:49Z`, `GIT_SHA 9b549c8d1c72e407ea9d3af3b9d5e50da794ec4d`.
+First surveyed on 2.1.240 (`BUILD_TIME 2026-08-22T05:07:39Z`); the 2.1.259
+re-survey found the `reply` lane hive drives unchanged and is recorded as a
+delta list under "Changes since 2.1.240" at the end.
 
 Every claim below must be re-verified on upgrade. To re-recover, find the
 request handler by a stable literal rather than a minified name, since the
@@ -39,7 +42,7 @@ by `respawn-stale`.
   namespace directory also holds `pty/`, `rv/` and `spare/`, the two live
   reply transports and the spare pool.
 - **configDir**: the binary never reads `CLAUDE_HOME` (zero occurrences in
-  2.1.240); hive's `_config_dir` prefers it over `CLAUDE_CONFIG_DIR`. A dev
+  2.1.240 and 2.1.259); hive's `_config_dir` prefers it over `CLAUDE_CONFIG_DIR`. A dev
   lane that sets only `CLAUDE_HOME` makes hive hash a directory the daemon has
   never heard of, so `daemon_reply` finds no socket and every delivery quietly
   takes the wrapped inbox lane. Set `CLAUDE_CONFIG_DIR` too when sandboxing.
@@ -77,8 +80,8 @@ Connection limits, all pre-parse:
 
 ## Proto
 
-Every request carries `proto` (integer). 2.1.240 accepts `1` only: the
-server's min and max are both 1. Out of range, non-integer, or absent →
+Every request carries `proto` (integer). 2.1.259 accepts `1` only, as 2.1.240
+did: the server's min and max are both 1. Out of range, non-integer, or absent →
 `{code:"EPROTO", serverProto, serverVersion}`, "background service and CLI
 versions differ; restart claude".
 
@@ -88,7 +91,10 @@ ignore `proto` entirely: `ping`, `nudge`, `yield`, `lease`, `leases`,
 `shutdown`. That makes `ping` the version probe that survives a skew: it
 answers `{version, proto}` under any claimed `proto`, where any other verb
 under a bad `proto` answers only `EPROTO`. Those same six also skip the
-adoption gate (`ESTARTING`).
+adoption gate (`ESTARTING`). Gate order on 2.1.259 is adoption first, then
+proto: a skewed client arriving during adoption sees `ESTARTING`, not
+`EPROTO`. `attach` alone waits up to 2.5s for adoption before that gate
+answers.
 
 ## Auth
 
@@ -119,8 +125,10 @@ job with one JSON line.
 | `EUNVERIFIED` | worker live but the supervisor could not verify its identity | `attach` |
 | `ESTALE` | a previous dispatch with this id is still being cleaned up | `dispatch`, `await-ack` |
 | `ETIMEOUT` | the worker did not acknowledge within `timeoutMs` | `dispatch`, `await-ack` |
+| `EHOSTDEAD` | the worker's terminal host process died (2.1.259) | `attach` |
+| `ECWDGONE` | a cold launch was refused because its cwd is gone (2.1.259) | `dispatch`, `await-ack` |
 
-Those twelve plus `EALIVE`, enumerated in the daemon's telemetry map but
+Those fourteen plus `EALIVE`, enumerated in the daemon's telemetry map but
 returned by no verb surveyed, are the whole vocabulary. `ENOTOWNED` is a
 bind-time failure, "refusing to bind: <dir> is owned by uid N", not a
 response.
@@ -128,22 +136,24 @@ response.
 `EUNKNOWN` covers three different failures with two different texts: `"bad
 json"`, `"unknown op: <op>"`, and `"malformed request: <first zod issue>"`.
 A known op missing a required field is the third: `{"op":"has"}` answers
-`"malformed request: Invalid input: expected string, received undefined"`,
-while an unknown op answers the bare `"Invalid input"` (the union
-discriminant failing). That difference separates an existing verb from an
-unknown one without executing it, but only for verbs that have a required
+`"malformed request: Invalid input: expected string, received undefined"`.
+An unknown op fails the union discriminant; on 2.1.259 that text enumerates
+the verb table (`"malformed request: Invalid discriminator value. Expected
+'ping' | 'nudge' | … | 'shutdown'"`), where 2.1.240 answered the bare
+`"Invalid input"`. Either way the difference separates an existing verb from
+an unknown one without executing it, but only for verbs that have a required
 field. `ping`, `nudge`, `yield`, `lease`, `leases` and `shutdown` need nothing
 but `op`, so a bare probe runs them: `{"op":"shutdown"}` stops the supervisor
 and reaps every worker.
 
-## Verbs (2.1.240)
+## Verbs (2.1.259)
 
 Input is the zod schema verbatim; `?` marks optional.
 
 | op | auth | input | returns |
 | --- | --- | --- | --- |
 | `ping` | no | — | `{version, proto}` |
-| `nudge` | no | — | `{restarting, version, processWrapper}` |
+| `nudge` | no | — | `{restarting, upgradePending, version, processWrapper}` |
 | `yield` | no | — | `{yielding}` |
 | `lease` | no | `client?:{label,cwd,pid}` | `{ok:true}`, connection held open |
 | `leases` | no | — | `{clients:[…]}` |
@@ -155,10 +165,10 @@ Input is the zod schema verbatim; `?` marks optional.
 | `kill` | no | `short`, `signal?:SIGTERM\|SIGKILL`, `handoff?`, `evict?` | `{ok:true}` |
 | `respawn-stale` | no | `short` | `{ok:true, …respawn result}` |
 | `resize` | no | `short`, `cols`, `rows`, `attachId?` | `{ok:true}` |
-| `attach` | optional | `short`, `cols`, `rows`, `attachId?`, `caps?`, `holdingFrame?` | `{imarkNonce, decModes, via, booting, tempo, state, cached, stale}` then the pty stream |
+| `attach` | optional | `short`, `cols`, `rows`, `attachId?`, `caps?`, `holdingFrame?` | `{imarkNonce, decModes, via, booting, tempo, state, cached, stale, workerCliVersion}` then the pty stream |
 | `subscribe` | no | `short`, `tail?` | streaming frames |
 | `ensure-spare` | no | `cwd` | `{ok:true}` — **stub** |
-| `permission-response` | **yes** | `short`, `requestId`, `allow` | `{ok:true}` — **stub** |
+| `permission-response` | **yes** | `short`, `requestId`, `allow` | `{ok:true}` — **stub** (key checked, nothing else) |
 | `shutdown` | no | `reapWorkers?` | `{reaped:N}` |
 
 Behavior the names do not describe:
@@ -178,12 +188,14 @@ Behavior the names do not describe:
   `tengu_dead_probe_bg_legacy_op` telemetry event and returns, ignoring the
   `cwd` it demands. `permission-response` checks the control key and returns,
   ignoring `short`, `requestId` and `allow`; there is no plumbing behind it
-  on 2.1.240.
+  on 2.1.240 or 2.1.259 (both probed live).
 - **`respawn-stale`** fires the same dead-op probe but still does the work
   (`respawnIfIdleStale()`). The probe is upstream's instrumentation for
   removal candidates, so the op is live but deprecated.
 - **`kill`**: with `evict:true` the roster row is deleted before the short is
   validated, so an unknown short still loses its row and then gets `ENOJOB`.
+  An `exec`-mode job that has already settled is dropped from the handle map
+  instead of signalled (2.1.259).
 - **`subscribe` frames**: `{type:"snapshot", record, streamTail}` (tail
   defaults to 200 lines), then `{type:"stream", line}` and
   `{type:"state", patch}` until `{type:"settled", outcome}` closes the
@@ -211,9 +223,15 @@ a subprocess), not over this socket.
 3. **No pty** → the rv channel again; a channel that refuses is `ENOREPLY`.
 
 Two consequences follow. `origin.kind === "human"` is what the receiving side keys the peer wrapper
-off: the wrapper is applied for `peer`, `channel`, `observer`, `slack-ping`
-and `unclassified`, and skipped for `human`, `auto-continuation`,
-`task-notification` and undefined. A `reply`-delivered message therefore
+off: the wrapper is applied for `peer`, `channel`, `observer`, `slack-ping`,
+`unclassified` and (2.1.259) `plugin`, and skipped for `human`,
+`auto-continuation`, `task-notification`, `coordinator`,
+`observer-activity` and undefined. One caveat arrived with 2.1.259: when a
+transcript is *replayed* into a resumed subagent or teammate, persisted
+`user` rows whose origin is `human`, `auto-continuation` or absent are
+rewritten to `unclassified` ("never presumed human, never host-replayed"),
+so a reply-delivered message re-read that way does get the wrapper. Live
+delivery is unaffected; hive members are not resumed through that path. A `reply`-delivered message therefore
 carries no banner in any layer, which is why it, not the inbox socket, is
 hive's primary claude-member lane. The wrapped inbox socket is the fallback
 when this lane returns nothing, so an outage here degrades presentation
@@ -235,8 +253,14 @@ code does not say:
   one budget and deliberately boots nothing: the fallback lane already covers
   a supervisor that is not running.
 - The `EAUTH` re-read is one retry, not a loop, because the daemon does not
-  rotate the key in normal operation: it is minted once and reused. A second
-  `EAUTH` means the key is wrong, not stale.
+  rotate the key in normal operation: it is minted once and reused (2.1.259
+  re-mints only when the file is missing, empty, or over 4096 bytes). A
+  second `EAUTH` means the key is wrong, not stale. The `EAUTH` text now
+  distinguishes an absent key ("this window didn't present the daemon
+  control key — it is likely running a Claude Code older than the daemon …
+  or stop driving the control socket directly") from a mismatched one ("the
+  presented daemon control key doesn't match — retry, and restart the Claude
+  Code daemon if this persists").
 
 ## Tech-debt offset candidates (not adopted, recorded)
 
@@ -278,3 +302,32 @@ measured current cost before adoption.
 - `subscribe` — push state and stream instead of polling. Surveyed and
   retracted: no consumer beat the sub-millisecond registry scan it would
   replace.
+
+## Changes since 2.1.240
+
+Re-surveyed on 2.1.259 with the same method (`strings` + the
+`job isn't accepting replies` anchor, then live probes of `ping`, `has`,
+an unknown op, a skewed `proto`, `ensure-spare` and `permission-response`).
+The `reply` lane hive drives is byte-for-byte the same three-branch
+function. What moved:
+
+- Gate order: adoption (`ESTARTING`) now precedes the `proto` gate; `attach`
+  waits up to 2.5s for adoption first.
+- Two new error codes: `EHOSTDEAD` (attach, worker's terminal host died)
+  and `ECWDGONE` (dispatch/await-ack, cold launch refused because the cwd is
+  gone). `ESTALLED` and `EKICKED` appear only on the client side.
+- Unknown-op text enumerates the verb table instead of `"Invalid input"`.
+- `nudge` adds `upgradePending`; `attach` adds `workerCliVersion` and a
+  legacy-record auto-respawn branch; `kill` drops a settled exec-mode job
+  from the handle map; `dispatch` drops a request whose client vanished
+  during the pre-dispatch yield (`tengu_bg_dispatch_stale_drop`).
+- Origin kinds grew (`plugin`, `coordinator`, `observer-activity`) and the
+  transcript-replay sanitizer rewrites persisted `human` origins to
+  `unclassified` (see the `reply` section).
+- Unchanged and re-verified: socket path and namespace hash, `/tmp` except
+  under Termux, no `CLAUDE_HOME` read, 30s first-line timeout, 1 MiB line
+  cap, uid guard text, control-key mint (16 random bytes hex, 0600), the
+  verb schema, `has`/`list` blindness to parked jobs, both stubs, the
+  bracketed-paste + `\r`-after-10ms pty branch, and the worker enqueueing an
+  rv `reply` frame with `origin:{kind:"human"}`.
+

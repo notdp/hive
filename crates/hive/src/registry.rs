@@ -28,11 +28,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _, Result};
 use serde_json::{Map, Value};
 
-pub const MEMBER_FIELDS: [&str; 5] = ["name", "cli", "model", "sessionId", "cwd"];
+use crate::pyval::truthy;
 
-/// Serializes env-mutating tests across this crate's test modules.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub const MEMBER_FIELDS: [&str; 5] = ["name", "cli", "model", "sessionId", "cwd"];
 
 /// `^[A-Za-z0-9][A-Za-z0-9._-]*$`
 fn name_ok(team: &str) -> bool {
@@ -45,9 +43,7 @@ fn name_ok(team: &str) -> bool {
 }
 
 pub fn store_dir() -> PathBuf {
-    let home = std::env::var("HIVE_HOME")
-        .unwrap_or_else(|_| format!("{}/.hive", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home).join("state").join("teams")
+    crate::team::hive_home().join("state").join("teams")
 }
 
 /// The team's registry file, or None when the name could escape the store.
@@ -56,18 +52,6 @@ pub fn entry_path(team: &str) -> Option<PathBuf> {
         return None;
     }
     Some(store_dir().join(format!("{team}.json")))
-}
-
-/// Python truthiness for a JSON value.
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map_or(true, |f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
 }
 
 /// Python `str(...)` of an optional JSON value, for `createdAt` comparisons.
@@ -86,17 +70,16 @@ fn _valid(entry: &Value) -> bool {
         Some(o) => o,
         None => return false,
     };
-    if !obj.get("team").map_or(false, truthy) {
+    if !truthy(obj.get("team")) {
         return false;
     }
     let members = match obj.get("members").and_then(Value::as_array) {
         Some(m) => m,
         None => return false,
     };
-    members.iter().all(|m| {
-        m.as_object()
-            .map_or(false, |mo| mo.get("name").map_or(false, truthy))
-    })
+    members
+        .iter()
+        .all(|m| m.as_object().is_some_and(|mo| truthy(mo.get("name"))))
 }
 
 /// The valid registry entry for *team*, or None (missing/corrupt/unsafe).
@@ -185,6 +168,7 @@ pub fn locked() -> Result<StoreLock> {
     fs::create_dir_all(&root)?;
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .mode(0o600)
@@ -240,7 +224,7 @@ pub fn record_team(
     entry.insert("display".to_string(), Value::String(display.to_string()));
     let rows: Vec<Value> = members
         .iter()
-        .filter(|m| m.get("name").map_or(false, truthy))
+        .filter(|m| truthy(m.get("name")))
         .map(|m| Value::Object(_member_row(m)))
         .collect();
     entry.insert("members".to_string(), Value::Array(rows));
@@ -249,12 +233,52 @@ pub fn record_team(
     Ok("written")
 }
 
+/// A registry entry opened for one read-merge-write cycle; the store lock
+/// is held until this drops.
+struct Opened {
+    path: PathBuf,
+    entry: Map<String, Value>,
+    _lock: StoreLock,
+}
+
+enum Open {
+    Ready(Opened),
+    Refused(&'static str),
+}
+
+/// The write lane's shared prelude: lock the store, then load *team*'s
+/// entry. Refuses with `rejected` (unsafe name), `missing` (no entry: the
+/// team was deleted), or `stale` (*created_at*, when given, does not match
+/// the stored instance: a recycled name's successor is never edited into).
+fn open_instance(team: &str, created_at: &str) -> Result<Open> {
+    let path = match entry_path(team) {
+        Some(p) => p,
+        None => return Ok(Open::Refused("rejected")),
+    };
+    let _lock = locked()?;
+    let entry = match load(team) {
+        Some(e) => e,
+        None => return Ok(Open::Refused("missing")),
+    };
+    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
+        return Ok(Open::Refused("stale"));
+    }
+    Ok(Open::Ready(Opened { path, entry, _lock }))
+}
+
+fn member_rows(entry: &Map<String, Value>) -> Vec<Value> {
+    entry
+        .get("members")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Add or replace one member row in the team's roster (CLI write lane).
 ///
-/// Returns `written`, `missing` (no entry: the team was deleted), or `stale`
-/// (*created_at*, when given, does not match the stored instance: a
-/// recycled name's successor is never edited into). Neither refusal is a
-/// cue to seed an entry — only `record_team` creates one.
+/// Returns `written` or one of `open_instance`'s refusals
+/// (`rejected`/`missing`/`stale`). No refusal is a cue to seed an entry —
+/// only `record_team` creates one.
 pub fn record_member(
     team: &str,
     member: &Map<String, Value>,
@@ -264,23 +288,15 @@ pub fn record_member(
     if name.is_empty() {
         return Ok("rejected");
     }
-    let path = match entry_path(team) {
-        Some(p) => p,
-        None => return Ok("rejected"),
+    let Opened {
+        path,
+        mut entry,
+        _lock,
+    } = match open_instance(team, created_at)? {
+        Open::Ready(o) => o,
+        Open::Refused(verdict) => return Ok(verdict),
     };
-    let _lock = locked()?;
-    let mut entry = match load(team) {
-        Some(e) => e,
-        None => return Ok("missing"),
-    };
-    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("stale");
-    }
-    let mut rows: Vec<Value> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let mut rows = member_rows(&entry);
     rows.retain(|m| m.get("name").and_then(Value::as_str) != Some(name.as_str()));
     rows.push(Value::Object(_member_row(member)));
     entry.insert("members".to_string(), Value::Array(rows));
@@ -305,23 +321,15 @@ pub fn reserve_member(
     if name.is_empty() {
         return Ok("rejected");
     }
-    let path = match entry_path(team) {
-        Some(p) => p,
-        None => return Ok("rejected"),
+    let Opened {
+        path,
+        mut entry,
+        _lock,
+    } = match open_instance(team, created_at)? {
+        Open::Ready(o) => o,
+        Open::Refused(verdict) => return Ok(verdict),
     };
-    let _lock = locked()?;
-    let mut entry = match load(team) {
-        Some(e) => e,
-        None => return Ok("missing"),
-    };
-    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("stale");
-    }
-    let mut rows: Vec<Value> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let mut rows = member_rows(&entry);
     if rows
         .iter()
         .any(|m| m.get("name").and_then(Value::as_str) == Some(name.as_str()))
@@ -337,23 +345,15 @@ pub fn reserve_member(
 /// Drop one member row from the team's roster (CLI write lane).
 /// `missing`/`stale` refuse as in `record_member`.
 pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'static str> {
-    let path = match entry_path(team) {
-        Some(p) => p,
-        None => return Ok("rejected"),
+    let Opened {
+        path,
+        mut entry,
+        _lock,
+    } = match open_instance(team, created_at)? {
+        Open::Ready(o) => o,
+        Open::Refused(verdict) => return Ok(verdict),
     };
-    let _lock = locked()?;
-    let mut entry = match load(team) {
-        Some(e) => e,
-        None => return Ok("missing"),
-    };
-    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
-        return Ok("stale");
-    }
-    let mut rows: Vec<Value> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let mut rows = member_rows(&entry);
     rows.retain(|m| m.get("name").and_then(Value::as_str) != Some(name));
     entry.insert("members".to_string(), Value::Array(rows));
     _write_atomic(&path, &entry)?;
@@ -362,14 +362,13 @@ pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'stati
 
 /// Update the display cache (the tmux window id rendering the team).
 pub fn set_display(team: &str, display: &str) -> Result<&'static str> {
-    let path = match entry_path(team) {
-        Some(p) => p,
-        None => return Ok("rejected"),
-    };
-    let _lock = locked()?;
-    let mut entry = match load(team) {
-        Some(e) => e,
-        None => return Ok("missing"),
+    let Opened {
+        path,
+        mut entry,
+        _lock,
+    } = match open_instance(team, "")? {
+        Open::Ready(o) => o,
+        Open::Refused(verdict) => return Ok(verdict),
     };
     if entry.get("display").and_then(Value::as_str) == Some(display) {
         return Ok("unchanged");
@@ -404,7 +403,7 @@ pub fn backfill_members(
     // ponytail: linear scans — rosters are a handful of rows
     let mut rows: Vec<(String, Map<String, Value>)> = Vec::new();
     for m in existing {
-        if !m.get("name").map_or(false, truthy) {
+        if !truthy(m.get("name")) {
             continue;
         }
         let name = field_str(m, "name");
@@ -434,7 +433,8 @@ pub fn backfill_members(
 ///
 /// Refuses a missing entry (the CLI writer owns creation) and a
 /// foreign-instance entry (a recycled name's predecessor must not be
-/// overwritten from observation). Returns `written`/`missing`/`unchanged`.
+/// overwritten from observation). Returns `written`/`missing`/`unchanged`,
+/// or `rejected` for an unsafe team name.
 pub fn backfill(
     team: &str,
     observed: &[Map<String, Value>],
@@ -444,7 +444,7 @@ pub fn backfill(
 ) -> Result<&'static str> {
     let path = match entry_path(team) {
         Some(p) => p,
-        None => return Ok("missing"),
+        None => return Ok("rejected"),
     };
     let _lock = locked()?;
     let entry = match load(team) {
@@ -534,28 +534,28 @@ fn _write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {
     // json.dump(..., ensure_ascii=False, indent=2, sort_keys=True)
     let mut text = serde_json::to_string_pretty(&sort_keys(&Value::Object(entry.clone())))?;
     text.push('\n');
-    // Python swallows OSError from the write/replace step (tmp cleaned up).
     let result = file
         .write_all(text.as_bytes())
         .and_then(|_| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
+    result?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use std::collections::{BTreeSet, HashMap};
-    use std::sync::MutexGuard;
 
-    fn store() -> (tempfile::TempDir, PathBuf, MutexGuard<'static, ()>) {
-        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn store() -> (tempfile::TempDir, PathBuf, EnvGuard) {
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
         let store = tmp.path().join(".hive").join("state").join("teams");
-        (tmp, store, guard)
+        (tmp, store, env)
     }
 
     fn m(pairs: &[(&str, &str)]) -> Map<String, Value> {
@@ -630,11 +630,33 @@ mod tests {
     }
 
     #[test]
+    fn test_write_failure_surfaces_as_error() {
+        let (_tmp, store, _guard) = store();
+        // A directory squatting on the entry path makes the tmp→entry rename fail.
+        fs::create_dir_all(store.join("honey.json")).unwrap();
+        assert!(record_team("honey", "/ws", "1.0", &[], "").is_err());
+        assert!(load("honey").is_none());
+        let leftovers: Vec<_> = fs::read_dir(&store)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".reg."))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp file left behind: {leftovers:?}");
+    }
+
+    #[test]
     fn test_unsafe_names_cannot_escape_store() {
         let (_tmp, _store, _guard) = store();
         for name in ["../evil", "a/b", "", ".hidden", "a..b"] {
             assert!(entry_path(name).is_none());
             assert_eq!(record_team(name, "", "1.0", &[], "").unwrap(), "rejected");
+            let row = m(&[("name", "x")]);
+            assert_eq!(record_member(name, &row, "").unwrap(), "rejected");
+            assert_eq!(reserve_member(name, &row, "").unwrap(), "rejected");
+            assert_eq!(remove_member(name, "x", "").unwrap(), "rejected");
+            assert_eq!(set_display(name, "@1").unwrap(), "rejected");
+            assert_eq!(backfill(name, &[], "", "", "").unwrap(), "rejected");
         }
     }
 

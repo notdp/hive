@@ -1,19 +1,24 @@
 //! Protect user drafts when injecting text into TUI input boxes.
 //!
-//! Normal Hive delivery never touches the composer — claude goes over its
-//! per-pane MCP channel and codex over its per-pane daemon RPC. This module
-//! only serves the retained keystroke surfaces (`hive inject` debugging and
-//! the `/compact` TUI control): a naive `send-keys -l <msg>` + Enter would
-//! concatenate whatever the user was typing with the injected text, so this
-//! saves the draft, clears the input box, lets the caller inject + submit,
-//! then pastes the draft back via bracketed paste so multi-line content does
-//! not trigger an accidental submit.
+//! Normal Hive delivery never touches the composer: a claude member takes
+//! the supervisor daemon's `op:"reply"` (the inbox socket is the fallback),
+//! codex goes through the shared app-server daemon, grok through its
+//! per-pane leader. Two keystroke surfaces remain and are the callers here:
+//! `agent::_submit_interactive_text` (`hive inject`, and `/compact`, which
+//! is TUI vocabulary and has to be typed) uses the save/clear/restore
+//! trio, and the claude bg keyboard lane's `_composer_has_draft` uses
+//! `suspected_draft` to gate its kill-ring paste. On those paths a naive
+//! `send-keys -l <msg>` + Enter would concatenate whatever the user was
+//! typing with the injected text, so this saves the draft, clears the
+//! input box, lets the caller inject + submit, then pastes the draft back
+//! via bracketed paste so multi-line content does not trigger an accidental
+//! submit.
 //!
-//! Profiles differ in prompt glyph, baseline cursor_x, and clear-keys cost:
+//! Profiles differ in prompt glyph and clear-keys cost:
 //!
-//! - claude: `❯ ` with NO-BREAK SPACE (U+00A0) separator; cursor_x=2 in
-//!   empty state; C-u × 30 drains the input box
-//! - codex:  `› ` (U+203A + 0x20); cursor_x=2 in empty state; C-u × 30
+//! - claude: `❯ ` with NO-BREAK SPACE (U+00A0) separator; C-u × 30 drains
+//!   the input box
+//! - codex:  `› ` (U+203A + 0x20); C-u × 30
 
 use std::time::{Duration, Instant};
 
@@ -26,20 +31,16 @@ const WAIT_INPUT_EMPTY_INTERVAL: Duration = Duration::from_millis(50);
 
 struct ProfileConfig {
     name: &'static str,
-    #[allow(dead_code)] // mirrored from the Python dataclass; nothing reads it there either
-    baseline_cursor_x: Option<i64>,
     clear_repetitions: usize,
 }
 
 static PROFILES: [ProfileConfig; 2] = [
     ProfileConfig {
         name: "claude",
-        baseline_cursor_x: Some(2),
         clear_repetitions: 30,
     },
     ProfileConfig {
         name: "codex",
-        baseline_cursor_x: Some(2),
         clear_repetitions: 30,
     },
 ];
@@ -101,8 +102,8 @@ pub fn clear_input(pane_id: &str, profile_name: &str) -> Result<()> {
 
 /// Poll until suspected_draft returns false. Return true on success.
 ///
-/// Python default was timeout=1.5s, interval=0.05s; the interval is a
-/// module constant here because no caller ever overrides it.
+/// Callers pick the timeout; the poll interval is a module constant because
+/// no caller ever overrides it.
 pub fn wait_input_empty(pane_id: &str, profile_name: &str, timeout: Duration) -> Result<bool> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -125,8 +126,9 @@ fn capture_lines(pane_id: &str, profile_name: &str) -> Result<Vec<String>> {
     Ok(text.lines().map(str::to_string).collect())
 }
 
-// tmux boundary: thin wrappers so unit tests can substitute captures the way
-// the Python suite monkeypatches `draft_guard.tmux`.
+// tmux boundary: thin wrappers the unit tests answer through `tests::mock_*`
+// (canned display values and captures, recorded key batches) so no test
+// reaches a tmux server.
 
 fn tmux_display_value(target: &str, fmt: &str) -> Option<String> {
     #[cfg(test)]
@@ -403,8 +405,7 @@ mod tests {
         SENT_KEYS.with(|s| s.borrow().clone().unwrap_or_default())
     }
 
-    // Leading newline in fixtures lets us keep them tidy, same as the
-    // Python triple-quoted versions.
+    // Fixtures start with a newline so the screen text lines up in source.
     fn fixture_lines(text: &str) -> Vec<String> {
         text.trim_start_matches('\n')
             .lines()

@@ -27,6 +27,15 @@ const _DAEMON_START_TIMEOUT: f64 = 8.0;
 const _CONNECT_COOLDOWN: f64 = 5.0;
 const _RESUME_COOLDOWN: f64 = 5.0;
 
+/// Accepted-transport classification for durable delivery observations: the
+/// shared daemon took the turn. Not proof the turn produced output.
+pub const TURN_START_ACCEPTED: &str = "turnStartAccepted";
+
+/// Interrupt outcomes: the daemon aborted the running turn, or there was no
+/// turn to abort (an idle thread is nothing to interrupt, not a failure).
+pub const TURN_INTERRUPT_ACCEPTED: &str = "turnInterruptAccepted";
+pub const NO_RUNNING_TURN: &str = "noRunningTurn";
+
 mod client;
 mod daemon;
 mod records;

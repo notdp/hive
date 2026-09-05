@@ -9,14 +9,14 @@ use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
 use crate::agent::Agent;
-use crate::runtime_state::{format_hive_envelope, project_thread_event};
+use crate::message::{format_hive_envelope, project_thread_event};
 use crate::team::Team;
 use crate::{bus, devlog};
 
 use super::*;
 
 pub fn _thread_payload(workspace: &str, message_id: &str) -> Result<Map<String, Value>> {
-    let events = bus::read_events_with_ns(workspace)?;
+    let events = bus::read_events_with_seq(workspace)?;
     let mut send_events: HashMap<String, (i64, Map<String, Value>)> = HashMap::new();
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -155,7 +155,6 @@ pub fn _send_payload(
     workspace: &str,
     team_name: &str,
     sender_agent: &str,
-    _sender_pane: &str,
     target_agent: &str,
     body: &str,
     artifact: &str,

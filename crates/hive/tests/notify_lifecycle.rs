@@ -1,31 +1,10 @@
-//! Real-tmux e2e for the notify lifecycle (port of tests/e2e/test_notify_lifecycle.py).
+//! Real-tmux e2e for the notify lifecycle: fire, select-window, clear.
 //! Runs entirely inside its own detached session; never touches a live one.
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn have_tmux() -> bool {
-    Command::new("tmux").arg("-V").output().is_ok()
-}
-
-fn run_tmux(args: &[&str]) -> String {
-    let out = Command::new("tmux").args(args).output().expect("tmux runs");
-    assert!(
-        out.status.success(),
-        "tmux {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches('\n')
-        .to_string()
-}
-
-fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .output();
-}
+mod common;
+use common::{kill_session, require_tmux, run_tmux, EnvVarGuard};
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", std::process::id())
@@ -33,9 +12,7 @@ fn unique(prefix: &str) -> String {
 
 #[test]
 fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
-    if !have_tmux() {
-        return;
-    }
+    require_tmux();
     let session = unique("hive-e2e-notify-a");
     let result = std::panic::catch_unwind(|| {
         let window_target = run_tmux(&[
@@ -162,13 +139,12 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
     // after-select-window is a command hook: a scripted `select-window` fires
     // it on a detached session too, so the whole flow runs inside its own
     // session.
-    if !have_tmux() {
-        return;
-    }
+    require_tmux();
     let session = unique("hive-e2e-notify-b");
     // The select hook must call back into the real hive binary, not this
-    // test harness (current_exe here is the test executable).
-    std::env::set_var("HIVE_BIN", env!("CARGO_BIN_EXE_hive"));
+    // test harness (current_exe here is the test executable); `self_exe`
+    // reads HIVE_BIN first. The guard puts the variable back on the way out.
+    let _hive_bin = EnvVarGuard::set("HIVE_BIN", env!("CARGO_BIN_EXE_hive"));
     let result = std::panic::catch_unwind(|| {
         run_tmux(&[
             "new-session",

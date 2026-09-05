@@ -1,12 +1,11 @@
 //! The cvim toolkit: embedded popup-editor assets plus the hidden helper
 //! subcommands the `cvim-command` bash asset calls back into.
 //!
-//! Port of `src/hive/core_assets/cvim/bin/` — `_cvim_shared.py` and the five
-//! helper scripts (`cvim-sendback`, `cvim-payload`, `cvim-list`, `cvim-seed`,
-//! `cvim-session`) become `hive cvim-*` hidden subcommands; the bash driver
-//! and its vim/protocol resources are embedded and materialized under
-//! `$HIVE_HOME/core_assets/cvim/` at first use. `cvim-profile` replaces the
-//! bash script's inline `python3 - <<PY` profile probe.
+//! The helpers (`cvim-sendback`, `cvim-payload`, `cvim-list`, `cvim-seed`,
+//! `cvim-session`, `cvim-profile`) are `hive cvim-*` hidden subcommands the
+//! driver invokes through `$hive_bin`; the bash driver and its vim/protocol
+//! resources are embedded and materialized under
+//! `$HIVE_HOME/core_assets/cvim/` at first use.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,9 +26,7 @@ const PROTOCOL_JSON: &str = include_str!("../assets/cvim/resources/cvim_edit_pro
 /// (rewriting any file whose on-disk copy drifted from the embedded content)
 /// and return the `cvim-command` path.
 pub fn materialize_assets() -> anyhow::Result<PathBuf> {
-    let root = crate::core_hooks::hive_home()
-        .join("core_assets")
-        .join("cvim");
+    let root = crate::team::hive_home().join("core_assets").join("cvim");
     crate::core_hooks::materialize_asset_tree(
         &root,
         &[
@@ -42,10 +39,10 @@ pub fn materialize_assets() -> anyhow::Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// _cvim_shared.py
+// transcript helpers shared by the cvim-* subcommands
 // ---------------------------------------------------------------------------
 
-/// Python `hive.adapters.REGISTRY` iteration order.
+/// Probe order for the adapter that claims a transcript.
 const ADAPTER_NAMES: [&str; 3] = ["claude", "codex", "grok"];
 
 fn adapter_for(name: &str) -> Option<Box<dyn SessionAdapter>> {
@@ -102,42 +99,22 @@ pub(crate) struct RecentEntry {
     pub text: String,
 }
 
-/// Up to `limit` most-recent assistant messages, newest first.
+/// Up to `limit` most-recent assistant messages, newest first; `limit == 0`
+/// lists nothing. (`cvim-list` defaults to 10 and the bash driver never
+/// passes a limit.)
 pub(crate) fn list_recent_assistant_messages(file_path: &Path, limit: usize) -> Vec<RecentEntry> {
-    match _detect_adapter_for_transcript(file_path) {
-        Some(adapter) => _list_messages_via_adapter(&*adapter, file_path, limit),
-        None => _list_messages_via_raw_jsonl(file_path, limit),
-    }
-}
-
-fn _list_messages_via_adapter(
-    adapter: &dyn SessionAdapter,
-    file_path: &Path,
-    limit: usize,
-) -> Vec<RecentEntry> {
-    let messages: Vec<Message> = adapter.iter_messages(file_path).collect();
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    for message in messages.iter().rev() {
-        if message.role != "assistant" {
-            continue;
-        }
-        let text = _assistant_text_from_normalized_message(message);
-        if text.is_empty() {
-            continue;
-        }
-        out.push(RecentEntry {
-            offset,
-            timestamp: _format_timestamp_dt(message.timestamp.as_ref()),
-            preview: _build_preview(&text),
-            text,
-        });
-        offset += 1;
-        if offset >= limit {
-            break;
-        }
-    }
-    out
+    let adapter = _detect_adapter_for_transcript(file_path);
+    _with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
+        hits.take(limit)
+            .enumerate()
+            .map(|(offset, (text, timestamp))| RecentEntry {
+                offset,
+                timestamp,
+                preview: _build_preview(&text),
+                text,
+            })
+            .collect()
+    })
 }
 
 fn _read_lossy(path: &Path) -> Option<String> {
@@ -146,45 +123,51 @@ fn _read_lossy(path: &Path) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-fn _list_messages_via_raw_jsonl(file_path: &Path, limit: usize) -> Vec<RecentEntry> {
-    let Some(content) = _read_lossy(file_path) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    for line in content.lines().rev() {
-        let Some(obj) = crate::adapters::base::safe_json_loads(line) else {
-            continue;
-        };
-        if obj.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
+/// Walk the non-empty assistant texts newest first, each paired with its
+/// `HH:MM` timestamp, and hand `take` the iterator. When an adapter claims
+/// the transcript its `iter_messages` is collected into a Vec and walked in
+/// reverse, so the whole file is parsed before `take` sees the first hit;
+/// only the raw claude JSONL fallback (the file is still read whole) parses
+/// its lines lazily from the tail, stopping where `take` stops.
+fn _with_assistant_texts_newest_first<R>(
+    file_path: &Path,
+    adapter: Option<&dyn SessionAdapter>,
+    take: impl FnOnce(&mut dyn Iterator<Item = (String, String)>) -> R,
+) -> R {
+    match adapter {
+        Some(adapter) => {
+            let messages: Vec<Message> = adapter.iter_messages(file_path).collect();
+            let mut hits = messages
+                .iter()
+                .rev()
+                .filter(|message| message.role == "assistant")
+                .filter_map(|message| {
+                    let text = _assistant_text_from_normalized_message(message);
+                    (!text.is_empty())
+                        .then(|| (text, _format_timestamp_dt(message.timestamp.as_ref())))
+                });
+            take(&mut hits)
         }
-        let message = match obj.get("message") {
-            Some(Value::Object(m)) => m.clone(),
-            _ => Map::new(),
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let text = _assistant_text_from_raw_claude_message(&message);
-        if text.is_empty() {
-            continue;
-        }
-        out.push(RecentEntry {
-            offset,
-            timestamp: _format_timestamp_value(obj.get("timestamp")),
-            preview: _build_preview(&text),
-            text,
-        });
-        offset += 1;
-        if offset >= limit {
-            break;
+        None => {
+            let content = _read_lossy(file_path).unwrap_or_default();
+            let mut hits = content.lines().rev().filter_map(|line| {
+                let obj = crate::adapters::base::safe_json_loads(line)?;
+                if obj.get("type").and_then(Value::as_str) != Some("message") {
+                    return None;
+                }
+                let message = obj.get("message")?.as_object()?;
+                if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                    return None;
+                }
+                let text = _assistant_text_from_raw_claude_message(message);
+                (!text.is_empty()).then(|| (text, _format_timestamp_value(obj.get("timestamp"))))
+            });
+            take(&mut hits)
         }
     }
-    out
 }
 
-/// `HH:MM` in the local timezone, like `dt.astimezone().strftime("%H:%M")`.
+/// `HH:MM` of `epoch_secs` in the local timezone.
 fn _local_hhmm(epoch_secs: f64) -> String {
     let t = epoch_secs.floor() as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -197,8 +180,8 @@ fn _local_hhmm(epoch_secs: f64) -> String {
 fn _format_timestamp_dt(value: Option<&DateTime>) -> String {
     match value {
         None => String::new(),
-        // A naive datetime run through Python's astimezone() is taken as
-        // already-local: its own wall-clock fields survive.
+        // A timestamp without a UTC offset is taken as already local: its
+        // own wall-clock fields survive.
         Some(dt) if dt.utc_offset_secs.is_none() => format!("{:02}:{:02}", dt.hour, dt.minute),
         Some(dt) => _local_hhmm(dt.timestamp()),
     }
@@ -309,59 +292,14 @@ fn _assistant_text_from_normalized_message(message: &Message) -> String {
 
 /// The Nth assistant message from the end (0=last, 1=second-to-last, ...).
 pub(crate) fn extract_last_assistant_text(file_path: &Path, offset: usize) -> String {
-    if let Some(adapter) = _detect_adapter_for_transcript(file_path) {
-        let offset = resolve_assistant_offset(file_path, offset, Some(&*adapter));
-        return _extract_last_assistant_text_via_adapter(&*adapter, file_path, offset);
-    }
-    let Some(content) = _read_lossy(file_path) else {
-        return String::new();
+    let adapter = _detect_adapter_for_transcript(file_path);
+    let offset = match adapter.as_deref() {
+        Some(adapter) => resolve_assistant_offset(file_path, offset, Some(adapter)),
+        None => offset,
     };
-    let mut skip = offset;
-    for line in content.lines().rev() {
-        let Some(obj) = crate::adapters::base::safe_json_loads(line) else {
-            continue;
-        };
-        if obj.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let message = match obj.get("message") {
-            Some(Value::Object(m)) => m.clone(),
-            _ => Map::new(),
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let text = _assistant_text_from_raw_claude_message(&message);
-        if !text.is_empty() {
-            if skip == 0 {
-                return text;
-            }
-            skip -= 1;
-        }
-    }
-    String::new()
-}
-
-fn _extract_last_assistant_text_via_adapter(
-    adapter: &dyn SessionAdapter,
-    file_path: &Path,
-    offset: usize,
-) -> String {
-    let messages: Vec<Message> = adapter.iter_messages(file_path).collect();
-    let mut skip = offset;
-    for message in messages.iter().rev() {
-        if message.role != "assistant" {
-            continue;
-        }
-        let text = _assistant_text_from_normalized_message(message);
-        if !text.is_empty() {
-            if skip == 0 {
-                return text;
-            }
-            skip -= 1;
-        }
-    }
-    String::new()
+    _with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
+        hits.nth(offset).map(|(text, _)| text).unwrap_or_default()
+    })
 }
 
 pub(crate) fn resolve_assistant_offset(
@@ -562,47 +500,51 @@ fn _claude_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fi
 
 fn _codex_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     use crate::adapters::codex_app_server;
-
-    if codex_app_server::thread_id_for_pane(pane).is_none() {
-        return (
-            NO_NATIVE_ADDRESS,
-            vec![
-                ("route", "tmuxKeys".into()),
-                ("why", "no_recorded_thread".into()),
-            ],
-        );
-    }
-    let mut fields: Fields = vec![("route", "codexThread".into())];
-    if interrupt {
-        let accepted = codex_app_server::interrupt_pane(pane);
-        fields.push(("interrupt", accepted.unwrap_or("failed").into()));
-        if accepted.is_none() && text.is_none() {
-            return (REFUSED, fields);
-        }
-    }
-    let Some(text) = text else {
-        return (OK, fields);
-    };
-    let accepted = codex_app_server::send_to_pane(pane, text);
-    fields.push(("send", accepted.unwrap_or("failed").into()));
-    (if accepted.is_some() { OK } else { REFUSED }, fields)
+    _daemon_sendback(
+        pane,
+        text,
+        interrupt,
+        ("codexThread", "no_recorded_thread"),
+        codex_app_server::thread_id_for_pane(pane).is_some(),
+        codex_app_server::interrupt_pane,
+        codex_app_server::send_to_pane,
+    )
 }
 
 fn _grok_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     use crate::adapters::grok_leader;
+    _daemon_sendback(
+        pane,
+        text,
+        interrupt,
+        ("grokSession", "no_recorded_session"),
+        grok_leader::session_id_for_pane(pane).is_some(),
+        grok_leader::interrupt_pane,
+        grok_leader::send_to_pane,
+    )
+}
 
-    if grok_leader::session_id_for_pane(pane).is_none() {
+/// The daemon-addressed CLIs share one sendback shape: a pane with no
+/// recorded address falls back to the composer, otherwise the interrupt
+/// and the send each go through the daemon and report their verdict.
+fn _daemon_sendback(
+    pane: &str,
+    text: Option<&str>,
+    interrupt: bool,
+    (route, no_address_why): (&str, &str),
+    has_address: bool,
+    interrupt_pane: fn(&str) -> Option<&'static str>,
+    send_to_pane: fn(&str, &str) -> Option<&'static str>,
+) -> (i32, Fields) {
+    if !has_address {
         return (
             NO_NATIVE_ADDRESS,
-            vec![
-                ("route", "tmuxKeys".into()),
-                ("why", "no_recorded_session".into()),
-            ],
+            vec![("route", "tmuxKeys".into()), ("why", no_address_why.into())],
         );
     }
-    let mut fields: Fields = vec![("route", "grokSession".into())];
+    let mut fields: Fields = vec![("route", route.into())];
     if interrupt {
-        let accepted = grok_leader::interrupt_pane(pane);
+        let accepted = interrupt_pane(pane);
         fields.push(("interrupt", accepted.unwrap_or("failed").into()));
         if accepted.is_none() && text.is_none() {
             return (REFUSED, fields);
@@ -611,7 +553,7 @@ fn _grok_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fiel
     let Some(text) = text else {
         return (OK, fields);
     };
-    let accepted = grok_leader::send_to_pane(pane, text);
+    let accepted = send_to_pane(pane, text);
     fields.push(("send", accepted.unwrap_or("failed").into()));
     (if accepted.is_some() { OK } else { REFUSED }, fields)
 }
@@ -855,8 +797,7 @@ pub fn list_main(args: &[String]) -> i32 {
         eprintln!("cvim-list: cannot write {}", menu_json.display());
         return 1;
     }
-    // The bash driver reads the count from stdout (the Python original left
-    // counting to a `python3 -c` one-liner the Rust binary no longer has).
+    // The bash driver reads the entry count from stdout.
     println!("{}", entries.len());
     0
 }
@@ -866,17 +807,16 @@ pub fn list_main(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 pub fn seed_main(args: &[String]) -> i32 {
-    // 2-arg: cwd dst / 3-arg: + preferred / 4-arg: + offset
-    if !(2..=4).contains(&args.len()) {
-        eprintln!("usage: cvim-seed <cwd> <dst> [preferred] [offset]");
+    if !(1..=3).contains(&args.len()) {
+        eprintln!("usage: cvim-seed <dst> [preferred] [offset]");
         return 1;
     }
-    let dst = Path::new(&args[1]);
-    let preferred = match args.get(2) {
+    let dst = Path::new(&args[0]);
+    let preferred = match args.get(1) {
         Some(p) if !p.is_empty() => Some(PathBuf::from(p)),
         _ => None,
     };
-    let offset: usize = match args.get(3) {
+    let offset: usize = match args.get(2) {
         Some(raw) if !raw.is_empty() => match raw.parse() {
             Ok(offset) => offset,
             Err(_) => {
@@ -905,7 +845,8 @@ pub fn session_main(args: &[String]) -> i32 {
     0
 }
 
-/// Replaces the bash inline `python3 - <<PY` probe: profile name for a pane.
+/// Profile name for a pane, printed for the bash driver (nothing when no
+/// agent CLI is recognized there).
 pub fn profile_main(args: &[String]) -> i32 {
     let pane = args.first().map(String::as_str).unwrap_or("");
     if let Some(profile) = crate::agent_cli::detect_profile_for_pane(pane) {
@@ -948,7 +889,6 @@ mod difflib {
         b2j
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn find_longest_match(
         a: &[&str],
         b: &[&str],
@@ -960,9 +900,9 @@ mod difflib {
     ) -> (usize, usize, usize) {
         let (mut besti, mut bestj, mut bestsize) = (alo, blo, 0usize);
         let mut j2len: HashMap<usize, usize> = HashMap::new();
-        for i in alo..ahi {
+        for (i, item) in a.iter().enumerate().take(ahi).skip(alo) {
             let mut newj2len: HashMap<usize, usize> = HashMap::new();
-            if let Some(indices) = b2j.get(a[i]) {
+            if let Some(indices) = b2j.get(item) {
                 for &j in indices {
                     if j < blo {
                         continue;
@@ -1092,7 +1032,7 @@ mod difflib {
             }
             group.push((tag, i1, i2, j1, j2));
         }
-        if !group.is_empty() && !(group.len() == 1 && group[0].0 == "equal") {
+        if !group.is_empty() && (group.len() != 1 || group[0].0 != "equal") {
             groups.push(group);
         }
         groups
@@ -1111,7 +1051,7 @@ mod difflib {
     }
 
     /// `difflib.unified_diff(a, b, fromfile="", tofile="")`, one output line
-    /// per element (lines keep their own endings like Python keepends).
+    /// per element (lines keep their own line endings).
     pub fn unified_diff(a_text: &str, b_text: &str) -> Vec<String> {
         let a = split_keepends(a_text);
         let b = split_keepends(b_text);
@@ -1178,7 +1118,7 @@ mod tests {
         path
     }
 
-    // -- tests/unit/test_cvim_command.py (shared-lib seams) ------------------
+    // -- transcript helpers --------------------------------------------------
 
     #[test]
     fn test_extract_includes_exit_spec_mode_plan_with_text() {
@@ -1233,7 +1173,24 @@ mod tests {
         assert_eq!(entries[0].timestamp, "");
     }
 
-    // -- tests/unit/test_cvim_payload.py -------------------------------------
+    #[test]
+    fn test_list_recent_assistant_messages_honors_limit_and_zero_lists_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let session = make_claude_session(
+            tmp.path(),
+            &[
+                serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "answer A"}]}),
+                serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "answer B"}]}),
+            ],
+        );
+        let one = list_recent_assistant_messages(&session, 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].offset, 0);
+        assert_eq!(one[0].text, "answer B");
+        assert!(list_recent_assistant_messages(&session, 0).is_empty());
+    }
+
+    // -- cvim-payload --------------------------------------------------------
 
     fn build_payload_via_main(
         tmp: &Path,
@@ -1442,15 +1399,10 @@ mod tests {
             ],
         );
         let dst = tmp.path().join("message.md");
-        let args: Vec<String> = [
-            "/repo",
-            dst.to_str().unwrap(),
-            session.to_str().unwrap(),
-            "0",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args: Vec<String> = [dst.to_str().unwrap(), session.to_str().unwrap(), "0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(seed_main(&args), 0);
         assert_eq!(fs::read_to_string(&dst).unwrap(), "seeded\n");
     }
@@ -1459,10 +1411,7 @@ mod tests {
     fn test_seed_main_blank_without_preferred() {
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("message.md");
-        let args: Vec<String> = ["/repo", dst.to_str().unwrap()]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = vec![dst.to_str().unwrap().to_string()];
         assert_eq!(seed_main(&args), 0);
         assert_eq!(fs::read_to_string(&dst).unwrap(), "");
     }
@@ -1500,7 +1449,8 @@ mod tests {
     fn test_materialize_assets_writes_and_heals_the_tree() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path());
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("HIVE_HOME", tmp.path());
         let command = materialize_assets().unwrap();
         assert!(command.ends_with("core_assets/cvim/bin/cvim-command"));
         assert_eq!(fs::read_to_string(&command).unwrap(), CVIM_COMMAND);
