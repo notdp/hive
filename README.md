@@ -83,6 +83,8 @@ An interactive Claude session has no attachable pty (`claude attach` is job-only
 
 The display layer binds it automatically for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume, and the pane is read-only. Delivery is unaffected: the same missing job row routes `hive send` to the live interactive session instead of the pane. Nobody can type at that member except the app that owns the session.
 
+The mirror is drawn as the window's narrow left rail: 14 columns, in which `hive view` shows a status column (member, busy or idle, HIVE messages since it opened, the last message's age and first words) instead of the transcript. A click on the rail widens it to 45% and a second click folds it back; `prefix+z` zooms it like any pane. `hive mirror on|off` shows or hides it (no argument toggles). One heuristic withholds it: a `hive create` / `join` / `attach` (or a `hive spawn` that rebuilds a lost window) run from a Claude desktop terminal panel (`TERM_PROGRAM=claude-desktop`, a tty on stdin) whose cwd is the session's own is already looking at that conversation, so the window records `@hive-mirror off` — an `attach` that finds the window still showing that session's rail takes the rail down once, the same way. It only speaks while the window records nothing; `hive mirror on` overrides it.
+
 ## Upgrade
 
 Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.

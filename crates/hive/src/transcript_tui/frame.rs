@@ -555,10 +555,176 @@ fn draw_viewer(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(hint).style(base), footer);
 }
 
+// ---------------------------------------------------------------------------
+// The rail: what a 14-column mirror pane can say about the session
+// ---------------------------------------------------------------------------
+
+/// Age of a transcript instant, one unit: `5s`, `3m`, `2h`, `4d`.
+pub(super) fn fmt_age(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86400)
+    }
+}
+
+/// Newlines and runs of whitespace collapsed to one space.
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The rail's name: the session's title badge, else who the last HIVE
+/// envelope on screen was addressed to, else `mirror`.
+fn rail_name(app: &App) -> String {
+    if let Some(badge) = &app.chrome.badge {
+        return badge.clone();
+    }
+    let addressed = app.rfind_block(
+        |b| matches!(b, DisplayBlock::User(u) if u.hive.as_ref().is_some_and(|m| m.to.is_some())),
+    );
+    match addressed {
+        Some(DisplayBlock::User(u)) => u.hive.and_then(|m| m.to).unwrap_or_default(),
+        _ => "mirror".to_string(),
+    }
+}
+
+/// Rows 5.. of the rail: the last user or assistant block's words behind
+/// their source prefix, folded to [`RAIL_WORD_ROWS`].
+fn rail_word_lines(t: &ViewTheme, block: &DisplayBlock, inner: usize) -> Vec<Line<'static>> {
+    let (prefix, prefix_style, text) = match block {
+        DisplayBlock::User(u) => match &u.hive {
+            Some(m) => ("▏", fg(t.accent_model), collapse_ws(&m.body)),
+            None => ("❯ ", fg(t.accent_user), collapse_ws(&u.text)),
+        },
+        DisplayBlock::Assistant(a) => ("", fg(t.gray), collapse_ws(&a.markdown)),
+        _ => return Vec::new(),
+    };
+    let prefix_w = UnicodeWidthStr::width(prefix);
+    let bw = inner.saturating_sub(prefix_w);
+    if bw < 2 || text.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = wrap_plain(&text, bw);
+    if rows.len() > RAIL_WORD_ROWS {
+        rows.truncate(RAIL_WORD_ROWS);
+        let last = rows.pop().unwrap_or_default();
+        rows.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, words)| {
+            let lead = if i == 0 {
+                Span::styled(prefix.to_string(), prefix_style)
+            } else {
+                Span::raw(" ".repeat(prefix_w))
+            };
+            Line::from(vec![lead, Span::styled(words, fg(t.text_secondary))])
+        })
+        .collect()
+}
+
+/// The rail: what a 14-column mirror pane can say about the session.
+pub(super) fn rail_lines(app: &App, width: usize, now_ms: i64) -> Vec<Line<'static>> {
+    if width < 4 {
+        return Vec::new();
+    }
+    let t = app.theme;
+    let inner = width - 2;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        rail_name(app),
+        bold(t.text_primary),
+    )));
+    if app.parser.busy() {
+        let elapsed_ms = app
+            .parser
+            .turn_started_ms()
+            .map(|start| (now_ms - start).max(0))
+            .unwrap_or(0);
+        let frame = SPINNER[((elapsed_ms / SPINNER_MS) as usize) % SPINNER.len()];
+        let worked = crate::transcript_view::format_worked_duration(elapsed_ms as f64 / 1000.0);
+        lines.push(Line::from(Span::styled(
+            format!("{frame} {worked}"),
+            fg(t.accent_model),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled("○ idle".to_string(), fg(t.gray))));
+    }
+    lines.push(Line::default());
+    let new = app.hive_since_open();
+    let count_style = if new > 0 {
+        fg(t.accent_model)
+    } else {
+        fg(t.gray)
+    };
+    lines.push(Line::from(Span::styled(
+        format!("✉ {new} new"),
+        count_style,
+    )));
+    let last = app.rfind_block(|b| matches!(b, DisplayBlock::User(_) | DisplayBlock::Assistant(_)));
+    let stamp = match &last {
+        Some(DisplayBlock::User(u)) => u.timestamp.as_ref(),
+        Some(DisplayBlock::Assistant(a)) => a.timestamp.as_ref(),
+        _ => None,
+    };
+    lines.push(match stamp {
+        Some(ts) => Line::from(Span::styled(
+            format!("{} ago", fmt_age((now_ms - ts.epoch_ms) / 1000)),
+            fg(t.gray),
+        )),
+        None => Line::default(),
+    });
+    if let Some(block) = &last {
+        lines.extend(rail_word_lines(t, block, inner));
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(line.spans);
+            clip_spans(spans, inner + 1)
+        })
+        .collect()
+}
+
+/// Paint the rail over the whole pane. Nothing on it is clickable, so the
+/// scroll hit rect is emptied: a stray click lands on nothing.
+fn draw_rail(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64) {
+    let t = app.theme;
+    let base = Style::default().bg(t.bg_base).fg(t.text_primary);
+    let lines = rail_lines(app, area.width as usize, now_ms);
+    frame.render_widget(Paragraph::new(lines).style(base), area);
+    if area.height >= 9 {
+        let hint = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        let line = clip_spans(
+            vec![Span::styled(" q quit".to_string(), fg(t.gray))],
+            area.width as usize,
+        );
+        frame.render_widget(Paragraph::new(line).style(base), hint);
+    }
+    app.scroll_rect = Rect::default();
+    app.viewport_h = 0;
+}
+
 pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let t = app.theme;
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(t.bg_base)), area);
+    app.rail = area.width <= RAIL_MAX_WIDTH;
+    if app.rail {
+        draw_rail(frame, app, area, now_ms());
+        return;
+    }
     if area.width < 10 || area.height < 4 {
         return;
     }
@@ -728,6 +894,7 @@ pub(super) fn load_backlog(app: &mut App, lines: &mut LineAccumulator, backlog: 
     for raw in &whole[tail_from..] {
         app.push_raw(raw);
     }
+    app.mark_opened();
 }
 
 /// Read everything appended since the last poll; only whole rows reach the

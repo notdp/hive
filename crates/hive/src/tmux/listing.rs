@@ -12,6 +12,14 @@ pub struct PaneInfo {
     pub group: String,
 }
 
+impl PaneInfo {
+    /// A pane standing for a member: hosting its engine (`agent`) or
+    /// mirroring it read-only (`mirror`).
+    pub fn is_member_pane(&self) -> bool {
+        self.role == "agent" || self.role == "mirror"
+    }
+}
+
 // Adding a column means touching three places: the format string, its field
 // count const, and the positional `p[n]` reads in the parser below.
 pub const _PANE_BASE_FMT: &str = concat!(

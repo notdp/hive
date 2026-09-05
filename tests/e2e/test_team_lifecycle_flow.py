@@ -11,8 +11,10 @@ import pytest
 from tests.e2e._helpers import (
     base_env,
     hive_binary_argv,
+    kill_private_server,
     run_hive_in_tmux_pane,
     run_tmux,
+    tmux_argv,
 )
 
 
@@ -29,7 +31,7 @@ def test_e2e_create_team_inspect_and_delete():
     session = f"hive-e2e-{uuid.uuid4().hex[:8]}"
     workspace = workdir / "ws"
 
-    pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}"]).stdout.strip()
+    pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}"], env=env).stdout.strip()
 
     def run_in_pane(args: list[str]) -> subprocess.CompletedProcess[str]:
         return run_hive_in_tmux_pane(pane_a, args, env=env, cwd=workdir)
@@ -51,7 +53,7 @@ def test_e2e_create_team_inspect_and_delete():
         assert delete_result.returncode == 0, delete_result.stdout
         assert not registry_entry.exists()
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)
+        kill_private_server(env)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -61,7 +63,7 @@ def test_e2e_create_outside_tmux_builds_a_session_window_and_delete_closes_it():
     Bash) builds a detached session named after the team holding the team
     window, and `hive delete` closes that session again. The commands run
     as plain subprocesses with every tmux and engine marker stripped; the
-    session lands on the default server under a unique name, like the
+    session lands on the test's private server (`TMUX_TMPDIR`), like the
     sessions the other e2e tests create."""
     workdir = Path(tempfile.mkdtemp(prefix="hive-e2e-", dir="/tmp"))
     env = {**os.environ, **base_env(workdir)}
@@ -80,11 +82,11 @@ def test_e2e_create_outside_tmux_builds_a_session_window_and_delete_closes_it():
         create_result = hive(["create", team, "--workspace", str(workspace)])
         assert create_result.returncode == 0, create_result.stderr
         assert f"Team '{team}' created" in create_result.stdout, create_result.stdout
-        run_tmux(["has-session", "-t", f"={team}"])
+        run_tmux(["has-session", "-t", f"={team}"], env=env)
         # `-u`: a client without a UTF-8 locale gets tabs sanitized to `_`.
         rows = [
             line.split("\t")
-            for line in run_tmux(["-u", "list-windows", "-t", f"={team}", "-F", "#{window_id}\t#{@hive-team}"]).stdout.splitlines()
+            for line in run_tmux(["-u", "list-windows", "-t", f"={team}", "-F", "#{window_id}\t#{@hive-team}"], env=env).stdout.splitlines()
         ]
         assert [row[1] for row in rows] == [team], rows
         entry = json.loads(registry_entry.read_text())
@@ -104,8 +106,8 @@ def test_e2e_create_outside_tmux_builds_a_session_window_and_delete_closes_it():
         assert not workspace.exists()
         # The team window was the session's only window: closing it took
         # the session hive had built with it.
-        assert subprocess.run(["tmux", "has-session", "-t", f"={team}"], capture_output=True).returncode != 0
+        assert subprocess.run(tmux_argv(["has-session", "-t", f"={team}"], env), env=env, capture_output=True).returncode != 0
     finally:
         subprocess.run([*hive_binary_argv(), "delete", team, "--delete-workspace"], env=env, cwd=workdir, capture_output=True, text=True, timeout=60)
-        subprocess.run(["tmux", "kill-session", "-t", f"={team}"], capture_output=True, text=True)
+        kill_private_server(env)
         shutil.rmtree(workdir, ignore_errors=True)

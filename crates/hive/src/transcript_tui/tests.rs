@@ -57,6 +57,17 @@ fn assistant_text_row(text: &str) -> String {
     assistant_text_row_at(FIXTURE_CWD, text)
 }
 
+/// A user row carrying one bare HIVE envelope.
+fn hive_row(from: &str, to: &str, msg_id: &str, body: &str) -> String {
+    user_row(&format!(
+        "<HIVE from={from} to={to} msgId={msg_id}>\n{body}\n</HIVE>"
+    ))
+}
+
+fn custom_title_row(title: &str) -> String {
+    json!({"type": "custom-title", "customTitle": title}).to_string()
+}
+
 fn assistant_text_row_at(cwd: &str, text: &str) -> String {
     json!({
         "type": "assistant", "gitBranch": "rs-rewrite", "cwd": cwd,
@@ -1270,4 +1281,298 @@ fn test_drain_reader_parses_a_whole_row_at_once() {
     .unwrap();
     let text = buffer_text(&draw_to_buffer(&mut app, W, H));
     assert!(text.contains("whole row"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// The rail
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rail_renders_name_state_count_and_last_words_at_12_cols() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&hive_row("comb.dodo", "comb.rex", "a1", "review the spec"));
+    app.push_raw(&assistant_text_row("ok"));
+    app.mark_opened();
+    let buf = draw_to_buffer(&mut app, 12, 20);
+    let text = buffer_text(&buf);
+    let name = row_text(&buf, 0);
+    assert!(name.contains("comb.rex"), "{name:?}");
+    assert!(!name.contains("comb.dodo"), "{name:?}");
+    assert_eq!(row_text(&buf, 1).trim(), "○ idle");
+    assert!(row_text(&buf, 3).contains("✉ 0 new"), "{text}");
+    // The last message on screen is the assistant's `ok`; a HIVE body is the
+    // words when it is the last one.
+    assert!(text.contains(" ok"), "{text}");
+    assert!(!text.contains("<HIVE"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&hive_row("comb.dodo", "comb.rex", "a1", "review the spec"));
+    app.mark_opened();
+    let buf = draw_to_buffer(&mut app, 12, 20);
+    let text = buffer_text(&buf);
+    let words: Vec<String> = (5..8).map(|y| row_text(&buf, y)).collect();
+    assert!(words[0].contains('▏'), "{words:?}");
+    let joined = words.iter().map(|w| w.trim()).collect::<Vec<_>>().join(" ");
+    assert!(joined.contains("review the"), "{words:?}");
+    assert!(!text.contains("<HIVE"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+    // Row 2 is the blank separator under the state line.
+    assert_eq!(row_text(&buf, 2).trim(), "");
+}
+
+#[test]
+fn test_rail_counts_hive_messages_since_open_not_before() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    let mut lines = LineAccumulator::new();
+    let backlog = format!(
+        "{}\n{}\n",
+        hive_row("comb.dodo", "comb.rex", "a1", "one"),
+        hive_row("comb.dodo", "comb.rex", "a2", "two")
+    );
+    load_backlog(&mut app, &mut lines, backlog.as_bytes());
+    let buf = draw_to_buffer(&mut app, 14, 20);
+    assert!(
+        row_text(&buf, 3).contains("✉ 0 new"),
+        "{}",
+        buffer_text(&buf)
+    );
+    app.push_raw(&hive_row("comb.dodo", "comb.rex", "a3", "three"));
+    let buf = draw_to_buffer(&mut app, 14, 20);
+    assert!(
+        row_text(&buf, 3).contains("✉ 1 new"),
+        "{}",
+        buffer_text(&buf)
+    );
+}
+
+#[test]
+fn test_rail_busy_shows_the_spinner_and_elapsed() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&user_row("go"));
+    assert!(app.parser.busy());
+    let ts = app.parser.turn_started_ms().unwrap();
+    let lines = rail_lines(&app, 14, ts + 5_000);
+    let row: String = lines[1]
+        .spans
+        .iter()
+        .map(|s| s.content.to_string())
+        .collect();
+    assert!(SPINNER.iter().any(|f| row.contains(f)), "{row:?}");
+    assert!(
+        row.contains(&crate::transcript_view::format_worked_duration(5.0)),
+        "{row:?}"
+    );
+    assert!(!row.contains("idle"), "{row:?}");
+    // The human's prompt is the last message: `❯ ` leads its words.
+    let words: String = lines[5]
+        .spans
+        .iter()
+        .map(|s| s.content.to_string())
+        .collect();
+    assert_eq!(words.trim(), "❯ go");
+}
+
+#[test]
+fn test_rail_name_prefers_the_title_badge_over_the_hive_address() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&user_row("plain"));
+    assert_eq!(
+        row_text(&draw_to_buffer(&mut app, 12, 20), 0).trim(),
+        "mirror"
+    );
+    app.push_raw(&hive_row("comb.dodo", "comb.rex", "a1", "hi"));
+    assert_eq!(
+        row_text(&draw_to_buffer(&mut app, 12, 20), 0).trim(),
+        "comb.rex"
+    );
+    app.push_raw(&custom_title_row("[honey] plan"));
+    assert_eq!(
+        row_text(&draw_to_buffer(&mut app, 12, 20), 0).trim(),
+        "honey"
+    );
+    app.push_raw(&custom_title_row(""));
+    assert_eq!(
+        row_text(&draw_to_buffer(&mut app, 12, 20), 0).trim(),
+        "comb.rex"
+    );
+
+    assert_eq!(
+        parse_title_badge("[honey.dodo]").as_deref(),
+        Some("honey.dodo")
+    );
+    assert_eq!(parse_title_badge("[ honey ] x").as_deref(), Some("honey"));
+    assert_eq!(parse_title_badge("plain"), None);
+    assert_eq!(parse_title_badge("[]"), None);
+    assert_eq!(parse_title_badge(""), None);
+}
+
+#[test]
+fn test_rail_age_buckets() {
+    assert_eq!(fmt_age(5), "5s");
+    assert_eq!(fmt_age(61), "1m");
+    assert_eq!(fmt_age(7200), "2h");
+    assert_eq!(fmt_age(3 * 86400), "3d");
+    assert_eq!(fmt_age(-1), "0s");
+}
+
+#[test]
+fn test_rail_shows_the_last_messages_age() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&user_row("hi"));
+    app.push_raw(&assistant_text_row("done"));
+    // The assistant row is stamped 12:44:06; two minutes later it reads 2m.
+    let stamped = match app.rfind_block(|b| matches!(b, DisplayBlock::Assistant(_))) {
+        Some(DisplayBlock::Assistant(a)) => a.timestamp.unwrap().epoch_ms,
+        other => panic!("{other:?}"),
+    };
+    let lines = rail_lines(&app, 14, stamped + 120_000);
+    let age: String = lines[4]
+        .spans
+        .iter()
+        .map(|s| s.content.to_string())
+        .collect();
+    assert_eq!(age.trim(), "2m ago");
+}
+
+#[test]
+fn test_rail_folds_long_words_with_an_ellipsis() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&assistant_text_row(
+        "one two three four five six seven eight nine ten eleven twelve thirteen\n\nfourteen",
+    ));
+    let lines = rail_lines(&app, 14, 0);
+    let words: Vec<String> = lines[5..]
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(words.len(), RAIL_WORD_ROWS, "{words:?}");
+    assert!(words.last().unwrap().ends_with('…'), "{words:?}");
+    assert!(
+        words
+            .iter()
+            .all(|w| UnicodeWidthStr::width(w.as_str()) <= 13),
+        "{words:?}"
+    );
+}
+
+#[test]
+fn test_rail_and_transcript_flip_with_width() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&hive_row("comb.dodo", "comb.rex", "a1", "review the spec"));
+    app.push_raw(&assistant_text_row("ok"));
+    let wide = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+    assert!(wide.contains("read-only") && wide.contains('╭'), "{wide}");
+    assert!(!app.rail);
+    let narrow = draw_to_buffer(&mut app, 12, 30);
+    let text = buffer_text(&narrow);
+    assert!(!text.contains("read-only") && !text.contains('╭'), "{text}");
+    assert!(row_text(&narrow, 0).contains("comb.rex"), "{text}");
+    assert!(app.rail);
+    let just_above = buffer_text(&draw_to_buffer(&mut app, 25, 30));
+    assert!(just_above.contains('╭'), "{just_above}");
+    assert!(!app.rail);
+    let wide_again = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+    assert_eq!(wide_again, wide);
+}
+
+#[test]
+fn test_rail_paints_both_themes() {
+    let _tz = utc();
+    for theme in [&GROKNIGHT, &GROKDAY] {
+        let mut app = App::new(theme);
+        app.push_raw(&hive_row("comb.dodo", "comb.rex", "a1", "hi"));
+        // Busy: the turn the envelope opened is still running.
+        let buf = draw_to_buffer(&mut app, 14, 20);
+        assert_eq!(buf.cell((0, 0)).unwrap().style().bg, Some(theme.bg_base));
+        let name = buf.cell((1, 0)).unwrap();
+        assert_eq!(name.symbol(), "c");
+        assert_eq!(name.style().fg, Some(theme.text_primary));
+        assert_eq!(name.style().bg, Some(theme.bg_base));
+        assert_eq!(
+            buf.cell((1, 1)).unwrap().style().fg,
+            Some(theme.accent_model)
+        );
+        let lead = buf.cell((1, 5)).unwrap();
+        assert_eq!(lead.symbol(), "▏");
+        assert_eq!(lead.style().fg, Some(theme.accent_model));
+        assert_eq!(
+            buf.cell((2, 5)).unwrap().style().fg,
+            Some(theme.text_secondary)
+        );
+        assert_eq!(buf.cell((13, 19)).unwrap().style().bg, Some(theme.bg_base));
+        // Idle once the assistant answered.
+        app.push_raw(&assistant_text_row("ok"));
+        let buf = draw_to_buffer(&mut app, 14, 20);
+        assert_eq!(buf.cell((1, 1)).unwrap().style().fg, Some(theme.gray));
+        assert_eq!(buf.cell((1, 5)).unwrap().symbol(), "o");
+        assert_eq!(
+            buf.cell((1, 5)).unwrap().style().fg,
+            Some(theme.text_secondary)
+        );
+    }
+}
+
+#[test]
+fn test_rail_hint_needs_a_tall_enough_pane() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&user_row("hi"));
+    let tall = draw_to_buffer(&mut app, 14, 9);
+    assert_eq!(row_text(&tall, 8).trim(), "q quit");
+    let short = draw_to_buffer(&mut app, 14, 8);
+    assert!(!buffer_text(&short).contains("q quit"));
+}
+
+#[test]
+fn test_rail_mode_ignores_navigation_keys_but_quits() {
+    let _tz = utc();
+    let mut app = App::new(&GROKNIGHT);
+    app.push_raw(&user_row("hi"));
+    app.push_raw(&assistant_text_row("ok"));
+    // A wide draw first, so the hit rect and the selectable layout are
+    // the transcript's; the rail draw must empty them.
+    draw_to_buffer(&mut app, 120, 30);
+    assert_ne!(app.scroll_rect, Rect::default());
+    draw_to_buffer(&mut app, 12, 20);
+    assert_eq!(app.scroll_rect, Rect::default());
+    assert_eq!(app.viewport_h, 0);
+    assert!(!key(&mut app, KeyCode::Up));
+    assert_eq!(app.selected, None);
+    assert!(!key(&mut app, KeyCode::Char('/')));
+    assert!(app.palette.is_none());
+    assert!(!key(&mut app, KeyCode::Enter));
+    assert!(app.viewer.is_none());
+    assert!(!ctrl(&mut app, 'o'));
+    assert_eq!(app.fold.density, Density::Normal);
+    assert!(key(&mut app, KeyCode::Char('q')));
+    assert!(ctrl(&mut app, 'c'));
+    // A click lands on nothing: the scroll hit rect is emptied in rail mode.
+    app.on_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        3,
+        5,
+        Instant::now(),
+    );
+    assert_eq!(app.selected, None);
+    draw_to_buffer(&mut app, 120, 30);
+    assert!(!key(&mut app, KeyCode::Up));
+    assert!(app.selected.is_some());
+}
+
+#[test]
+fn test_rail_cols_fit_the_viewers_rail_threshold() {
+    assert!(RAIL_MAX_WIDTH as i64 >= crate::layout::RAIL_COLS);
 }

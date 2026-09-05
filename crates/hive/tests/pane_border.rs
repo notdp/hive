@@ -3,15 +3,19 @@
 //! `display-message -p`, inside a detached session of the test's own.
 
 mod common;
-use common::{kill_session, require_tmux, run_tmux};
+use common::{kill_session, private_server, require_tmux, run_tmux, PrivateServer};
 
 struct BorderPane {
+    // `kill_session` in Drop runs before any field drops, so the server
+    // directory outlives the session whatever the field order.
+    _server: PrivateServer,
     session: String,
     pane: String,
 }
 
 impl BorderPane {
     fn new(tag: &str) -> Self {
+        let server = private_server();
         let session = format!("hive-e2e-border-{tag}-{}", std::process::id());
         let pane = run_tmux(&[
             "new-session",
@@ -26,7 +30,11 @@ impl BorderPane {
             "-F",
             "#{pane_id}",
         ]);
-        BorderPane { session, pane }
+        BorderPane {
+            _server: server,
+            session,
+            pane,
+        }
     }
 
     fn set(&self, key: &str, value: &str) {

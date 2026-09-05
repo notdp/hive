@@ -10,10 +10,26 @@ pub(super) struct Chrome {
     pub(super) cwd: Option<String>,
     /// Latest full-context usage (input + cache + output) from an assistant row.
     pub(super) context_used: i64,
+    /// The `[…]` badge of the latest `custom-title` row — the team address
+    /// the hive skill asks sessions to title themselves with.
+    pub(super) badge: Option<String>,
+}
+
+/// The text between a leading `[` and the first `]`, trimmed; None when the
+/// title carries no badge.
+pub(super) fn parse_title_badge(title: &str) -> Option<String> {
+    let inner = title.trim_start().strip_prefix('[')?;
+    let end = inner.find(']')?;
+    let badge = inner[..end].trim();
+    (!badge.is_empty()).then(|| badge.to_string())
 }
 
 impl Chrome {
     fn update(&mut self, row: &Value) {
+        if row.get("type").and_then(Value::as_str) == Some("custom-title") {
+            let title = row.get("customTitle").and_then(Value::as_str).unwrap_or("");
+            self.badge = parse_title_badge(title);
+        }
         if let Some(b) = row.get("gitBranch").and_then(Value::as_str) {
             if !b.is_empty() {
                 self.branch = Some(b.to_string());
@@ -348,6 +364,10 @@ pub(super) struct App {
     cache: HashMap<u64, CachedEntry>,
     cache_width: usize,
     cache_theme: ThemeKind,
+    /// Baseline for the rail's "since open" counter.
+    hive_count_at_open: usize,
+    /// Whether the last draw was the rail: navigation keys are then inert.
+    pub(super) rail: bool,
 }
 
 impl App {
@@ -370,7 +390,47 @@ impl App {
             cache: HashMap::new(),
             cache_width: 0,
             cache_theme: theme.kind,
+            hive_count_at_open: 0,
+            rail: false,
         }
+    }
+
+    /// The newest block on screen that `pick` accepts, pending tail first.
+    pub(super) fn rfind_block(&self, pick: impl Fn(&DisplayBlock) -> bool) -> Option<DisplayBlock> {
+        self.parser
+            .pending_blocks()
+            .into_iter()
+            .rev()
+            .find(|b| pick(b))
+            .or_else(|| {
+                self.finalized
+                    .iter()
+                    .rev()
+                    .find(|e| pick(&e.block))
+                    .map(|e| e.block.clone())
+            })
+    }
+
+    /// HIVE envelopes on screen, finalized and pending alike.
+    fn hive_count(&self) -> usize {
+        let is_hive = |b: &DisplayBlock| matches!(b, DisplayBlock::User(u) if u.hive.is_some());
+        self.finalized.iter().filter(|e| is_hive(&e.block)).count()
+            + self
+                .parser
+                .pending_blocks()
+                .iter()
+                .filter(|b| is_hive(b))
+                .count()
+    }
+
+    /// Baseline for the rail's "since open" counter; taken once the backlog is in.
+    pub(super) fn mark_opened(&mut self) {
+        self.hive_count_at_open = self.hive_count();
+    }
+
+    /// HIVE envelopes that arrived after [`App::mark_opened`].
+    pub(super) fn hive_since_open(&self) -> usize {
+        self.hive_count().saturating_sub(self.hive_count_at_open)
     }
 
     pub(super) fn push_raw(&mut self, raw: &str) {
@@ -623,6 +683,10 @@ impl App {
             && matches!(code, KeyCode::Char('c') | KeyCode::Char('q'))
         {
             return true;
+        }
+        // A blind palette or block viewer in a 14-column pane helps nobody.
+        if self.rail {
+            return code == KeyCode::Char('q');
         }
         if self.viewer.is_some() {
             self.viewer_key(code, mods);

@@ -80,6 +80,8 @@ bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 
 一个 claude 成员的 sessionId 如果查不到 bg job 记录，它就是交互式会话（桌面 `ccd`、被 join 收编的会话），显示层会自动给它挂上这个镜像：此时 resume 会 fork 出第二个引擎，抢走这个成员的投递，所以这种成员的 pane 挂的是镜像而不是 resume，pane 因此是只读的。投递不受影响：查不到 job 记录这同一个判断会让 `hive send` 直接投给活着的交互式会话而不是 pane。能向该成员输入的只有持有该会话的 app。
 
+镜像画在窗口左侧的窄栏（rail）里：14 列宽，`hive view` 在这个宽度下不画 transcript，改画一根状态栏（成员名、忙/闲、打开以来收到的 HIVE 消息数、最后一条消息的时间和开头几个字）。点一下窄栏它展开到 45%，再点一下折回去；`prefix+z` 缩放它和任何 pane 一样。`hive mirror on|off` 显示或隐藏它（不带参数则切换）。只有一条启发式规则会主动不画它：在 Claude 桌面终端面板里（`TERM_PROGRAM=claude-desktop`、stdin 是 tty）跑 `hive create` / `join` / `attach`（或重建丢失窗口的 `hive spawn`），且 cwd 就是该会话自己的 cwd——人已经在看这段对话了，窗口记下 `@hive-mirror off`；`attach` 找到的窗口若还挂着这个会话的窄栏，也照此撤掉一次。它只在窗口尚无记录时说话；`hive mirror on` 可以推翻它。
+
 ## 升级
 
 重跑[安装](#安装)里的 installer 一行命令，它总是拉取最新 release。发版方式是推一个与 crate 版本一致的 `v*` tag；CI（cargo-dist）编译各平台二进制并发布 GitHub Release。

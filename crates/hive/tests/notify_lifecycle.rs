@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{kill_session, require_tmux, run_tmux, EnvVarGuard};
+use common::{kill_session, private_server, require_tmux, run_tmux, EnvVarGuard};
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", std::process::id())
@@ -13,6 +13,7 @@ fn unique(prefix: &str) -> String {
 #[test]
 fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
     require_tmux();
+    let _server = private_server();
     let session = unique("hive-e2e-notify-a");
     let result = std::panic::catch_unwind(|| {
         let window_target = run_tmux(&[
@@ -140,6 +141,7 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
     // it on a detached session too, so the whole flow runs inside its own
     // session.
     require_tmux();
+    let _server = private_server();
     let session = unique("hive-e2e-notify-b");
     // The select hook must call back into the real hive binary, not this
     // test harness (current_exe here is the test executable); `self_exe`

@@ -50,6 +50,7 @@ fn display_env() -> DisplayEnv {
     // replace the test process with `tmux attach`.
     env.set("TMUX", "/tmp/hive-test-tmux,1,0");
     env.set("TMUX_PANE", "%0");
+    env.remove("TERM_PROGRAM");
     DisplayEnv { _tmp: tmp, env }
 }
 
@@ -60,6 +61,7 @@ fn display_env_outside() -> DisplayEnv {
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     env.set("CLAUDE_HOME", tmp.path().join(".claude"));
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+    env.remove("TERM_PROGRAM");
     DisplayEnv { _tmp: tmp, env }
 }
 
@@ -115,7 +117,10 @@ struct BuiltWindow {
 /// created here (else `dev`), with the first window at index 1 on purpose —
 /// base-index is not always 0. `tags` are `(target, key, value)` rows the
 /// double answers for pane tags (`show-options -p`) and window options
-/// (`display-message -t <window> #{@key}`) alike.
+/// (`display-message -t <window> #{@key}`) alike; what the verbs write
+/// (`set-option -p`, `set-window-option @…`) is answered back the same way,
+/// and a split pane's full-format `list-panes` row is built from its tags.
+/// `kill-pane` drops the pane from every listing.
 fn fake_tmux_sessions(
     windows: &'static str,
     panes: &'static [&'static str],
@@ -167,18 +172,31 @@ fn fake_tmux_sessions(
         .iter()
         .map(|row| row.split('\t').next().unwrap_or_default().to_string())
         .collect();
-    let mut extra_rows: Vec<String> = Vec::new();
-    let mut next_pane = 1;
+    let mut split_panes: Vec<String> = Vec::new();
+    let mut written: std::collections::HashMap<(String, String), String> = Default::default();
+    // Fresh panes number after the fixture's, as tmux would.
+    let mut next_pane = live
+        .iter()
+        .filter_map(|p| p.trim_start_matches('%').parse::<usize>().ok())
+        .max()
+        .map_or(1, |n| n + 1);
     let mut live_sessions: Vec<String> = sessions.iter().map(|s| s.to_string()).collect();
     let mut created_session: Option<String> = None;
     crate::tmux::_set_run_override(move |args, _check, _timeout| {
         recorded.borrow_mut().push(args.to_vec());
         let mut returncode = 0;
         let session = created_session.clone().unwrap_or_else(|| "dev".to_string());
+        // What a verb wrote outranks the fixture: the fixture is the state
+        // before the verb ran.
         let tag_for = |target: &str, key: &str| -> String {
-            tags.iter()
-                .find(|(t, k, _)| *t == target && *k == key)
-                .map(|(_, _, v)| (*v).to_string())
+            written
+                .get(&(target.to_string(), key.to_string()))
+                .cloned()
+                .or_else(|| {
+                    tags.iter()
+                        .find(|(t, k, _)| *t == target && *k == key)
+                        .map(|(_, _, v)| (*v).to_string())
+                })
                 .unwrap_or_default()
         };
         let out = match args[0].as_str() {
@@ -228,13 +246,29 @@ fn fake_tmux_sessions(
                 format!("{target}:2\t{pane}")
             }
             "set-window-option" => {
-                // set-window-option -t <window> @hive-team <team>
-                if args.get(3).map(String::as_str) == Some("@hive-team") {
-                    let target = args.get(2).cloned().unwrap_or_default();
-                    let team = args.get(4).cloned().unwrap_or_default();
-                    for w in built.borrow_mut().iter_mut().filter(|w| w.target == target) {
-                        w.team = team.clone();
+                // set-window-option -t <window> @<option> <value>
+                let target = args.get(2).cloned().unwrap_or_default();
+                if let Some(key) = args.get(3).and_then(|opt| opt.strip_prefix('@')) {
+                    let value = args.get(4).cloned().unwrap_or_default();
+                    if key == "hive-team" {
+                        for w in built.borrow_mut().iter_mut().filter(|w| w.target == target) {
+                            w.team = value.clone();
+                        }
                     }
+                    written.insert((target, key.to_string()), value);
+                }
+                String::new()
+            }
+            "set-option" => {
+                // set-option -p -t <pane> [-u] @<key> [<value>]
+                let pane = args.get(3).cloned().unwrap_or_default();
+                if args.get(4).map(String::as_str) == Some("-u") {
+                    if let Some(key) = args.get(5).and_then(|opt| opt.strip_prefix('@')) {
+                        written.remove(&(pane, key.to_string()));
+                    }
+                } else if let Some(key) = args.get(4).and_then(|opt| opt.strip_prefix('@')) {
+                    let value = args.get(5).cloned().unwrap_or_default();
+                    written.insert((pane, key.to_string()), value);
                 }
                 String::new()
             }
@@ -242,16 +276,39 @@ fn fake_tmux_sessions(
                 let pane = format!("%{next_pane}");
                 next_pane += 1;
                 live.push(pane.clone());
-                extra_rows.push(format!("{pane}\t\t\t\t\t\t\t"));
+                split_panes.push(pane.clone());
                 pane
+            }
+            "kill-pane" => {
+                let pane = args.get(2).cloned().unwrap_or_default();
+                live.retain(|p| *p != pane);
+                split_panes.retain(|p| *p != pane);
+                String::new()
             }
             "list-panes" => {
                 let fmt = args.last().cloned().unwrap_or_default();
                 if fmt == "#{pane_id}" {
                     live.join("\n")
                 } else {
-                    let mut rows: Vec<String> = panes.iter().map(|r| (*r).to_string()).collect();
-                    rows.extend(extra_rows.iter().cloned());
+                    let mut rows: Vec<String> = panes
+                        .iter()
+                        .filter(|r| {
+                            let id = r.split('\t').next().unwrap_or_default();
+                            live.iter().any(|p| p == id)
+                        })
+                        .map(|r| (*r).to_string())
+                        .collect();
+                    rows.extend(split_panes.iter().map(|pane| {
+                        let tag = |key: &str| tag_for(pane, key);
+                        format!(
+                            "{pane}\t\t\t{}\t{}\t{}\t{}\t{}",
+                            tag("hive-role"),
+                            tag("hive-agent"),
+                            tag("hive-team"),
+                            tag("hive-cli"),
+                            tag("hive-group")
+                        )
+                    }));
                     rows.join("\n")
                 }
             }
@@ -387,6 +444,10 @@ fn test_attach_without_a_window_rebuilds_it_and_records_the_display() {
         crate::registry::load("honey").unwrap()["display"],
         Value::from("@7")
     );
+    // The window build installs the rail's click binding on the server.
+    let binding = crate::tmux::mirror_click_binding();
+    let binding: Vec<&str> = binding.iter().map(String::as_str).collect();
+    assert!(has_row(&argv, &binding));
 }
 
 #[test]
@@ -1660,10 +1721,557 @@ fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_on_a_mirror_p
         &argv,
         &["set-option", "-p", "-t", "%1", "@hive-agent", "orch"]
     ));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-role", "mirror"]
+    ));
     assert!(argv.borrow().iter().any(|a| a[0] == "send-keys"
         && a.contains(&"-l".to_string())
         && a.iter().any(|arg| arg.contains("hive view s-me"))));
     assert_eq!(count(&argv, "split-window"), 0);
+}
+
+#[test]
+fn test_self_session_on_screen_decision_table() {
+    for (term_program, stdin_tty, cwd, member_cwd, expected) in [
+        ("claude-desktop", true, "/a", "/a", true),
+        ("claude-desktop", true, "/a", "/b", false),
+        ("claude-desktop", false, "/a", "/a", false),
+        ("iTerm.app", true, "/a", "/a", false),
+        ("", true, "/a", "/a", false),
+        ("claude-desktop", true, "", "", false),
+    ] {
+        assert_eq!(
+            _self_session_on_screen(term_program, stdin_tty, cwd, member_cwd),
+            expected,
+            "{term_program} tty={stdin_tty} cwd={cwd} member={member_cwd}"
+        );
+    }
+}
+
+#[test]
+fn test_pane_role_records_off_when_the_heuristic_fires_on_an_undecided_window() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    let argv = fake_tmux("dev:1\t@7\thoney\t\t\t\n", &[]);
+    let orch = member_row("orch", "claude", "s-me");
+
+    assert_eq!(_pane_role_with("dev:1", &orch, || true), None);
+
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+    // Recorded once: the next decision reads the option, not the heuristic.
+    assert_eq!(
+        _pane_role_with("dev:1", &orch, || panic!("heuristic consulted")),
+        None
+    );
+    assert_eq!(count(&argv, "set-window-option"), 1);
+}
+
+#[test]
+fn test_pane_role_draws_the_rail_when_the_heuristic_is_quiet() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    let argv = fake_tmux("dev:1\t@7\thoney\t\t\t\n", &[]);
+
+    assert_eq!(
+        _pane_role_with("dev:1", &member_row("orch", "claude", "s-me"), || false),
+        Some("mirror")
+    );
+    // An engine member never consults it.
+    assert_eq!(
+        _pane_role_with("dev:1", &member_row("sage", "grok", "sid"), || panic!(
+            "heuristic consulted"
+        )),
+        Some("agent")
+    );
+    assert_eq!(count(&argv, "set-window-option"), 0);
+}
+
+#[test]
+fn test_pane_role_recorded_on_beats_the_heuristic() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    let argv = fake_tmux_tagged(
+        "dev:1\t@7\thoney\t\t\t\n",
+        &[],
+        &[("dev:1", "hive-mirror", "on")],
+    );
+
+    assert_eq!(
+        _pane_role_with("dev:1", &member_row("orch", "claude", "s-me"), || panic!(
+            "heuristic consulted"
+        )),
+        Some("mirror")
+    );
+    assert_eq!(count(&argv, "set-window-option"), 0);
+}
+
+#[test]
+fn test_create_outside_tmux_withholds_the_self_mirror_when_the_window_records_off() {
+    let mut env = display_env_outside();
+    let _claude = claude_session_me(&mut env);
+    let _hived = hived_answering_ping("honey");
+    // The window the create will build already records the absence — the
+    // option-driven half of `_pane_role`; the recording half is
+    // `test_pane_role_records_off_when_the_heuristic_fires_on_an_undecided_window`.
+    let argv = fake_tmux_sessions("", &[], &[("honey:1", "hive-mirror", "off")], &[]);
+
+    core_cmds::_create_detached_team("honey", "", "", false, &[]);
+
+    let entry = crate::registry::load("honey").expect("team recorded");
+    let names: Vec<Value> = entry["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].clone())
+        .collect();
+    assert_eq!(names, vec![Value::from("orch")]);
+    // No viewer started; the first pane is tagged as the no-orch branch
+    // tags it, so a verb run from it still finds the team.
+    assert!(argv.borrow().iter().all(|a| a[0] != "send-keys"));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-role", "terminal"]
+    ));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-agent", "orch"]
+    ));
+    assert_eq!(count(&argv, "split-window"), 0);
+}
+
+#[test]
+fn test_attach_heal_respects_hive_mirror_off() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        "dev:2\t@7\thoney\t\t\t\n",
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+        &[("dev:2", "hive-mirror", "off")],
+    );
+
+    attach_cmd("honey");
+
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert_eq!(count(&argv, "send-keys"), 0);
+    assert!(has_row(&argv, &["switch-client", "-t", "dev:2"]));
+}
+
+#[test]
+fn test_attach_heal_keeps_the_rail_the_window_already_shows() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux(
+        "dev:2\t@7\thoney\t\t\t\n",
+        &[
+            "%0\t\tzsh\tterminal\t\thoney\t\t",
+            "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
+        ],
+    );
+
+    attach_cmd("honey");
+
+    // The rail counts as the member's pane: no second one, no kill.
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert_eq!(count(&argv, "send-keys"), 0);
+    assert_eq!(count(&argv, "kill-pane"), 0);
+    assert!(argv.borrow().iter().all(|a| a[0] != "set-window-option"));
+    assert!(has_row(&argv, &["switch-client", "-t", "dev:2"]));
+}
+
+#[test]
+fn test_attach_rebuild_hands_the_first_pane_to_the_next_member_when_the_mirror_is_withheld() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[
+            member_row("orch", "claude", "s-me"),
+            member_row("sage", "grok", "sid-sage"),
+        ],
+        "",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged("", &[], &[("dev:2", "hive-mirror", "off")]);
+
+    attach_cmd("honey");
+
+    // The withheld mirror consumes no pane: sage takes the window's own.
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-role", "agent"]
+    ));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-agent", "sage"]
+    ));
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
+}
+
+// --- the self heuristic on an attach that finds the window ------------------
+
+fn honey_with_a_rail() -> Argv {
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[
+            member_row("orch", "claude", "s-me"),
+            member_row("sage", "grok", "sid-sage"),
+        ],
+        "@7",
+    )
+    .unwrap();
+    fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &[
+            "%0\t\tzsh\tterminal\t\thoney\t\t",
+            "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
+            "%2\t[sage]\tgrok\tagent\tsage\thoney\tgrok\t",
+        ],
+        &[("dev:1", "hive-team", "honey")],
+    )
+}
+
+#[test]
+fn test_attach_from_the_panel_withdraws_the_self_rail_once_and_records_off() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    let argv = honey_with_a_rail();
+    let entry = crate::registry::load("honey").unwrap();
+
+    let gone = _withdraw_self_mirrors_with("dev:1", &entry, |m| map_str(m, "name") == "orch");
+
+    assert_eq!(gone, vec!["%1".to_string()]);
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+    assert!(has_row(&argv, &["kill-pane", "-t", "%1"]));
+    // The two survivors get the landscape preset.
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "main-pane-width", "50%"]
+    ));
+    assert!(has_row(
+        &argv,
+        &["select-layout", "-t", "dev:1", "main-vertical"]
+    ));
+    // Once: the recorded `off` is the answer from now on.
+    assert!(_withdraw_self_mirrors_with("dev:1", &entry, |_| true).is_empty());
+    assert_eq!(count(&argv, "kill-pane"), 1);
+}
+
+#[test]
+fn test_attach_leaves_a_rail_that_mirrors_someone_else() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    let argv = honey_with_a_rail();
+    let entry = crate::registry::load("honey").unwrap();
+
+    let gone = _withdraw_self_mirrors_with("dev:1", &entry, |m| map_str(m, "name") == "sage");
+
+    assert!(gone.is_empty());
+    assert_eq!(count(&argv, "kill-pane"), 0);
+    assert!(argv.borrow().iter().all(|a| a[0] != "set-window-option"));
+}
+
+#[test]
+fn test_attach_leaves_the_rail_when_the_window_records_on() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &[
+            "%0\t\tzsh\tterminal\t\thoney\t\t",
+            "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
+        ],
+        &[("dev:1", "hive-mirror", "on")],
+    );
+    let entry = crate::registry::load("honey").unwrap();
+
+    assert!(_withdraw_self_mirrors_with("dev:1", &entry, |_| true).is_empty());
+    assert_eq!(count(&argv, "kill-pane"), 0);
+}
+
+#[test]
+fn test_attach_heal_builds_the_rail_when_not_suppressed() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux(
+        "dev:2\t@7\thoney\t\t\t\n",
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+    );
+
+    attach_cmd("honey");
+
+    assert_eq!(count(&argv, "split-window"), 1);
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-role", "mirror"]
+    ));
+    // The re-tile after the split generates the rail layout (the double's
+    // window is 200x50; the double keeps window order across the swap).
+    let layout =
+        crate::layout::window_layout((200, 50), &["%1".into()], &["%0".into()], None).unwrap();
+    assert!(has_row(&argv, &["select-layout", "-t", "dev:2", &layout]));
+}
+
+// --- hive mirror -------------------------------------------------------------
+
+const _MIRROR_WINDOW: &str = "dev:1\t@7\thoney\t\t\t\n";
+
+#[test]
+fn test_mirror_off_kills_the_rails_records_off_and_retiles() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &[
+            "%0\t\tzsh\tterminal\torch\thoney\t\t",
+            "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
+            "%2\t[sage]\tgrok\tagent\tsage\thoney\tgrok\t",
+        ],
+        &[("dev:1", "hive-team", "honey")],
+    );
+
+    assert_eq!(_mirror("off"), Ok("mirror off (honey)".to_string()));
+
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+    assert!(has_row(&argv, &["kill-pane", "-t", "%1"]));
+    assert_eq!(count(&argv, "kill-pane"), 1);
+    // The two survivors get the landscape preset.
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "main-pane-width", "50%"]
+    ));
+    assert!(has_row(
+        &argv,
+        &["select-layout", "-t", "dev:1", "main-vertical"]
+    ));
+    assert_eq!(count(&argv, "select-layout"), 1);
+}
+
+#[test]
+fn test_mirror_off_without_a_rail_records_off_and_leaves_the_window_alone() {
+    let _env = display_env();
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &["%0\t\tzsh\tterminal\torch\thoney\t\t"],
+        &[("dev:1", "hive-team", "honey")],
+    );
+
+    assert_eq!(
+        _mirror("off"),
+        Ok("mirror off (honey): no rail".to_string())
+    );
+
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+    assert_eq!(count(&argv, "kill-pane"), 0);
+    assert_eq!(count(&argv, "select-layout"), 0);
+}
+
+#[test]
+fn test_mirror_on_with_nothing_to_show_says_so_and_leaves_the_window_alone() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    // The rail is already on screen: nothing to backfill.
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &[
+            "%0\t\tzsh\tterminal\t\thoney\t\t",
+            "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
+        ],
+        &[("dev:1", "hive-team", "honey")],
+    );
+
+    assert_eq!(
+        _mirror("on"),
+        Ok("mirror on (honey): no session mirror to show".to_string())
+    );
+
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
+    ));
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert_eq!(count(&argv, "select-layout"), 0);
+}
+
+#[test]
+fn test_mirror_off_refuses_from_the_rail_pane() {
+    let mut env = display_env();
+    env.env.set("TMUX_PANE", "%1");
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &["%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t"],
+        &[("dev:1", "hive-team", "honey")],
+    );
+
+    let err = _mirror("off").unwrap_err();
+
+    assert!(err.contains("rail"), "{err}");
+    assert_eq!(count(&argv, "kill-pane"), 0);
+    assert!(argv.borrow().iter().all(|a| a[0] != "set-window-option"));
+}
+
+#[test]
+fn test_mirror_on_records_on_and_backfills_the_session_mirror() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    // From the desktop panel: the recorded `on` is what the backfill reads,
+    // so the heuristic cannot take the rail straight back.
+    env.env.set("TERM_PROGRAM", "claude-desktop");
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+        &[
+            ("dev:1", "hive-team", "honey"),
+            ("dev:1", "hive-mirror", "off"),
+        ],
+    );
+
+    assert_eq!(_mirror("on"), Ok("mirror on (honey)".to_string()));
+
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
+    ));
+    assert!(!has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+    assert_eq!(count(&argv, "split-window"), 1);
+    assert!(argv
+        .borrow()
+        .iter()
+        .any(|a| a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view s-me"))));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-role", "mirror"]
+    ));
+}
+
+#[test]
+fn test_mirror_toggles_by_presence() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        _MIRROR_WINDOW,
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+        &[("dev:1", "hive-team", "honey")],
+    );
+
+    // No rail: the toggle builds one…
+    assert_eq!(_mirror(""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(count(&argv, "split-window"), 1);
+    // …and with the rail on screen the next toggle removes it.
+    assert_eq!(_mirror(""), Ok("mirror off (honey)".to_string()));
+    assert!(has_row(&argv, &["kill-pane", "-t", "%1"]));
+}
+
+#[test]
+fn test_mirror_outside_a_team_window_fails() {
+    let _env = display_env();
+    let _argv = fake_tmux("dev:1\t@7\t\t\t\t\n", &[]);
+
+    let err = _mirror("on").unwrap_err();
+
+    assert!(err.contains("hive ls"), "{err}");
 }
 
 // --- join outside tmux: the joined session gets its mirror pane now ------
@@ -1705,12 +2313,17 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
     assert_eq!(joined["cli"], Value::from("claude"));
     assert_ne!(joined["name"], Value::from("orch"));
     // One pane split into the existing window, running the session's
-    // read-only mirror — never a resume, which would fork a bg job.
+    // read-only mirror — never a resume, which would fork a bg job — and
+    // tagged as the window's rail.
     assert_eq!(count(&argv, "new-window"), 0);
     assert_eq!(count(&argv, "split-window"), 1);
     assert!(argv.borrow().iter().any(|a| a[0] == "send-keys"
         && a.contains(&"-l".to_string())
         && a.iter().any(|arg| arg.contains("hive view s-me"))));
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%2", "@hive-role", "mirror"]
+    ));
 }
 
 #[test]

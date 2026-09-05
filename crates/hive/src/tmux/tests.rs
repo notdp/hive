@@ -603,6 +603,7 @@ fn test_configure_hive_window_disables_native_tmux_alerts() {
     assert_eq!(
         argvs,
         vec![
+            mirror_click_binding(),
             v(&[
                 "set-window-option",
                 "-t",
@@ -626,6 +627,45 @@ fn test_configure_hive_window_disables_native_tmux_alerts() {
             ]),
             v(&["set-window-option", "-t", "dev:1", "monitor-bell", "off"]),
         ]
+    );
+}
+
+#[test]
+fn test_mirror_click_binding_keeps_the_stock_click_as_its_else_branch() {
+    let binding = mirror_click_binding();
+    assert_eq!(
+        binding[..4],
+        v(&["bind-key", "-T", "root", "MouseDown1Pane"])[..]
+    );
+    assert_eq!(binding[4..8], v(&["if-shell", "-F", "-t", "="])[..]);
+    assert!(binding[8].contains("@hive-role"), "{}", binding[8]);
+    assert!(binding[8].contains("window_zoomed_flag"), "{}", binding[8]);
+    // The rail branch is the toggle nested as one quoted command, selected
+    // first, and never `send-keys`: the viewer must not receive the click
+    // that resized it. Byte-exact — tmux parses the nested quoting.
+    assert_eq!(
+        binding[9],
+        "select-pane -t = ; 'if-shell' '-F' '-t' '=' '#{e|>:#{pane_width},14}' \
+         'resize-pane -t = -x 14' 'resize-pane -t = -x 45%'"
+    );
+    assert_eq!(binding[10], _STOCK_CLICK);
+    assert_eq!(_STOCK_CLICK, "select-pane -t = ; send-keys -M");
+    assert_eq!(binding.len(), 11);
+}
+
+#[test]
+fn test_rail_toggle_argv_folds_above_the_rail_width() {
+    assert_eq!(
+        rail_toggle_argv("%9"),
+        v(&[
+            "if-shell",
+            "-F",
+            "-t",
+            "%9",
+            "#{e|>:#{pane_width},14}",
+            "resize-pane -t %9 -x 14",
+            "resize-pane -t %9 -x 45%",
+        ])
     );
 }
 

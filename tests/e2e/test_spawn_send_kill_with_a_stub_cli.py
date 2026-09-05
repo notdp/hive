@@ -29,6 +29,7 @@ import pytest
 from tests.e2e._helpers import (
     base_env,
     hive_binary_argv,
+    kill_private_server,
     run_tmux,
     send_tmux_command,
     wait_for,
@@ -94,7 +95,10 @@ def test_e2e_spawn_send_kill_with_a_stub_cli():
     try:
         _run_stub_flow(workdir, config_dir, bindir, session)
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)
+        # The flow's own teardown already killed the private server and
+        # removed workdir; a kill-server retried here by TMUX_TMPDIR would
+        # fall through to the developer's default server once that
+        # directory is gone. Only the stub processes are swept again.
         for pid in _stub_pids(config_dir):
             if pid != os.getpid() and _pid_alive(pid):
                 os.kill(pid, signal.SIGKILL)
@@ -133,16 +137,20 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         for flag in ("-e", f"{key}={value}")
     ]
     shell = f"/bin/sh -c 'export PATH={bindir}:$PATH; exec /bin/sh'"
+    # The private server (TMUX_TMPDIR) is what every tmux client here talks
+    # to; the pane shells and the engines' tool subprocesses inherit it
+    # through pane_env, so their hive calls land on the same server.
+    tmux_env = {"TMUX_TMPDIR": pane_env["TMUX_TMPDIR"]}
     pane_a = run_tmux([
         "new-session", "-d", "-s", session, "-x", "160", "-y", "48", "-c", str(workdir),
         *env_flags, "-P", "-F", "#{pane_id}", shell,
-    ]).stdout.strip()
-    run_tmux(["set-option", "-t", session, "default-command", shell])
+    ], env=tmux_env).stdout.strip()
+    run_tmux(["set-option", "-t", session, "default-command", shell], env=tmux_env)
 
     try:
         # The orch: a human's `hive claude` in the pane. The managed launcher
         # spawns the bg job (stub engine) and attaches the pane to it.
-        send_tmux_command(pane_a, "hive claude")
+        send_tmux_command(pane_a, "hive claude", env=tmux_env)
         wait_for(lambda: len(_stub_jobs(config_dir)) == 1, timeout=30.0)
         orch_job = _stub_jobs(config_dir)[0]["id"]
         wait_for(lambda: _stub_json(config_dir, f"engine-{orch_job}.json") is not None, timeout=30.0)
@@ -204,7 +212,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert "spawned in pane" in spawn_result.stdout, spawn_result.stdout
         # The member got a pane of its own, tagged with its name — so the
         # single-pane check after kill below is about a pane that existed.
-        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"]).stdout.split("\n")
+        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
         tagged = [line for line in tagged if line.strip()]
         assert len(tagged) == 2, tagged
         assert tagged[0].startswith(pane_a), tagged
@@ -264,7 +272,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert ["stop", worker_job] in _stub_calls(config_dir)
         wait_for(lambda: not _pid_alive(worker_engine_pid), timeout=10.0)
         assert "worker" not in roster()
-        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"]).stdout.split()
+        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"], env=tmux_env).stdout.split()
         assert panes == [pane_a]
 
         # The same spawn from outside tmux altogether — no client, no engine
@@ -279,7 +287,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         )
         assert outside_spawn.returncode == 0, outside_spawn.stderr
         assert "spawned in pane" in outside_spawn.stdout, outside_spawn.stdout
-        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"]).stdout.split("\n")
+        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
         tagged = [line for line in tagged if line.strip()]
         assert len(tagged) == 2, tagged
         assert tagged[0].startswith(pane_a), tagged
@@ -316,7 +324,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert ["stop", runner_job] in _stub_calls(config_dir)
         wait_for(lambda: not _pid_alive(runner_engine_pid), timeout=10.0)
         assert "runner" not in roster()
-        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"]).stdout.split()
+        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"], env=tmux_env).stdout.split()
         assert panes == [pane_a]
 
         delete_result = orch(["delete", team, "--delete-workspace"])
@@ -337,7 +345,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         for pid in leftovers:
             if pid and pid != os.getpid() and _pid_alive(pid):
                 os.kill(pid, signal.SIGKILL)
-        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)
+        kill_private_server(tmux_env)
         if auto_workspace is not None:
             shutil.rmtree(auto_workspace, ignore_errors=True)
         shutil.rmtree(workdir, ignore_errors=True)

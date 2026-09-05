@@ -109,6 +109,23 @@ on screen.
 rendered; everything above is read once and discarded, save the ultra scan.
 Scrolling up reaches the top of that window, not the top of the session.
 
+## The rail
+
+A pane 24 columns wide or narrower gets a status column instead of the
+transcript: the team window draws the mirror as a 14-column rail on its left.
+Everything on it is read off the transcript the viewer already parses — the
+name is the `[…]` badge of the session's latest `custom-title` row, else the
+`to=` of the latest HIVE envelope on screen, else `mirror`; busy and its
+timer are the parser's `busy()` / `turn_started_ms()`; the count is HIVE
+envelopes seen since the viewer opened (the backlog sets the baseline); the
+age and first words are the last user or assistant block's, a HIVE body
+behind `▏`, a human prompt behind `❯`, assistant markdown bare, folded to
+three rows. Nothing here reads the registry or tmux. Widen the pane and the
+transcript is back on the next poll; narrow it and the rail is. In rail mode
+`on_key` returns early: only `q` (and Ctrl+C / Ctrl+Q) does anything, the
+palette and the block viewer are neither drawn nor reachable, and a click
+lands on nothing. A pane 9 rows or taller ends with a ` q quit` hint.
+
 ## What it borrows from Grok
 
 The look and most of the interaction semantics come from Grok Build's pager

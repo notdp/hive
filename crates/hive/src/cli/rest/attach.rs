@@ -159,15 +159,13 @@ fn _attach_launcher(cli_name: &str, quoted_sid: &str) -> Option<String> {
     }
 }
 
-fn _member_attach_command(cli_name: &str, session_id: &str, cwd: &str) -> String {
-    let quoted_sid = shlex_quote(session_id);
-    let launch = _attach_launcher(cli_name, &quoted_sid).expect("attachable cli");
-    let cwd = if cwd.is_empty() {
-        getcwd()
-    } else {
-        cwd.to_string()
-    };
-    if cli_name == "claude" && crate::adapters::claude_bg::job_row(session_id, "claude").is_none() {
+fn _member_attach_command(member: &Map<String, Value>, mirrors: bool) -> String {
+    let cli_name = map_str(member, "cli");
+    let quoted_sid = shlex_quote(&map_str(member, "sessionId"));
+    let launch = _attach_launcher(&cli_name, &quoted_sid).expect("attachable cli");
+    let cwd = map_str(member, "cwd");
+    let cwd = if cwd.is_empty() { getcwd() } else { cwd };
+    if mirrors {
         // An interactive session (desktop ccd, joined session) must NOT be
         // resumed — the launcher's resume lane would mint a forked bg job
         // that steals the member's deliveries. Render the transcript
@@ -181,19 +179,134 @@ fn _member_attach_command(cli_name: &str, session_id: &str, cwd: &str) -> String
     )
 }
 
-/// Title + tags + context + viewer launcher for one member's display pane.
-pub(crate) fn _bind_member_viewer(pane: &str, member: &Map<String, Value>, team: &str, ws: &str) {
+/// A claude member whose sessionId is an interactive session (a creating
+/// or joined desktop/ccd session), not a bg job: its pane can only mirror
+/// it, never resume it.
+pub(crate) fn _mirrors_a_session(member: &Map<String, Value>) -> bool {
+    map_str(member, "cli") == "claude"
+        && crate::adapters::claude_bg::job_row(&map_str(member, "sessionId"), "claude").is_none()
+}
+
+/// The window's recorded rail choice: `@hive-mirror` `on` / `off` (written
+/// by `hive mirror`, or `off` by the self heuristic), None when nobody has
+/// decided yet — the only state the heuristic is consulted in.
+fn _mirror_preference(window: &str) -> Option<bool> {
+    match tmux::get_window_option(window, "hive-mirror").as_deref() {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => None,
+    }
+}
+
+/// Heuristic, not authority: the human is already looking at this session.
+/// A shell inside a Claude desktop terminal panel (`TERM_PROGRAM`
+/// claude-desktop) with a human at it (stdin is a tty — a Claude Code tool
+/// subprocess has none) and the session's own cwd is that conversation on
+/// screen; a mirror of it beside it is dead weight.
+pub(crate) fn _self_session_on_screen(
+    term_program: &str,
+    stdin_tty: bool,
+    cwd: &str,
+    member_cwd: &str,
+) -> bool {
+    term_program == "claude-desktop" && stdin_tty && !member_cwd.is_empty() && cwd == member_cwd
+}
+
+/// The heuristic against this process's own env and tty, for one member.
+fn _self_on_screen(member: &Map<String, Value>) -> bool {
+    _self_session_on_screen(
+        &env_string("TERM_PROGRAM"),
+        stdin_isatty(),
+        &getcwd(),
+        &map_str(member, "cwd"),
+    )
+}
+
+/// The `@hive-role` of the pane *member* gets in *window* now — `agent`
+/// riding its engine, `mirror` for a session mirror — or None when no pane
+/// is drawn: a session mirror is withheld while the window records `off`,
+/// or, with nothing recorded, when the self heuristic fires — which records
+/// `off` so heal and backfill respect it. A recorded `on` is never second-
+/// guessed. Decided once per member: the job-ledger probe behind
+/// `_mirrors_a_session` is a CLI call.
+pub(crate) fn _pane_role(window: &str, member: &Map<String, Value>) -> Option<&'static str> {
+    _pane_role_with(window, member, || _self_on_screen(member))
+}
+
+/// `_pane_role` with the heuristic's verdict supplied; only reached when
+/// the window has no recorded choice.
+pub(crate) fn _pane_role_with(
+    window: &str,
+    member: &Map<String, Value>,
+    on_screen: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    if !_mirrors_a_session(member) {
+        return Some("agent");
+    }
+    match _mirror_preference(window) {
+        Some(false) => None,
+        Some(true) => Some("mirror"),
+        None if on_screen() => {
+            tmux::set_window_option(window, "@hive-mirror", "off");
+            None
+        }
+        None => Some("mirror"),
+    }
+}
+
+/// The heuristic on a window that already shows a rail: an attach from the
+/// panel of the very session a rail mirrors takes that rail down, once,
+/// recording `off` — a window with a recorded choice is left as it is.
+/// Returns the panes killed. `kill-pane` unzooms, so the re-tile lands.
+pub(crate) fn _withdraw_self_mirrors_with(
+    window: &str,
+    entry: &Map<String, Value>,
+    on_screen: impl Fn(&Map<String, Value>) -> bool,
+) -> Vec<String> {
+    if _mirror_preference(window).is_some() {
+        return Vec::new();
+    }
+    let members = _entry_members(entry);
+    let rails: Vec<String> = tmux::list_panes_full(window)
+        .into_iter()
+        .filter(|p| p.role == "mirror")
+        .filter(|p| {
+            members
+                .iter()
+                .any(|m| map_str(m, "name") == p.agent && on_screen(m))
+        })
+        .map(|p| p.pane_id)
+        .collect();
+    if rails.is_empty() {
+        return rails;
+    }
+    tmux::set_window_option(window, "@hive-mirror", "off");
+    for pane in &rails {
+        tmux::kill_pane(pane);
+    }
+    let _ = crate::layout::apply_adaptive(window);
+    rails
+}
+
+/// Title + tags + context + viewer launcher for one member's display pane,
+/// *role* being what `_pane_role` decided for it.
+pub(crate) fn _bind_member_viewer(
+    pane: &str,
+    member: &Map<String, Value>,
+    team: &str,
+    ws: &str,
+    role: &str,
+) {
     let name = map_str(member, "name");
     let cli_name = map_str(member, "cli");
-    let cwd = map_str(member, "cwd");
     tmux::set_pane_title(pane, &format!("[{name}]"));
-    tmux::tag_pane(pane, "agent", &name, team, &cli_name, "");
+    tmux::tag_pane(pane, role, &name, team, &cli_name, "");
     if !ws.is_empty() {
         let _ = crate::context::save_context_for_pane(pane, team, ws, &name);
     }
     ok_or_fail(tmux::send_keys(
         pane,
-        &_member_attach_command(&cli_name, &map_str(member, "sessionId"), &cwd),
+        &_member_attach_command(member, role == "mirror"),
         true,
     ));
 }
@@ -229,13 +342,17 @@ pub(super) fn _members_to_backfill(
 }
 
 /// Split panes into an existing team window for roster members it does not
-/// render yet (a member spawned after the window was built).
-fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> Vec<String> {
+/// render yet (a member spawned after the window was built, a session
+/// mirror `hive mirror on` asks back). Re-tiles when it added any.
+pub(super) fn _backfill_missing_member_panes(
+    window: &str,
+    entry: &Map<String, Value>,
+) -> Vec<String> {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
     let rendered: std::collections::HashSet<String> = tmux::list_panes_full(window)
         .into_iter()
-        .filter(|p| p.role == "agent" && !p.agent.is_empty())
+        .filter(|p| p.is_member_pane() && !p.agent.is_empty())
         .map(|p| p.agent)
         .collect();
     let mut prev_pane = tmux::list_panes(window)
@@ -247,6 +364,9 @@ fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> V
     }
     let mut added = Vec::new();
     for member in _members_to_backfill(&rendered, _entry_members(entry)) {
+        let Some(role) = _pane_role(window, &member) else {
+            continue;
+        };
         let name = map_str(&member, "name");
         let cwd = map_str(&member, "cwd");
         let count = tmux::list_panes(window).len();
@@ -261,7 +381,7 @@ fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> V
         if split.is_empty() {
             continue;
         }
-        _bind_member_viewer(&split, &member, &team, &ws);
+        _bind_member_viewer(&split, &member, &team, &ws, role);
         added.push(name);
         prev_pane = split;
     }
@@ -364,16 +484,23 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
 
     let mut attached: Vec<String> = Vec::new();
     let mut prev_pane = first_pane.clone();
-    for (i, index) in attachable_idx.iter().enumerate() {
+    // The first member to take a pane gets the window's own; a withheld
+    // mirror leaves it a shell, as a window with nobody attachable is.
+    let mut first_free = true;
+    for index in &attachable_idx {
         let member = &members[*index];
+        let Some(role) = _pane_role(&window, member) else {
+            continue;
+        };
         let name = map_str(member, "name");
         let cwd = map_str(member, "cwd");
-        let pane = if i == 0 {
+        let pane = if first_free {
+            first_free = false;
             first_pane.clone()
         } else {
             let split = ok_or_fail(tmux::split_window(
                 &prev_pane,
-                crate::layout::split_horizontal(&window, i + 1),
+                crate::layout::split_horizontal(&window, attached.len() + 1),
                 None,
                 true,
                 if cwd.is_empty() { None } else { Some(&cwd) },
@@ -384,7 +511,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
             }
             split
         };
-        _bind_member_viewer(&pane, member, &team, &ws);
+        _bind_member_viewer(&pane, member, &team, &ws, role);
         attached.push(name);
         prev_pane = pane;
     }
@@ -447,6 +574,13 @@ pub fn attach_cmd(team_name: &str) {
         Err(message) => fail(&message),
     };
     let (window, built) = _ensure_team_display(&entry);
+    if !built {
+        for pane in _withdraw_self_mirrors_with(&window, &entry, _self_on_screen) {
+            eprintln!(
+                "- {pane}: this session's own mirror withdrawn (`hive mirror on` restores it)"
+            );
+        }
+    }
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {
         if let Ok(mut t) = Team::load(team_name, "") {

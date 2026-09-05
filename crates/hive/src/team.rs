@@ -83,6 +83,7 @@ pub fn clear_window_tags(window: &str) {
         "hive-created",
         "hive-peers",
         "hive-built",
+        "hive-mirror",
     ] {
         tmux::clear_window_option(window, &format!("@{key}"));
     }
@@ -526,7 +527,7 @@ impl Team {
             if pane.team != name {
                 continue;
             }
-            if pane.role == "agent" {
+            if pane.is_member_pane() {
                 if !pane.agent.is_empty() && !pane.group.is_empty() {
                     team.member_groups
                         .insert(pane.agent.clone(), pane.group.clone());
@@ -1738,6 +1739,26 @@ mod tests {
         let loaded = Team::load("team-a", "").unwrap();
 
         assert_eq!(loaded.agent_named("claude").unwrap().cwd, "/repo");
+    }
+
+    /// The rail is the member's pane as much as an engine pane is: a verb
+    /// addressing the orch (kill, capture, inject) lands on it.
+    #[test]
+    fn test_team_load_binds_a_member_to_its_mirror_pane() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        set_hive_window("dev:0", "team-a", "/tmp/ws", "", "0");
+        with_state(|st| {
+            st.list_panes_full_fn = Some(Box::new(|_target| {
+                let mut pane = pane_info("%1", "hive", "mirror", "orch", "team-a");
+                pane.cli = "claude".to_string();
+                vec![pane]
+            }));
+        });
+
+        let loaded = Team::load("team-a", "").unwrap();
+
+        assert_eq!(loaded.get("orch").unwrap().pane_id, "%1");
+        assert_eq!(loaded.agent_named("orch").unwrap().cli, "claude");
     }
 
     #[test]

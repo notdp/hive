@@ -17,6 +17,12 @@
 //! (/theme /view /find /quit) whose input types into the composer box, the
 //! dropdown anchored above it. Keystrokes still go nowhere by construction —
 //! the mirror only ever reads the transcript.
+//!
+//! In a pane `RAIL_MAX_WIDTH` columns or narrower — the team window's
+//! mirror rail — the same app draws a status column instead (`frame.rs`
+//! `rail_lines`): the member, busy or idle, HIVE envelopes since open, the
+//! last message's age and first words. Only `q` (and Ctrl+C / Ctrl+Q) acts
+//! there.
 
 mod app;
 mod frame;
@@ -79,6 +85,11 @@ const WHEEL_LINES: usize = 3;
 const MULTI_CLICK: Duration = Duration::from_millis(300);
 /// Thinking-body strength between bg and text (grok thinking.rs bg_blend).
 const THINKING_BLEND: f64 = 0.7;
+/// Pane width at or below which the viewer draws its rail instead of the
+/// transcript. The tmux rail is 14 columns; a little more is still a rail.
+pub(crate) const RAIL_MAX_WIDTH: u16 = 24;
+/// Rows of the last message's words the rail shows.
+const RAIL_WORD_ROWS: usize = 3;
 
 fn fg(c: Color) -> Style {
     Style::default().fg(c)

@@ -286,6 +286,15 @@ pub(crate) fn build_cli() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("mirror")
+                .about("Show or hide the read-only mirror rail on the current team window.")
+                .arg(
+                    Arg::new("mode")
+                        .num_args(0..=1)
+                        .value_parser(["on", "off"]),
+                ),
+        )
+        .subcommand(
             Command::new("flow")
                 .about("Deterministic member orchestration over live panes.")
                 .subcommand_required(true)
@@ -568,6 +577,7 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "compact",
     "team",
     "layout",
+    "mirror",
     "flow",
     "pr",
     "view",
@@ -902,6 +912,7 @@ fn dispatch(matches: &ArgMatches) {
         Some(("compact", m)) => rest::compact_cmd(arg_str(m, "pane_id")),
         Some(("team", m)) => core_cmds::team_cmd(arg_str(m, "team_arg")),
         Some(("layout", m)) => rest::layout_cmd(&arg_str(m, "preset").to_lowercase()),
+        Some(("mirror", m)) => rest::mirror_cmd(arg_str(m, "mode")),
         Some(("flow", m)) => match m.subcommand() {
             Some(("run", m)) => {
                 let script = arg_str(m, "script");
@@ -1142,6 +1153,8 @@ mod tests {
         assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(_no_tmux_refusal("config"), None);
+        // `mirror` reads the caller's window: tmux-only
+        assert_eq!(_no_tmux_refusal("mirror"), Some(_TMUX_REQUIRED_MESSAGE));
     }
 
     /// Root help lists a command exactly when its clap node is not hidden:

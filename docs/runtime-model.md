@@ -108,7 +108,26 @@ stay registry-only until they have one. A window hive built itself carries
 session lent the team (an in-tmux create). A claude member whose sessionId names an interactive session (a
 creating or joined desktop/ccd session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
-steals the member's deliveries.
+steals the member's deliveries. That mirror is the window's rail: a
+14-column pane (`layout::RAIL_COLS`) on the left, tagged `@hive-role mirror`
+beside its member tags, the member panes sharing the rest (a flow board's
+dock strip under them, right of the rail). The rail is display state only.
+`@hive-mirror` on the window is the recorded choice: `off` — written by
+`hive mirror off`, or by the self heuristic when a create, join or attach
+(or a `hive spawn` that rebuilds a lost window) from a Claude desktop
+terminal panel whose cwd is the session's own would mirror the conversation
+already on that screen — keeps heal and backfill from drawing it; `on`,
+written by `hive mirror on`, draws it and is never second-guessed. The
+heuristic speaks only while nothing is recorded, and records `off` when it
+does: at a build or backfill it withholds the rail; at an attach that finds
+the window still showing that session's rail it takes the rail down, once.
+A click on the rail widens it to 45% of the window, a second click folds it
+(a root-table `MouseDown1Pane` binding installed at every window build,
+whose else branch is tmux's stock click); `prefix+z` zooms it like any
+pane. The heuristic is a heuristic: it reads `TERM_PROGRAM`, a tty on stdin
+and the cwd, nothing more — a Claude Code tool subprocess has no tty on
+stdin (probed), so the stdin conjunct keeps it from firing there, and any
+misjudgement is one `hive mirror` away from corrected.
 
 ### Mailbox addresses
 
@@ -214,8 +233,9 @@ deliberately must not be typed at.
 
 Not every claude member is a bg job. A joined interactive session — a desktop
 Claude that ran `hive create` or `hive join` — is a member whose engine is that
-session, and its pane is a read-only `hive view` mirror (built at create or
-join, or by `hive attach`). No CLI process runs on that pane's tty, so the
+session, and its pane is a read-only `hive view` mirror, drawn as the
+window's rail (built at create or join, or by `hive attach`; `hive mirror`
+shows or hides it). No CLI process runs on that pane's tty, so the
 pane-keyed probe alone would report the member dead; the roster sessionId is
 the engine identity, and while it names a live session that session's registry
 status is the member's `cliAlive`, `busy` and `inputState`. `alive` stays the

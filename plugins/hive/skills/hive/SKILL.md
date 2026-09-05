@@ -12,7 +12,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 ```bash
 hive team            # 名册 + runtime:你是谁、队里有谁、各自什么状态
 hive send <addr> "<内容>"   # 唯一投递动词。成功零输出,自动锚线程
-hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外:建一个以团名命名的 tmux session 放团窗口(Claude session 建团则你以 <team>.orch 入册,首格是你的只读镜像);tmux 内 agent pane:当前 pane 立为 orch;shell 建的团无 orch
+hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外:建一个以团名命名的 tmux session 放团窗口(Claude session 建团则你以 <team>.orch 入册,窗口左侧窄栏 rail 是你的只读镜像;human 用 `hive mirror` 开关);tmux 内 agent pane:当前 pane 立为 orch;shell 建的团无 orch
 hive join <team>     # 入队。tmux 外:当前 Claude session 进名册成为正式成员;tmux 内:当前 pane 注册进窗口的 team
 hive spawn <name>    # 造新成员:引擎起在守护进程里,pane 切进团窗口——你在不在 tmux 里都一样
 hive attach <team>   # 跳到团的窗口;窗口没了先按名册重建,后来的成员缺 pane 就补上

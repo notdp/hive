@@ -65,8 +65,24 @@ impl Rig {
     /// (the tab separators below would come back as `_`); the binary under
     /// test fixes its own locale up in `main`, this client has to ask.
     fn tmux(&self, args: &[&str]) -> Output {
+        // `-S`: by explicit socket, so a client outliving the temp dir can
+        // never fall through to the developer's default server (tmux does
+        // that silently when TMUX_TMPDIR names a missing directory).
+        // tmux creates the socket directory only when resolving it from
+        // TMUX_TMPDIR; a `-S` client needs it there before a server binds,
+        // and tmux refuses any mode but 0700.
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(self.socket_dir());
+        let socket = self.socket_dir().join("default");
         let mut cmd = Command::new("tmux");
-        cmd.arg("-u").args(args).env("TMUX_TMPDIR", self.tmp.path());
+        cmd.arg("-u")
+            .arg("-S")
+            .arg(&socket)
+            .args(args)
+            .env("TMUX_TMPDIR", self.tmp.path());
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
         }
@@ -111,8 +127,10 @@ impl Rig {
 
     /// The built hive binary, homed under the rig, on the private server.
     /// `inside` = (socket path, pane id) puts the call inside that pane the
-    /// way a tmux client's shell would see it.
-    fn hive(&self, args: &[&str], inside: Option<(&str, &str)>) -> Output {
+    /// way a tmux client's shell would see it. `TERM_PROGRAM` is stripped:
+    /// the self-mirror heuristic must never fire from the developer's
+    /// shell.
+    fn hive_cmd(&self, args: &[&str], inside: Option<(&str, &str)>) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hive"));
         cmd.args(args)
             .current_dir(self.tmp.path())
@@ -123,7 +141,8 @@ impl Rig {
             .env("CODEX_HOME", self.tmp.path().join("codex"))
             .env("GROK_HOME", self.tmp.path().join("grok"))
             .env("XDG_CACHE_HOME", self.tmp.path().join("cache"))
-            .env("TMUX_TMPDIR", self.tmp.path());
+            .env("TMUX_TMPDIR", self.tmp.path())
+            .env_remove("TERM_PROGRAM");
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
         }
@@ -131,7 +150,120 @@ impl Rig {
             cmd.env("TMUX", format!("{socket},{},0", std::process::id()))
                 .env("TMUX_PANE", pane);
         }
-        cmd.output().expect("hive runs")
+        cmd
+    }
+
+    fn hive(&self, args: &[&str], inside: Option<(&str, &str)>) -> Output {
+        self.hive_cmd(args, inside).output().expect("hive runs")
+    }
+
+    /// `hive` run by a live Claude session `me` (sessionId `s-me`): its
+    /// registration names the inbox socket the process carries, and this
+    /// test process is the pid behind it. `claude` on PATH is a stub whose
+    /// job ledger is empty, so `s-me` reads as an interactive session — a
+    /// mirror, never a resume — without the real CLI being asked.
+    fn hive_as_claude(&self, args: &[&str], inside: Option<(&str, &str)>) -> Output {
+        // `CLAUDE_HOME` outranks `CLAUDE_CONFIG_DIR` in hive's config-dir
+        // ladder, so the registration goes where the binary will look.
+        let sessions = self.tmp.path().join("claude-home").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let socket = self.tmp.path().join("me.sock");
+        std::fs::write(
+            sessions.join("me.json"),
+            serde_json::json!({
+                "name": "me",
+                "pid": std::process::id(),
+                "messagingSocketPath": socket,
+                "sessionId": "s-me",
+                "cwd": self.tmp.path(),
+            })
+            .to_string(),
+        )
+        .expect("session registration");
+        let bin = self.tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("stub bin dir");
+        let stub = bin.join("claude");
+        std::fs::write(&stub, "#!/bin/sh\necho '[]'\n").expect("stub claude");
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("stub claude mode");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        self.hive_cmd(args, inside)
+            .env("CLAUDE_CODE_MESSAGING_SOCKET", &socket)
+            .env("PATH", path)
+            .output()
+            .expect("hive runs")
+    }
+
+    fn hive_as_claude_ok(&self, args: &[&str], inside: Option<(&str, &str)>) -> String {
+        let out = self.hive_as_claude(args, inside);
+        assert!(
+            out.status.success(),
+            "hive {args:?} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// `(pane_id, @hive-role, @hive-agent, pane_width)` in window order.
+    fn panes(&self, window_id: &str) -> Vec<(String, String, String, i64)> {
+        self.tmux_ok(&[
+            "list-panes",
+            "-t",
+            window_id,
+            "-F",
+            "#{pane_id}\t#{@hive-role}\t#{@hive-agent}\t#{pane_width}",
+        ])
+        .lines()
+        .map(|line| {
+            let mut parts = line.split('\t');
+            (
+                parts.next().unwrap_or_default().to_string(),
+                parts.next().unwrap_or_default().to_string(),
+                parts.next().unwrap_or_default().to_string(),
+                parts.next().unwrap_or_default().parse().unwrap_or(-1),
+            )
+        })
+        .collect()
+    }
+
+    fn window_option(&self, window_id: &str, key: &str) -> String {
+        self.tmux_ok(&[
+            "display-message",
+            "-p",
+            "-t",
+            window_id,
+            &format!("#{{@{key}}}"),
+        ])
+    }
+
+    fn zoomed(&self, window_id: &str) -> bool {
+        self.tmux_ok(&[
+            "display-message",
+            "-p",
+            "-t",
+            window_id,
+            "#{window_zoomed_flag}",
+        ]) == "1"
+    }
+
+    /// The server's root key table, one line per binding, sorted.
+    fn root_keys(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .tmux_ok(&["list-keys", "-T", "root"])
+            .lines()
+            .map(str::to_string)
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    fn socket_path(&self) -> String {
+        self.tmux_ok(&["display-message", "-p", "#{socket_path}"])
     }
 
     fn hive_ok(&self, args: &[&str], inside: Option<(&str, &str)>) -> String {
@@ -360,4 +492,200 @@ fn test_attach_names_a_missing_team_without_touching_tmux() {
     assert!(stderr.contains(&rig.team), "stderr: {stderr}");
     // No server was ever started on the private socket.
     assert!(!rig.socket_dir().exists());
+}
+
+#[test]
+fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_trips() {
+    let rig = Rig::new("rail");
+    // The server's stock key table, read before hive ever touches it.
+    let probe = format!("probe-{}", std::process::id());
+    rig.tmux_ok(&["new-session", "-d", "-s", &probe]);
+    let keys_before = rig.root_keys();
+
+    let ws = rig.ws();
+    rig.hive_as_claude_ok(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+    );
+    let entry = rig.registry_entry().expect("registry entry");
+    let roster: Vec<(String, String, String)> = entry["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["name"].as_str().unwrap_or_default().to_string(),
+                m["cli"].as_str().unwrap_or_default().to_string(),
+                m["sessionId"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roster,
+        vec![("orch".to_string(), "claude".to_string(), "s-me".to_string())]
+    );
+    let (_, window_id) = rig.team_windows().into_iter().next().expect("team window");
+    let panes = rig.panes(&window_id);
+    assert_eq!(panes.len(), 1, "{panes:?}");
+    assert_eq!(
+        (panes[0].1.as_str(), panes[0].2.as_str()),
+        ("mirror", "orch")
+    );
+
+    // The window build changed exactly one root binding: the click, whose
+    // rail branch resizes and whose else branch is the stock click.
+    let keys_after = rig.root_keys();
+    let gone: Vec<&String> = keys_before
+        .iter()
+        .filter(|k| !keys_after.contains(k))
+        .collect();
+    let added: Vec<&String> = keys_after
+        .iter()
+        .filter(|k| !keys_before.contains(k))
+        .collect();
+    assert_eq!(gone.len(), 1, "removed: {gone:?}");
+    assert_eq!(added.len(), 1, "added: {added:?}");
+    assert!(gone[0].contains("MouseDown1Pane"), "{}", gone[0]);
+    assert!(added[0].contains("MouseDown1Pane"), "{}", added[0]);
+    assert!(added[0].contains("@hive-role"), "{}", added[0]);
+    assert!(added[0].contains("resize-pane"), "{}", added[0]);
+    // The stock click hive hard-codes is the one tmux shipped (`list-keys`
+    // escapes its `;`), and the installed binding ends in that same text as
+    // its else branch — a tmux that changes its stock click fails here.
+    assert!(
+        gone[0]
+            .replace(r"\;", ";")
+            .ends_with(hive::tmux::_STOCK_CLICK),
+        "{}",
+        gone[0]
+    );
+    assert!(
+        added[0]
+            .trim_end_matches('"')
+            .ends_with(hive::tmux::_STOCK_CLICK),
+        "{}",
+        added[0]
+    );
+    for key in ["MouseDown1Status", "MouseDrag1Border"] {
+        let before: Vec<&String> = keys_before.iter().filter(|k| k.contains(key)).collect();
+        let after: Vec<&String> = keys_after.iter().filter(|k| k.contains(key)).collect();
+        assert_eq!(before, after, "{key}");
+    }
+
+    // A plain pane stands in for a member: roles are what the layout
+    // tiles by, and `hive mirror` runs from it.
+    let plain = rig.tmux_ok(&[
+        "split-window",
+        "-h",
+        "-t",
+        &window_id,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let socket = rig.socket_path();
+    let inside = Some((socket.as_str(), plain.as_str()));
+
+    let stdout = rig.hive_ok(&["mirror", "off"], inside);
+    assert_eq!(stdout, format!("mirror off ({})\n", rig.team));
+    assert!(
+        rig.panes(&window_id).iter().all(|p| p.1 != "mirror"),
+        "{:?}",
+        rig.panes(&window_id)
+    );
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "off");
+
+    // The heal respects the recorded absence.
+    let stdout = rig.hive_ok(&["attach", &rig.team], inside);
+    assert!(stdout.starts_with("found "), "{stdout}");
+    assert!(rig.panes(&window_id).iter().all(|p| p.1 != "mirror"));
+
+    // `off` with no rail records the choice and touches nothing else.
+    let stdout = rig.hive_ok(&["mirror", "off"], inside);
+    assert_eq!(stdout, format!("mirror off ({}): no rail\n", rig.team));
+    assert_eq!(rig.panes(&window_id).len(), 1);
+
+    let stdout = rig.hive_ok(&["mirror", "on"], inside);
+    assert_eq!(stdout, format!("mirror on ({})\n", rig.team));
+    let panes = rig.panes(&window_id);
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert_eq!(
+        (panes[0].1.as_str(), panes[0].2.as_str(), panes[0].3),
+        ("mirror", "orch", 14),
+        "{panes:?}"
+    );
+    assert_eq!(panes[1].0, plain);
+    assert_eq!(panes[1].3, 220 - 15, "{panes:?}");
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
+
+    // `on` with the rail already up says so and keeps the human's zoom.
+    rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
+    assert!(rig.zoomed(&window_id));
+    let stdout = rig.hive_ok(&["mirror", "on"], inside);
+    assert_eq!(
+        stdout,
+        format!("mirror on ({}): no session mirror to show\n", rig.team)
+    );
+    assert!(rig.zoomed(&window_id));
+    rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
+    assert!(!rig.zoomed(&window_id));
+
+    // The click binding's rail branch, run by tmux's own parser exactly as
+    // the binding carries it (the mouse pane `=` being the rail): opens to
+    // 45% of the 220 columns, then folds back to the rail.
+    let rail = panes[0].0.clone();
+    let then = hive::tmux::mirror_click_binding()[9].replace('=', &rail);
+    rig.tmux_ok(&["if-shell", "-F", "-t", &rail, "1", &then]);
+    assert_eq!(rig.panes(&window_id)[0].3, 99);
+    rig.tmux_ok(&["if-shell", "-F", "-t", &rail, "1", &then]);
+    assert_eq!(rig.panes(&window_id)[0].3, 14);
+
+    // No argument toggles by presence; the kill unzooms, so the survivor
+    // is re-tiled to the whole window.
+    rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
+    let stdout = rig.hive_ok(&["mirror"], inside);
+    assert_eq!(stdout, format!("mirror off ({})\n", rig.team));
+    let panes = rig.panes(&window_id);
+    assert!(panes.iter().all(|p| p.1 != "mirror"), "{panes:?}");
+    assert!(!rig.zoomed(&window_id));
+    assert_eq!(panes[0].3, 220, "{panes:?}");
+
+    rig.delete();
+}
+
+#[test]
+fn test_flow_rig_mirror_pane_is_the_rail() {
+    let rig = Rig::new("flowrig");
+    // The mirror pane is `hive view s-rig` with nothing else keeping the
+    // pane open, and the viewer looks under `$HOME/.claude/projects` — so
+    // the run's HOME is the rig and the transcript exists (empty: the
+    // viewer follows it live).
+    let project = rig.tmp.path().join(".claude").join("projects").join("p");
+    std::fs::create_dir_all(&project).expect("projects dir");
+    std::fs::write(project.join("s-rig.jsonl"), "").expect("transcript");
+    let out = rig
+        .hive_cmd(&["flow", "rig", &rig.team, "--orch", "s-rig"], None)
+        .env("HOME", rig.tmp.path())
+        .output()
+        .expect("hive runs");
+    assert!(
+        out.status.success(),
+        "flow rig failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, window_id) = rig.team_windows().into_iter().next().expect("rig window");
+    let panes = rig.panes(&window_id);
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert_eq!(
+        (panes[0].1.as_str(), panes[0].3),
+        ("mirror", 14),
+        "{panes:?}"
+    );
+    assert_eq!(
+        (panes[1].1.as_str(), panes[1].3),
+        ("dock", 205),
+        "{panes:?}"
+    );
+    rig.hive_ok(&["flow", "rig", &rig.team, "--down"], None);
+    assert!(rig.registry_entry().is_none());
 }

@@ -53,6 +53,7 @@ Team:
   delete  Delete a team and clean up.
   join    Join a team.
   layout  Apply a tmux layout preset to the current team window.
+  mirror  Show or hide the read-only mirror rail on the current team window.
 
 Human Helpers:
   Popup editor and split helpers for the human (not the model). In Claude Code
@@ -125,8 +126,9 @@ Examples:
   named after the team; inside: in your session), and a member without a
   pane gets one riding its engine's own viewer (claude attach loop / codex
   thread resume / grok session resume; a joined interactive Claude session
-  gets a read-only `hive view` mirror). Outside tmux this finishes by
-  exec'ing `tmux attach`.
+  gets a read-only `hive view` mirror, drawn as the narrow rail on the
+  window's left — `hive mirror` shows or hides it). Outside tmux this
+  finishes by exec'ing `tmux attach`.
 
 Options:
   -h, --help  Show this message and exit.
@@ -209,8 +211,14 @@ Commands:
   NAME is optional everywhere (pool-picked by default). Outside tmux: a
   tmux session named after the team (created detached when missing) holds
   its window; a Claude session running the command becomes the orch,
-  mirrored read-only in the first pane. Inside tmux on an agent pane: that pane becomes the orch.
-  Inside tmux on a shell pane: the window binds the team without an orch.
+  mirrored read-only in the rail — the narrow first column of the window
+  (`hive mirror` shows or hides it; the rail is withheld when the window
+  records `@hive-mirror off`, or when the command runs from the Claude
+  desktop panel already showing that session — a heuristic keyed on
+  `TERM_PROGRAM=claude-desktop`, a tty on stdin and the session's cwd, which
+  then records `off`). Inside tmux on an agent pane: that pane becomes the
+  orch. Inside tmux on a shell pane: the window binds the team without an
+  orch.
 
   The workspace defaults to the team's own directory, $HIVE_HOME/teams/NAME/
   (beside its team.json; holds hive.db, run/, artifacts/), and is reset on
@@ -310,7 +318,8 @@ Commands:
   each node its state; liveness comes from the hived.
 
   The pane tags itself @hive-role dock: the adaptive layout keeps it as a
-  full-width strip at the bottom and tiles the members above it.
+  strip at the bottom (right of the mirror rail when there is one) and
+  tiles the members above it.
 
 Options:
   --team <TEAM>  Team to watch (default: the team in scope)
@@ -357,9 +366,9 @@ Options:
 
   Creates a detached tmux session named RUN, binds a team of the same name
   to its window (session = team = run), starts `hive flow board --team RUN`
-  in a full-width dock strip, and — with --orch — a read-only `hive view`
-  mirror of the orchestrating Claude session. Attach with `hive attach RUN`;
-  members spawn above the dock as nodes run.
+  in a dock strip at the bottom, and — with --orch — a read-only `hive view`
+  mirror of the orchestrating Claude session in the window's rail. Attach
+  with `hive attach RUN`; members spawn above the dock as nodes run.
 
   --down retires every member, deletes the team and kills the session.
 
@@ -493,6 +502,36 @@ Options:
   Apply a tmux layout preset to the current team window.
 
   Use ``auto`` to pick a preset adaptively from the window's aspect ratio.
+  With ``auto``, a window with a mirror rail (`@hive-role mirror`) or a flow
+  dock (`@hive-role dock`) gets a generated layout instead: rails on the
+  left, the dock strip at the bottom, members tiled between; an explicit
+  preset applies as given and flattens them until the next adaptive apply.
+
+Options:
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["mirror"] => {
+            r#"Usage: hive mirror [OPTIONS] [{on|off}]
+
+  Show or hide the read-only mirror rail on the current team window.
+
+  The rail is the narrow left column mirroring a session member (a Claude
+  session that created or joined the team) through `hive view`. `off` kills
+  the rail panes and records `@hive-mirror off` on the window, so `hive
+  attach` and spawn leave them out when they heal the display; `on` records
+  `on` and splits them back in — and a recorded `on` also overrides the
+  self heuristic (see `hive create --help`) on every later heal. No
+  argument toggles. `off` refuses from the rail pane itself. Prints one
+  line: `mirror on (TEAM)` / `mirror off (TEAM)`, with a `: no session
+  mirror to show` / `: no rail` tail when the choice was recorded but the
+  window had nothing to add or remove (it is then left as it is, zoom
+  included).
+
+  A click on a rail widens it to 45% of the window and a second click folds
+  it back; tmux zoom (prefix+z) works as on any pane. A `hive flow rig`
+  orch mirror is not a roster member: `off` removes it, `on` cannot bring it
+  back — only `--down` and a fresh rig (which retires every member) does.
 
 Options:
   -h, --help  Show this message and exit.
@@ -739,6 +778,12 @@ Options:
             r#"Usage: hive view [OPTIONS] SESSION_ID
 
   Read-only viewer for a Claude session transcript (follows live).
+
+  In a pane narrower than 25 columns — the team window's mirror rail — it
+  draws a status column instead of the transcript: the member, busy or
+  idle, HIVE messages since it opened, the last message's age and first
+  words. Widen the pane (click the rail, or prefix+z) and the transcript is
+  back.
 
 Options:
   -h, --help  Show this message and exit.
