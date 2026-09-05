@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{Map, Value};
@@ -28,12 +28,10 @@ pub(crate) const _ENGINE_MARKER_ENV: [&str; 3] = [
 ];
 
 // Verbs that never need a tmux context — plus the team verbs, which read the
-// registry (the truth layer) and only touch tmux when a display exists.
-// `flow` rides the same doctrine: it requires a team with a display window
-// (the non-tmux caller's real gate lives in Team/Agent::spawn, keyed on a
-// registry-addressable anchor), and `flow node --team` exists precisely for
-// callers without a pane identity (a workflow proxy subagent, a desktop
-// session).
+// registry (the truth layer) and address the team's window by id, so a
+// caller outside tmux or in another session reaches it the same way. `flow`
+// rides the same doctrine, and `flow node --team` exists for callers without
+// a pane identity (a workflow proxy subagent, a desktop session).
 pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
@@ -52,7 +50,6 @@ pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "kill",
     "delete",
     "attach",
-    "render",
     "view",
     "flow",
 ];
@@ -212,9 +209,9 @@ pub(crate) fn stdin_isatty() -> bool {
 
 /// Roster identity of the engine session this process runs inside.
 ///
-/// The headless rung of the scope ladder: pane tags cover members with a
-/// display, but an engine that was spawned or joined a team headless has
-/// none — its scope lives only in the registry row keyed by its sessionId.
+/// The session rung of the scope ladder: pane tags cover a caller sitting in
+/// a member pane, but an engine's tool subprocess carries no pane of its own
+/// — its scope is the registry row keyed by its sessionId.
 /// Three engines key that row, each by an id it mints for itself and hands
 /// to its own tool subprocesses: a codex tool by its `CODEX_THREAD_ID`
 /// (restricted to codex rows), a grok tool by its `GROK_SESSION_ID`
@@ -551,21 +548,6 @@ pub(crate) fn _window_id_slug(window_id: &str, fallback_index: &str) -> String {
     format!("w{raw}")
 }
 
-/// Where auto workspaces live. The headless create takes it as a parameter
-/// so a test can point it somewhere it owns instead of the real `/tmp`.
-pub(crate) const _AUTO_WORKSPACE_ROOT: &str = "/tmp";
-
-pub(crate) fn _default_auto_workspace_path(
-    session_name: &str,
-    window_id: &str,
-    fallback_index: &str,
-) -> PathBuf {
-    Path::new(_AUTO_WORKSPACE_ROOT).join(format!(
-        "hive-{session_name}-{}",
-        _window_id_slug(window_id, fallback_index)
-    ))
-}
-
 /// Window-id-derived team name — the overflow scheme behind the pool.
 pub(crate) fn _default_team_name_for_window(
     session_name: &str,
@@ -604,7 +586,7 @@ pub(crate) fn _pick_team_name(session_name: &str, window_id: &str, window_index:
         .map(|p| p.team)
         .collect();
     used.extend(_claimed_group_namespaces());
-    // The registry is the name authority: a headless or detached team owns
+    // The registry is the name authority: a team whose window is gone owns
     // its name until `hive delete` — a pool pick must never clobber it.
     for entry in crate::registry::list_entries() {
         let team = map_str(&entry, "team");
@@ -775,7 +757,7 @@ pub(crate) fn _team_status_payload(t: &mut Team) -> Map<String, Value> {
 /// The scope ladder, strongest evidence first: the pane's own tags, the
 /// roster row keyed by this engine's own session id, and only then the
 /// saved context file. The session rung is what answers outside tmux,
-/// where a headless member has no pane: the context file there was written
+/// where a member's tool has no pane: the context file there was written
 /// by whoever spawned it and would answer with the orch — see
 /// [`_session_member_binding`].
 pub(crate) fn _self_member_for_team(team: &str) -> String {
@@ -909,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_grok_session_id_resolves_identity_and_workspace() {
-        // A headless grok member has no pane, no thread and no Claude
+        // A grok member's tool has no pane, no thread and no Claude
         // socket: its leader exports GROK_SESSION_ID into every tool
         // subprocess, and that id keys its grok roster row.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -976,9 +958,9 @@ mod tests {
 
     #[test]
     fn test_default_team_falls_back_to_session_membership() {
-        // A session that created or joined a team headless has no pane tags;
-        // its scope lives in the registry row keyed by its sessionId — the
-        // same authority `hive send` resolves guests by.
+        // A session that created or joined a team from outside tmux has no
+        // pane tags; its scope lives in the registry row keyed by its
+        // sessionId — the same authority `hive send` resolves guests by.
         let tmp = tempfile::TempDir::new().unwrap();
         let mut env = isolated(tmp.path());
         let mut member = Map::new();
@@ -1015,9 +997,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_team_resolves_headless_codex_member() {
-        // A codex member spawned headless has no pane record and no Claude
-        // socket; its CODEX_THREAD_ID keys a codex roster row.
+    fn test_default_team_resolves_a_codex_member_by_its_thread() {
+        // A codex member's tool with no pane record and no Claude socket:
+        // its CODEX_THREAD_ID keys a codex roster row.
         let tmp = tempfile::TempDir::new().unwrap();
         let mut env = isolated(tmp.path());
         env.set("CODEX_HOME", tmp.path().join(".codex"));
@@ -1094,14 +1076,6 @@ mod tests {
     fn test_default_team_name_for_window_uses_slug() {
         assert_eq!(_default_team_name_for_window("dev", "@7", "1"), "dev-w7");
         assert_eq!(_default_team_name_for_window("dev", "", "5"), "dev-w5");
-    }
-
-    #[test]
-    fn test_default_auto_workspace_path_shape() {
-        assert_eq!(
-            _default_auto_workspace_path("dev", "@9", "0"),
-            PathBuf::from("/tmp/hive-dev-w9")
-        );
     }
 
     #[test]

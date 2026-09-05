@@ -8,8 +8,15 @@ behavior is documented in the modules themselves.
 
 ## Truth layers
 
-- `registry.rs` is the team truth layer: one JSON file per team under
-  `$HIVE_HOME/state/teams/`. tmux is display, resolved on top of it, and a
+- `registry.rs` is the team truth layer: one directory per team,
+  `$HIVE_HOME/teams/<team>/`, whose `team.json` is the registry entry — a
+  directory without one is not a team. That directory is also the team's
+  default workspace (`hive.db`, `run/`, `artifacts/`); an explicit
+  `--workspace` lives elsewhere and the entry's `workspace` field records
+  it. `hive create` on the default resets it (a recycled pool name must not
+  inherit its predecessor's bus); `hive delete` removes `team.json` only,
+  `--delete-workspace` the whole directory. The store lock is
+  `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
   pane or a window is not the authority on who is on a team. The write lanes
   are split, with the CLI owning roster membership and the hived only
   backfilling fields of names already there, so an observation racing a kill
@@ -46,7 +53,7 @@ behavior is documented in the modules themselves.
   `CARGO_PKG_VERSION` (`plugin_manager.rs`), the codex manifest is not
   checked, and a missed codex bump only costs an idempotent re-add at the
   next codex launch. The plugin ships no hooks at all: codex gates plugin
-  hooks behind a hook-review dialog that would block headless members, so
+  hooks behind a hook-review dialog that would block unattended members, so
   the codex re-add lives in hive's launch path
   (`ensure_codex_plugin_current`), and the claude side needs none — the
   command source is the sync.

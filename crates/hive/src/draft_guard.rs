@@ -3,7 +3,7 @@
 //! Normal Hive delivery never touches the composer: a claude member takes
 //! the supervisor daemon's `op:"reply"` (the inbox socket is the fallback),
 //! codex goes through the shared app-server daemon, grok through its
-//! per-pane leader. Two keystroke surfaces remain and are the callers here:
+//! leader daemon. Two keystroke surfaces remain and are the callers here:
 //! `agent::_submit_interactive_text` (`hive inject`, and `/compact`, which
 //! is TUI vocabulary and has to be typed) uses the save/clear/restore
 //! trio, and the claude bg keyboard lane's `_composer_has_draft` uses

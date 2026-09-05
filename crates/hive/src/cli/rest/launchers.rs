@@ -579,7 +579,13 @@ fn _grok_raw(args: &[String]) -> ! {
     execvp("grok", args)
 }
 
-/// Replace this process with grok, attached to a per-pane leader daemon.
+/// Replace this process with grok, attached to the pane's leader daemon.
+///
+/// A pane tagged as a team member resolves to the member's identity-keyed
+/// engine, which spawn minted before this pane existed: `spawn_daemon`
+/// finds it listening and the TUI attaches (`--resume <sid>`). An untagged
+/// pane — a raw `hive grok` outside any team — is the one place a leader is
+/// born from a pane, keyed `p<slug>` with the pane's lifecycle.
 ///
 /// Degrades to raw `grok` whenever the managed path cannot apply — the
 /// caller never ends up worse than plain grok.

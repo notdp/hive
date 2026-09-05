@@ -4341,8 +4341,8 @@ fn live_session(session_id: &str, pid: i32) -> crate::adapters::claude_sessions:
     }
 }
 
-/// `hive render` renders a joined desktop Claude as a read-only viewer pane:
-/// no CLI on the tty, so the pane probe says cli_exited while the member's
+/// A joined desktop Claude is drawn as a read-only viewer pane: no CLI on
+/// the tty, so the pane probe says cli_exited while the member's
 /// engine — its session — is alive and reachable.
 fn mirror_pane_hook(member: Agent) -> Hook {
     Hook {

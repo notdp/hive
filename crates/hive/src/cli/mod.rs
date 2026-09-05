@@ -130,13 +130,13 @@ pub(crate) fn build_cli() -> Command {
                         .long("workspace")
                         .short('w')
                         .default_value("")
-                        .help("Workspace path to initialize"),
+                        .help("Workspace path to initialize (default: the team dir)"),
                 )
                 .arg(
                     Arg::new("reset_workspace")
                         .long("reset-workspace")
                         .action(ArgAction::SetTrue)
-                        .help("Remove existing workspace before initialization"),
+                        .help("Wipe an existing --workspace before initialization"),
                 )
                 .arg(
                     Arg::new("state_entries")
@@ -360,12 +360,7 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("attach")
-                .about("Jump to a team's tmux window. Read-only: never builds one.")
-                .arg(Arg::new("team_name").required(true)),
-        )
-        .subcommand(
-            Command::new("render")
-                .about("Render a team's display: build its window, then jump to it.")
+                .about("Jump to a team's tmux window, rebuilding it first when it is gone.")
                 .arg(Arg::new("team_name").required(true)),
         )
         .subcommand(json_default_options(
@@ -492,7 +487,7 @@ pub(crate) fn build_cli() -> Command {
         ))
         .subcommand(passthrough_command(
             "grok",
-            "Launch grok attached to a per-pane leader daemon (hive-managed).",
+            "Launch grok attached to the pane's leader daemon (hive-managed).",
         ))
         .subcommand(
             Command::new("ccd")
@@ -577,7 +572,6 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "pr",
     "view",
     "attach",
-    "render",
     "ls",
     "send",
     "thread",
@@ -691,9 +685,9 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 ///
 /// Outside tmux only `send` has identity lanes, and every one of them is the
 /// engine's own minted session: a Claude session sending into hive as a
-/// guest (its messaging socket), a headless codex member (its thread keys
-/// its roster row) or a headless grok member (its leader's session id keys
-/// one). An engine whose session names nobody on the roster is told so by
+/// guest (its messaging socket), a codex member's tool (its thread keys its
+/// roster row) or a grok member's tool (its leader's session id keys one).
+/// An engine whose session names nobody on the roster is told so by
 /// name — that is the shape a killed member's leftover subprocess arrives
 /// in, and the tmux line would send it hunting for a terminal it is never
 /// going to have.
@@ -952,7 +946,6 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("view", m)) => core_cmds::view_cmd(arg_str(m, "session_id")),
         Some(("attach", m)) => rest::attach_cmd(arg_str(m, "team_name")),
-        Some(("render", m)) => rest::render_cmd(arg_str(m, "team_name")),
         Some(("ls", m)) => core_cmds::ls_cmd(m.get_flag("plain")),
         Some(("send", m)) => core_cmds::send(
             arg_str(m, "to_agent"),

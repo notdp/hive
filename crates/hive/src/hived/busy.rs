@@ -139,7 +139,7 @@ pub fn _claude_registry_busy(pane_id: &str) -> Option<bool> {
 }
 
 /// Busy flag from the pane's native runtime source (codex shared
-/// app-server via the pane's thread record, grok per-pane leader, claude's
+/// app-server via the pane's thread record, grok's leader daemon, claude's
 /// own session registry).
 ///
 /// None when no native source holds live state for the pane, which is the

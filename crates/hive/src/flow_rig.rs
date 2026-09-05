@@ -15,9 +15,6 @@ use anyhow::{bail, Context as _, Result};
 use crate::team::{Team, LEAD_AGENT_NAME};
 use crate::tmux;
 
-const SESSION_COLS: u32 = 220;
-const SESSION_ROWS: u32 = 60;
-
 pub fn rig_cmd(run: &str, orch: Option<&str>, workspace: Option<&str>, down: bool) -> i32 {
     let outcome = if down {
         rig_down(run)
@@ -45,23 +42,22 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     if crate::registry::load(run).is_some() {
         bail!("team '{run}' already exists (hive flow rig {run} --down releases it)");
     }
-    if tmux::has_session(run) {
-        bail!("tmux session '{run}' already exists (tmux kill-session -t {run})");
+    if tmux::has_session(&format!("={run}")) {
+        bail!("tmux session '{run}' already exists (tmux kill-session -t ={run})");
     }
+    // The team directory is the default, as for `hive create`; the rig
+    // only initializes it (never resets), so a run's op journal under
+    // `artifacts/flow/` survives a `--down` and re-rig for `--resume`.
     let workspace = match workspace {
         Some(dir) if !dir.is_empty() => crate::cli::expanduser(dir),
-        _ => crate::team::hive_home()
-            .join("workspaces")
-            .join(run)
+        _ => crate::registry::team_dir(run)
+            .expect("validated above")
             .to_string_lossy()
             .into_owned(),
     };
 
-    let dock = tmux::new_session(run, SESSION_COLS, SESSION_ROWS)
+    let (window, dock, _) = crate::cli::rest::_new_team_session_window(run)
         .with_context(|| format!("creating tmux session '{run}'"))?;
-    let window = tmux::get_pane_window_target(&dock)
-        .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| format!("{run}:"));
 
     let team = match Team::create_for_window(
         run,
@@ -74,7 +70,7 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     ) {
         Ok(team) => team,
         Err(e) => {
-            tmux::kill_session(run);
+            tmux::kill_session(&format!("={run}"));
             return Err(e);
         }
     };
@@ -116,8 +112,13 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-fn rig_down(run: &str) -> Result<()> {
-    if crate::registry::load(run).is_none() && !tmux::has_session(run) {
+pub(crate) fn rig_down(run: &str) -> Result<()> {
+    // Exact-name targets throughout: once `hive delete` has closed the
+    // team window (and with it the session), a bare `-t <run>` would
+    // prefix-match a stranger's `<run>-x` session and kill that instead.
+    let session = format!("={run}");
+    let had_session = tmux::has_session(&session);
+    if crate::registry::load(run).is_none() && !had_session {
         bail!("no rig named '{run}' (no team, no tmux session)");
     }
     if let Ok(mut team) = Team::load(run, "") {
@@ -131,8 +132,10 @@ fn rig_down(run: &str) -> Result<()> {
     if crate::registry::load(run).is_some() {
         crate::cli::core_cmds::delete(run, "", false);
     }
-    if tmux::has_session(run) {
-        tmux::kill_session(run);
+    if tmux::has_session(&session) {
+        tmux::kill_session(&session);
+    }
+    if had_session {
         println!("session '{run}' killed");
     }
     Ok(())

@@ -162,15 +162,22 @@ pub(super) fn _wait_codex_attached(pane_id: &str, timeout: f64, interval: f64) -
     }
 }
 
-/// Wait for the grok TUI to materialize the session hive minted for it.
+/// Wait for the pane's grok TUI to be up on the member's session.
 ///
-/// `--session-id` is honoured at startup: grok creates
-/// `$GROK_HOME/sessions/<quoted cwd>/<sid>/` before the first prompt, so that
-/// directory appearing is the readiness signal — no screen scraping. The cwd
-/// segment is grok's own encoding of the pane cwd, so the pane's session is
-/// matched by id under any of them. On resume the directory already exists, so
-/// the pane's live grok process is required too. Best-effort like the codex
-/// thread wait: a timeout is not fatal.
+/// The session directory `$GROK_HOME/sessions/<quoted cwd>/<sid>/` is the
+/// session's on-disk trace — the leader's for a minted session
+/// (`session/new`), the TUI's for a fork — and the cwd segment is grok's
+/// own encoding, so the session is matched by id under any of them. The
+/// directory alone is not readiness: for a minted or resumed session it is
+/// expected on disk before the pane runs anything, so readiness also needs
+/// a live grok process on the pane; no screen scraping either way.
+/// "Expected" is an assumption, not a verified fact: whether the leader
+/// writes the directory eagerly at `session/new` or lazily at the first
+/// prompt is observable only live (codex 0.153.2 turned lazy on its
+/// rollout), and a lazy write would hold this wait to its timeout and skip
+/// the hived's eager connect. The grok acceptance run is the oracle: spawn
+/// time well under `AGENT_STARTUP_TIMEOUT`, `connect-grok` connected.
+/// Best-effort like the codex thread wait: a timeout is not fatal.
 pub(super) fn _wait_grok_session_ready(
     pane_id: &str,
     session_id: &str,

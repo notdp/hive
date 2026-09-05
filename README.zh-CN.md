@@ -8,9 +8,9 @@ _本文档以 [README.md](README.md) 为准，翻译可能滞后于英文原版�
 
 ## 什么是 Hive
 
-Hive 是面向 agent 的 runtime，不是靠人手动驱动的 CLI。一个 team 是注册表里的名册（`$HIVE_HOME/state/teams/` 下每队一个 JSON）加上每个成员各自的引擎；tmux 窗口是 `hive render` 在其上渲染的显示层。
+Hive 是面向 agent 的 runtime，不是靠人手动驱动的 CLI。一个 team 是注册表里的名册（每队一个目录 `$HIVE_HOME/teams/<team>/`，放 `team.json`，缺省也是它的 workspace）加上每个成员各自的引擎；tmux 窗口是画在名册之上的显示层——建团即有。
 
-这条边界由实现保证。tmux 外的 `hive create` 注册的是 headless 团；没有显示层时 `hive spawn` 出来的成员只有引擎没有 pane，照样收消息、回报、被 kill；窗口可以之后用 `hive render <team>` 实体化，一个成员一个 pane。tmux 不持有任何真相，关闭窗口不丢失状态。
+这条边界由实现保证。tmux 外的 `hive create` 建一个以团名命名的 detached tmux session 放团窗口；`hive spawn` 从任何地方把 pane 切进团窗口；`hive attach` 跳过去，窗口被关或 tmux 重启时先按名册重建——引擎从来不在窗口里。tmux 不持有任何真相，关闭窗口不丢失状态。
 
 派活、发消息、读 runtime 状态都在 agent 会话里完成，由 agent 执行命令。给人的入口是插件 skill `/hive:hive [team]`：不带参数按处境创建或加入，带队名则加入该队，队不存在则创建。仍有一小部分命令由人执行：安装插件、看会话 transcript（`hive view`）、弹窗编辑器（`hive cvim` / `hive vim`）、分屏 fork，以及本地开发安装。
 
@@ -78,7 +78,7 @@ bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 
 交互式的 Claude 会话没有可挂的 pty（`claude attach` 只认 job），但它的 transcript 会随 turn 推进逐条追加，因此按这个文件渲染出来的就是一份实时镜像，且结构上无法回打。`hive view` 就是这个渲染器。
 
-一个 claude 成员的 sessionId 如果查不到 bg job 记录，它就是交互式会话（桌面 `ccd`、被 join 收编的会话），`hive render` 会自动给它挂上这个镜像：此时 resume 会 fork 出第二个引擎，抢走这个成员的投递，所以这种成员的 pane 挂的是镜像而不是 resume，pane 因此是只读的。投递不受影响：查不到 job 记录这同一个判断会让 `hive send` 直接投给活着的交互式会话而不是 pane。能向该成员输入的只有持有该会话的 app。
+一个 claude 成员的 sessionId 如果查不到 bg job 记录，它就是交互式会话（桌面 `ccd`、被 join 收编的会话），显示层会自动给它挂上这个镜像：此时 resume 会 fork 出第二个引擎，抢走这个成员的投递，所以这种成员的 pane 挂的是镜像而不是 resume，pane 因此是只读的。投递不受影响：查不到 job 记录这同一个判断会让 `hive send` 直接投给活着的交互式会话而不是 pane。能向该成员输入的只有持有该会话的 app。
 
 ## 升级
 

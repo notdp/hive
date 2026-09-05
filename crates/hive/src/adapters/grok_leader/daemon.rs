@@ -7,12 +7,11 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::adapters::base::washed_spawner_env;
-
 use super::keys::{
     _daemon_env_for_pane, _key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
 };
 use super::{grok_home, _DAEMON_START_TIMEOUT};
+use crate::adapters::base::washed_spawner_env;
 
 // --------------------------------------------------------------------------
 // daemon lifecycle
@@ -191,18 +190,22 @@ pub fn spawn_daemon(pane: &str) -> bool {
     )
 }
 
-/// Ensure the member's leader daemon is listening — no pane involved.
+/// Ensure the member's leader daemon is listening — keyed by identity,
+/// no pane involved.
 ///
-/// The headless spawn lane: the leader mints the member's identity itself
-/// (see `_daemon_env_for_pane` for what is washed and why), and there is
-/// no pane to report, so no `TMUX_PANE` is pinned. `TMUX` goes too: it
-/// names the spawner's tmux server and session, and `tmux::is_inside_tmux`
-/// takes any non-empty `TMUX` as running inside a tmux client, which a
-/// headless member's tool shells are not.
+/// The engine-first lane: a team member's engine lives on
+/// `m-<team>.<member>` and is raised before any pane exists; a pane that
+/// later runs the TUI is one more client of this daemon. The identity
+/// markers are washed as for the pane lane (see `_daemon_env_for_pane`),
+/// and no `TMUX_PANE` is pinned: the member's tool subprocesses identify
+/// by the `GROK_SESSION_ID` the leader exports, matched against the roster,
+/// and find their pane from that row (`tmux::get_current_pane_id`) — the
+/// pane is display resolved on top of identity, never the other way round.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
+    let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
     _spawn_daemon_key(
         &member_key(team, member),
-        washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]),
+        env,
         "grok",
         _DAEMON_START_TIMEOUT,
     )

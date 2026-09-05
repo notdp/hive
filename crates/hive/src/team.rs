@@ -82,6 +82,7 @@ pub fn clear_window_tags(window: &str) {
         "hive-desc",
         "hive-created",
         "hive-peers",
+        "hive-built",
     ] {
         tmux::clear_window_option(window, &format!("@{key}"));
     }
@@ -236,6 +237,13 @@ pub(crate) fn _set_fake_tmux_run(
     tests::with_state(|st| st.run_fn = Some(Box::new(f)));
 }
 
+/// Sibling seam for `Team::anchor_pane`'s window listing, which reads
+/// `list_panes_full` off the same fake.
+#[cfg(test)]
+pub(crate) fn _set_fake_tmux_panes(f: impl Fn(&str) -> Vec<PaneInfo> + 'static) {
+    tests::with_state(|st| st.list_panes_full_fn = Some(Box::new(f)));
+}
+
 #[derive(Debug, Clone)]
 pub struct Team {
     pub name: String,
@@ -335,8 +343,8 @@ impl Team {
             bail!("{}", error);
         }
         if crate::registry::load(name).is_some() {
-            // The registry is the name authority: a headless or detached
-            // team owns its name (its engines may still be running) until
+            // The registry is the name authority: a team whose window is
+            // gone owns its name (its engines may still be running) until
             // `hive delete` releases it. Never silently clobbered.
             bail!(
                 "team '{name}' already exists in the registry \
@@ -2248,7 +2256,7 @@ mod tests {
         assert_eq!(teams["windowed"].get("workspace").unwrap(), "/tmp/ws-w");
     }
 
-    /// The registry is the name authority: a headless team owns its name.
+    /// The registry is the name authority: a windowless team owns its name.
     #[test]
     fn test_create_refuses_a_registry_claimed_name() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");

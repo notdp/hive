@@ -32,6 +32,7 @@ pub(super) fn hooked_split_window(
 ) -> anyhow::Result<String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
+        h.event_order.push(format!("split:{target}"));
         h.split_window_result
             .clone()
             .unwrap_or_else(|| Ok(target.to_string()))
@@ -151,6 +152,7 @@ pub(super) fn hooked_clear_pane_tags(pane_id: &str) {
 pub(super) fn hooked_send_keys(pane_id: &str, text: &str, enter: bool) -> anyhow::Result<()> {
     #[cfg(test)]
     if testhook::with(|h| {
+        h.event_order.push(format!("launch:{pane_id}"));
         h.calls.push(text.to_string());
         if enter {
             h.calls.push("<Enter>".to_string());
@@ -645,32 +647,61 @@ pub(super) fn hooked_codex_daemon_alive() -> bool {
 
 // --- grok_leader seams -----------------------------------------------------
 
-pub(super) fn hooked_grok_spawn_daemon(pane_id: &str) -> bool {
+/// The member's leader daemon, raised by identity (no pane).
+pub(super) fn hooked_grok_spawn_member_daemon(team: &str, member: &str) -> bool {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
-        h.grok_started.push(pane_id.to_string());
-        h.grok_spawn_daemon
+        h.event_order.push(format!("leader:{team}.{member}"));
+        h.grok_leaders.push((team.to_string(), member.to_string()));
+        h.grok_spawn_member_daemon
     }) {
         return v;
     }
-    crate::adapters::grok_leader::spawn_daemon(pane_id)
+    crate::adapters::grok_leader::spawn_member_daemon(team, member)
 }
 
-pub(super) fn hooked_write_pane_session(
-    pane_id: &str,
+/// The engine-first mint: leader + `session/new` + record, all by identity.
+pub(super) fn hooked_grok_create_member_session(
+    team: &str,
+    member: &str,
+    session_id: &str,
+    cwd: &str,
+) -> bool {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.event_order
+            .push(format!("mint:{team}.{member}:{session_id}:{cwd}"));
+        h.grok_minted.push((
+            team.to_string(),
+            member.to_string(),
+            session_id.to_string(),
+            cwd.to_string(),
+        ));
+        h.grok_create_member_session
+    }) {
+        return v;
+    }
+    crate::adapters::grok_leader::create_member_session(team, member, session_id, cwd)
+}
+
+/// The session record on a daemon key (resume/fork lanes, where the TUI —
+/// not `session/new` — materializes the session).
+pub(super) fn hooked_grok_write_session_key(
+    key: &str,
     session_id: &str,
     cwd: &str,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     if testhook::with(|h| {
+        h.event_order.push(format!("record:{key}:{session_id}"));
         h.grok_sessions
-            .push((pane_id.to_string(), session_id.to_string(), cwd.to_string()))
+            .push((key.to_string(), session_id.to_string(), cwd.to_string()))
     })
     .is_some()
     {
         return Ok(());
     }
-    crate::adapters::grok_leader::write_pane_session(pane_id, session_id, cwd)
+    crate::adapters::grok_leader::write_session_key(key, session_id, cwd)
 }
 
 pub(super) fn hooked_grok_send_to_pane(pane_id: &str, text: &str) -> Option<&'static str> {

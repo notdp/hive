@@ -29,11 +29,16 @@ pub fn is_inside_tmux() -> bool {
 ///   its jobId, and hive records which pane each job is bound to. An
 ///   interactive claude session's tools carry the socket too, but have no
 ///   bg registry entry (and no job record), so they fall through.
+/// - a grok member's leader exports `GROK_SESSION_ID` into its tools; that
+///   id keys the member's grok roster row, and the member's pane is the one
+///   tagged with that team and name on the default server. The leader
+///   carries no `TMUX_PANE` (it is minted by identity before any pane
+///   exists), so display is resolved from identity here, as for the other
+///   two.
 ///
-/// A headless member (a codex thread, grok session or claude session with
-/// no pane yet) resolves nothing here; its identity is the registry row
-/// keyed by its sessionId — the ladder's headless rung
-/// (`cli::util::_session_member_binding`).
+/// A member whose pane is gone (window closed, server restarted) resolves
+/// nothing here; its identity is the registry row keyed by its sessionId —
+/// the ladder's session rung (`cli::util::_session_member_binding`).
 fn _member_env_pane() -> Option<String> {
     let thread_id = env_string("CODEX_THREAD_ID").trim().to_string();
     if !thread_id.is_empty() {
@@ -64,10 +69,24 @@ fn _member_env_pane() -> Option<String> {
             }
         }
     }
-    // A per-pane daemon (the grok leader) pins its member's TMUX_PANE into
-    // the env it spawns tools with, but carries no $TMUX — grok has no
-    // per-CLI marker of its own, so the pinned pane is its identity. Trust
-    // it only when the pane is real on the default server.
+    let grok_session = env_string("GROK_SESSION_ID").trim().to_string();
+    if !grok_session.is_empty() {
+        if let Some((team, member)) =
+            crate::registry::member_for_session(&grok_session, Some("grok"))
+        {
+            if let Some(pane) = super::listing::list_panes_all()
+                .into_iter()
+                .find(|p| p.team == team && p.agent == member)
+            {
+                return Some(pane.pane_id);
+            }
+        }
+    }
+    // A pane-keyed grok leader (a raw `hive grok` outside any team) pins
+    // its pane's TMUX_PANE into the env it spawns tools with, but carries
+    // no $TMUX; a member's identity-keyed leader pins nothing (the rung
+    // above is its display). Trust a pinned pane only when it is real on
+    // the default server.
     let pinned = env_string("TMUX_PANE").trim().to_string();
     if !pinned.is_empty() && env_string("TMUX").is_empty() {
         if let Ok(r) = _run(

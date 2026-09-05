@@ -8,7 +8,9 @@ stand-in (`_stub_claude.py`), so no LLM is in the loop. The oracles are
 causal, never screen text: the stub's recorded argv (what `claude --bg` was
 asked to run), the bus row the member's send left behind, the frame that
 landed in the orch engine's inbox (nonce and msgId round trip), the
-registry roster, and the `claude stop` the kill issued.
+registry roster, and the `claude stop` the kill issued. A second spawn
+runs from outside tmux entirely (no client, no engine identity) and must
+land in the same team window.
 """
 
 import json
@@ -174,9 +176,13 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         created = json.loads(create_result.stdout)
         assert created["team"] == team
         assert created["orch"] == {"pane": pane_a, "name": "orch", "cli": "claude"}
+        # The default workspace is the team's own directory under the
+        # registry store, beside its team.json — not a /tmp slug keyed by
+        # the tmux session.
         auto_workspace = Path(created["workspace"])
+        assert auto_workspace == workdir / ".hive" / "teams" / team
         bus_db = auto_workspace / "hive.db"
-        registry_entry = workdir / ".hive" / "state" / "teams" / f"{team}.json"
+        registry_entry = auto_workspace / "team.json"
         assert registry_entry.is_file()
 
         def roster() -> dict[str, dict]:
@@ -195,6 +201,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
 
         spawn_result = orch(["spawn", "worker", "--cli", "claude", "--prompt", nonce])
         assert spawn_result.returncode == 0, spawn_result.stderr
+        assert "spawned in pane" in spawn_result.stdout, spawn_result.stdout
         # The member got a pane of its own, tagged with its name — so the
         # single-pane check after kill below is about a pane that existed.
         tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"]).stdout.split("\n")
@@ -257,6 +264,58 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert ["stop", worker_job] in _stub_calls(config_dir)
         wait_for(lambda: not _pid_alive(worker_engine_pid), timeout=10.0)
         assert "worker" not in roster()
+        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"]).stdout.split()
+        assert panes == [pane_a]
+
+        # The same spawn from outside tmux altogether — no client, no engine
+        # identity, the team named by flag and the cwd its workspace (a
+        # Workflow's Bash, a plain shell): the member still gets a pane
+        # split into the team window, and its engine is wired the same way.
+        outside_nonce = f"nonce-{uuid.uuid4().hex}"
+        outside_env = {"HOME": os.environ["HOME"], **pane_env}
+        outside_spawn = subprocess.run(
+            ["hive", "spawn", "runner", "--cli", "claude", "-t", team, "--prompt", outside_nonce],
+            env=outside_env, cwd=auto_workspace, capture_output=True, text=True, timeout=60,
+        )
+        assert outside_spawn.returncode == 0, outside_spawn.stderr
+        assert "spawned in pane" in outside_spawn.stdout, outside_spawn.stdout
+        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"]).stdout.split("\n")
+        tagged = [line for line in tagged if line.strip()]
+        assert len(tagged) == 2, tagged
+        assert tagged[0].startswith(pane_a), tagged
+        assert tagged[1].endswith(" runner"), tagged
+        runner_bg = [c for c in _stub_calls(config_dir) if c[:1] == ["--bg"] and "--name" in c
+                     and c[c.index("--name") + 1] == f"{team}.runner"]
+        assert len(runner_bg) == 1, _stub_calls(config_dir)
+        assert runner_bg[0][-1].splitlines()[-1] == outside_nonce
+        jobs = {row["name"]: row for row in _stub_jobs(config_dir)}
+        runner_job = jobs[f"{team}.runner"]["id"]
+        runner_engine_pid = jobs[f"{team}.runner"]["pid"]
+        assert roster()["runner"]["sessionId"] == runner_job
+
+        def outside_rows() -> list[tuple]:
+            return [r for r in _bus_rows(bus_db) if r[4] == outside_nonce]
+
+        try:
+            wait_for(lambda: len(outside_rows()) == 1, timeout=60.0)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"no bus row carried the outside-spawn nonce; member outcome: "
+                f"{_stub_json(config_dir, f'send-{runner_job}.json')}"
+            ) from exc
+        (_msg_id, from_agent, to_agent, _in_reply_to, _body), = outside_rows()
+        assert (from_agent, to_agent) == ("runner", "orch")
+        wait_for(
+            lambda: any(outside_nonce in f.get("message", {}).get("content", "")
+                        for f in _inbox_frames(config_dir, orch_job)),
+            timeout=30.0,
+        )
+
+        kill_result = orch(["kill", "runner"])
+        assert kill_result.returncode == 0, kill_result.stderr
+        assert ["stop", runner_job] in _stub_calls(config_dir)
+        wait_for(lambda: not _pid_alive(runner_engine_pid), timeout=10.0)
+        assert "runner" not in roster()
         panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"]).stdout.split()
         assert panes == [pane_a]
 
