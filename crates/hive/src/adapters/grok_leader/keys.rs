@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -9,6 +8,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::grok_home;
+use crate::adapters::base::washed_spawner_env;
 
 // --------------------------------------------------------------------------
 // daemon keys: the engine's identity on disk
@@ -104,14 +104,6 @@ pub fn pane_socket_path(pane: &str) -> PathBuf {
     socket_path_for_key(&resolve_pane_key(pane))
 }
 
-/// Sibling pidfile of the leader socket.
-///
-/// Written once the socket appears so the hived (which does not start the
-/// daemon) can prove liveness and reap orphans.
-pub fn pane_pidfile_path(pane: &str) -> PathBuf {
-    pane_socket_path(pane).with_extension("pid")
-}
-
 /// Sibling record of the session id hive minted for this daemon.
 pub fn session_path_for_key(key: &str) -> PathBuf {
     socket_path_for_key(key).with_extension("session")
@@ -137,7 +129,14 @@ pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()>
     write_session_key(&resolve_pane_key(pane), session_id, cwd)
 }
 
-pub fn read_session_key(key: &str) -> Option<(String, String)> {
+/// The session hive minted for a key, with the cwd recorded at spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub cwd: String,
+}
+
+pub fn read_session_key(key: &str) -> Option<SessionRecord> {
     let text = fs::read_to_string(session_path_for_key(key)).ok()?;
     let data: Value = serde_json::from_str(&text).ok()?;
     let obj = data.as_object()?;
@@ -149,10 +148,13 @@ pub fn read_session_key(key: &str) -> Option<(String, String)> {
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())?;
-    Some((session_id.to_string(), cwd.to_string()))
+    Some(SessionRecord {
+        session_id: session_id.to_string(),
+        cwd: cwd.to_string(),
+    })
 }
 
-pub fn read_pane_session(pane: &str) -> Option<(String, String)> {
+pub fn read_pane_session(pane: &str) -> Option<SessionRecord> {
     read_session_key(&resolve_pane_key(pane))
 }
 
@@ -165,14 +167,7 @@ pub fn read_pane_session(pane: &str) -> Option<(String, String)> {
 /// resolve to the *spawner*. Wash them: the leader exports its own session
 /// id into the tools it runs, and that is the only identity they need.
 pub(super) fn _daemon_env_for_pane(pane: &str) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| {
-            !(key.starts_with("CLAUDE")
-                || key.starts_with("ANTHROPIC")
-                || matches!(key.as_str(), "CODEX_THREAD_ID" | "GROK_SESSION_ID"))
-        })
-        .collect();
+    let mut env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID"]);
     env.insert("TMUX_PANE".to_string(), pane.to_string());
     env
 }

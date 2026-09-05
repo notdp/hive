@@ -1,4 +1,5 @@
-//! Agent: an agent CLI instance running in a tmux pane.
+//! Agent: a team member's engine (claude job / codex thread / grok
+//! session), optionally shown in a tmux pane.
 
 mod control;
 mod seams;

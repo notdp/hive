@@ -13,61 +13,73 @@ use crate::runtime_snapshot::RuntimeSnapshot;
 
 use super::*;
 
-/// Native codex runtime from the shared daemon, or None if unmanaged.
-pub fn _codex_app_server_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
-    let rt = hooked_cas_runtime_for_pane(pane_id)?;
-    let input_state = if rt.input_state.is_empty() {
-        "ready".to_string()
+/// The busy/turn/input triple the codex app-server and grok leader runtimes
+/// report, as runtime fields. `waiting_reason` names why that source parks on
+/// `waiting_user`; `source` is its `_runtimeSource` label.
+fn daemon_runtime_fields(
+    busy: bool,
+    turn_phase: &str,
+    input_state: &str,
+    waiting_reason: &str,
+    source: &str,
+) -> Map<String, Value> {
+    let input_state = if input_state.is_empty() {
+        "ready"
     } else {
-        rt.input_state.clone()
+        input_state
     };
     let mut fields = Map::new();
-    fields.insert("busy".to_string(), Value::Bool(rt.busy));
-    fields.insert("turnPhase".to_string(), Value::from(rt.turn_phase.clone()));
-    fields.insert("inputState".to_string(), Value::from(input_state.clone()));
+    fields.insert("busy".to_string(), Value::Bool(busy));
+    fields.insert("turnPhase".to_string(), Value::from(turn_phase));
+    fields.insert("inputState".to_string(), Value::from(input_state));
     fields.insert(
         "inputReason".to_string(),
         Value::from(if input_state != "waiting_user" {
             ""
         } else {
-            "app_server_active_flag"
+            waiting_reason
         }),
     );
-    fields.insert(
-        "_runtimeSource".to_string(),
-        Value::from("codex_app_server"),
-    );
-    Some(fields)
+    fields.insert("_runtimeSource".to_string(), Value::from(source));
+    fields
+}
+
+fn codex_runtime_fields(
+    rt: &crate::adapters::codex_app_server::ThreadRuntime,
+) -> Map<String, Value> {
+    daemon_runtime_fields(
+        rt.busy,
+        &rt.turn_phase,
+        &rt.input_state,
+        "app_server_active_flag",
+        "codex_app_server",
+    )
+}
+
+fn grok_runtime_fields(rt: &crate::adapters::grok_leader::SessionRuntime) -> Map<String, Value> {
+    daemon_runtime_fields(
+        rt.busy,
+        &rt.turn_phase,
+        &rt.input_state,
+        "leader_permission_request",
+        "grok-leader",
+    )
+}
+
+/// Native codex runtime from the shared daemon, or None if unmanaged.
+pub fn _codex_app_server_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
+    hooked_cas_runtime_for_pane(pane_id).map(|rt| codex_runtime_fields(&rt))
 }
 
 /// Native grok runtime from the pane's leader, or None if no daemon.
 pub fn _grok_leader_runtime(pane_id: &str) -> Option<Map<String, Value>> {
-    let rt = hooked_gl_runtime_for_pane(pane_id)?;
-    let input_state = if rt.input_state.is_empty() {
-        "ready".to_string()
-    } else {
-        rt.input_state.clone()
-    };
-    let mut fields = Map::new();
-    fields.insert("busy".to_string(), Value::Bool(rt.busy));
-    fields.insert("turnPhase".to_string(), Value::from(rt.turn_phase.clone()));
-    fields.insert("inputState".to_string(), Value::from(input_state.clone()));
-    fields.insert(
-        "inputReason".to_string(),
-        Value::from(if input_state != "waiting_user" {
-            ""
-        } else {
-            "leader_permission_request"
-        }),
-    );
-    fields.insert("_runtimeSource".to_string(), Value::from("grok-leader"));
-    Some(fields)
+    hooked_gl_runtime_for_pane(pane_id).map(|rt| grok_runtime_fields(&rt))
 }
 
 /// Native claude runtime from the pane's bg job, or None if unmanaged.
 pub fn _claude_bg_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
-    let (job_id, record_session, _cwd) = hooked_cb_read_pane_job(pane_id)?;
-    Some(_claude_job_runtime(&job_id, &record_session))
+    let record = hooked_cb_read_pane_job(pane_id)?;
+    Some(_claude_job_runtime(&record.job_id, &record.session_id))
 }
 
 /// Native claude runtime keyed by the job itself (pane optional).
@@ -240,97 +252,15 @@ pub fn _agent_runtime_payload(
         return runtime;
     };
 
-    // A hive-managed codex has a recorded thread on the shared app-server
-    // daemon: read native runtime signals (busy / turn) over the socket
-    // instead of reverse-engineering them from the transcript, and its
-    // session id IS the recorded threadId — no probing. An unmanaged codex
-    // (no record) falls through to the transcript path below.
-    if profile.name == "codex" {
-        if let Some(app_runtime) = hooked_codex_app_server_runtime(pane_id) {
-            for (key, value) in app_runtime {
-                runtime.insert(key, value);
-            }
-            runtime.insert(
-                "sessionId".to_string(),
-                Value::from(
-                    hooked_cas_session_id_for_pane(pane_id)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "unresolved".to_string()),
-                ),
-            );
-            return runtime;
-        }
+    if profile.name == "codex" && codex_pane_runtime(pane_id, &mut runtime) {
+        return runtime;
     }
-
-    // hive-spawned grok is the same shape over its per-pane leader daemon,
-    // and its session id needs no probing: hive minted it at spawn time and
-    // wrote it beside the socket. Unlike codex it never falls through to the
-    // transcript path — that gate only knows claude/codex record shapes and
-    // reads a pending grok permission request as clear — so with no leader
-    // state the honest answer is unknown.
     if profile.name == "grok" {
-        let leader_runtime = _grok_leader_runtime(pane_id);
-        runtime.insert(
-            "sessionId".to_string(),
-            Value::from(
-                hooked_gl_session_id_for_pane(pane_id)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unresolved".to_string()),
-            ),
-        );
-        match leader_runtime {
-            Some(fields) => {
-                for (key, value) in fields {
-                    runtime.insert(key, value);
-                }
-            }
-            None => {
-                runtime.insert("inputState".to_string(), Value::from("unknown"));
-                runtime.insert("inputReason".to_string(), Value::from("no_leader_runtime"));
-            }
-        }
+        grok_pane_runtime(pane_id, &mut runtime);
         return runtime;
     }
 
-    let session_id;
-    let snapshot_fresh = runtime_snapshot
-        .map(|s| !s.sessionId.value.is_empty() && s.sessionId.is_fresh(None))
-        .unwrap_or(false);
-    if snapshot_fresh {
-        let snapshot = runtime_snapshot.unwrap();
-        for (key, value) in snapshot.to_runtime_fields(None) {
-            runtime.insert(key, value);
-        }
-        session_id = snapshot.sessionId.value.clone();
-    } else {
-        session_id = adapter
-            .resolve_current_session_id(pane_id)
-            .unwrap_or_default();
-        let source = if session_id.is_empty() { "" } else { "adapter" };
-        runtime.insert(
-            "sessionId".to_string(),
-            Value::from(if session_id.is_empty() {
-                "unresolved".to_string()
-            } else {
-                session_id.clone()
-            }),
-        );
-        if !session_id.is_empty() {
-            let snapshot = runtime_snapshots()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .update_session_id(
-                    pane_id,
-                    &session_id,
-                    source,
-                    None,
-                    Some(_SESSION_SNAPSHOT_FRESHNESS_S),
-                );
-            for (key, value) in snapshot.to_runtime_fields(None) {
-                runtime.insert(key, value);
-            }
-        }
-    }
+    let session_id = resolve_session_fields(&adapter, pane_id, runtime_snapshot, &mut runtime);
 
     // An interactive claude reports its own state in the session registry —
     // the same fields the bg engine path maps. It is the authority when it
@@ -357,8 +287,117 @@ pub fn _agent_runtime_payload(
         return runtime;
     }
 
+    transcript_gate_fields(&adapter, pane_id, &session_id, &mut runtime);
+    runtime
+}
+
+/// A hive-managed codex has a recorded thread on the shared app-server
+/// daemon: its runtime signals (busy / turn) come over the socket instead
+/// of being reverse-engineered from the transcript, and its session id IS
+/// the recorded threadId — no probing. False for an unmanaged codex (no
+/// record), which takes the transcript path.
+fn codex_pane_runtime(pane_id: &str, runtime: &mut Map<String, Value>) -> bool {
+    let Some(app_runtime) = hooked_codex_app_server_runtime(pane_id) else {
+        return false;
+    };
+    for (key, value) in app_runtime {
+        runtime.insert(key, value);
+    }
+    runtime.insert(
+        "sessionId".to_string(),
+        Value::from(
+            hooked_cas_session_id_for_pane(pane_id)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unresolved".to_string()),
+        ),
+    );
+    true
+}
+
+/// hive-spawned grok is the same shape over its per-pane leader daemon, and
+/// its session id needs no probing: hive minted it at spawn time and wrote
+/// it beside the socket. Unlike codex it never falls through to the
+/// transcript path — that gate only knows claude/codex record shapes and
+/// reads a pending grok permission request as clear — so with no leader
+/// state the honest answer is unknown.
+fn grok_pane_runtime(pane_id: &str, runtime: &mut Map<String, Value>) {
+    runtime.insert(
+        "sessionId".to_string(),
+        Value::from(
+            hooked_gl_session_id_for_pane(pane_id)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unresolved".to_string()),
+        ),
+    );
+    match _grok_leader_runtime(pane_id) {
+        Some(fields) => {
+            for (key, value) in fields {
+                runtime.insert(key, value);
+            }
+        }
+        None => {
+            runtime.insert("inputState".to_string(), Value::from("unknown"));
+            runtime.insert("inputReason".to_string(), Value::from("no_leader_runtime"));
+        }
+    }
+}
+
+/// The pane's session id and snapshot fields: a fresh runtime snapshot is
+/// reused as is, otherwise the adapter probes and the answer is cached in
+/// the snapshot store. Returns the session id, empty when unresolved.
+fn resolve_session_fields(
+    adapter: &AdapterHandle,
+    pane_id: &str,
+    runtime_snapshot: Option<&RuntimeSnapshot>,
+    runtime: &mut Map<String, Value>,
+) -> String {
+    if let Some(snapshot) =
+        runtime_snapshot.filter(|s| !s.sessionId.value.is_empty() && s.sessionId.is_fresh(None))
+    {
+        for (key, value) in snapshot.to_runtime_fields(None) {
+            runtime.insert(key, value);
+        }
+        return snapshot.sessionId.value.clone();
+    }
+    let session_id = adapter
+        .resolve_current_session_id(pane_id)
+        .unwrap_or_default();
+    let source = if session_id.is_empty() { "" } else { "adapter" };
+    runtime.insert(
+        "sessionId".to_string(),
+        Value::from(if session_id.is_empty() {
+            "unresolved".to_string()
+        } else {
+            session_id.clone()
+        }),
+    );
+    if !session_id.is_empty() {
+        let snapshot = runtime_snapshots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update_session_id(
+                pane_id,
+                &session_id,
+                source,
+                None,
+                Some(_SESSION_SNAPSHOT_FRESHNESS_S),
+            );
+        for (key, value) in snapshot.to_runtime_fields(None) {
+            runtime.insert(key, value);
+        }
+    }
+    session_id
+}
+
+/// Input state read off the session transcript's ask gate.
+fn transcript_gate_fields(
+    adapter: &AdapterHandle,
+    pane_id: &str,
+    session_id: &str,
+    runtime: &mut Map<String, Value>,
+) {
     let cwd_hint = hooked_display_value(pane_id, "#{pane_current_path}");
-    let transcript = adapter.find_session_file(&session_id, cwd_hint.as_deref());
+    let transcript = adapter.find_session_file(session_id, cwd_hint.as_deref());
     runtime.insert(
         "_transcript".to_string(),
         match transcript.as_ref() {
@@ -369,7 +408,7 @@ pub fn _agent_runtime_payload(
     let Some(transcript) = transcript else {
         runtime.insert("inputState".to_string(), Value::from("unknown"));
         runtime.insert("inputReason".to_string(), Value::from("transcript_missing"));
-        return runtime;
+        return;
     };
 
     let exists = transcript.exists();
@@ -377,7 +416,7 @@ pub fn _agent_runtime_payload(
     if !exists {
         runtime.insert("inputState".to_string(), Value::from("unknown"));
         runtime.insert("inputReason".to_string(), Value::from("transcript_missing"));
-        return runtime;
+        return;
     }
 
     runtime.insert(
@@ -404,7 +443,6 @@ pub fn _agent_runtime_payload(
             }),
         );
     }
-    runtime
 }
 
 /// Runtime of a claude member whose engine is a live interactive session
@@ -467,27 +505,10 @@ pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
                 runtime.insert("inputReason".to_string(), Value::from("no_daemon_runtime"));
             }
             Some(rt) => {
-                let input_state = if rt.input_state.is_empty() {
-                    "ready".to_string()
-                } else {
-                    rt.input_state.clone()
-                };
                 runtime.insert("cliAlive".to_string(), Value::Bool(true));
-                runtime.insert("busy".to_string(), Value::Bool(rt.busy));
-                runtime.insert("turnPhase".to_string(), Value::from(rt.turn_phase.clone()));
-                runtime.insert("inputState".to_string(), Value::from(input_state.clone()));
-                runtime.insert(
-                    "inputReason".to_string(),
-                    Value::from(if input_state != "waiting_user" {
-                        ""
-                    } else {
-                        "app_server_active_flag"
-                    }),
-                );
-                runtime.insert(
-                    "_runtimeSource".to_string(),
-                    Value::from("codex_app_server"),
-                );
+                for (key, value) in codex_runtime_fields(&rt) {
+                    runtime.insert(key, value);
+                }
             }
         }
         runtime.insert("sessionId".to_string(), Value::from(sid));
@@ -500,28 +521,14 @@ pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
                 runtime.insert("inputReason".to_string(), Value::from("no_leader_runtime"));
             }
             Some(rt) => {
-                let input_state = if rt.input_state.is_empty() {
-                    "ready".to_string()
-                } else {
-                    rt.input_state.clone()
-                };
                 runtime.insert("cliAlive".to_string(), Value::Bool(true));
-                runtime.insert("busy".to_string(), Value::Bool(rt.busy));
-                runtime.insert("turnPhase".to_string(), Value::from(rt.turn_phase.clone()));
-                runtime.insert("inputState".to_string(), Value::from(input_state.clone()));
-                runtime.insert(
-                    "inputReason".to_string(),
-                    Value::from(if input_state != "waiting_user" {
-                        ""
-                    } else {
-                        "leader_permission_request"
-                    }),
-                );
-                runtime.insert("_runtimeSource".to_string(), Value::from("grok-leader"));
+                for (key, value) in grok_runtime_fields(&rt) {
+                    runtime.insert(key, value);
+                }
             }
         }
         let record = hooked_gl_read_session_key(&key);
-        let record_sid = record.map(|(sid, _)| sid).unwrap_or_default();
+        let record_sid = record.map(|r| r.session_id).unwrap_or_default();
         let final_sid = if !record_sid.is_empty() {
             record_sid
         } else if !sid.is_empty() {
@@ -692,12 +699,18 @@ pub fn _team_member_bindings_impl(team_name: &str) -> Result<Vec<(String, Map<St
 
 pub fn _idle_notify_agent_panes_impl(team_name: &str) -> Vec<String> {
     let bindings = hooked_team_member_bindings(team_name).unwrap_or_default();
+    agent_panes_from_bindings(&bindings)
+}
+
+/// The live agent panes among *bindings*: role `agent`, pane alive, a CLI
+/// process on it (a retained shell is not an agent), deduplicated.
+pub(super) fn agent_panes_from_bindings(bindings: &[(String, Map<String, Value>)]) -> Vec<String> {
     let mut panes: Vec<String> = Vec::new();
     for (_, member) in bindings {
         if member.get("role").and_then(Value::as_str) != Some("agent") {
             continue;
         }
-        let pane_id = map_get_str(&member, "pane");
+        let pane_id = map_get_str(member, "pane");
         if !pane_id.is_empty()
             && !panes.contains(&pane_id)
             && hooked_is_pane_alive(&pane_id)

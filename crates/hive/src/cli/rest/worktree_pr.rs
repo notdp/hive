@@ -151,7 +151,7 @@ pub fn pr_clear_cmd(plain: bool) {
                 false
             )
         );
-    } else if previous.as_deref().map_or(false, |p| !p.is_empty()) {
+    } else if previous.as_deref().is_some_and(|p| !p.is_empty()) {
         println!(
             "window {window} cleared @hive-pr={}",
             previous.unwrap_or_default()

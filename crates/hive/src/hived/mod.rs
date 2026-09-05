@@ -39,8 +39,6 @@ pub use server::*;
 pub use state::*;
 pub use supervisors::*;
 
-#[allow(dead_code)]
-pub const ACTIVE_SLEEP: f64 = 0.5;
 pub const IDLE_NOTIFY_TICK_SECONDS: f64 = 1.0;
 pub const IDLE_NOTIFY_THRESHOLD_SECONDS: f64 = 5.0;
 pub const IDLE_NOTIFY_MESSAGE: &str = "Window idle 5s+ (all agents stopped). Return to review.";
@@ -54,9 +52,8 @@ pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // The CLI's socket budget must be strictly longer than the work it asks the
 // hived to perform: worst-case native transport submission (claude inbox
 // connect+write / codex daemon RPC / grok leader prompt+ack) plus slack for
-// scheduling and payload plumbing.
-// A send blocks on nothing else — it returns queued the moment the transport
-// accepts; confirmation is asynchronous (background tracker / query-time).
+// scheduling and payload plumbing. A send blocks on nothing else: it
+// returns the moment the transport accepts, and nothing tracks it after.
 pub const REQUEST_SLACK: f64 = 5.0;
 pub const HIVED_API_VERSION: i64 = 5;
 pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;
@@ -78,8 +75,8 @@ pub const FLOW_MAILBOX_AGENT: &str = "flow.run";
 const _SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
 
 // Near-zero process clock (runtime_snapshot's timestamps share the shape).
-// Python's monotonic is system uptime, so its "last seen at 0.0" defaults
-// mean "long ago" — the Rust ports of those stamps seed NEG_INFINITY instead.
+// A stamp that must read as "long ago" seeds NEG_INFINITY, not 0.0: zero is
+// only moments before the first tick on this clock.
 fn monotonic() -> f64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()

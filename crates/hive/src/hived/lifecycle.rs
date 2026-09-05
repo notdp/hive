@@ -101,7 +101,7 @@ pub fn _start_hived(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr_log);
-    // Python start_new_session=True → setsid in the child.
+    // Own session: the hived must outlive the terminal of the CLI that spawned it.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
@@ -163,9 +163,8 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
     let mut notify_debug_state = NotifyDebugState::default();
     let mut code_reexec_state = ReexecState::default();
     let mut claude_view_state = ClaudeTickState::default();
-    // Python inits these to 0.0 against a large system-uptime monotonic, so
-    // every periodic check runs on the first tick; our monotonic starts near
-    // zero, so seed them to negative infinity to keep that behavior.
+    // `monotonic()` starts near zero, so a 0.0 seed would skip the first
+    // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
     let mut last_owner_check = f64::NEG_INFINITY;
     let mut last_daemon_cleanup = f64::NEG_INFINITY;
@@ -187,7 +186,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             ("startedAt", Value::from(hived_started_at.clone())),
         ],
     );
-    let mut inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env();
+    let inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env();
     let mut server = match hooked_open_server_socket(workspace) {
         Ok(server) => server,
         Err(err) => {
@@ -212,7 +211,6 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
     };
     hooked_write_hived_owner(workspace, getpid(), &hived_started_at, &owner_token);
     hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
-    inherited_reexec_lock_fd = None;
     let session_target = tmux_window
         .split_once(':')
         .map(|(session, _)| session)
@@ -225,7 +223,8 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         monitor.start();
     }
 
-    // Python's try/finally around the serve loop.
+    // Every exit from the loop is a `break`, so the teardown after it runs
+    // for all of them.
     loop {
         if !Path::new(workspace).is_dir() {
             break;
@@ -235,11 +234,12 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         if now - last_window_check >= 30.0 {
             last_window_check = now;
             // The registry entry is the team's existence; the tmux window
-            // is only its display. A dead window no longer retires the
-            // hived (engines keep running headless) — a *missing*
-            // registry file does (`hive delete` archives it). Corrupt or
-            // foreign-instance entries are not "missing": never retire on
-            // a read that might be wrong.
+            // is only its display. A dead window alone never retires the
+            // hived (engines keep running headless); only a *missing*
+            // registry file (`hive delete` archives it) with no display
+            // window left behind it does. Corrupt or foreign-instance
+            // entries are not "missing": never retire on a read that
+            // might be wrong.
             if let Some(path) = crate::registry::entry_path(team) {
                 if !path.is_file() && !hooked_is_tmux_window_alive(tmux_window_id) {
                     break;
@@ -310,8 +310,8 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
 
         let tick_members = hooked_team_member_bindings(team).unwrap_or_default();
 
-        // Border cosmetics must never take the hived down (the tick fns
-        // swallow their own failures).
+        // Job relabelling and border cosmetics must never take the hived
+        // down (the tick fns swallow their own failures).
         _claude_name_tick(&tick_members, team, &mut claude_view_state);
         _claude_view_tick(workspace, team, &tick_members, &mut claude_view_state);
 
@@ -339,8 +339,6 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         );
     }
 
-    // Python `finally`
-    hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
     if let Some(monitor) = busy_monitor.as_ref() {
         monitor.stop();
     }

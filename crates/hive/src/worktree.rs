@@ -20,7 +20,7 @@ use serde::Serialize;
 
 pub const POOL_SEGMENTS: [&str; 2] = [".claude", "worktrees"];
 
-/// branch.<feature>.<key> written on a ready start; cleared by done.
+/// `branch.<feature>.<key>` written on a ready start; cleared by done.
 pub const META_KEYS: [&str; 5] = [
     "hive-owner",
     "hive-team",
@@ -236,7 +236,6 @@ pub struct WorktreeInfo {
     /// short branch name; "" when detached/bare
     pub branch: String,
     pub prunable: bool,
-    pub locked: bool,
     pub is_main: bool,
 }
 
@@ -263,14 +262,13 @@ pub fn list_worktrees(anchor: &Path) -> Result<Vec<WorktreeInfo>> {
                     .to_string();
             } else if line.starts_with("prunable") {
                 c.prunable = true;
-            } else if line.starts_with("locked") {
-                c.locked = true;
             }
         }
     }
     if let Some(c) = current.take() {
         items.push(c);
     }
+    // git-worktree(1): the main worktree is listed first, linked ones after.
     if let Some(first) = items.first_mut() {
         first.is_main = true;
     }
@@ -603,13 +601,10 @@ pub fn start(
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0)
         });
-        // Python str(float) keeps a trailing ".0" on integral values.
-        let created_s = if created.is_finite() && created.fract() == 0.0 && created.abs() < 1e16 {
-            format!("{created:.1}")
-        } else {
-            format!("{created}")
-        };
-        meta.insert("hive-created".to_string(), created_s);
+        meta.insert(
+            "hive-created".to_string(),
+            crate::pyval::py_float_str(created),
+        );
         let gmb = match gh_merge_base.filter(|s| !s.is_empty()) {
             Some(g) => g.to_string(),
             None => pr_merge_base_from_ref(&base.r#ref),

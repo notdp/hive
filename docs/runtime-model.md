@@ -35,11 +35,18 @@ Consequences across modules:
   it, and hived identity is `(workspace socket, team)`, so a dead window does
   not retire a hived on its own; a missing registry entry with no window left
   behind it does.
-- **Team verbs outside tmux.** create/join/spawn/team/kill/delete/attach and
-  view need no tmux context: a team created outside tmux is headless, and a
-  spawn with no live display launches the engine alone, addressed directly
-  from then on. A pane serves as an address; these verbs do not require one.
-  The rest of the surface is display work and refuses to run outside tmux.
+- **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
+  delete/attach) need no tmux context: a team created outside tmux is
+  headless, and a spawn with no live display launches the engine alone,
+  addressed directly from then on. A pane serves as an address; these verbs
+  do not require one. `render` builds the display window from outside tmux
+  and `flow` rides the same doctrine; `view`, the read-only listings (`ls`,
+  `ccd`), `worktree`, and the setup/launcher commands never needed a pane.
+  The full list is `cli/util.rs::_TMUX_OPTIONAL_ROOT_COMMANDS`; everything
+  else (layout, fork, inject, cvim, …) acts on the current pane and refuses
+  to run outside tmux, except `send`, which is admitted when the caller's
+  own session names a roster row or a Claude messaging socket (the ladder
+  in the next bullet).
 - **Engine key scope.** A member's daemon is keyed by `<team>.<member>`, so it
   survives the pane; a raw non-team pane keeps a pane key and pane lifecycle.
   With no pane to ask, an engine still resolves who it is, by a three-rung
@@ -249,21 +256,26 @@ Mid-turn, both lanes leave an `enqueue`, an `attachment` row of type
 and no `user` row for the message at all. The terminal `remove` separates
 absorption from delay: a frame that is not `priority: next` (which hive does
 not send) is held to the end of the turn and then dequeued into its own
-wrapped turn, from the same opening row. Consumers must key on the terminal
-`remove`, not on its reason string: clients from 2.1.246 carry
-`reason: "absorbed_mid_turn"`, while 2.1.241 and earlier write the same
-terminal `remove` with no reason at all.
+wrapped turn, from the same opening row. The reason string is versioned:
+clients from 2.1.246 carry `reason: "absorbed_mid_turn"`, while 2.1.241 and
+earlier write the same terminal `remove` with no reason at all. The viewer
+(`transcript_view/parser.rs`, per `transcript-view.md`) keys on
+`reason == absorbed_mid_turn`, so a transcript written by 2.1.241 or earlier
+does not render the absorbed row unless its `queued_command` attachment
+carries it.
 
 An absorbed arrival exists only as an attachment and its queue rows, so
 nothing downstream (a reader, a viewer, an oracle) can count it as a turn or
 read a response obligation out of the file. The receipt duty covers that
 obligation; the queue does not.
 
-On the member lane, `origin.from` does not name the sender. Hive labels the
-inbox frame with the target's own `<team>.<member>`, so a member's transcript
-shows its own address on a message someone else sent. The sender travels in
-band, in the `<HIVE from=…>` envelope. The `ccd.<name>` lane labels the frame
-with the sending member's address instead.
+On the member lane and the `ccd.<name>` lane alike, the frame's `from` is
+the message author, never the recipient: `<team>.<sender>` for a member
+(`hived/payloads.rs`), a guest's or `ccd.` sender's already-qualified
+address verbatim, and the bare team name when hive itself speaks
+(`agent/control.rs::origin_label`). That label reaches only the human's
+message card; the receiving model sees the text, so the sender also travels
+in band, in the `<HIVE from=…>` envelope.
 
 ### The member keyboard
 

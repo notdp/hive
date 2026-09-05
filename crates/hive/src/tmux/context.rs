@@ -124,11 +124,6 @@ pub fn get_current_session_name() -> Option<String> {
     current_pane_display("#{session_name}")
 }
 
-/// Get the window index for the calling pane.
-pub fn get_current_window_index() -> Option<String> {
-    current_pane_display("#{window_index}")
-}
-
 /// Get the stable tmux window id for the calling pane.
 pub fn get_current_window_id() -> Option<String> {
     let pane_id = get_current_pane_id()?;
@@ -225,15 +220,11 @@ pub fn source_file(path: &str) -> bool {
 
 pub fn get_most_recent_client_tty(session_name: Option<&str>) -> Option<String> {
     let rows = _list_terminal_clients(session_name);
-    rows.into_iter().next().map(|row| row.2)
-}
-
-pub fn get_most_recent_terminal_client_pane(session_name: Option<&str>) -> Option<String> {
-    let rows = _list_terminal_clients(session_name);
     rows.into_iter().next().map(|row| row.1)
 }
 
-fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String, String)> {
+/// Terminal (non-control-mode) clients as `(activity, tty)`, newest first.
+fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
     let mut args: Vec<&str> = vec!["list-clients"];
     if let Some(session) = session_name {
         if !session.is_empty() {
@@ -249,7 +240,7 @@ fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String, Strin
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    let mut rows: Vec<(i64, String, String)> = Vec::new();
+    let mut rows: Vec<(i64, String)> = Vec::new();
     for line in r.stdout.trim().split('\n') {
         if line.is_empty() {
             continue;
@@ -260,7 +251,7 @@ fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String, Strin
         }
         let raw = if parts[0].is_empty() { "0" } else { parts[0] };
         let activity: i64 = raw.parse().unwrap_or(0);
-        rows.push((activity, parts[2].to_string(), parts[3].to_string()));
+        rows.push((activity, parts[3].to_string()));
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0));
     rows
@@ -311,10 +302,6 @@ pub fn get_client_mode(target: Option<&str>) -> String {
         Some("0") => "terminal".to_string(),
         _ => "unknown".to_string(),
     }
-}
-
-pub fn is_control_mode_client(target: Option<&str>) -> bool {
-    get_client_mode(target) == "control"
 }
 
 pub fn get_pane_window_name(pane_id: &str) -> Option<String> {
@@ -399,13 +386,6 @@ pub fn list_tty_processes(tty: &str) -> Vec<TTYProcessInfo> {
     processes
 }
 
-pub fn list_tty_commands(tty: &str) -> Vec<String> {
-    list_tty_processes(tty)
-        .into_iter()
-        .map(|process| process.command)
-        .collect()
-}
-
 pub fn get_pane_window_target(pane_id: &str) -> Option<String> {
     display_value(pane_id, "#{session_name}:#{window_index}")
 }
@@ -416,47 +396,4 @@ pub fn get_window_id(target: &str) -> Option<String> {
 
 pub fn get_pane_session_name(pane_id: &str) -> Option<String> {
     display_value(pane_id, "#{session_name}")
-}
-
-pub fn get_pane_count(pane_id: &str) -> u32 {
-    let value = display_value(pane_id, "#{window_panes}").unwrap_or_else(|| "1".to_string());
-    value.parse().unwrap_or(1)
-}
-
-/// Minimal `shlex.quote`.
-fn shlex_quote(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    let safe = s.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-')
-    });
-    if safe {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\"'\"'"))
-    }
-}
-
-pub fn flash_window_status(window_target: &str, style: &str, seconds: i64) {
-    let duration = std::cmp::max(1, seconds);
-    let quoted_target = shlex_quote(window_target);
-    let quoted_style = shlex_quote(style);
-    let set_cmd = format!(
-        "tmux set-window-option -t {quoted_target} window-status-style {quoted_style} >/dev/null 2>&1 || true"
-    );
-    let clear_cmd = format!(
-        "tmux set-window-option -t {quoted_target} -u window-status-style >/dev/null 2>&1 || true"
-    );
-    let mut parts: Vec<String> = Vec::new();
-    for _ in 0..duration {
-        parts.push(set_cmd.clone());
-        parts.push("sleep 0.5".to_string());
-        parts.push(clear_cmd.clone());
-        parts.push("sleep 0.5".to_string());
-    }
-    parts.push(clear_cmd.clone());
-    let joined = parts.join("; ");
-    let _ = _run(&["run-shell", "-b", &joined], false, 5);
 }

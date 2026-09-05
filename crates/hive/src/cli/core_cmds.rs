@@ -94,7 +94,7 @@ pub fn create(
     } else {
         expanduser(workspace)
     };
-    let t = match Team::create(&name, desc, "", &ws_str) {
+    let t = match Team::create(&name, desc, &ws_str) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -163,10 +163,6 @@ fn _title_badge_hint(badge: &str) -> String {
     )
 }
 
-/// Where auto workspaces live. A parameter at the two functions below so a
-/// test can point them somewhere it owns instead of the real `/tmp`.
-pub(crate) const _AUTO_WORKSPACE_ROOT: &str = "/tmp";
-
 /// Workspace of a headless team: the caller's, else an auto one under *root*.
 ///
 /// A team without a workspace has no bus, so `hive spawn --task` and every
@@ -216,19 +212,11 @@ fn _create_headless_team(
             if !creator.session_id.is_empty()
                 && _registry_member_for_session(&creator.session_id).is_none() =>
         {
-            let mut row = Map::new();
-            row.insert(
-                "name".to_string(),
-                Value::String(LEAD_AGENT_NAME.to_string()),
-            );
-            row.insert("cli".to_string(), Value::String("claude".to_string()));
-            row.insert("model".to_string(), Value::String(String::new()));
-            row.insert(
-                "sessionId".to_string(),
-                Value::String(creator.session_id.clone()),
-            );
-            row.insert("cwd".to_string(), Value::String(getcwd()));
-            Some(row)
+            Some(_session_member_row(
+                LEAD_AGENT_NAME,
+                "claude",
+                &creator.session_id,
+            ))
         }
         _ => None,
     };
@@ -387,7 +375,6 @@ fn _create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
         &orch_pane,
         LEAD_AGENT_NAME,
         &format!("auto-init from tmux {session_name} ({window})"),
-        "",
         &ws_str,
         false,
     ) {
@@ -403,18 +390,11 @@ fn _create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     tmux::set_pane_option(&orch_pane, "hive-cli", &orch_cli);
     let _ = crate::context::save_context_for_pane(&orch_pane, &t.name, &ws_str, LEAD_AGENT_NAME);
     _remember_context(&t.name, &ws_str, LEAD_AGENT_NAME);
-    let mut member = Map::new();
-    member.insert(
-        "name".to_string(),
-        Value::String(LEAD_AGENT_NAME.to_string()),
+    let member = _session_member_row(
+        LEAD_AGENT_NAME,
+        &orch_cli,
+        t.lead_session_id.as_deref().unwrap_or_default(),
     );
-    member.insert("cli".to_string(), Value::String(orch_cli.clone()));
-    member.insert("model".to_string(), Value::String(String::new()));
-    member.insert(
-        "sessionId".to_string(),
-        Value::String(t.lead_session_id.clone().unwrap_or_default()),
-    );
-    member.insert("cwd".to_string(), Value::String(getcwd()));
     let _ = crate::registry::record_team(
         &t.name,
         &ws_str,
@@ -467,15 +447,7 @@ fn _prepare_window_for_new_team(window_target: &str, current_pane: &str) {
         }
         return;
     }
-    for key in [
-        "hive-team",
-        "hive-workspace",
-        "hive-desc",
-        "hive-created",
-        "hive-peers",
-    ] {
-        tmux::clear_window_option(window_target, &format!("@{key}"));
-    }
+    crate::team::clear_window_tags(window_target);
 }
 
 /// Guard a default/explicit team name that another window already owns.
@@ -505,7 +477,16 @@ fn _claim_team_name(team_name: &str, this_window: &str, explicit: bool) {
 // daemon-backed gates (orch create)
 // ---------------------------------------------------------------------------
 
-/// Refuse to let an unmanaged codex join; point to the fix.
+/// The `/hive` entry as *cli* types it — claude keeps the plugin-qualified
+/// name, codex and grok take the bare skill name (the spawn prompt rule).
+fn _hive_skill_entry(cli: &str) -> String {
+    let profile = crate::agent_cli::get_profile(cli).expect("known agent cli");
+    profile.skill_cmd_for(if cli == "claude" { "hive:hive" } else { "hive" })
+}
+
+/// Refuse an engine hive does not manage (a codex thread off the shared
+/// daemon, a bare interactive claude, a grok without a leader) as the orch
+/// of a new team; each refusal says how to relaunch.
 fn _require_daemon_backed(pane: &str) {
     if _is_codex_tool_env() {
         // Running from inside the codex TUI's own tool: pane record or
@@ -542,7 +523,7 @@ fn _require_daemon_backed(pane: &str) {
     {
         return; // recorded thread on a live shared daemon — hive-managed, fine
     }
-    fail(
+    fail(&format!(
         "this codex is not hive-managed; hive needs its thread on the shared \
          app-server daemon for native runtime, so it can't join yet.\n\
          for future launches use hcodex (one-time setup, any shell):\n  \
@@ -552,8 +533,9 @@ fn _require_daemon_backed(pane: &str) {
          1) exit codex: press Ctrl-C (twice)\n  \
          2) run: hive codex resume <session-id>   (or `hive codex resume` \
          for the picker)\n\
-         then re-run /hive.",
-    );
+         then re-run {}.",
+        _hive_skill_entry("codex")
+    ));
 }
 
 /// Refuse a bare interactive claude pane: hive claude members run as bg jobs.
@@ -561,7 +543,7 @@ fn _require_claude_job_backed(pane: &str) {
     if crate::adapters::claude_bg::job_id_for_pane(pane).is_some() {
         return;
     }
-    fail(
+    fail(&format!(
         "this claude is not hive-managed; hive claude members run as \
          background jobs (`claude --bg`) with the pane attached as a viewer, \
          so it can't join yet.\n\
@@ -571,8 +553,9 @@ fn _require_claude_job_backed(pane: &str) {
          for this session now (your session is preserved):\n  \
          1) note your session id (`claude --resume` lists it), exit claude\n  \
          2) run: hive claude -r <session-id>\n\
-         then re-run /hive.",
-    );
+         then re-run {}.",
+        _hive_skill_entry("claude")
+    ));
 }
 
 /// Refuse a plain grok pane: hive delivers only through the pane leader.
@@ -596,7 +579,8 @@ fn _require_grok_leader_backed(pane: &str) {
          for this session now (your session is preserved):\n  \
          1) exit grok: /exit\n  \
          2) run: {resume}\n\
-         then re-run /skills hive."
+         then re-run {}.",
+        _hive_skill_entry("grok")
     ));
 }
 
@@ -749,15 +733,7 @@ fn _join_as_ccd(team_name: &str, name_override: &str) {
     } else {
         name_override.to_string()
     };
-    let mut row = Map::new();
-    row.insert("name".to_string(), Value::String(member_name.clone()));
-    row.insert("cli".to_string(), Value::String("claude".to_string()));
-    row.insert("model".to_string(), Value::String(String::new()));
-    row.insert(
-        "sessionId".to_string(),
-        Value::String(guest.session_id.clone()),
-    );
-    row.insert("cwd".to_string(), Value::String(getcwd()));
+    let row = _session_member_row(&member_name, "claude", &guest.session_id);
     let _ = crate::registry::record_member(team_name, &row, "");
     println!("joined: {team_name}.{member_name}");
     println!(
@@ -835,7 +811,7 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
         }
     }
     if reply_to.is_empty() {
-        _validate_root_send_protocol(body, artifact);
+        _validate_root_send_protocol(body);
     }
     let resolved_artifact = _resolve_artifact_path(artifact, &ws);
     let payload = match request_send_payload(
@@ -923,7 +899,7 @@ fn _send_to_ccd_session(label: &str, message: &str, artifact: &str) {
     // model sees just the text. Wrap the body in the ordinary <HIVE> envelope
     // so the sender travels in band and the receiver answers by copying it
     // verbatim: `hive send <team>.<agent>`. No msgId: this is not a bus thread.
-    let envelope = crate::runtime_state::format_hive_envelope(
+    let envelope = crate::message::format_hive_envelope(
         &sender,
         &format!("ccd.{}", target.name),
         message,
@@ -1031,7 +1007,7 @@ pub fn team_cmd(team_arg: &str) {
         ),
     );
     let window_id = tmux::get_current_window_id().unwrap_or_default();
-    if session_name.as_deref().map_or(false, |s| !s.is_empty()) && !window_id.is_empty() {
+    if session_name.as_deref().is_some_and(|s| !s.is_empty()) && !window_id.is_empty() {
         result.insert(
             "runtimeWorkspace".to_string(),
             Value::String(
@@ -1423,22 +1399,48 @@ pub fn view_cmd(session_id: &str) {
 // ---------------------------------------------------------------------------
 
 /// Diagnose agent connectivity and session state.
+///
+/// The report is always JSON on stdout: with no reachable hived it still
+/// carries the workspace's `runDir` and `logs` map (the debugging entry
+/// points) next to a `hived` section saying why, and the exit status is 1.
 pub fn doctor(agent_name: &str) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let mut t = t.expect("required resolve returned no team");
     let ws = ok_or_fail(resolve_workspace(Some(&t), true));
-    let self_name = _resolve_sender(None);
-
     let target_name = if agent_name.is_empty() {
-        self_name
+        _resolve_sender(None)
     } else {
         agent_name.to_string()
     };
-    let _ = _ensure_team_hived(&mut t, &ws);
-    let payload = crate::hived::request_doctor(&ws, &t.name, &target_name, true);
-    let mut payload = match payload {
+    let (payload, healthy) = _doctor_report(&mut t, &ws, &target_name);
+    println!("{}", json_pretty(&Value::Object(payload)));
+    if !healthy {
+        std::process::exit(1);
+    }
+}
+
+/// `(report, healthy)` for *target_name* on team *t* in workspace *ws*.
+///
+/// Healthy: the hived's verbose doctor answer, `ok` stripped and
+/// `duplicateTeams` added when the team is bound twice. Otherwise — no
+/// hived answering on the workspace socket, or an `ok: false` answer — the
+/// report is built here: `workspace`, `runDir`, `logs`, and a `hived`
+/// section with `ok: false` and the reason.
+pub(crate) fn _doctor_report(
+    t: &mut Team,
+    ws: &str,
+    target_name: &str,
+) -> (Map<String, Value>, bool) {
+    let _ = _ensure_team_hived(t, ws);
+    let answer = crate::hived::request_doctor(ws, &t.name, target_name, true);
+    let mut payload = match answer {
         Some(payload) if !payload.is_empty() => payload,
-        _ => fail(&crate::devlog::hived_unavailable_message(Path::new(&ws))),
+        _ => {
+            return (
+                _hived_down_report(ws, &crate::devlog::hived_unavailable_message(Path::new(ws))),
+                false,
+            )
+        }
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
         let error = match payload.get("error") {
@@ -1446,7 +1448,7 @@ pub fn doctor(agent_name: &str) {
             Some(other) => other.to_string(),
             None => "doctor failed".to_string(),
         };
-        fail(&error);
+        return (_hived_down_report(ws, &error), false);
     }
     payload.shift_remove("ok");
     let dupes = crate::team::duplicate_team_bindings().unwrap_or_default();
@@ -1456,7 +1458,33 @@ pub fn doctor(agent_name: &str) {
             Value::Array(dupes.into_iter().map(Value::Object).collect()),
         );
     }
-    println!("{}", json_pretty(&Value::Object(payload)));
+    (payload, true)
+}
+
+/// The doctor report when the hived cannot answer: the same `runDir` and
+/// `logs` the hived's own verbose answer carries (`hived/payloads.rs`),
+/// computed here from the workspace, plus the failure.
+fn _hived_down_report(ws: &str, error: &str) -> Map<String, Value> {
+    let workspace = Path::new(ws);
+    let mut payload = Map::new();
+    payload.insert("workspace".to_string(), Value::from(ws));
+    payload.insert(
+        "runDir".to_string(),
+        Value::from(
+            crate::devlog::run_dir(workspace)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    payload.insert(
+        "logs".to_string(),
+        Value::Object(crate::devlog::log_paths(workspace)),
+    );
+    let mut hived = Map::new();
+    hived.insert("ok".to_string(), Value::Bool(false));
+    hived.insert("error".to_string(), Value::from(error));
+    payload.insert("hived".to_string(), Value::Object(hived));
+    payload
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,12 +1543,8 @@ pub fn kill(agent_name: &str, team_arg: &str) {
         Ok(agent) => agent,
         Err(_) => fail(&format!("agent '{agent_name}' not found")),
     };
-    // Team::retire is the one retirement path (roster + registry + layout);
-    // the lead is not on the roster, so it is killed directly.
+    // Team::retire is the one retirement path (roster + registry + layout).
     let removed_from_team = t.retire(&agent_name);
-    if !removed_from_team {
-        agent.kill();
-    }
     let mut result = Map::new();
     result.insert("member".to_string(), Value::String(agent_name));
     result.insert("action".to_string(), Value::String("kill".to_string()));
@@ -1560,7 +1584,7 @@ pub(crate) fn _sweep_team_grok_daemons(team: &str) {
 }
 
 /// Delete a team and clean up.
-pub fn delete(name: &str, workspace: &str, _keep_workspace: bool, delete_workspace: bool) {
+pub fn delete(name: &str, workspace: &str, delete_workspace: bool) {
     ok_or_fail(_delete_team(name, workspace, delete_workspace));
 }
 
@@ -1580,15 +1604,7 @@ fn _delete_team(name: &str, workspace: &str, delete_workspace: bool) -> Result<(
     }
 
     if !team_window.is_empty() {
-        for key in [
-            "hive-team",
-            "hive-workspace",
-            "hive-desc",
-            "hive-created",
-            "hive-peers",
-        ] {
-            tmux::clear_window_option(&team_window, &format!("@{key}"));
-        }
+        crate::team::clear_window_tags(&team_window);
     }
 
     let legacy_team_dir = crate::team::hive_home().join("teams").join(name);
@@ -1652,6 +1668,7 @@ fn _delete_team(name: &str, workspace: &str, delete_workspace: bool) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
 
     fn as_map(value: Value) -> Map<String, Value> {
@@ -1663,12 +1680,10 @@ mod tests {
 
     #[test]
     fn test_delete_refuses_unsafe_names_before_touching_disk() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let hive_home = tmp.path().join("hive");
-        std::env::set_var("HIVE_HOME", &hive_home);
+        env.set("HIVE_HOME", &hive_home);
         // what `teams/../evil` and an absolute name would have resolved to
         let sibling = hive_home.join("evil");
         let outside = tmp.path().join("outside");
@@ -1757,6 +1772,13 @@ mod tests {
     }
 
     #[test]
+    fn test_hive_skill_entry_is_each_clis_own_form() {
+        assert_eq!(_hive_skill_entry("claude"), "/hive:hive");
+        assert_eq!(_hive_skill_entry("codex"), "$hive");
+        assert_eq!(_hive_skill_entry("grok"), "/hive");
+    }
+
+    #[test]
     fn test_headless_create_workspace_defaults_outside_the_window_slug_namespace() {
         let root = Path::new(_AUTO_WORKSPACE_ROOT);
         let auto = _headless_create_workspace(root, "hornet", "");
@@ -1778,20 +1800,10 @@ mod tests {
 
     #[test]
     fn test_headless_create_records_a_usable_workspace() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join("hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
-        for key in [
-            "TMUX",
-            "TMUX_PANE",
-            "CODEX_THREAD_ID",
-            "CLAUDE_CODE_MESSAGING_SOCKET",
-        ] {
-            std::env::remove_var(key);
-        }
+        env.set("HIVE_HOME", tmp.path().join("hive"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
         // an owned workspace root: the auto path must never land in real /tmp
         let root = tmp.path().join("ws-root");
         std::fs::create_dir_all(&root).unwrap();
@@ -1810,16 +1822,13 @@ mod tests {
             std::fs::read_to_string(Path::new(&ws).join("state").join("k")).unwrap(),
             "v"
         );
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_team_grok_daemon_keys_selects_only_this_teams_members() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("GROK_HOME", tmp.path());
+        env.set("GROK_HOME", tmp.path());
         let hive = tmp.path().join("hive");
         std::fs::create_dir_all(&hive).unwrap();
         for name in [
@@ -1839,11 +1848,9 @@ mod tests {
 
     #[test]
     fn test_sweep_team_grok_daemons_clears_only_this_teams_keys() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("GROK_HOME", tmp.path());
+        env.set("GROK_HOME", tmp.path());
         let hive = tmp.path().join("hive");
         std::fs::create_dir_all(&hive).unwrap();
         for name in [
@@ -1889,11 +1896,9 @@ mod tests {
 
     #[test]
     fn test_kill_address_prefers_the_explicit_team_over_the_prefix() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join("hive"));
+        env.set("HIVE_HOME", tmp.path().join("hive"));
         crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[], "").unwrap();
 
         // bare name: the pane's team decides, unless -t names one

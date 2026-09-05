@@ -1,25 +1,9 @@
-//! Real-tmux rendering of the hive pane-border format (port of
-//! tests/e2e/test_pane_border_format.py). tmux itself evaluates the format,
-//! so the assertions run the real renderer via `display-message -p`.
+//! Real-tmux rendering of the hive pane-border format. tmux itself evaluates
+//! the format, so the assertions run the real renderer via
+//! `display-message -p`, inside a detached session of the test's own.
 
-use std::process::Command;
-
-fn have_tmux() -> bool {
-    Command::new("tmux").arg("-V").output().is_ok()
-}
-
-fn run_tmux(args: &[&str]) -> String {
-    let out = Command::new("tmux").args(args).output().expect("tmux runs");
-    assert!(
-        out.status.success(),
-        "tmux {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .trim_end_matches('\n')
-        .to_string()
-}
+mod common;
+use common::{kill_session, require_tmux, run_tmux};
 
 struct BorderPane {
     session: String,
@@ -62,17 +46,13 @@ impl BorderPane {
 
 impl Drop for BorderPane {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session])
-            .output();
+        kill_session(&self.session);
     }
 }
 
 #[test]
 fn test_border_follows_the_viewed_session() {
-    if !have_tmux() {
-        return;
-    }
+    require_tmux();
     let p = BorderPane::new("view");
     p.set("@hive-agent", "red");
     p.set("@hive-team", "probe");
@@ -92,7 +72,7 @@ fn test_border_follows_the_viewed_session() {
         " probe.red#[fg=colour220] -> comb.blue#[default] "
     );
 
-    // Notify marker composes with the drift suffix.
+    // Notify marker composes with the view suffix.
     p.set("@hive-notify-active", "1");
     assert!(p
         .render()
@@ -101,9 +81,7 @@ fn test_border_follows_the_viewed_session() {
 
 #[test]
 fn test_border_untagged_pane_falls_back_to_pane_title() {
-    if !have_tmux() {
-        return;
-    }
+    require_tmux();
     let p = BorderPane::new("title");
     run_tmux(&["select-pane", "-t", &p.pane, "-T", "plain shell"]);
     assert_eq!(p.render(), " plain shell ");
@@ -111,9 +89,7 @@ fn test_border_untagged_pane_falls_back_to_pane_title() {
 
 #[test]
 fn test_border_without_a_team_tag_shows_the_bare_agent() {
-    if !have_tmux() {
-        return;
-    }
+    require_tmux();
     let p = BorderPane::new("bare");
     p.set("@hive-agent", "red");
     run_tmux(&["select-pane", "-t", &p.pane, "-T", "whatever the TUI wrote"]);

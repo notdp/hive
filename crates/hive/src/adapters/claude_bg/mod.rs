@@ -24,7 +24,7 @@
 //!   and exits 0 after reviving a parked/stopped engine — new pid, same
 //!   jobId/sessionId. That is the wake primitive delivery self-heals with.
 //!
-//! Hidden claude subcommands are only recognized at argv[1], so every
+//! Hidden claude subcommands are only recognized at `argv[1]`, so every
 //! invocation here calls the binary directly with the subcommand first. Spawn
 //! env is washed of CLAUDE*/ANTHROPIC* vars: an inherited
 //! `CLAUDE_CODE_CHILD_SESSION` marker makes the engine skip registration
@@ -47,8 +47,6 @@ pub use lifecycle::*;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
-
 const _AGENTS_TIMEOUT: f64 = 10.0; // observed ~270ms; the cap only bounds a hung CLI
 const _SPAWN_TIMEOUT: f64 = 60.0;
 const _WAKE_TIMEOUT: f64 = 20.0; // observed ~2-6s including a fresh supervisor start
@@ -69,15 +67,6 @@ pub const STATUS_STALE_AFTER_SECONDS: f64 = 30.0 * 60.0;
 pub fn looks_like_job_id(value: &str) -> bool {
     let n = value.chars().count();
     (6..=12).contains(&n) && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-}
-
-fn str_of(value: Option<&Value>) -> String {
-    // `str(data.get(k) or "")`: string as-is, number rendered, anything else "".
-    match value {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    }
 }
 
 fn sleep_s(secs: f64) {

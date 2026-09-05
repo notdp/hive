@@ -2,14 +2,14 @@
 //!
 //! This module owns the clap command tree for the ENTIRE surface, `pub fn
 //! main()`, and the shared helpers both command halves use. Core registry
-//! verbs live in `core_cmds`; everything else routes to `rest` (ported
-//! separately as `cli/rest.rs`).
+//! verbs live in `core_cmds`; everything else routes to the `rest`
+//! directory.
 
 pub mod core_cmds;
 pub mod help_text;
 pub mod rest;
 mod team_ops;
-mod util;
+pub(crate) mod util;
 
 use std::path::Path;
 
@@ -24,21 +24,13 @@ pub use util::*;
 // Command tree
 // ---------------------------------------------------------------------------
 
-fn passthrough_command(
-    name: &'static str,
-    about: &'static str,
-    long_about: &'static str,
-) -> Command {
-    Command::new(name)
-        .about(about)
-        .long_about(long_about)
-        .disable_help_flag(true)
-        .arg(
-            Arg::new("args")
-                .num_args(0..)
-                .allow_hyphen_values(true)
-                .trailing_var_arg(true),
-        )
+fn passthrough_command(name: &'static str, about: &'static str) -> Command {
+    Command::new(name).about(about).disable_help_flag(true).arg(
+        Arg::new("args")
+            .num_args(0..)
+            .allow_hyphen_values(true)
+            .trailing_var_arg(true),
+    )
 }
 
 fn json_default_options(cmd: Command) -> Command {
@@ -47,13 +39,6 @@ fn json_default_options(cmd: Command) -> Command {
             .long("plain")
             .action(ArgAction::SetTrue)
             .help("Human-readable output instead of the default JSON"),
-    )
-    .arg(
-        Arg::new("legacy_json")
-            .long("json")
-            .action(ArgAction::SetTrue)
-            .hide(true)
-            .help("Deprecated no-op (JSON is the default output)"),
     )
 }
 
@@ -66,21 +51,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("fork")
                 .about("Fork the current agent session into a new split pane.")
-                .long_about(
-                    "Fork the current agent session into a new split pane.\n\n\
-                     Humans typically bind this to a keyboard shortcut (terminal + tmux).\n\
-                     Agents also invoke it to create a clone that can pick up work without\n\
-                     interrupting the current turn.\n\n\
-                     Pass `--join-as <name>` to register the new pane as a team member;\n\
-                     `--prompt` then sends an initial message after the fork is ready.\n\n\
-                     On a pane not bound to any Hive team, fork still works: it produces a bare,\n\
-                     independent clone (no team registration, no `@hive-*` tags) and returns\n\
-                     `registered: null`, `team: null`. `--join-as` requires a team-bound pane.\n\n\
-                     Examples:\n  \
-                     hive fork                                  # auto-detect split direction\n  \
-                     hive fork --split h                        # force horizontal split\n  \
-                     hive fork --join-as dodo-c1 --prompt \"continue the thread\"",
-                )
                 .arg(
                     Arg::new("pane_id")
                         .long("pane")
@@ -111,12 +81,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("join")
                 .about("Join a team.")
-                .long_about(
-                    "Join a team.\n\n\
-                     Outside tmux: the current Claude session enters TEAM's roster as a\n\
-                     full member. Inside tmux: the current pane (or --pane) registers into\n\
-                     the window's team.",
-                )
                 .arg(Arg::new("team_arg").default_value(""))
                 .arg(
                     Arg::new("name_override")
@@ -153,13 +117,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("create")
                 .about("Create a team.")
-                .long_about(
-                    "Create a team.\n\n\
-                     NAME is optional everywhere (pool-picked by default). Outside tmux:\n\
-                     a headless team — `hive render` builds its window. Inside tmux on an agent\n\
-                     pane: that pane becomes the orch. Inside tmux on a shell pane: the\n\
-                     window binds the team without an orch.",
-                )
                 .arg(Arg::new("name").default_value(""))
                 .arg(
                     Arg::new("desc")
@@ -200,13 +157,6 @@ pub(crate) fn build_cli() -> Command {
                         .help("Workspace path to remove"),
                 )
                 .arg(
-                    Arg::new("keep_workspace")
-                        .long("keep-workspace")
-                        .action(ArgAction::SetTrue)
-                        .hide(true)
-                        .help("Deprecated no-op (workspace is now kept by default)"),
-                )
-                .arg(
                     Arg::new("delete_workspace")
                         .long("delete-workspace")
                         .action(ArgAction::SetTrue)
@@ -216,21 +166,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("spawn")
                 .about("Spawn an agent pane, optionally dispatching a task atomically.")
-                .long_about(
-                    "Spawn an agent pane, optionally dispatching a task atomically.\n\n\
-                     Creates a new tmux pane in the current window and starts the chosen\n\
-                     agent CLI. By default spawns the same CLI as the current pane; use\n\
-                     `--cli claude|codex|grok` to pick a specific one.\n\n\
-                     With `--task <artifact>`, the member boots straight into the member\n\
-                     contract (`/hive:hive`) and the task artifact arrives as its first\n\
-                     `<HIVE>` message — spawn and dispatch are one atomic step, so the\n\
-                     member never wanders off exploring while waiting for work.\n\n\
-                     Examples:\n  \
-                     hive spawn explore --task /tmp/tasks/explore.md\n  \
-                     hive spawn review --cli codex --task /tmp/tasks/review.md\n  \
-                     hive spawn dodo --cli codex\n  \
-                     hive spawn claude -m claude-opus-5 --skill none",
-                )
                 .arg(Arg::new("agent_name").required(true))
                 .arg(
                     Arg::new("model")
@@ -309,29 +244,12 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("inject")
                 .about("Debug: inject raw input into an agent pane.")
-                .long_about(
-                    "Debug: inject raw input into an agent pane.\n\n\
-                     Writes text directly into the target pane without the `<HIVE>`\n\
-                     envelope or delivery tracking. Use only when bypassing the message\n\
-                     protocol for low-level debugging.\n\n\
-                     Example:\n  hive inject dodo \"plain ping\"",
-                )
                 .arg(Arg::new("agent_name").required(true))
                 .arg(Arg::new("text").required(true).allow_hyphen_values(true)),
         )
         .subcommand(
             Command::new("compact")
                 .about("Trigger /compact on your own pane.")
-                .long_about(
-                    "Trigger /compact on your own pane.\n\n\
-                     Works on any agent pane, team-bound or not: a pane with no Hive team is\n\
-                     compacted by its literal pane facts, and the response carries `member` =\n\
-                     the pane id with `team: null`.\n\n\
-                     When wired into a tmux key binding, pass `--pane \"#{pane_id}\"` so the\n\
-                     triggering pane is captured by tmux at keypress time rather than read\n\
-                     from the (potentially stale) TMUX_PANE env in a detached subprocess.\n\n\
-                     Examples:\n  hive compact\n  hive compact --pane %21",
-                )
                 .arg(
                     Arg::new("pane_id")
                         .long("pane")
@@ -342,20 +260,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("team")
                 .about("Show team overview.")
-                .long_about(
-                    "Show team overview.\n\n\
-                     Returns a JSON payload with `members[]`, `self` (your own name), the\n\
-                     bound `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.\n\n\
-                     Each member row carries the runtime fields `busy`, `inputState`, and\n\
-                     `turnPhase` — see docs/runtime-model.md for semantics. `self` is a\n\
-                     string pointer: look yourself up in `members[]` for your own state.\n\n\
-                     If the current tmux window has no team bound, returns a bootstrap\n\
-                     payload instead: `team=null`, a pane list, and a `hint` telling you\n\
-                     to run `hive create`.\n\n\
-                     Examples:\n  \
-                     hive team                                # full payload when a team is bound\n  \
-                     hive team | jq '.members[] | select(.name==\"dodo\")'",
-                )
                 .arg(
                     Arg::new("team_arg")
                         .long("team")
@@ -367,10 +271,6 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("layout")
                 .about("Apply a tmux layout preset to the current team window.")
-                .long_about(
-                    "Apply a tmux layout preset to the current team window.\n\n\
-                     Use ``auto`` to pick a preset adaptively from the window's aspect ratio.",
-                )
                 .arg(
                     Arg::new("preset")
                         .required(true)
@@ -387,31 +287,12 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("flow")
-                .about("Deterministic member orchestration from a JavaScript flow script.")
-                .long_about(
-                    "Deterministic member orchestration from a JavaScript flow script.\n\n\
-                     A flow script starts with `export const meta = {...}` and uses the\n\
-                     embedded dialect: `agent()` spawns a live member pane, dispatches a\n\
-                     task atomically, and blocks for the reply; `parallel()` fans out;\n\
-                     `pipeline()` runs per-item stages. Every node is a visible pane —\n\
-                     watch, type into, or interrupt any of them while the flow runs.",
-                )
+                .about("Deterministic member orchestration over live panes.")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new("run")
                         .about("Run SCRIPT against the current team.")
-                        .long_about(
-                            "Run SCRIPT against the current team.\n\n\
-                             The script is trusted JavaScript (you or your orch wrote it). Members\n\
-                             it spawns reply to the reserved `flow` mailbox; the runner blocks\n\
-                             until the script finishes. Typical use from an orch: run it in a\n\
-                             background shell and read the output when it completes.\n\n\
-                             Every run journals its ops under <workspace>/artifacts/flow/ and\n\
-                             prints its run id; `--resume <run-id>` replays the unchanged prefix\n\
-                             from the journal — members still alive are reused instead of\n\
-                             respawned.",
-                        )
                         .arg(Arg::new("script").required(true))
                         .arg(
                             Arg::new("resume")
@@ -423,15 +304,6 @@ pub(crate) fn build_cli() -> Command {
                 .subcommand(
                     Command::new("board")
                         .about("Live progress board for the team's flow nodes (run it in a pane).")
-                        .long_about(
-                            "Live progress board for the team's flow nodes (run it in a pane).\n\n\
-                             Renders the roster and the flow.run mailbox as per-node state\n\
-                             (spawned/working/done/gone) with elapsed times. Phases come from\n\
-                             the members' pane groups (the --phase of `hive flow node run`,\n\
-                             the enclosing `phase()` of a flow script); nothing else to write.\n\
-                             The pane tags itself @hive-role dock: the adaptive layout keeps\n\
-                             it as a full-width strip at the bottom and tiles members above.",
-                        )
                         .arg(Arg::new("team").long("team")),
                 )
                 .subcommand(
@@ -442,15 +314,6 @@ pub(crate) fn build_cli() -> Command {
                         .subcommand(
                             Command::new("run")
                                 .about("Place the task on stdin onto member NAME and block for its reply.")
-                                .long_about(
-                                    "Place the task on stdin onto member NAME and block for its reply.\n\n\
-                                     Spawns the member (or reuses one of that name that is still alive),\n\
-                                     dispatches the task atomically, waits without timeout, and prints one\n\
-                                     JSON object: {status: 'replied', body, artifact, msgId, name, pane}.\n\
-                                     A member that dies before replying ends the call with an error. This\n\
-                                     is the seam an external orchestrator's proxy (the hive-node agent)\n\
-                                     runs in the background.",
-                                )
                                 .arg(Arg::new("name").long("name").required(true))
                                 .arg(Arg::new("cli").long("cli"))
                                 .arg(Arg::new("model").long("model"))
@@ -464,14 +327,7 @@ pub(crate) fn build_cli() -> Command {
                 )
                 .subcommand(
                     Command::new("rig")
-                        .about("Create (or tear down) a workflow team: tmux session, team, orch mirror, board.")
-                        .long_about(
-                            "Create a workflow team named RUN: a detached tmux session of the same\n\
-                             name, the team bound to its window, an orch mirror pane (`hive view`\n\
-                             of --orch's session) and a full-width `hive flow board` dock. Attach\n\
-                             with `hive attach RUN`. `--down` retires every member, deletes the\n\
-                             team and kills the session.",
-                        )
+                        .about("Create (or tear down) a workflow team: tmux session, team, board.")
                         .arg(Arg::new("run").required(true))
                         .arg(Arg::new("orch").long("orch").value_name("SESSION_ID"))
                         .arg(Arg::new("workspace").long("workspace").value_name("DIR"))
@@ -490,15 +346,6 @@ pub(crate) fn build_cli() -> Command {
                 .subcommand(json_default_options(
                     Command::new("set")
                         .about("Label the current team window with its PR number.")
-                        .long_about(
-                            "Label the current team window with its PR number.\n\n\
-                             Run right after ``gh pr create --draft`` — writes ``@hive-pr`` on the\n\
-                             current tmux window and installs a per-window status-bar display derived\n\
-                             from the global ``window-status-format`` / ``window-status-current-format``\n\
-                             (the index position renders ``PR<n>``; user styling and padding are\n\
-                             preserved). Idempotent — re-running replaces the stamp and re-derives\n\
-                             the display.",
-                        )
                         .arg(Arg::new("number").required(true).value_parser(clap::value_parser!(i64))),
                 ))
                 .subcommand(json_default_options(
@@ -514,69 +361,20 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("attach")
                 .about("Jump to a team's tmux window. Read-only: never builds one.")
-                .long_about(
-                    "Jump to a team's tmux window. Read-only: never builds one.\n\n\
-                     A team with no window is still alive — it is a registry roster, not a\n\
-                     display — so this fails instead of rendering one behind your back.\n\
-                     `hive render` builds the window. Run from outside tmux this finishes\n\
-                     by exec'ing `tmux attach`.",
-                )
                 .arg(Arg::new("team_name").required(true)),
         )
         .subcommand(
             Command::new("render")
                 .about("Render a team's display: build its window, then jump to it.")
-                .long_about(
-                    "Render a team's display: build its window, then jump to it.\n\n\
-                     The registry is the team's existence; this materializes its tmux window —\n\
-                     one attach pane per member, each riding its engine's own viewer (claude\n\
-                     attach loop / codex thread resume / grok session resume). An existing\n\
-                     window gains panes for members spawned since it was built. Ends by\n\
-                     jumping to the window, like `hive attach`.",
-                )
                 .arg(Arg::new("team_name").required(true)),
         )
         .subcommand(json_default_options(
             Command::new("ls")
-                .about("List hive teams from the registry, with their display state.")
-                .long_about(
-                    "List hive teams from the registry, with their display state.\n\n\
-                     Works outside tmux too — the registry is the truth layer; without a\n\
-                     server every team simply shows as detached.",
-                ),
+                .about("List hive teams from the registry, with their display state."),
         ))
         .subcommand(
             Command::new("send")
                 .about("Send a message to another agent — the only message verb.")
-                .long_about(
-                    "Send a message to another agent — the only message verb.\n\n\
-                     Threading is automatic: when the latest inbound message from the\n\
-                     recipient is still unanswered, this send is recorded as its reply;\n\
-                     otherwise it opens a new thread. Senders never handle msgIds.\n\n\
-                     The recipient is an address, and every `from=` value on a received\n\
-                     envelope is one — answer by copying it verbatim. A teammate is a bare\n\
-                     name. A member of some team is `<team>.<member>` (how a Claude session\n\
-                     outside tmux, e.g. the desktop app, reaches in; bare names work there\n\
-                     too while unique across live teams — its message arrives as\n\
-                     `from=ccd.<its name>`). A Claude session outside any team is\n\
-                     `ccd.<name or title or pid>` (how a member reaches out). `flow.run`\n\
-                     is the flow runner's mailbox — an address kind, not a member; sends\n\
-                     to it confirm with one `delivered to flow mailbox` line and never\n\
-                     get a HIVE ack back.\n\n\
-                     New-thread sends must keep `body` to a short summary and put details\n\
-                     in `--artifact`; the body is rejected if longer than 500 chars, has\n\
-                     3+ lines, contains fenced code, or starts markdown heading/list\n\
-                     lines. A send that continues a thread is exempt.\n\n\
-                     Delivery is binary and fire-and-forget: the native transport (claude\n\
-                     daemon / codex daemon) either accepted the message — its runtime owns\n\
-                     it from there — or the command exits non-zero with the transport\n\
-                     error. Success prints nothing; there is nothing to poll afterwards.\n\n\
-                     Examples:\n  \
-                     hive send dodo \"review this diff\" --artifact /tmp/diff.md\n  \
-                     hive send \"ccd.PR review\" \"build is green\"    # session by desktop title\n  \
-                     hive send dodo \"see report\" --artifact - <<'EOF'\n  \
-                     # Findings\n  - item\n  EOF",
-                )
                 // click passes hyphen-leading values ("- bullet reply…")
                 // through positional arguments; clap must too.
                 .arg(Arg::new("to_agent").required(true))
@@ -595,38 +393,16 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("thread")
                 .about("Show a reply thread rooted at a msgId.")
-                .long_about(
-                    "Show a reply thread rooted at a msgId.\n\n\
-                     Returns the chain of send/reply events linked to this msgId. Useful\n\
-                     to audit conversation flow or resolve \"who replied to what\".\n\n\
-                     Example:\n  hive thread aBc1",
-                )
                 .arg(Arg::new("message_id").required(true)),
         )
         .subcommand(
             Command::new("doctor")
                 .about("Diagnose agent connectivity and session state.")
-                .long_about(
-                    "Diagnose agent connectivity and session state.\n\n\
-                     With no argument, probes yourself. With an agent name, probes that\n\
-                     peer — pane liveness, transcript readability, hived heartbeat,\n\
-                     runtime input state.\n\n\
-                     Examples:\n  \
-                     hive doctor                  # probe self\n  \
-                     hive doctor dodo             # probe a peer",
-                )
                 .arg(Arg::new("agent_name").default_value("")),
         )
         .subcommand(
             Command::new("capture")
                 .about("Debug: capture raw pane output from a team member's pane.")
-                .long_about(
-                    "Debug: capture raw pane output from a team member's pane.\n\n\
-                     Prints the last N lines (default 30) of the member's tmux pane.\n\
-                     Use to inspect what the agent actually sees when transcript parsing\n\
-                     gives unexpected results.\n\n\
-                     Example:\n  hive capture dodo -n 80",
-                )
                 .arg(Arg::new("member_name").required(true))
                 .arg(
                     Arg::new("lines")
@@ -639,25 +415,11 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("interrupt")
                 .about("Interrupt an agent's running turn.")
-                .long_about(
-                    "Interrupt an agent's running turn.\n\n\
-                     Aborts the turn over the member's own transport — addressed to its\n\
-                     engine, not typed at its pane. Use when a peer is stuck in a tool\n\
-                     loop or you need to abort a runaway action.\n\n\
-                     Example:\n  hive interrupt dodo",
-                )
                 .arg(Arg::new("agent_name").required(true)),
         )
         .subcommand(
             Command::new("kill")
                 .about("Kill an agent pane and remove it from the team.")
-                .long_about(
-                    "Kill an agent pane and remove it from the team.\n\n\
-                     Qualified names (`<group>.<name>`) resolve across teams so you can\n\
-                     kill a peer-team agent from the main group pane. Bare names resolve\n\
-                     against the caller's scoped team.\n\n\
-                     Example:\n  hive kill worker1",
-                )
                 .arg(Arg::new("agent_name").required(true))
                 .arg(
                     Arg::new("team_arg")
@@ -670,46 +432,22 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(passthrough_command(
             "cvim",
             "Human-only: edit the last assistant message in vim, send it back.",
-            "Human-only: edit the last assistant message in vim, send it back.\n\n\
-             Opens a popup vim seeded with the previous assistant message and sends the\n\
-             edited result back to the agent pane. Intended to be typed by the human via\n\
-             the agent's shell escape (e.g. `!hive cvim`) in Claude Code or Codex. Not\n\
-             meant for the model to invoke on its own.",
         ))
         .subcommand(passthrough_command(
             "vim",
             "Human-only: compose in a blank vim buffer, send it to the agent pane.",
-            "Human-only: compose in a blank vim buffer, send it to the agent pane.\n\n\
-             Intended to be typed by the human via the agent's shell escape (e.g. `!hive vim`)\n\
-             in Claude Code or Codex. Not meant for the model to invoke on its own.",
         ))
         .subcommand(passthrough_command(
             "vfork",
             "Human-only: fork the current Hive session into a vertical split.",
-            "Human-only: fork the current Hive session into a vertical split.\n\n\
-             Intended to be typed by the human via the agent's shell escape (e.g. `!hive vfork`)\n\
-             in Claude Code or Codex. Not meant for the model to invoke on its own.",
         ))
         .subcommand(passthrough_command(
             "hfork",
             "Human-only: fork the current Hive session into a horizontal split.",
-            "Human-only: fork the current Hive session into a horizontal split.\n\n\
-             Intended to be typed by the human via the agent's shell escape (e.g. `!hive hfork`)\n\
-             in Claude Code or Codex. Not meant for the model to invoke on its own.",
         ))
         .subcommand(
             Command::new("notify")
                 .about("Notify the user for the current pane.")
-                .long_about(
-                    "Notify the user for the current pane.\n\n\
-                     Flashes the tmux window status line, renames the tab, and rings the\n\
-                     terminal bell so the user can spot the pending pane at a glance. The\n\
-                     flash persists until the user focuses the target window (no\n\
-                     timeout). Use this only when you are blocked and need the human\n\
-                     back — not for progress updates. Message structure should cover:\n\
-                     what happened, why you need them now, what to do on return.\n\n\
-                     Examples:\n  hive notify \"press Space to come back and confirm migration\"",
-                )
                 .arg(Arg::new("message").required(true).allow_hyphen_values(true)),
         )
         .subcommand(
@@ -741,57 +479,29 @@ pub(crate) fn build_cli() -> Command {
                 ))
                 .subcommand(Command::new("setup").about(
                     "One-time install: sync the marketplace, then register and install \
-                     the hive plugin for every agent CLI on PATH.",
+                     the hive plugin for claude and codex on PATH.",
                 )),
         )
         .subcommand(passthrough_command(
             "codex",
             "Launch codex on the shared app-server daemon (hive-managed).",
-            "Launch codex on the shared app-server daemon (hive-managed).\n\n\
-             Usually invoked through the `hcodex` launcher from `hive shell-init` rather\n\
-             than by hand; all arguments are forwarded to codex. Replaces the current process\n\
-             with codex and never returns on success.",
         ))
         .subcommand(passthrough_command(
             "claude",
             "Launch claude as a hive-managed background job (hclaude launcher).",
-            "Launch claude as a hive-managed background job (hclaude launcher).\n\n\
-             Interactive launches run as `claude --bg` jobs with the pane attached as\n\
-             a viewer; management subcommands and non-interactive shapes pass through\n\
-             to plain claude. Does not return on the raw path; on the managed path it\n\
-             exits with the viewer loop's status.",
         ))
         .subcommand(passthrough_command(
             "grok",
             "Launch grok attached to a per-pane leader daemon (hive-managed).",
-            "Launch grok attached to a per-pane leader daemon (hive-managed).\n\n\
-             Usually invoked through the `hgrok` launcher from `hive shell-init` rather\n\
-             than by hand; all arguments are forwarded to grok. Replaces the current\n\
-             process with grok and never returns on success.",
         ))
         .subcommand(
             Command::new("ccd")
                 .about("Discover Claude Code sessions outside the team — the desktop app, another terminal — by their cross-session inbox registry.")
-                .long_about(
-                    "Discover Claude Code sessions outside the team — the desktop app,\n\
-                     another terminal — by their cross-session inbox registry.\n\n\
-                     `hive ccd ls` lists the reachable sessions; messaging one is plain\n\
-                     `hive send ccd.<name>` (name, desktop title, or pid).",
-                )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new("ls")
-                        .about("List the Claude Code sessions `hive send ccd.<name>` can reach.")
-                        .long_about(
-                            "List the Claude Code sessions `hive send ccd.<name>` can reach.\n\n\
-                             The same registry `/list-agents` reads: every live session that binds a\n\
-                             cross-session inbox (Claude Code 2.1.224+). A session on an older CLI, or\n\
-                             started in bare mode, has no inbox and is not listed. `title` is the\n\
-                             desktop app's session title when one is set. A session that is really a\n\
-                             live team member carries a `member` field with its `<team>.<agent>`\n\
-                             address: message it over the bus, not here.",
-                        ),
+                        .about("List the Claude Code sessions `hive send ccd.<name>` can reach."),
                 ),
         )
         .subcommand(
@@ -807,56 +517,21 @@ pub(crate) fn build_cli() -> Command {
         .subcommand(
             Command::new("shell-init")
                 .about("Print the `hcodex` / `hclaude` / `hgrok` launchers for your shell.")
-                .long_about(
-                    "Print the `hcodex` / `hclaude` / `hgrok` launchers for your shell.\n\n\
-                     Add to your shell rc; then `hcodex` / `hclaude` / `hgrok` start a\n\
-                     hive-connected codex / claude / grok in the current tmux pane, while the\n\
-                     plain `codex` / `claude` / `grok` stay untouched:\n\n  \
-                     # ~/.zshrc or ~/.bashrc\n  \
-                     eval \"$(hive shell-init zsh)\"\n  \
-                     # ~/.config/fish/config.fish\n  \
-                     hive shell-init fish | source\n\n\
-                     Outside tmux, and for management subcommands and non-interactive flags,\n\
-                     the launchers run the plain binary.",
-                )
                 .arg(Arg::new("shell").default_value("")),
         )
         .subcommand(
             Command::new("worktree")
                 .about("Per-feature worktree pool: start a feature, finish it, inspect state.")
-                .long_about(
-                    "Per-feature worktree pool: start a feature, finish it, inspect state.\n\n\
-                     Pool layout: <main checkout>/.claude/worktrees/<feature>, branch == feature.\n\
-                     Hive creates/removes worktrees and records ownership in git config;\n\
-                     entering/leaving the directory is the agent's own move (Claude:\n\
-                     EnterWorktree path=<path> / ExitWorktree action=keep; Codex: cd).\n\n\
-                     Examples:\n  \
-                     hive worktree start login-flow         # create worktree + branch, print JSON with path\n  \
-                     hive worktree status                   # pool state for this repo\n  \
-                     hive worktree done login-flow          # remove the worktree, keep the branch",
-                )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(json_default_options(
                     Command::new("set-base")
                         .about("Declare the team's integration branch (the base of every sub-PR).")
-                        .long_about(
-                            "Declare the team's integration branch (the base of every sub-PR).\n\n\
-                             Run from the team window after creating and pushing the branch; every\n\
-                             `hive worktree start` in this window afterwards resolves its base from\n\
-                             it. REF must already resolve to a commit.",
-                        )
                         .arg(Arg::new("ref").required(true)),
                 ))
                 .subcommand(json_default_options(
                     Command::new("start")
                         .about("Create (or re-attach) the worktree for FEATURE and print its path as JSON.")
-                        .long_about(
-                            "Create (or re-attach) the worktree for FEATURE and print its path as JSON.\n\n\
-                             Exit 0 = ready (mode created/existing/attached/adopted-existing-branch).\n\
-                             Exit 1 with mode=needs-rebase = branch exists but does not contain the\n\
-                             resolved base: rebase inside the worktree, then rerun start.",
-                        )
                         .arg(Arg::new("feature").required(true))
                         .arg(
                             Arg::new("base_ref")
@@ -867,11 +542,6 @@ pub(crate) fn build_cli() -> Command {
                 .subcommand(json_default_options(
                     Command::new("done")
                         .about("Remove FEATURE's worktree. The branch is always kept (PRs live on it).")
-                        .long_about(
-                            "Remove FEATURE's worktree. The branch is always kept (PRs live on it).\n\n\
-                             Refuses while you are inside the worktree, while a git operation is in\n\
-                             progress, or while there are uncommitted changes (unless --force).",
-                        )
                         .arg(Arg::new("feature").required(true))
                         .arg(
                             Arg::new("force")
@@ -930,18 +600,28 @@ const _KNOWN_COMMANDS: &[&str] = &[
     "worktree",
 ];
 
-/// Click groups and their subcommands (help lookup + bare-group help).
-const _HELP_GROUPS: &[(&str, &[&str])] = &[
-    ("ccd", &["ls"]),
-    ("config", &["get", "set", "unset"]),
-    ("flow", &["run"]),
+/// Click groups, by command path, and their subcommands (help lookup +
+/// bare-group help). Every path here and every path + sub has a `help_text`
+/// entry; `test_every_help_path_has_help_text` holds that line.
+const _HELP_GROUPS: &[(&[&str], &[&str])] = &[
+    (&["ccd"], &["ls"]),
+    (&["config"], &["get", "set", "unset"]),
+    (&["flow"], &["board", "node", "rig", "run"]),
+    (&["flow", "node"], &["run"]),
     (
-        "plugin",
+        &["plugin"],
         &["disable", "enable", "list", "ls", "setup", "sync"],
     ),
-    ("pr", &["clear", "set"]),
-    ("worktree", &["done", "set-base", "start", "status"]),
+    (&["pr"], &["clear", "set"]),
+    (&["worktree"], &["done", "set-base", "start", "status"]),
 ];
+
+fn _group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
+    _HELP_GROUPS
+        .iter()
+        .find(|(group, _)| *group == path)
+        .map(|(_, subs)| *subs)
+}
 
 /// Click help interception: the command path whose help click would print.
 ///
@@ -949,7 +629,14 @@ const _HELP_GROUPS: &[(&str, &[&str])] = &[
 /// `help_option_names` is `["--help"]`) is an eager option: it prints help
 /// and exits 0 wherever it appears among the parsed args (never past `--`).
 /// A group prints its own help unless a known subcommand appears first.
+/// Only a known command has a help arm. An unknown token never reaches this
+/// function (the known-command gate in `main_with_argv` rejects it first); a
+/// dash-first one (`hive --bogus -h`, `hive -- flow -h`) is left to clap,
+/// which rejects it with exit 2 like any other unexpected argument.
 fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
+    if !_KNOWN_COMMANDS.contains(&invoked) {
+        return None;
+    }
     if matches!(invoked, "claude" | "codex" | "grok") {
         return None; // launchers forward all args to the wrapped CLI
     }
@@ -958,34 +645,36 @@ fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
     } else {
         &["-h", "--help"]
     };
-    let subs = _HELP_GROUPS
-        .iter()
-        .find(|(group, _)| *group == invoked)
-        .map(|(_, subs)| *subs);
-    for (i, tok) in tail.iter().enumerate() {
+    let mut path = vec![invoked];
+    for tok in tail {
         if tok == "--" {
             return None;
         }
         if help_opts.contains(&tok.as_str()) {
-            return Some(vec![invoked]);
+            return Some(path);
         }
-        if let Some(subs) = subs {
-            if subs.contains(&tok.as_str()) {
-                for tok2 in &tail[i + 1..] {
-                    if tok2 == "--" {
-                        break;
-                    }
-                    if help_opts.contains(&tok2.as_str()) {
-                        return Some(vec![invoked, tok.as_str()]);
-                    }
-                }
-            }
-            // ponytail: a non-sub token stops the scan; click's own parse
+        match _group_subs(&path) {
+            Some(subs) if subs.contains(&tok.as_str()) => path.push(tok.as_str()),
+            // a non-sub token on a group stops the scan; click's own parse
             // error for it (out of the equivalence corpus) falls to clap.
-            return None;
+            Some(_) => return None,
+            None => {}
         }
     }
     None
+}
+
+/// Click's `no_args_is_help` on a group: the group path *tail* stops on
+/// (`hive flow`, `hive flow node`), or None when it reaches a leaf command.
+fn bare_group_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
+    let mut path = vec![invoked];
+    for tok in tail {
+        if !_group_subs(&path)?.contains(&tok.as_str()) {
+            return None;
+        }
+        path.push(tok.as_str());
+    }
+    _group_subs(&path).map(|_| path)
 }
 
 fn arg_str<'a>(m: &'a ArgMatches, key: &str) -> &'a str {
@@ -1036,7 +725,13 @@ fn run_root_gates(invoked: &str) {
 }
 
 pub fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+    main_with_argv(std::env::args().collect());
+}
+
+/// The whole command-line path on an explicit argv (`argv[0]` is the
+/// program name, skipped). Every early exit calls `std::process::exit`;
+/// only the launcher passthroughs and a dispatched handler return.
+fn main_with_argv(argv: Vec<String>) {
     let args: Vec<String> = argv.iter().skip(1).cloned().collect();
     let root_help = help_text::help_for(&[]).expect("root help");
 
@@ -1103,11 +798,8 @@ pub fn main() {
     }
 
     // Click group with no subcommand: `no_args_is_help` — stderr, exit 2.
-    if tail.is_empty() && _HELP_GROUPS.iter().any(|(group, _)| *group == invoked) {
-        eprint!(
-            "{}",
-            help_text::help_for(&[invoked.as_str()]).expect("group help")
-        );
+    if let Some(path) = bare_group_path(&invoked, &tail) {
+        eprint!("{}", help_text::help_for(&path).expect("group help"));
         std::process::exit(2);
     }
 
@@ -1177,7 +869,6 @@ fn dispatch(matches: &ArgMatches) {
         Some(("delete", m)) => core_cmds::delete(
             arg_str(m, "name"),
             arg_str(m, "workspace"),
-            m.get_flag("keep_workspace"),
             m.get_flag("delete_workspace"),
         ),
         Some(("spawn", m)) => {
@@ -1326,6 +1017,7 @@ fn dispatch(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
 
     #[test]
     fn test_free_text_positionals_accept_hyphen_leading_values() {
@@ -1353,28 +1045,86 @@ mod tests {
         }
     }
 
-    /// A headless engine subprocess: no tmux, no socket, no engine session.
-    fn headless_gate_env(tmp: &std::path::Path) {
-        std::env::set_var("HIVE_HOME", tmp.join(".hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.join(".claude"));
-        for key in [
-            "TMUX",
-            "TMUX_PANE",
-            "CODEX_THREAD_ID",
-            "GROK_SESSION_ID",
-            "CLAUDE_CODE_MESSAGING_SOCKET",
-        ] {
-            std::env::remove_var(key);
+    /// Every path `help_path`/`bare_group_path` can produce — a
+    /// `_KNOWN_COMMANDS` entry, a `_HELP_GROUPS` group, or a group plus one
+    /// of its subs — must resolve, or `-h` on it panics instead of
+    /// printing. Tokens outside that table never become a path.
+    #[test]
+    fn test_every_help_path_has_help_text() {
+        let cli = build_cli();
+        let tail = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(help_path("--bogus", &tail(&["-h"])), None);
+        assert_eq!(help_path("--", &tail(&["flow", "-h"])), None);
+        assert_eq!(help_path("bogus", &tail(&["--help"])), None);
+        assert_eq!(bare_group_path("--bogus", &tail(&[])), None);
+        for name in _KNOWN_COMMANDS {
+            if matches!(*name, "claude" | "codex" | "grok") {
+                continue; // launchers forward -h to the wrapped CLI
+            }
+            assert!(help_text::help_for(&[name]).is_some(), "no help for {name}");
+        }
+        for (group, subs) in _HELP_GROUPS {
+            assert!(
+                help_text::help_for(group).is_some(),
+                "no help for {group:?}"
+            );
+            let mut cmd = &cli;
+            for seg in *group {
+                cmd = cmd
+                    .find_subcommand(seg)
+                    .unwrap_or_else(|| panic!("{group:?} not in tree"));
+            }
+            for sub in *subs {
+                let path: Vec<&str> = group.iter().copied().chain([*sub]).collect();
+                assert!(help_text::help_for(&path).is_some(), "no help for {path:?}");
+                assert!(cmd.find_subcommand(sub).is_some(), "{path:?} not in tree");
+            }
         }
     }
 
     #[test]
+    fn test_help_path_walks_nested_groups() {
+        let tail = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            help_path("flow", &tail(&["node", "run", "--name", "x", "--help"])),
+            Some(vec!["flow", "node", "run"])
+        );
+        assert_eq!(
+            help_path("flow", &tail(&["node", "-h"])),
+            Some(vec!["flow", "node"])
+        );
+        assert_eq!(
+            help_path("flow", &tail(&["-h", "node"])),
+            Some(vec!["flow"])
+        );
+        assert_eq!(help_path("flow", &tail(&["bogus", "-h"])), None);
+        assert_eq!(help_path("flow", &tail(&["run", "--", "-h"])), None);
+        assert_eq!(
+            help_path("plugin", &tail(&["sync", "--help"])),
+            Some(vec!["plugin", "sync"])
+        );
+        assert_eq!(help_path("codex", &tail(&["--help"])), None);
+        assert_eq!(
+            bare_group_path("flow", &tail(&["node"])),
+            Some(vec!["flow", "node"])
+        );
+        assert_eq!(bare_group_path("flow", &tail(&[])), Some(vec!["flow"]));
+        assert_eq!(bare_group_path("flow", &tail(&["run"])), None);
+        assert_eq!(bare_group_path("send", &tail(&[])), None);
+    }
+
+    /// A headless engine subprocess: no tmux, no socket, no engine session.
+    fn headless_gate_env(tmp: &std::path::Path) -> EnvGuard {
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        env.set("HIVE_HOME", tmp.join(".hive"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.join(".claude"));
+        env
+    }
+
+    #[test]
     fn test_no_tmux_refusal_admits_a_rostered_grok_session_and_names_a_stale_one() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        headless_gate_env(tmp.path());
+        let mut env = headless_gate_env(tmp.path());
         let mut member = serde_json::Map::new();
         member.insert("name".to_string(), serde_json::Value::String("bee".into()));
         member.insert("cli".to_string(), serde_json::Value::String("grok".into()));
@@ -1387,39 +1137,179 @@ mod tests {
         // no identity at all: the generic tmux refusal
         assert_eq!(_no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
 
-        std::env::set_var("GROK_SESSION_ID", "s-bee");
+        env.set("GROK_SESSION_ID", "s-bee");
         assert_eq!(_no_tmux_refusal("send"), None);
 
         // the leader's env outlived the member it names
-        std::env::set_var("GROK_SESSION_ID", "s-ant");
+        env.set("GROK_SESSION_ID", "s-ant");
         assert_eq!(_no_tmux_refusal("send"), Some(_UNROSTERED_ENGINE_MESSAGE));
 
         // the session lane is a send lane only; other verbs still need tmux
-        std::env::set_var("GROK_SESSION_ID", "s-bee");
+        env.set("GROK_SESSION_ID", "s-bee");
         assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(_no_tmux_refusal("config"), None);
+    }
 
-        std::env::remove_var("GROK_SESSION_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    /// Root help lists a command exactly when its clap node is not hidden:
+    /// every `_KNOWN_COMMANDS` entry has a `  <name>  <about>` line unless
+    /// `.hide(true)` marks it (resume-hint today; `plugin ls` is hidden too
+    /// but is a subcommand, outside the root table), and no hidden one leaks.
+    #[test]
+    fn test_root_help_lists_every_visible_command_and_no_hidden_one() {
+        let help = help_text::help_for(&[]).unwrap();
+        let listed: std::collections::HashSet<&str> = help
+            .lines()
+            .filter_map(|line| {
+                let body = line.strip_prefix("  ")?;
+                if body.starts_with(' ') || body.starts_with('-') {
+                    return None; // wrapped description / an option row
+                }
+                let (name, rest) = body.split_once(' ')?;
+                rest.starts_with(' ').then_some(name)
+            })
+            .collect();
+        let cli = build_cli();
+        for name in _KNOWN_COMMANDS {
+            let hidden = cli.find_subcommand(name).unwrap().is_hide_set();
+            assert_eq!(
+                listed.contains(name),
+                !hidden,
+                "{name}: hidden={hidden}, listed={}",
+                listed.contains(name)
+            );
+        }
+    }
+
+    // --- exit-code lane: the binary's own argv path in a child process ---
+
+    const _CHILD_ENTRY: &str = "cli::tests::test_child_entry_runs_hive_argv_from_env";
+
+    /// Child half of `run_hive_child`: a no-op in the normal run. When the
+    /// parent re-executes this test binary with `HIVE_TEST_CHILD_ARGV`
+    /// (JSON argv), it runs `main_with_argv` on it and exits the way `hive`
+    /// would; stdout/stderr are redirected to the files named in
+    /// `HIVE_TEST_CHILD_STDOUT` / `HIVE_TEST_CHILD_STDERR` first, so the
+    /// harness's own preamble never reaches the oracle.
+    #[test]
+    fn test_child_entry_runs_hive_argv_from_env() {
+        let Ok(argv) = std::env::var("HIVE_TEST_CHILD_ARGV") else {
+            return;
+        };
+        let argv: Vec<String> = serde_json::from_str(&argv).expect("child argv is a JSON array");
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        for (key, fd) in [("HIVE_TEST_CHILD_STDOUT", 1), ("HIVE_TEST_CHILD_STDERR", 2)] {
+            let file = std::fs::File::create(std::env::var(key).expect(key)).expect(key);
+            assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), fd) }, fd);
+            std::mem::forget(file);
+        }
+        main_with_argv(argv);
+        std::process::exit(0);
+    }
+
+    /// `hive <args>` as the binary runs it, in a child process: (exit code,
+    /// stdout, stderr). The child sees a throwaway `HIVE_HOME`, no engine
+    /// identity and no pane; `inside_tmux` sets `TMUX` so the root gates
+    /// (env checks only) admit tmux-only commands. No tmux double runs in
+    /// the child, so drive only invocations that exit before a tmux call.
+    fn run_hive_child(args: &[&str], inside_tmux: bool) -> (i32, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("stdout");
+        let err = tmp.path().join("stderr");
+        let mut argv = vec!["hive".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([_CHILD_ENTRY, "--exact", "--nocapture", "--test-threads=1"])
+            .env(
+                "HIVE_TEST_CHILD_ARGV",
+                serde_json::to_string(&argv).unwrap(),
+            )
+            .env("HIVE_TEST_CHILD_STDOUT", &out)
+            .env("HIVE_TEST_CHILD_STDERR", &err)
+            .env("HIVE_HOME", tmp.path().join(".hive"))
+            .env("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"))
+            .env_remove("TMUX_PANE")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("GROK_SESSION_ID")
+            .env_remove("CLAUDE_CODE_MESSAGING_SOCKET")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if inside_tmux {
+            cmd.env("TMUX", "/tmp/hive-test-tmux,1,0");
+        } else {
+            cmd.env_remove("TMUX");
+        }
+        let status = cmd.status().expect("child test binary runs");
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
+        (status.code().unwrap_or(-1), read(&out), read(&err))
     }
 
     #[test]
-    fn test_render_root_help_sections_present() {
-        let help = help_text::help_for(&[]).unwrap();
-        for section in [
-            "Daily:",
-            "Panes:",
-            "Workflow:",
-            "Team:",
-            "Human Helpers:",
-            "Debug:",
-            "Extensions:",
-            "Launchers:",
-            "Examples:",
+    fn test_help_on_an_unknown_or_dash_first_token_is_a_clap_usage_error() {
+        // Reviewer case: these used to reach `help_for(...).expect(...)` and
+        // panic (exit 101); now clap rejects the token like `hive -x` does.
+        for (args, token) in [
+            (&["--bogus", "-h"][..], "--bogus"),
+            (&["--", "flow", "-h"][..], "flow"),
         ] {
-            assert!(help.contains(section), "missing section {section}");
+            let (code, out, err) = run_hive_child(args, false);
+            assert_eq!(code, 2, "{args:?}: stderr {err}");
+            assert_eq!(out, "", "{args:?} printed help");
+            assert!(
+                err.contains("unexpected argument") && err.contains(token),
+                "{args:?}: {err}"
+            );
         }
-        assert!(!help.contains("resume-hint"), "hidden command leaked");
+        let (code, out, err) = run_hive_child(&["bogus", "-h"], false);
+        assert_eq!(code, 2);
+        assert_eq!(out, "");
+        assert!(err.contains("No such command 'bogus'"), "{err}");
+    }
+
+    #[test]
+    fn test_help_on_a_known_path_prints_its_text_and_exits_0() {
+        let (code, out, err) = run_hive_child(&["plugin", "sync", "--help"], false);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, help_text::help_for(&["plugin", "sync"]).unwrap());
+        assert_eq!(err, "");
+    }
+
+    #[test]
+    fn test_spawn_task_path_is_validated_before_the_handler_runs() {
+        // No team exists under the child's HIVE_HOME, so a handler that ran
+        // would fail its team resolve (exit 1); exit 2 with click's message
+        // proves the parse-time check fired first.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("task-dir");
+        std::fs::create_dir(&dir).unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+        let (code, out, err) = run_hive_child(&["spawn", "--task", &dir, "bee"], true);
+        assert_eq!(code, 2, "{err}");
+        assert_eq!(out, "");
+        assert_eq!(
+            err,
+            format!("Error: Invalid value for '--task': Path '{dir}' is a directory.\n")
+        );
+        let missing = tmp.path().join("absent.md").to_string_lossy().into_owned();
+        let (code, _, err) = run_hive_child(&["spawn", "--task", &missing, "bee"], true);
+        assert_eq!(code, 2, "{err}");
+        assert_eq!(
+            err,
+            format!("Error: Invalid value for '--task': Path '{missing}' does not exist.\n")
+        );
+    }
+
+    #[test]
+    fn test_resume_hint_prints_nothing_and_exits_0_without_a_pane_identity() {
+        // A wrapper calls this after every launch; with no TMUX_PANE there is
+        // no member identity to hint for, and the wrapper must see silence.
+        let (code, out, err) = run_hive_child(&["resume-hint", "claude"], true);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, "");
+        assert_eq!(err, "");
     }
 }

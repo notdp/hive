@@ -170,10 +170,6 @@ pub fn kill_pane(pane_id: &str) {
     let _ = _run(&["kill-pane", "-t", pane_id], false, 5);
 }
 
-pub fn kill_window(target: &str) {
-    let _ = _run(&["kill-window", "-t", target], false, 5);
-}
-
 // --- Layout & Appearance ---
 
 pub fn select_layout(target: &str, layout: &str) {

@@ -49,11 +49,6 @@ pub(super) fn cells_to_line(cells: &[Cell]) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Word-aware wrap of one styled line into display-column budget `width`.
-fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
-    wrap_cells_first(cells, width, width)
-}
-
 /// Punctuation that may not open a line (CJK closing marks and their ASCII
 /// cousins) or close one (opening brackets and quotes).
 const NO_LINE_START: &str = "，。、；：！？）］｝」』》〉】〕”’…—,.;:!?)]}";
@@ -244,6 +239,22 @@ fn patch_bg(line: Line<'static>, inner_w: usize, bg: Color) -> Line<'static> {
     cells_to_line(&cells)
 }
 
+/// Trim a band's trailing blank lines and, unless expanded, fold it to
+/// `BAND_MAX_LINES` with a `…` on the last kept line (clipped to `bw`).
+/// Returns whether the band was long enough to fold.
+fn fold_band(lines: &mut Vec<String>, bw: usize, expanded: bool) -> bool {
+    while lines.last().is_some_and(|l| l.is_empty()) && lines.len() > 1 {
+        lines.pop();
+    }
+    let foldable = lines.len() > BAND_MAX_LINES;
+    if foldable && !expanded {
+        lines.truncate(BAND_MAX_LINES);
+        let last = lines.pop().unwrap_or_default();
+        lines.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
+    }
+    foldable
+}
+
 /// One rendered entry plus whether Left/Right can fold it at all.
 pub(super) struct Rendered {
     pub(super) lines: Vec<Line<'static>>,
@@ -263,15 +274,7 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
         let first = if vis.is_empty() { head_w } else { bw };
         vis.extend(wrap_plain_first(src, first, bw));
     }
-    while vis.last().is_some_and(|l| l.is_empty()) && vis.len() > 1 {
-        vis.pop();
-    }
-    let foldable = vis.len() > BAND_MAX_LINES;
-    if foldable && !expanded {
-        vis.truncate(BAND_MAX_LINES);
-        let last = vis.pop().unwrap_or_default();
-        vis.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
-    }
+    let foldable = fold_band(&mut vis, bw, expanded);
     let mut out = Vec::new();
     // No marker: the band's own background is what says this is the human.
     out.push(band_line(t, Vec::new(), inner_w)); // vpad top
@@ -300,18 +303,11 @@ fn render_user(t: &ViewTheme, u: &UserBlock, inner_w: usize, expanded: bool) -> 
     }
 }
 
-/// How a peer message separates itself from an ordinary user band: its own
-/// band colour plus a rail glyph in the left margin. Three candidates while
-/// the look is being chosen (`HIVE_VIEW_BAND=1|2|3`).
+/// How a peer message separates itself from an ordinary user band: the
+/// contrast is structural — a user message is a filled band, a peer's is an
+/// open rail on the base background with an accent glyph in the margin.
 fn hive_band_style(t: &ViewTheme) -> (Color, char, Color) {
-    let accent = t.accent_model;
-    match std::env::var("HIVE_VIEW_BAND").ok().as_deref() {
-        // 2 — rail plus a shallow neutral fill, halfway to the user band.
-        Some("2") => (blend(t.bg_base, t.bg_light, 0.45), '▏', accent),
-        // 1 (default) — rail only. The contrast against a user message is
-        // structural: theirs is a filled band, a peer's is an open rail.
-        _ => (t.bg_base, '▏', accent),
-    }
+    (t.bg_base, '▏', t.accent_model)
 }
 
 /// Band row for a peer message: rail glyph in the margin, everything on the
@@ -394,15 +390,7 @@ fn render_hive(
     for src in msg.body.lines() {
         body.extend(wrap_plain(src, bw));
     }
-    while body.last().is_some_and(|l| l.is_empty()) && body.len() > 1 {
-        body.pop();
-    }
-    let foldable = body.len() > BAND_MAX_LINES;
-    if foldable && !expanded {
-        body.truncate(BAND_MAX_LINES);
-        let last = body.pop().unwrap_or_default();
-        body.push(format!("{} …", clip_plain(&last, bw.saturating_sub(2))));
-    }
+    let foldable = fold_band(&mut body, bw, expanded);
 
     let mut out = vec![line(Vec::new()), line(head)];
     for text in body {
@@ -540,64 +528,104 @@ fn render_thinking(
     }
 }
 
+/// The scrollback's left margin; the full-screen block viewer has none.
+const SCROLLBACK_INDENT: &str = "   ";
+
+fn indented(indent: &str, spans: Vec<Span<'static>>) -> Line<'static> {
+    let mut all = Vec::with_capacity(spans.len() + 1);
+    if !indent.is_empty() {
+        all.push(Span::raw(indent.to_string()));
+    }
+    all.extend(spans);
+    Line::from(all)
+}
+
 /// One tool-output band row (grok execute.rs `.with_panel_background`): the
-/// text on the full content-width `bg_dark` band.
-fn band_row(t: &ViewTheme, text: String, text_fg: Color, inner_w: usize) -> Line<'static> {
-    let cw = inner_w.saturating_sub(ROW_CHROME);
+/// text on a `width`-column `bg_dark` band after `indent`.
+fn band_row(
+    t: &ViewTheme,
+    indent: &str,
+    text: String,
+    text_fg: Color,
+    width: usize,
+) -> Line<'static> {
     let used = UnicodeWidthStr::width(text.as_str());
-    let mut spans = vec![
-        Span::raw("   "),
-        Span::styled(text, fg(text_fg).bg(t.bg_dark)),
-    ];
-    if cw > used {
+    let mut spans = vec![Span::styled(text, fg(text_fg).bg(t.bg_dark))];
+    if width > used {
         spans.push(Span::styled(
-            " ".repeat(cw - used),
+            " ".repeat(width - used),
             Style::default().bg(t.bg_dark),
         ));
     }
-    Line::from(spans)
+    indented(indent, spans)
 }
 
-/// Expanded tool output (grok execute.rs render_with_truncation): one blank
-/// spacer, then — success — full-width `bg_dark` band rows in primary text
-/// preserving line breaks, or — error — accent_error text with no band
-/// (grok's error branch). The storage-cap marker renders muted.
-fn outcome_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, inner_w: usize) {
-    let pw = inner_w.saturating_sub(ROW_CHROME);
+/// Expanded tool output (grok execute.rs render_with_truncation): success —
+/// `bg_dark` band rows in primary text preserving line breaks; error —
+/// accent_error text with no band (grok's error branch). The storage-cap
+/// marker renders muted. Shared by the scrollback and the block viewer,
+/// which differ in `indent`, `width`, and the scrollback's leading spacer
+/// (`scrollback_outcome`).
+pub(super) fn outcome_rows(
+    t: &ViewTheme,
+    out: &mut Vec<Line<'static>>,
+    indent: &str,
+    res: &ToolOutcome,
+    width: usize,
+) {
     let text = res.text.trim_end();
-    if text.is_empty() && !res.truncated {
-        return;
-    }
-    out.push(Line::default());
     if res.is_error {
         for src in text.lines() {
-            for piece in wrap_plain(src, pw) {
-                out.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(piece, fg(t.accent_error)),
-                ]));
+            for piece in wrap_plain(src, width) {
+                out.push(indented(
+                    indent,
+                    vec![Span::styled(piece, fg(t.accent_error))],
+                ));
             }
         }
         if res.truncated {
-            out.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled("… output truncated".to_string(), fg(t.gray)),
-            ]));
+            out.push(indented(
+                indent,
+                vec![Span::styled("… output truncated".to_string(), fg(t.gray))],
+            ));
         }
         return;
     }
     for src in text.lines() {
-        for piece in wrap_plain(src, pw) {
-            out.push(band_row(t, piece, t.text_primary, inner_w));
+        for piece in wrap_plain(src, width) {
+            out.push(band_row(t, indent, piece, t.text_primary, width));
         }
     }
     if res.truncated {
         out.push(band_row(
             t,
+            indent,
             "… output truncated".to_string(),
             t.gray,
-            inner_w,
+            width,
         ));
+    }
+}
+
+/// Scrollback outcome: one blank spacer, then the rows, only when there is
+/// anything to show.
+fn scrollback_outcome(
+    t: &ViewTheme,
+    out: &mut Vec<Line<'static>>,
+    res: &ToolOutcome,
+    inner_w: usize,
+) {
+    let mut rows = Vec::new();
+    outcome_rows(
+        t,
+        &mut rows,
+        SCROLLBACK_INDENT,
+        res,
+        inner_w.saturating_sub(ROW_CHROME),
+    );
+    if !rows.is_empty() {
+        out.push(Line::default());
+        out.extend(rows);
     }
 }
 
@@ -605,18 +633,26 @@ fn outcome_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, res: &ToolOutcome, 
 /// in gray_dim, the command body in the theme's bash function-call blue,
 /// physical newlines preserved, soft-wrap and continuation rows hanging
 /// 2 cols so they align under the command after the `$ `.
-fn command_rows(t: &ViewTheme, out: &mut Vec<Line<'static>>, command: &str, inner_w: usize) {
-    let bw = inner_w.saturating_sub(ROW_CHROME + 2).max(1);
+pub(super) fn command_rows(
+    t: &ViewTheme,
+    out: &mut Vec<Line<'static>>,
+    indent: &str,
+    command: &str,
+    width: usize,
+) {
+    let bw = width.saturating_sub(2).max(1);
     let mut first = true;
     for src in command.lines() {
         for piece in wrap_plain(src, bw) {
             let lead = if first { "$ " } else { "  " };
             first = false;
-            out.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(lead.to_string(), fg(t.gray_dim)),
-                Span::styled(piece, fg(t.command_fg)),
-            ]));
+            out.push(indented(
+                indent,
+                vec![
+                    Span::styled(lead.to_string(), fg(t.gray_dim)),
+                    Span::styled(piece, fg(t.command_fg)),
+                ],
+            ));
         }
     }
 }
@@ -670,7 +706,7 @@ fn render_group(
             ];
             lines.push(clip_spans(spans, inner_w));
             if let Some(res) = &member.result {
-                outcome_rows(t, &mut lines, res, inner_w);
+                scrollback_outcome(t, &mut lines, res, inner_w);
             }
         }
     }
@@ -707,11 +743,15 @@ fn render_run(
     }
     let mut lines = vec![header];
     if expanded {
-        if !r.command.is_empty() {
-            command_rows(t, &mut lines, &r.command, inner_w);
-        }
+        command_rows(
+            t,
+            &mut lines,
+            SCROLLBACK_INDENT,
+            &r.command,
+            inner_w.saturating_sub(ROW_CHROME),
+        );
         if let Some(res) = &r.result {
-            outcome_rows(t, &mut lines, res, inner_w);
+            scrollback_outcome(t, &mut lines, res, inner_w);
         }
     }
     Rendered {
@@ -750,7 +790,7 @@ fn render_tool(
     let mut lines = vec![header];
     if expanded {
         if let Some(res) = &tool.result {
-            outcome_rows(t, &mut lines, res, inner_w);
+            scrollback_outcome(t, &mut lines, res, inner_w);
         }
     }
     Rendered {

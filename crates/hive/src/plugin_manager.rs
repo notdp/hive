@@ -1,13 +1,20 @@
-//! Optional plugin enable/disable lifecycle.
+//! Optional plugin enable/disable lifecycle, plus the local marketplace
+//! that ships the Claude/Codex plugin payload with the binary.
 //!
-//! Port of `src/hive/plugin_manager.py`. Shipped plugin data lives in
-//! `src/hive/plugins/` (Python reads it via importlib resources); here the
-//! files are embedded at compile time via `include_str!` per PORTING.md
-//! ("Rust embeds or locates them"). Installed state lives on disk under
-//! `$HIVE_HOME/plugins/`.
+//! Three source trees are embedded at compile time via `include_str!`:
+//! `crates/hive/assets/plugins/` (the shipped hive plugins, `BUILTIN_PLUGINS`),
+//! `crates/hive/assets/marketplace/` (the two marketplace manifests), and
+//! the repo-level `plugins/hive/` (the plugin payload: its two manifests,
+//! the skill with its references, and the `hive-node` agent). Enabled state
+//! lives on disk under `$HIVE_HOME/plugins/`. The one shipped
+//! plugin (`notify`) is a manifest-only toggle the hived reads through
+//! `is_plugin_enabled`, so enabling copies the manifest under
+//! `installed/<name>/` and records the state entry, nothing more. Disable
+//! still understands the commands / skills / hooks / tmux fields older
+//! installs recorded, because `cleanup_retired_plugins` sweeps those legacy
+//! entries.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,7 +102,7 @@ pub fn ensure_codex_plugin_current() {
 /// `$HIVE_HOME/core_assets/marketplace/` (heal-on-drift) and return the
 /// payload plugin directory.
 pub fn materialize_marketplace() -> Result<PathBuf> {
-    let root = crate::core_hooks::hive_home()
+    let root = crate::team::hive_home()
         .join("core_assets")
         .join("marketplace");
     let mut files: Vec<(String, &str, bool)> = vec![
@@ -133,7 +140,7 @@ struct BuiltinPlugin {
     files: &'static [(&'static str, &'static str)],
 }
 
-// The embedded mirror of `resources.files("hive.plugins")`.
+// The shipped plugins, embedded from `crates/hive/assets/plugins/<name>/`.
 static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
     name: "notify",
     files: &[(
@@ -143,15 +150,11 @@ static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
 }];
 
 fn _state_path() -> PathBuf {
-    crate::core_hooks::hive_home()
-        .join("plugins")
-        .join("state.json")
+    crate::team::hive_home().join("plugins").join("state.json")
 }
 
 fn _installed_root() -> PathBuf {
-    crate::core_hooks::hive_home()
-        .join("plugins")
-        .join("installed")
+    crate::team::hive_home().join("plugins").join("installed")
 }
 
 fn _default_state() -> Map<String, Value> {
@@ -190,19 +193,7 @@ fn _remove_path(path: &Path) {
     }
 }
 
-fn _ensure_executable_if_script(path: &Path) {
-    let Ok(bytes) = fs::read(path) else { return };
-    let text = String::from_utf8_lossy(&bytes);
-    let Some(first_line) = text.lines().next() else {
-        return;
-    };
-    if first_line.starts_with("#!") {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-    }
-}
-
-/// Write the embedded plugin files under `dst` (Python `_copy_tree` walking
-/// the resource dir; the `__pycache__` skip is moot for embedded data).
+/// Write the embedded plugin files under `dst`.
 fn _copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for (rel, content) in files {
@@ -211,7 +202,6 @@ fn _copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
         fs::write(&target, content)?;
-        _ensure_executable_if_script(&target);
     }
     Ok(())
 }
@@ -279,50 +269,14 @@ pub fn list_plugins() -> Result<Vec<Value>> {
     Ok(rows)
 }
 
-fn _render_plugin_text(content: &str, install_dir: &Path) -> String {
-    content.replace("${HIVE_PLUGIN_ROOT}", &install_dir.to_string_lossy())
-}
-
-fn _materialize_installed_commands(install_dir: &Path) -> Result<Vec<PathBuf>> {
-    let commands_dir = install_dir.join("commands");
-    if !commands_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut entries: Vec<PathBuf> = fs::read_dir(&commands_dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    let mut materialized = Vec::new();
-    for command_path in entries {
-        let file_name = command_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        if file_name.starts_with('.') {
-            continue;
-        }
-        let content = fs::read_to_string(&command_path)?;
-        fs::write(&command_path, _render_plugin_text(&content, install_dir))?;
-        _ensure_executable_if_script(&command_path);
-        materialized.push(command_path);
-    }
-    Ok(materialized)
-}
-
-fn _source_tmux_conf(conf: &Path) -> bool {
+/// Legacy installs that set `tmux: true` sourced a `tmux/enable.conf`;
+/// undo it from the matching `disable.conf` when the file is still there.
+fn _uninstall_tmux_bindings(install_dir: &Path) -> bool {
+    let conf = install_dir.join("tmux").join("disable.conf");
     if !conf.is_file() {
         return false;
     }
     crate::tmux::source_file(&conf.to_string_lossy())
-}
-
-fn _install_tmux_bindings(install_dir: &Path) -> bool {
-    _source_tmux_conf(&install_dir.join("tmux").join("enable.conf"))
-}
-
-fn _uninstall_tmux_bindings(install_dir: &Path) -> bool {
-    _source_tmux_conf(&install_dir.join("tmux").join("disable.conf"))
 }
 
 /// True if *path* is a symlink pointing into the hive plugin installed tree.
@@ -347,50 +301,6 @@ fn _is_plugin_managed_skill(path: &Path) -> bool {
     target.starts_with(&root)
 }
 
-fn _substitute_hook_value(value: &Value, install_dir: &Path) -> Value {
-    match value {
-        Value::String(s) => {
-            Value::String(s.replace("${HIVE_PLUGIN_ROOT}", &install_dir.to_string_lossy()))
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| _substitute_hook_value(item, install_dir))
-                .collect(),
-        ),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, item)| (key.clone(), _substitute_hook_value(item, install_dir)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn _plugin_hook_defs(install_dir: &Path) -> Result<Map<String, Value>> {
-    let path = install_dir.join("hooks").join("hooks.json");
-    if !path.exists() {
-        return Ok(Map::new());
-    }
-    let data: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-    match _substitute_hook_value(&data, install_dir) {
-        Value::Object(m) => Ok(m),
-        _ => Err(anyhow!("hooks.json must be a JSON object")),
-    }
-}
-
-/// Python truthiness for the `tmux` state flag.
-fn _truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::Bool(true)) => true,
-        Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
 fn _string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
     plugin_state
         .get(key)
@@ -407,7 +317,7 @@ fn _string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
 
 pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
     let mut state = _load_state();
-    if !state.get("plugins").map_or(false, |v| v.is_object()) {
+    if !state.get("plugins").is_some_and(|v| v.is_object()) {
         state.insert("plugins".to_string(), Value::Object(Map::new()));
     }
     let plugin_state = state
@@ -443,7 +353,7 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
     if let Some(install_root) = &install_root {
-        if _truthy(plugin_state.get("tmux")) {
+        if crate::pyval::truthy(plugin_state.get("tmux")) {
             _uninstall_tmux_bindings(install_root);
         }
         _remove_path(install_root);
@@ -497,20 +407,12 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
     }
     _copy_tree(_plugin_resource_dir(name)?.files, &install_dir)?;
 
-    _materialize_installed_commands(&install_dir)?;
-    let hook_defs = _plugin_hook_defs(&install_dir)?;
-    if !hook_defs.is_empty() {
-        crate::core_hooks::merge_hook_groups(&hook_defs)?;
-    }
-    let has_tmux = _install_tmux_bindings(&install_dir);
-
     let mut state = _load_state();
     let mut plugin_state = Map::new();
     plugin_state.insert(
         "installRoot".to_string(),
         json!(install_dir.to_string_lossy()),
     );
-    plugin_state.insert("hooks".to_string(), Value::Object(hook_defs));
     plugin_state.insert(
         "enabledAt".to_string(),
         json!(SystemTime::now()
@@ -518,10 +420,7 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
             .map(|d| d.as_secs())
             .unwrap_or(0)),
     );
-    if has_tmux {
-        plugin_state.insert("tmux".to_string(), Value::Bool(true));
-    }
-    if !state.get("plugins").map_or(false, |v| v.is_object()) {
+    if !state.get("plugins").is_some_and(|v| v.is_object()) {
         state.insert("plugins".to_string(), Value::Object(Map::new()));
     }
     state
@@ -536,24 +435,22 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
         "description": manifest.description,
         "enabled": true,
         "installRoot": install_dir.to_string_lossy(),
-        "tmux": has_tmux,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::TEST_ENV_LOCK;
-    use std::os::unix::fs::symlink;
-    use std::sync::MutexGuard;
+    use crate::testenv::EnvGuard;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
-    fn setup() -> (tempfile::TempDir, MutexGuard<'static, ()>) {
-        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn setup() -> (tempfile::TempDir, EnvGuard) {
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CLAUDE_HOME", tmp.path().join(".claude"));
-        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
-        (tmp, guard)
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
+        env.set("CLAUDE_HOME", tmp.path().join(".claude"));
+        env.set("CODEX_HOME", tmp.path().join(".codex"));
+        (tmp, env)
     }
 
     #[test]
@@ -609,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_ensure_codex_plugin_current_readds_only_on_version_drift() {
-        let (tmp, _guard) = setup();
+        let (tmp, mut env) = setup();
         let bin = tmp.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let log = tmp.path().join("codex.log");
@@ -620,12 +517,12 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
 
         // cache missing -> marketplace healed + one re-add
         ensure_codex_plugin_current();
         assert_eq!(fs::read_to_string(&log).unwrap(), "plugin add hive@hive\n");
-        assert!(crate::core_hooks::hive_home()
+        assert!(crate::team::hive_home()
             .join("core_assets/marketplace/codex/plugins/hive/.codex-plugin/plugin.json")
             .is_file());
 

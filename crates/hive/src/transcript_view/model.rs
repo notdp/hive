@@ -15,11 +15,14 @@ pub(super) fn _clip(text: &str, limit: usize) -> String {
 /// A HIVE envelope as it reaches a claude transcript, with the tag parsed
 /// into fields instead of shown raw.
 ///
-/// Four carriers exist, all of which land in the same `user` row:
-/// bare (typed straight into the pane), claude's session-inbox injection at
-/// turn start or folded in mid-turn (a lead line plus a trailing safety
-/// paragraph), and the retired `<channel …>` wrapper still sitting in old
-/// transcripts.
+/// Five carriers exist. Four land in a `user` row: bare (typed straight
+/// into the pane), claude's session-inbox injection at turn start or folded
+/// in mid-turn (a lead line plus a trailing safety paragraph), and the
+/// retired `<channel …>` wrapper still sitting in old transcripts. The fifth
+/// — a message absorbed while the turn was already running — leaves no
+/// `user` row at all and is read off its `queued_command` attachment or
+/// `queue-operation` row instead (the parser's `push_queued_command` and
+/// `push_absorbed_queue_row`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HiveMessage {
     pub from: Option<String>,
@@ -387,7 +390,7 @@ impl ToolOutcome {
     }
 
     /// Collapsed display line: the whole text clipped at 160 chars, first
-    /// line only (the legacy stream's derivation, now an accessor).
+    /// line only.
     pub fn first_line(&self) -> String {
         _clip(&self.text, 160)
             .lines()
@@ -517,7 +520,7 @@ impl ThinkingBlock {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssistantBlock {
-    /// Raw markdown source; render with [`grok_md`].
+    /// Raw markdown source; rendered by the `grok_md` engine.
     pub markdown: String,
     pub timestamp: Option<Timestamp>,
 }

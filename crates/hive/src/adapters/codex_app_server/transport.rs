@@ -10,15 +10,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Accepted-transport classification for durable delivery observations: the
-/// shared daemon took the turn. Not proof the turn produced output.
-pub const TURN_START_ACCEPTED: &str = "turnStartAccepted";
-
-/// Interrupt outcomes: the daemon aborted the running turn, or there was no
-/// turn to abort (an idle thread is nothing to interrupt, not a failure).
-pub const TURN_INTERRUPT_ACCEPTED: &str = "turnInterruptAccepted";
-pub const NO_RUNNING_TURN: &str = "noRunningTurn";
-
 fn _urandom(n: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n];
     let mut file = fs::File::open("/dev/urandom")?;
@@ -77,7 +68,8 @@ pub(super) fn _ws_send_frame(stream: &UnixStream, opcode: u8, payload: &[u8]) ->
     writer.write_all(&frame)
 }
 
-/// Python `_WSConn`.
+/// One websocket connection to the app-server over its unix socket: the
+/// HTTP upgrade handshake, masked client frames, ping/pong.
 pub struct WsConn {
     pub(super) stream: Arc<UnixStream>,
     rx: Vec<u8>,

@@ -109,7 +109,7 @@ fn _render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) ->
     }
     lines.push(
         "  note: existing Codex panes may not reload plugin settings dynamically; \
-         restart them if old hooks or commands still run."
+         restart them if old commands still run."
             .to_string(),
     );
     lines.join("\n")
@@ -174,7 +174,7 @@ pub fn plugin_sync() {
 }
 
 // `hive plugin setup` — the one human-run install step. Registers the
-// materialized marketplace and installs the plugin for every agent CLI on
+// materialized marketplace and installs the plugin for claude and codex on
 // PATH; each sub-step tolerates "already done" failures so re-running is
 // safe, and re-running is also how an install is repaired.
 fn _setup_step(label: &str, argv: &[&str]) {
@@ -377,6 +377,13 @@ end
 "#;
 
 pub fn shell_init_cmd(shell: &str) {
+    print!("{}", _shell_init_script(shell));
+}
+
+/// The launcher script for *shell* (`$SHELL`'s basename when empty, zsh
+/// when that is unset too): fish gets its own dialect, everything else the
+/// zsh/bash one.
+pub(crate) fn _shell_init_script(shell: &str) -> &'static str {
     let resolved = if shell.is_empty() {
         let env_shell = env_string("SHELL");
         if env_shell.is_empty() {
@@ -391,11 +398,11 @@ pub fn shell_init_cmd(shell: &str) {
         shell.to_string()
     };
     if resolved.trim() == "fish" {
-        print!("{_SHELL_INIT_FISH}");
+        _SHELL_INIT_FISH
     } else {
         // zsh and bash share this syntax. The ksh-style `function name {` form
         // bypasses alias expansion of the name in BOTH shells, so a stray
         // alias cannot break the parse.
-        print!("{_SHELL_INIT_POSIX}");
+        _SHELL_INIT_POSIX
     }
 }

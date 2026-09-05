@@ -1,11 +1,8 @@
 use super::*;
+use crate::testenv::EnvGuard;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
-// env vars are process-global: every test touching them takes this lock.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 type Calls = Rc<RefCell<Vec<(Vec<String>, bool, u64)>>>;
 
@@ -215,11 +212,11 @@ fn test_is_pane_alive_treats_tmux_failure_as_alive() {
 
 #[test]
 fn test_context_helpers_use_environment_and_display_message() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    std::env::set_var("TMUX", "/tmp/tmux-1");
-    std::env::set_var("TMUX_PANE", "%7");
-    std::env::remove_var("CODEX_THREAD_ID");
-    std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+    let mut env = EnvGuard::new();
+    env.set("TMUX", "/tmp/tmux-1");
+    env.set("TMUX_PANE", "%7");
+    env.remove("CODEX_THREAD_ID");
+    env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
     _set_run_override(|args, _check, _timeout| {
         let stdout = if args.iter().any(|a| a == "#{session_name}:#{window_index}") {
             "dev:2\n"
@@ -237,12 +234,8 @@ fn test_context_helpers_use_environment_and_display_message() {
     assert_eq!(get_current_pane_id().as_deref(), Some("%7"));
     assert_eq!(get_current_window_target().as_deref(), Some("dev:2"));
     assert_eq!(get_current_session_name().as_deref(), Some("dev"));
-    assert_eq!(get_current_window_index().as_deref(), Some("2"));
     assert_eq!(get_current_window_id().as_deref(), Some("@42"));
     assert_eq!(get_window_id("dev:2").as_deref(), Some("@42"));
-
-    std::env::remove_var("TMUX");
-    std::env::remove_var("TMUX_PANE");
 }
 
 #[test]
@@ -257,14 +250,12 @@ fn test_client_mode_and_popup_support_helpers() {
     });
 
     assert_eq!(get_client_mode(Some("%7")), "control");
-    assert!(is_control_mode_client(Some("%7")));
 }
 
 #[test]
 fn test_client_mode_returns_terminal_or_unknown() {
     _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
     assert_eq!(get_client_mode(Some("%8")), "terminal");
-    assert!(!is_control_mode_client(Some("%8")));
 
     _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
     assert_eq!(get_client_mode(Some("%8")), "unknown");
@@ -286,10 +277,6 @@ fn test_client_window_helpers_resolve_most_recent_client() {
     assert_eq!(
         get_most_recent_client_tty(Some("dev")).as_deref(),
         Some("/dev/ttys050")
-    );
-    assert_eq!(
-        get_most_recent_terminal_client_pane(Some("dev")).as_deref(),
-        Some("%5")
     );
     assert_eq!(
         get_client_window_target("/dev/ttys050").as_deref(),
@@ -319,17 +306,13 @@ fn test_client_helpers_ignore_control_mode_clients() {
         Some("/dev/ttys020")
     );
     assert_eq!(
-        get_most_recent_terminal_client_pane(Some("dev")).as_deref(),
-        Some("%term")
-    );
-    assert_eq!(
         get_most_recent_client_window(Some("dev")).as_deref(),
         Some("dev:2")
     );
 }
 
 #[test]
-fn test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output() {
+fn test_list_tty_processes_strips_dev_prefix_and_parses_output() {
     let calls: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
     set_exec_override(move |argv, _timeout, _input| {
@@ -357,32 +340,28 @@ fn test_list_tty_processes_and_commands_strip_dev_prefix_and_parse_output() {
             },
         ]
     );
-    assert_eq!(list_tty_commands("/dev/ttys012"), vec!["-zsh", "claude"]);
     let expected = v(&["ps", "-t", "ttys012", "-o", "pid=,comm=,command="]);
-    assert_eq!(*calls.borrow(), vec![expected.clone(), expected]);
+    assert_eq!(*calls.borrow(), vec![expected]);
 }
 
 #[test]
 fn test_current_window_helpers_return_none_without_tmux_pane() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    std::env::remove_var("TMUX_PANE");
-    std::env::remove_var("TMUX");
-    std::env::remove_var("CODEX_THREAD_ID");
-    std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+    let mut env = EnvGuard::new();
+    env.remove("TMUX_PANE");
+    env.remove("TMUX");
+    env.remove("CODEX_THREAD_ID");
+    env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
 
     assert_eq!(get_current_window_target(), None);
     assert_eq!(get_current_session_name(), None);
-    assert_eq!(get_current_window_index(), None);
     assert_eq!(get_current_window_id(), None);
 }
 
 #[test]
-fn test_list_panes_with_titles_and_full_parse_rows() {
+fn test_list_panes_full_parses_rows() {
     _set_run_override(|args, _check, _timeout| {
         let fmt = args.last().map(String::as_str).unwrap_or("");
-        let stdout = if fmt == "#{pane_id}\t#{pane_title}" {
-            "%1\tmain\n%2\tworker\n"
-        } else if fmt == _PANE_BASE_FMT {
+        let stdout = if fmt == _PANE_BASE_FMT {
             "%1\tmain\tcodex\tagent\tclaude\tteam-a\t\n%2\tshell\tzsh\tterminal\tterm-1\tteam-a\t\n"
         } else {
             ""
@@ -390,24 +369,8 @@ fn test_list_panes_with_titles_and_full_parse_rows() {
         Ok(ok_run(0, stdout, ""))
     });
 
-    let titled = list_panes_with_titles("dev:0");
     let full = list_panes_full("dev:0");
 
-    assert_eq!(
-        titled,
-        vec![
-            PaneInfo {
-                pane_id: "%1".to_string(),
-                title: "main".to_string(),
-                ..Default::default()
-            },
-            PaneInfo {
-                pane_id: "%2".to_string(),
-                title: "worker".to_string(),
-                ..Default::default()
-            },
-        ]
-    );
     assert_eq!(
         full[0],
         PaneInfo {
@@ -559,18 +522,18 @@ fn test_configure_hive_window_disables_native_tmux_alerts() {
 }
 
 #[test]
-fn test_parse_control_mode_output_pane_matches_output_notifications() {
+fn test_parse_control_mode_output_matches_output_notifications() {
     assert_eq!(
-        parse_control_mode_output_pane("%output %2772 hello").as_deref(),
-        Some("%2772")
+        parse_control_mode_output("%output %2772 hello"),
+        ("%2772".to_string(), "hello".to_string())
     );
     assert_eq!(
-        parse_control_mode_output_pane("%extended-output %2773 12 : world").as_deref(),
-        Some("%2773")
+        parse_control_mode_output("%extended-output %2773 12 : world"),
+        ("%2773".to_string(), "world".to_string())
     );
     assert_eq!(
-        parse_control_mode_output_pane("%session-changed $1 dev"),
-        None
+        parse_control_mode_output("%session-changed $1 dev"),
+        (String::new(), String::new())
     );
 }
 
@@ -653,12 +616,11 @@ fn test_control_mode_monitor_marks_visible_text_busy() {
 }
 
 #[test]
-fn test_window_option_helpers_and_flash() {
+fn test_window_option_helpers() {
     let calls = _capture_run(0, "");
 
     set_window_option("dev:1", "window-status-style", "fg=red");
     clear_window_option("dev:1", "window-status-style");
-    flash_window_status("dev:1", "fg=colour235,bg=colour220,bold", 3);
 
     let calls = calls.borrow();
     assert_eq!(
@@ -681,10 +643,6 @@ fn test_window_option_helpers_and_flash() {
             "window-status-style"
         ])
     );
-    assert_eq!(calls[2].0[0..2], v(&["run-shell", "-b"]));
-    assert!(calls[2].0[2].contains("window-status-style"));
-    assert!(calls[2].0[2].contains("dev:1"));
-    assert_eq!(calls[2].0[2].matches("sleep 0.5").count(), 6);
 }
 
 #[test]

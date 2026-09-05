@@ -108,16 +108,17 @@ pub fn _cleanup_dead_daemons(workspace: &str, team: &str) {
 /// Keep this team's codex members riding the shared daemon.
 pub fn _codex_supervisor_tick(workspace: &str, team: &str) {
     let panes = hooked_list_panes_all();
+    if panes.is_empty() {
+        return; // an empty listing is a tmux failure, not an empty server
+    }
     let live_panes: HashSet<String> = panes.iter().map(|p| p.pane_id.clone()).collect();
-    if !panes.is_empty() {
-        for pane in hooked_cas_list_recorded_panes() {
-            if !live_panes.contains(&pane) {
-                hooked_cas_clear_pane_thread(&pane);
-                codex_reattach_at()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&pane);
-            }
+    for pane in hooked_cas_list_recorded_panes() {
+        if !live_panes.contains(&pane) {
+            hooked_cas_clear_pane_thread(&pane);
+            codex_reattach_at()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&pane);
         }
     }
 
@@ -193,9 +194,9 @@ pub fn _codex_supervisor_tick(workspace: &str, team: &str) {
 /// Records are machine-level (like codex's thread records), so staleness
 /// must never rebind a recycled pane id to a foreign job. A record whose
 /// pane is gone also means nobody is watching that engine any more:
-/// ``claude stop`` parks it — the job stays in the ledger and ``hive
-/// resume`` can still wake it, so nothing is lost, but no orphan engine
-/// keeps burning in the background.
+/// ``claude stop`` parks it — the job stays in the ledger and ``hive claude
+/// --resume <jobId>`` (or a delivery) can still wake it, so nothing is lost,
+/// but no orphan engine keeps burning in the background.
 ///
 /// No respawn/reattach half: the engine's life is claude's own supervisor's
 /// business (wake happens on demand at delivery), and the pane viewer
@@ -213,22 +214,21 @@ pub fn _claude_supervisor_tick(workspace: &str) {
         }
         let record = hooked_cb_read_pane_job(&pane);
         hooked_cb_clear_pane_job(&pane);
-        if let Some((job_id, _sid, _cwd)) = record {
+        if let Some(record) = record {
             hooked_notify_debug_emit(
                 workspace,
                 "claude.job.park",
                 &[
                     ("pane", Value::from(pane.clone())),
-                    ("job", Value::from(job_id.clone())),
+                    ("job", Value::from(record.job_id.clone())),
                 ],
             );
-            hooked_cb_stop_job(&job_id);
+            hooked_cb_stop_job(&record.job_id);
         }
     }
 }
 
-/// Shared per-loop state for the claude name/view ticks (the Python
-/// `claude_view_state` dict).
+/// Shared per-loop state for the claude name/view ticks.
 #[derive(Debug, Default)]
 pub struct ClaudeTickState {
     pub named: HashSet<String>,
@@ -240,7 +240,7 @@ pub struct ClaudeTickState {
 /// Keep each claude member's job labelled `<team>.<member>`.
 ///
 /// A member spawned by hive is minted under that name already; one adopted
-/// from a pane that was running claude first (init, spawn, resume) was minted
+/// from a pane that was running claude first (join, `--resume`) was minted
 /// before the pane carried any tag, so its job keeps a `hive-<pane>`
 /// placeholder. The engine's registry entry — read anyway on every tick —
 /// carries the current label, so the comparison is free and the rename fires
@@ -353,10 +353,13 @@ pub fn _claude_view_tick(
 /// Backfill the team's registry entry from live observation.
 ///
 /// Refreshes fields of members the registry already knows (model switch,
-/// cwd change, a sessionId learned late) and the display cache. It never
-/// adds or removes a roster name — membership belongs to the CLI writers,
-/// and the whole read-merge-write runs under the store lock so an
-/// observation racing a `hive kill` cannot resurrect the killed member.
+/// cwd change, a sessionId learned late) and the display cache. The cwd
+/// comes from `Team::load`'s pane merge, which reads `#{pane_current_path}`
+/// off the live pane, so this is the only lane that follows a member's `cd`
+/// into the registry. It never adds or removes a roster name — membership
+/// belongs to the CLI writers, and the whole read-merge-write runs under the
+/// store lock so an observation racing a `hive kill` cannot resurrect the
+/// killed member.
 pub fn _write_registry_backfill(workspace: &str, team: &str) {
     let Ok(t) = hooked_team_load(team) else {
         return;

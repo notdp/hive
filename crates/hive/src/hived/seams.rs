@@ -1,9 +1,8 @@
 // --------------------------------------------------------------------------
-// seams (the Rust shape of the Python tests' monkeypatching). Each hooked_*
-// consults the process-global test hook, then falls through to the real
-// module. The hook is process-global (not thread-local) because hived work
-// crosses threads (request handlers); nextest's process-per-test keeps it
-// isolated.
+// seams. Each hooked_* consults the process-global test hook, then falls
+// through to the real module. The hook is process-global (not thread-local)
+// because hived work crosses threads (request handlers); nextest's
+// process-per-test keeps it isolated.
 // --------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf};
@@ -12,6 +11,8 @@ use std::thread;
 use anyhow::Result;
 use serde_json::{Map, Value};
 
+use crate::adapters::claude_bg::PaneJob;
+use crate::adapters::grok_leader::SessionRecord;
 use crate::agent::{Agent, DeliveryError};
 use crate::team::Team;
 
@@ -26,7 +27,7 @@ pub(super) fn hookget<T>(f: impl FnOnce(&testhook::Hook) -> T) -> Option<T> {
         .map(f)
 }
 
-/// Adapter dispatch used by the runtime probes (Python `adapters.get`).
+/// Adapter dispatch used by the runtime probes.
 pub enum AdapterHandle {
     Real(Box<dyn crate::adapters::base::SessionAdapter>),
     #[cfg(test)]
@@ -205,7 +206,7 @@ pub(super) fn hooked_check_input_gate(path: &Path) -> crate::adapters::base::Gat
 
 // --- claude_bg seams -------------------------------------------------------
 
-pub(super) fn hooked_cb_read_pane_job(pane: &str) -> Option<(String, String, String)> {
+pub(super) fn hooked_cb_read_pane_job(pane: &str) -> Option<PaneJob> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cb_read_pane_job.clone()).flatten() {
         return f(pane);
@@ -443,7 +444,7 @@ pub(super) fn hooked_gl_session_id_for_pane(pane: &str) -> Option<String> {
     crate::adapters::grok_leader::session_id_for_pane(pane)
 }
 
-pub(super) fn hooked_gl_read_session_key(key: &str) -> Option<(String, String)> {
+pub(super) fn hooked_gl_read_session_key(key: &str) -> Option<SessionRecord> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_read_session_key.clone()).flatten() {
         return f(key);
@@ -588,7 +589,7 @@ pub(super) fn hooked_agent_send(
     agent.send_from(text, sender)
 }
 
-// --- self seams (Python monkeypatches on hive.hived itself) ---------------
+// --- self seams (this module's own entry points, replaceable in tests) ----
 
 pub fn _resolve_live_agent(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
     #[cfg(test)]

@@ -1,17 +1,22 @@
-//! Grok leader client over a *per-pane* leader daemon.
+//! Grok leader client over a key-scoped leader daemon.
 //!
-//! Each hive-spawned grok pane runs its own `grok agent leader --leader-socket
-//! <sock>` daemon sharing the real GROK_HOME. The grok TUI in that pane attaches
-//! to it (`grok --leader --leader-socket <sock> --session-id <uuid>`); hive
-//! attaches as a second client through `grok agent --leader stdio --leader-socket
-//! <sock>` — a subprocess speaking ACP JSON-RPC 2.0 as newline-delimited JSON on
-//! stdin/stdout. The leader's own socket protocol is private, so hive never talks
-//! to the socket directly: the stdio subprocess is the supported door.
+//! A leader daemon (`grok agent leader --leader-socket <sock>`, sharing the
+//! real GROK_HOME) is keyed by who it serves (`keys.rs`): a team member's
+//! engine lives on `m-<team>.<member>` and outlives any pane, a raw `hive grok`
+//! pane on `p<slug>`. A pane reaches its daemon through `resolve_pane_key`; a
+//! headless member needs no pane at all (`spawn_member_daemon`). The grok TUI
+//! in a pane attaches with `grok --leader --leader-socket <sock> --session-id
+//! <uuid>`; hive attaches as a second client through `grok agent --leader
+//! stdio --leader-socket <sock>` — a subprocess speaking ACP JSON-RPC 2.0 as
+//! newline-delimited JSON on stdin/stdout. The leader's own socket protocol is
+//! private, so hive never talks to the socket directly: the stdio subprocess
+//! is the supported door.
 //!
 //! Which session that second client drives is not discoverable from the leader
-//! (`session/list` returns every session of the cwd), so hive mints the pane's
-//! session id at spawn time and records it beside the socket in a `.session`
-//! file. The client loads exactly that session and folds only its notifications.
+//! (`session/list` returns every session of the cwd), so hive mints the
+//! session id at spawn time and records it beside the socket in the key's
+//! `.session` file. The client loads exactly that session and folds only its
+//! notifications.
 //!
 //! `session/load` replays the session's past `session/update` notifications
 //! before it answers, so everything received before the load response is dropped —

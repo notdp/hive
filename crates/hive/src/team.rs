@@ -1,4 +1,4 @@
-//! Team: a tmux window with a group of agents.
+//! Team: a registry roster with an optional tmux display window.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
 use crate::agent::Agent;
+use crate::pyval::{py_float_str, truthy};
 use crate::tmux::PaneInfo;
 
 #[cfg(test)]
@@ -43,28 +44,6 @@ fn getcwd() -> String {
         .unwrap_or_default()
 }
 
-/// Python `str(float)`: integral floats keep a trailing `.0`.
-// ponytail: no scientific-notation branch — epoch timestamps never reach 1e16.
-pub(crate) fn py_float_str(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e16 {
-        format!("{value:.1}")
-    } else {
-        format!("{value}")
-    }
-}
-
-/// Python truthiness for an optional JSON value.
-fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
 /// `str(row.get(key) or "")` for the string payloads registry rows carry.
 fn row_str(row: &Map<String, Value>, key: &str) -> String {
     match row.get(key) {
@@ -88,11 +67,23 @@ fn new_agent(
         team_name: team_name.to_string(),
         pane_id: pane_id.to_string(),
         model: model.to_string(),
-        prompt: String::new(),
         cwd: cwd.to_string(),
         session_id,
-        spawned_at: now_epoch(),
         cli: cli.to_string(),
+    }
+}
+
+/// Drop every `@hive-*` window tag `_write_window_options` (or a Python-era
+/// hive, which also wrote `@hive-peers`) left on *window*.
+pub fn clear_window_tags(window: &str) {
+    for key in [
+        "hive-team",
+        "hive-workspace",
+        "hive-desc",
+        "hive-created",
+        "hive-peers",
+    ] {
+        tmux::clear_window_option(window, &format!("@{key}"));
     }
 }
 
@@ -142,7 +133,6 @@ struct SpawnCall {
     model: String,
     prompt: String,
     cwd: String,
-    is_first: bool,
     split_horizontal: bool,
     split_size: Option<String>,
     skill: String,
@@ -150,11 +140,15 @@ struct SpawnCall {
     cli: String,
 }
 
-// --- cross-module seams (cfg-switched so unit tests mirror the pytest
-// monkeypatching without a tmux server or the parallel agent/agent_cli ports)
+// --- cross-module seams: each wrapper runs the real call unless the test
+// installed an answer for that seam (`tests::Hook`); the tmux those real
+// calls reach is `crate::tmux`, answered in tests by `_set_run_override`.
 
-#[cfg(not(test))]
 fn agent_spawn(call: SpawnCall) -> Result<Agent> {
+    #[cfg(test)]
+    if let Some(answer) = tests::hook(|h| h.spawn(&call)).flatten() {
+        return answer;
+    }
     Agent::spawn(
         &call.name,
         &call.team_name,
@@ -163,7 +157,6 @@ fn agent_spawn(call: SpawnCall) -> Result<Agent> {
             model: call.model.clone(),
             prompt: call.prompt.clone(),
             cwd: call.cwd.clone(),
-            is_first: call.is_first,
             split_horizontal: call.split_horizontal,
             split_size: call.split_size.clone(),
             skill: call.skill.clone(),
@@ -177,44 +170,27 @@ fn agent_spawn(call: SpawnCall) -> Result<Agent> {
     )
 }
 
-#[cfg(test)]
-fn agent_spawn(call: SpawnCall) -> Result<Agent> {
-    tests::fake_agent::spawn(call)
+fn detect_current_session_id(pane_id: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(id) = tests::hook(|h| h.session_id.clone()).flatten() {
+        return Some(id);
+    }
+    crate::agent::detect_current_session_id(pane_id)
 }
 
-#[cfg(not(test))]
-fn detect_current_session_id(cwd: &str, pane_id: &str) -> Option<String> {
-    crate::agent::detect_current_session_id(cwd, "", pane_id)
-}
-
-#[cfg(test)]
-fn detect_current_session_id(cwd: &str, pane_id: &str) -> Option<String> {
-    tests::fake_agent::detect_current_session_id(cwd, pane_id)
-}
-
-#[cfg(not(test))]
-fn agent_kill(agent: &Agent) {
-    agent.kill();
-}
-
-#[cfg(test)]
-fn agent_kill(agent: &Agent) {
-    tests::fake_agent::kill(agent);
-}
-
-#[cfg(not(test))]
-fn member_role_for_pane(pane_id: &str) -> String {
-    crate::agent_cli::member_role_for_pane(pane_id).to_string()
-}
-
-#[cfg(test)]
-fn member_role_for_pane(pane_id: &str) -> String {
-    tests::fake_agent_cli::member_role_for_pane(pane_id)
+/// Name of the CLI profile live on *pane_id* (`agent_cli`'s process and
+/// title probe), None when nothing recognizable runs there.
+fn detect_profile_name_for_pane(pane_id: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(answer) = tests::hook(|h| h.profile_for_pane.as_ref().map(|f| f(pane_id))).flatten()
+    {
+        return answer;
+    }
+    crate::agent_cli::detect_profile_for_pane(pane_id).map(|profile| profile.name.to_string())
 }
 
 /// Python Team.load's cli resolution for a member pane: the pane tag, the
 /// pane command, then live profile detection, then the "claude" default.
-#[cfg(not(test))]
 fn resolve_member_cli(pane: &PaneInfo) -> String {
     let resolved = if !pane.cli.is_empty() {
         pane.cli.clone()
@@ -224,25 +200,17 @@ fn resolve_member_cli(pane: &PaneInfo) -> String {
     if crate::agent_cli::AGENT_CLI_NAMES.contains(&resolved.as_str()) {
         return resolved;
     }
-    match crate::agent_cli::detect_profile_for_pane(&pane.pane_id) {
-        Some(profile) => profile.name.to_string(),
-        None => "claude".to_string(),
+    detect_profile_name_for_pane(&pane.pane_id).unwrap_or_else(|| "claude".to_string())
+}
+
+fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
+    #[cfg(test)]
+    if let Some(answer) =
+        tests::hook(|h| h.team_runtime.as_ref().map(|f| f(workspace, team_name))).flatten()
+    {
+        return answer;
     }
-}
-
-#[cfg(test)]
-fn resolve_member_cli(pane: &PaneInfo) -> String {
-    tests::fake_agent_cli::resolve_member_cli(pane)
-}
-
-#[cfg(not(test))]
-fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
     crate::hived::request_team_runtime(workspace, team_name)
-}
-
-#[cfg(test)]
-fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
-    tests::fake_hived::request_team_runtime(workspace, team_name)
 }
 
 /// The hived's team-runtime answer, or None when there is nothing to trust:
@@ -266,16 +234,6 @@ pub(crate) fn _set_fake_tmux_run(
     f: impl Fn(&[String], bool) -> Result<crate::tmux::Run, crate::tmux::TmuxError> + 'static,
 ) {
     tests::with_state(|st| st.run_fn = Some(Box::new(f)));
-}
-
-#[cfg(not(test))]
-fn find_team_window_for_load(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
-    _find_team_window(name, prefer_pane)
-}
-
-#[cfg(test)]
-fn find_team_window_for_load(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
-    Ok(tests::fake_find_team_window(name, prefer_pane))
 }
 
 #[derive(Debug, Clone)]
@@ -363,7 +321,6 @@ impl Team {
         lead_pane_id: &str,
         lead_name: &str,
         description: &str,
-        cwd: &str,
         workspace: &str,
         tag_lead: bool,
     ) -> Result<Team> {
@@ -396,11 +353,6 @@ impl Team {
             bail!("Team '{existing}' already exists in this window");
         }
 
-        let resolved_cwd = if cwd.is_empty() {
-            getcwd()
-        } else {
-            cwd.to_string()
-        };
         let mut team = Team {
             name: name.to_string(),
             description: description.to_string(),
@@ -414,7 +366,7 @@ impl Team {
         } else {
             tmux::get_current_pane_id().unwrap_or_default()
         };
-        team.lead_session_id = detect_current_session_id(&resolved_cwd, &team.lead_pane_id);
+        team.lead_session_id = detect_current_session_id(&team.lead_pane_id);
         team.tmux_session = if window_target.contains(':') {
             window_target.split(':').next().unwrap_or("").to_string()
         } else {
@@ -425,7 +377,7 @@ impl Team {
         if tag_lead && !team.lead_pane_id.is_empty() {
             tmux::tag_pane(
                 &team.lead_pane_id,
-                &member_role_for_pane(&team.lead_pane_id),
+                crate::agent_cli::member_role_for_pane(&team.lead_pane_id),
                 &team.lead_name,
                 name,
                 "",
@@ -438,7 +390,7 @@ impl Team {
     }
 
     /// Create a new team in the currently-focused tmux window.
-    pub fn create(name: &str, description: &str, cwd: &str, workspace: &str) -> Result<Team> {
+    pub fn create(name: &str, description: &str, workspace: &str) -> Result<Team> {
         if !tmux::is_inside_tmux() {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
@@ -448,7 +400,6 @@ impl Team {
             &tmux::get_current_pane_id().unwrap_or_default(),
             LEAD_AGENT_NAME,
             description,
-            cwd,
             workspace,
             true,
         )
@@ -471,7 +422,7 @@ impl Team {
         } else {
             tmux::get_current_pane_id().unwrap_or_default()
         };
-        let (window_target, window_data) = find_team_window_for_load(name, &hint)?;
+        let (window_target, window_data) = _find_team_window(name, &hint)?;
         if snap.is_none() && window_target.is_empty() {
             bail!("Team '{name}' not found");
         }
@@ -613,11 +564,6 @@ impl Team {
         Ok(team)
     }
 
-    /// Write team state to tmux options (window + pane level).
-    pub fn save(&self) {
-        self._write_window_options();
-    }
-
     pub fn lead_agent(&self) -> Option<Agent> {
         if self.lead_pane_id.is_empty() {
             return None;
@@ -627,11 +573,9 @@ impl Team {
             team_name: self.name.clone(),
             pane_id: self.lead_pane_id.clone(),
             model: String::new(),
-            prompt: String::new(),
             cwd: tmux::display_value(&self.lead_pane_id, "#{pane_current_path}")
                 .unwrap_or_else(getcwd),
             session_id: self.lead_session_id.clone(),
-            spawned_at: now_epoch(),
             cli: tmux::get_pane_option(&self.lead_pane_id, "hive-cli").unwrap_or_default(),
         })
     }
@@ -639,6 +583,7 @@ impl Team {
     // --- Agent management ---
 
     /// Spawn a new agent in the team.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &mut self,
         name: &str,
@@ -663,7 +608,10 @@ impl Team {
         // land on — that is the only reason to refuse.
         let target = self.anchor_pane();
         if target.is_empty() {
-            bail!("{}", _TMUX_REQUIRED_MESSAGE);
+            bail!(
+                "team '{}' has no pane to split from (no live member pane, lead pane, display window, or current pane)",
+                self.name
+            );
         }
         // Cross-process name claim under the registry lock: the in-memory
         // check above cannot see a concurrent spawner (a workflow fanning out
@@ -672,9 +620,9 @@ impl Team {
         // if the spawn fails.
         let claimed = self.claim_name(name, cli, model)?;
 
-        let is_first = self.agents.is_empty();
         let window_for_split = self.display_window();
-        let split_horizontal = is_first && layout::split_horizontal(&window_for_split, 2);
+        let split_horizontal =
+            self.agents.is_empty() && layout::split_horizontal(&window_for_split, 2);
         let split_size = "50%";
 
         let spawned = agent_spawn(SpawnCall {
@@ -688,7 +636,6 @@ impl Team {
             } else {
                 cwd.to_string()
             },
-            is_first,
             split_horizontal,
             split_size: Some(split_size.to_string()),
             skill: skill.to_string(),
@@ -804,8 +751,12 @@ impl Team {
     }
 
     /// Reserve `name` in the registry roster (paneless placeholder). Ok(true)
-    /// when this call made the claim, Ok(false) when the team has no registry
-    /// entry to race on, Err when another process holds the name.
+    /// when this call made the claim; Err when another process holds the
+    /// name. Ok(false) means no claim was made and the spawn goes on guarded
+    /// only by the in-memory check: the team has no registry entry (or a
+    /// recycled successor's), or the store lock/write failed — best-effort,
+    /// like the spawn path's other registry writes (`_registry_record_member`
+    /// warns, the rollback `remove_member` is discarded).
     fn claim_name(&self, name: &str, cli: &str, model: &str) -> Result<bool> {
         if self.name.is_empty() {
             return Ok(false);
@@ -841,7 +792,7 @@ impl Team {
             row.insert("name".to_string(), Value::String(lead.name.clone()));
             row.insert(
                 "role".to_string(),
-                Value::String(member_role_for_pane(&lead.pane_id)),
+                Value::String(crate::agent_cli::member_role_for_pane(&lead.pane_id).to_string()),
             );
             row.insert("pane".to_string(), Value::String(lead.pane_id.clone()));
             if let Some(group) = self.member_groups.get(&lead.name).filter(|g| !g.is_empty()) {
@@ -890,7 +841,7 @@ impl Team {
     /// Kill all agent panes (not the session itself if in-place).
     pub fn cleanup(&self) {
         for agent in &self.agents {
-            agent_kill(agent);
+            agent.kill();
         }
         if !self.lead_pane_id.is_empty() && tmux::is_pane_alive(&self.lead_pane_id) {
             tmux::clear_pane_tags(&self.lead_pane_id);
@@ -941,9 +892,6 @@ pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamW
             continue;
         }
         let mut parts: Vec<String> = line.split('\t').map(str::to_string).collect();
-        if parts.len() == 5 {
-            parts.insert(1, String::new());
-        }
         while parts.len() < 6 {
             parts.push(String::new());
         }
@@ -1010,15 +958,7 @@ pub fn _gc_stale_team_windows(name: &str, keep: &str, all_windows: &[String]) {
         if _window_has_live_team_members(wt, name) {
             continue;
         }
-        for key in [
-            "hive-team",
-            "hive-workspace",
-            "hive-desc",
-            "hive-created",
-            "hive-peers",
-        ] {
-            tmux::clear_window_option(wt, &format!("@{key}"));
-        }
+        clear_window_tags(wt);
     }
 }
 
@@ -1189,14 +1129,52 @@ pub fn list_teams() -> Result<Vec<Map<String, Value>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use crate::tmux::{Run, TmuxError};
     use std::cell::RefCell;
-    use std::sync::MutexGuard;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
 
     // ------------------------------------------------------------------
-    // Fake state shared by fake_tmux / fake_layout / fake_agent /
-    // fake_agent_cli (the monkeypatch equivalent of tests/conftest.py's
-    // configure_hive_home fixture).
+    // Seam hook: what a test pins on this module's cross-module calls. An
+    // unset field runs the real call (`configure_hive_home` installs an
+    // empty hook, and points the real tmux facade at a no-server double).
+    // ------------------------------------------------------------------
+
+    type SpawnFn = Box<dyn Fn(usize, &SpawnCall) -> Agent>;
+    type TeamRuntimeFn = Box<dyn Fn(&str, &str) -> Option<Map<String, Value>>>;
+    type ProfileFn = Box<dyn Fn(&str) -> Option<String>>;
+
+    #[derive(Default)]
+    pub struct Hook {
+        pub spawn_calls: Vec<SpawnCall>,
+        pub spawn_fn: Option<SpawnFn>,
+        pub session_id: Option<String>,
+        pub team_runtime: Option<TeamRuntimeFn>,
+        pub profile_for_pane: Option<ProfileFn>,
+    }
+
+    impl Hook {
+        /// Record the spawn; answer it (1-based call number, the call) when
+        /// `spawn_fn` is set, else let `Agent::spawn` run.
+        pub fn spawn(&mut self, call: &SpawnCall) -> Option<Result<Agent>> {
+            self.spawn_calls.push(call.clone());
+            let n = self.spawn_calls.len();
+            self.spawn_fn.as_ref().map(|f| Ok(f(n, call)))
+        }
+    }
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub fn hook<T>(f: impl FnOnce(&mut Hook) -> T) -> Option<T> {
+        HOOK.with(|cell| cell.borrow_mut().as_mut().map(f))
+    }
+
+    // ------------------------------------------------------------------
+    // Fake state shared by fake_tmux / fake_layout; `configure_hive_home`
+    // resets it per test.
     // ------------------------------------------------------------------
 
     pub struct FakeState {
@@ -1204,10 +1182,9 @@ mod tests {
         pub current_pane: String,
         pub session_name: String,
         pub current_window_target: Option<String>,
-        pub window_options: HashMap<String, HashMap<String, String>>,
+        /// Ordered so the rendered `list-windows` output is deterministic.
+        pub window_options: BTreeMap<String, HashMap<String, String>>,
         pub pane_options: HashMap<String, HashMap<String, String>>,
-        pub default_command: String,
-        pub pane_commands: HashMap<String, String>,
         pub pane_alive: bool,
         pub tagged: Vec<(String, String, String, String, String, String)>,
         pub borders: Vec<String>,
@@ -1221,12 +1198,6 @@ mod tests {
         pub window_size: (i64, i64),
         pub layout_panes: Vec<String>,
         pub layout_actions: Vec<(String, String, String, String)>,
-        pub find_override: Option<Box<dyn Fn(&str, &str) -> (String, TeamWindowData)>>,
-        pub detect_session_id: Option<String>,
-        pub spawn_calls: Vec<SpawnCall>,
-        pub spawn_fn: Option<Box<dyn Fn(usize, &SpawnCall) -> Agent>>,
-        pub killed: Vec<String>,
-        pub team_runtime: Option<Box<dyn Fn(&str, &str) -> Option<Map<String, Value>>>>,
     }
 
     impl Default for FakeState {
@@ -1236,10 +1207,8 @@ mod tests {
                 current_pane: "%0".to_string(),
                 session_name: "dev".to_string(),
                 current_window_target: Some("dev:0".to_string()),
-                window_options: HashMap::new(),
+                window_options: BTreeMap::new(),
                 pane_options: HashMap::new(),
-                default_command: "claude".to_string(),
-                pane_commands: HashMap::new(),
                 pane_alive: true,
                 tagged: Vec::new(),
                 borders: Vec::new(),
@@ -1253,12 +1222,6 @@ mod tests {
                 window_size: (0, 0),
                 layout_panes: Vec::new(),
                 layout_actions: Vec::new(),
-                find_override: None,
-                detect_session_id: None,
-                spawn_calls: Vec::new(),
-                spawn_fn: None,
-                killed: Vec::new(),
-                team_runtime: None,
             }
         }
     }
@@ -1280,31 +1243,38 @@ mod tests {
         format!("@{suffix}")
     }
 
-    /// conftest's state-backed `_find_team_window` patch (with a per-test
-    /// override slot, like the tests that re-monkeypatch it).
-    pub fn fake_find_team_window(name: &str, prefer_pane: &str) -> (String, TeamWindowData) {
-        with_state(|st| {
-            if let Some(f) = &st.find_override {
-                return f(name, prefer_pane);
+    /// What `list-windows -a -F <fmt>` prints for the fake window options:
+    /// `#{session_name}:#{window_index}` is the target, `#{window_id}` its
+    /// derived id, `#{@key}` the option — so `_find_team_window` reads back
+    /// what `_write_window_options` wrote. Any other `_run` prints nothing.
+    fn fake_run_stdout(st: &FakeState, args: &[String]) -> String {
+        if args.first().map(String::as_str) != Some("list-windows") {
+            return String::new();
+        }
+        let Some(fmt) = args
+            .iter()
+            .position(|a| a == "-F")
+            .and_then(|i| args.get(i + 1))
+        else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for (target, opts) in &st.window_options {
+            let mut line = fmt
+                .replace("#{session_name}:#{window_index}", target)
+                .replace("#{window_id}", &window_id_for_target(target));
+            while let Some(start) = line.find("#{@") {
+                let Some(len) = line[start..].find('}') else {
+                    break;
+                };
+                let key = line[start + 3..start + len].to_string();
+                let value = opts.get(&key).cloned().unwrap_or_default();
+                line.replace_range(start..start + len + 1, &value);
             }
-            for (target, opts) in &st.window_options {
-                if opts.get("hive-team").map(String::as_str) == Some(name) {
-                    return (
-                        target.clone(),
-                        TeamWindowData {
-                            window_id: window_id_for_target(target),
-                            workspace: opts.get("hive-workspace").cloned().unwrap_or_default(),
-                            desc: opts.get("hive-desc").cloned().unwrap_or_default(),
-                            created: opts
-                                .get("hive-created")
-                                .cloned()
-                                .unwrap_or_else(|| "0".to_string()),
-                        },
-                    );
-                }
-            }
-            (String::new(), TeamWindowData::default())
-        })
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
     }
 
     pub mod fake_tmux {
@@ -1421,17 +1391,6 @@ mod tests {
             })
         }
 
-        pub fn get_pane_current_command(pane_id: &str) -> Option<String> {
-            with_state(|st| {
-                Some(
-                    st.pane_commands
-                        .get(pane_id)
-                        .cloned()
-                        .unwrap_or_else(|| st.default_command.clone()),
-                )
-            })
-        }
-
         pub fn display_value(target: &str, fmt: &str) -> Option<String> {
             with_state(|st| {
                 st.display_values
@@ -1455,7 +1414,7 @@ mod tests {
                 }
                 let mut out = Vec::new();
                 for (pane_id, opts) in &st.pane_options {
-                    if opts.get("hive-team").map_or(false, |t| !t.is_empty()) {
+                    if opts.get("hive-team").is_some_and(|t| !t.is_empty()) {
                         out.push(PaneInfo {
                             pane_id: pane_id.clone(),
                             title: String::new(),
@@ -1495,15 +1454,15 @@ mod tests {
                 Some(f) => f(&owned, check),
                 None => Ok(Run {
                     returncode: 0,
-                    stdout: String::new(),
+                    stdout: super::fake_run_stdout(st, &owned),
                     stderr: String::new(),
                 }),
             })
         }
     }
 
-    /// Fake layout runs the REAL `layout::pick` over fake tmux state — the
-    /// same shape as the pytest suite, which patches only `hive.layout.tmux`.
+    /// Fake layout runs the REAL `layout::pick` over fake tmux state, so
+    /// only the tmux calls are faked, not the preset choice.
     pub mod fake_layout {
         use super::with_state;
 
@@ -1544,128 +1503,81 @@ mod tests {
         }
     }
 
-    pub mod fake_agent {
-        use super::super::{new_agent, SpawnCall};
-        use super::with_state;
-        use crate::agent::Agent;
-
-        pub fn detect_current_session_id(_cwd: &str, _pane_id: &str) -> Option<String> {
-            with_state(|st| st.detect_session_id.clone())
-        }
-
-        pub fn spawn(call: SpawnCall) -> anyhow::Result<Agent> {
-            with_state(|st| {
-                st.spawn_calls.push(call.clone());
-                let n = st.spawn_calls.len();
-                let agent = match &st.spawn_fn {
-                    Some(f) => f(n, &call),
-                    None => new_agent(
-                        &call.name,
-                        &call.team_name,
-                        "%9",
-                        &call.cli,
-                        &call.cwd,
-                        &call.model,
-                        None,
-                    ),
-                };
-                Ok(agent)
-            })
-        }
-
-        pub fn kill(agent: &Agent) {
-            with_state(|st| st.killed.push(agent.name.clone()));
-        }
-    }
-
-    pub mod fake_hived {
-        use super::with_state;
-        use serde_json::{Map, Value};
-
-        pub fn request_team_runtime(
-            workspace: &str,
-            team_name: &str,
-        ) -> Option<Map<String, Value>> {
-            with_state(|st| {
-                st.team_runtime
-                    .as_ref()
-                    .and_then(|f| f(workspace, team_name))
-            })
-        }
-    }
-
-    pub mod fake_agent_cli {
-        use super::fake_tmux;
-        use crate::tmux::PaneInfo;
-
-        fn normalize(command: &str) -> String {
-            let value = command.trim().to_lowercase();
-            let value = value
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('-');
-            match value {
-                "claude-code" | "claudecode" | "claude.exe" => "claude".to_string(),
-                other => other.to_string(),
-            }
-        }
-
-        fn is_agent_command(command: &str) -> bool {
-            matches!(normalize(command).as_str(), "claude" | "codex" | "grok")
-        }
-
-        pub fn member_role_for_pane(pane_id: &str) -> String {
-            let command = fake_tmux::get_pane_current_command(pane_id).unwrap_or_default();
-            if is_agent_command(&command) {
-                "agent".to_string()
-            } else {
-                "terminal".to_string()
-            }
-        }
-
-        pub fn resolve_member_cli(pane: &PaneInfo) -> String {
-            let resolved = if !pane.cli.is_empty() {
-                pane.cli.clone()
-            } else {
-                normalize(&pane.command)
-            };
-            if matches!(resolved.as_str(), "claude" | "codex" | "grok") {
-                resolved
-            } else {
-                "claude".to_string()
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Test helpers
     // ------------------------------------------------------------------
 
-    /// Mirror of tests/conftest.py's `configure_hive_home` fixture.
-    fn configure_hive_home(
-        tmux_inside: bool,
-        current_pane: &str,
-    ) -> (tempfile::TempDir, MutexGuard<'static, ()>) {
-        let guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    /// Isolate every engine home under a temp dir, reset the fake tmux
+    /// state, install an empty seam hook, and make every `crate::tmux::_run`
+    /// the seams' real calls reach fail as it would with no server — holding
+    /// the env lock for the test's lifetime.
+    fn configure_hive_home(tmux_inside: bool, current_pane: &str) -> (tempfile::TempDir, EnvGuard) {
+        let mut env = EnvGuard::cleared(&[
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CODEX_THREAD_ID",
+            "GROK_SESSION_ID",
+        ]);
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
-        std::env::set_var("CLAUDE_HOME", tmp.path().join(".claude"));
-        std::env::set_var("GROK_HOME", tmp.path().join(".grok"));
-        std::env::set_var("XDG_CACHE_HOME", tmp.path().join(".cache"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("claude-env-isolation"));
-        std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-        std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("GROK_SESSION_ID");
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
+        env.set("CODEX_HOME", tmp.path().join(".codex"));
+        env.set("CLAUDE_HOME", tmp.path().join(".claude"));
+        env.set("GROK_HOME", tmp.path().join(".grok"));
+        env.set("XDG_CACHE_HOME", tmp.path().join(".cache"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude-env-isolation"));
         with_state(|st| {
             *st = FakeState::default();
             st.tmux_inside = tmux_inside;
             st.current_pane = current_pane.to_string();
         });
-        (tmp, guard)
+        HOOK.with(|cell| *cell.borrow_mut() = Some(Hook::default()));
+        real_tmux_pane_commands(&[]);
+        (tmp, env)
+    }
+
+    fn no_tmux_server() -> TmuxError {
+        TmuxError::Os("no tmux server in unit tests".to_string())
+    }
+
+    /// Answer the real tmux facade's `display-message -t <pane> -p
+    /// #{pane_current_command}` from *commands* (the read
+    /// `agent_cli::member_role_for_pane` probes first); every other real
+    /// tmux call fails as it would with no server.
+    fn real_tmux_pane_commands(commands: &[(&str, &str)]) {
+        let commands: HashMap<String, String> = commands
+            .iter()
+            .map(|(pane, command)| (pane.to_string(), command.to_string()))
+            .collect();
+        crate::tmux::_set_run_override(move |args, _check, _timeout| {
+            let pane = args
+                .iter()
+                .position(|a| a == "-t")
+                .and_then(|i| args.get(i + 1));
+            let command = match (args.first().map(String::as_str), args.last()) {
+                (Some("display-message"), Some(fmt)) if fmt == "#{pane_current_command}" => {
+                    pane.and_then(|p| commands.get(p))
+                }
+                _ => None,
+            };
+            match command {
+                Some(command) => Ok(Run {
+                    returncode: 0,
+                    stdout: format!("{command}\n"),
+                    stderr: String::new(),
+                }),
+                None => Err(no_tmux_server()),
+            }
+        });
+    }
+
+    fn set_hive_window(target: &str, team: &str, workspace: &str, desc: &str, created: &str) {
+        for (key, value) in [
+            ("@hive-team", team),
+            ("@hive-workspace", workspace),
+            ("@hive-desc", desc),
+            ("@hive-created", created),
+        ] {
+            fake_tmux::set_window_option(target, key, value);
+        }
     }
 
     fn pane_info(pane_id: &str, command: &str, role: &str, agent: &str, team: &str) -> PaneInfo {
@@ -1706,9 +1618,10 @@ mod tests {
     #[test]
     fn test_team_create_inside_tmux_tags_lead_and_detects_session() {
         let (_tmp, _guard) = configure_hive_home(true, "%7");
-        with_state(|st| st.detect_session_id = Some("sess-123".to_string()));
+        hook(|h| h.session_id = Some("sess-123".to_string()));
+        real_tmux_pane_commands(&[("%7", "claude")]);
 
-        let team = Team::create("team-a", "demo", "", "/tmp/ws").unwrap();
+        let team = Team::create("team-a", "demo", "/tmp/ws").unwrap();
 
         assert_eq!(team.lead_pane_id, "%7");
         assert_eq!(team.lead_session_id.as_deref(), Some("sess-123"));
@@ -1745,7 +1658,7 @@ mod tests {
     fn test_team_create_rejects_outside_tmux() {
         let (_tmp, _guard) = configure_hive_home(false, "%0");
 
-        let err = Team::create("team-a", "", "", "").unwrap_err();
+        let err = Team::create("team-a", "", "").unwrap_err();
         assert!(err.to_string().contains("requires tmux"), "{err}");
     }
 
@@ -1756,7 +1669,7 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
 
         for name in ["ccd", "ccd.desk", "a.b"] {
-            let err = Team::create(name, "", "", "").unwrap_err();
+            let err = Team::create(name, "", "").unwrap_err();
             assert!(err.to_string().contains("invalid"), "{name}: {err}");
         }
     }
@@ -1778,7 +1691,7 @@ mod tests {
             "claude", "team-a", "%1", "claude", "/tmp", "m1", None,
         ));
 
-        team.save();
+        team._write_window_options();
         assert_eq!(
             with_state(|st| st.borders.clone()),
             vec!["dev:0".to_string()]
@@ -1801,17 +1714,8 @@ mod tests {
     #[test]
     fn test_team_load_restores_agent_cwd_from_pane_current_path() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
+        set_hive_window("dev:0", "team-a", "/tmp/ws", "", "0");
         with_state(|st| {
-            st.find_override = Some(Box::new(|_name, _prefer| {
-                (
-                    "dev:0".to_string(),
-                    TeamWindowData {
-                        workspace: "/tmp/ws".to_string(),
-                        created: "0".to_string(),
-                        ..Default::default()
-                    },
-                )
-            }));
             st.list_panes_full_fn = Some(Box::new(|_target| {
                 let mut pane = pane_info("%1", "claude", "agent", "claude", "team-a");
                 pane.cli = "claude".to_string();
@@ -1850,8 +1754,8 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         let agent = new_agent("claude", "team-a", "%9", "claude", "", "", None);
         let spawn_result = agent.clone();
-        with_state(move |st| {
-            st.spawn_fn = Some(Box::new(move |_n, _call| spawn_result.clone()));
+        hook(move |h| h.spawn_fn = Some(Box::new(move |_n, _call| spawn_result.clone())));
+        with_state(|st| {
             st.current_window_target = Some("dev:1".to_string());
             st.window_size = (200, 50);
             st.layout_panes = vec!["%1".to_string(), "%9".to_string()];
@@ -1863,15 +1767,28 @@ mod tests {
             ..Default::default()
         };
         let result = team
-            .spawn("claude", "", "start now", "", "demo-review", None, "claude")
+            .spawn(
+                "claude",
+                "",
+                "start now",
+                "",
+                "demo-review",
+                Some(&HashMap::from([("FOO".to_string(), "bar".to_string())])),
+                "claude",
+            )
             .unwrap();
 
         assert_eq!(result.pane_id, agent.pane_id);
         assert_eq!(result.name, agent.name);
-        let calls = with_state(|st| st.spawn_calls.clone());
+        let calls = hook(|h| h.spawn_calls.clone()).unwrap();
         assert_eq!(calls[0].target_pane, "%0");
         assert_eq!(calls[0].skill, "demo-review");
         assert_eq!(calls[0].prompt, "start now");
+        assert_eq!(calls[0].split_size.as_deref(), Some("50%"));
+        assert_eq!(
+            calls[0].extra_env.as_ref().and_then(|env| env.get("FOO")),
+            Some(&"bar".to_string())
+        );
         let tagged = with_state(|st| st.tagged.clone());
         assert_eq!(
             tagged,
@@ -1893,8 +1810,8 @@ mod tests {
     fn test_team_spawn_portrait_window_applies_even_vertical() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         let agent = new_agent("claude", "team-a", "%9", "claude", "", "", None);
-        with_state(move |st| {
-            st.spawn_fn = Some(Box::new(move |_n, _call| agent.clone()));
+        hook(move |h| h.spawn_fn = Some(Box::new(move |_n, _call| agent.clone())));
+        with_state(|st| {
             st.current_window_target = Some("dev:1".to_string());
             st.window_size = (191, 171);
             st.layout_panes = vec!["%0".to_string(), "%9".to_string()];
@@ -1920,15 +1837,15 @@ mod tests {
             .iter()
             .any(|call| call.0 == "opt" && call.2 == "main-pane-width"));
         // Pre-spawn split should also follow portrait orientation (vertical = False).
-        let calls = with_state(|st| st.spawn_calls.clone());
+        let calls = hook(|h| h.spawn_calls.clone()).unwrap();
         assert!(!calls[0].split_horizontal);
     }
 
     #[test]
     fn test_team_spawn_second_agent_splits_from_last_agent() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
-        with_state(|st| {
-            st.spawn_fn = Some(Box::new(|n, call| {
+        hook(|h| {
+            h.spawn_fn = Some(Box::new(|n, call| {
                 super::new_agent(
                     &call.name,
                     "team-a",
@@ -1938,9 +1855,9 @@ mod tests {
                     "",
                     None,
                 )
-            }));
-            st.current_window_target = None;
+            }))
         });
+        with_state(|st| st.current_window_target = None);
 
         let mut team = Team {
             name: "team-a".to_string(),
@@ -1952,7 +1869,7 @@ mod tests {
         team.spawn("gpt", "", "", "", "hive", None, "claude")
             .unwrap();
 
-        let calls = with_state(|st| st.spawn_calls.clone());
+        let calls = hook(|h| h.spawn_calls.clone()).unwrap();
         assert_eq!(calls[0].target_pane, "%9");
         assert!(!calls[0].split_horizontal);
         assert_eq!(calls[0].skill, "hive");
@@ -1977,11 +1894,6 @@ mod tests {
     #[test]
     fn test_team_status_stays_local_only() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
-        with_state(|st| {
-            st.default_command = "zsh".to_string();
-            st.pane_commands
-                .insert("%1".to_string(), "codex".to_string());
-        });
 
         let mut team = Team {
             name: "team-a".to_string(),
@@ -2021,7 +1933,7 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         with_state(|st| {
             st.run_fn = Some(run_stdout(
-                "dev:2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\tmy-team\t/tmp/ws\tdesc\t0\n",
+                "dev:2\t@2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\t@3\tmy-team\t/tmp/ws\tdesc\t0\n",
             ));
             st.pane_window_targets
                 .insert("%99".to_string(), "dev:3".to_string());
@@ -2042,7 +1954,7 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         with_state(|st| {
             st.run_fn = Some(run_stdout(
-                "dev:2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\tmy-team\t/tmp/ws\tdesc\t0\n",
+                "dev:2\t@2\tmy-team\t/tmp/ws\tdesc\t0\ndev:3\t@3\tmy-team\t/tmp/ws\tdesc\t0\n",
             ));
             st.list_panes_full_or_none_fn = Some(Box::new(|target| {
                 if target == "dev:3" {
@@ -2154,7 +2066,7 @@ mod tests {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         with_state(|st| {
             st.run_fn = Some(run_stdout(
-                "dev:2\t0-2\t/tmp/ws2\tdesc\t0\ndev:3\t0-2\t/tmp/ws3\tdesc\t0\n",
+                "dev:2\t@2\t0-2\t/tmp/ws2\tdesc\t0\ndev:3\t@3\t0-2\t/tmp/ws3\tdesc\t0\n",
             ));
             st.pane_window_targets
                 .insert("%40".to_string(), "dev:3".to_string());
@@ -2243,11 +2155,6 @@ mod tests {
             crate::registry::record_team("ghostteam", "/tmp/ws-g", "111.0", &members, "").unwrap(),
             "written"
         );
-        with_state(|st| {
-            st.find_override = Some(Box::new(|_name, _prefer| {
-                (String::new(), TeamWindowData::default())
-            }));
-        });
 
         let loaded = Team::load("ghostteam", "").unwrap();
 
@@ -2264,11 +2171,6 @@ mod tests {
     #[test]
     fn test_team_load_unknown_everywhere_still_raises() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
-        with_state(|st| {
-            st.find_override = Some(Box::new(|_name, _prefer| {
-                (String::new(), TeamWindowData::default())
-            }));
-        });
 
         let err = Team::load("nosuchteam", "").unwrap_err();
         assert!(
@@ -2296,17 +2198,8 @@ mod tests {
             crate::registry::record_team("team-u", "/tmp/ws-u", "5.0", &members, "").unwrap(),
             "written"
         );
+        set_hive_window("dev:0", "team-u", "", "", "5.0");
         with_state(|st| {
-            st.find_override = Some(Box::new(|_name, _prefer| {
-                (
-                    "dev:0".to_string(),
-                    TeamWindowData {
-                        window_id: "@0".to_string(),
-                        created: "5.0".to_string(),
-                        ..Default::default()
-                    },
-                )
-            }));
             st.list_panes_full_fn = Some(Box::new(|_target| {
                 let mut pane = pane_info("%1", "codex", "agent", "alive", "team-u");
                 pane.cli = "codex".to_string();
@@ -2364,7 +2257,7 @@ mod tests {
             "written"
         );
 
-        let err = Team::create_for_window("team-h", "dev:0", "", LEAD_AGENT_NAME, "", "", "", true)
+        let err = Team::create_for_window("team-h", "dev:0", "", LEAD_AGENT_NAME, "", "", true)
             .unwrap_err();
         assert!(
             err.to_string().contains("already exists in the registry"),
@@ -2375,14 +2268,7 @@ mod tests {
     #[test]
     fn test_team_status_payload_shape() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
-        with_state(|st| {
-            st.default_command = String::new();
-            st.pane_commands
-                .insert("%0".to_string(), "python3.12".to_string());
-            st.pane_commands
-                .insert("%1".to_string(), "codex".to_string());
-            st.pane_commands.insert("%2".to_string(), "zsh".to_string());
-        });
+        real_tmux_pane_commands(&[("%0", "python3.12")]);
         let mut team = Team {
             name: "team-a".to_string(),
             workspace: "/tmp/ws".to_string(),
@@ -2433,9 +2319,7 @@ mod tests {
     }
 
     fn stub_team_runtime(response: Value) {
-        with_state(|st| {
-            st.team_runtime = Some(Box::new(move |_, _| response.as_object().cloned()))
-        });
+        hook(|h| h.team_runtime = Some(Box::new(move |_, _| response.as_object().cloned())));
     }
 
     #[test]
@@ -2478,8 +2362,39 @@ mod tests {
     #[test]
     fn test_member_alive_no_hived_uses_pane_liveness() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
+        // No hived answers: pin the seam instead of probing a real socket path.
+        hook(|h| h.team_runtime = Some(Box::new(|_, _| None)));
 
         assert!(team_with_pane_member("%1").member_alive("worker"));
         assert!(!team_with_pane_member("").member_alive("worker"));
+    }
+
+    /// The real `resolve_member_cli` ladder: the pane tag answers first, then
+    /// the pane command (normalized), then the live profile probe, and
+    /// "claude" when the probe finds nothing. The probe runs only for the
+    /// last two rungs.
+    #[test]
+    fn test_resolve_member_cli_ladder_tag_then_command_then_probe_then_claude() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        let probed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&probed);
+        hook(|h| {
+            h.profile_for_pane = Some(Box::new(move |pane_id| {
+                seen.borrow_mut().push(pane_id.to_string());
+                (pane_id == "%3").then(|| "grok".to_string())
+            }))
+        });
+
+        let mut tagged = pane_info("%1", "node", "agent", "a", "team-a");
+        tagged.cli = "codex".to_string();
+        let by_command = pane_info("%2", "/usr/local/bin/codex", "agent", "b", "team-a");
+        let by_probe = pane_info("%3", "node", "agent", "c", "team-a");
+        let unknown = pane_info("%4", "zsh", "agent", "d", "team-a");
+
+        assert_eq!(resolve_member_cli(&tagged), "codex");
+        assert_eq!(resolve_member_cli(&by_command), "codex");
+        assert_eq!(resolve_member_cli(&by_probe), "grok");
+        assert_eq!(resolve_member_cli(&unknown), "claude");
+        assert_eq!(*probed.borrow(), vec!["%3".to_string(), "%4".to_string()]);
     }
 }

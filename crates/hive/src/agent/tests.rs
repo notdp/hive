@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
+use crate::testenv::EnvGuard;
 
 use super::testhook::{self, fake_engine, Hook};
 use super::*;
@@ -25,23 +26,16 @@ fn spawn_opts(f: impl FnOnce(&mut SpawnOptions)) -> SpawnOptions {
 
 fn member(name: &str, team: &str, pane: &str, cli: &str) -> Agent {
     Agent {
-        name: name.to_string(),
-        team_name: team.to_string(),
-        pane_id: pane.to_string(),
-        model: String::new(),
-        prompt: String::new(),
         cwd: "/tmp".to_string(),
-        session_id: None,
-        spawned_at: 0.0,
-        cli: cli.to_string(),
+        ..testhook::fake_agent(name, team, pane, cli)
     }
 }
 
 fn headless(cli: &str, session_id: Option<&str>) -> Agent {
-    let mut agent = member("rex", "honey", "", cli);
-    agent.cwd = "/repo".to_string();
-    agent.session_id = session_id.map(|s| s.to_string());
-    agent
+    Agent {
+        session_id: session_id.map(|s| s.to_string()),
+        ..testhook::fake_agent("rex", "honey", "", cli)
+    }
 }
 
 /// Python `_mock_claude_bg_up`.
@@ -127,16 +121,67 @@ fn test_spawn_outside_tmux_with_target_pane_proceeds() {
     let _guard = setup();
     hook(|h| h.is_inside_tmux = false);
     mock_claude_bg_up("abcd1234", "sess-registry");
-    Agent::spawn(
+    let agent = Agent::spawn(
         "w1",
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
         }),
     )
     .unwrap();
+    // the target pane was tagged as the member's and given the launch
+    assert_eq!(agent.pane_id, "%0");
+    assert_eq!(
+        hook(|h| h.tags.clone()),
+        vec![(
+            "%0".to_string(),
+            "agent".to_string(),
+            "w1".to_string(),
+            "t".to_string()
+        )]
+    );
+    assert_eq!(
+        launch_of(&calls()[0])
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        vec!["hive", "claude", "--resume", "'abcd1234'"]
+    );
+}
+
+#[test]
+fn test_spawn_split_window_failure_touches_nothing_downstream() {
+    // The split is the first side effect: when tmux refuses it there is no
+    // pane to tag, title, kill or launch into, and no engine gets minted.
+    for cli_name in ["claude", "codex", "grok"] {
+        let _guard = setup();
+        mock_daemon_up();
+        mock_grok_leader_up();
+        hook(|h| h.split_window_result = Some(Err("no space for new pane".into())));
+        let err = err_of(Agent::spawn(
+            "w1",
+            "t",
+            "%0",
+            spawn_opts(|o| {
+                o.skill = "none".into();
+                o.cli = cli_name.into();
+            }),
+        ));
+        assert!(err.contains("no space for new pane"), "{cli_name}: {err}");
+        hook(|h| {
+            assert!(h.tags.is_empty(), "{cli_name}");
+            assert!(h.titles.is_empty(), "{cli_name}");
+            assert!(h.killed.is_empty(), "{cli_name}");
+            assert!(h.cleared_tags.is_empty(), "{cli_name}");
+            assert!(h.calls.is_empty(), "{cli_name}");
+            assert!(h.spawns.is_empty(), "{cli_name}");
+            assert!(h.records.is_empty(), "{cli_name}");
+            assert!(h.codex_started.is_empty(), "{cli_name}");
+            assert!(h.codex_records.is_empty(), "{cli_name}");
+            assert!(h.grok_started.is_empty(), "{cli_name}");
+            assert!(h.grok_sessions.is_empty(), "{cli_name}");
+        });
+    }
 }
 
 #[test]
@@ -148,7 +193,6 @@ fn test_spawn_loads_specified_skill() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "demo-review".into();
         }),
     )
@@ -167,7 +211,6 @@ fn test_spawn_skips_skill_when_none() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
         }),
     )
@@ -187,7 +230,6 @@ fn test_spawn_passes_extra_env() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
             o.extra_env = Some(vec![("CR_WORKSPACE".into(), "/tmp/cr-test".into())]);
         }),
@@ -219,7 +261,6 @@ fn test_spawn_without_extra_env_exports_nothing_in_the_pane() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
         }),
     )
@@ -237,7 +278,6 @@ fn test_spawn_hive_loads_skill_and_sends_prompt() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "hive".into();
             o.prompt = "Please check your inbox.".into();
         }),
@@ -260,7 +300,6 @@ fn test_spawn_codex_hive_loads_skill_and_sends_prompt() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "hive".into();
             o.prompt = "Please check your inbox.".into();
             o.cli = "codex".into();
@@ -288,7 +327,6 @@ fn test_spawn_claude_mints_job_records_pane_and_attaches() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
         }),
     )
@@ -321,13 +359,35 @@ fn test_spawn_claude_mint_failure_kills_pane_and_fails() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
         }),
     ));
     assert!(err.contains("job identity"), "{err}");
     assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
     assert!(calls().is_empty()); // no startup command was ever sent
+}
+
+#[test]
+fn test_spawn_claude_mint_failure_in_place_clears_tags_instead_of_killing() {
+    // split_window=false: the caller's own pane survives the failed mint,
+    // only the tags/title just written come off.
+    let _guard = setup();
+    hook(|h| h.spawn_job_result = None);
+    let err = err_of(Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.cli = "claude".into();
+            o.split_window = false;
+        }),
+    ));
+    assert!(err.contains("job identity"), "{err}");
+    assert!(hook(|h| h.killed.clone()).is_empty());
+    assert_eq!(hook(|h| h.cleared_tags.clone()), vec!["%0"]);
+    assert!(hook(|h| h.titles.clone()).contains(&("%0".to_string(), "".to_string())));
+    assert!(hook(|h| h.records.clone()).is_empty());
+    assert!(calls().is_empty());
 }
 
 #[test]
@@ -340,7 +400,6 @@ fn test_spawn_claude_engine_never_registers_stops_job_and_fails() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
         }),
     ));
@@ -363,7 +422,6 @@ fn test_spawn_rejects_prompt_starting_with_dash() {
             "t",
             "%0",
             spawn_opts(|o| {
-                o.is_first = true;
                 o.cli = cli_name.into();
                 o.skill = "none".into();
                 o.prompt = "--edge prompt".into();
@@ -388,7 +446,6 @@ fn test_spawn_pane_command_runs_hive_launcher_then_resume_hint() {
             "%0",
             spawn_opts(|o| {
                 o.cwd = "/work/dir".into();
-                o.is_first = true;
                 o.cli = cli_name.into();
                 o.skill = "none".into();
             }),
@@ -417,7 +474,6 @@ fn test_spawn_claude_resume_wakes_the_job_and_rebinds_the_pane() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
             o.session_id = Some("cafe0123".into());
             o.session_mode = "resume".into();
@@ -447,7 +503,6 @@ fn test_spawn_claude_resume_of_a_gone_job_fails_and_gives_the_pane_back() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
             o.session_id = Some("cafe0123".into());
             o.session_mode = "resume".into();
@@ -466,7 +521,6 @@ fn test_spawn_tags_pane_before_waiting_for_ready() {
         "t",
         "%9",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "claude".into();
         }),
@@ -497,7 +551,6 @@ fn test_spawn_claude_pins_model_at_bg_spawn_not_pane_flag() {
         "%0",
         spawn_opts(|o| {
             o.model = "opus".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "claude".into();
         }),
@@ -521,7 +574,6 @@ fn test_spawn_codex_pins_model_at_mint_not_flag() {
         "%0",
         spawn_opts(|o| {
             o.model = "gpt-5.2".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -564,7 +616,6 @@ fn test_spawn_claude_fork_mints_a_new_job_from_the_session() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "claude".into();
             o.session_id = Some("sess-abc".into());
@@ -587,7 +638,6 @@ fn test_spawn_codex_resume_uses_fork_subcommand() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
             o.session_id = Some("sess-abc".into());
@@ -614,7 +664,6 @@ fn test_spawn_codex_new_session_resumes_minted_thread() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -653,7 +702,6 @@ fn test_spawn_codex_mint_failure_kills_pane_and_fails() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -675,7 +723,6 @@ fn test_spawn_codex_preconnects_2nd_client_with_workspace() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
             o.workspace = "/tmp/ws".into();
@@ -695,7 +742,6 @@ fn test_spawn_codex_skips_preconnect_without_workspace() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -716,7 +762,6 @@ fn test_spawn_codex_new_session_refuses_when_daemon_fails() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -738,7 +783,6 @@ fn test_spawn_codex_daemon_fail_in_place_clears_tags_instead_of_killing() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
             o.split_window = false;
@@ -748,6 +792,83 @@ fn test_spawn_codex_daemon_fail_in_place_clears_tags_instead_of_killing() {
     assert!(hook(|h| h.killed.clone()).is_empty());
     assert_eq!(hook(|h| h.cleared_tags.clone()), vec!["%0"]);
     assert!(calls().is_empty());
+}
+
+#[test]
+fn test_spawn_codex_trust_failure_gives_the_pane_back() {
+    // ensure_dir_trusted is part of the daemon bring-up: when the cwd
+    // cannot be trusted no thread is minted, and the pane goes back the
+    // same way a daemon failure hands it back.
+    let trust_fails = |h: &mut Hook| {
+        h.codex_spawn_daemon = true;
+        h.ensure_dir_trusted_error = Some("trust rpc refused".into());
+    };
+    let no_thread_no_launch = |h: &mut Hook| {
+        assert_eq!(h.codex_trusted, vec!["/work/dir"]); // the trust was attempted
+        assert!(h.codex_minted.is_empty()); // start_member_thread never ran
+        assert!(h.codex_records.is_empty());
+        assert!(h.connects_codex.is_empty());
+        assert!(h.calls.is_empty());
+    };
+
+    // new thread, split pane: the pane is killed
+    let _guard = setup();
+    hook(trust_fails);
+    let err = err_of(Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.cwd = "/work/dir".into();
+            o.skill = "none".into();
+            o.cli = "codex".into();
+            o.workspace = "/tmp/ws".into();
+        }),
+    ));
+    assert!(err.contains("trust rpc refused"), "{err}");
+    assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
+    assert!(hook(|h| h.cleared_tags.clone()).is_empty());
+    hook(no_thread_no_launch);
+
+    // new thread, in place: tags/title come off, the pane survives
+    let _guard = setup();
+    hook(trust_fails);
+    let err = err_of(Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.cwd = "/work/dir".into();
+            o.skill = "none".into();
+            o.cli = "codex".into();
+            o.split_window = false;
+        }),
+    ));
+    assert!(err.contains("trust rpc refused"), "{err}");
+    assert!(hook(|h| h.killed.clone()).is_empty());
+    assert_eq!(hook(|h| h.cleared_tags.clone()), vec!["%0"]);
+    assert!(hook(|h| h.titles.clone()).contains(&("%0".to_string(), "".to_string())));
+    hook(no_thread_no_launch);
+
+    // resume: the recorded thread is not rebound either
+    let _guard = setup();
+    hook(trust_fails);
+    let err = err_of(Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.cwd = "/work/dir".into();
+            o.skill = "none".into();
+            o.cli = "codex".into();
+            o.session_id = Some("roll-1".into());
+            o.session_mode = "resume".into();
+        }),
+    ));
+    assert!(err.contains("trust rpc refused"), "{err}");
+    assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
+    assert!(hook(|h| h.cleared_tags.clone()).is_empty());
+    hook(no_thread_no_launch);
 }
 
 #[test]
@@ -762,7 +883,6 @@ fn test_spawn_codex_fork_does_not_start_daemon() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
             o.session_id = Some("sess-abc".into());
@@ -786,7 +906,6 @@ fn test_spawn_grok_launches_with_minted_session_id_and_model_flag() {
         spawn_opts(|o| {
             o.model = "grok-4.6".into();
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "grok".into();
         }),
@@ -1297,7 +1416,6 @@ fn test_spawn_claude_skips_session_detection() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "claude".into();
         }),
@@ -1317,10 +1435,10 @@ fn test_detect_current_session_id_delegates_to_resolve() {
             .insert("%11".to_string(), "map-sess-1".to_string());
     });
     assert_eq!(
-        detect_current_session_id("/tmp/test", "", "%11"),
+        detect_current_session_id("%11"),
         Some("map-sess-1".to_string())
     );
-    assert_eq!(detect_current_session_id("/tmp/test", "", "%99"), None);
+    assert_eq!(detect_current_session_id("%99"), None);
 }
 
 // --- session_mode: fork vs resume (VAL B5-B7) ----------------------------
@@ -1568,7 +1686,8 @@ fn test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner() {
 #[test]
 fn test_wait_grok_session_ready_sees_the_session_dir_and_is_nonfatal() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("GROK_HOME", tmp.path());
+    let mut env = EnvGuard::new();
+    env.set("GROK_HOME", tmp.path());
     {
         let _guard = setup();
         hook(|h| h.wait_grok_ready = None); // run the real wait
@@ -1701,7 +1820,6 @@ fn test_spawn_codex_daemon_native_launch_keeps_shell() {
         "%0",
         spawn_opts(|o| {
             o.cwd = "/work/dir".into();
-            o.is_first = true;
             o.skill = "none".into();
             o.cli = "codex".into();
         }),
@@ -1748,7 +1866,6 @@ fn test_spawn_skill_ref_is_bare_for_grok_and_qualified_for_claude() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "grok".into();
             o.skill = "hive:hive".into();
         }),
@@ -1764,7 +1881,6 @@ fn test_spawn_skill_ref_is_bare_for_grok_and_qualified_for_claude() {
         "t",
         "%0",
         spawn_opts(|o| {
-            o.is_first = true;
             o.cli = "claude".into();
             o.skill = "hive:hive".into();
         }),

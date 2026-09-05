@@ -11,10 +11,10 @@
 //! `~/.cache/hive/notify.jsonl` (or `$XDG_CACHE_HOME/hive/...`) when no
 //! workspace can be resolved.
 //!
-//! Hived callers already know their workspace and pass it explicitly via
-//! `emit_for_window(..., workspace)`; UI helpers without the hint resolve
-//! `@hive-workspace` on the target window. `workspace_for_window` failures
-//! fall back to the global log silently.
+//! Hived callers already know their workspace and call `emit(workspace, ..)`
+//! directly; notify_ui helpers go through `emit_for_window`, which resolves
+//! `@hive-workspace` on the target window only when the hint is empty.
+//! `workspace_for_window` failures fall back to the global log silently.
 //!
 //! Multiple processes (hived loop, select-hook cleanup) write to the same log
 //! via a single append write on an `O_APPEND` fd.
@@ -86,8 +86,7 @@ pub fn emit(workspace: &str, event: &str, fields: &[(&str, Value)]) {
         }
         record.push((key.to_string(), value.clone()));
     }
-    // Insertion-order compact JSON, matching Python's
-    // json.dumps(..., ensure_ascii=False, separators=(",", ":")).
+    // Insertion-order compact JSON: no whitespace, non-ASCII kept raw.
     let mut payload = String::from("{");
     for (index, (key, value)) in record.iter().enumerate() {
         if index > 0 {
@@ -125,10 +124,9 @@ pub fn emit(workspace: &str, event: &str, fields: &[(&str, Value)]) {
 pub mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Test stand-in for `crate::tmux` (monkeypatch equivalent). Also used by
+    /// Test stand-in for `crate::tmux`. Also used by
     /// `notify_ui` tests to route debug logs into a temp workspace.
     pub mod fake_tmux {
         use std::cell::RefCell;
@@ -161,15 +159,6 @@ pub mod tests {
         }
     }
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn restore_env(key: &str, saved: Option<String>) {
-        match saved {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
-
     fn first_record(path: &std::path::Path) -> Value {
         let text = std::fs::read_to_string(path).unwrap();
         serde_json::from_str(text.lines().next().unwrap()).unwrap()
@@ -177,16 +166,14 @@ pub mod tests {
 
     #[test]
     fn test_emit_falls_back_to_global_log_when_no_workspace() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
         let tmp = TempDir::new().unwrap();
-        let saved = std::env::var("XDG_CACHE_HOME").ok();
-        std::env::set_var("XDG_CACHE_HOME", tmp.path());
+        env.set("XDG_CACHE_HOME", tmp.path());
 
         emit("", "global.event", &[("payload", json!("x"))]);
 
         let log = tmp.path().join("hive").join("notify.jsonl");
         let record = first_record(&log);
-        restore_env("XDG_CACHE_HOME", saved);
         assert_eq!(record["event"], "global.event");
         assert_eq!(record["component"], "notify");
         assert_eq!(record["workspace"], "<global>");
@@ -196,19 +183,14 @@ pub mod tests {
 
     #[test]
     fn test_emit_filters_heartbeat_events_in_normal_mode() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
         let tmp = TempDir::new().unwrap();
-        let saved_cache = std::env::var("XDG_CACHE_HOME").ok();
-        let saved_verbosity = std::env::var("HIVE_LOG_VERBOSITY").ok();
-        std::env::set_var("XDG_CACHE_HOME", tmp.path());
-        std::env::set_var("HIVE_LOG_VERBOSITY", "normal");
+        env.set("XDG_CACHE_HOME", tmp.path());
+        env.set("HIVE_LOG_VERBOSITY", "normal");
 
         emit("", "tick.summary", &[("team", json!("team-a"))]);
 
-        let exists = tmp.path().join("hive").join("notify.jsonl").exists();
-        restore_env("XDG_CACHE_HOME", saved_cache);
-        restore_env("HIVE_LOG_VERBOSITY", saved_verbosity);
-        assert!(!exists);
+        assert!(!tmp.path().join("hive").join("notify.jsonl").exists());
     }
 
     #[test]

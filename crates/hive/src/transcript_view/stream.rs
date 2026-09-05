@@ -90,10 +90,11 @@ fn _user_line(text: &str) -> String {
     )
 }
 
-/// Print [`DisplayBlock`]s as the legacy plain ANSI stream (piped mode).
+/// Print [`DisplayBlock`]s as the plain ANSI stream (piped mode).
 pub(super) struct StreamPrinter {
     pub(super) parser: TranscriptParser,
-    pub(super) state: &'static str, // idle | working
+    pub(super) working: bool,
+    /// When `working` last flipped, for the status line's elapsed counter.
     state_since: Instant,
 }
 
@@ -147,19 +148,15 @@ impl StreamPrinter {
     pub(super) fn new() -> Self {
         StreamPrinter {
             parser: TranscriptParser::new(),
-            state: "idle",
+            working: false,
             state_since: Instant::now(),
         }
     }
 
     fn sync_state(&mut self) {
-        let state = if self.parser.busy() {
-            "working"
-        } else {
-            "idle"
-        };
-        if state != self.state {
-            self.state = state;
+        let working = self.parser.busy();
+        if working != self.working {
+            self.working = working;
             self.state_since = Instant::now();
         }
     }
@@ -231,7 +228,7 @@ impl StreamPrinter {
     }
 
     pub(super) fn status_line(&self, tick: usize, session_id: &str) -> String {
-        let verb = if self.state == "working" {
+        let verb = if self.working {
             let frames: Vec<char> = _SPINNER.chars().collect();
             let frame = frames[tick % frames.len()];
             let elapsed = self.state_since.elapsed().as_secs();
@@ -273,7 +270,7 @@ pub fn follow(session_id: &str) -> i32 {
     follow_plain(session_id, &path)
 }
 
-/// Legacy plain ANSI stream, used when stdout is not a tty (pipes, logs).
+/// Plain ANSI stream, used when stdout is not a tty (pipes, logs).
 fn follow_plain(session_id: &str, path: &Path) -> i32 {
     let name = path
         .file_name()
@@ -283,7 +280,7 @@ fn follow_plain(session_id: &str, path: &Path) -> i32 {
     let mut printer = StreamPrinter::new();
     let mut tick: usize = 0;
     let mut idle_ticks: usize = 0;
-    let file = match File::open(&path) {
+    let file = match File::open(path) {
         Ok(f) => f,
         Err(err) => {
             eprintln!("{}: {}", path.display(), err);

@@ -17,8 +17,8 @@ use serde_json::{Map, Value};
 
 use super::*;
 
-/// The serve loop's view of its listener (fake servers in tests implement it
-/// the way the Python tests pass duck-typed `_Server` objects).
+/// The serve loop's view of its listener; tests implement it with a
+/// recording fake.
 pub trait HivedServerApi: Send + Sync {
     fn close(&self);
     fn accept_timeout(&self, timeout: f64) -> Option<UnixStream>;
@@ -130,7 +130,6 @@ pub fn _handle_request(
                 workspace,
                 &team_in_request(),
                 &map_get_str(request, "senderAgent"),
-                &map_get_str(request, "senderPane"),
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),

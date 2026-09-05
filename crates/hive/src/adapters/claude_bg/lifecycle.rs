@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::adapters::claude_sessions::_config_dir;
+use crate::adapters::claude_sessions::{_config_dir, truthy_str};
 
 use super::engine::{hooked_engine_for_job, EngineSession};
 use super::keyboard::_strip_ansi;
 use super::{
-    looks_like_job_id, sleep_s, str_of, _AGENTS_TIMEOUT, _ENTRY_POLL_INTERVAL, _SPAWN_TIMEOUT,
+    looks_like_job_id, sleep_s, _AGENTS_TIMEOUT, _ENTRY_POLL_INTERVAL, _SPAWN_TIMEOUT,
     _WAKE_ENTRY_TIMEOUT, _WAKE_TIMEOUT,
 };
 
@@ -117,13 +117,12 @@ pub(super) fn run_capture(
 /// All job rows from `claude agents --json --all`; None when the CLI call
 /// itself failed (distinct from an empty ledger).
 pub fn list_jobs(claude_bin: &str) -> Option<Vec<Map<String, Value>>> {
-    let argv: Vec<String> =
-        ["agents", "--json", "--all"]
-            .iter()
-            .fold(vec![claude_bin.to_string()], |mut acc, a| {
-                acc.push(a.to_string());
-                acc
-            });
+    let argv = vec![
+        claude_bin.to_string(),
+        "agents".to_string(),
+        "--json".to_string(),
+        "--all".to_string(),
+    ];
     let (code, stdout, _stderr) = run_capture(&argv, _AGENTS_TIMEOUT, None, &bg_env(None))?;
     if code != 0 {
         return None;
@@ -156,7 +155,8 @@ pub fn job_row(job_id: &str, claude_bin: &str) -> Option<Map<String, Value>> {
         return None;
     }
     let rows = hooked_list_jobs(claude_bin)?;
-    rows.into_iter().find(|row| str_of(row.get("id")) == job_id)
+    rows.into_iter()
+        .find(|row| truthy_str(row.get("id")) == job_id)
 }
 
 pub fn job_exists(job_id: &str, claude_bin: &str) -> bool {
@@ -272,12 +272,22 @@ fn hooked_wake_job(job_id: &str, claude_bin: &str) -> bool {
 
 /// Poll for the engine's registry entry (spawn readiness).
 pub fn wait_engine_entry(job_id: &str, timeout: f64) -> Option<EngineSession> {
+    wait_engine_entry_until(job_id, timeout, || false)
+}
+
+/// [`wait_engine_entry`] that also stops early once *give_up* says the entry
+/// can no longer come (the attach client behind it exited, say).
+pub(super) fn wait_engine_entry_until(
+    job_id: &str,
+    timeout: f64,
+    mut give_up: impl FnMut() -> bool,
+) -> Option<EngineSession> {
     let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
     loop {
         if let Some(engine) = hooked_engine_for_job(job_id) {
             return Some(engine);
         }
-        if Instant::now() >= deadline {
+        if give_up() || Instant::now() >= deadline {
             return None;
         }
         sleep_s(_ENTRY_POLL_INTERVAL);

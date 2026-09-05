@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::base::{
-    parse_iso_timestamp, safe_json_loads, safe_mtime, str_or_none, DateTime, Message, MessagePart,
-    SessionAdapter, SessionMeta,
+    parse_iso_timestamp, safe_json_loads, str_or_none, Message, MessagePart, SessionAdapter,
+    SessionMeta,
 };
 
 const _HISTORY_NAME: &str = "chat_history.jsonl";
@@ -49,8 +49,8 @@ impl SessionAdapter for GrokAdapter {
     // --- discovery ---
 
     fn resolve_current_session_id(&self, pane_id: &str) -> Option<String> {
-        // A grok session is owned by its per-pane leader daemon, which records
-        // the minted session id in the pane session file.
+        // hive mints the session id at spawn and records it in the `.session`
+        // file of the leader key this pane resolves to; read it back from there.
         crate::adapters::grok_leader::session_id_for_pane(pane_id)
     }
 
@@ -81,45 +81,6 @@ impl SessionAdapter for GrokAdapter {
         matches.into_iter().next()
     }
 
-    fn list_sessions(&self, cwd: Option<&str>, limit: Option<usize>) -> Vec<SessionMeta> {
-        let root = self._sessions_root();
-        if !root.is_dir() {
-            return Vec::new();
-        }
-        let mut files: Vec<(f64, PathBuf)> = Vec::new();
-        if let Ok(level1) = fs::read_dir(&root) {
-            for cwd_dir in level1.flatten() {
-                if let Ok(level2) = fs::read_dir(cwd_dir.path()) {
-                    for session_dir in level2.flatten() {
-                        let candidate = session_dir.path().join(_HISTORY_NAME);
-                        if candidate.exists() {
-                            files.push((safe_mtime(&candidate), candidate));
-                        }
-                    }
-                }
-            }
-        }
-        files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut out: Vec<SessionMeta> = Vec::new();
-        for (_, path) in files {
-            let Some(meta) = self.read_meta(&path) else {
-                continue;
-            };
-            if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-                if meta.cwd.as_deref() != Some(cwd) {
-                    continue;
-                }
-            }
-            out.push(meta);
-            if let Some(limit) = limit {
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
     // --- reading ---
 
     fn read_meta(&self, path: &Path) -> Option<SessionMeta> {
@@ -139,13 +100,6 @@ impl SessionAdapter for GrokAdapter {
             .ok()
             .and_then(|text| safe_json_loads(&text))
             .unwrap_or_default();
-        let mut started_at = parse_iso_timestamp(summary.get("timestamp"));
-        if started_at.is_none() {
-            let mtime = safe_mtime(path);
-            if mtime >= 0.0 {
-                started_at = Some(DateTime::from_timestamp_utc(mtime));
-            }
-        }
         let cwd_dir = parent
             .parent()
             .and_then(|p| p.file_name())
@@ -153,11 +107,7 @@ impl SessionAdapter for GrokAdapter {
             .unwrap_or("");
         Some(SessionMeta {
             session_id,
-            cli_name: self.name().to_string(),
             cwd: Some(_unquote(cwd_dir)),
-            title: str_or_none(summary.get("title")),
-            started_at,
-            jsonl_path: path.to_path_buf(),
             model: str_or_none(summary.get("model")).or_else(|| _first_assistant_model(path)),
         })
     }
@@ -184,10 +134,6 @@ impl SessionAdapter for GrokAdapter {
                 return Some(message);
             }
         }))
-    }
-
-    fn message_from_record(&self, payload: &Map<String, Value>) -> Option<Message> {
-        _message_from_record(payload)
     }
 }
 
@@ -373,11 +319,8 @@ fn _unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
-    use std::os::unix::ffi::OsStrExt;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const CWD: &str = "/Users/dp/work/hive";
     const OTHER_CWD: &str = "/tmp/other";
@@ -399,25 +342,14 @@ mod tests {
         _assistant("ok", "grok-4.6-build")
     }
 
-    fn _set_mtime(path: &Path, secs: i64) {
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        let tv = libc::timeval {
-            tv_sec: secs as libc::time_t,
-            tv_usec: 0,
-        };
-        let times = [tv, tv];
-        let rc = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
-        assert_eq!(rc, 0);
-    }
-
     // --- discovery -----------------------------------------------------------
 
     #[test]
     fn test_find_session_file_uses_quoted_cwd_directory() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        std::env::set_var("GROK_HOME", &home);
+        env.set("GROK_HOME", &home);
         let target = _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
         _write_session(&home, "sess-b", OTHER_CWD, &[_default_assistant()]);
 
@@ -429,10 +361,10 @@ mod tests {
 
     #[test]
     fn test_find_session_file_globs_when_cwd_is_unknown_or_wrong() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        std::env::set_var("GROK_HOME", &home);
+        env.set("GROK_HOME", &home);
         let target = _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
 
         assert_eq!(
@@ -447,50 +379,14 @@ mod tests {
 
     #[test]
     fn test_find_session_file_returns_none_when_missing() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        std::env::set_var("GROK_HOME", &home);
+        env.set("GROK_HOME", &home);
         _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
 
         assert_eq!(GrokAdapter.find_session_file("sess-missing", None), None);
         assert_eq!(GrokAdapter.find_session_file("", None), None);
-    }
-
-    #[test]
-    fn test_list_sessions_orders_by_mtime_and_filters_by_cwd() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join(".grok");
-        std::env::set_var("GROK_HOME", &home);
-        let old = _write_session(&home, "sess-old", CWD, &[_default_assistant()]);
-        let new = _write_session(&home, "sess-new", OTHER_CWD, &[_default_assistant()]);
-        _set_mtime(&old, 1_700_000_000);
-        _set_mtime(&new, 1_700_000_500);
-
-        let adapter = GrokAdapter;
-        let ids: Vec<String> = adapter
-            .list_sessions(None, None)
-            .into_iter()
-            .map(|m| m.session_id)
-            .collect();
-        assert_eq!(ids, ["sess-new", "sess-old"]);
-        let cwds: Vec<Option<String>> = adapter
-            .list_sessions(Some(CWD), None)
-            .into_iter()
-            .map(|m| m.cwd)
-            .collect();
-        assert_eq!(cwds, [Some(CWD.to_string())]);
-        let limited: Vec<String> = adapter
-            .list_sessions(None, Some(1))
-            .into_iter()
-            .map(|m| m.session_id)
-            .collect();
-        assert_eq!(limited, ["sess-new"]);
-        assert!(adapter
-            .list_sessions(None, None)
-            .iter()
-            .all(|m| m.cli_name == "grok"));
     }
 
     // --- meta ----------------------------------------------------------------
@@ -515,14 +411,10 @@ mod tests {
         assert_eq!(meta.session_id, "sess-a");
         assert_eq!(meta.cwd.as_deref(), Some(CWD));
         assert_eq!(meta.model.as_deref(), Some("grok-4.6"));
-        assert_eq!(meta.title.as_deref(), Some("nonce hunt"));
-        let started_at = meta.started_at.expect("started_at");
-        assert_eq!(started_at.year, 2026);
-        assert_eq!(meta.jsonl_path, history);
     }
 
     #[test]
-    fn test_read_meta_falls_back_to_mtime_and_first_assistant_model() {
+    fn test_read_meta_falls_back_to_first_assistant_model() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
         let history = _write_session(
@@ -535,13 +427,9 @@ mod tests {
                 _assistant("ok", "grok-4.6-build"),
             ],
         );
-        _set_mtime(&history, 1_700_000_000);
 
         let meta = GrokAdapter.read_meta(&history).expect("meta");
         assert_eq!(meta.model.as_deref(), Some("grok-4.6-build"));
-        assert!(meta.title.is_none());
-        let started_at = meta.started_at.expect("started_at");
-        assert_eq!(started_at.timestamp(), 1_700_000_000.0);
     }
 
     #[test]
@@ -600,7 +488,6 @@ mod tests {
 
     #[test]
     fn test_message_from_record_handles_list_assistant_content_and_unknowns() {
-        let adapter = GrokAdapter;
         let payload = match json!({
             "type": "assistant",
             "content": [{"type": "text", "text": "a"}, {"type": "image", "url": "x"}],
@@ -608,7 +495,7 @@ mod tests {
             Value::Object(map) => map,
             _ => unreachable!(),
         };
-        let listed = adapter.message_from_record(&payload).expect("message");
+        let listed = _message_from_record(&payload).expect("message");
         assert_eq!(listed.role, "assistant");
         let kinds: Vec<&str> = listed.parts.iter().map(|p| p.kind.as_str()).collect();
         assert_eq!(kinds, ["text", "unknown"]);
@@ -617,8 +504,8 @@ mod tests {
             Value::Object(map) => map,
             _ => unreachable!(),
         };
-        assert!(adapter.message_from_record(&rewind).is_none());
-        assert!(adapter.message_from_record(&Map::new()).is_none());
+        assert!(_message_from_record(&rewind).is_none());
+        assert!(_message_from_record(&Map::new()).is_none());
     }
 
     #[test]

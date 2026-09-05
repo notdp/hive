@@ -1,4 +1,5 @@
-//! Shared state projection helpers for Hive runtime and CLI surfaces.
+//! Send-message helpers shared by the hived and the CLI: body-length
+//! hints, the `<HIVE>` envelope, and the thread-event projection.
 
 use serde_json::{Map, Value};
 
@@ -166,9 +167,6 @@ pub fn format_hive_envelope(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // No Python unit tests exist for this module; these are minimal sanity
-    // checks for the ported logic.
 
     #[test]
     fn test_body_warning_hint_flags_structured_body() {

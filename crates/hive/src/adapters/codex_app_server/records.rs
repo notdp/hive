@@ -55,7 +55,14 @@ pub fn write_pane_thread(pane: &str, thread_id: &str, cwd: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn read_pane_thread(pane: &str) -> Option<(String, String)> {
+/// The pane→thread binding hive wrote at spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneThread {
+    pub thread_id: String,
+    pub cwd: String,
+}
+
+pub fn read_pane_thread(pane: &str) -> Option<PaneThread> {
     let text = fs::read_to_string(pane_thread_path(pane)).ok()?;
     let data: Value = serde_json::from_str(&text).ok()?;
     let obj = data.as_object()?;
@@ -64,7 +71,10 @@ pub fn read_pane_thread(pane: &str) -> Option<(String, String)> {
         .and_then(Value::as_str)
         .filter(|tid| !tid.is_empty())?;
     let cwd = obj.get("cwd").and_then(Value::as_str).unwrap_or("");
-    Some((thread_id.to_string(), cwd.to_string()))
+    Some(PaneThread {
+        thread_id: thread_id.to_string(),
+        cwd: cwd.to_string(),
+    })
 }
 
 pub fn clear_pane_thread(pane: &str) -> Result<()> {
@@ -76,7 +86,7 @@ pub fn clear_pane_thread(pane: &str) -> Result<()> {
 }
 
 pub fn thread_id_for_pane(pane: &str) -> Option<String> {
-    read_pane_thread(pane).map(|(tid, _cwd)| tid)
+    read_pane_thread(pane).map(|record| record.thread_id)
 }
 
 /// Inverse of [`pane_thread_path`]: `hive-pane-19.thread` -> `%19`.
@@ -117,8 +127,8 @@ pub fn pane_for_thread(thread_id: &str) -> Option<String> {
         return None;
     }
     for pane in list_recorded_panes() {
-        if let Some((tid, _cwd)) = read_pane_thread(&pane) {
-            if tid == thread_id {
+        if let Some(record) = read_pane_thread(&pane) {
+            if record.thread_id == thread_id {
                 return Some(pane);
             }
         }
@@ -130,7 +140,7 @@ pub fn pane_for_thread(thread_id: &str) -> Option<String> {
 // directory trust (config.toml)
 // --------------------------------------------------------------------------
 
-/// Python `_TRUST_LEVEL_RE`: `^\s*trust_level\s*=`.
+/// Matches `^\s*trust_level\s*=`.
 fn _trust_level_line(line: &str) -> bool {
     match line.trim_start().strip_prefix("trust_level") {
         Some(rest) => rest.trim_start().starts_with('='),
@@ -152,7 +162,7 @@ fn _trusted_section_headers(directory: &str) -> Vec<String> {
     headers
 }
 
-/// Python str.splitlines(keepends=True) over \n, \r\n, and \r.
+/// Split into lines, each keeping its terminator (`\n`, `\r\n`, or `\r`).
 fn _split_keepends(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();

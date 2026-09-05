@@ -10,8 +10,6 @@ pub const AGENT_STARTUP_TIMEOUT: f64 = 90.0;
 pub(super) const _TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
-pub const SUPPORTED_CLIS: [&str; 3] = ["claude", "codex", "grok"];
-
 /// Escape a string for safe shell use.
 pub(super) fn _shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -30,13 +28,14 @@ fn _resolve_session_id_from_runtime(pane_id: &str) -> Option<String> {
 }
 
 /// Best-effort lookup for the current pane's agent session ID.
-pub fn detect_current_session_id(_cwd: &str, _model: &str, pane_id: &str) -> Option<String> {
+pub fn detect_current_session_id(pane_id: &str) -> Option<String> {
     _resolve_session_id_from_runtime(pane_id)
 }
 
 /// A native transport (codex daemon / grok leader / claude inbox) did not accept the
 /// message. Normal hive delivery never falls back to keystrokes; callers
-/// surface this as an explicit submit failure (injectStatus=failed).
+/// surface this as an explicit submit failure (the hived answers `hive send`
+/// with `ok: false, error: "transport refused ..."`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryError(pub String);
 
@@ -230,11 +229,4 @@ pub(super) fn _uuid4() -> String {
         &hex[16..20],
         &hex[20..32]
     )
-}
-
-pub(super) fn now_epoch() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
 }

@@ -2,7 +2,6 @@
 //!
 //! Picks a preset from the window's aspect ratio (tmux cell ≈ 1:2 pixel,
 //! so char-width >= 2*char-height ≈ landscape pixels) and current pane count.
-//! Used by Team.spawn, hive kill, hive layout, and resume.
 //!
 //! A window with a dock pane (`@hive-role dock`, the `hive flow board`
 //! strip) gets a generated layout string instead of a preset: the dock stays
@@ -158,8 +157,7 @@ pub fn dock_layout(size: (i64, i64), members: &[String], dock: &str) -> Option<S
     Some(format!("{:04x},{body}", layout_checksum(&body)))
 }
 
-// Seam so unit tests can record tmux calls without a tmux server
-// (mirrors the monkeypatching in tests/unit/test_layout.py).
+// Seam so unit tests can record tmux calls without a tmux server.
 trait TmuxOps {
     fn window_zoomed(&mut self, target: &str) -> bool;
     fn window_size(&mut self, target: &str) -> (i64, i64);
@@ -223,6 +221,7 @@ fn window_lock(window_target: &str) -> Option<WindowLock> {
         .collect();
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join(format!("layout-{key}.lock")))

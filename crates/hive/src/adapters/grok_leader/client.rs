@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use super::keys::{read_session_key, socket_path_for_key};
+use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
 use super::{
     _ACK_TIMEOUT, _CALL_TIMEOUT, _INIT_TIMEOUT, _LOAD_TIMEOUT, _MESSAGE_CHUNKS, _TOOL_PHASES,
 };
@@ -46,7 +46,7 @@ fn _now_epoch() -> f64 {
 }
 
 // --------------------------------------------------------------------------
-// the leader subprocess seam (Python `subprocess.Popen`)
+// the leader subprocess seam
 // --------------------------------------------------------------------------
 
 /// The stdio child as the client sees it. Production wraps a real
@@ -118,7 +118,7 @@ impl LeaderProc for RealProc {
     }
 
     fn terminate(&self) {
-        // Python Popen.terminate: a no-op once the child was reaped.
+        // No-op once the child was reaped: its pid may already be someone else's.
         let mut child = self.child.lock().unwrap();
         if let Ok(Some(_)) = child.try_wait() {
             return;
@@ -158,7 +158,7 @@ fn _spawn_stdio_proc(argv: &[String]) -> io::Result<Arc<dyn LeaderProc>> {
 // one stdio client attached to one pane's leader
 // --------------------------------------------------------------------------
 
-/// Python `threading.Event`.
+/// A one-shot flag with a timed wait.
 struct Event {
     flag: Mutex<bool>,
     cv: Condvar,
@@ -209,7 +209,7 @@ struct ClientShared {
 
 pub(super) struct ClientInner {
     proc: Arc<dyn LeaderProc>,
-    /// Python `_io_lock`: stdin writes are atomic per message.
+    /// Held across each stdin write: one message per line, never interleaved.
     io_lock: Mutex<()>,
     next_id: Mutex<u64>,
     state: Mutex<ClientShared>,
@@ -464,7 +464,7 @@ impl GrokStdioClient {
         let proc = _spawn_stdio_proc(&argv)?;
         let stdout = proc
             .take_stdout()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "stdout unavailable"))?;
+            .ok_or_else(|| io::Error::other("stdout unavailable"))?;
         let inner = Arc::new(ClientInner {
             proc,
             io_lock: Mutex::new(()),
@@ -522,7 +522,7 @@ impl GrokStdioClient {
     /// Both values come from the key's session file — cwd is recorded at
     /// spawn time, so no tmux query is needed here.
     pub fn handshake(&self) -> bool {
-        let (session_id, cwd) = match read_session_key(&self.key) {
+        let SessionRecord { session_id, cwd } = match read_session_key(&self.key) {
             Some(session) => session,
             None => return false,
         };
@@ -717,9 +717,9 @@ impl GrokStdioClient {
 }
 
 impl Drop for GrokStdioClient {
-    /// Python `weakref.finalize(self, self._proc.terminate)`: a short-lived
-    /// CLI (`hive compact`) drops without close(); without this the stdio
-    /// child would outlive it and hold a leader connection forever.
+    /// A short-lived CLI (`hive compact`) drops without close(); without
+    /// this the stdio child would outlive it and hold a leader connection
+    /// forever.
     fn drop(&mut self) {
         self.inner.proc.terminate();
     }

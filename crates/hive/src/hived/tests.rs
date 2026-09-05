@@ -14,9 +14,12 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Map, Value};
 
+use crate::adapters::claude_bg::PaneJob;
+use crate::adapters::grok_leader::SessionRecord;
 use crate::agent::{Agent, DeliveryError};
 use crate::runtime_snapshot::RuntimeSnapshot;
 use crate::team::Team;
+use crate::testenv::EnvGuard;
 use crate::{bus, devlog};
 
 use super::testhook::{self, FakeAdapter, Hook};
@@ -73,9 +76,9 @@ fn busy_map(busy: bool) -> Map<String, Value> {
     map
 }
 
-// ---- test_hived_busy_phantom_gate.py -----------------------------------
+// ---- busy / phantom-redraw gate ----------------------------------------
 
-/// The Python `_Monitor` fake.
+/// Output monitor with a fixed busy verdict and output age.
 struct FakeMonitor {
     busy: bool,
     last_output_age: Option<f64>,
@@ -416,7 +419,7 @@ fn test_path_cache_refreshes_after_ttl() {
     assert_eq!(CALLS.load(Ordering::SeqCst), 2);
 }
 
-// ---- test_hived_runtime_snapshot.py ------------------------------------
+// ---- runtime snapshots -------------------------------------------------
 
 fn seed_snapshot(pane_id: &str, session_id: &str, observed_at: f64, freshness: Option<f64>) {
     runtime_snapshots().lock().unwrap().update_session_id(
@@ -665,7 +668,7 @@ fn test_agent_runtime_payload_stamps_a_freshness_window_on_a_probed_session() {
     assert!(!field.is_fresh(Some(field.observed_at + field.freshness_s.unwrap() + 1.0)));
 }
 
-// ---- test_hived_claude_runtime.py --------------------------------------
+// ---- claude runtime ----------------------------------------------------
 
 fn engine(status: &str, waiting_for: &str, session_id: &str) -> EngineSession {
     let now = std::time::SystemTime::now()
@@ -687,7 +690,7 @@ fn engine(status: &str, waiting_for: &str, session_id: &str) -> EngineSession {
 
 fn pin(
     hook: &mut Hook,
-    record: Option<(String, String, String)>,
+    record: Option<PaneJob>,
     engine: Option<EngineSession>,
     rows: Option<Vec<Map<String, Value>>>,
 ) {
@@ -696,8 +699,12 @@ fn pin(
     hook.cb_list_jobs = Some(Arc::new(move || rows.clone()));
 }
 
-fn record(job: &str, sid: &str) -> Option<(String, String, String)> {
-    Some((job.to_string(), sid.to_string(), "/w".to_string()))
+fn record(job: &str, sid: &str) -> Option<PaneJob> {
+    Some(PaneJob {
+        job_id: job.to_string(),
+        session_id: sid.to_string(),
+        cwd: "/w".to_string(),
+    })
 }
 
 #[test]
@@ -1009,15 +1016,9 @@ fn test_claude_supervisor_tick_parks_jobs_of_dead_panes() {
     let stopped: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let cleared_sink = Arc::clone(&cleared);
     let stopped_sink = Arc::clone(&stopped);
-    let mut records: HashMap<String, (String, String, String)> = HashMap::new();
-    records.insert(
-        "%9".to_string(),
-        ("dead0001".to_string(), "s".to_string(), "/w".to_string()),
-    );
-    records.insert(
-        "%1".to_string(),
-        ("live0001".to_string(), "s".to_string(), "/w".to_string()),
-    );
+    let mut records: HashMap<String, PaneJob> = HashMap::new();
+    records.insert("%9".to_string(), record("dead0001", "s").unwrap());
+    records.insert("%1".to_string(), record("live0001", "s").unwrap());
     let hook = Hook {
         list_panes_all: Some(Arc::new(|| {
             vec![crate::tmux::PaneInfo {
@@ -1066,7 +1067,7 @@ fn test_claude_supervisor_tick_treats_empty_listing_as_tmux_failure() {
     assert!(cleared.lock().unwrap().is_empty());
 }
 
-// ---- test_hived_codex_runtime.py ---------------------------------------
+// ---- codex runtime -----------------------------------------------------
 
 fn thread_runtime(busy: bool, turn_phase: &str, input_state: &str) -> ThreadRuntime {
     ThreadRuntime {
@@ -1124,17 +1125,7 @@ fn fake_team(name: &str, agents: Vec<Agent>) -> Team {
 }
 
 fn fake_agent(name: &str, pane_id: &str, cli: &str) -> Agent {
-    Agent {
-        name: name.to_string(),
-        team_name: String::new(),
-        pane_id: pane_id.to_string(),
-        model: String::new(),
-        prompt: String::new(),
-        cwd: "/repo".to_string(),
-        session_id: None,
-        spawned_at: 0.0,
-        cli: cli.to_string(),
-    }
+    crate::agent::testhook::fake_agent(name, "", pane_id, cli)
 }
 
 #[test]
@@ -1167,7 +1158,7 @@ fn test_doctor_verbose_reports_codex_daemon() {
     assert_eq!(diag["codexDaemon"], Value::Object(expected));
 }
 
-// ---- test_hived_grok_runtime.py ----------------------------------------
+// ---- grok runtime ------------------------------------------------------
 
 fn session_runtime(busy: bool, turn_phase: &str, input_state: &str) -> SessionRuntime {
     SessionRuntime {
@@ -1318,7 +1309,7 @@ fn test_native_daemon_busy_none_when_no_daemon_holds_the_pane() {
     assert_eq!(_native_daemon_busy("%5"), None);
 }
 
-// ---- test_hived_claude_view_tick.py ------------------------------------
+// ---- claude view tick --------------------------------------------------
 
 fn view_members() -> Vec<(String, Map<String, Value>)> {
     let mut red = Map::new();
@@ -1537,7 +1528,7 @@ fn test_an_empty_pane_listing_is_a_tmux_failure() {
     assert!(env.state.labels.is_empty());
 }
 
-// ---- job names (same Python file) --------------------------------------
+// ---- claude job names --------------------------------------------------
 
 fn named_engine(job_id: &str, name: &str) -> EngineSession {
     EngineSession {
@@ -1658,19 +1649,21 @@ fn test_non_claude_members_are_not_renamed() {
     assert!(started.lock().unwrap().is_empty());
 }
 
-// ---- test_hived_daemon_cleanup.py --------------------------------------
+// ---- grok daemon cleanup -----------------------------------------------
 
 /// Daemon keys on disk; records emit/drop/kill call order.
 struct ReapEnv {
     calls: Arc<Mutex<Vec<String>>>,
     keys: Arc<Mutex<Vec<String>>>,
     tmp: tempfile::TempDir,
+    _env: EnvGuard,
     _guard: testhook::Guard,
 }
 
 fn reap_env(pane_alive: bool) -> ReapEnv {
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let keys: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let keys_src = Arc::clone(&keys);
@@ -1704,6 +1697,7 @@ fn reap_env(pane_alive: bool) -> ReapEnv {
         calls,
         keys,
         tmp,
+        _env: env,
         _guard: testhook::install(hook),
     }
 }
@@ -1841,7 +1835,7 @@ fn test_cleanup_member_daemon_missing_registry_reaps_after_grace() {
         .contains(&"kill m-honey.rex".to_string()));
 }
 
-// ---- codex shared-daemon supervisor (same Python file) -----------------
+// ---- codex shared-daemon supervisor ------------------------------------
 
 #[derive(Clone)]
 struct SuperState {
@@ -2049,7 +2043,7 @@ fn test_supervisor_skips_member_without_record() {
     assert!(!calls.lock().unwrap().iter().any(|c| c.starts_with("send ")));
 }
 
-// ---- test_hived_idle_notify.py -----------------------------------------
+// ---- idle notify -------------------------------------------------------
 
 const WINDOW: &str = "team-a:1";
 const WINDOW_B: &str = "team-a:2";
@@ -2085,7 +2079,16 @@ fn bmon_ages(ages: &[(&str, f64)]) -> IdleBusyMonitor {
     }
 }
 
-type Cleanup = (String, Vec<String>, String, bool, String, String);
+/// One recorded `clear_stale_notify` call.
+#[derive(Debug, PartialEq)]
+struct Cleanup {
+    window: String,
+    panes: Vec<String>,
+    token: String,
+    remove_attention: bool,
+    source: String,
+    workspace: String,
+}
 
 struct IdleSetup {
     calls: Arc<Mutex<Vec<(String, String)>>>,
@@ -2149,14 +2152,14 @@ fn idle_setup(
         })),
         clear_stale_notify: Some(Arc::new(
             move |window, panes, token, remove_attention, source, workspace| {
-                cleanups_sink.lock().unwrap().push((
-                    window.to_string(),
-                    panes.to_vec(),
-                    token.to_string(),
+                cleanups_sink.lock().unwrap().push(Cleanup {
+                    window: window.to_string(),
+                    panes: panes.to_vec(),
+                    token: token.to_string(),
                     remove_attention,
-                    source.to_string(),
-                    workspace.to_string(),
-                ))
+                    source: source.to_string(),
+                    workspace: workspace.to_string(),
+                })
             },
         )),
         is_plugin_enabled: Some(Arc::new(move |_name| plugin_enabled)),
@@ -2458,14 +2461,14 @@ fn test_idle_notify_clears_notify_when_target_window_is_selected() {
     assert!(env.calls.lock().unwrap().is_empty());
     assert_eq!(
         *env.cleanups.lock().unwrap(),
-        vec![(
-            WINDOW.to_string(),
-            vec!["%1".to_string()],
-            "%1:selected-fire".to_string(),
-            false,
-            "hived.active_window".to_string(),
-            String::new(),
-        )]
+        vec![Cleanup {
+            window: WINDOW.to_string(),
+            panes: vec!["%1".to_string()],
+            token: "%1:selected-fire".to_string(),
+            remove_attention: false,
+            source: "hived.active_window".to_string(),
+            workspace: String::new(),
+        }]
     );
     assert!(state[WINDOW].notified);
     assert!(state[WINDOW].seen_since_fire);
@@ -2488,14 +2491,14 @@ fn test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled() {
     assert!(env.calls.lock().unwrap().is_empty());
     assert_eq!(
         *env.cleanups.lock().unwrap(),
-        vec![(
-            WINDOW.to_string(),
-            vec!["%1".to_string()],
-            "%1:selected-fire".to_string(),
-            false,
-            "hived.active_window".to_string(),
-            String::new(),
-        )]
+        vec![Cleanup {
+            window: WINDOW.to_string(),
+            panes: vec!["%1".to_string()],
+            token: "%1:selected-fire".to_string(),
+            remove_attention: false,
+            source: "hived.active_window".to_string(),
+            workspace: String::new(),
+        }]
     );
     assert!(state.is_empty());
 }
@@ -2618,7 +2621,7 @@ fn test_idle_notify_agent_panes_filters_to_live_agent_roles() {
     assert_eq!(_idle_notify_agent_panes("team-a"), vec!["%1".to_string()]);
 }
 
-// ---- test_hived_queue.py -----------------------------------------------
+// ---- socket server / lifecycle -----------------------------------------
 
 fn short_workspace() -> tempfile::TempDir {
     // AF_UNIX sun_path caps near 104 bytes: the hived socket cannot live
@@ -2972,15 +2975,180 @@ fn test_handle_request_connect_grok_brings_2nd_client_online() {
         json_obj(&[("ok", Value::Bool(true)), ("connected", Value::Bool(true))])
     );
     assert_eq!(*connected.lock().unwrap(), vec!["%5".to_string()]);
+
+    // No pane, no client: the leader is never asked and the CLI is told so.
+    let (response, keep_running) = _handle_request(
+        "/tmp/ws",
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[("action", Value::from("connect-grok"))]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(
+        response,
+        json_obj(&[("ok", Value::Bool(true)), ("connected", Value::Bool(false))])
+    );
+    assert_eq!(*connected.lock().unwrap(), vec!["%5".to_string()]);
 }
 
 #[test]
-fn test_start_hived_spawns_fresh_python_process() {
-    // Adapted: the Rust build spawns its own binary, not `python -m`.
+fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let resolved: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let resolved_sink = Arc::clone(&resolved);
+    let handed_sink = Arc::clone(&handed);
+    let ws_hook = workspace.to_string_lossy().to_string();
+    let hook = Hook {
+        resolve_live_agent: Some(Arc::new(move |team, _agent| {
+            resolved_sink.lock().unwrap().push(team.to_string());
+            let team = Team {
+                name: team.to_string(),
+                workspace: ws_hook.clone(),
+                tmux_session: "dev".to_string(),
+                tmux_window: "dev:0".to_string(),
+                ..Default::default()
+            };
+            Ok((team, fake_agent("b", "%9", "claude")))
+        })),
+        check_send_gate: Some(Arc::new(|_target| Ok(()))),
+        agent_send: Some(Arc::new(move |_agent, text, sender| {
+            handed_sink
+                .lock()
+                .unwrap()
+                .push((text.to_string(), sender.to_string()));
+            Ok("udsWriteAccepted".to_string())
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    // No `team` in the request: the hived's own team is the default.
+    let (response, keep_running) = _handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("send")),
+            ("senderAgent", Value::from("a")),
+            ("targetAgent", Value::from("b")),
+            ("body", Value::from("  ship it  ")),
+        ]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["to"], Value::from("b"));
+    let msg_id = response["msgId"].as_str().unwrap().to_string();
+    assert!(!msg_id.is_empty());
+    assert_eq!(*resolved.lock().unwrap(), vec!["team-a".to_string()]);
+    let events = bus::read_all_events(&workspace).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].msg_id, msg_id);
+    assert_eq!(events[0].from, "a");
+    assert_eq!(events[0].to, "b");
+    assert_eq!(events[0].body, "ship it");
+    let handed = handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    let (envelope, sender_label) = &handed[0];
+    assert_eq!(sender_label, "team-a.a");
+    assert!(
+        envelope.contains(&msg_id),
+        "envelope must carry the bus msgId"
+    );
+}
+
+#[test]
+fn test_handle_request_doctor_embeds_hived_identity_and_defaults_the_team() {
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&asked);
+    let hook = Hook {
+        team_load: Some(Arc::new(move |name| {
+            sink.lock().unwrap().push(name.to_string());
+            Ok(fake_team(name, vec![fake_agent("v", "%1", "codex")]))
+        })),
+        agent_is_alive: Some(Arc::new(|_a| true)),
+        member_runtime_payload: Some(Arc::new(|_p, _r| json_obj(&[("alive", Value::Bool(true))]))),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    // No `team` in the request: the hived's own team is the default.
+    let (response, keep_running) = _handle_request(
+        "/tmp/ws",
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("doctor")),
+            ("agent", Value::from("v")),
+        ]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(*asked.lock().unwrap(), vec!["team-a".to_string()]);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["team"], Value::from("team-a"));
+    assert_eq!(response["agent"], Value::from("v"));
+    assert_eq!(response["alive"], Value::Bool(true));
+    // The identity block a doctor reader uses to tell which hived answered.
+    assert_eq!(
+        response["hived"],
+        Value::Object(json_obj(&[
+            ("pid", Value::from(getpid())),
+            ("started_at", Value::from("2026-04-17T00:00:00Z")),
+            ("code_hash", Value::from(hived_build_hash())),
+        ]))
+    );
+}
+
+#[test]
+fn test_handle_request_reports_a_failing_handler_without_retiring_the_loop() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| {
+            Err(anyhow::anyhow!("no such team '{name}'"))
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    // A `team` in the request overrides the hived's own team.
+    let (response, keep_running) = _handle_request(
+        "/tmp/ws",
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("team-runtime")),
+            ("team", Value::from("ghost")),
+        ]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(
+        response,
+        json_obj(&[
+            ("ok", Value::Bool(false)),
+            ("error", Value::from("no such team 'ghost'")),
+        ])
+    );
+}
+
+#[test]
+fn test_start_hived_spawns_current_exe_with_hived_argv() {
     let captured: Arc<Mutex<Vec<(Vec<String>, PathBuf)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&captured);
     let hook = Hook {
-        current_exe: Some(Arc::new(|| "/tmp/fake-python".to_string())),
+        current_exe: Some(Arc::new(|| "/tmp/fake-hive".to_string())),
         popen: Some(Arc::new(move |command, stderr_path| {
             sink.lock()
                 .unwrap()
@@ -2998,7 +3166,7 @@ fn test_start_hived_spawns_fresh_python_process() {
     assert_eq!(
         captured[0].0,
         vec![
-            "/tmp/fake-python".to_string(),
+            "/tmp/fake-hive".to_string(),
             "--hived".to_string(),
             "/tmp/ws".to_string(),
             "team-a".to_string(),
@@ -3117,14 +3285,14 @@ fn test_try_acquire_reexec_lock_returns_none_when_lock_is_busy() {
 
 #[test]
 fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
-    std::env::remove_var(_HIVED_REEXEC_LOCK_ENV);
+    let _env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let lock_sink = Arc::clone(&calls);
     let release_sink = Arc::clone(&calls);
     let cleanup_sink = Arc::clone(&calls);
     let execv_sink = Arc::clone(&calls);
     let hook = Hook {
-        current_exe: Some(Arc::new(|| "/tmp/fake-python".to_string())),
+        current_exe: Some(Arc::new(|| "/tmp/fake-hive".to_string())),
         try_acquire_reexec_lock: Some(Arc::new(move |workspace| {
             lock_sink.lock().unwrap().push(format!("lock {workspace}"));
             Some(42)
@@ -3174,7 +3342,7 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
             "monitor.stop".to_string(),
             "server.close".to_string(),
             "cleanup /ws".to_string(),
-            "execv /tmp/fake-python --hived /ws team-a dev:3 @99 env=42".to_string(),
+            "execv /tmp/fake-hive --hived /ws team-a dev:3 @99 env=42".to_string(),
             "release Some(42)".to_string(),
         ]
     );
@@ -3219,14 +3387,14 @@ fn test_reexec_hived_skips_when_reexec_lock_is_busy() {
 fn test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails() {
     // execv failing after the teardown used to punch through the loop
     // and leave the window with no hived *and* no socket.
-    std::env::remove_var(_HIVED_REEXEC_LOCK_ENV);
+    let _env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let release_sink = Arc::clone(&calls);
     let cleanup_sink = Arc::clone(&calls);
     let open_sink = Arc::clone(&calls);
     let open_calls = Arc::clone(&calls);
     let hook = Hook {
-        current_exe: Some(Arc::new(|| "/tmp/fake-python".to_string())),
+        current_exe: Some(Arc::new(|| "/tmp/fake-hive".to_string())),
         try_acquire_reexec_lock: Some(Arc::new(|_workspace| Some(42))),
         release_reexec_lock_fd: Some(Arc::new(move |fd| {
             release_sink.lock().unwrap().push(format!("release {fd:?}"))
@@ -3305,9 +3473,9 @@ fn test_cleanup_socket_if_owner_skips_foreign_owner() {
 
 #[test]
 fn test_hived_loop_retires_orphan_before_idle_tick() {
+    let mut env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-    std::env::remove_var(_HIVED_REEXEC_LOCK_ENV);
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let events: Arc<Mutex<Vec<(String, Map<String, Value>)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3438,9 +3606,10 @@ fn test_open_server_socket_relocates_and_links_for_a_long_workspace() {
 
 #[test]
 fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-    std::env::set_var(_HIVED_REEXEC_LOCK_ENV, "78");
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    env.set(_HIVED_REEXEC_LOCK_ENV, "78");
     let workspace = tmp.path().to_string_lossy().to_string();
     let events: Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
@@ -3492,9 +3661,10 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
 
 #[test]
 fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-    std::env::set_var(_HIVED_REEXEC_LOCK_ENV, "77");
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    env.set(_HIVED_REEXEC_LOCK_ENV, "77");
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let open_sink = Arc::clone(&calls);
@@ -3531,7 +3701,6 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
         vec![
             format!("open {workspace}"),
             "release Some(77)".to_string(),
-            "release None".to_string(),
             "server.close".to_string(),
             format!("cleanup {workspace}"),
         ]
@@ -3566,6 +3735,7 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
     let _guard = testhook::install(hook);
 
     let listener = UnixListener::bind(run_tmp.path().join("hived.sock")).unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
         let mut conn = conn;
@@ -3576,17 +3746,106 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
                 Ok(_) => continue, // drain until the client half-closes
             }
         }
-        thread::sleep(Duration::from_millis(800)); // valid latency, below the budget
+        // Hold the reply past the ping budget: a send that borrowed the
+        // ping timeout would have hung up by the time this is written.
+        let drained = std::time::Instant::now();
+        thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL * 3.0));
         let _ = (&conn).write_all(b"{\"ok\": true, \"msgId\": \"x1\", \"delivery\": \"queued\"}\n");
+        let _ = held_tx.send(drained.elapsed().as_secs_f64());
     });
 
-    let response = request_send("/tmp/ws-x", "t", "a", "%1", "b", "hello", "", "");
+    let response = request_send("/tmp/ws-x", "t", "a", "b", "hello", "", "");
 
+    // The server held the reply past the ping budget (SOCKET_RETRY_INTERVAL)
+    // but inside the send budget; the oracle is the reply arriving at all.
+    let held_for = held_rx.recv().unwrap();
+    assert!(held_for < _send_request_timeout());
     let response = response.expect("delayed acceptance must not be dropped");
     assert_eq!(response["delivery"], Value::from("queued"));
 }
 
-// ---- test_hived_views.py -----------------------------------------------
+#[test]
+fn test_serve_connection_round_trips_ping_over_a_real_socket() {
+    // No handle_request hook: the wire framing meets the real dispatcher.
+    let _guard = testhook::install(Hook::default());
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_string_lossy().to_string();
+    let server = Arc::new(_open_server_socket(&workspace).unwrap());
+
+    let ws_serve = workspace.clone();
+    let server_serve = Arc::clone(&server);
+    let serve_thread = thread::spawn(move || {
+        _serve_requests(
+            server_serve.as_ref(),
+            &ws_serve,
+            "team-a",
+            "dev:3",
+            "@99",
+            "2026-04-17T00:00:00Z",
+            5.0,
+        )
+    });
+
+    let ping = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
+        .expect("ping must be answered over the socket");
+    assert_eq!(ping["ok"], Value::Bool(true));
+    assert_eq!(ping["apiVersion"], Value::from(HIVED_API_VERSION));
+    assert_eq!(ping["buildHash"], Value::from(hived_build_hash()));
+    assert_eq!(ping["tmuxWindowId"], Value::from("@99"));
+    assert_eq!(
+        ping["hived"]["started_at"],
+        Value::from("2026-04-17T00:00:00Z")
+    );
+    assert!(
+        !_SHUTDOWN.load(Ordering::SeqCst),
+        "ping must keep the loop running"
+    );
+
+    // A truncated frame is answered as an unknown action and the loop
+    // stays up for the next client.
+    let mut raw = UnixStream::connect(_socket_path(&workspace)).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs_f64(SOCKET_READY_TIMEOUT)))
+        .unwrap();
+    raw.write_all(b"{\"action\": \"ping\"\n").unwrap();
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut reply = String::new();
+    raw.read_to_string(&mut reply).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply).unwrap(),
+        serde_json::json!({"ok": false, "error": "unknown action"})
+    );
+    assert!(!_SHUTDOWN.load(Ordering::SeqCst));
+
+    let again = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
+        .expect("the loop must survive a malformed frame");
+    assert_eq!(again["tmuxWindowId"], Value::from("@99"));
+
+    let bye = _request_hived(
+        &workspace,
+        &action_payload("shutdown"),
+        SOCKET_READY_TIMEOUT,
+    );
+    assert_eq!(bye, Some(json_obj(&[("ok", Value::Bool(true))])));
+    // The loop is parked in accept: one more client wakes it to notice
+    // the shutdown flag instead of waiting out the accept timeout.
+    let _ = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT);
+    let keep_running = serve_thread.join().unwrap();
+    assert!(!keep_running);
+    // The wake-up ping's handler thread retires on its own; the loop does
+    // not wait for it.
+    let settle = std::time::Instant::now();
+    while _requests_in_flight() && settle.elapsed().as_secs_f64() < SOCKET_READY_TIMEOUT {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !_requests_in_flight(),
+        "handler thread still counted in flight"
+    );
+    server.close();
+    _cleanup_socket_impl(&workspace);
+}
+
+// ---- thread view -------------------------------------------------------
 
 #[test]
 fn test_thread_payload_projects_pure_send_chain() {
@@ -3657,7 +3916,7 @@ fn test_thread_payload_projects_pure_send_chain() {
         .all(|m| m.as_object().unwrap().get("delivery").is_none()));
 }
 
-// ---- test_delivery_durability.py ---------------------------------------
+// ---- send payload ------------------------------------------------------
 
 fn wire_send(hook: &mut Hook, workspace: &Path) {
     let workspace = workspace.to_string_lossy().to_string();
@@ -3674,7 +3933,6 @@ fn wire_send(hook: &mut Hook, workspace: &Path) {
     hook.check_send_gate = Some(Arc::new(|_target| Ok(())));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_payload_for_test(
     workspace: &Path,
     sender: &str,
@@ -3687,7 +3945,6 @@ fn send_payload_for_test(
         &workspace.to_string_lossy(),
         "team-x",
         sender,
-        "%1",
         target,
         body,
         artifact,
@@ -3847,7 +4104,7 @@ fn test_send_to_flow_mailbox_writes_bus_row_without_transport() {
     assert_eq!(events[0].in_reply_to, "m1");
 }
 
-// ---- test_retained_shell_liveness.py (hived-owned surface) -------------
+// ---- retained-shell liveness -------------------------------------------
 
 fn retained_shell_hook() -> Hook {
     Hook {
@@ -4137,19 +4394,13 @@ fn test_team_runtime_leaves_a_pane_member_with_no_live_session_dead() {
     assert_eq!(rt["inputReason"], Value::from("cli_exited"));
 }
 
-// ---- test_agent_headless.py (the two hived-owned tests) ----------------
+// ---- headless member runtime -------------------------------------------
 
 fn headless_member(cli: &str, session_id: Option<&str>) -> Agent {
     Agent {
-        name: "rex".to_string(),
         team_name: "honey".to_string(),
-        pane_id: String::new(),
-        model: String::new(),
-        prompt: String::new(),
-        cwd: "/repo".to_string(),
         session_id: session_id.map(|s| s.to_string()),
-        spawned_at: 0.0,
-        cli: cli.to_string(),
+        ..fake_agent("rex", "", cli)
     }
 }
 
@@ -4164,7 +4415,10 @@ fn test_headless_member_runtime_grok() {
             }
         })),
         gl_read_session_key: Some(Arc::new(|_key| {
-            Some(("sid-g".to_string(), "/repo".to_string()))
+            Some(SessionRecord {
+                session_id: "sid-g".to_string(),
+                cwd: "/repo".to_string(),
+            })
         })),
         ..Default::default()
     };
@@ -4188,7 +4442,7 @@ fn test_headless_member_runtime_unknown_engine() {
     assert_eq!(payload["inputState"], Value::from("unknown"));
 }
 
-// ---- test_registry.py: the hived writer over the registry --------------
+// ---- the hived writer over the registry --------------------------------
 
 fn writer_team(agents: Vec<Agent>) -> Team {
     Team {
@@ -4234,10 +4488,12 @@ fn roster_by_name(team: &str) -> HashMap<String, Map<String, Value>> {
 
 #[test]
 fn test_writer_backfills_roster_and_display() {
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let mut worker_row = Map::new();
     worker_row.insert("name".to_string(), Value::from("worker"));
+    worker_row.insert("cwd".to_string(), Value::from("/old"));
     let mut validator_row = Map::new();
     validator_row.insert("name".to_string(), Value::from("validator"));
     assert_eq!(
@@ -4246,11 +4502,12 @@ fn test_writer_backfills_roster_and_display() {
         "written"
     );
     {
+        // Team::load merges the live pane's #{pane_current_path} into the
+        // agent; the worker has since `cd`-ed away from the row's "/old".
+        let mut worker = fake_agent("worker", "%1", "claude");
+        worker.cwd = "/fresh".to_string();
         let hook = writer_hook(
-            writer_team(vec![
-                fake_agent("worker", "%1", "claude"),
-                fake_agent("validator", "%2", "codex"),
-            ]),
+            writer_team(vec![worker, fake_agent("validator", "%2", "codex")]),
             &[("%1", "sid-w"), ("%2", "sid-v")],
         );
         let _guard = testhook::install(hook);
@@ -4261,6 +4518,7 @@ fn test_writer_backfills_roster_and_display() {
     let entry = crate::registry::load("honey").unwrap();
     let by_name = roster_by_name("honey");
     assert_eq!(by_name["worker"]["sessionId"], Value::from("sid-w"));
+    assert_eq!(by_name["worker"]["cwd"], Value::from("/fresh"));
     assert_eq!(by_name["validator"]["sessionId"], Value::from("sid-v"));
     assert_eq!(by_name["validator"]["model"], Value::from("m-codex"));
     assert_eq!(entry["display"], Value::from("@0"));
@@ -4282,8 +4540,9 @@ fn test_writer_backfills_roster_and_display() {
 #[test]
 fn test_writer_without_registry_entry_writes_nothing() {
     // Observation never creates a roster: membership belongs to the CLI.
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let hook = writer_hook(
         writer_team(vec![fake_agent("worker", "%1", "claude")]),
         &[("%1", "sid-w")],

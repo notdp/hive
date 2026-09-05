@@ -1,5 +1,6 @@
 use super::interact::Density;
 use super::*;
+use crate::testenv::EnvGuard;
 use crate::transcript_view::LineAccumulator;
 use crate::view_theme::{GROKDAY, GROKNIGHT};
 use ratatui::backend::TestBackend;
@@ -7,6 +8,17 @@ use serde_json::json;
 
 const W: u16 = 80;
 const H: u16 = 30;
+/// Session cwd stamped on the fixture rows; nothing asserts on it except the
+/// top-line test, which builds its own rows under a temp `$HOME`.
+const FIXTURE_CWD: &str = "/work/hive";
+
+/// The env lock with `TZ=UTC`, so a rendered clock is the fixture's UTC
+/// timestamp and never the machine's zone.
+fn utc() -> EnvGuard {
+    let mut env = EnvGuard::new();
+    env.set("TZ", "UTC");
+    env
+}
 
 fn draw_to_buffer(app: &mut App, w: u16, h: u16) -> Buffer {
     let backend = TestBackend::new(w, h);
@@ -29,8 +41,12 @@ fn buffer_text(buf: &Buffer) -> String {
 }
 
 fn user_row(text: &str) -> String {
+    user_row_at(FIXTURE_CWD, text)
+}
+
+fn user_row_at(cwd: &str, text: &str) -> String {
     json!({
-        "type": "user", "gitBranch": "rs-rewrite", "cwd": "/Users/dp/dev/hive",
+        "type": "user", "gitBranch": "rs-rewrite", "cwd": cwd,
         "timestamp": "2026-08-30T12:40:00.000Z",
         "message": {"content": text},
     })
@@ -38,8 +54,12 @@ fn user_row(text: &str) -> String {
 }
 
 fn assistant_text_row(text: &str) -> String {
+    assistant_text_row_at(FIXTURE_CWD, text)
+}
+
+fn assistant_text_row_at(cwd: &str, text: &str) -> String {
     json!({
-        "type": "assistant", "gitBranch": "rs-rewrite", "cwd": "/Users/dp/dev/hive",
+        "type": "assistant", "gitBranch": "rs-rewrite", "cwd": cwd,
         "timestamp": "2026-08-30T12:44:06.000Z",
         "message": {
             "model": "claude-fable-5",
@@ -96,11 +116,14 @@ fn type_str(app: &mut App, s: &str) {
 
 #[test]
 fn test_top_line_renders_branch_worktree_cwd_and_token_counter() {
-    std::env::set_var("HOME", "/Users/dp");
-    std::env::set_var("TZ", "UTC");
+    let home = tempfile::tempdir().unwrap();
+    let mut env = utc();
+    env.set("HOME", home.path());
+    let cwd = home.path().join("dev/hive");
+    let cwd = cwd.to_str().unwrap();
     let mut app = App::new(&GROKNIGHT);
-    app.push_raw(&user_row("hello"));
-    app.push_raw(&assistant_text_row("done"));
+    app.push_raw(&user_row_at(cwd, "hello"));
+    app.push_raw(&assistant_text_row_at(cwd, "done"));
     let buf = draw_to_buffer(&mut app, W, H);
     let top = row_text(&buf, 1);
     assert!(top.contains("⎇ rs-rewrite"), "{top:?}");
@@ -113,7 +136,7 @@ fn test_top_line_renders_branch_worktree_cwd_and_token_counter() {
 
 #[test]
 fn test_user_band_fills_full_inner_width_with_cjk_text() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row(
         "宽度测试中文段落，一直排到需要换行为止，确认背景条完整。",
@@ -160,7 +183,7 @@ fn test_user_band_fills_full_inner_width_with_cjk_text() {
 
 #[test]
 fn test_grokday_theme_paints_light_frame_and_band() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKDAY);
     app.push_raw(&user_row("hello light"));
     app.push_raw(&assistant_text_row("done"));
@@ -185,7 +208,7 @@ fn test_grokday_theme_paints_light_frame_and_band() {
 
 #[test]
 fn test_tool_lines_render_group_run_and_thinking() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&tool_use_row("Read", "t1", json!({"file_path": "/a.rs"})));
@@ -223,7 +246,7 @@ fn test_bottom_line_is_left_aligned_key_hints() {
 
 #[test]
 fn test_worked_for_line_and_hive_header() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&assistant_text_row("done"));
@@ -423,7 +446,7 @@ fn test_mouse_wheel_scrolls_three_lines() {
 
 #[test]
 fn test_up_selects_and_draws_grok_bracket_frame() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&assistant_text_row("done"));
@@ -463,7 +486,7 @@ fn test_up_selects_and_draws_grok_bracket_frame() {
 
 #[test]
 fn test_shift_arrows_jump_turns() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("first"));
     app.push_raw(&assistant_text_row("a1"));
@@ -484,8 +507,8 @@ fn test_shift_arrows_jump_turns() {
 
 // ---- fold / density -------------------------------------------------
 
+/// Callers hold [`utc`] first: the fixture rows carry timestamps.
 fn thinking_app() -> App {
-    std::env::set_var("TZ", "UTC");
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&thinking_row("deep reasoning body text"));
@@ -495,6 +518,7 @@ fn thinking_app() -> App {
 
 #[test]
 fn test_right_expands_selected_thinking_block() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Up); // assistant
@@ -544,6 +568,7 @@ fn test_execution_bullet_carries_the_outcome() {
 
 #[test]
 fn test_selected_collapsed_thinking_header_undims_with_patch() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Up);
@@ -564,6 +589,7 @@ fn test_selected_collapsed_thinking_header_undims_with_patch() {
 
 #[test]
 fn test_ctrl_e_toggles_all_thinking() {
+    let _tz = utc();
     let mut app = thinking_app();
     app.push_raw(&thinking_row("second thought body"));
     app.push_raw(&assistant_text_row("done again"));
@@ -581,6 +607,7 @@ fn test_ctrl_e_toggles_all_thinking() {
 
 #[test]
 fn test_ctrl_o_density_cycle_expands_thinking_and_tools() {
+    let _tz = utc();
     let mut app = thinking_app();
     app.push_raw(&tool_use_row(
         "Bash",
@@ -624,6 +651,7 @@ fn test_ctrl_o_density_cycle_expands_thinking_and_tools() {
 
 #[test]
 fn test_double_click_toggles_fold_and_click_selects() {
+    let _tz = utc();
     let mut app = thinking_app();
     let buf = draw_to_buffer(&mut app, W, H);
     let row = (0..H)
@@ -652,6 +680,7 @@ fn test_double_click_toggles_fold_and_click_selects() {
 
 #[test]
 fn test_enter_opens_viewer_and_q_closes_it_not_the_app() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Up); // assistant
@@ -670,7 +699,7 @@ fn test_enter_opens_viewer_and_q_closes_it_not_the_app() {
 
 #[test]
 fn test_ctrl_f_opens_viewer_for_run_with_command_and_output() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&tool_use_row(
@@ -696,6 +725,7 @@ fn test_ctrl_f_opens_viewer_for_run_with_command_and_output() {
 
 #[test]
 fn test_slash_opens_palette_with_rows_and_esc_closes() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Char('/'));
@@ -732,7 +762,8 @@ fn test_slash_opens_palette_with_rows_and_esc_closes() {
 #[test]
 fn test_palette_theme_switch_persists_and_restyles() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path());
+    let mut env = utc();
+    env.set("HIVE_HOME", tmp.path());
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Char('/'));
@@ -760,6 +791,7 @@ fn test_palette_theme_switch_persists_and_restyles() {
 
 #[test]
 fn test_palette_view_sets_density_and_quit_quits() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Char('/'));
@@ -774,7 +806,7 @@ fn test_palette_view_sets_density_and_quit_quits() {
 
 #[test]
 fn test_palette_find_jumps_and_n_cycles() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("alpha SPEC here"));
     app.push_raw(&assistant_text_row("nothing to see"));
@@ -798,7 +830,7 @@ fn test_palette_find_jumps_and_n_cycles() {
 
 #[test]
 fn test_long_user_band_folds_and_expands() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     let long: String = (1..=8)
         .map(|i| format!("user line number {i}"))
@@ -822,7 +854,7 @@ fn test_long_user_band_folds_and_expands() {
 
 #[test]
 fn test_expanded_run_shows_dollar_command_and_banded_output() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     for t in [&GROKNIGHT, &GROKDAY] {
         let mut app = App::new(t);
         app.push_raw(&user_row("go"));
@@ -885,7 +917,7 @@ fn test_expanded_run_shows_dollar_command_and_banded_output() {
 
 #[test]
 fn test_expanded_run_error_output_is_unbanded_error_text() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&tool_use_row(
@@ -970,7 +1002,7 @@ fn test_turn_status_row_appears_only_while_busy() {
 
 #[test]
 fn test_composer_box_rows_present_and_idle() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("hi"));
     app.push_raw(&assistant_text_row("ok"));
@@ -1013,6 +1045,7 @@ fn test_composer_box_rows_present_and_idle() {
 
 #[test]
 fn test_slash_palette_types_into_composer_box() {
+    let _tz = utc();
     let mut app = thinking_app();
     let _ = draw_to_buffer(&mut app, W, H);
     key(&mut app, KeyCode::Char('/'));
@@ -1047,7 +1080,7 @@ fn test_slash_palette_types_into_composer_box() {
     );
 }
 
-// ---- markdown tables re-layout on resize ----------------------------
+// ---- scrollbar / wrapping / clock column ---------------------------
 
 #[test]
 fn test_scrollbar_thumb_tracks_the_viewport() {
@@ -1110,7 +1143,7 @@ fn test_cjk_fills_the_line_instead_of_moving_the_run_down() {
 
 #[test]
 fn test_only_the_opening_line_makes_room_for_the_clock() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&assistant_text_row(&"palabra ".repeat(60)));
     let buf = draw_to_buffer(&mut app, W, H);
@@ -1134,9 +1167,11 @@ fn test_only_the_opening_line_makes_room_for_the_clock() {
     );
 }
 
+// ---- markdown tables re-layout on resize ----------------------------
+
 #[test]
 fn test_markdown_table_relayouts_on_resize() {
-    std::env::set_var("TZ", "UTC");
+    let _tz = utc();
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("table"));
     // Natural width well past 120-col wrap budget: the no-width markdown

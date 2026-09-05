@@ -16,33 +16,33 @@ Hive はエージェント向けのランタイムであり、人が手動で操
 
 ## インストール
 
-Hive は単一の Rust バイナリで、チェックアウトからビルドします:
+Hive は単一の Rust バイナリです。[GitHub Releases](https://github.com/notdp/hive/releases) に macOS / Linux（aarch64 と x86_64）向けのビルド済みバイナリがあります:
 
 ```bash
-git clone https://github.com/notdp/hive.git
-cd hive
-cargo install --path crates/hive
+curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-このリポジトリは両 CLI 向けのプラグイン marketplace でもあります。プラグインが配るのは、エージェントに協調プロトコルを教えるスキルです:
+Rust ツールチェインがあれば経路がもう 2 つあります。[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) は同じビルド済み release を取得し（コンパイルなし）、`cargo install` はソースからビルドします:
 
 ```bash
-# Claude Code
-claude plugin marketplace add notdp/hive
-claude plugin install hive@hive
-
-# Codex
-codex plugin marketplace add https://github.com/notdp/hive.git
-codex plugin add hive@hive
+cargo binstall --git https://github.com/notdp/hive hive
+# または
+cargo install --git https://github.com/notdp/hive hive
 ```
 
-CLI は先に自分でインストールしてください。プラグインの `SessionStart` フックはインストールするように見えますが、実際にはしません。収束の処理は今も `pipx install` でこのリポジトリを叩きますが、これは Rust 移行前の経路で、以降このリポジトリに `pyproject.toml` はありません。よってバイナリは生成されず、フック後半の処理（Claude 側 marketplace 自動更新の有効化）にも到達しません。収束する経路は、PATH 上に十分新しい `hive` が既にある場合だけです。そのとき検査は何もインストールせずそのまま先へ進みます。
+プラグイン — エージェントにプロトコルを教えるスキル — はバイナリに同梱され、`hive` が `$HIVE_HOME` 配下に実体化するローカル marketplace から配られます。1 コマンドで PATH 上のすべてのエージェント CLI に登録とインストールを行います（再実行すればインストールを修復します）:
+
+```bash
+hive plugin setup
+```
+
+内部では marketplace を実体化し、claude（2.1.229 以上）と codex それぞれに `plugin marketplace add` + install を実行します。claude 側の marketplace エントリは command source で、Claude はセッションごとに `hive plugin sync` を再実行するため、スキルの更新はバイナリに乗って届きます。codex 側のプラグインはフックを一切持ちません（フックは codex のフック審査ダイアログの後ろに置かれてしまいます）。バイナリのバージョンが変わると、hive 自身の codex 起動パスがエンジン起動前にプラグインを再 add します。リモートからは何も取得せず、settings にも触れません。
 
 必要な環境:
 
 - `tmux` 3.2 以上 — `hive cvim` / `hive vim` のポップアップのため。加えて `hive view` がテーマ判定に使う素の OSC 11 背景色クエリに pane が応答するのも 3.2 からです
-- ビルド用の Rust ツールチェイン
-- `python3` — notify のポップアップが python のヒアドキュメントです（`hive flow run` にインタプリタは不要になりました。flow スクリプトは JavaScript で、バイナリ内蔵のエンジンが実行します）
+- Rust ツールチェイン — ソースからビルドする経路でのみ必要です。インストーラはビルド済みバイナリを配ります
+- `python3` — notify のポップアップが python のヒアドキュメントです（`hive flow run` にインタプリタは不要です。flow スクリプトは JavaScript で、バイナリ内蔵のエンジンが実行します）
 - 少なくとも 1 つのエージェント CLI: `claude` / `codex` / `grok`
 
 ## エージェントセッションで起動する
@@ -83,11 +83,9 @@ claude メンバーの sessionId に対応する bg job レコードがない場
 
 ## アップグレード
 
-```bash
-git pull && cargo install --path crates/hive
-```
+[インストール](#インストール)のインストーラ 1 行を再実行します。常に最新の release を取得します。リリースは crate のバージョンに一致する `v*` タグを push することで切られ、CI（cargo-dist）が各プラットフォームのバイナリをビルドして GitHub Release を公開します。
 
-プラグインの manifest バージョンは CLI のバージョンに固定されているので、リリース 1 回でプラグイン更新も一緒に出ます。Claude Code 側は、bootstrap フックが `extraKnownMarketplaces` のエントリを書き込んだ時点から marketplace が自動更新されます。ただし `FORCE_AUTOUPDATE_PLUGINS` なしで `DISABLE_AUTOUPDATER` が設定されているとこの書き込みはスキップされ、その場合は `claude plugin update hive@hive` を手動で実行します。Codex は add した時点の marketplace スナップショットを保持し、自分では更新しません。更新するには `codex plugin marketplace upgrade hive` を実行します。
+スキルの更新はバイナリに乗って届きます。claude 側では marketplace の command source がセッションごとに `hive plugin sync` を再実行し、変更内容を自動で拾います。codex 側では、稼働中のバイナリのバージョンに対応するエントリがキャッシュにないとき、hive の起動パスがプラグインを再 add します。プラグインの manifest バージョンは CLI のバージョンに固定されており、その固定が codex キャッシュのキーになっています。
 
 ## 開発
 
@@ -96,6 +94,7 @@ git pull && cargo install --path crates/hive
 ## ドキュメント
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) — レジストリと表示層のアイデンティティ、CLI ごとのネイティブランタイム源、`busy` / `inputState` / `turnPhase`
+- [`docs/transcript-view.md`](docs/transcript-view.md) — `hive view` が描くもの: JSONL → `DisplayBlock` の解析モデル、ビューアのクローム、テーマ解決
 - [`docs/daemon-control-socket.md`](docs/daemon-control-socket.md) — Claude supervisor daemon の制御プロトコル。その `op:"reply"` が hive の配信本線
 - [`plugins/hive/skills/hive/SKILL.md`](plugins/hive/skills/hive/SKILL.md) — `/hive:hive` がエージェントに読み込ませる協調プロトコル
 

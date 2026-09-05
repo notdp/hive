@@ -206,55 +206,15 @@ fn viewer_title(block: &DisplayBlock) -> String {
     }
 }
 
-/// One viewer output row on the full-width `bg_dark` band (same style as the
-/// scrollback's expanded outcome band).
-fn viewer_band_row(t: &ViewTheme, text: String, text_fg: Color, width: usize) -> Line<'static> {
-    let used = UnicodeWidthStr::width(text.as_str());
-    let mut spans = vec![Span::styled(text, fg(text_fg).bg(t.bg_dark))];
-    if width > used {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(t.bg_dark),
-        ));
-    }
-    Line::from(spans)
-}
-
+/// The viewer's tool output: the scrollback's rows, unindented.
 fn viewer_outcome_lines(
     out: &mut Vec<Line<'static>>,
     t: &ViewTheme,
     width: usize,
     result: &Option<ToolOutcome>,
 ) {
-    let Some(res) = result else {
-        return;
-    };
-    if res.is_error {
-        for src in res.text.trim_end().lines() {
-            for piece in wrap_plain(src, width) {
-                out.push(Line::from(Span::styled(piece, fg(t.accent_error))));
-            }
-        }
-        if res.truncated {
-            out.push(Line::from(Span::styled(
-                "… output truncated".to_string(),
-                fg(t.gray),
-            )));
-        }
-        return;
-    }
-    for src in res.text.trim_end().lines() {
-        for piece in wrap_plain(src, width) {
-            out.push(viewer_band_row(t, piece, t.text_primary, width));
-        }
-    }
-    if res.truncated {
-        out.push(viewer_band_row(
-            t,
-            "… output truncated".to_string(),
-            t.gray,
-            width,
-        ));
+    if let Some(res) = result {
+        outcome_rows(t, out, "", res, width);
     }
 }
 
@@ -279,19 +239,7 @@ fn viewer_lines(block: &DisplayBlock, t: &ViewTheme, width: usize) -> Vec<Line<'
         DisplayBlock::Assistant(a) => out = md(&a.markdown),
         DisplayBlock::Thinking(tb) => out = md(&tb.text),
         DisplayBlock::Run(r) => {
-            for (i, src) in r.command.lines().enumerate() {
-                let prefix = if i == 0 { "$ " } else { "  " };
-                for (j, piece) in wrap_plain(src, width.saturating_sub(2))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let lead = if j == 0 { prefix } else { "  " };
-                    out.push(Line::from(vec![
-                        Span::styled(lead.to_string(), fg(t.gray_dim)),
-                        Span::styled(piece, fg(t.command_fg)),
-                    ]));
-                }
-            }
+            command_rows(t, &mut out, "", &r.command, width);
             if !out.is_empty() {
                 out.push(Line::default());
             }
@@ -426,10 +374,11 @@ impl App {
     }
 
     pub(super) fn push_raw(&mut self, raw: &str) {
-        if let Ok(row) = serde_json::from_str::<Value>(raw) {
-            self.chrome.update(&row);
-        }
-        self.finalized.extend(self.parser.push_entries(raw));
+        let Ok(row) = serde_json::from_str::<Value>(raw) else {
+            return;
+        };
+        self.chrome.update(&row);
+        self.finalized.extend(self.parser.push_row(&row));
     }
 
     /// Assemble the scrollback: cached finalized entries (re-rendered when
@@ -457,7 +406,7 @@ impl App {
                     | DisplayBlock::Tool(_)
                     | DisplayBlock::Thinking(_)
             );
-            if !lines.is_empty() && !(dense && last_dense) {
+            if !lines.is_empty() && (!dense || !last_dense) {
                 lines.push(Line::default());
             }
             last_dense = dense;
@@ -744,6 +693,9 @@ impl App {
             KeyCode::PageDown => v.scroll += page,
             KeyCode::PageUp => v.scroll = v.scroll.saturating_sub(page),
             KeyCode::Char('g') => v.scroll = 0,
+            // Past any real length: draw_viewer clamps to the last page each
+            // frame, and the halved MAX leaves headroom for a `+= page` from
+            // the same event batch, handled before that draw.
             KeyCode::Char('G') => v.scroll = usize::MAX / 2,
             _ => {}
         }

@@ -96,6 +96,7 @@ The installed `hive` binary is the transport for live agents. Keep it on a commi
 ## Docs
 
 - [`docs/runtime-model.md`](docs/runtime-model.md) — registry-vs-display identity, the per-CLI native runtime sources, and `busy` / `inputState` / `turnPhase`
+- [`docs/transcript-view.md`](docs/transcript-view.md) — what `hive view` draws: the JSONL → `DisplayBlock` parse model, the viewer's chrome, theme resolution
 - [`docs/daemon-control-socket.md`](docs/daemon-control-socket.md) — the Claude supervisor daemon's control protocol, whose `op:"reply"` is hive's delivery lane
 - [`plugins/hive/skills/hive/SKILL.md`](plugins/hive/skills/hive/SKILL.md) — the collaboration protocol `/hive:hive` loads into an agent
 

@@ -5,6 +5,8 @@
 use serde_json::{json, Map, Value};
 
 use super::*;
+use crate::team::Team;
+use crate::testenv::EnvGuard;
 
 fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -12,23 +14,16 @@ fn args(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn test_attach_backfills_only_missing_attachable_members() {
-    let member = |name: &str, cli: &str, sid: &str| -> Map<String, Value> {
-        let mut m = Map::new();
-        m.insert("name".to_string(), Value::from(name));
-        m.insert("cli".to_string(), Value::from(cli));
-        m.insert("sessionId".to_string(), Value::from(sid));
-        m
-    };
     let rendered: std::collections::HashSet<String> =
         ["orch".to_string(), "scout".to_string()].into();
     let picked = _members_to_backfill(
         &rendered,
         vec![
-            member("orch", "claude", "sid-1"),  // already rendered
-            member("scout", "claude", "sid-2"), // already rendered
-            member("sage", "grok", "sid-3"),    // missing -> backfill
-            member("ghost", "grok", ""),        // no engine identity
-            member("shelly", "bash", "sid-4"),  // not an agent CLI
+            member_row("orch", "claude", "sid-1"),  // already rendered
+            member_row("scout", "claude", "sid-2"), // already rendered
+            member_row("sage", "grok", "sid-3"),    // missing -> backfill
+            member_row("ghost", "grok", ""),        // no engine identity
+            member_row("shelly", "bash", "sid-4"),  // not an agent CLI
         ],
     );
     let names: Vec<String> = picked.iter().map(|m| map_str(m, "name")).collect();
@@ -40,23 +35,22 @@ fn test_attach_backfills_only_missing_attachable_members() {
 /// Temp `$HIVE_HOME` + an inside-tmux env, held for the test's lifetime.
 struct DisplayEnv {
     _tmp: tempfile::TempDir,
-    _guard: std::sync::MutexGuard<'static, ()>,
+    env: EnvGuard,
 }
 
 fn display_env() -> DisplayEnv {
-    let guard = crate::registry::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    // Claude's pane→job records (`Team::load` reads them for claude member
+    // panes) come from a throwaway tree, never the developer's own.
+    env.set("CLAUDE_HOME", tmp.path().join(".claude"));
+    env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     // Inside tmux: the jump must never reach exec_attach, which would
     // replace the test process with `tmux attach`.
-    std::env::set_var("TMUX", "/tmp/hive-test-tmux,1,0");
-    std::env::set_var("TMUX_PANE", "%0");
-    DisplayEnv {
-        _tmp: tmp,
-        _guard: guard,
-    }
+    env.set("TMUX", "/tmp/hive-test-tmux,1,0");
+    env.set("TMUX_PANE", "%0");
+    DisplayEnv { _tmp: tmp, env }
 }
 
 fn member_row(name: &str, cli: &str, session_id: &str) -> Map<String, Value> {
@@ -78,6 +72,18 @@ type Argv = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
 /// own fake in test builds while `attach.rs` calls the real module. Only the
 /// real module's argv is recorded — which is the half that writes.
 fn fake_tmux(windows: &'static str, panes: &'static [&'static str]) -> Argv {
+    fake_tmux_tagged(windows, panes, &[])
+}
+
+/// `fake_tmux` whose `show-options -p` also answers pane tags:
+/// `(pane, key, value)` rows, `key` without the `@` (`hive-team`). Tagging
+/// the caller's own pane (`%0` under `display_env`) is what lets a verb with
+/// no team argument discover its team through the binding ladder.
+fn fake_tmux_tagged(
+    windows: &'static str,
+    panes: &'static [&'static str],
+    pane_tags: &'static [(&'static str, &'static str, &'static str)],
+) -> Argv {
     crate::team::_set_fake_tmux_run(move |_args, _check| {
         Ok(crate::tmux::Run {
             returncode: 0,
@@ -120,6 +126,19 @@ fn fake_tmux(windows: &'static str, panes: &'static [&'static str]) -> Argv {
                     rows.extend(extra_rows.iter().cloned());
                     rows.join("\n")
                 }
+            }
+            "show-options" => {
+                // show-options -p -v -t <pane> @<key>
+                let pane = args.get(4).map(String::as_str).unwrap_or_default();
+                let key = args
+                    .get(5)
+                    .and_then(|opt| opt.strip_prefix('@'))
+                    .unwrap_or_default();
+                pane_tags
+                    .iter()
+                    .find(|(p, k, _)| *p == pane && *k == key)
+                    .map(|(_, _, v)| (*v).to_string())
+                    .unwrap_or_default()
             }
             "display-message" => match args.last().map(String::as_str).unwrap_or_default() {
                 "#{session_name}" => "dev".to_string(),
@@ -592,8 +611,9 @@ fn test_uuid4_shape() {
 
 #[test]
 fn test_plugin_setup_drives_both_clis_in_order() {
+    let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let log = tmp.path().join("calls.log");
@@ -607,7 +627,7 @@ fn test_plugin_setup_drives_both_clis_in_order() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
 
     admin::plugin_setup();
 
@@ -639,15 +659,9 @@ fn test_plugin_setup_drives_both_clis_in_order() {
 
 #[test]
 fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
-    let _guard = crate::registry::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-    std::env::remove_var("TMUX");
-    std::env::remove_var("TMUX_PANE");
-    std::env::remove_var("CODEX_THREAD_ID");
-    std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
     let workspaceless = crate::team::Team {
         name: "hornet".to_string(),
         ..Default::default()
@@ -672,4 +686,401 @@ fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
         spawn::_task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
         Some("/tmp/ws-hn".to_string())
     );
+}
+
+// --- handler-level tests: doctor / spawn --task / inject / capture -------
+//
+// Same shape as the attach/render tests above: a registry under a temp
+// `$HIVE_HOME`, the tmux double recording argv, and the seams the handler
+// crosses answered by their own hooks. The oracle is always something the
+// handler left behind — a registry row, a recorded request, an argv.
+
+/// Healthy identity for the hived hook's ping, so `_ensure_team_hived`
+/// believes a hived is up and starts none. Every other request still goes
+/// to the real workspace socket: unanswered when nothing listens there,
+/// answered by `fake_hived` when a test binds it.
+fn hived_answering_ping(team: &str) -> crate::hived::testhook::Guard {
+    let team = team.to_string();
+    let mut hook = crate::hived::testhook::Hook::default();
+    hook.request_ping = Some(std::sync::Arc::new(move |_ws: &str| {
+        let mut identity = Map::new();
+        identity.insert("ok".to_string(), Value::Bool(true));
+        identity.insert(
+            "apiVersion".to_string(),
+            Value::from(crate::hived::HIVED_API_VERSION),
+        );
+        identity.insert(
+            "buildHash".to_string(),
+            Value::from(crate::hived::hived_build_hash()),
+        );
+        identity.insert("team".to_string(), Value::from(team.clone()));
+        Some(identity)
+    }));
+    crate::hived::testhook::install(hook)
+}
+
+/// A hived stand-in on the workspace socket: records every request it is
+/// sent and answers each with `{ok: true, msgId: "m-<n>"}`.
+struct FakeHived {
+    path: std::path::PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<Map<String, Value>>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeHived {
+    fn bind(workspace: &str) -> FakeHived {
+        use std::io::{Read, Write};
+        let path = crate::hived::_socket_path(workspace);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stop_seen, log) = (
+            std::sync::Arc::clone(&stop),
+            std::sync::Arc::clone(&requests),
+        );
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_seen.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else { break };
+                let mut body = Vec::new();
+                let _ = stream.read_to_end(&mut body);
+                let request: Map<String, Value> = serde_json::from_slice(&body).unwrap();
+                let mut log = log.lock().unwrap();
+                log.push(request);
+                let reply = json!({"ok": true, "msgId": format!("m-{}", log.len())});
+                let _ = stream.write_all(reply.to_string().as_bytes());
+            }
+        });
+        FakeHived {
+            path,
+            stop,
+            requests,
+            thread: Some(thread),
+        }
+    }
+
+    fn requests(&self) -> Vec<Map<String, Value>> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeHived {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wake the accept loop so it sees the flag.
+        let _ = std::os::unix::net::UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[test]
+fn test_doctor_without_a_reachable_hived_reports_run_dir_and_logs() {
+    let env = display_env();
+    let ws = env._tmp.path().join("ws").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&ws).unwrap();
+    let argv = fake_tmux("", &[]);
+    let _hived = hived_answering_ping("honey");
+    let mut t = Team {
+        name: "honey".to_string(),
+        workspace: ws.clone(),
+        ..Default::default()
+    };
+
+    let (report, healthy) = core_cmds::_doctor_report(&mut t, &ws, "orch");
+
+    assert!(!healthy);
+    let workspace = std::path::Path::new(&ws);
+    assert_eq!(report["workspace"], Value::from(ws.as_str()));
+    assert_eq!(
+        report["runDir"],
+        Value::from(
+            crate::devlog::run_dir(workspace)
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    assert_eq!(
+        report["logs"],
+        Value::Object(crate::devlog::log_paths(workspace))
+    );
+    assert_eq!(report["hived"]["ok"], Value::Bool(false));
+    assert_eq!(
+        report["hived"]["error"],
+        Value::from(crate::devlog::hived_unavailable_message(workspace))
+    );
+    assert!(report.get("duplicateTeams").is_none());
+    // The hook answered the ping, so no hived was started, and the socket
+    // the doctor request then looked for is still absent.
+    assert!(!crate::hived::_socket_path(&ws).exists());
+    // Read-only on tmux: window identity and duplicate-binding lookups.
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| matches!(a[0].as_str(), "display-message" | "list-windows")));
+}
+
+#[test]
+fn test_spawn_with_a_task_rosters_the_headless_member_and_dispatches_the_artifact() {
+    let env = display_env();
+    let ws = env._tmp.path().join("ws").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&ws).unwrap();
+    let task = env._tmp.path().join("task.md");
+    std::fs::write(&task, "review the diff\n").unwrap();
+    let task_path = std::fs::canonicalize(&task)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    crate::registry::record_team(
+        "honey",
+        &ws,
+        "100.0",
+        &[member_row("orch", "grok", "sid-orch")],
+        "",
+    )
+    .unwrap();
+    // No window for the team: the spawn is engine-only. The caller's own
+    // pane is orch's, which is who signs the dispatch.
+    let argv = fake_tmux_tagged(
+        "",
+        &[],
+        &[("%0", "hive-team", "honey"), ("%0", "hive-agent", "orch")],
+    );
+    let _agent = crate::agent::testhook::install(crate::agent::testhook::Hook::new());
+    let _hived = hived_answering_ping("honey");
+    let fake_hived = FakeHived::bind(&ws);
+
+    spawn::spawn(
+        "bee",
+        "",
+        "",
+        "",
+        "",
+        &[],
+        Some("claude"),
+        Some(task.to_string_lossy().as_ref()),
+        "honey",
+    );
+
+    // The member exists in the registry: claude, the minted job as its
+    // identity, the spawner's cwd (no --cwd was given).
+    let entry = crate::registry::load("honey").unwrap();
+    let bee = entry["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "bee")
+        .expect("bee on the roster");
+    assert_eq!(bee["cli"], Value::from("claude"));
+    assert_eq!(bee["sessionId"], Value::from("abcd1234"));
+    assert_eq!(bee["cwd"], Value::from(getcwd()));
+    // The engine was minted under the member's label with the bootstrap
+    // prompt alone — the task rides the message, not the birth prompt.
+    let spawns = crate::agent::testhook::with(|h| h.spawns.clone()).unwrap();
+    assert_eq!(spawns.len(), 1, "{spawns:?}");
+    assert_eq!(spawns[0].name, "honey.bee");
+    assert_eq!(
+        spawns[0].prompt,
+        crate::agent::compose_initial_prompt("claude", "hive:hive", "", "honey")
+    );
+    assert!(!spawns[0].prompt.contains(&task_path));
+    // One send reached the hived: orch → bee, the artifact being the task
+    // file by its canonical path.
+    let requests = fake_hived.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let sent = &requests[0];
+    assert_eq!(sent["action"], Value::from("send"));
+    assert_eq!(sent["team"], Value::from("honey"));
+    assert_eq!(sent["senderAgent"], Value::from("orch"));
+    assert_eq!(sent["targetAgent"], Value::from("bee"));
+    assert_eq!(sent["body"], Value::from("task dispatch: task.md"));
+    assert_eq!(sent["artifact"], Value::from(task_path.as_str()));
+    assert_eq!(sent["replyTo"], Value::from(""));
+    // Headless: tmux saw no window built and no keystroke.
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !matches!(a[0].as_str(), "new-window" | "split-window" | "send-keys")));
+}
+
+/// A rendered team as `Team::load` resolves it: orch and sage (grok) and
+/// bee (claude) each on a pane of the team window. Built in memory — the
+/// registry-plus-window resolution is `team.rs`'s own contract.
+fn rendered_team() -> Team {
+    use crate::agent::testhook::fake_agent;
+    Team {
+        name: "honey".to_string(),
+        agents: vec![
+            fake_agent("orch", "honey", "%1", "grok"),
+            fake_agent("sage", "honey", "%2", "grok"),
+            fake_agent("bee", "honey", "%3", "claude"),
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_inject_types_into_the_members_pane_and_refuses_a_pane_with_no_composer() {
+    let _env = display_env();
+    let t = rendered_team();
+    let _agent = crate::agent::testhook::install(crate::agent::testhook::Hook::new());
+    let calls = || crate::agent::testhook::with(|h| std::mem::take(&mut h.calls)).unwrap();
+
+    // A grok member: the text and Enter go to that member's pane.
+    crate::agent::testhook::with(|h| h.resolve_profile_name = Some("grok".to_string()));
+    let report = _inject_report(&t, "sage", "hello sage").unwrap();
+    assert_eq!(report["pane"], Value::from("%2"));
+    assert_eq!(report["member"], Value::from("sage"));
+    assert_eq!(report["success"], Value::Bool(true));
+    assert_eq!(calls(), vec!["hello sage", "<Enter>"]);
+
+    // A claude member whose pane has no job record and no interactive
+    // claude process (an attach viewer): refused by pane id, nothing typed.
+    crate::agent::testhook::with(|h| {
+        h.resolve_profile_name = Some("claude".to_string());
+        h.job_id_for_pane = None;
+        h.interactive_claude_pid = None;
+    });
+    let err = _inject_report(&t, "bee", "hello bee")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no interactive claude process on pane %3"),
+        "{err}"
+    );
+    assert_eq!(calls(), Vec::<String>::new());
+
+    // Not on the roster: named, and no pane is touched.
+    let err = _inject_report(&t, "ghost", "hello")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("member 'ghost' not found in team 'honey'"),
+        "{err}"
+    );
+    assert_eq!(calls(), Vec::<String>::new());
+}
+
+#[test]
+fn test_capture_reads_the_members_own_pane() {
+    let _env = display_env();
+    let argv = fake_tmux("", &[]);
+    let t = rendered_team();
+
+    let text = _capture_text(&t, "sage", 40).unwrap();
+
+    // One capture, of sage's pane — not the caller's (%0) nor orch's.
+    assert_eq!(
+        argv.borrow().as_slice(),
+        &[args(&["capture-pane", "-t", "%2", "-p", "-S", "-40"])]
+    );
+    assert_eq!(text, "");
+    let err = _capture_text(&t, "ghost", 40).unwrap_err().to_string();
+    assert!(
+        err.contains("member 'ghost' not found in team 'honey'"),
+        "{err}"
+    );
+    assert_eq!(argv.borrow().len(), 1);
+}
+
+// --- shell-init / resume-hint ----------------------------------------------
+
+/// The launcher script must be sourceable by both shells it claims and leave
+/// the three launchers defined as functions.
+#[test]
+fn test_shell_init_script_parses_in_zsh_and_bash_and_defines_the_launchers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("hive-init.sh");
+    std::fs::write(&path, _shell_init_script("zsh")).unwrap();
+    let quoted = shlex_quote(&path.to_string_lossy());
+    let run = |shell: &str, argv: &[&str]| {
+        let out = std::process::Command::new(shell)
+            .args(argv)
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} must be runnable for this test: {e}"));
+        assert!(
+            out.status.success(),
+            "{shell} {argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // Syntax only, no rc files.
+    run("zsh", &["-f", "-n", &path.to_string_lossy()]);
+    run(
+        "bash",
+        &["--noprofile", "--norc", "-n", &path.to_string_lossy()],
+    );
+    // Sourced: each launcher is a function in both dialects.
+    assert_eq!(
+        run(
+            "zsh",
+            &[
+                "-f",
+                "-c",
+                &format!("source {quoted}; whence -w hclaude hcodex hgrok")
+            ]
+        ),
+        "hclaude: function\nhcodex: function\nhgrok: function\n"
+    );
+    assert_eq!(
+        run(
+            "bash",
+            &[
+                "--noprofile",
+                "--norc",
+                "-c",
+                &format!("source {quoted}; declare -F hclaude hcodex hgrok"),
+            ]
+        ),
+        "hclaude\nhcodex\nhgrok\n"
+    );
+}
+
+#[test]
+fn test_shell_init_resolves_the_dialect_from_shell_env() {
+    let mut env = EnvGuard::new();
+    assert_ne!(_shell_init_script("fish"), _shell_init_script("zsh"));
+    env.set("SHELL", "/opt/homebrew/bin/fish");
+    assert_eq!(_shell_init_script(""), _shell_init_script("fish"));
+    env.set("SHELL", "/bin/bash");
+    assert_eq!(_shell_init_script(""), _shell_init_script("zsh"));
+    env.remove("SHELL");
+    assert_eq!(_shell_init_script(""), _shell_init_script("zsh"));
+}
+
+#[test]
+fn test_resume_hint_needs_a_tagged_member_pane_and_its_job_record() {
+    let mut env = display_env();
+    env.env.set("TMUX_PANE", "%5");
+    let _argv = fake_tmux_tagged(
+        "",
+        &[],
+        &[("%5", "hive-team", "honey"), ("%5", "hive-agent", "bee")],
+    );
+
+    // A member pane with no job record: nothing to resume, no hint.
+    assert_eq!(_resume_hint("claude", "/tmp/w"), None);
+
+    crate::adapters::claude_bg::write_pane_job("%5", "job-77", "sess-77", "/tmp/w").unwrap();
+    let hint = _resume_hint("claude", "/tmp/w").expect("a recorded job is resumable");
+    assert!(hint.starts_with("Resume from anywhere:\n  "), "{hint}");
+    assert!(
+        hint.contains("cd /tmp/w && hive claude --resume job-77"),
+        "{hint}"
+    );
+
+    // The record alone is not enough: an untagged pane is nobody's member.
+    env.env.set("TMUX_PANE", "%6");
+    crate::adapters::claude_bg::write_pane_job("%6", "job-78", "sess-78", "/tmp/w").unwrap();
+    assert_eq!(_resume_hint("claude", "/tmp/w"), None);
 }

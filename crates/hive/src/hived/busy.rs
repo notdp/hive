@@ -159,26 +159,7 @@ pub fn _native_daemon_busy_impl(pane_id: &str) -> Option<bool> {
 
 /// Public ``busy`` signal: true when the agent is in mid-turn.
 pub fn _pane_is_truly_busy(pane_id: &str, monitor: Option<&dyn OutputMonitor>) -> bool {
-    if pane_id.is_empty() {
-        return false;
-    }
-
-    if let Some(app_busy) = hooked_native_daemon_busy(pane_id) {
-        return app_busy;
-    }
-
-    let monitor_busy = monitor
-        .map(|m| m.is_busy(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS))
-        .unwrap_or(false);
-    if monitor_busy {
-        let progressed =
-            hooked_transcript_progressed_recently(pane_id, BUSY_OUTPUT_THRESHOLD_SECONDS);
-        if progressed != Some(false) {
-            return true;
-        }
-    }
-
-    false
+    _is_output_busy(pane_id, monitor, None)
 }
 
 pub fn _busy_output_payload_impl(pane_id: &str) -> Map<String, Value> {
@@ -191,7 +172,10 @@ pub fn _busy_output_payload_impl(pane_id: &str) -> Map<String, Value> {
     map
 }
 
-/// idle-notify variant of `_pane_is_truly_busy` with the inactive_age clamp.
+/// Busy verdict: the native daemon/registry answer when one exists, else
+/// the output monitor gated by transcript progress. With an `inactive_age`
+/// (idle-notify's window-inactive boundary) output the user already saw
+/// while the window was active does not count.
 pub fn _is_output_busy(
     pane_id: &str,
     monitor: Option<&dyn OutputMonitor>,

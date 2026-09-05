@@ -204,10 +204,6 @@ pub fn get_profile(command: &str) -> Option<&'static CLIProfile> {
     profile_by_name(&normalize_command(command))
 }
 
-pub fn detect_profile_from_pane_command(command: &str) -> Option<&'static CLIProfile> {
-    get_profile(command)
-}
-
 pub fn detect_profile_from_text(text: &str) -> Option<&'static CLIProfile> {
     let value = text.trim().to_lowercase();
     if value.is_empty() {
@@ -231,7 +227,7 @@ const _SCRIPT_RUNTIMES: [&str; 1] = ["node"];
 
 /// CLI identity from process fields, not argument text.
 ///
-/// Matches the executable itself (ps comm / argv[0]) or the verified script
+/// Matches the executable itself (ps comm / `argv[0]`) or the verified script
 /// runtime shape `node <.../codex|claude> ...`. Later argv tokens are the
 /// process's own arguments — `rg codex src` is a search, not a CLI — so
 /// they are never scanned.
@@ -435,8 +431,7 @@ fn adapter_for(name: &str) -> Option<Box<dyn SessionAdapter>> {
 /// engine still counts as a live claude. Any probe failure fails closed to
 /// None.
 pub fn detect_cli_process_for_pane(pane_id: &str) -> Option<&'static CLIProfile> {
-    let profile =
-        detect_profile_from_pane_command(&pane_current_command(pane_id).unwrap_or_default());
+    let profile = get_profile(&pane_current_command(pane_id).unwrap_or_default());
     if profile.is_some() {
         return profile;
     }
@@ -626,6 +621,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
+    use crate::testenv::EnvGuard;
+
     use serde_json::{json, Map, Value};
 
     use super::test_hooks::{PaneProbes, ADAPTER_GET, PANE_PROBES};
@@ -643,12 +640,13 @@ mod tests {
         ADAPTER_GET.with(|g| *g.borrow_mut() = Some(Box::new(f)));
     }
 
-    /// Points the claude_bg job-record probes at a disposable tree the way
-    /// conftest.py redirects CLAUDE_HOME for every test.
-    fn isolate_claude_home() -> tempfile::TempDir {
+    /// Points the claude_bg job-record probes at a disposable CLAUDE_HOME
+    /// for the test's lifetime.
+    fn isolate_claude_home() -> (tempfile::TempDir, EnvGuard) {
         let dir = tempfile::TempDir::new().unwrap();
-        std::env::set_var("CLAUDE_HOME", dir.path());
-        dir
+        let mut env = EnvGuard::new();
+        env.set("CLAUDE_HOME", dir.path());
+        (dir, env)
     }
 
     fn proc(pid: &str, command: &str, argv: &str) -> TTYProcessInfo {
@@ -805,16 +803,10 @@ mod tests {
         fn find_session_file(&self, _session_id: &str, _cwd: Option<&str>) -> Option<PathBuf> {
             unreachable!()
         }
-        fn list_sessions(&self, _cwd: Option<&str>, _limit: Option<usize>) -> Vec<SessionMeta> {
-            unreachable!()
-        }
         fn read_meta(&self, _path: &Path) -> Option<SessionMeta> {
             unreachable!()
         }
         fn iter_messages(&self, _path: &Path) -> Box<dyn Iterator<Item = Message>> {
-            unreachable!()
-        }
-        fn message_from_record(&self, _payload: &Map<String, Value>) -> Option<Message> {
             unreachable!()
         }
     }
@@ -881,24 +873,14 @@ mod tests {
                 None
             }
         }
-        fn list_sessions(&self, _cwd: Option<&str>, _limit: Option<usize>) -> Vec<SessionMeta> {
-            unreachable!()
-        }
-        fn read_meta(&self, path: &Path) -> Option<SessionMeta> {
+        fn read_meta(&self, _path: &Path) -> Option<SessionMeta> {
             Some(SessionMeta {
                 session_id: "sess-app".to_string(),
-                cli_name: "codex".to_string(),
                 cwd: None,
-                title: None,
-                started_at: None,
-                jsonl_path: path.to_path_buf(),
                 model: Some("gpt-5.5".to_string()),
             })
         }
         fn iter_messages(&self, _path: &Path) -> Box<dyn Iterator<Item = Message>> {
-            unreachable!()
-        }
-        fn message_from_record(&self, _payload: &Map<String, Value>) -> Option<Message> {
             unreachable!()
         }
     }
@@ -1103,7 +1085,8 @@ mod tests {
     fn test_validate_spawn_model_accepts_a_catalog_hit() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = codex_cache(dir.path(), &["gpt-5.6-sol", "gpt-5.5"]);
-        std::env::set_var("CODEX_HOME", &home);
+        let mut env = EnvGuard::new();
+        env.set("CODEX_HOME", &home);
         assert_eq!(validate_spawn_model("codex", "gpt-5.6-sol"), None);
     }
 
@@ -1111,7 +1094,8 @@ mod tests {
     fn test_validate_spawn_model_rejects_a_miss_with_a_hint() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = codex_cache(dir.path(), &["gpt-5.6-sol", "gpt-5.5"]);
-        std::env::set_var("CODEX_HOME", &home);
+        let mut env = EnvGuard::new();
+        env.set("CODEX_HOME", &home);
         let error = validate_spawn_model("codex", "gpt-5.6-sole").expect("error");
         assert!(error.contains("gpt-5.6-sole") && error.contains("gpt-5.6-sol"));
     }
@@ -1120,7 +1104,8 @@ mod tests {
     fn test_validate_spawn_model_reads_the_grok_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = grok_cache(dir.path(), &["grok-4.6", "grok-4.5"]);
-        std::env::set_var("GROK_HOME", &home);
+        let mut env = EnvGuard::new();
+        env.set("GROK_HOME", &home);
         assert_eq!(validate_spawn_model("grok", "grok-4.6"), None);
         assert!(validate_spawn_model("grok", "grok-build").is_some());
     }
@@ -1128,8 +1113,9 @@ mod tests {
     #[test]
     fn test_validate_spawn_model_fails_open_without_a_catalog() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::env::set_var("CODEX_HOME", dir.path().join("empty"));
-        std::env::set_var("GROK_HOME", dir.path().join("empty"));
+        let mut env = EnvGuard::new();
+        env.set("CODEX_HOME", dir.path().join("empty"));
+        env.set("GROK_HOME", dir.path().join("empty"));
         assert_eq!(validate_spawn_model("codex", "gpt-anything"), None);
         assert_eq!(validate_spawn_model("grok", "grok-anything"), None);
         // claude keeps no local catalog: always the CLI's own call
@@ -1146,8 +1132,9 @@ mod tests {
         // no catalog needed: a gpt model on claude is wrong whatever the
         // catalog says
         let dir = tempfile::TempDir::new().unwrap();
-        std::env::set_var("CODEX_HOME", dir.path().join("none"));
-        std::env::set_var("GROK_HOME", dir.path().join("none"));
+        let mut env = EnvGuard::new();
+        env.set("CODEX_HOME", dir.path().join("none"));
+        env.set("GROK_HOME", dir.path().join("none"));
         assert!(validate_spawn_model("claude", "gpt-5.5").is_some());
         assert!(validate_spawn_model("claude", "grok-4.6").is_some());
         assert!(validate_spawn_model("codex", "claude-opus-5").is_some());

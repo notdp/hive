@@ -27,9 +27,9 @@ pub enum FoldKind {
 /// Transcript view density (hive's own design, session-local): `normal` is
 /// today's rendering, `verbose` expands thinking and tool execution blocks.
 ///
-/// There was a `thinking` level between them; it went away when it turned
-/// out claude no longer records thinking text, which left it expanding a
-/// row of empty blocks.
+/// There was a `thinking` level between them; it went away because claude
+/// persists thinking text only about half the time, which left it expanding
+/// a row of empty blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Density {
     Normal,
@@ -275,7 +275,7 @@ pub fn find_match(
         return None;
     }
     let needle = query.to_lowercase();
-    let hit = |&(_, ref text): &(u64, String)| text.to_lowercase().contains(&needle);
+    let hit = |(_, text): &(u64, String)| text.to_lowercase().contains(&needle);
     let pivot = current.and_then(|id| entries.iter().position(|&(eid, _)| eid == id));
     let n = entries.len();
     let order: Vec<usize> = if forward {

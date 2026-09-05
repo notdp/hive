@@ -1,5 +1,4 @@
-//! Behavioral tests for the embedded `cvim-command` bash asset, driven the
-//! way `tests/unit/test_cvim_command.py` drives the Python-era copy: a fake
+//! Behavioral tests for the embedded `cvim-command` bash asset: a fake
 //! tmux/ps/editor on PATH, the real hive binary as $HIVE_BIN for the hidden
 //! `cvim-*` helper subcommands.
 //!
@@ -18,7 +17,8 @@ const CVIM_COMMAND: &str = include_str!("../assets/cvim/bin/cvim-command");
 const MENU_VIM: &str = include_str!("../assets/cvim/resources/menu.vim");
 const PROTOCOL_JSON: &str = include_str!("../assets/cvim/resources/cvim_edit_protocol.json");
 
-/// Same fake tmux as tests/unit/test_cvim_command.py::_write_fake_tmux.
+/// Fake tmux: answers the queries cvim-command makes from `FAKE_TMUX_STATE`
+/// and journals every mutating call to `FAKE_TMUX_ACTIONS`.
 const FAKE_TMUX: &str = r##"#!/usr/bin/env python3
 import json
 import os
@@ -426,8 +426,7 @@ fn test_cvim_menu_mode_activates_with_session_seed_and_no_offset() {
     let content: String = rows.iter().map(|r| format!("{r}\n")).collect();
     fs::write(&transcript, content).unwrap();
 
-    // HIVE_BIN wrapper: cvim-session answers with the fixture transcript
-    // (the Python test overwrote the cvim-session script the same way);
+    // HIVE_BIN wrapper: cvim-session answers with the fixture transcript;
     // everything else goes to the real binary.
     let wrapper = harness.path().join("hive-wrapper");
     write_script(

@@ -7,6 +7,7 @@ discipline rubric, the way the human reads a jsonl.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 
@@ -101,7 +102,6 @@ def test_semantic_coroner(rig):
         '只输出 JSON:{"violations":[{"member":"...","kind":"...","evidence":"..."}]}。没有违规输出 {"violations":[]}。\n\n'
         "材料:\n" + json.dumps(material, ensure_ascii=False)
     )
-    import os
     coroner_env = {
         k: v for k, v in os.environ.items()
         if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC"))

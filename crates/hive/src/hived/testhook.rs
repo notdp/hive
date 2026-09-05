@@ -1,16 +1,15 @@
 // --------------------------------------------------------------------------
-// test hook: one process-global environment double, mirroring what the
-// Python suite pins with monkeypatch. Closures instead of data so each test
-// wires exactly the behavior its Python original monkeypatched.
+// test hook: one process-global environment double. Closures instead of
+// data so each test wires exactly the behavior it needs and nothing else.
 // --------------------------------------------------------------------------
 
 use super::{AdapterHandle, ExecOutcome, HivedServerApi, OutputMonitor};
 use crate::adapters::base::GateResult;
-use crate::adapters::claude_bg::EngineSession;
+use crate::adapters::claude_bg::{EngineSession, PaneJob};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::ThreadRuntime;
-use crate::adapters::grok_leader::SessionRuntime;
+use crate::adapters::grok_leader::{SessionRecord, SessionRuntime};
 use crate::agent::{Agent, DeliveryError};
 use crate::team::Team;
 use serde_json::{Map, Value};
@@ -21,8 +20,8 @@ pub type F0<R> = Arc<dyn Fn() -> R + Send + Sync>;
 pub type S1<R> = Arc<dyn Fn(&str) -> R + Send + Sync>;
 pub type S2<R> = Arc<dyn Fn(&str, &str) -> R + Send + Sync>;
 
-/// The two adapter methods the hived consumes (Python fakes stub only
-/// `resolve_current_session_id` / `find_session_file`).
+/// The two adapter methods the hived consumes
+/// (`resolve_current_session_id` / `find_session_file`).
 #[derive(Clone)]
 pub struct FakeAdapter {
     pub resolve: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
@@ -51,7 +50,7 @@ pub struct Hook {
     pub resolve_model_for_pane: Option<Arc<dyn Fn(&str, &str, &str) -> String + Send + Sync>>,
     pub member_role_for_pane: Option<S1<&'static str>>,
     // claude_bg
-    pub cb_read_pane_job: Option<S1<Option<(String, String, String)>>>,
+    pub cb_read_pane_job: Option<S1<Option<PaneJob>>>,
     pub cb_engine_session_for_job: Option<S1<Option<EngineSession>>>,
     pub cb_list_jobs: Option<F0<Option<Vec<Map<String, Value>>>>>,
     pub cb_job_id_for_pane: Option<S1<Option<String>>>,
@@ -82,7 +81,7 @@ pub struct Hook {
     pub gl_runtime_for_pane: Option<S1<Option<SessionRuntime>>>,
     pub gl_runtime_for_key: Option<S1<Option<SessionRuntime>>>,
     pub gl_session_id_for_pane: Option<S1<Option<String>>>,
-    pub gl_read_session_key: Option<S1<Option<(String, String)>>>,
+    pub gl_read_session_key: Option<S1<Option<SessionRecord>>>,
     pub gl_list_daemon_keys: Option<F0<Vec<String>>>,
     pub gl_socket_path_for_key: Option<S1<PathBuf>>,
     pub gl_kill_daemon_key: Option<S1<()>>,
@@ -182,7 +181,7 @@ pub fn install(hook: Hook) -> Guard {
     Guard
 }
 
-/// Mutate the installed hook in place (mid-test re-monkeypatching).
+/// Mutate the installed hook in place mid-test.
 pub fn update(f: impl FnOnce(&mut Hook)) {
     if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         f(hook);

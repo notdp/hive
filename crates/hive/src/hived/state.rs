@@ -1,5 +1,5 @@
 // --------------------------------------------------------------------------
-// module state (Python module globals; nextest gives one process per test)
+// module state (process globals; nextest gives one process per test)
 // --------------------------------------------------------------------------
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::runtime_snapshot::RuntimeSnapshotStore;
 
-/// Public `busy` monitor duck type (Python passes the monitor object around).
+/// The pane-output busy monitor the serve loop holds; tests install fakes.
 pub trait OutputMonitor: Send + Sync {
     fn is_busy(&self, pane_id: &str, threshold_seconds: f64) -> bool;
     fn last_output_age(&self, pane_id: &str) -> Option<f64>;

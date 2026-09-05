@@ -12,7 +12,7 @@
 //! Interaction layer (grok's pager surface, read-only): Up/Down block
 //! selection with grok's bracket-frame highlight, Shift+Left/Right turn
 //! jumps, Left/Right (and double-click) per-block collapse/expand, Ctrl+E
-//! all-thinking toggle, Ctrl+O density cycle (normal/thinking/verbose),
+//! all-thinking toggle, Ctrl+O density cycle (normal/verbose),
 //! Enter/Ctrl+F full-screen block viewer, and a `/` command palette
 //! (/theme /view /find /quit) whose input types into the composer box, the
 //! dropdown anchored above it. Keystrokes still go nowhere by construction —

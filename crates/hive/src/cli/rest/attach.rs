@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
 use super::*;
@@ -11,24 +12,25 @@ use crate::tmux;
 pub fn inject_cmd(agent_name: &str, text: &str) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let t = t.expect("required resolve returned no team");
-    let agent = match t.get(agent_name) {
-        Ok(agent) => agent,
-        Err(_) => fail(&format!(
-            "member '{agent_name}' not found in team '{}'",
-            t.name
-        )),
-    };
-    // Documented low-level bypass: raw composer keystrokes for every CLI, so
-    // delivery paths (channel/RPC) can be debugged from outside themselves.
-    if let Err(exc) = crate::agent::_submit_interactive_text(&agent.pane_id, text, &agent.cli) {
-        fail(&exc.to_string());
-    }
+    let result = ok_or_fail(_inject_report(&t, agent_name, text));
+    println!("{}", json_pretty(&Value::Object(result)));
+}
+
+/// Type *text* into the member's composer and describe the delivery.
+///
+/// Documented low-level bypass: raw composer keystrokes for every CLI, so
+/// delivery paths (channel/RPC) can be debugged from outside themselves.
+pub(crate) fn _inject_report(t: &Team, agent_name: &str, text: &str) -> Result<Map<String, Value>> {
+    let agent = t
+        .get(agent_name)
+        .map_err(|_| anyhow!("member '{agent_name}' not found in team '{}'", t.name))?;
+    crate::agent::_submit_interactive_text(&agent.pane_id, text, &agent.cli)?;
     let mut result = Map::new();
     result.insert("member".to_string(), Value::String(agent_name.to_string()));
     result.insert("action".to_string(), Value::String("inject".to_string()));
     result.insert("pane".to_string(), Value::String(agent.pane_id.clone()));
     result.insert("success".to_string(), Value::Bool(true));
-    println!("{}", json_pretty(&Value::Object(result)));
+    Ok(result)
 }
 
 /// Run `/compact` on the literal pane. Returns the compaction status.
@@ -196,20 +198,33 @@ fn _bind_member_viewer(pane: &str, member: &Map<String, Value>, team: &str, ws: 
     ));
 }
 
+/// A member a pane can ride: engine identity recorded, on a CLI
+/// `_attach_launcher` has a resume form for.
+fn _attachable(member: &Map<String, Value>) -> bool {
+    truthy(member.get("sessionId")) && _attach_launcher(&map_str(member, "cli"), "").is_some()
+}
+
+fn _entry_members(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {
+    entry
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_object().cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Roster members an existing window should gain panes for: not rendered
-/// yet, engine identity recorded, and an attachable CLI — in roster order.
+/// yet and attachable — in roster order.
 pub(super) fn _members_to_backfill(
     rendered: &std::collections::HashSet<String>,
     members: Vec<Map<String, Value>>,
 ) -> Vec<Map<String, Value>> {
     _sorted_member_rows(members)
         .into_iter()
-        .filter(|member| {
-            let name = map_str(member, "name");
-            !rendered.contains(&name)
-                && truthy(member.get("sessionId"))
-                && matches!(map_str(member, "cli").as_str(), "claude" | "codex" | "grok")
-        })
+        .filter(|member| !rendered.contains(&map_str(member, "name")) && _attachable(member))
         .collect()
 }
 
@@ -230,17 +245,8 @@ fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> V
     if prev_pane.is_empty() {
         return Vec::new();
     }
-    let members: Vec<Map<String, Value>> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default();
     let mut added = Vec::new();
-    for member in _members_to_backfill(&rendered, members) {
+    for member in _members_to_backfill(&rendered, _entry_members(entry)) {
         let name = map_str(&member, "name");
         let cwd = map_str(&member, "cwd");
         let count = tmux::list_panes(window).len();
@@ -271,23 +277,11 @@ fn _backfill_missing_member_panes(window: &str, entry: &Map<String, Value>) -> V
 fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>, Vec<String>) {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
-    let members: Vec<Map<String, Value>> = entry
-        .get("members")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default();
-    let members = _sorted_member_rows(members);
+    let members = _sorted_member_rows(_entry_members(entry));
     let attachable_idx: Vec<usize> = members
         .iter()
         .enumerate()
-        .filter(|(_, member)| {
-            truthy(member.get("sessionId"))
-                && matches!(map_str(member, "cli").as_str(), "claude" | "codex" | "grok")
-        })
+        .filter(|(_, member)| _attachable(member))
         .map(|(index, _)| index)
         .collect();
     let mut skipped: Vec<String> = members
@@ -486,14 +480,14 @@ pub fn thread(message_id: &str) {
 pub fn capture(member_name: &str, lines: i64) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let t = t.expect("required resolve returned no team");
-    match t.get(member_name) {
-        Ok(agent) => {
-            let text = ok_or_fail(agent.capture(lines.max(0) as u32));
-            println!("{text}");
-        }
-        Err(_) => fail(&format!(
-            "member '{member_name}' not found in team '{}'",
-            t.name
-        )),
-    }
+    println!("{}", ok_or_fail(_capture_text(&t, member_name, lines)));
+}
+
+/// The last *lines* of the member's own pane (the pane its roster row
+/// resolved to), or the not-found refusal.
+pub(crate) fn _capture_text(t: &Team, member_name: &str, lines: i64) -> Result<String> {
+    let agent = t
+        .get(member_name)
+        .map_err(|_| anyhow!("member '{member_name}' not found in team '{}'", t.name))?;
+    agent.capture(lines.max(0) as u32)
 }

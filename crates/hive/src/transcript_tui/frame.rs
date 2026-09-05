@@ -114,8 +114,8 @@ fn now_ms() -> i64 {
 /// (views/turn_status.rs): the innermost unfinished block if there is one,
 /// otherwise the assistant is writing.
 fn activity_label(app: &App) -> String {
-    match app.parser.pending_entries().last().map(|e| e.block.clone()) {
-        Some(DisplayBlock::Thinking(_)) => "Thinking…".to_string(),
+    let pending = app.parser.pending_entries();
+    match pending.last().map(|e| &e.block) {
         Some(DisplayBlock::Run(r)) if !r.description.is_empty() => format!("{}…", r.description),
         Some(DisplayBlock::Run(_)) => "Running…".to_string(),
         Some(DisplayBlock::Tool(tool)) => format!("{}…", tool.name),
@@ -149,7 +149,7 @@ fn running_line(app: &App, inner_w: usize) -> Option<Line<'static>> {
             fg(t.gray),
         ),
     ];
-    let tokens = app.parser.tokens();
+    let tokens = app.parser.output_tokens();
     if tokens > 0 {
         let right = format!("⇣{}", fmt_tokens(tokens));
         let used = cells_width(&line_cells(&Line::from(spans.clone())));
@@ -162,7 +162,7 @@ fn running_line(app: &App, inner_w: usize) -> Option<Line<'static>> {
     Some(clip_spans(spans, inner_w))
 }
 
-fn bottom_line(t: &ViewTheme, _model: Option<&str>, inner_w: usize) -> Line<'static> {
+fn bottom_line(t: &ViewTheme, inner_w: usize) -> Line<'static> {
     // grok hint row: left-aligned "Key:label" pairs with │ separators
     // (Shift+Tab:mode │ Ctrl+x:shortcuts); model/effort live on the
     // composer's bottom border instead.
@@ -651,7 +651,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         // Palette input renders inside the box; the hint row stays below it.
         draw_composer(frame, app, bx);
         frame.render_widget(
-            Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
+            Paragraph::new(bottom_line(t, inner.width as usize)).style(base),
             hint_rect,
         );
         if app.palette.is_some() {
@@ -662,7 +662,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         draw_palette(frame, app, inner, hint_rect.y, Some(hint_rect));
     } else {
         frame.render_widget(
-            Paragraph::new(bottom_line(t, app.parser.model(), inner.width as usize)).style(base),
+            Paragraph::new(bottom_line(t, inner.width as usize)).style(base),
             hint_rect,
         );
     }

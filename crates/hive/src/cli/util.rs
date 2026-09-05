@@ -42,7 +42,6 @@ pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "claude",
     "grok",
     "resume-hint",
-    "skills",
     "worktree",
     "ls",
     "ccd",
@@ -68,7 +67,6 @@ pub(crate) const _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
     "plugin",
     "resume-hint",
     "shell-init",
-    "skills",
 ];
 
 pub const TEAM_NAME_POOL: [&str; 10] = [
@@ -105,7 +103,22 @@ pub(crate) fn getcwd() -> String {
 }
 
 /// Python `str(float)` for epoch timestamps: integral floats keep `.0`.
-pub(crate) use crate::team::py_float_str;
+pub(crate) use crate::pyval::{py_float_str, truthy};
+
+/// The hive binary that tmux hooks, the flow dock and the cvim asset call
+/// back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
+/// the bash asset, and integration tests (whose current_exe is the test
+/// harness) point hooks at the real binary with it.
+pub(crate) fn self_exe() -> String {
+    let overridden = env_string("HIVE_BIN");
+    if !overridden.is_empty() {
+        return overridden;
+    }
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "hive".to_string())
+}
 
 pub(crate) fn env_string(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
@@ -118,18 +131,6 @@ pub(crate) fn map_str(map: &Map<String, Value>, key: &str) -> String {
         Some(Value::Null) | None => String::new(),
         Some(Value::Bool(false)) => String::new(),
         Some(other) => other.to_string(),
-    }
-}
-
-/// Python truthiness for an optional JSON value.
-pub(crate) fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().map_or(true, |f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
     }
 }
 
@@ -490,11 +491,8 @@ pub(crate) fn _ensure_pane_in_scope(t: &Team, pane_id: &str) {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn _maybe_warn_long_body(body: &str, command: &str) {
-    if let Some(hint) = crate::runtime_state::body_warning_hint(body) {
-        eprintln!(
-            "{}",
-            crate::runtime_state::format_body_warning(command, &hint)
-        );
+    if let Some(hint) = crate::message::body_warning_hint(body) {
+        eprintln!("{}", crate::message::format_body_warning(command, &hint));
     }
 }
 
@@ -508,7 +506,7 @@ pub(crate) fn _root_send_protocol_error(body: &str) -> Option<String> {
     // artifact is not mandatory — short confirmations like "ack" legitimately
     // don't need one. The length/structure gate below already forces bulky or
     // structured content into --artifact.
-    if crate::runtime_state::body_warning_hint(summary).is_some() {
+    if crate::message::body_warning_hint(summary).is_some() {
         return Some(
             "new root send body must stay short and unstructured; move details into --artifact \
              (prefer `--artifact -` unless you already have a file)"
@@ -518,7 +516,7 @@ pub(crate) fn _root_send_protocol_error(body: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn _validate_root_send_protocol(body: &str, _artifact: &str) {
+pub(crate) fn _validate_root_send_protocol(body: &str) {
     if let Some(err) = _root_send_protocol_error(body) {
         fail(&err);
     }
@@ -553,13 +551,17 @@ pub(crate) fn _window_id_slug(window_id: &str, fallback_index: &str) -> String {
     format!("w{raw}")
 }
 
+/// Where auto workspaces live. The headless create takes it as a parameter
+/// so a test can point it somewhere it owns instead of the real `/tmp`.
+pub(crate) const _AUTO_WORKSPACE_ROOT: &str = "/tmp";
+
 pub(crate) fn _default_auto_workspace_path(
     session_name: &str,
     window_id: &str,
     fallback_index: &str,
 ) -> PathBuf {
-    PathBuf::from(format!(
-        "/tmp/hive-{session_name}-{}",
+    Path::new(_AUTO_WORKSPACE_ROOT).join(format!(
+        "hive-{session_name}-{}",
         _window_id_slug(window_id, fallback_index)
     ))
 }
@@ -877,19 +879,17 @@ pub(crate) fn _resolve_spawn_cli_name(cli_name: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
 
     // --- tests/unit/test_env_binding.py (env-lane cases) ---
 
-    fn clear_tmux_env() {
-        for key in [
-            "TMUX",
-            "TMUX_PANE",
-            "CODEX_THREAD_ID",
-            "GROK_SESSION_ID",
-            "CLAUDE_CODE_MESSAGING_SOCKET",
-        ] {
-            std::env::remove_var(key);
-        }
+    /// Isolated HIVE_HOME and CLAUDE_CONFIG_DIR under *tmp*, with no engine
+    /// identity inherited from the shell, for the test's lifetime.
+    fn isolated(tmp: &std::path::Path) -> EnvGuard {
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        env.set("HIVE_HOME", tmp.join(".hive"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.join(".claude"));
+        env
     }
 
     /// A grok member row on *team*, keyed by *session_id*.
@@ -912,15 +912,10 @@ mod tests {
         // A headless grok member has no pane, no thread and no Claude
         // socket: its leader exports GROK_SESSION_ID into every tool
         // subprocess, and that id keys its grok roster row.
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
         record_grok_member("honey", "/tmp/ws-h", "rex", "s-rex");
-        std::env::set_var("GROK_SESSION_ID", "s-rex");
+        env.set("GROK_SESSION_ID", "s-rex");
 
         let binding = _session_member_binding();
         assert_eq!(map_str(&binding, "team"), "honey");
@@ -942,60 +937,41 @@ mod tests {
         assert_eq!(_default_team(), None);
         assert_eq!(_default_agent(), None);
         assert_eq!(_self_member_for_team("honey"), "");
-
-        std::env::remove_var("GROK_SESSION_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_grok_session_ignores_a_row_of_another_cli() {
         // The row match is the identity: a claude row carrying the same id
         // is a stranger, exactly as it is for a codex thread.
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
         let mut member = Map::new();
         member.insert("name".to_string(), Value::String("orch".to_string()));
         member.insert("cli".to_string(), Value::String("claude".to_string()));
         member.insert("sessionId".to_string(), Value::String("s-both".to_string()));
         crate::registry::record_team("wasp", "/tmp/ws-w", "1.0", &[member], "").unwrap();
-        std::env::set_var("GROK_SESSION_ID", "s-both");
+        env.set("GROK_SESSION_ID", "s-both");
 
         assert!(_session_member_binding().is_empty());
         assert_eq!(_default_team(), None);
         assert_eq!(_default_agent(), None);
         assert_eq!(_self_member_for_team("wasp"), "");
-
-        std::env::remove_var("GROK_SESSION_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_grok_session_outranks_the_saved_context_file() {
         // The saved context file was written by the spawner and names the
         // orch; the member's own session row must outrank it.
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
         record_grok_member("hornet", "/tmp/ws-hn", "bee", "s-bee");
         crate::context::save_context_for_pane("", "hornet", "/tmp/ws-hn", LEAD_AGENT_NAME).unwrap();
 
         // context file alone: the orch answers
         assert_eq!(_self_member_for_team("hornet"), LEAD_AGENT_NAME);
 
-        std::env::set_var("GROK_SESSION_ID", "s-bee");
+        env.set("GROK_SESSION_ID", "s-bee");
         assert_eq!(_self_member_for_team("hornet"), "bee");
-
-        std::env::remove_var("GROK_SESSION_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
@@ -1003,13 +979,8 @@ mod tests {
         // A session that created or joined a team headless has no pane tags;
         // its scope lives in the registry row keyed by its sessionId — the
         // same authority `hive send` resolves guests by.
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
         let mut member = Map::new();
         member.insert("name".to_string(), Value::String("orch".to_string()));
         member.insert("cli".to_string(), Value::String("claude".to_string()));
@@ -1031,7 +1002,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/me.sock");
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/me.sock");
 
         assert_eq!(_default_team().as_deref(), Some("wasp"));
         assert_eq!(_default_agent().as_deref(), Some("orch"));
@@ -1039,24 +1010,17 @@ mod tests {
         assert_eq!(map_str(&binding, "workspace"), "/tmp/ws-w");
 
         // A session on no roster resolves nothing.
-        std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
         assert_eq!(_default_team(), None);
-        std::env::remove_var("CLAUDE_CODE_MESSAGING_SOCKET");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_default_team_resolves_headless_codex_member() {
         // A codex member spawned headless has no pane record and no Claude
         // socket; its CODEX_THREAD_ID keys a codex roster row.
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
+        env.set("CODEX_HOME", tmp.path().join(".codex"));
         let mut member = Map::new();
         member.insert("name".to_string(), Value::String("review".to_string()));
         member.insert("cli".to_string(), Value::String("codex".to_string()));
@@ -1068,7 +1032,7 @@ mod tests {
             crate::registry::record_team("rr", "/tmp/ws-rr", "1.0", &[member], "").unwrap(),
             "written"
         );
-        std::env::set_var("CODEX_THREAD_ID", "01aa-headless");
+        env.set("CODEX_THREAD_ID", "01aa-headless");
 
         assert_eq!(_default_team().as_deref(), Some("rr"));
         assert_eq!(_default_agent().as_deref(), Some("review"));
@@ -1078,23 +1042,16 @@ mod tests {
         assert_eq!(map_str(&binding, "pane"), "");
 
         // A thread on no roster resolves nothing.
-        std::env::set_var("CODEX_THREAD_ID", "01aa-ghost");
+        env.set("CODEX_THREAD_ID", "01aa-ghost");
         assert_eq!(_default_team(), None);
         assert_eq!(_default_agent(), None);
-        std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_codex_thread_ignores_claude_row_with_same_session_id() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("HIVE_HOME", tmp.path().join(".hive"));
-        std::env::set_var("CODEX_HOME", tmp.path().join(".codex"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
-        clear_tmux_env();
+        let mut env = isolated(tmp.path());
+        env.set("CODEX_HOME", tmp.path().join(".codex"));
         let mut member = Map::new();
         member.insert("name".to_string(), Value::String("orch".to_string()));
         member.insert("cli".to_string(), Value::String("claude".to_string()));
@@ -1103,33 +1060,27 @@ mod tests {
             Value::String("01aa-shared".to_string()),
         );
         crate::registry::record_team("wasp", "/tmp/ws-w", "1.0", &[member], "").unwrap();
-        std::env::set_var("CODEX_THREAD_ID", "01aa-shared");
+        env.set("CODEX_THREAD_ID", "01aa-shared");
 
         assert_eq!(_default_team(), None);
         assert_eq!(_default_agent(), None);
         assert!(_session_member_binding().is_empty());
-        std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
     fn test_unresolved_sender_defaults_to_orch_only_for_tmux_shell() {
-        let _guard = crate::registry::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        clear_tmux_env();
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
         // no tmux client, no engine marker: nothing to sign as
         assert_eq!(_unresolved_sender_fallback(), None);
         // a human shell inside a tmux client speaks as orch
-        std::env::set_var("TMUX", "/tmp/tmux-0/default,1,0");
+        env.set("TMUX", "/tmp/tmux-0/default,1,0");
         assert_eq!(_unresolved_sender_fallback().as_deref(), Some("orch"));
         // an engine marker makes it a member context even inside tmux
         for key in _ENGINE_MARKER_ENV {
-            std::env::set_var(key, "x");
+            env.set(key, "x");
             assert_eq!(_unresolved_sender_fallback(), None, "{key}");
-            std::env::remove_var(key);
+            env.remove(key);
         }
-        std::env::remove_var("TMUX");
     }
 
     #[test]

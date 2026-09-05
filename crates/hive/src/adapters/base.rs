@@ -4,6 +4,7 @@
 //! so callers can discover, locate, and read session JSONL files without
 //! knowing the per-CLI on-disk layout.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -12,8 +13,8 @@ use serde_json::{Map, Value};
 
 // --- timestamps -------------------------------------------------------------
 
-/// Minimal datetime standing in for Python's `datetime`: parsed civil fields
-/// plus an optional UTC offset (`None` mirrors a naive Python datetime).
+/// A parsed ISO-8601 timestamp: civil fields plus the UTC offset it carried
+/// (`None` when it carried none).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DateTime {
     pub year: i32,
@@ -27,27 +28,9 @@ pub struct DateTime {
 }
 
 impl DateTime {
-    /// `datetime.fromtimestamp(secs, timezone.utc)`.
-    pub fn from_timestamp_utc(secs: f64) -> DateTime {
-        let whole = secs.floor() as i64;
-        let micro = ((secs - whole as f64) * 1_000_000.0).round() as u32;
-        let days = whole.div_euclid(86_400);
-        let sod = whole.rem_euclid(86_400);
-        let (year, month, day) = civil_from_days(days);
-        DateTime {
-            year,
-            month,
-            day,
-            hour: (sod / 3600) as u32,
-            minute: ((sod % 3600) / 60) as u32,
-            second: (sod % 60) as u32,
-            microsecond: micro,
-            utc_offset_secs: Some(0),
-        }
-    }
-
-    /// Seconds since the Unix epoch, like `datetime.timestamp()`.
-    // ponytail: naive datetimes are treated as UTC (Python uses local time);
+    /// Seconds since the Unix epoch.
+    // ponytail: an offset-less timestamp is treated as UTC (the general case
+    // would apply the local zone);
     // hive transcripts always carry an offset, so the naive branch never fires.
     pub fn timestamp(&self) -> f64 {
         let days = days_from_civil(self.year, self.month, self.day);
@@ -70,29 +53,12 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    ((if m <= 2 { y + 1 } else { y }) as i32, m, d)
-}
-
 // --- core records -----------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionMeta {
     pub session_id: String,
-    pub cli_name: String,
     pub cwd: Option<String>,
-    pub title: Option<String>,
-    pub started_at: Option<DateTime>,
-    pub jsonl_path: PathBuf,
     pub model: Option<String>,
 }
 
@@ -131,20 +97,31 @@ pub trait SessionAdapter {
     /// former and is ignored by the latter.
     fn find_session_file(&self, session_id: &str, cwd: Option<&str>) -> Option<PathBuf>;
 
-    /// Enumerate known sessions, optionally filtered by `cwd`.
-    fn list_sessions(&self, cwd: Option<&str>, limit: Option<usize>) -> Vec<SessionMeta>;
-
     /// Parse the meta header of a JSONL session file.
     fn read_meta(&self, path: &Path) -> Option<SessionMeta>;
 
     /// Yield normalized [`Message`] records from a JSONL session file.
     fn iter_messages(&self, path: &Path) -> Box<dyn Iterator<Item = Message>>;
-
-    /// Normalize one raw JSONL record into a [`Message`] when possible.
-    fn message_from_record(&self, payload: &Map<String, Value>) -> Option<Message>;
 }
 
 // --- shared helpers ---------------------------------------------------------
+
+/// The spawner's env with every inherited identity marker washed, for a
+/// daemon that serves tool shells of its own: the spawner may itself run
+/// inside another member's engine (an orch's flow runner), and an inherited
+/// CLAUDE_CODE_MESSAGING_SOCKET — or any other CLAUDE*/ANTHROPIC* marker —
+/// would make every hive call from those shells resolve to the *spawner*.
+/// *drop* names the caller's further markers to wash by exact key.
+pub(crate) fn washed_spawner_env(drop: &[&str]) -> HashMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(key, _)| {
+            !(key.starts_with("CLAUDE")
+                || key.starts_with("ANTHROPIC")
+                || drop.contains(&key.as_str()))
+        })
+        .collect()
+}
 
 pub fn parse_iso_timestamp(value: Option<&Value>) -> Option<DateTime> {
     let raw = match value {
@@ -187,7 +164,7 @@ fn parse_isoformat(s: &str) -> Option<DateTime> {
         return None;
     }
     let rest = s.get(11..)?;
-    let (time_part, offset) = match rest.find(|c| c == '+' || c == '-') {
+    let (time_part, offset) = match rest.find(['+', '-']) {
         Some(i) => (&rest[..i], Some(&rest[i..])),
         None => (rest, None),
     };
@@ -257,6 +234,13 @@ pub fn safe_json_loads(line: &str) -> Option<Map<String, Value>> {
     }
 }
 
+/// The JSON object stored at *path*; None when the file is unreadable,
+/// unparseable, or holds anything but an object.
+pub fn read_json_object(path: &Path) -> Option<Map<String, Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    safe_json_loads(&text)
+}
+
 /// Normalize a process command/argv token for CLI matching.
 pub fn normalize_command_token(value: &str) -> String {
     let value = value.trim().to_lowercase();
@@ -282,17 +266,6 @@ pub fn str_or_none(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Return file mtime, or -1 on error.
-pub fn safe_mtime(path: &Path) -> f64 {
-    match path.metadata().and_then(|m| m.modified()) {
-        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d.as_secs_f64(),
-            Err(e) => -e.duration().as_secs_f64(),
-        },
-        Err(_) => -1.0,
-    }
-}
-
 // --- Send gate helpers ------------------------------------------------------
 // Detect whether the target agent is waiting for a user answer
 // (AskUserQuestion) before allowing message injection.
@@ -308,7 +281,8 @@ pub struct GateResult {
     pub reason: String,
 }
 
-/// Extract content blocks from a JSONL record, handling claude/codex.
+/// Claude's `message.content` block list (codex records never carry one;
+/// their `response_item` payload is read directly by the caller).
 fn _extract_content_blocks(payload: &Map<String, Value>) -> &[Value] {
     if let Some(Value::Object(msg)) = payload.get("message") {
         if let Some(Value::Array(content)) = msg.get("content") {
@@ -427,7 +401,7 @@ pub fn check_input_gate(path: &Path) -> GateResult {
             lines.remove(0);
         }
 
-        // Parse all lines, collect relevant records
+        // Parse every complete line in the window
         let mut records: Vec<Map<String, Value>> = Vec::new();
         for line in lines {
             let line = line.trim();
@@ -749,7 +723,7 @@ mod tests {
         assert_eq!(result.status, "waiting");
     }
 
-    // --- cross-CLI parity (from test_adapters_iter_messages.py) ---
+    // --- cross-CLI parity ---
 
     #[test]
     fn test_all_adapters_return_messages_with_uniform_shape() {

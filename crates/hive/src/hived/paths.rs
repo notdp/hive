@@ -12,21 +12,7 @@ use crate::devlog;
 use super::*;
 
 pub fn _now_iso() -> String {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs() as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::gmtime_r(&secs, &mut tm) };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        tm.tm_year as i64 + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec,
-    )
+    format!("{}Z", devlog::utc_now_iso_seconds())
 }
 
 pub(super) fn getpid() -> i64 {
@@ -41,8 +27,9 @@ pub(super) fn _hived_metadata(started_at: &str) -> Map<String, Value> {
     meta
 }
 
-/// Python str(float) for registry createdAt round-trips.
-pub(super) use crate::team::py_float_str;
+/// Registry `createdAt` is compared as a string, so the hived formats its
+/// float exactly like the CLI writer did (whole seconds keep a `.0`).
+pub(super) use crate::pyval::py_float_str;
 
 pub(super) fn map_get_str(map: &Map<String, Value>, key: &str) -> String {
     match map.get(key) {
@@ -138,8 +125,8 @@ pub fn _owner_matches_current_process(
     if owner.is_empty() {
         return true;
     }
-    // Python int(owner.get("pid", 0)): a missing pid is 0, an unparseable
-    // one raises → True (treated as matching, i.e. not a foreign owner).
+    // A missing pid reads as 0; an unparseable one is never a foreign owner
+    // (treated as matching).
     let pid = match owner.get("pid") {
         None => 0,
         Some(_) => match owner_pid(owner) {

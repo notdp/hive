@@ -15,7 +15,8 @@ pub const CVIM_DIR_NAME: &str = "cvim";
 const VERBOSITY_ENV: &str = "HIVE_LOG_VERBOSITY";
 const DEV_ONLY_EVENTS: [&str; 3] = ["active.changed", "tick.summary", "windows.changed"];
 
-/// Python `GLOBAL_HIVE_DIR` module constant; computed per call here.
+/// `${XDG_CACHE_HOME:-~/.cache}/hive`: where logs land when no workspace
+/// resolves. Computed per call so a changed env is seen.
 pub fn global_hive_dir() -> PathBuf {
     let base = match env::var("XDG_CACHE_HOME") {
         Ok(value) => PathBuf::from(value),
@@ -24,21 +25,38 @@ pub fn global_hive_dir() -> PathBuf {
     base.join("hive")
 }
 
-pub fn utc_timestamp_ms() -> String {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs() as libc::time_t;
+/// `YYYY-MM-DDTHH:MM:SS` of *secs* in UTC, no zone suffix — callers add
+/// the `Z` or fractional tail their own record format carries.
+fn utc_iso_seconds(secs: u64) -> String {
+    let secs = secs as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::gmtime_r(&secs, &mut tm) };
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
         tm.tm_year as i64 + 1900,
         tm.tm_mon + 1,
         tm.tm_mday,
         tm.tm_hour,
         tm.tm_min,
-        tm.tm_sec,
+        tm.tm_sec
+    )
+}
+
+/// Now as `YYYY-MM-DDTHH:MM:SS` UTC, no zone suffix.
+pub fn utc_now_iso_seconds() -> String {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    utc_iso_seconds(dur.as_secs())
+}
+
+pub fn utc_timestamp_ms() -> String {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{}.{:03}Z",
+        utc_iso_seconds(dur.as_secs()),
         dur.subsec_millis()
     )
 }
@@ -155,8 +173,7 @@ pub fn hived_unavailable_message(workspace: &Path) -> String {
     }
 }
 
-/// Python signature has `workspace: str | Path = ""`; empty/None falls back to
-/// the global cache dir.
+/// A missing or empty workspace falls back to the global cache dir.
 pub fn cvim_log_dir(workspace: Option<&Path>) -> PathBuf {
     match workspace {
         Some(ws) if !ws.as_os_str().is_empty() => run_dir(ws).join(CVIM_DIR_NAME),
@@ -186,9 +203,9 @@ pub fn default_verbosity() -> &'static str {
     verbosity_for_source(&exe)
 }
 
-/// Mirrors Python `default_verbosity`, parameterized on the source path the
-/// Python code reads from `__file__` (env override first, then install-mode
-/// heuristic: a `site-packages`/`dist-packages` ancestor means "installed").
+/// Verbosity for the binary at *source*: the env override wins, otherwise a
+/// binary running from a cargo `target/` dir beside a `Cargo.toml` is a dev
+/// checkout and everything else is an install.
 fn verbosity_for_source(source: &Path) -> &'static str {
     let env_value = env::var(VERBOSITY_ENV)
         .unwrap_or_default()
@@ -199,8 +216,6 @@ fn verbosity_for_source(source: &Path) -> &'static str {
         "normal" => return "normal",
         _ => {}
     }
-    // Python keyed "installed" on a site-packages ancestor; the Rust binary's
-    // dev signal is running from a cargo target/ dir (any profile).
     let dev_checkout = source.ancestors().any(|parent| {
         matches!(
             parent.file_name().and_then(|name| name.to_str()),
@@ -224,11 +239,8 @@ pub fn should_emit(event: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::EnvGuard;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    // HIVE_LOG_VERBOSITY is process-global; serialize the tests that touch it.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_hived_socket_stays_in_tree_for_a_short_workspace() {
@@ -298,8 +310,7 @@ mod tests {
 
     #[test]
     fn test_default_verbosity_is_normal_from_installed_binary() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        env::remove_var("HIVE_LOG_VERBOSITY");
+        let _env = EnvGuard::cleared(&["HIVE_LOG_VERBOSITY"]);
 
         let source = Path::new("/usr/local/bin/hive");
         assert_eq!(verbosity_for_source(source), "normal");
@@ -307,8 +318,7 @@ mod tests {
 
     #[test]
     fn test_default_verbosity_is_dev_from_source_checkout() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        env::remove_var("HIVE_LOG_VERBOSITY");
+        let _env = EnvGuard::cleared(&["HIVE_LOG_VERBOSITY"]);
 
         assert_eq!(
             verbosity_for_source(&env::current_exe().expect("test binary path")),
@@ -318,12 +328,11 @@ mod tests {
 
     #[test]
     fn test_env_overrides_default_verbosity() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        env::set_var("HIVE_LOG_VERBOSITY", "dev");
+        let mut env = EnvGuard::new();
+        env.set("HIVE_LOG_VERBOSITY", "dev");
 
-        let source = Path::new("/venv/lib/python3.11/site-packages/hive/devlog.py");
+        let source = Path::new("/usr/local/bin/hive");
         assert_eq!(verbosity_for_source(source), "dev");
-        env::remove_var("HIVE_LOG_VERBOSITY");
     }
 
     #[test]

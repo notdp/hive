@@ -1,7 +1,9 @@
-use super::attach::{_attach_pipe, _close_pipe};
+use super::attach::{
+    Client, _attach_pipe, _close_pipe, _engine_screen_size, _wait_client_ready, _wait_engine_behind,
+};
 use super::testhook::{FakePipe, Hook};
 use super::*;
-use crate::adapters::claude_sessions::test_env;
+use crate::testenv::EnvGuard;
 use serde_json::json;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -13,43 +15,20 @@ use std::time::{Duration, Instant};
 
 // --- fixtures -----------------------------------------------------------
 
-/// An isolated claude config tree (the Python `_claude_home` fixture).
+/// An isolated claude config tree: CLAUDE_HOME pointed at a tempdir for the
+/// test's lifetime.
 struct Home {
     config: PathBuf,
     dir: tempfile::TempDir,
-    _env: test_env::EnvGuard,
+    env: EnvGuard,
 }
 
 fn claude_home() -> Home {
-    let env_guard = test_env::EnvGuard::new();
+    let mut env = EnvGuard::cleared(&crate::testenv::CLAUDE_VARS);
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("claude-home");
-    std::env::set_var("CLAUDE_HOME", &config);
-    Home {
-        config,
-        dir,
-        _env: env_guard,
-    }
-}
-
-/// Set an env var for the test's lifetime, restoring the old value.
-struct VarGuard(&'static str, Option<String>);
-
-impl VarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let old = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        VarGuard(key, old)
-    }
-}
-
-impl Drop for VarGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(v) => std::env::set_var(self.0, v),
-            None => std::env::remove_var(self.0),
-        }
-    }
+    env.set("CLAUDE_HOME", &config);
+    Home { config, dir, env }
 }
 
 fn write_registry_entry(home: &Home, file_pid: i64, fields: &Value) {
@@ -108,31 +87,48 @@ fn fake_engine(job_id: &str, status: &str) -> EngineSession {
     }
 }
 
-/// Attach *pipe*, feed the screen from *screens*, transcript from a file.
+/// The parts of a `wire` that most tests leave at their defaults.
 ///
-/// *baseline* is what the screen shows before anything is typed — the
-/// pipe reads it first and only counts an echo that was not already
+/// *engine* is what the attach finds behind the pipe (an idle cafe1234 by
+/// default). *baseline* is what the screen shows before anything is typed
+/// — the pipe reads it first and only counts an echo that was not already
 /// there. *draft* is what the dim-aware composer parser reports before
 /// the C-u.
+struct Wire<'a> {
+    engine: Option<EngineSession>,
+    baseline: &'a str,
+    draft: bool,
+}
+
+impl Default for Wire<'_> {
+    fn default() -> Self {
+        Wire {
+            engine: None,
+            baseline: "> ",
+            draft: false,
+        }
+    }
+}
+
+/// Attach *pipe*, feed the screen from *screens*, transcript from a file.
 fn wire(
     hook: &mut Hook,
     pipe: &FakePipe,
     screens: &[&str],
     transcript: Option<PathBuf>,
-    engine: Option<EngineSession>,
-    baseline: &str,
-    draft: bool,
+    opts: Wire,
 ) {
     hook.attach_pipe = Some(pipe.clone());
     hook.client_ready = Some(true);
     hook.wait_engine_behind = Some(Some(
-        engine.unwrap_or_else(|| fake_engine("cafe1234", "idle")),
+        opts.engine
+            .unwrap_or_else(|| fake_engine("cafe1234", "idle")),
     ));
     hook.transcript_cursor = Some((transcript, 0));
-    hook.composer_draft = Some(draft);
+    hook.composer_draft = Some(opts.draft);
     hook.no_sleep = true;
     let mut st = pipe.state.lock().unwrap();
-    st.stream = baseline.to_string();
+    st.stream = opts.baseline.to_string();
     st.pending = screens.iter().map(|s| s.to_string()).collect();
 }
 
@@ -166,7 +162,11 @@ fn test_pane_job_record_roundtrip_and_reverse_lookup() {
 
     assert_eq!(
         read_pane_job("%19"),
-        Some(("cafe1234".into(), "sess-19".into(), "/w/a".into()))
+        Some(PaneJob {
+            job_id: "cafe1234".into(),
+            session_id: "sess-19".into(),
+            cwd: "/w/a".into(),
+        })
     );
     assert_eq!(job_id_for_pane("%7").as_deref(), Some("beef5678"));
     let mut panes = list_recorded_panes();
@@ -309,9 +309,9 @@ fn test_job_row_separates_asleep_from_gone() {
 
 #[test]
 fn test_spawn_job_parses_the_backgrounded_announcement() {
-    let home = claude_home();
-    let _child = VarGuard::set("CLAUDE_CODE_CHILD_SESSION", "1");
-    let _model = VarGuard::set("ANTHROPIC_MODEL", "x");
+    let mut home = claude_home();
+    home.env.set("CLAUDE_CODE_CHILD_SESSION", "1");
+    home.env.set("ANTHROPIC_MODEL", "x");
     let out = home.dir.path();
     fs::write(
         out.join("stdout.bin"),
@@ -436,6 +436,183 @@ fn test_ensure_engine_gives_up_when_wake_fails() {
     assert!(ensure_engine("cafe1234", Some(0.0), "claude").is_none());
 }
 
+// --- the waits behind an attach -----------------------------------------
+
+/// A fake client whose `poll` answers *exit* (None: still running).
+fn client(exit: Option<i32>) -> (FakePipe, Client) {
+    let pipe = FakePipe::default();
+    pipe.state.lock().unwrap().poll = exit;
+    (pipe.clone(), Client::Fake(pipe))
+}
+
+/// What is left of the scripted `engine_for_job` answers: the hook pops one
+/// per poll while more than one remains, so the length counts the polls.
+fn engine_queue() -> Vec<Option<EngineSession>> {
+    testhook::with(|h| h.engine_for_job.clone().unwrap().into_iter().collect()).unwrap()
+}
+
+#[test]
+fn test_wait_engine_behind_polls_until_the_entry_appears() {
+    // Two misses, then the entry: the wait keeps polling while the client
+    // lives, and the answer is the entry the third poll found.
+    let mut hook = Hook::default();
+    hook.engine_for_job = Some(VecDeque::from(vec![
+        None,
+        None,
+        Some(fake_engine("cafe1234", "idle")),
+    ]));
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (_pipe, mut proc) = client(None);
+
+    let engine = _wait_engine_behind("cafe1234", &mut proc).unwrap();
+
+    assert_eq!(engine.job_id, "cafe1234");
+    assert_eq!(engine_queue().len(), 1, "both misses were consumed");
+}
+
+#[test]
+fn test_wait_engine_behind_gives_up_once_the_client_exits() {
+    // The entry is one more poll away, but the client already exited: the
+    // wait stops on the first miss instead of finding it.
+    let mut hook = Hook::default();
+    hook.engine_for_job = Some(VecDeque::from(vec![
+        None,
+        None,
+        Some(fake_engine("cafe1234", "idle")),
+    ]));
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (_pipe, mut proc) = client(Some(1));
+
+    assert_eq!(_wait_engine_behind("cafe1234", &mut proc), None);
+    assert_eq!(engine_queue().len(), 2, "polled exactly once");
+}
+
+#[test]
+fn test_wait_engine_behind_times_out_with_the_client_still_alive() {
+    let mut hook = Hook::default();
+    hook.engine_for_job = Some(VecDeque::from(vec![
+        None,
+        None,
+        Some(fake_engine("cafe1234", "idle")),
+    ]));
+    hook.engine_ready_timeout = Some(0.0);
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (_pipe, mut proc) = client(None);
+
+    assert_eq!(_wait_engine_behind("cafe1234", &mut proc), None);
+    assert_eq!(engine_queue().len(), 2, "polled exactly once");
+}
+
+/// A live attach-journal entry naming *pid*, with the procStart the journal
+/// check verifies against `ps`.
+fn attach_journal_entry(home: &Home, pid: i32) {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()
+        .unwrap();
+    let proc_start = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!proc_start.is_empty(), "ps knows pid {pid}");
+    let dir = home.config.join("daemon").join("attach-journal");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("gesture.json"),
+        json!({"gestureId": "gesture", "surface": "bg_cli", "pid": pid, "procStart": proc_start})
+            .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_wait_client_ready_once_the_journal_names_the_client() {
+    let home = claude_home();
+    let mut hook = Hook::default();
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (pipe, mut proc) = client(None);
+    pipe.state.lock().unwrap().pid = Some(me() as i32);
+    attach_journal_entry(&home, me() as i32);
+
+    assert!(_wait_client_ready(&mut proc));
+}
+
+#[test]
+fn test_wait_client_ready_is_false_once_the_client_exits() {
+    // The journal entry alone would say ready; an exited client wins.
+    let home = claude_home();
+    let mut hook = Hook::default();
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (pipe, mut proc) = client(Some(0));
+    pipe.state.lock().unwrap().pid = Some(me() as i32);
+    attach_journal_entry(&home, me() as i32);
+
+    assert!(!_wait_client_ready(&mut proc));
+}
+
+#[test]
+fn test_wait_client_ready_times_out_on_a_journal_naming_someone_else() {
+    let home = claude_home();
+    let mut hook = Hook::default();
+    hook.client_ready_timeout = Some(0.05);
+    hook.no_sleep = true;
+    let _g = testhook::install(hook);
+    let (pipe, mut proc) = client(None);
+    pipe.state.lock().unwrap().pid = Some(me() as i32 + 1);
+    attach_journal_entry(&home, me() as i32);
+
+    assert!(!_wait_client_ready(&mut proc));
+}
+
+#[test]
+fn test_engine_screen_size_is_the_bound_panes_size() {
+    let _home = claude_home();
+    write_pane_job("%5", "cafe1234", "sid", "/w").unwrap();
+    let argv: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+    let recorded = std::rc::Rc::clone(&argv);
+    let answers = std::rc::Rc::new(std::cell::RefCell::new(VecDeque::from(vec![
+        "132\t43".to_string(),
+        "wide\ttall".to_string(),
+    ])));
+    let script = std::rc::Rc::clone(&answers);
+    crate::tmux::_set_run_override(move |args, _check, _timeout| {
+        recorded.borrow_mut().push(args.to_vec());
+        Ok(crate::tmux::Run {
+            returncode: 0,
+            stdout: script.borrow_mut().pop_front().unwrap_or_default(),
+            stderr: String::new(),
+        })
+    });
+
+    assert_eq!(_engine_screen_size("cafe1234"), (132, 43));
+    assert_eq!(
+        argv.borrow()[0],
+        vec![
+            "display-message",
+            "-t",
+            "%5",
+            "-p",
+            "#{pane_width}\t#{pane_height}"
+        ]
+    );
+    // an unparsable answer falls back to claude's own pty-host size
+    assert_eq!(
+        _engine_screen_size("cafe1234"),
+        (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
+    );
+    // a job on nobody's pane never asks tmux
+    assert_eq!(
+        _engine_screen_size("beef5678"),
+        (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
+    );
+    assert_eq!(argv.borrow().len(), 2);
+}
+
 // --- runtime mapping ----------------------------------------------------
 
 fn runtime_engine(status: &str, waiting_for: &str, updated_at: Option<f64>) -> EngineSession {
@@ -529,9 +706,9 @@ fn test_attach_puts_the_subcommand_first() {
 
 #[test]
 fn test_pipe_env_is_washed_of_claude_vars() {
-    let _home = claude_home();
-    let _child = VarGuard::set("CLAUDE_CODE_CHILD_SESSION", "1");
-    let _key = VarGuard::set("ANTHROPIC_API_KEY", "secret");
+    let mut home = claude_home();
+    home.env.set("CLAUDE_CODE_CHILD_SESSION", "1");
+    home.env.set("ANTHROPIC_API_KEY", "secret");
     let env = bg_env(None);
     assert!(!env.contains_key("CLAUDE_CODE_CHILD_SESSION"));
     assert!(!env.contains_key("ANTHROPIC_API_KEY"));
@@ -542,9 +719,9 @@ fn test_bg_env_carries_no_identity_of_the_spawner_or_of_hive() {
     // The spawner may be a codex or grok member; its session id keys *its*
     // roster row, so a job inheriting it would sign as the spawner. Hive
     // hands the job no identity of its own either — the engine mints one.
-    let _home = claude_home();
-    let _thread = VarGuard::set("CODEX_THREAD_ID", "tid-1");
-    let _grok = VarGuard::set("GROK_SESSION_ID", "s-spawner");
+    let mut home = claude_home();
+    home.env.set("CODEX_THREAD_ID", "tid-1");
+    home.env.set("GROK_SESSION_ID", "s-spawner");
     let env = bg_env(Some(&HashMap::from([(
         "CR_WORKSPACE".to_string(),
         "/tmp/cr".to_string(),
@@ -578,9 +755,7 @@ fn test_typing_clears_the_composer_in_its_own_chunk_then_submits() {
         &pipe,
         &["> hello there"],
         Some(path),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     let _g = testhook::install(hook);
 
@@ -606,9 +781,7 @@ fn test_a_lost_keystroke_is_retyped_and_the_retype_cannot_double() {
         &pipe,
         &["> ", "> ", "> ping"],
         Some(path),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     hook.type_retry_after = Some(0.0);
     let _g = testhook::install(hook);
@@ -633,9 +806,7 @@ fn test_no_echo_within_the_budget_refuses_instead_of_submitting() {
         &pipe,
         &["> something else"],
         Some(dir.path().join("none.jsonl")),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     hook.type_ready_timeout = Some(0.0);
     let _g = testhook::install(hook);
@@ -657,7 +828,7 @@ fn test_the_echo_survives_the_composer_wrapping_the_text() {
     let wrapped =
         "╭─────────╮\n│ a long sendback that the │\n│ composer wraps over two lines │\n╰──╯";
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &[wrapped], Some(path), None, "> ", false);
+    wire(&mut hook, &pipe, &[wrapped], Some(path), Wire::default());
     let _g = testhook::install(hook);
 
     assert!(type_into_job("cafe1234", text, "claude").ok);
@@ -678,9 +849,10 @@ fn test_text_already_on_the_screen_is_not_taken_for_the_echo() {
         &pipe,
         &[],
         Some(dir.path().join("none.jsonl")),
-        None,
-        stale,
-        false,
+        Wire {
+            baseline: stale,
+            ..Default::default()
+        },
     );
     hook.type_ready_timeout = Some(0.01);
     let _g = testhook::install(hook);
@@ -701,7 +873,16 @@ fn test_a_second_copy_of_the_same_text_is_the_echo() {
     let path = transcript(dir.path(), &[user("ping")]);
     let frame = format!("{stale}\n> ping");
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &[&frame], Some(path), None, stale, false);
+    wire(
+        &mut hook,
+        &pipe,
+        &[&frame],
+        Some(path),
+        Wire {
+            baseline: stale,
+            ..Default::default()
+        },
+    );
     let _g = testhook::install(hook);
 
     assert!(type_into_job("cafe1234", "ping", "claude").ok);
@@ -723,15 +904,7 @@ fn test_a_long_sendback_echoes_by_its_tail() {
         "│ filler line │\n".repeat(5)
     );
     let mut hook = Hook::default();
-    wire(
-        &mut hook,
-        &pipe,
-        &[&viewport],
-        Some(path),
-        None,
-        "> ",
-        false,
-    );
+    wire(&mut hook, &pipe, &[&viewport], Some(path), Wire::default());
     let _g = testhook::install(hook);
 
     assert!(type_into_job("cafe1234", &text, "claude").ok);
@@ -753,9 +926,10 @@ fn test_a_pasted_text_placeholder_counts_as_the_echo() {
         &pipe,
         &[&frame],
         Some(path),
-        None,
-        earlier,
-        false,
+        Wire {
+            baseline: earlier,
+            ..Default::default()
+        },
     );
     let _g = testhook::install(hook);
 
@@ -791,9 +965,7 @@ fn test_a_broken_pipe_is_a_failure_not_a_crash() {
         &pipe,
         &["> "],
         Some(dir.path().join("none.jsonl")),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     let _g = testhook::install(hook);
 
@@ -819,9 +991,7 @@ fn test_a_turn_that_swallowed_a_leftover_draft_is_not_confirmed() {
         &pipe,
         &["> DRAFTJUNK/compact"],
         Some(path),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     let _g = testhook::install(hook);
 
@@ -842,9 +1012,7 @@ fn test_a_slash_command_is_confirmed_by_its_command_record() {
         &pipe,
         &["> /compact"],
         Some(path),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     let _g = testhook::install(hook);
 
@@ -862,15 +1030,7 @@ fn test_a_ui_only_slash_command_degrades_to_written() {
     let dir = tempfile::tempdir().unwrap();
     let path = transcript(dir.path(), &[]);
     let mut hook = Hook::default();
-    wire(
-        &mut hook,
-        &pipe,
-        &["> /cost"],
-        Some(path),
-        None,
-        "> ",
-        false,
-    );
+    wire(&mut hook, &pipe, &["> /cost"], Some(path), Wire::default());
     hook.slash_confirm_timeout = Some(0.0);
     let _g = testhook::install(hook);
 
@@ -886,7 +1046,7 @@ fn test_plain_text_without_a_turn_is_a_failure() {
     let dir = tempfile::tempdir().unwrap();
     let path = transcript(dir.path(), &[]);
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &["> ping"], Some(path), None, "> ", false);
+    wire(&mut hook, &pipe, &["> ping"], Some(path), Wire::default());
     hook.submit_confirm_timeout = Some(0.0);
     let _g = testhook::install(hook);
 
@@ -911,9 +1071,10 @@ fn test_interrupt_writes_one_escape_and_confirms_on_the_marker() {
         &pipe,
         &[""],
         Some(path),
-        Some(fake_engine("cafe1234", "busy")),
-        "> ",
-        false,
+        Wire {
+            engine: Some(fake_engine("cafe1234", "busy")),
+            ..Default::default()
+        },
     );
     let _g = testhook::install(hook);
 
@@ -933,7 +1094,7 @@ fn test_interrupt_of_an_idle_engine_returns_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = transcript(dir.path(), &[]);
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &[""], Some(path), None, "> ", false);
+    wire(&mut hook, &pipe, &[""], Some(path), Wire::default());
     hook.forbid_engine_lookup = true; // an idle engine must not be polled
     let _g = testhook::install(hook);
 
@@ -954,9 +1115,10 @@ fn test_interrupt_of_a_busy_engine_that_stays_busy_fails() {
         &pipe,
         &[""],
         Some(path),
-        Some(fake_engine("cafe1234", "busy")),
-        "> ",
-        false,
+        Wire {
+            engine: Some(fake_engine("cafe1234", "busy")),
+            ..Default::default()
+        },
     );
     hook.engine_for_job = Some(VecDeque::from(vec![Some(fake_engine("cafe1234", "busy"))]));
     hook.interrupt_confirm_timeout = Some(0.0);
@@ -976,9 +1138,10 @@ fn test_interrupt_confirms_when_the_engine_leaves_busy() {
         &pipe,
         &[""],
         Some(path),
-        Some(fake_engine("cafe1234", "busy")),
-        "> ",
-        false,
+        Wire {
+            engine: Some(fake_engine("cafe1234", "busy")),
+            ..Default::default()
+        },
     );
     hook.engine_for_job = Some(VecDeque::from(vec![Some(fake_engine("cafe1234", "idle"))]));
     let _g = testhook::install(hook);
@@ -998,7 +1161,7 @@ fn test_a_client_that_will_not_exit_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let path = transcript(dir.path(), &[user("ping")]);
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &["> ping"], Some(path), None, "> ", false);
+    wire(&mut hook, &pipe, &["> ping"], Some(path), Wire::default());
     let _g = testhook::install(hook);
 
     assert!(type_into_job("cafe1234", "ping", "claude").ok);
@@ -1026,9 +1189,10 @@ fn test_a_killed_draft_is_pasted_back_after_the_submit() {
         &pipe,
         &["> hello there"],
         Some(path),
-        None,
-        "> ",
-        true,
+        Wire {
+            draft: true,
+            ..Default::default()
+        },
     );
     let _g = testhook::install(hook);
 
@@ -1051,9 +1215,7 @@ fn test_an_empty_composer_never_gets_a_stale_ring_pasted() {
         &pipe,
         &["> hello there"],
         Some(path),
-        None,
-        "> ",
-        false,
+        Wire::default(),
     );
     let _g = testhook::install(hook);
 
@@ -1075,9 +1237,10 @@ fn test_a_retype_forfeits_the_restore() {
         &pipe,
         &["> ", "> ", "> ping"],
         Some(path),
-        None,
-        "> ",
-        true,
+        Wire {
+            draft: true,
+            ..Default::default()
+        },
     );
     hook.type_retry_after = Some(0.0);
     let _g = testhook::install(hook);
@@ -1092,7 +1255,16 @@ fn test_a_slash_command_restores_the_draft_too() {
     let dir = tempfile::tempdir().unwrap();
     let path = transcript(dir.path(), &[]);
     let mut hook = Hook::default();
-    wire(&mut hook, &pipe, &["> /cost"], Some(path), None, "> ", true);
+    wire(
+        &mut hook,
+        &pipe,
+        &["> /cost"],
+        Some(path),
+        Wire {
+            draft: true,
+            ..Default::default()
+        },
+    );
     hook.slash_confirm_timeout = Some(0.0);
     let _g = testhook::install(hook);
 
@@ -1116,9 +1288,10 @@ fn test_a_failed_submit_does_not_touch_the_ring() {
         &pipe,
         &["> hello there"],
         Some(path),
-        None,
-        "> ",
-        true,
+        Wire {
+            draft: true,
+            ..Default::default()
+        },
     );
     let _g = testhook::install(hook);
 
@@ -1262,14 +1435,14 @@ fn test_the_registry_name_is_read_into_the_engine_session() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("s.sock");
     fs::write(&sock, "").unwrap();
-    let engine = _entry_to_engine(&json!({
+    let entry = json!({
         "kind": "bg",
         "pid": 1,
         "jobId": "cafe1234",
         "messagingSocketPath": sock.to_str().unwrap(),
         "name": "honey.worker",
-    }))
-    .unwrap();
+    });
+    let engine = _entry_to_engine(entry.as_object().unwrap()).unwrap();
     assert_eq!(engine.name, "honey.worker");
 }
 
@@ -1278,8 +1451,8 @@ fn test_bg_env_keeps_color_forcing_for_the_renderer() {
     // Color is the engine's to keep — a cold-spawned engine renders its
     // TUI with this env for its whole life. Safety against colored output
     // lives at the parse sites (ANSI strip), never in the env.
-    let _home = claude_home();
-    let _force = VarGuard::set("FORCE_COLOR", "3");
+    let mut home = claude_home();
+    home.env.set("FORCE_COLOR", "3");
     let env = bg_env(None);
     assert_eq!(env.get("FORCE_COLOR").map(String::as_str), Some("3"));
     assert!(!env.contains_key("NO_COLOR"));

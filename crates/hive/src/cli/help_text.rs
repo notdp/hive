@@ -1,9 +1,9 @@
-//! Click help text captured verbatim from the Python CLI (the spec).
-//!
-//! Generated — do not hand-edit. Regenerate after any help-text change in
-//! `src/hive/cli.py` by capturing `python -c "from hive.cli import cli;
-//! cli(prog_name='hive')" <path> --help` (COLUMNS unset, output piped) for
-//! every command path and pasting the byte-exact stdout here.
+//! Hand-maintained help text in click's layout: the one help surface hive
+//! prints. `cli/mod.rs::help_path` intercepts every `-h`/`--help` before
+//! clap parses, so clap's own help never reaches a user; keep each clap
+//! command's `about` equal to its first line here. Adding a command or group
+//! means adding its arm here and, for a group, listing it in
+//! `cli/mod.rs::_HELP_GROUPS`.
 
 /// Exact click `--help` output for a command path (`[]` = root).
 pub(crate) fn help_for(path: &[&str]) -> Option<&'static str> {
@@ -38,7 +38,7 @@ Workflow:
   Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.
 
   attach    Jump to a team's tmux window. Read-only: never builds one.
-  flow      Deterministic member orchestration from a JavaScript flow script.
+  flow      Deterministic member orchestration over live panes.
   ls        List hive teams from the registry, with their display state.
   pr        Pin a PR number on the team window's status bar.
   render    Render a team's display: build its window, then jump to it.
@@ -646,7 +646,9 @@ Options:
 
   Creates a new tmux pane in the current window and starts the chosen agent
   CLI. By default spawns the same CLI as the current pane; use `--cli
-  claude|codex|grok` to pick a specific one.
+  claude|codex|grok` to pick a specific one. Outside tmux, or when the team
+  has no window yet, the member starts engine-only (headless; default CLI
+  claude) and `hive render` gives it a pane later.
 
   With `--task <artifact>`, the member boots straight into the member contract
   (`/hive:hive`) and the task artifact arrives as its first `<HIVE>` message —
@@ -897,6 +899,26 @@ Options:
 
 Options:
   --plain     Human-readable output instead of the default JSON
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["plugin", "setup"] => {
+            r#"Usage: hive plugin setup [OPTIONS]
+
+  One-time install: sync the marketplace, then register and install the hive
+  plugin for claude and codex on PATH.
+
+Options:
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["plugin", "sync"] => {
+            r#"Usage: hive plugin sync [OPTIONS]
+
+  Materialize the embedded plugin marketplace and print the payload directory
+  (the command source Claude re-runs each session).
+
+Options:
   -h, --help  Show this message and exit.
 "#
         }

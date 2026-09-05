@@ -14,14 +14,17 @@ pub mod flow_rig;
 pub mod flow_script;
 pub mod hived;
 pub mod layout;
+pub mod message;
 pub mod notify_debug;
 pub mod notify_ui;
 pub mod plugin_manager;
+pub(crate) mod pyval;
 pub mod registry;
 pub mod runtime_snapshot;
-pub mod runtime_state;
 pub mod settings;
 pub mod team;
+#[cfg(test)]
+pub(crate) mod testenv;
 pub mod tmux;
 pub mod transcript_tui;
 pub mod transcript_view;
