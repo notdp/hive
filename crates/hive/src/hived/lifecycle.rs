@@ -236,7 +236,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             // The registry entry is the team's existence; the tmux window
             // is only its display. A dead window alone never retires the
             // hived (engines keep running headless); only a *missing*
-            // registry file (`hive delete` archives it) with no display
+            // registry file (`hive delete` removes it) with no display
             // window left behind it does. Corrupt or foreign-instance
             // entries are not "missing": never retire on a read that
             // might be wrong.

@@ -1892,7 +1892,7 @@ fn test_spawn_daemon_member_pane_gets_the_member_socket() {
 
 #[test]
 fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
-    // The headless lane: no pane, and nothing of the spawner's identity —
+    // The identity lane: no pane, and nothing of the spawner's identity —
     // its GROK_SESSION_ID would make every hive call in this member sign as
     // the spawner.
     let mut bed = setup();
@@ -1941,6 +1941,248 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
         env_map.keys().all(|key| inherited.contains(key)),
         "{env_map:?}"
     );
+    assert_eq!(
+        fs::read_to_string(bed.tmp.path().join("hive").join("m-honey.rex.pid")).unwrap(),
+        "7778"
+    );
+}
+
+/// A fake leader answering the mint: initialize, then session/new echoing
+/// the id hive put in `_meta`.
+fn minting_responder() -> Responder {
+    Box::new(
+        |msg: &Value| match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("session/new") => vec![_ok(
+                msg,
+                json!({"sessionId": msg["params"]["_meta"]["sessionId"]}),
+            )],
+            _ => Vec::new(),
+        },
+    )
+}
+
+/// One fake member daemon spawn (pid 7778) that binds a live listener on
+/// the socket it is asked for, so later probes find it; returns the
+/// spawn count.
+fn set_listening_daemon_spawn() -> Arc<Mutex<usize>> {
+    let spawns: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let count = spawns.clone();
+    let listeners: Arc<Mutex<Vec<UnixListener>>> = Arc::new(Mutex::new(Vec::new()));
+    set_daemon_spawn(move |argv, _env| {
+        *count.lock().unwrap() += 1;
+        let sock = &argv[argv
+            .iter()
+            .position(|arg| arg == "--leader-socket")
+            .unwrap()
+            + 1];
+        listeners
+            .lock()
+            .unwrap()
+            .push(bind_leader_socket(std::path::Path::new(sock)));
+        Ok(Box::new(FakeDaemonChild {
+            pid: 7778,
+            returncode: None,
+            panic_on_terminate: false,
+        }))
+    });
+    spawns
+}
+
+#[test]
+fn test_create_member_session_mints_on_the_identity_key_before_any_pane() {
+    let _bed = setup();
+    let _spawns = set_listening_daemon_spawn();
+    let proc = FakeProc::new(Some(minting_responder()));
+    let handout = proc.clone();
+    let stdio_argvs: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let argv_log = stdio_argvs.clone();
+    set_stdio_spawn(move |argv| {
+        argv_log.lock().unwrap().push(argv.to_vec());
+        Ok(handout.clone() as Arc<dyn LeaderProc>)
+    });
+
+    assert!(create_member_session("honey", "rex", SID, CWD));
+
+    // the stdio client went to the identity socket — no pane was consulted
+    let key = member_key("honey", "rex");
+    assert_eq!(
+        stdio_argvs.lock().unwrap().as_slice(),
+        &[vec![
+            "grok".to_string(),
+            "agent".to_string(),
+            "--leader".to_string(),
+            "stdio".to_string(),
+            "--leader-socket".to_string(),
+            socket_path_for_key(&key).to_string_lossy().into_owned(),
+        ]]
+    );
+    // initialize, then session/new carrying hive's id in _meta and the cwd
+    let sent = proc.sent();
+    let methods: Vec<&str> = sent
+        .iter()
+        .filter_map(|msg| msg.get("method").and_then(Value::as_str))
+        .collect();
+    assert_eq!(methods, vec!["initialize", "session/new"]);
+    assert_eq!(sent[1]["params"]["cwd"], json!(CWD));
+    assert_eq!(sent[1]["params"]["_meta"]["sessionId"], json!(SID));
+    // the record lives on the identity key
+    assert_eq!(
+        read_session_key(&key),
+        Some(SessionRecord {
+            session_id: SID.to_string(),
+            cwd: CWD.to_string(),
+        })
+    );
+    // and the creating client is the pool's, already bound to the session
+    let pooled = pool()._client_for_key(&key).unwrap();
+    assert_eq!(pooled.session_id().as_deref(), Some(SID));
+    assert_eq!(stdio_argvs.lock().unwrap().len(), 1); // adopted, not re-spawned
+
+    pool().drop_key(&key);
+    proc.eof();
+    let handle = pooled.reader.lock().unwrap().take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    drop(pooled);
+}
+
+#[test]
+fn test_create_member_session_leaves_no_record_when_session_new_fails() {
+    let _bed = setup();
+    let _spawns = set_listening_daemon_spawn();
+    let proc = FakeProc::new(Some(Box::new(|msg: &Value| {
+        match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("session/new") => vec![json!({
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {"code": -32000, "message": "cwd not allowed"},
+            })],
+            _ => Vec::new(),
+        }
+    })));
+    let handout = proc.clone();
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+
+    let key = member_key("honey", "rex");
+    let sock = socket_path_for_key(&key);
+    set_leader_identity(7778, &sock);
+    let killed: KillLog = Arc::new(Mutex::new(Vec::new()));
+    let record = killed.clone();
+    set_terminate_pg(move |pid| record.lock().unwrap().push(pid));
+
+    assert!(!create_member_session("honey", "rex", SID, CWD));
+
+    assert_eq!(read_session_key(&key), None);
+    assert!(proc.terminated.load(Ordering::SeqCst)); // the failed client is closed
+    assert!(pool()._client_for_key(&key).is_none());
+    // the leader this mint raised goes with it: nothing is left for the
+    // hived's orphan reap to find
+    assert_eq!(*killed.lock().unwrap(), vec![7778]);
+    assert!(!sock.exists());
+    assert!(!sock.with_extension("pid").exists());
+}
+
+#[test]
+fn test_create_member_session_leaves_a_reused_leader_alone_when_session_new_fails() {
+    // The leader was already listening before this mint: not ours to
+    // kill on the way out — only the record and the failed client go.
+    let _bed = setup();
+    let key = member_key("honey", "rex");
+    let sock = socket_path_for_key(&key);
+    let _listener = bind_leader_socket(&sock);
+    fs::write(sock.with_extension("pid"), "4321").unwrap();
+    set_leader_identity(4321, &sock);
+    set_daemon_spawn(|_argv, _env| panic!("a listening leader is reused, never respawned"));
+    set_terminate_pg(|pid| panic!("signalled {pid}, a leader this mint did not raise"));
+    let proc = FakeProc::new(Some(Box::new(|msg: &Value| {
+        match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("session/new") => vec![json!({
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {"code": -32000, "message": "cwd not allowed"},
+            })],
+            _ => Vec::new(),
+        }
+    })));
+    let handout = proc.clone();
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+
+    assert!(!create_member_session("honey", "rex", SID, CWD));
+
+    assert_eq!(read_session_key(&key), None);
+    assert!(proc.terminated.load(Ordering::SeqCst));
+    assert!(pool()._client_for_key(&key).is_none());
+    assert!(sock.exists());
+    assert_eq!(
+        fs::read_to_string(sock.with_extension("pid")).unwrap(),
+        "4321"
+    );
+}
+
+#[test]
+fn test_create_member_session_fails_without_a_leader() {
+    let _bed = setup();
+    set_daemon_spawn(|_argv, _env| Err(io::Error::new(io::ErrorKind::NotFound, "no grok")));
+    let spawned = Arc::new(AtomicBool::new(false));
+    let flag = spawned.clone();
+    set_stdio_spawn(move |_argv| {
+        flag.store(true, Ordering::SeqCst);
+        Err(io::Error::other("unreachable"))
+    });
+    assert!(!create_member_session("honey", "rex", SID, CWD));
+    assert!(!spawned.load(Ordering::SeqCst)); // no client without a daemon
+    assert_eq!(read_session_key(&member_key("honey", "rex")), None);
+}
+
+#[test]
+fn test_member_pane_is_a_client_of_the_identity_minted_engine() {
+    // The engine is minted by identity; a pane tagged as the member later
+    // reaches the very same daemon key, socket and session record — the
+    // pane's `spawn_daemon` finds the leader listening and raises nothing.
+    let _bed = setup();
+    let spawns = set_listening_daemon_spawn();
+    let proc = FakeProc::new(Some(minting_responder()));
+    let handout = proc.clone();
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    assert!(create_member_session("honey", "rex", SID, CWD));
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%19".to_string(), "hive-team".to_string()),
+        "honey".to_string(),
+    );
+    tags.insert(
+        ("%19".to_string(), "hive-agent".to_string()),
+        "rex".to_string(),
+    );
+    set_pane_options(tags);
+
+    let key = member_key("honey", "rex");
+    assert_eq!(resolve_pane_key("%19"), key);
+    assert_eq!(pane_socket_path("%19"), socket_path_for_key(&key));
+    assert_eq!(
+        read_pane_session("%19"),
+        Some(SessionRecord {
+            session_id: SID.to_string(),
+            cwd: CWD.to_string(),
+        })
+    );
+    assert!(spawn_daemon("%19"));
+    assert_eq!(*spawns.lock().unwrap(), 1); // reused, not a second leader
+
+    let pooled = pool()._client_for_key(&key).unwrap();
+    pool().drop_key(&key);
+    proc.eof();
+    let handle = pooled.reader.lock().unwrap().take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    drop(pooled);
 }
 
 #[test]

@@ -169,16 +169,20 @@ impl Agent {
             cli: cli.to_string(),
         };
 
-        // Readiness comes from runtime signals, not screen text: the codex TUI
-        // process on the pane TTY and the minted session directory (grok) can
-        // only appear once the agent is actually up. A claude member needs no
-        // wait at all — its engine entry was proven before the pane command
-        // was even typed, and the pane only watches.
+        // Readiness comes from runtime signals, not screen text: the codex
+        // TUI process on the pane TTY, and for grok the member's session
+        // directory plus a grok process on the pane, can only be there once
+        // the agent is actually up. A claude member needs no wait at all —
+        // its engine entry was proven before the pane command was even
+        // typed, and the pane only watches.
         if cli == "codex" {
             hooked_wait_codex_attached(&pane_id);
         } else if cli == "grok" {
-            // The 2nd client can only load a session the TUI has opened, so the
-            // connect follows readiness instead of racing it.
+            // Client order on the session: the mint's stdio client bound
+            // it first (and stays in this process's pool while the pane
+            // comes up), the pane's TUI `--resume` is the next, and the
+            // hived's own client connects only once the TUI is up, so its
+            // session/load replay does not race the TUI's.
             if hooked_wait_grok_session_ready(&pane_id, &grok_session_id)
                 && !opts.workspace.is_empty()
             {
@@ -192,8 +196,8 @@ impl Agent {
 
 /// Skill activation + optional user prompt: the text every CLI takes as its
 /// positional `[prompt]` arg (also on resume/fork) and auto-submits at
-/// startup, bypassing TUI keystroke injection entirely. Shared by the pane
-/// spawn and the headless spawn (`cli::rest::spawn`).
+/// startup, bypassing TUI keystroke injection entirely. Shared by every
+/// spawn path.
 pub fn compose_initial_prompt(cli: &str, skill: &str, prompt: &str, team_name: &str) -> String {
     let mut initial_prompt = String::new();
     if !skill.is_empty() && skill != "none" {
@@ -332,8 +336,9 @@ fn _open_member_pane(
 }
 
 /// Everything a per-CLI engine mint reads; each mint returns the launch
-/// arguments to append after `hive <cli>` (grok also hands back the session
-/// id the pane will materialize, for the readiness wait).
+/// arguments to append after `hive <cli>` (grok also hands back the
+/// member's session id — minted on the leader, or the branch id a fork's
+/// TUI will create — for the readiness wait).
 struct _MintContext<'a> {
     name: &'a str,
     team_name: &'a str,
@@ -488,50 +493,75 @@ impl _MintContext<'_> {
         Ok(parts)
     }
 
-    /// Grok's leader cannot say which of the cwd's sessions is this pane's,
-    /// so hive mints the id, hands it to the TUI and records it beside the
-    /// socket. A resume keeps the resumed session's own id. Unlike claude
-    /// (pinned at bg-spawn) and codex (pinned at thread/start), grok also
-    /// takes model and resume/fork on the launch command line. Returns the
-    /// launch arguments and the session id the pane will materialize.
+    /// A grok member's engine is its leader daemon on `m-<team>.<member>`,
+    /// minted by identity before the pane runs anything: a fresh member
+    /// gets `session/new` with hive's minted id (the leader cannot say which
+    /// of the cwd's sessions is the member's, so hive names it and records
+    /// it beside the socket), and the pane then attaches to that session as
+    /// one more leader client — `hive grok --resume <sid>`, the same attach
+    /// form claude (`--resume <jobId>`) and codex (`resume <threadId>`)
+    /// take. A resume keeps the resumed session's own id; a fork has no
+    /// leader-side primitive, so the TUI branches it (`--session-id <new>
+    /// --resume <old> --fork-session`) on the identity-keyed leader. Unlike
+    /// claude and codex, grok takes the model on the launch line. Returns
+    /// the launch arguments and the member's session id.
     fn _mint_grok(&self) -> anyhow::Result<(Vec<String>, String)> {
         let opts = self.opts;
-        let pane_id = self.pane_id;
-        if !hooked_grok_spawn_daemon(pane_id) {
-            // Grok runtime state lives on the per-pane leader; without one
-            // the TUI would run detached from hive. Same deal as codex: give
-            // the pane back rather than tag an unreachable member.
-            self._undo_pane_side_effects();
-            bail!(
-                "grok leader daemon failed to start for pane {pane_id}; \
-                 grok runtime is leader-only, refusing to spawn an \
-                 unattached grok team member"
-            );
-        }
+        let (name, team_name, cwd) = (self.name, self.team_name, self.cwd);
+        let key = crate::adapters::grok_leader::member_key(team_name, name);
         let mut parts: Vec<String> = Vec::new();
-        let grok_session_id;
-        if opts.session_id.is_some() && opts.session_mode == "resume" {
-            grok_session_id = opts.session_id.clone().unwrap_or_default();
-        } else {
-            grok_session_id = _uuid4();
-            parts.push("--session-id".to_string());
-            parts.push(grok_session_id.clone());
-        }
-        hooked_write_pane_session(pane_id, &grok_session_id, self.cwd)?;
-
-        if !opts.model.is_empty() && opts.session_id.is_none() {
-            parts.push("-m".to_string());
-            parts.push(_shell_escape(&opts.model));
-        }
-        if let Some(sid) = &opts.session_id {
-            // Resume/fork uses the original session's model.
-            parts.push("--resume".to_string());
-            parts.push(_shell_escape(sid));
-            if opts.session_mode == "fork" {
-                // `--session-id` (already on the launch line) names the fork.
-                parts.push("--fork-session".to_string());
+        let grok_session_id = match (&opts.session_id, opts.session_mode.as_str()) {
+            (None, _) => {
+                let sid = _uuid4();
+                if !hooked_grok_create_member_session(team_name, name, &sid, cwd) {
+                    // Grok runtime state lives on the member's leader;
+                    // without a materialized session the TUI would run
+                    // detached from hive. Same deal as codex: give the pane
+                    // back rather than tag an unreachable member.
+                    self._undo_pane_side_effects();
+                    bail!(
+                        "grok leader for '{team_name}.{name}' did not materialize \
+                         the session (cwd {cwd}); grok runtime is leader-only, \
+                         refusing to spawn an unattached grok team member"
+                    );
+                }
+                parts.push("--resume".to_string());
+                parts.push(sid.clone());
+                if !opts.model.is_empty() {
+                    parts.push("-m".to_string());
+                    parts.push(_shell_escape(&opts.model));
+                }
+                sid
             }
-        }
+            (Some(old), mode) => {
+                if !hooked_grok_spawn_member_daemon(team_name, name) {
+                    self._undo_pane_side_effects();
+                    bail!(
+                        "grok leader daemon failed to start for '{team_name}.{name}'; \
+                         grok runtime is leader-only, refusing to spawn an \
+                         unattached grok team member"
+                    );
+                }
+                let sid = if mode == "resume" {
+                    old.clone()
+                } else {
+                    _uuid4()
+                };
+                hooked_grok_write_session_key(&key, &sid, cwd)?;
+                if mode != "resume" {
+                    // `--session-id` names the branch the TUI creates.
+                    parts.push("--session-id".to_string());
+                    parts.push(sid.clone());
+                }
+                // Resume/fork uses the original session's model.
+                parts.push("--resume".to_string());
+                parts.push(_shell_escape(old));
+                if mode != "resume" {
+                    parts.push("--fork-session".to_string());
+                }
+                sid
+            }
+        };
         Ok((parts, grok_session_id))
     }
 }

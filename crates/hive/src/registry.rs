@@ -1,8 +1,15 @@
-//! The team registry: durable team truth under `$HIVE_HOME/state/teams/`.
+//! The team registry: durable team truth under `$HIVE_HOME/teams/`.
 //!
-//! One JSON file per team. This store is the authoritative record of a team's
-//! identity and roster — tmux windows and panes are a display layer resolved on
-//! top of it, so a team survives a killed window or a tmux restart.
+//! One directory per team, `$HIVE_HOME/teams/<team>/`, holding everything
+//! hive owns for the team: `team.json` (the registry entry this module
+//! reads and writes), and — when the team runs on its default workspace,
+//! which is this same directory — the bus `hive.db`, `run/` (hived socket,
+//! notify log, cvim runs) and `artifacts/`. A team exists when its
+//! `team.json` does; a directory without one is a leftover workspace a
+//! deleted team kept, not a team. The entry is the authoritative record of
+//! a team's identity and roster — tmux windows and panes are a display
+//! layer resolved on top of it, so a team survives a killed window or a
+//! tmux restart.
 //!
 //! Write lanes are split by authority:
 //!
@@ -42,16 +49,25 @@ fn name_ok(team: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+pub const ENTRY_FILE: &str = "team.json";
+
+/// `$HIVE_HOME/teams/`: one directory per team, plus the store lock.
 pub fn store_dir() -> PathBuf {
-    crate::team::hive_home().join("state").join("teams")
+    crate::team::hive_home().join("teams")
 }
 
-/// The team's registry file, or None when the name could escape the store.
-pub fn entry_path(team: &str) -> Option<PathBuf> {
+/// The team's directory, `$HIVE_HOME/teams/<team>/`, or None when the name
+/// could escape the store. Also the team's default workspace.
+pub fn team_dir(team: &str) -> Option<PathBuf> {
     if team.is_empty() || !name_ok(team) || team.contains("..") {
         return None;
     }
-    Some(store_dir().join(format!("{team}.json")))
+    Some(store_dir().join(team))
+}
+
+/// The team's registry file, `$HIVE_HOME/teams/<team>/team.json`.
+pub fn entry_path(team: &str) -> Option<PathBuf> {
+    team_dir(team).map(|dir| dir.join(ENTRY_FILE))
 }
 
 /// Python `str(...)` of an optional JSON value, for `createdAt` comparisons.
@@ -99,33 +115,61 @@ pub fn load(team: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Every valid registry entry; unreadable files surface as corrupt markers.
+/// (team, member) of the roster row whose sessionId is *session_id*,
+/// optionally narrowed to rows of one *cli*.
+///
+/// The session rung of the identity ladder: an engine's tool subprocess
+/// carries the id the engine minted for itself (a codex thread id, a grok
+/// session id, a Claude session's socket), and the row match *is* the
+/// identity — with a cli given, a row of another cli carrying the same id
+/// is a stranger. No liveness is recorded here; delivery enforces it.
+pub fn member_for_session(session_id: &str, cli: Option<&str>) -> Option<(String, String)> {
+    if session_id.is_empty() {
+        return None;
+    }
+    for entry in list_entries() {
+        let Some(members) = entry.get("members").and_then(Value::as_array) else {
+            continue;
+        };
+        for m in members.iter().filter_map(Value::as_object) {
+            if field_str(m, "sessionId") == session_id
+                && cli.is_none_or(|cli| field_str(m, "cli") == cli)
+            {
+                return Some((field_str(&entry, "team"), field_str(m, "name")));
+            }
+        }
+    }
+    None
+}
+
+/// Every valid registry entry, by team name; a directory whose `team.json`
+/// is unreadable surfaces as a corrupt marker, one without a `team.json` is
+/// not a team (a leftover workspace) and is skipped.
 pub fn list_entries() -> Vec<Map<String, Value>> {
     let root = store_dir();
     if !root.is_dir() {
         return Vec::new();
     }
-    let mut paths: Vec<PathBuf> = match fs::read_dir(&root) {
+    let mut dirs: Vec<PathBuf> = match fs::read_dir(&root) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // glob("*.json"): case-sensitive, hidden files excluded
-                name.ends_with(".json") && !name.starts_with('.')
-            })
+            .filter(|p| p.is_dir())
             .collect(),
         Err(_) => return Vec::new(),
     };
-    paths.sort();
+    dirs.sort();
     let mut out = Vec::new();
-    for path in paths {
-        let stem = path
-            .file_stem()
+    for dir in dirs {
+        let team = dir
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        if entry_path(&stem).is_none() {
+        let Some(path) = entry_path(&team) else {
+            continue;
+        };
+        if !path.is_file() {
             continue;
         }
         let entry = fs::read_to_string(&path)
@@ -139,7 +183,7 @@ pub fn list_entries() -> Vec<Map<String, Value>> {
             }
             _ => {
                 let mut marker = Map::new();
-                marker.insert("team".to_string(), Value::String(stem));
+                marker.insert("team".to_string(), Value::String(team));
                 marker.insert("corrupt".to_string(), Value::Bool(true));
                 out.push(marker);
             }
@@ -379,6 +423,10 @@ pub fn set_display(team: &str, display: &str) -> Result<&'static str> {
 }
 
 /// Remove the team's registry entry (delete is the team's end of life).
+///
+/// Only `team.json` goes: whatever else the team directory holds (its
+/// default workspace — bus, run dir, artifacts) is `hive delete
+/// --delete-workspace`'s to remove. A directory left empty is dropped.
 pub fn delete_team(team: &str) -> Result<()> {
     let path = match entry_path(team) {
         Some(p) => p,
@@ -386,6 +434,9 @@ pub fn delete_team(team: &str) -> Result<()> {
     };
     let _lock = locked()?;
     let _ = fs::remove_file(&path);
+    if let Some(dir) = path.parent() {
+        let _ = fs::remove_dir(dir);
+    }
     Ok(())
 }
 
@@ -554,7 +605,7 @@ mod tests {
         let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("HIVE_HOME", tmp.path().join(".hive"));
-        let store = tmp.path().join(".hive").join("state").join("teams");
+        let store = tmp.path().join(".hive").join("teams");
         (tmp, store, env)
     }
 
@@ -605,8 +656,14 @@ mod tests {
         let raw = fs::read_to_string(entry_path("honey").unwrap()).unwrap();
         assert!(raw.starts_with("{\n  \"createdAt\""));
         assert!(raw.find("\"cli\"").unwrap() < raw.find("\"name\"").unwrap());
+        // the entry sits in the team's own directory under the store
+        assert_eq!(
+            entry_path("honey").unwrap(),
+            store.join("honey").join("team.json")
+        );
+        assert_eq!(team_dir("honey").unwrap(), store.join("honey"));
         // no temp files left behind
-        let leftovers: Vec<String> = fs::read_dir(&store)
+        let leftovers: Vec<String> = fs::read_dir(store.join("honey"))
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -618,8 +675,8 @@ mod tests {
     #[test]
     fn test_corrupt_entries_are_tolerated_and_marked() {
         let (_tmp, store, _guard) = store();
-        fs::create_dir_all(&store).unwrap();
-        fs::write(store.join("bad.json"), "{not json").unwrap();
+        fs::create_dir_all(store.join("bad")).unwrap();
+        fs::write(store.join("bad").join("team.json"), "{not json").unwrap();
 
         assert!(load("bad").is_none());
         let listed: HashMap<String, Map<String, Value>> = list_entries()
@@ -633,10 +690,10 @@ mod tests {
     fn test_write_failure_surfaces_as_error() {
         let (_tmp, store, _guard) = store();
         // A directory squatting on the entry path makes the tmp→entry rename fail.
-        fs::create_dir_all(store.join("honey.json")).unwrap();
+        fs::create_dir_all(store.join("honey").join("team.json")).unwrap();
         assert!(record_team("honey", "/ws", "1.0", &[], "").is_err());
         assert!(load("honey").is_none());
-        let leftovers: Vec<_> = fs::read_dir(&store)
+        let leftovers: Vec<_> = fs::read_dir(store.join("honey"))
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -650,6 +707,7 @@ mod tests {
         let (_tmp, _store, _guard) = store();
         for name in ["../evil", "a/b", "", ".hidden", "a..b"] {
             assert!(entry_path(name).is_none());
+            assert!(team_dir(name).is_none());
             assert_eq!(record_team(name, "", "1.0", &[], "").unwrap(), "rejected");
             let row = m(&[("name", "x")]);
             assert_eq!(record_member(name, &row, "").unwrap(), "rejected");
@@ -739,16 +797,61 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_team_removes_the_entry() {
-        let (_tmp, _store, _guard) = store();
+    fn test_delete_team_removes_the_entry_and_an_emptied_team_dir() {
+        let (_tmp, store, _guard) = store();
         assert_eq!(
             record_team("honey", "/ws", "1.0", &[], "").unwrap(),
             "written"
         );
         delete_team("honey").unwrap();
         assert!(load("honey").is_none());
-        let path = entry_path("honey").unwrap();
-        assert!(!path.is_file());
+        assert!(!entry_path("honey").unwrap().is_file());
+        // nothing else was in the directory, so it is gone too
+        assert!(!store.join("honey").exists());
+        // the store and its lock stay
+        assert!(store.join(".lock").is_file());
+    }
+
+    #[test]
+    fn test_delete_team_leaves_the_teams_workspace_files_in_place() {
+        let (_tmp, store, _guard) = store();
+        let dir = store.join("honey");
+        record_team("honey", dir.to_str().unwrap(), "1.0", &[], "").unwrap();
+        fs::write(dir.join("hive.db"), "bus").unwrap();
+        fs::create_dir_all(dir.join("run")).unwrap();
+        delete_team("honey").unwrap();
+        assert!(!dir.join("team.json").exists());
+        assert!(dir.join("hive.db").is_file());
+        assert!(dir.join("run").is_dir());
+        // a directory without team.json is not a team
+        assert!(load("honey").is_none());
+        assert!(list_entries().is_empty());
+    }
+
+    #[test]
+    fn test_list_entries_enumerates_team_dirs_holding_team_json() {
+        let (_tmp, store, _guard) = store();
+        record_team("honey", "/ws", "1.0", &[], "").unwrap();
+        record_team("comb", "/ws2", "2.0", &[], "").unwrap();
+        // a leftover workspace dir, the lock file and an unsafe dir name are
+        // not teams
+        fs::create_dir_all(store.join("wasp").join("run")).unwrap();
+        fs::create_dir_all(store.join(".hidden")).unwrap();
+        fs::write(store.join(".hidden").join("team.json"), "{}").unwrap();
+        let listed: Vec<String> = list_entries()
+            .into_iter()
+            .map(|e| e["team"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(listed, vec!["comb".to_string(), "honey".to_string()]);
+    }
+
+    #[test]
+    fn test_store_lock_lives_beside_the_team_dirs() {
+        let (_tmp, store, _guard) = store();
+        let lock = locked().unwrap();
+        assert!(store.join(".lock").is_file());
+        drop(lock);
+        assert!(list_entries().is_empty());
     }
 
     #[test]

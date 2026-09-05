@@ -18,7 +18,7 @@ impl Agent {
     ///
     /// Delivery is native-transport-only: codex goes through the shared
     /// daemon's `turn/start` RPC on the member's recorded thread, grok
-    /// through its per-pane leader's `session/prompt`, claude through the
+    /// through its leader daemon's `session/prompt`, claude through the
     /// supervisor daemon's reply channel with the session's own inbox socket
     /// as fallback. None of them touches the composer, and there is no
     /// keystroke fallback on any failure — a transport that did not accept
@@ -90,9 +90,9 @@ impl Agent {
             };
         }
         if claude_member {
-            // The pane may be a display-only mirror (hive render draws an
-            // interactive member — a joined ccd — as a read-only viewer and
-            // tags the pane with the member's name). The engine identity is
+            // The pane may be a display-only mirror (an interactive member —
+            // a joined ccd, a ccd orch — is drawn as a read-only viewer and
+            // tagged with the member's name). The engine identity is
             // the roster sessionId; when it names a live interactive session
             // rather than a bg job, deliver there — the pane was never the
             // address, only the picture.

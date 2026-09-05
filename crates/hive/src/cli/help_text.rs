@@ -37,11 +37,11 @@ Panes:
 Workflow:
   Higher-level flows on top of Hive: worktrees, PR anchors, team snapshots.
 
-  attach    Jump to a team's tmux window. Read-only: never builds one.
+  attach    Jump to a team's tmux window, rebuilding it first when it is
+            gone.
   flow      Deterministic member orchestration over live panes.
   ls        List hive teams from the registry, with their display state.
   pr        Pin a PR number on the team window's status bar.
-  render    Render a team's display: build its window, then jump to it.
   view      Read-only viewer for a Claude session transcript (follows live).
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
             state.
@@ -89,7 +89,8 @@ Launchers:
   claude      Launch claude as a hive-managed background job (hclaude
               launcher).
   codex       Launch codex on the shared app-server daemon (hive-managed).
-  grok        Launch grok attached to a per-pane leader daemon (hive-managed).
+  grok        Launch grok attached to the pane's leader daemon (hive-managed):
+              a team member's identity-keyed engine, else a pane-scoped one.
   shell-init  Print the `hcodex` / `hclaude` / `hgrok` launchers for your
               shell.
 
@@ -117,12 +118,15 @@ Examples:
         ["attach"] => {
             r#"Usage: hive attach [OPTIONS] TEAM_NAME
 
-  Jump to a team's tmux window. Read-only: never builds one.
+  Jump to a team's tmux window, rebuilding it first when it is gone.
 
-  A team with no window is still alive — it is a registry roster, not a
-  display — so this fails instead of rendering one behind your back. `hive
-  render` builds the window. Run from outside tmux this finishes by exec'ing
-  `tmux attach`.
+  The registry is the team's existence; this makes its display whole before
+  jumping — a missing window is rebuilt (outside tmux: in a detached session
+  named after the team; inside: in your session), and a member without a
+  pane gets one riding its engine's own viewer (claude attach loop / codex
+  thread resume / grok session resume; a joined interactive Claude session
+  gets a read-only `hive view` mirror). Outside tmux this finishes by
+  exec'ing `tmux attach`.
 
 Options:
   -h, --help  Show this message and exit.
@@ -203,14 +207,21 @@ Commands:
   Create a team.
 
   NAME is optional everywhere (pool-picked by default). Outside tmux: a
-  headless team — `hive render` builds its window. Inside tmux on an agent
-  pane: that pane becomes the orch. Inside tmux on a shell pane: the window
-  binds the team without an orch.
+  tmux session named after the team (created detached when missing) holds
+  its window; a Claude session running the command becomes the orch,
+  mirrored read-only in the first pane. Inside tmux on an agent pane: that pane becomes the orch.
+  Inside tmux on a shell pane: the window binds the team without an orch.
+
+  The workspace defaults to the team's own directory, $HIVE_HOME/teams/NAME/
+  (beside its team.json; holds hive.db, run/, artifacts/), and is reset on
+  every create — a pool name recycled after `hive delete` never inherits the
+  old bus or event log. --workspace puts it elsewhere; an existing directory
+  there is kept unless --reset-workspace wipes it.
 
 Options:
   -d, --desc TEXT       Team description
-  -w, --workspace TEXT  Workspace path to initialize
-  --reset-workspace     Remove existing workspace before initialization
+  -w, --workspace TEXT  Workspace path to initialize (default: the team dir)
+  --reset-workspace     Wipe an existing --workspace before initialization
   --state TEXT          Initial state KEY=VALUE (repeatable)
   -h, --help            Show this message and exit.
 "#
@@ -234,8 +245,14 @@ Options:
 
   Delete a team and clean up.
 
+  Removes the registry entry ($HIVE_HOME/teams/NAME/team.json), closes the
+  window hive built, stops the hived. The team directory's bus, run/ and
+  artifacts/ stay for reading until the name is recycled; --delete-workspace
+  removes the whole team directory — or the external workspace the entry
+  records, which is never removed without the flag.
+
 Options:
-  -w, --workspace TEXT  Workspace path to remove
+  -w, --workspace TEXT  Workspace path to remove (default: the entry's)
   --delete-workspace    Also delete the workspace directory
   -h, --help            Show this message and exit.
 "#
@@ -348,7 +365,8 @@ Options:
 
 Options:
   --orch <SESSION_ID>  Claude session to mirror in an orch pane
-  --workspace <DIR>    Team workspace (default: $HIVE_HOME/workspaces/RUN)
+  --workspace <DIR>    Team workspace (default: $HIVE_HOME/teams/RUN, kept
+                       across --down so a run can --resume)
   --down               Tear the rig down
   -h, --help           Show this message and exit.
 "#
@@ -541,21 +559,6 @@ Commands:
   set    Label the current team window with its PR number.
 "#
         }
-        ["render"] => {
-            r#"Usage: hive render [OPTIONS] TEAM_NAME
-
-  Render a team's display: build its window, then jump to it.
-
-  The registry is the team's existence; this materializes its tmux window —
-  one attach pane per member, each riding its engine's own viewer (claude
-  attach loop / codex thread resume / grok session resume). An existing
-  window gains panes for members spawned since it was built. Ends by jumping
-  to the window, like `hive attach`.
-
-Options:
-  -h, --help  Show this message and exit.
-"#
-        }
         ["resume-hint"] => {
             r#"Usage: hive resume-hint [OPTIONS] {claude|codex|grok}
 
@@ -644,11 +647,11 @@ Options:
 
   Spawn an agent pane, optionally dispatching a task atomically.
 
-  Creates a new tmux pane in the current window and starts the chosen agent
-  CLI. By default spawns the same CLI as the current pane; use `--cli
-  claude|codex|grok` to pick a specific one. Outside tmux, or when the team
-  has no window yet, the member starts engine-only (headless; default CLI
-  claude) and `hive render` gives it a pane later.
+  Splits a new pane into the team's window and starts the chosen agent CLI
+  there — from inside tmux, another session, or outside tmux alike (a window
+  that is gone is rebuilt first). By default spawns the same CLI as the
+  current pane (claude when there is none); use `--cli claude|codex|grok` to
+  pick one.
 
   With `--task <artifact>`, the member boots straight into the member contract
   (`/hive:hive`) and the task artifact arrives as its first `<HIVE>` message —

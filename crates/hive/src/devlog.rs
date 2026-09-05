@@ -87,11 +87,13 @@ pub fn hived_socket_link_path(run_dir: &Path) -> PathBuf {
 /// The path hived actually binds and clients actually connect to.
 ///
 /// `sun_path` caps a unix socket path at ~103 bytes on macOS, so a deep
-/// workspace (a Claude scratchpad, a nested worktree) cannot host its own
-/// socket. Rather than refusing the workspace, the socket relocates to a
-/// short, deterministic spot — `/tmp/hive-<uid>/<sha256(run dir)[..12]>/hived.sock`
+/// workspace (an explicit `--workspace` in a Claude scratchpad or a nested
+/// worktree, a test's long `HIVE_HOME`) cannot host its own socket. Rather
+/// than refusing the workspace, the socket relocates to a short,
+/// deterministic spot — `/tmp/hive-<uid>/<sha256(run dir)[..12]>/hived.sock`
 /// — that every hive process derives from the same run dir, so no lookup
-/// table and nothing to persist. Short workspaces keep the in-tree path.
+/// table and nothing to persist. Short workspaces keep the in-tree path;
+/// the default one, `~/.hive/teams/<team>/run/hived.sock`, is one.
 pub fn hived_socket_path_in(run_dir: &Path) -> PathBuf {
     let in_tree = hived_socket_link_path(run_dir);
     if in_tree.as_os_str().len() <= max_socket_path_len() {
@@ -250,6 +252,13 @@ mod tests {
             PathBuf::from("/tmp/ws/run/hived.sock")
         );
         assert!(!hived_socket_is_relocated(&run_dir(ws)));
+        // the default workspace, a team dir under a home-dir HIVE_HOME
+        let team_dir = Path::new("/Users/someone/.hive/teams/honeycomb");
+        assert_eq!(
+            hived_socket_path(team_dir),
+            team_dir.join("run").join("hived.sock")
+        );
+        assert!(!hived_socket_is_relocated(&run_dir(team_dir)));
         // exactly at the limit still binds in tree
         let room = max_socket_path_len() - "/run/hived.sock".len();
         let edge = PathBuf::from("/".to_string() + &"y".repeat(room - 1));

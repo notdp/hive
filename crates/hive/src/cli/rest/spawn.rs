@@ -1,137 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
 use super::*;
-use crate::agent::Agent;
-use crate::team::{Team, LEAD_AGENT_NAME};
-use crate::tmux;
+use crate::team::Team;
 
 // ---------------------------------------------------------------------------
 // spawn
 // ---------------------------------------------------------------------------
 
-/// Spawn a member with no pane: engine first, registry as its existence.
-#[allow(clippy::too_many_arguments)]
-fn _spawn_headless_member(
-    t: &mut Team,
-    team_name: &str,
-    agent_name: &str,
-    model: &str,
-    prompt: &str,
-    cwd: &str,
-    skill: &str,
-    env_entries: &[String],
-    cli_name: Option<&str>,
-) -> Result<Agent> {
-    let resolved_cli = match cli_name {
-        Some(cli) if crate::agent_cli::AGENT_CLI_NAMES.contains(&cli) => cli.to_string(),
-        _ => "claude".to_string(),
-    };
-    if let Some(model_error) = crate::agent_cli::validate_spawn_model(&resolved_cli, model) {
-        bail!("{model_error}");
-    }
-    if agent_name == "flow" || agent_name.starts_with("flow.") {
-        bail!(
-            "'{agent_name}' collides with the flow runner's mailbox address kind (flow.run), not a member name"
-        );
-    }
-    if t.agent_named(agent_name).is_some() {
-        bail!("Agent '{agent_name}' already exists in team '{}'", t.name);
-    }
-    let resolved_cwd = if cwd.is_empty() {
-        getcwd()
-    } else {
-        expanduser(cwd)
-    };
-    let extra_env: Map<String, Value> = if env_entries.is_empty() {
-        Map::new()
-    } else {
-        _parse_entries(env_entries)
-    };
-
-    let initial_prompt =
-        crate::agent::compose_initial_prompt(&resolved_cli, skill, prompt, team_name);
-    let label = format!("{team_name}.{agent_name}");
-
-    let mut session_id = String::new();
-    if resolved_cli == "claude" {
-        let mut extra_args: Vec<String> = Vec::new();
-        if !model.is_empty() {
-            extra_args.push("--model".to_string());
-            extra_args.push(model.to_string());
-        }
-        let env: HashMap<String, String> = extra_env
-            .iter()
-            .map(|(key, value)| (key.clone(), value_as_env_string(value)))
-            .collect();
-        let (job_id, _engine) = crate::agent::mint_claude_job(
-            &resolved_cwd,
-            &label,
-            &initial_prompt,
-            &extra_args,
-            &env,
-        )?;
-        session_id = job_id;
-    } else if resolved_cli == "codex" {
-        use crate::adapters::codex_app_server;
-        let thread_id = crate::agent::mint_codex_thread(&resolved_cwd, &label, model)?;
-        if !initial_prompt.is_empty()
-            && codex_app_server::send_to_thread(&thread_id, &initial_prompt).is_none()
-        {
-            bail!("codex thread '{thread_id}' refused the bootstrap turn");
-        }
-        session_id = thread_id;
-    } else if resolved_cli == "grok" {
-        if !model.is_empty() {
-            bail!(
-                "headless grok spawn cannot pick a model yet (the TUI flag \
-                 has no verified ACP equivalent); omit --model"
-            );
-        }
-        use crate::adapters::grok_leader;
-        session_id = uuid4();
-        if !grok_leader::create_member_session(team_name, agent_name, &session_id, &resolved_cwd) {
-            bail!("grok leader for '{agent_name}' did not materialize the session");
-        }
-        if !initial_prompt.is_empty()
-            && grok_leader::send_to_key(
-                &grok_leader::member_key(team_name, agent_name),
-                &initial_prompt,
-            )
-            .is_none()
-        {
-            grok_leader::kill_daemon_key(&grok_leader::member_key(team_name, agent_name));
-            bail!("grok member '{agent_name}' refused the bootstrap prompt");
-        }
-    }
-
-    let agent = Agent {
-        name: agent_name.to_string(),
-        team_name: team_name.to_string(),
-        pane_id: String::new(),
-        model: model.to_string(),
-        cwd: resolved_cwd,
-        session_id: if session_id.is_empty() {
-            None
-        } else {
-            Some(session_id)
-        },
-        cli: resolved_cli,
-    };
-    let ws = resolve_workspace(Some(&*t), false).unwrap_or_default();
-    _remember_context(team_name, &ws, LEAD_AGENT_NAME);
-    _record_headless_member(t, agent)
-}
-
 /// Workspace the `--task` dispatch will ride, or None without `--task`.
 ///
 /// Split out so the requirement is checked before the spawn: the dispatch
-/// needs a workspace, and discovering that after `_spawn_headless_member`
-/// has claimed the name and minted the engine leaves a half-born member on
-/// the roster.
+/// needs a workspace, and discovering that after the member is registered
+/// and its engine minted leaves a half-born member on the roster.
 pub(crate) fn _task_dispatch_workspace(
     t: &Team,
     task_artifact: Option<&str>,
@@ -164,35 +48,37 @@ pub fn spawn(
     // workspace must fail while the roster is still clean, not after the
     // member is registered and its engine minted.
     let task_workspace = ok_or_fail(_task_dispatch_workspace(&t, task_artifact));
-    // A live display and a tmux-resident caller get a pane; anything else —
-    // a ccd orch outside tmux, a team with no window — spawns engine-only.
-    let headless = t.tmux_window.is_empty() || !tmux::is_inside_tmux();
+    if t.tmux_window.is_empty() {
+        // The display is gone (server restart, window closed by hand):
+        // rebuild it before splitting.
+        let entry = ok_or_fail(
+            crate::registry::load(&team_name)
+                .ok_or_else(|| anyhow!("team '{team_name}' has no registry entry (deleted?)")),
+        );
+        let _ = _ensure_team_display(&entry);
+        // re-resolve: the anchor is now the new window's first pane
+        t = ok_or_fail(_load_team(&team_name, ""));
+    }
     let use_prompt = if task_artifact.is_some() { "" } else { prompt };
     let use_skill = if task_artifact.is_some() {
         "hive:hive"
     } else {
         skill
     };
-    let spawned: Result<Agent> = if headless {
-        _spawn_headless_member(
-            &mut t, &team_name, agent_name, model, use_prompt, cwd, use_skill, env, cli_name,
-        )
+    let entries: Map<String, Value> = if env.is_empty() {
+        Map::new()
     } else {
-        let entries: Map<String, Value> = if env.is_empty() {
-            Map::new()
-        } else {
-            _parse_entries(env)
-        };
-        let pairs: Vec<(String, String)> = entries
-            .iter()
-            .map(|(key, value)| (key.clone(), value_as_env_string(value)))
-            .collect();
-        spawn_team_agent(
-            &mut t, &team_name, agent_name, model, use_prompt, cwd, use_skill, &pairs, cli_name,
-        )
-        .cloned()
+        _parse_entries(env)
     };
-    let agent = match spawned {
+    let pairs: Vec<(String, String)> = entries
+        .iter()
+        .map(|(key, value)| (key.clone(), value_as_env_string(value)))
+        .collect();
+    let agent = match spawn_team_agent(
+        &mut t, &team_name, agent_name, model, use_prompt, cwd, use_skill, &pairs, cli_name,
+    )
+    .cloned()
+    {
         Ok(agent) => agent,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -201,13 +87,7 @@ pub fn spawn(
     };
 
     let Some(task_artifact) = task_artifact else {
-        if !agent.pane_id.is_empty() {
-            println!("Agent '{agent_name}' spawned in pane {}", agent.pane_id);
-        } else {
-            println!(
-                "Agent '{agent_name}' spawned headless (engine only — `hive render {team_name}` renders it)"
-            );
-        }
+        println!("Agent '{agent_name}' spawned in pane {}", agent.pane_id);
         return;
     };
 

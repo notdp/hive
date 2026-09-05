@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{Map, Value};
@@ -105,9 +105,8 @@ pub(crate) fn _is_codex_tool_env() -> bool {
 }
 
 /// Hive-managed identity for a codex tool thread: a pane record (display
-/// bound), or a codex roster row whose sessionId is this thread (a headless
-/// member has no pane until `hive render` materializes one — the registry,
-/// not the pane record, is the truth layer).
+/// bound), or a codex roster row whose sessionId is this thread — the
+/// registry, not the pane record, is the truth layer.
 pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {
@@ -130,7 +129,7 @@ pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
 /// record is display binding, not a heartbeat), so liveness is enforced at
 /// delivery, where the daemon answers or does not.
 pub(crate) fn _codex_thread_member(thread_id: &str) -> Option<(String, String)> {
-    _registry_member_matching(thread_id.trim(), Some("codex"))
+    crate::registry::member_for_session(thread_id.trim(), Some("codex"))
 }
 
 /// The codex member this process's own tool thread belongs to, or None.
@@ -146,7 +145,7 @@ pub(crate) fn _codex_thread_member_env() -> Option<(String, String)> {
 /// rows for the same reason: another cli's row carrying the same id is a
 /// stranger.
 pub(crate) fn _grok_session_member_env() -> Option<(String, String)> {
-    _registry_member_matching(env_string("GROK_SESSION_ID").trim(), Some("grok"))
+    crate::registry::member_for_session(env_string("GROK_SESSION_ID").trim(), Some("grok"))
 }
 
 pub(crate) fn _codex_relaunch_message() -> String {
@@ -178,35 +177,18 @@ pub(crate) fn _hive_version() -> &'static str {
 // Dead-team GC
 // ---------------------------------------------------------------------------
 
-/// Clean up legacy per-team dirs and stale contexts for unknown teams.
+/// Clear a stale current context naming a team that no longer exists.
 ///
-/// "Known" is the registry union with live windows, so a headless team is
-/// never treated as dead. On a failed team listing nothing is touched
-/// (conservative: cannot prove any team dead).
+/// "Known" is the registry union with live windows, so a team whose window
+/// is gone is never treated as dead. On a failed team listing nothing is
+/// touched (conservative: cannot prove any team dead). Team directories are
+/// never swept here: one without a `team.json` is a workspace `hive delete`
+/// deliberately kept.
 pub(crate) fn _gc_dead_teams() {
     let live_names: HashSet<String> = match crate::team::list_teams() {
         Ok(teams) => teams.iter().map(|t| map_str(t, "name")).collect(),
         Err(_) => return,
     };
-    let root = crate::team::hive_home().join("teams");
-    if root.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-            paths.sort();
-            for path in paths {
-                if !path.is_dir() {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !live_names.contains(&name) {
-                    let _ = std::fs::remove_dir_all(&path);
-                }
-            }
-        }
-    }
     let ctx = crate::context::load_current_context();
     if let Some(team) = ctx.get("team").filter(|t| !t.is_empty()) {
         if !live_names.contains(team) {
@@ -250,7 +232,7 @@ pub(crate) fn _derive_agent_name(seen: &mut HashSet<String>) -> String {
 }
 
 /// Names taken in the team: the window's tagged panes, the lead, and the
-/// registry roster (a headless or pane-less member owns its name too).
+/// registry roster (a member whose pane is gone owns its name too).
 pub(crate) fn _window_seen_names(t: &Team, panes: &[PaneInfo]) -> HashSet<String> {
     let mut seen_names = _names_used_in_window(panes);
     if let Some(entry) = crate::registry::load(&t.name) {
@@ -483,22 +465,6 @@ pub(crate) fn _registry_record_member(t: &Team, agent: &Agent) -> RecordVerdict 
     verdict
 }
 
-/// Put a pane-less *agent* whose engine is already running on the roster.
-/// A team deleted under the spawn cannot hold it: the engine is stopped and
-/// the spawn fails, rather than leaving a member no address can reach.
-pub(crate) fn _record_headless_member(t: &mut Team, agent: Agent) -> Result<Agent> {
-    t.upsert_agent(agent.clone());
-    if _registry_record_member(t, &agent) == RecordVerdict::Missing {
-        t.retire(&agent.name);
-        bail!(
-            "team '{}' has no registry entry (deleted?); '{}' retired",
-            t.name,
-            agent.name
-        );
-    }
-    Ok(agent)
-}
-
 // ---------------------------------------------------------------------------
 // spawn_team_agent seam (flow.rs + `hive spawn`)
 // ---------------------------------------------------------------------------
@@ -600,7 +566,7 @@ pub(crate) fn _find_qualified_agent_target(
 
 /// Split `<team>.<member>` when the prefix names an existing team.
 ///
-/// Team existence is the registry first (a headless team has no window),
+/// Team existence is the registry first (a team whose window is gone still exists),
 /// the window scan second (a live pre-registry team). Returns
 /// `(team, member)` or `("", addr)` when the prefix names no team.
 pub(crate) fn _split_team_address(addr: &str) -> (String, String) {
@@ -651,30 +617,9 @@ pub(crate) fn _resolve_send_target_team(to_agent: &str) -> (String, Team) {
     )
 }
 
-/// (team, member) whose recorded engine identity is *session_id*.
+/// (team, member) whose recorded engine identity is *session_id*, any cli.
 pub(crate) fn _registry_member_for_session(session_id: &str) -> Option<(String, String)> {
-    _registry_member_matching(session_id, None)
-}
-
-/// Roster row keyed by *session_id*, optionally narrowed to one *cli*.
-fn _registry_member_matching(session_id: &str, cli: Option<&str>) -> Option<(String, String)> {
-    if session_id.is_empty() {
-        return None;
-    }
-    for entry in crate::registry::list_entries() {
-        if let Some(members) = entry.get("members").and_then(Value::as_array) {
-            for m in members {
-                if let Some(m) = m.as_object() {
-                    if map_str(m, "sessionId") == session_id
-                        && cli.is_none_or(|cli| map_str(m, "cli") == cli)
-                    {
-                        return Some((map_str(&entry, "team"), map_str(m, "name")));
-                    }
-                }
-            }
-        }
-    }
-    None
+    crate::registry::member_for_session(session_id, None)
 }
 
 /// Target resolution for a Claude-session guest (outside tmux).
@@ -960,7 +905,7 @@ mod tests {
         }
     }
 
-    fn _headless_agent(name: &str, cli: &str) -> Agent {
+    fn _paneless_agent(name: &str, cli: &str) -> Agent {
         Agent {
             session_id: Some("sid-1".to_string()),
             ..crate::agent::testhook::fake_agent(name, "honey", "", cli)
@@ -1002,32 +947,11 @@ mod tests {
         let _env = _iso(tmp.path());
         let t = _registry_team("honey", 100.0, &[]);
         crate::registry::delete_team("honey").unwrap();
-        let agent = _headless_agent("worker", "claude");
+        let agent = _paneless_agent("worker", "claude");
 
         assert_eq!(_registry_record_member(&t, &agent), RecordVerdict::Missing);
 
         assert!(!crate::registry::entry_path("honey").unwrap().exists());
-    }
-
-    #[test]
-    fn test_headless_spawn_into_a_deleted_team_stops_the_engine() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
-        let mut hook = crate::agent::testhook::Hook::new();
-        hook.job_row_ids.push("sid-1".to_string());
-        let _hook = crate::agent::testhook::install(hook);
-        let mut t = _registry_team("honey", 100.0, &[]);
-        crate::registry::delete_team("honey").unwrap();
-
-        let err = _record_headless_member(&mut t, _headless_agent("worker", "claude"))
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("no registry entry"), "{err}");
-        assert!(t.agent_named("worker").is_none());
-        assert!(!crate::registry::entry_path("honey").unwrap().exists());
-        let stopped = crate::agent::testhook::with(|h| h.stopped.clone()).unwrap();
-        assert_eq!(stopped, vec!["sid-1".to_string()]);
     }
 
     #[test]
@@ -1036,7 +960,7 @@ mod tests {
         let _env = _iso(tmp.path());
         let stale = _registry_team("honey", 100.0, &["old"]);
         let _fresh = _registry_team("honey", 200.0, &["new"]);
-        let agent = _headless_agent("worker", "claude");
+        let agent = _paneless_agent("worker", "claude");
 
         assert_eq!(
             _registry_record_member(&stale, &agent),
@@ -1054,7 +978,7 @@ mod tests {
         let _env = _iso(tmp.path());
         // an integral epoch is the case `format!("{now}")` got wrong
         let t = _registry_team("honey", 1_700_000_000.0, &[]);
-        let agent = _headless_agent("worker", "codex");
+        let agent = _paneless_agent("worker", "codex");
 
         assert_eq!(_registry_record_member(&t, &agent), RecordVerdict::Written);
 
@@ -1073,7 +997,7 @@ mod tests {
         assert_eq!(names, vec!["orch", "abe", "zed"]);
     }
 
-    // --- codex-native gate: headless members are hive-managed via the registry ---
+    // --- codex-native gate: pane-less members are hive-managed via the registry ---
 
     /// Isolated HIVE_HOME and CODEX_HOME under *tmp*, for the test's lifetime.
     fn _iso(tmp: &std::path::Path) -> EnvGuard {
@@ -1112,7 +1036,7 @@ mod tests {
         .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
         .collect();
         crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
-        // no pane record: a headless member's identity is the registry row
+        // no pane record: a pane-less member's identity is the registry row
         assert!(_codex_thread_is_hive_managed(" 01aa-headless "));
         assert!(!_codex_thread_is_hive_managed("01aa-other"));
         assert_eq!(

@@ -285,7 +285,7 @@ pub fn plugin_disable(name: &str, plain: bool) {
 
 const _SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
-# per-pane leader for grok, supervisor-hosted bg job for claude) and print a
+# pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
@@ -330,7 +330,7 @@ function hgrok {
 
 const _SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
-# per-pane leader for grok, supervisor-hosted bg job for claude) and print a
+# pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
 # they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex

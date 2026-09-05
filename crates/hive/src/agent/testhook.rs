@@ -85,7 +85,11 @@ pub struct Hook {
     pub codex_interrupted_panes: Vec<String>,
     pub codex_interrupted_threads: Vec<String>,
 
-    pub grok_started: Vec<String>,
+    /// (team, member) leaders raised by identity (resume/fork lanes).
+    pub grok_leaders: Vec<(String, String)>,
+    /// (team, member, session id, cwd) engine mints — the fresh lane.
+    pub grok_minted: Vec<(String, String, String, String)>,
+    /// (daemon key, session id, cwd) records hive wrote itself.
     pub grok_sessions: Vec<(String, String, String)>,
     pub grok_sent: Vec<(String, String)>,
     pub grok_sent_key: Vec<(String, String)>,
@@ -143,7 +147,8 @@ pub struct Hook {
     pub codex_interrupt_thread: Option<&'static str>,
     pub codex_daemon_alive: Option<bool>,
 
-    pub grok_spawn_daemon: bool,
+    pub grok_spawn_member_daemon: bool,
+    pub grok_create_member_session: bool,
     pub grok_send_to_pane: Option<&'static str>,
     pub grok_send_to_key: Option<&'static str>,
     pub grok_interrupt_pane: Option<&'static str>,

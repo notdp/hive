@@ -2,21 +2,30 @@
 //!
 //! A leader daemon (`grok agent leader --leader-socket <sock>`, sharing the
 //! real GROK_HOME) is keyed by who it serves (`keys.rs`): a team member's
-//! engine lives on `m-<team>.<member>` and outlives any pane, a raw `hive grok`
-//! pane on `p<slug>`. A pane reaches its daemon through `resolve_pane_key`; a
-//! headless member needs no pane at all (`spawn_member_daemon`). The grok TUI
-//! in a pane attaches with `grok --leader --leader-socket <sock> --session-id
-//! <uuid>`; hive attaches as a second client through `grok agent --leader
-//! stdio --leader-socket <sock>` — a subprocess speaking ACP JSON-RPC 2.0 as
-//! newline-delimited JSON on stdin/stdout. The leader's own socket protocol is
-//! private, so hive never talks to the socket directly: the stdio subprocess
-//! is the supported door.
+//! engine lives on `m-<team>.<member>`, a raw `hive grok` pane outside any
+//! team on `p<slug>`. The engine layer never depends on the display layer:
+//! a member's engine is born by identity — `create_member_session` raises
+//! the daemon on the member key with no pane in sight
+//! (`spawn_member_daemon`), asks it for `session/new` with the id hive
+//! minted, and records that session beside the socket — and a tmux pane is
+//! only a client attached afterwards: the TUI in it runs `hive grok
+//! --resume <sid>`, resolves the pane's member tags to the same key
+//! (`resolve_pane_key`), finds the leader listening, and loads the session.
+//! That is the shape claude (bg job, `claude attach`) and codex (thread,
+//! `codex resume`) already have. Only the pane-keyed `p<slug>` daemon of a
+//! raw `hive grok` is born from a pane (`spawn_daemon`), and it shares the
+//! pane's lifecycle.
 //!
-//! Which session that second client drives is not discoverable from the leader
-//! (`session/list` returns every session of the cwd), so hive mints the
-//! session id at spawn time and records it beside the socket in the key's
-//! `.session` file. The client loads exactly that session and folds only its
-//! notifications.
+//! Hive itself attaches as a further client through `grok agent --leader
+//! stdio --leader-socket <sock>` — a subprocess speaking ACP JSON-RPC 2.0 as
+//! newline-delimited JSON on stdin/stdout. The leader's own socket protocol
+//! is private, so hive never talks to the socket directly: the stdio
+//! subprocess is the supported door.
+//!
+//! Which session that client drives is not discoverable from the leader
+//! (`session/list` returns every session of the cwd), which is why hive
+//! names the session at the mint and keeps the key's `.session` file. The
+//! client loads exactly that session and folds only its notifications.
 //!
 //! `session/load` replays the session's past `session/update` notifications
 //! before it answers, so everything received before the load response is dropped —

@@ -31,7 +31,7 @@ hive spawn impl-auth --cli codex --task <workspace>/artifacts/tasks/impl-auth.md
 ```
 
 - `--task` 把任务原子投递为成员的首条 `<HIVE>` 消息——成员不会空 inbox 出生。
-- `--cli` 缺省跟你同 CLI(claude|codex|grok);headless spawn 没有 pane 可参照,缺省是 claude。要异构时必须显式传,见 pattern ①。
+- `--cli` 缺省跟你同 CLI(claude|codex|grok);tmux 外 spawn 没有 pane 可参照,缺省是 claude。要异构时必须显式传,见 pattern ①。
 - model 不确定就别传,默认就是对的(不照抄状态栏,那不是 model id)。要传时:claude 用别名 `fable` / `opus` / `sonnet`——永远指向该档当前最新;典型分工 `fable` 做 verify/裁决,`opus` 做执行主力(集成验收不 spawn 成员,是你自己做,见 pattern ⑤)。codex/grok 传具体 id,按该 CLI 的 catalog 校验,打错带 did-you-mean 拒收。
 
 成员完工会 `hive send` 回报你——自动锚回派发线程。读摘要,必要时读它的 artifact。
@@ -82,7 +82,7 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 **⑤ 集成验收**——所有任务 DONE 后,你自己拉集成分支、跑测试、核验收标准,过了才向 human 汇报。终验不外包。
 
-**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 JavaScript 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,所以团必须有 tmux 窗口(headless 团用不了);跑脚本的人不必在 tmux 里。
+**⑥ flow 脚本(机械流程)**——循环、fan-out、barrier 这类确定性控制流不用手工编排:写一个 JavaScript 脚本交给 `hive flow run`,每个 `agent()` 都是真实成员,human 全程可见可介入。`agent()` 走的是 pane spawn,进团窗口;跑脚本的人不必在 tmux 里。
 
 ```js
 // workflow.js
@@ -165,9 +165,7 @@ gh pr merge <PR号> --match-head-commit <验过的head> --squash
 - stage 汇报和最终交付要有自包含 HTML,Markdown 源同目录,发 human 时给 HTML 绝对路径;agent 间 artifact 一律 Markdown——human 看渲染,agent 读源码。
 - 全部完成且 human 签字后,才 kill 剩余成员;整团收摊用 `hive delete`。
 
-## 窗口相关(可选显示层)
-
-以下命令只在 `hive render` 出窗口后有意义,headless 团忽略:
+## 窗口相关
 
 - 布局拖乱了跑 `hive layout`。
 - PR 号钉窗口状态栏:`hive pr set <PR号>` / `hive pr clear`。

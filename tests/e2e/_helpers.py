@@ -63,9 +63,12 @@ def run_hive_in_tmux_pane(
     *,
     env: dict[str, str],
     cwd: Path,
-    timeout: float = 20.0,
+    timeout: float = 60.0,
     capture_lines: int = 200,
 ) -> subprocess.CompletedProcess[str]:
+    # The pane runs the user's interactive shell, and a prompt with
+    # completion plugins can take over ten seconds just to consume the
+    # ~300-character command line before hive even starts.
     marker = f"__HIVE_DONE_{uuid.uuid4().hex}__"
     marker_pattern = re.compile(rf"^{re.escape(marker)}:(\d+)$")
     output_path = cwd / f".hive-tmux-{uuid.uuid4().hex}.out"

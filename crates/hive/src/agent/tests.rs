@@ -53,10 +53,12 @@ fn mock_daemon_up() {
     hook(|h| h.codex_spawn_daemon = true);
 }
 
-/// Python `_mock_grok_leader_up`.
+/// The grok member engine mints (leader by identity, session/new) and
+/// the pane's readiness wait answers at once.
 fn mock_grok_leader_up() {
     hook(|h| {
-        h.grok_spawn_daemon = true;
+        h.grok_spawn_member_daemon = true;
+        h.grok_create_member_session = true;
         h.wait_grok_ready = Some(true);
     });
 }
@@ -178,7 +180,8 @@ fn test_spawn_split_window_failure_touches_nothing_downstream() {
             assert!(h.records.is_empty(), "{cli_name}");
             assert!(h.codex_started.is_empty(), "{cli_name}");
             assert!(h.codex_records.is_empty(), "{cli_name}");
-            assert!(h.grok_started.is_empty(), "{cli_name}");
+            assert!(h.grok_leaders.is_empty(), "{cli_name}");
+            assert!(h.grok_minted.is_empty(), "{cli_name}");
             assert!(h.grok_sessions.is_empty(), "{cli_name}");
         });
     }
@@ -896,7 +899,10 @@ fn test_spawn_codex_fork_does_not_start_daemon() {
 }
 
 #[test]
-fn test_spawn_grok_launches_with_minted_session_id_and_model_flag() {
+fn test_spawn_grok_mints_the_engine_by_identity_then_attaches_the_pane() {
+    // The oracle for dp's rule: the engine (leader + session) is minted on
+    // <team>.<member> with no pane argument, before the launch line is
+    // typed; the pane then attaches to that session with `--resume <sid>`.
     let _guard = setup();
     mock_grok_leader_up();
     Agent::spawn(
@@ -911,24 +917,44 @@ fn test_spawn_grok_launches_with_minted_session_id_and_model_flag() {
         }),
     )
     .unwrap();
+    let minted = hook(|h| h.grok_minted.clone());
+    assert_eq!(minted.len(), 1);
+    let (team, member, session_id, cwd) = minted[0].clone();
+    assert_eq!(
+        (team.as_str(), member.as_str(), cwd.as_str()),
+        ("t", "w1", "/work/dir")
+    );
+    assert!(!session_id.is_empty());
+    // hive never writes the record itself here: session/new owns it
+    assert!(hook(|h| h.grok_sessions.clone()).is_empty());
+    assert!(hook(|h| h.grok_leaders.clone()).is_empty()); // the mint raises the leader
     let launch = launch_of(&calls()[0]);
-    let (pane, session_id, cwd) = hook(|h| h.grok_sessions[0].clone());
-    assert_eq!((pane.as_str(), cwd.as_str()), ("%0", "/work/dir"));
     assert_eq!(
         launch.split_whitespace().collect::<Vec<_>>(),
         vec![
             "hive",
             "grok",
-            "--session-id",
+            "--resume",
             session_id.as_str(),
             "-m",
             "'grok-4.6'"
         ]
     );
+    // no `--session-id`: the pane creates nothing, it attaches
+    assert!(!launch.contains("--session-id"));
+    assert_eq!(
+        hook(|h| h.event_order.clone()),
+        vec![
+            "split:%0".to_string(),
+            format!("mint:t.w1:{session_id}:/work/dir"),
+            "launch:%0".to_string(),
+            "ready:%0".to_string(),
+        ]
+    );
 }
 
 #[test]
-fn test_spawn_grok_resume_keeps_the_session_id_and_drops_fork_flag() {
+fn test_spawn_grok_resume_raises_the_leader_by_identity_and_keeps_the_session_id() {
     let _guard = setup();
     mock_grok_leader_up();
     Agent::spawn(
@@ -948,15 +974,38 @@ fn test_spawn_grok_resume_keeps_the_session_id_and_drops_fork_flag() {
         launch.split_whitespace().collect::<Vec<_>>(),
         vec!["hive", "grok", "--resume", "'sess-abc'"]
     );
-    // the pane drives the resumed session itself — no new id is minted
+    // no session/new: the session exists, the leader is raised by identity
+    // and the record names the resumed id on the member key
+    assert!(hook(|h| h.grok_minted.clone()).is_empty());
+    assert_eq!(
+        hook(|h| h.grok_leaders.clone()),
+        vec![("t".to_string(), "w1".to_string())]
+    );
     assert_eq!(
         hook(|h| h.grok_sessions.clone()),
-        vec![("%0".to_string(), "sess-abc".to_string(), "/tmp".to_string())]
+        vec![(
+            "m-t.w1".to_string(),
+            "sess-abc".to_string(),
+            "/tmp".to_string()
+        )]
+    );
+    assert_eq!(
+        hook(|h| h.event_order.clone()),
+        vec![
+            "split:%0",
+            "leader:t.w1",
+            "record:m-t.w1:sess-abc",
+            "launch:%0",
+            "ready:%0",
+        ]
     );
 }
 
 #[test]
 fn test_spawn_grok_fork_mints_a_new_session_id_for_the_branch() {
+    // A fork has no leader-side primitive: the leader is raised by
+    // identity, and the pane's TUI branches the session under the id hive
+    // recorded on the member key.
     let _guard = setup();
     mock_grok_leader_up();
     Agent::spawn(
@@ -971,7 +1020,13 @@ fn test_spawn_grok_fork_mints_a_new_session_id_for_the_branch() {
     )
     .unwrap();
     let launch = launch_of(&calls()[0]);
-    let forked_id = hook(|h| h.grok_sessions[0].1.clone());
+    assert!(hook(|h| h.grok_minted.clone()).is_empty());
+    assert_eq!(
+        hook(|h| h.grok_leaders.clone()),
+        vec![("t".to_string(), "w1".to_string())]
+    );
+    let (key, forked_id, _cwd) = hook(|h| h.grok_sessions[0].clone());
+    assert_eq!(key, "m-t.w1");
     assert_ne!(forked_id, "sess-abc");
     assert_eq!(
         launch.split_whitespace().collect::<Vec<_>>(),
@@ -988,10 +1043,11 @@ fn test_spawn_grok_fork_mints_a_new_session_id_for_the_branch() {
 }
 
 #[test]
-fn test_spawn_grok_refuses_when_leader_daemon_fails() {
-    // Grok runtime lives on the per-pane leader: without one the pane would
-    // run a grok nobody can reach, so spawn gives the pane back and raises.
-    let _guard = setup(); // grok spawn_daemon defaults to false
+fn test_spawn_grok_refuses_when_the_engine_mint_fails() {
+    // Grok runtime lives on the member's leader: without a materialized
+    // session the pane would run a grok nobody can reach, so spawn gives
+    // the pane back and raises.
+    let _guard = setup(); // grok_create_member_session defaults to false
     let err = err_of(Agent::spawn(
         "w1",
         "t",
@@ -1005,6 +1061,26 @@ fn test_spawn_grok_refuses_when_leader_daemon_fails() {
     assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
     assert!(calls().is_empty()); // no launch command was ever sent
     assert!(hook(|h| h.grok_sessions.clone()).is_empty()); // and no session record left behind
+}
+
+#[test]
+fn test_spawn_grok_resume_refuses_when_the_leader_fails() {
+    let _guard = setup(); // grok_spawn_member_daemon defaults to false
+    let err = err_of(Agent::spawn(
+        "w1",
+        "t",
+        "%0",
+        spawn_opts(|o| {
+            o.skill = "none".into();
+            o.cli = "grok".into();
+            o.session_id = Some("sess-abc".into());
+            o.session_mode = "resume".into();
+        }),
+    ));
+    assert!(err.contains("leader-only"), "{err}");
+    assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
+    assert!(calls().is_empty());
+    assert!(hook(|h| h.grok_sessions.clone()).is_empty());
 }
 
 #[test]
@@ -1044,9 +1120,10 @@ fn test_spawn_grok_connects_the_2nd_client_once_the_session_is_ready() {
         }),
     )
     .unwrap();
+    let order = hook(|h| h.event_order.clone());
     assert_eq!(
-        hook(|h| h.event_order.clone()),
-        vec!["ready:%0", "connect:/tmp/ws:%0"]
+        &order[order.len() - 2..],
+        &["ready:%0".to_string(), "connect:/tmp/ws:%0".to_string()]
     );
 }
 
@@ -1232,9 +1309,9 @@ fn test_send_claude_resolves_the_engine_from_the_pane_job_record() {
 
 #[test]
 fn test_send_claude_pane_without_job_delivers_to_interactive_session() {
-    // hive render draws an interactive member (a joined ccd) as a
-    // read-only mirror pane tagged with the member's name; the roster
-    // sessionId — not the mirror pane — is the delivery address.
+    // An interactive member (a joined ccd) is drawn as a read-only mirror
+    // pane tagged with the member's name; the roster sessionId — not the
+    // mirror pane — is the delivery address.
     let _guard = setup();
     pin_cli_probe("claude");
     hook(|h| h.daemon_reply = Some("udsWriteAccepted"));
@@ -1667,7 +1744,7 @@ fn test_wait_codex_attached_timeout_is_deterministic_and_nonfatal() {
 #[test]
 fn test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner() {
     let _guard = setup();
-    hook(|h| h.grok_spawn_daemon = true);
+    hook(|h| h.grok_create_member_session = true);
     Agent::spawn(
         "w",
         "t",
@@ -1679,7 +1756,7 @@ fn test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner() {
     )
     .unwrap();
     let waited = hook(|h| h.waited_grok.clone());
-    let minted = hook(|h| h.grok_sessions[0].1.clone());
+    let minted = hook(|h| h.grok_minted[0].2.clone());
     assert_eq!(waited, vec![("%0".to_string(), minted)]); // the id hive minted, not the pane's cwd
 }
 
@@ -1856,10 +1933,7 @@ fn test_spawn_skill_ref_is_bare_for_grok_and_qualified_for_claude() {
     // opens the picker — never format the grok launch with it.
     let _guard = setup();
     mock_claude_bg_up("abcd1234", "sess-registry");
-    hook(|h| {
-        h.grok_spawn_daemon = true;
-        h.wait_grok_ready = Some(true);
-    });
+    mock_grok_leader_up();
 
     Agent::spawn(
         "g",

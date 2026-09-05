@@ -35,18 +35,34 @@ Consequences across modules:
   it, and hived identity is `(workspace socket, team)`, so a dead window does
   not retire a hived on its own; a missing registry entry with no window left
   behind it does.
+- **One directory per team.** `$HIVE_HOME/teams/<team>/` holds everything
+  hive owns for the team: `team.json` (the entry — present means the team
+  exists), and, on the default workspace, `hive.db` (the bus), `run/`
+  (`hived.sock`, `notify.jsonl`, `hived.stderr`, `cvim/`) and `artifacts/`.
+  `--workspace <DIR>` on `create` or `flow rig` puts the workspace elsewhere
+  and the entry's `workspace` field records it; `team.json` stays in the team
+  directory. `create` always resets the default workspace (a pool name
+  recycled after `hive delete` must not inherit the old bus or event log);
+  `flow rig` only initializes it, so a run's op journal survives a `--down`
+  and re-rig. `hive delete` removes `team.json` and leaves the rest;
+  `--delete-workspace` removes the whole directory (or the external
+  workspace); an external workspace is never removed without the flag. A
+  long `HIVE_HOME` relocates the hived socket under `/tmp/hive-<uid>/` as
+  any long workspace does (`devlog.rs::hived_socket_path_in`).
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
-  delete/attach) need no tmux context: a team created outside tmux is
-  headless, and a spawn with no live display launches the engine alone,
-  addressed directly from then on. A pane serves as an address; these verbs
-  do not require one. `render` builds the display window from outside tmux
-  and `flow` rides the same doctrine; `view`, the read-only listings (`ls`,
-  `ccd`), `worktree`, and the setup/launcher commands never needed a pane.
-  The full list is `cli/util.rs::_TMUX_OPTIONAL_ROOT_COMMANDS`; everything
-  else (layout, fork, inject, cvim, …) acts on the current pane and refuses
-  to run outside tmux, except `send`, which is admitted when the caller's
-  own session names a roster row or a Claude messaging socket (the ladder
-  in the next bullet).
+  delete/attach) need no tmux client: `create` outside tmux puts the
+  team window in the session named after the team (created detached when
+  missing), `spawn` splits
+  a pane into the team's window by id from anywhere, and `attach` rebuilds
+  a window that is gone before jumping to it. A pane serves as an address;
+  these verbs do not require the caller to have one. `flow` rides the same
+  doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
+  the setup/launcher commands never needed a pane. The full list is
+  `cli/util.rs::_TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
+  fork, inject, cvim, …) acts on the current pane and refuses to run outside
+  tmux, except `send`, which is admitted when the caller's own session names
+  a roster row or a Claude messaging socket (the ladder in the next
+  bullet).
 - **Engine key scope.** A member's daemon is keyed by `<team>.<member>`, so it
   survives the pane; a raw non-team pane keeps a pane key and pane lifecycle.
   With no pane to ask, an engine still resolves who it is, by a three-rung
@@ -63,7 +79,17 @@ Consequences across modules:
   reason. The first rung that resolves settles the identity, including when
   it names a different team; an engine whose session matches no row is
   nobody, and `hive send` tells it so rather than letting it sign as the
-  orch.
+  orch. Display is then resolved on top of identity, not read from env: a
+  member engine's tools carry no usable `TMUX_PANE` (a claude bg engine has
+  none, codex's daemon env is frozen at spawn, a grok member's leader is
+  minted before any pane exists and pins none), so `get_current_pane_id`
+  walks from the engine's own marker to its pane — a codex thread to its
+  pane record, a claude socket to its engine's job to the job's pane, a grok
+  session id to its roster row to the pane tagged with that member. That is
+  what lets the pane-bound verbs (layout, fork, inject, cvim, …) run from a
+  member's tool shell; a member whose pane is gone keeps its identity and
+  loses only those verbs. A raw `hive grok` pane outside any team is the one
+  leader that still pins its pane.
 - **Reaping on failed reads.** Daemon reaping does not fire on an unreadable
   registry read, and a young pidfile gets a grace window so a spawn
   mid-registration is not mistaken for an orphan.
@@ -71,12 +97,18 @@ Consequences across modules:
   still lists, so no create lane reuses a name until `hive delete` releases
   it.
 
-`hive render` renders and does not define membership. Only a member with a
-recorded engine identity and an attachable cli gets a pane; the rest are named
-on stderr and left headless. A claude member whose sessionId names an
-interactive session (a joined desktop/ccd session, not a bg job) is rendered
-read-only through `hive view`, because the resume lane would mint a forked job
-that steals the member's deliveries.
+The display is eager and never defines membership: every create leaves the
+team bound to a window (the caller's inside tmux, a fresh one in the team
+session outside), every spawn splits a pane into it, and `hive attach` heals
+it, rebuilding a window that is gone and adding a pane for any roster member
+without one. Only a member with a recorded engine identity and an attachable
+cli gets a pane; the rest are named on stderr when the window is rebuilt, and
+stay registry-only until they have one. A window hive built itself carries
+`@hive-built`; `hive delete` closes those and leaves a window a human's
+session lent the team (an in-tmux create). A claude member whose sessionId names an interactive session (a
+creating or joined desktop/ccd session, not a bg job) is drawn read-only
+through `hive view`, because the resume lane would mint a forked job that
+steals the member's deliveries.
 
 ### Mailbox addresses
 
@@ -182,11 +214,12 @@ deliberately must not be typed at.
 
 Not every claude member is a bg job. A joined interactive session — a desktop
 Claude that ran `hive create` or `hive join` — is a member whose engine is that
-session, and `hive render` gives it a read-only `hive view` mirror pane. No CLI
-process runs on that pane's tty, so the pane-keyed probe alone would report the
-member dead; the roster sessionId is the engine identity, and while it names a
-live session that session's registry status is the member's `cliAlive`, `busy`
-and `inputState`. `alive` stays the pane's own fact.
+session, and its pane is a read-only `hive view` mirror (built at create or
+join, or by `hive attach`). No CLI process runs on that pane's tty, so the
+pane-keyed probe alone would report the member dead; the roster sessionId is
+the engine identity, and while it names a live session that session's registry
+status is the member's `cliAlive`, `busy` and `inputState`. `alive` stays the
+pane's own fact.
 
 ### What the viewer is showing
 
@@ -352,7 +385,7 @@ one, since it launches the engine itself. A claude session that is not on a
 pane is the opposite case and is supported: run outside tmux, `hive join`
 enrols the calling session with its own sessionId as engine identity, delivery
 takes the same two lanes (daemon reply, then the session's own inbox socket),
-and attach renders it read-only. Such a member has no bg job, no ledger row,
+and its pane is a read-only mirror. Such a member has no bg job, no ledger row,
 and none of the keyboard path above applies to it.
 
 ## Codex: one shared app-server daemon
@@ -399,18 +432,27 @@ reverse-engineering it from the transcript.
 
 ## Grok: the leader daemon
 
-A born-connected grok pane runs a `grok agent leader` daemon; the TUI attaches
-to it and hive attaches as a second ACP client, folding runtime from that
-client's notification stream.
+A grok member's engine is a `grok agent leader` daemon keyed by identity
+(`m-<team>.<member>`), and it is born before any pane exists: spawn raises
+the daemon on the member key, asks it for `session/new` with the session id
+hive minted, and records that session beside the socket. A tmux pane is a
+client attached afterwards — the TUI in it runs `hive grok --resume <sid>`,
+resolves the pane's member tags to the same key, and loads the session — the
+same engine-first shape as a claude bg job (`claude attach`) and a codex
+thread (`codex resume`). Hive attaches as a further ACP client and folds
+runtime from that client's notification stream. Only a raw `hive grok` pane
+outside any team gets a pane-keyed leader with the pane's lifecycle.
 
 - **Session ownership.** The leader keeps every session of the cwd, so which
-  one belongs to this pane is not discoverable from it. Hive mints the session
-  id at spawn, passes it in, records it, and the client ignores notifications
-  for any other.
+  one belongs to this member is not discoverable from it. Hive names the
+  session at the mint, records it, and the client ignores notifications for
+  any other. A resume keeps the resumed session's own id on the member key; a
+  fork has no leader-side primitive, so the pane's TUI branches it under the
+  id hive recorded.
 - **Session load replay.** Session load replays the session's past updates
   before it answers, so everything received before the load response is
   discarded; a replayed turn must not mark the pane busy. Spawn therefore asks
-  the hived to connect once the session exists and grok is up, rather than
+  the hived to connect once the pane's grok is up on the session, rather than
   lazily on the next tick.
 - **Permission requests.** Hive answers its own copy with `cancelled` and
   reports the member as waiting: the decision belongs to the human at the TUI,

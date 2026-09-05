@@ -155,7 +155,7 @@ fn _spawn_stdio_proc(argv: &[String]) -> io::Result<Arc<dyn LeaderProc>> {
 }
 
 // --------------------------------------------------------------------------
-// one stdio client attached to one pane's leader
+// one stdio client attached to one key's leader
 // --------------------------------------------------------------------------
 
 /// A one-shot flag with a timed wait.
@@ -554,10 +554,11 @@ impl GrokStdioClient {
 
     /// `initialize` then `session/new` with hive's minted id.
     ///
-    /// The headless spawn primitive: the leader materializes the session
-    /// (spike-verified: the id must ride `_meta.sessionId` — a top-level
-    /// `sessionId` is silently ignored and the server mints its own).
-    /// Binds this client to the new session on success.
+    /// The engine-first mint primitive: the leader materializes the session
+    /// before any pane exists (spike-verified: the id must ride
+    /// `_meta.sessionId` — a top-level `sessionId` is silently ignored and
+    /// the server mints its own). Binds this client to the new session on
+    /// success.
     pub fn new_session(&self, session_id: &str, cwd: &str) -> bool {
         let initialized = self.call(
             "initialize",

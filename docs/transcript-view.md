@@ -7,7 +7,7 @@ join` — has no attachable pty. `claude attach` addresses bg jobs only, and
 `--resume` does not attach to the running engine: it forks a second one,
 which mints a bg job that then steals the member's deliveries. The only
 remaining surface is the transcript JSONL, which claude appends event by
-event as the turn unfolds. `hive render` substitutes the viewer for any
+event as the turn unfolds. The display layer substitutes the viewer for any
 claude member with no bg-job row.
 
 ## The boundary

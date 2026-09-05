@@ -314,7 +314,7 @@ fn codex_pane_runtime(pane_id: &str, runtime: &mut Map<String, Value>) -> bool {
     true
 }
 
-/// hive-spawned grok is the same shape over its per-pane leader daemon, and
+/// hive-spawned grok is the same shape over its identity-keyed leader, and
 /// its session id needs no probing: hive minted it at spawn time and wrote
 /// it beside the socket. Unlike codex it never falls through to the
 /// transcript path — that gate only knows claude/codex record shapes and
@@ -475,11 +475,12 @@ pub fn _claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
     Some(fields)
 }
 
-/// Runtime for a registry member with no pane: the engine IS the member.
+/// Runtime of a member with no pane (its window is gone): the engine's own
+/// state is the only evidence.
 ///
 /// ``alive`` mirrors engine liveness (there is no pane to be alive), and
 /// ``headless`` marks the row so consumers can tell a closed display from a
-/// dead member.
+/// dead engine.
 pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     let mut runtime = Map::new();
     runtime.insert("alive".to_string(), Value::Bool(false));
@@ -570,8 +571,8 @@ pub fn _member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Va
 /// Overlay the engine's own runtime on a claude member whose pane is only a
 /// mirror of it.
 ///
-/// `hive render` renders an interactive claude member — a joined desktop
-/// session — as a read-only `hive view` pane. No CLI process runs on that
+/// A joined or creating interactive claude member is drawn as a read-only
+/// `hive view` pane. No CLI process runs on that
 /// tty, so the pane-keyed probe reports `cli_exited`; but for claude the
 /// pane tty is never the evidence (see docs/runtime-model.md), the engine
 /// is. The roster sessionId is that engine's identity: while it names a live

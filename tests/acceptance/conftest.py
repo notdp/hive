@@ -147,7 +147,7 @@ def rig():
             "return members.map((m) => ({ name: m.name, summary: m.summary }))\n"
         )
         # Reproduce the honest parentage: an orch's flow runner lives inside
-        # a headless engine — no $TMUX. Only the pinned pane identity rides
+        # an engine's tool subprocess — no $TMUX. Only the pinned pane identity rides
         # in, exactly what a spawned daemon's tools get.
         env = dict(os.environ)
         env.pop("TMUX", None)
@@ -187,8 +187,8 @@ def rig():
             if str(state.get("name", "")).startswith(f"{r.team}."):
                 subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
                 subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
-        # The registry keeps a headless team alive forever (hived won't
-        # exit, member daemons won't reap) — release the name explicitly.
+        # The registry keeps the team alive (hived won't exit, member
+        # daemons won't reap) — release the name explicitly.
         for cli in r.clis:
             subprocess.run(["hive", "kill", f"{r.team}.{r.member(cli)}"],
                            capture_output=True, timeout=30)

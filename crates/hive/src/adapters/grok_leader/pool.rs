@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use super::client::{GrokStdioClient, SessionRuntime};
-use super::daemon::{probe_socket, spawn_member_daemon};
+use super::daemon::{kill_daemon_key, probe_socket, spawn_member_daemon};
 use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
     socket_path_for_key, write_session_key,
@@ -13,7 +13,7 @@ use super::keys::{
 use super::{CANCEL_SENT, PROMPT_QUEUED, _CONNECT_COOLDOWN};
 
 // --------------------------------------------------------------------------
-// per-pane client pool (hived-side)
+// per-key client pool (hived-side)
 // --------------------------------------------------------------------------
 
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
@@ -240,8 +240,8 @@ impl GrokClientPool {
         }
     }
 
-    /// `create_member_session`'s adopt path: the creating client takes the
-    /// key's slot, and whatever client held it before is closed.
+    /// Bind *client* as *key*'s pooled client (the mint's adopt path),
+    /// closing whatever the pool held for the key before.
     fn _adopt_client(&self, key: &str, client: Arc<GrokStdioClient>) {
         let existing = {
             let mut state = self.state.lock().unwrap();
@@ -304,27 +304,42 @@ pub fn session_id_for_pane(pane: &str) -> Option<String> {
     read_pane_session(pane).map(|record| record.session_id)
 }
 
-/// Materialize the member's session on its leader — the headless spawn.
+/// Materialize the member's session on its leader — the engine-first mint.
 ///
-/// Ensures the member daemon, asks it for `session/new` with hive's
-/// minted id, and records the session beside the socket on success. The
-/// creating client stays in the pool, already bound and folding the
-/// session's notifications.
+/// Raises the member daemon by identity, asks it for `session/new` with
+/// hive's minted id, and records the session beside the socket on success,
+/// all before any pane exists: a pane attaching later (`hive grok --resume
+/// <sid>`) is one more client of this engine. The creating client stays in
+/// the pool, already bound and folding the session's notifications.
+///
+/// A failure after the daemon came up takes a leader this mint raised down
+/// with it: the spawn gives the pane back, and a leader with no record and
+/// no roster row would otherwise sit unaddressable until the hived's orphan
+/// reap. A leader that was already listening is reused, never killed.
 pub fn create_member_session(team: &str, member: &str, session_id: &str, cwd: &str) -> bool {
+    let key = member_key(team, member);
+    let raised_here = !probe_socket(&socket_path_for_key(&key));
     if !spawn_member_daemon(team, member) {
         return false;
     }
-    let key = member_key(team, member);
+    let undo = |client: Option<&GrokStdioClient>| {
+        if let Some(client) = client {
+            client.close();
+        }
+        if raised_here {
+            kill_daemon_key(&key);
+        }
+        false
+    };
     let client = match GrokStdioClient::new(&key) {
         Ok(client) => Arc::new(client),
-        Err(_) => return false,
+        Err(_) => return undo(None),
     };
     if !client.new_session(session_id, cwd) {
-        client.close();
-        return false;
+        return undo(Some(&client));
     }
     if write_session_key(&key, session_id, cwd).is_err() {
-        return false;
+        return undo(Some(&client));
     }
     pool()._adopt_client(&key, client);
     true

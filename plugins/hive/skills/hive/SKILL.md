@@ -5,21 +5,20 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 
 # Hive 协作协议
 
-一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口只是可选的显示器:headless 成员照常收发消息、被派活、被 kill,`hive render` 只是把团画出来。
+一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口是显示器,建团即有:窗口被关、tmux 重启都不丢团,`hive attach` 会把它重建出来。
 
 主线动词(`worktree` 见 references/worktree.md,编排与 `flow` 见 references/orchestration.md):
 
 ```bash
 hive team            # 名册 + runtime:你是谁、队里有谁、各自什么状态
 hive send <addr> "<内容>"   # 唯一投递动词。成功零输出,自动锚线程
-hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外:headless 团(你以 <team>.orch 入册);tmux 内 agent pane:当前 pane 立为 orch;shell 建的团无 orch
+hive create [name]   # 建团,name 缺省池名,建团者是 agent 就成为 orch。tmux 外:建一个以团名命名的 tmux session 放团窗口(Claude session 建团则你以 <team>.orch 入册,首格是你的只读镜像);tmux 内 agent pane:当前 pane 立为 orch;shell 建的团无 orch
 hive join <team>     # 入队。tmux 外:当前 Claude session 进名册成为正式成员;tmux 内:当前 pane 注册进窗口的 team
-hive spawn <name>    # 造新成员。tmux 外(或团没有窗口)spawn 出 headless 成员:引擎直起、无 pane,投递、回报、kill 全都照常
-hive attach <team>   # 跳到团的窗口(只跳,不建)
-hive render <team>   # 把注册表里的团画成窗口:没有窗口就建,有窗口就补后来 spawn 的成员,然后跳过去
+hive spawn <name>    # 造新成员:引擎起在守护进程里,pane 切进团窗口——你在不在 tmux 里都一样
+hive attach <team>   # 跳到团的窗口;窗口没了先按名册重建,后来的成员缺 pane 就补上
 hive kill <member>   # 成员退场
-hive delete <team>   # 注销名册、释放团名;关掉窗口不删团
-hive ls              # 全部 team(含没有窗口的)
+hive delete <team>   # 注销名册、释放团名;关掉窗口不删团。团目录 $HIVE_HOME/teams/<team>/ 的 bus/run/artifacts 留着,--delete-workspace 才整目录删
+hive ls              # 全部 team(含窗口已关的)
 ```
 
 ## 入口分派:`/hive:hive [team]`
@@ -28,7 +27,7 @@ hive ls              # 全部 team(含没有窗口的)
 
 1. **你已经在队里**(`hive team` 的 `self` 有值,或出生就带队籍):参数只是对队籍的确认,直接读「你是成员」从「出生」开始。参数与所在队不符时回一句说明即可,不换队——队籍以名册为准。
 2. **你不在任何队,参数给了 team 名**(`/hive:hive wasp`):`hive join wasp` 入队;报 not found 就 `hive create wasp`——同一个入口幂等。建完你就是发起人,读 references/orchestration.md。
-3. **你不在任何队,无参数**:`hive create` 建新团(名字自动从池里挑)——tmux 内当前 pane 立为 orch,tmux 外是 headless 团,语义同一个。想加入已有团就带参数说队名——无参永远是要新团。
+3. **你不在任何队,无参数**:`hive create` 建新团(名字自动从池里挑)——tmux 内当前 pane 立为 orch,tmux 外建团 session,语义同一个。想加入已有团就带参数说队名——无参永远是要新团。
 
 tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 session 标题,在原标题**前面插入**方括号徽章,供 human 和 `hive ccd ls` 识别:成员用 `[<team>.<member>] `,orch 用 `[<team>] `(原标题为空只留徽章);退队或删团时摘掉徽章恢复原标题。tmux pane 成员不用做——border 已带队籍。
 
@@ -46,7 +45,7 @@ tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 se
 
 - 回信永远照抄来信的 `from=` 地址——它在任何处境下都可达。
 - tmux pane 成员发队友用裸名(`hive send dodo …`);本队前缀等价裸名。自己拼的别队前缀会被拒——照抄 from 不受此限(guest 编排者的回信地址就是别队前缀,照抄即达)。
-- tmux 外(headless 成员、joined session、guest)用 `<team>.<member>`;裸名全局唯一时也行。
+- tmux 外(joined session、guest、引擎的工具进程)用 `<team>.<member>`;裸名全局唯一时也行。
 - team 外的 Claude session 用 `ccd.<name>`(见「互通」)。
 - `flow.run` 是 flow 脚本的收件箱地址,不是成员。收到 `from=flow.run` 照抄回信;它只列在 `mailboxes`、不列在 `members`,这是正常的。
 
@@ -62,7 +61,7 @@ Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 tu
 
 ### 收活:任务以派发 artifact 为准
 
-队友消息以三行 `<HIVE>` 信封注入你的对话(headless 一样):开标签、正文、闭标签;`from` / `to` 必有,`msgId`、`reply-to`(回复才有)、`artifact` 按需出现。
+队友消息以三行 `<HIVE>` 信封注入你的对话:开标签、正文、闭标签;`from` / `to` 必有,`msgId`、`reply-to`(回复才有)、`artifact` 按需出现。
 
 ```text
 <HIVE from=comb.dodo to=comb.rex msgId=a1b2 artifact=/tmp/spec.md>

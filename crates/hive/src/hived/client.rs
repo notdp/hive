@@ -79,7 +79,7 @@ pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
     _request_hived(workspace, &action_payload("connect-codex"), 3.0)
 }
 
-/// Ask the hived to bring a per-pane grok 2nd client online now.
+/// Ask the hived to bring the grok 2nd client for the pane's daemon key online now.
 ///
 /// Called at spawn time so the stdio client has loaded the pane's session
 /// before its first turn: ``session/load`` replays past updates, and a replay
