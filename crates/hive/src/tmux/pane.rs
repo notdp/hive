@@ -224,11 +224,13 @@ pub fn enable_pane_border_status(target: &str) {
     );
 }
 
-/// Apply tmux window options expected for Hive-managed panes.
+/// Apply tmux window options expected for Hive-managed panes, and the
+/// layout hooks that keep the window planned (`layout::install_hooks`).
 pub fn configure_hive_window(target: &str) {
     enable_pane_border_status(target);
     set_window_option(target, "monitor-activity", "off");
     set_window_option(target, "monitor-bell", "off");
+    crate::layout::install_hooks(target);
 }
 
 pub fn set_window_option(target: &str, option: &str, value: &str) {

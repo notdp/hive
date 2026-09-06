@@ -167,5 +167,5 @@ gh pr merge <PR号> --match-head-commit <验过的head> --squash
 
 ## 窗口相关
 
-- 布局拖乱了跑 `hive layout`。
+- 布局拖乱了跑 `hive layout auto`。
 - PR 号钉窗口状态栏:`hive pr set <PR号>` / `hive pr clear`。

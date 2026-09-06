@@ -133,6 +133,17 @@ pub(crate) fn shlex_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Escape `value` for the inside of a tmux double-quoted string: tmux's
+/// command parser expands `$name` and honours `\` there even when the
+/// value is single-quoted for the shell it reaches, so a binary path with
+/// a `$` would otherwise reach `run-shell` rewritten.
+pub(crate) fn tmux_dquote_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+}
+
 pub(crate) fn env_string(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }

@@ -88,42 +88,48 @@ pub fn compact_cmd(pane_id: &str) {
 // layout
 // ---------------------------------------------------------------------------
 
-pub fn layout_cmd(preset: &str) {
-    let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
-    let t = t.expect("required resolve returned no team");
-    let window_target = if !t.tmux_window.is_empty() {
-        t.tmux_window.clone()
+/// `hive layout <preset|auto> [--on-change] [--window TARGET]`. `auto`
+/// from a human forces the plan (the "布局拖乱了" repair); `--on-change`
+/// is the window hooks' form, which applies only when the plan's key
+/// differs from `@hive-layout` and prints nothing (a run-shell job's
+/// output would land in a tmux view). `--window` names the window when
+/// there is no caller pane (a run-shell job has no TMUX_PANE).
+pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
+    let window_target = if !window.is_empty() {
+        window.to_string()
     } else {
-        tmux::get_current_window_target().unwrap_or_default()
+        let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
+        let t = t.expect("required resolve returned no team");
+        if !t.tmux_window.is_empty() {
+            t.tmux_window.clone()
+        } else {
+            tmux::get_current_window_target().unwrap_or_default()
+        }
     };
     if window_target.is_empty() {
         fail("Cannot determine tmux window target");
     }
     if preset == "auto" {
-        match crate::layout::apply_adaptive(&window_target) {
-            None => println!(
-                "{}",
-                py_dumps(
-                    &json!({"layout": "", "window": window_target, "reason": "no-op"}),
-                    true,
-                    None,
-                    false
-                )
-            ),
-            Some(choice) => println!(
-                "{}",
-                py_dumps(
-                    &json!({
-                        "layout": choice.preset,
-                        "orientation": choice.orientation,
-                        "window": window_target,
-                    }),
-                    true,
-                    None,
-                    false
-                )
-            ),
+        let outcome = crate::layout::ensure(&window_target, !on_change);
+        if on_change {
+            return;
         }
+        let plan = outcome.plan();
+        println!(
+            "{}",
+            py_dumps(
+                &json!({
+                    "layout": plan.map(|p| p.key.as_str()).unwrap_or_default(),
+                    "orientation": plan.map(|p| p.orientation).unwrap_or_default(),
+                    "window": window_target,
+                    "applied": outcome.applied(),
+                    "reason": outcome.reason(),
+                }),
+                true,
+                None,
+                false
+            )
+        );
         return;
     }
     if preset == "main-vertical" || preset == "main-horizontal" {
@@ -337,10 +343,9 @@ pub(super) fn _backfill_missing_member_panes(
             continue;
         }
         let cwd = map_str(&member, "cwd");
-        let count = tmux::list_panes(window).len();
         let split = tmux::split_window(
             &prev_pane,
-            crate::layout::split_horizontal(window, count + 1),
+            crate::layout::split_horizontal(window),
             None,
             true,
             if cwd.is_empty() { None } else { Some(&cwd) },
@@ -354,7 +359,7 @@ pub(super) fn _backfill_missing_member_panes(
         prev_pane = split;
     }
     if !added.is_empty() {
-        let _ = crate::layout::apply_adaptive(window);
+        let _ = crate::layout::ensure(window, false);
     }
     added
 }
@@ -485,7 +490,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
         } else {
             let split = ok_or_fail(tmux::split_window(
                 &prev_pane,
-                crate::layout::split_horizontal(&window, attached.len() + 1),
+                crate::layout::split_horizontal(&window),
                 None,
                 true,
                 if cwd.is_empty() { None } else { Some(&cwd) },
@@ -501,7 +506,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
         prev_pane = pane;
     }
 
-    let _ = crate::layout::apply_adaptive(&window);
+    let _ = crate::layout::ensure(&window, false);
     let _ = crate::registry::set_display(&team, &tmux::get_window_id(&window).unwrap_or_default());
     (window, attached, skipped)
 }

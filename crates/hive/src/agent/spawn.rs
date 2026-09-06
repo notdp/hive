@@ -324,7 +324,7 @@ fn _open_member_pane(
         // long is the distorted-window the human stares at.
         let window_for_tile = hooked_get_pane_window_target(&pane_id);
         if !window_for_tile.is_empty() {
-            crate::layout::apply_adaptive(&window_for_tile);
+            let _ = crate::layout::ensure(&window_for_tile, false);
         }
         pane_id
     } else {

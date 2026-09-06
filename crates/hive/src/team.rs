@@ -75,8 +75,11 @@ fn new_agent(
 
 /// Drop every `@hive-*` window tag `_write_window_options` (or a Python-era
 /// hive, which also wrote `@hive-peers`) left on *window*, with the display
-/// carriers the hived and notify wrote on it.
+/// carriers the hived and notify wrote on it, and the layout hooks with
+/// their `@hive-layout` key: a window that stops being hive's keeps its
+/// layout to itself.
 pub fn clear_window_tags(window: &str) {
+    layout::remove_hooks(window);
     for key in [
         "hive-team",
         "hive-workspace",
@@ -637,7 +640,7 @@ impl Team {
 
         let window_for_split = self.display_window();
         let split_horizontal =
-            self.agents.is_empty() && layout::split_horizontal(&window_for_split, 2);
+            self.agents.is_empty() && layout::split_horizontal(&window_for_split);
         let split_size = "50%";
 
         let spawned = agent_spawn(SpawnCall {
@@ -672,7 +675,7 @@ impl Team {
         self.upsert_agent(agent.clone());
         if !window_for_split.is_empty() {
             tmux::configure_hive_window(&window_for_split);
-            let _ = layout::apply_adaptive(&window_for_split);
+            let _ = layout::ensure(&window_for_split, false);
         }
 
         Ok(agent)
@@ -752,7 +755,7 @@ impl Team {
         }
         let window = self.display_window();
         if !window.is_empty() {
-            let _ = layout::apply_adaptive(&window);
+            let _ = layout::ensure(&window, false);
         }
         true
     }
@@ -1177,6 +1180,10 @@ mod tests {
     // resets it per test.
     // ------------------------------------------------------------------
 
+    type RunFn = Box<dyn Fn(&[String], bool) -> Result<Run, TmuxError>>;
+    type ListPanesFn = Box<dyn Fn(&str) -> Vec<PaneInfo>>;
+    type ListPanesOrNoneFn = Box<dyn Fn(&str) -> Option<Vec<PaneInfo>>>;
+
     pub struct FakeState {
         pub tmux_inside: bool,
         pub current_pane: String,
@@ -1192,9 +1199,9 @@ mod tests {
         pub display_values: HashMap<(String, String), String>,
         pub default_display_value: Option<String>,
         pub pane_window_targets: HashMap<String, String>,
-        pub run_fn: Option<Box<dyn Fn(&[String], bool) -> Result<Run, TmuxError>>>,
-        pub list_panes_full_fn: Option<Box<dyn Fn(&str) -> Vec<PaneInfo>>>,
-        pub list_panes_full_or_none_fn: Option<Box<dyn Fn(&str) -> Option<Vec<PaneInfo>>>>,
+        pub run_fn: Option<RunFn>,
+        pub list_panes_full_fn: Option<ListPanesFn>,
+        pub list_panes_full_or_none_fn: Option<ListPanesOrNoneFn>,
         pub window_size: (i64, i64),
         pub layout_panes: Vec<String>,
         pub layout_actions: Vec<(String, String, String, String)>,
@@ -1468,45 +1475,79 @@ mod tests {
         }
     }
 
-    /// Fake layout runs the REAL `layout::pick` over fake tmux state, so
-    /// only the tmux calls are faked, not the preset choice.
+    /// Fake layout runs the REAL planner over fake tmux state
+    /// (`window_size`, `layout_panes` with their `hive-role` tags), so only
+    /// the tmux calls are faked, not the plan.
     pub mod fake_layout {
         use super::with_state;
+        use crate::tmux::PaneInfo;
 
-        pub fn split_horizontal(window_target: &str, pane_count_after: usize) -> bool {
+        fn layout_panes() -> Vec<PaneInfo> {
+            with_state(|st| {
+                st.layout_panes
+                    .iter()
+                    .map(|pane_id| PaneInfo {
+                        pane_id: pane_id.clone(),
+                        role: st
+                            .pane_options
+                            .get(pane_id)
+                            .and_then(|opts| opts.get("hive-role"))
+                            .cloned()
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    })
+                    .collect()
+            })
+        }
+
+        pub fn split_horizontal(window_target: &str) -> bool {
             if window_target.is_empty() {
                 return true;
             }
             let size = with_state(|st| st.window_size);
-            match crate::layout::pick(size, pane_count_after) {
-                None => true,
-                Some(choice) => choice.orientation == "horizontal",
-            }
+            let mut panes = layout_panes();
+            panes.push(PaneInfo::default());
+            crate::layout::split_beside(size, &panes)
         }
 
-        pub fn apply_adaptive(window_target: &str) -> Option<crate::layout::LayoutChoice> {
-            if window_target.is_empty() {
-                return None;
-            }
-            let (size, count) = with_state(|st| (st.window_size, st.layout_panes.len()));
-            let choice = crate::layout::pick(size, count)?;
+        /// Records the unset as a cleared `@hive-layout` and one row per
+        /// hook on `st.cleared`.
+        pub fn remove_hooks(window: &str) {
             with_state(|st| {
-                for (key, value) in &choice.options {
-                    st.layout_actions.push((
-                        "opt".to_string(),
-                        window_target.to_string(),
-                        key.to_string(),
-                        value.to_string(),
-                    ));
+                for hook in crate::layout::LAYOUT_HOOKS {
+                    st.cleared.push((window.to_string(), hook.to_string()));
                 }
+            });
+            super::fake_tmux::clear_window_option(window, crate::layout::LAYOUT_KEY_OPTION);
+        }
+
+        pub fn ensure(window_target: &str, force: bool) -> crate::layout::Outcome {
+            if window_target.is_empty() {
+                return crate::layout::Outcome::Skipped("no-window");
+            }
+            let size = with_state(|st| st.window_size);
+            let Some(plan) = crate::layout::plan(size, &layout_panes()) else {
+                return crate::layout::Outcome::Skipped("no-plan");
+            };
+            let stored = with_state(|st| {
+                st.window_options
+                    .get(window_target)
+                    .and_then(|opts| opts.get("hive-layout"))
+                    .cloned()
+            });
+            if !force && stored.as_deref() == Some(plan.key.as_str()) {
+                return crate::layout::Outcome::Unchanged(plan);
+            }
+            with_state(|st| {
                 st.layout_actions.push((
                     "layout".to_string(),
                     window_target.to_string(),
-                    choice.preset.to_string(),
-                    String::new(),
+                    plan.key.clone(),
+                    plan.layout.clone(),
                 ));
             });
-            Some(choice)
+            super::fake_tmux::set_window_option(window_target, "@hive-layout", &plan.key);
+            crate::layout::Outcome::Applied(plan)
         }
     }
 
@@ -1607,7 +1648,7 @@ mod tests {
         }
     }
 
-    fn run_stdout(stdout: &'static str) -> Box<dyn Fn(&[String], bool) -> Result<Run, TmuxError>> {
+    fn run_stdout(stdout: &'static str) -> RunFn {
         Box::new(move |_args, _check| {
             Ok(Run {
                 returncode: 0,
@@ -1831,10 +1872,10 @@ mod tests {
         assert!(with_state(|st| st.borders.clone()).contains(&"dev:1".to_string()));
     }
 
-    /// Guards Bug 1 regression: portrait window must end on `even-vertical`,
-    /// not the legacy hardcoded `main-vertical`.
+    /// Guards Bug 1 regression: a portrait window must end stacked, not on
+    /// the legacy hardcoded left-right split.
     #[test]
-    fn test_team_spawn_portrait_window_applies_even_vertical() {
+    fn test_team_spawn_portrait_window_stacks_the_panes() {
         let (_tmp, _guard) = configure_hive_home(true, "%0");
         let agent = new_agent("claude", "team-a", "%9", "claude", "", "", None);
         hook(move |h| h.spawn_fn = Some(Box::new(move |_n, _call| agent.clone())));
@@ -1853,16 +1894,24 @@ mod tests {
             .unwrap();
 
         let layouts = with_state(|st| st.layout_actions.clone());
-        assert!(layouts.contains(&(
-            "layout".to_string(),
-            "dev:1".to_string(),
-            "even-vertical".to_string(),
-            String::new()
-        )));
-        // Portrait must not set main-pane-width.
-        assert!(!layouts
-            .iter()
-            .any(|call| call.0 == "opt" && call.2 == "main-pane-width"));
+        let plan = crate::layout::plan(
+            (191, 171),
+            &["%0", "%9"].map(|id| crate::tmux::PaneInfo {
+                pane_id: id.to_string(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(plan.orientation, "portrait");
+        assert_eq!(
+            layouts,
+            vec![(
+                "layout".to_string(),
+                "dev:1".to_string(),
+                plan.key,
+                plan.layout
+            )]
+        );
         // Pre-spawn split should also follow portrait orientation (vertical = False).
         let calls = hook(|h| h.spawn_calls.clone()).unwrap();
         assert!(!calls[0].split_horizontal);
@@ -2027,6 +2076,33 @@ mod tests {
                 .collect()
         );
         assert!(!cleared.contains(&("dev:3".to_string(), "@hive-team".to_string())));
+    }
+
+    /// A window that stops being hive's loses the layout hooks and the
+    /// plan key with its tags, or its next split would be re-tiled.
+    #[test]
+    fn test_clear_window_tags_unsets_the_layout_hooks_and_key() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        fake_tmux::set_window_option("dev:2", "@hive-team", "my-team");
+        fake_tmux::set_window_option(
+            "dev:2",
+            "@hive-layout",
+            "landscape/m2/no-mirror/no-dock/2x1",
+        );
+
+        clear_window_tags("dev:2");
+
+        let cleared = with_state(|st| st.cleared.clone());
+        for hook in crate::layout::LAYOUT_HOOKS {
+            assert!(
+                cleared.contains(&("dev:2".to_string(), hook.to_string())),
+                "{hook} left: {cleared:?}"
+            );
+        }
+        assert!(cleared.contains(&("dev:2".to_string(), "@hive-layout".to_string())));
+        assert!(cleared.contains(&("dev:2".to_string(), "@hive-team".to_string())));
+        let left = with_state(|st| st.window_options.get("dev:2").cloned().unwrap_or_default());
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// A duplicate window with live member panes is never cleared (Bug A safety).

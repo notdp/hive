@@ -110,8 +110,33 @@ creating or joined desktop/ccd session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
 steals the member's deliveries. That mirror is an ordinary pane
 tagged `@hive-role mirror` beside its member tags: the first pane of a team
-window (a landscape window's `main-vertical` makes it the main one), a pane
-above the dock strip in a flow rig. The mirror is display state only.
+window, a pane above the dock strip in a flow rig. The mirror is display
+state only.
+
+hive owns the team window's layout, and that too is display state. The
+planner (`layout/plan.rs`) reads the window's size and its panes' roles
+and emits one tmux layout string: a flow dock (`@hive-role dock`) is a
+full-width strip at the bottom; the mirror is a left column in a landscape
+window (`w >= 2h`) and a top row in a portrait one, half the body unless
+the members score better beside an 80-column / 24-row mirror; the members
+take the grid whose equal cells come closest to 80x24. `select-layout`
+hands cells to panes in window order, so the apply swaps the mirror first
+and the dock last before it lands. The key of the plan last applied —
+orientation, member count, mirror and dock presence, grid, mirror share,
+never absolute sizes — sits on the window as `@hive-layout`. Two window
+hooks (`window-resized`, `window-layout-changed`, installed wherever a
+window is marked as hive's) run `hive layout auto --on-change --window`,
+which re-plans and applies only when the key differs (the apply's flock is
+keyed on the window id, so the hook's `@N` and a verb's `session:index`
+serialize on one file; a window down to one pane drops its key, so the
+next member is planned): a client attaching
+at another size, a spawn, a kill, a mirror or dock coming and going all
+re-plan without a hived, while a human's border drag — same key — holds,
+through proportional resizes, until the plan changes. `hive layout auto`
+from a human forces the apply; an explicit preset applies as given and
+holds the same way. `hive delete` (and every tag sweep) unsets the hooks
+and the key with the window tags: a window a human's session lent the
+team is theirs again, not re-tiled at their next split.
 `@hive-mirror` on the window is the recorded choice: `off`, written by
 `hive mirror off`, keeps heal and backfill from drawing it; `on`, written by
 `hive mirror on` or when a session mirror is built, is what makes the status
