@@ -235,7 +235,7 @@ impl Client {
 /// matching it means the attach changes nothing. With no pane on record (or
 /// no tmux answer) the engine is not on anyone's screen and any size is
 /// harmless; the fallback is the size claude's own pty host starts at.
-pub(super) fn _engine_screen_size(job_id: &str) -> (u16, u16) {
+pub(crate) fn engine_screen_size(job_id: &str) -> (u16, u16) {
     if let Some(pane) = pane_for_job(job_id) {
         if let Some(raw) = crate::tmux::display_value(&pane, "#{pane_width}\t#{pane_height}") {
             let mut parts = raw.splitn(2, '\t');
@@ -257,14 +257,14 @@ pub(super) fn _engine_screen_size(job_id: &str) -> (u16, u16) {
     (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
 }
 
-pub(super) fn _attach_pipe(job_id: &str, claude_bin: &str) -> Option<Client> {
+pub(crate) fn attach_pipe(job_id: &str, claude_bin: &str) -> Option<Client> {
     #[cfg(test)]
     {
         if let Some(Some(pipe)) = testhook::with(|h| h.attach_pipe.clone()) {
             return Some(Client::Fake(pipe));
         }
     }
-    let (cols, rows) = _engine_screen_size(job_id);
+    let (cols, rows) = engine_screen_size(job_id);
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
     let mut ws = libc::winsize {
@@ -325,14 +325,14 @@ pub(super) fn _attach_pipe(job_id: &str, claude_bin: &str) -> Option<Client> {
     }
 }
 
-pub(super) fn _feed(proc: &mut Client, payload: &str) -> bool {
+pub(crate) fn feed(proc: &mut Client, payload: &str) -> bool {
     proc.write_str(payload).is_ok()
 }
 
 /// The engine the pipe is typing into — the attach itself wakes a parked one,
 /// so this is also the wake wait. A client that exits first says the job is
 /// gone; there is nothing left to wait for.
-pub(super) fn _wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
+pub(crate) fn wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
     wait_engine_entry_until(job_id, engine_ready_timeout(), || proc.poll().is_some())
 }
 
@@ -363,7 +363,7 @@ pub(super) fn hooked_wait_engine_behind(job_id: &str, proc: &mut Client) -> Opti
             return v;
         }
     }
-    _wait_engine_behind(job_id, proc)
+    wait_engine_behind(job_id, proc)
 }
 
 /// Wait until the attach client has the session on screen.
@@ -372,7 +372,7 @@ pub(super) fn hooked_wait_engine_behind(job_id: &str, proc: &mut Client) -> Opti
 /// control bytes: a `\x15` written into a client that is not in raw key mode
 /// yet is inserted into the composer as a literal character instead of
 /// clearing it — observed once on 2.1.240, and silent when it happens.
-pub(super) fn _wait_client_ready(proc: &mut Client) -> bool {
+pub(crate) fn wait_client_ready(proc: &mut Client) -> bool {
     let deadline = Instant::now() + Duration::from_secs_f64(client_ready_timeout());
     while Instant::now() < deadline {
         if proc.poll().is_some() {
@@ -393,12 +393,12 @@ pub(super) fn hooked_wait_client_ready(proc: &mut Client) -> bool {
             return v;
         }
     }
-    _wait_client_ready(proc)
+    wait_client_ready(proc)
 }
 
-/// C-u, in a chunk of its own — see [`_wait_client_ready`].
-pub(super) fn _clear_composer(proc: &mut Client) -> bool {
-    if !_feed(proc, _CLEAR_LINE) {
+/// C-u, in a chunk of its own — see [`wait_client_ready`].
+pub(crate) fn clear_composer(proc: &mut Client) -> bool {
+    if !feed(proc, _CLEAR_LINE) {
         return false;
     }
     sleep_s(_CONTROL_KEY_GAP);
@@ -409,9 +409,9 @@ pub(super) fn _clear_composer(proc: &mut Client) -> bool {
 ///
 /// Best-effort — a failed restore leaves what today's behavior always left,
 /// the draft on claude's kill ring with the TUI's own Ctrl+Y hint on screen.
-pub(super) fn _restore_draft(proc: &mut Client) {
+pub(crate) fn restore_draft(proc: &mut Client) {
     sleep_s(_CONTROL_KEY_GAP);
-    if _feed(proc, _RESTORE_KILL) {
+    if feed(proc, _RESTORE_KILL) {
         sleep_s(_CONTROL_KEY_GAP); // let the client forward it before EOF
     }
 }
@@ -421,7 +421,7 @@ pub(super) fn _restore_draft(proc: &mut Client) {
 /// A wedged client would otherwise outlive the caller holding the pipe open;
 /// nothing downstream may block on it — reap off-thread so the caller
 /// returns immediately.
-pub(super) fn _close_pipe(mut proc: Client) {
+pub(crate) fn close_pipe(mut proc: Client) {
     proc.close_stdin();
     thread::spawn(move || {
         if proc.wait_timeout(_ATTACH_EXIT_TIMEOUT).is_none() {

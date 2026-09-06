@@ -24,7 +24,7 @@ use super::base::{
 const _HISTORY_NAME: &str = "chat_history.jsonl";
 const _META_SCAN_LIMIT: usize = 20;
 
-fn _role_by_type(record_type: &str) -> Option<&'static str> {
+fn role_by_type(record_type: &str) -> Option<&'static str> {
     match record_type {
         "user" => Some("user"),
         "assistant" => Some("assistant"),
@@ -36,7 +36,7 @@ fn _role_by_type(record_type: &str) -> Option<&'static str> {
 pub struct GrokAdapter;
 
 impl GrokAdapter {
-    fn _sessions_root(&self) -> PathBuf {
+    fn sessions_root(&self) -> PathBuf {
         crate::adapters::grok_leader::grok_home().join("sessions")
     }
 }
@@ -58,12 +58,12 @@ impl SessionAdapter for GrokAdapter {
         if session_id.is_empty() {
             return None;
         }
-        let root = self._sessions_root();
+        let root = self.sessions_root();
         if !root.is_dir() {
             return None;
         }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            let direct = root.join(_quote(cwd)).join(session_id).join(_HISTORY_NAME);
+            let direct = root.join(quote(cwd)).join(session_id).join(_HISTORY_NAME);
             if direct.exists() {
                 return Some(direct);
             }
@@ -107,8 +107,8 @@ impl SessionAdapter for GrokAdapter {
             .unwrap_or("");
         Some(SessionMeta {
             session_id,
-            cwd: Some(_unquote(cwd_dir)),
-            model: str_or_none(summary.get("model")).or_else(|| _first_assistant_model(path)),
+            cwd: Some(unquote(cwd_dir)),
+            model: str_or_none(summary.get("model")).or_else(|| first_assistant_model(path)),
         })
     }
 
@@ -130,22 +130,22 @@ impl SessionAdapter for GrokAdapter {
             let Some(payload) = safe_json_loads(line) else {
                 continue;
             };
-            if let Some(message) = _message_from_record(&payload) {
+            if let Some(message) = message_from_record(&payload) {
                 return Some(message);
             }
         }))
     }
 }
 
-fn _message_from_record(payload: &Map<String, Value>) -> Option<Message> {
+fn message_from_record(payload: &Map<String, Value>) -> Option<Message> {
     let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
     let content = payload.get("content");
-    if let Some(role) = _role_by_type(record_type) {
-        return Some(_message(role, _iter_grok_parts(content), payload));
+    if let Some(role) = role_by_type(record_type) {
+        return Some(message(role, iter_grok_parts(content), payload));
     }
     if record_type == "reasoning" {
-        let text = _text_of(content).or_else(|| str_or_none(payload.get("text")));
-        return Some(_message(
+        let text = text_of(content).or_else(|| str_or_none(payload.get("text")));
+        return Some(message(
             "assistant",
             vec![MessagePart {
                 kind: "thinking".to_string(),
@@ -157,12 +157,12 @@ fn _message_from_record(payload: &Map<String, Value>) -> Option<Message> {
         ));
     }
     if record_type == "tool_result" {
-        return Some(_message(
+        return Some(message(
             "tool",
             vec![MessagePart {
                 kind: "tool_result".to_string(),
                 tool_name: str_or_none(payload.get("tool_name")),
-                tool_output: _text_of(content),
+                tool_output: text_of(content),
                 raw: Some(Value::Object(payload.clone())),
                 ..Default::default()
             }],
@@ -172,7 +172,7 @@ fn _message_from_record(payload: &Map<String, Value>) -> Option<Message> {
     None
 }
 
-fn _message(role: &str, parts: Vec<MessagePart>, payload: &Map<String, Value>) -> Message {
+fn message(role: &str, parts: Vec<MessagePart>, payload: &Map<String, Value>) -> Message {
     Message {
         message_id: None,
         parent_id: None,
@@ -183,7 +183,7 @@ fn _message(role: &str, parts: Vec<MessagePart>, payload: &Map<String, Value>) -
     }
 }
 
-fn _iter_grok_parts(content: Option<&Value>) -> Vec<MessagePart> {
+fn iter_grok_parts(content: Option<&Value>) -> Vec<MessagePart> {
     let mut parts: Vec<MessagePart> = Vec::new();
     match content {
         Some(Value::String(text)) => {
@@ -219,7 +219,7 @@ fn _iter_grok_parts(content: Option<&Value>) -> Vec<MessagePart> {
     parts
 }
 
-fn _text_of(content: Option<&Value>) -> Option<String> {
+fn text_of(content: Option<&Value>) -> Option<String> {
     match content {
         Some(Value::String(text)) => {
             if text.is_empty() {
@@ -252,7 +252,7 @@ fn _text_of(content: Option<&Value>) -> Option<String> {
     }
 }
 
-fn _first_assistant_model(path: &Path) -> Option<String> {
+fn first_assistant_model(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -279,7 +279,7 @@ fn _first_assistant_model(path: &Path) -> Option<String> {
 
 /// `urllib.parse.quote(value, safe="")`: percent-encode every byte outside
 /// the unreserved set.
-fn _quote(value: &str) -> String {
+fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -293,7 +293,7 @@ fn _quote(value: &str) -> String {
 }
 
 /// `urllib.parse.unquote`: decode %XX sequences, leaving malformed ones as-is.
-fn _unquote(value: &str) -> String {
+fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -325,8 +325,8 @@ mod tests {
     const CWD: &str = "/Users/dp/work/hive";
     const OTHER_CWD: &str = "/tmp/other";
 
-    fn _write_session(home: &Path, session_id: &str, cwd: &str, records: &[Value]) -> PathBuf {
-        let session_dir = home.join("sessions").join(_quote(cwd)).join(session_id);
+    fn write_session(home: &Path, session_id: &str, cwd: &str, records: &[Value]) -> PathBuf {
+        let session_dir = home.join("sessions").join(quote(cwd)).join(session_id);
         fs::create_dir_all(&session_dir).unwrap();
         let history = session_dir.join(_HISTORY_NAME);
         let text: String = records.iter().map(|r| r.to_string() + "\n").collect();
@@ -334,12 +334,12 @@ mod tests {
         history
     }
 
-    fn _assistant(text: &str, model_id: &str) -> Value {
+    fn assistant(text: &str, model_id: &str) -> Value {
         json!({"type": "assistant", "content": text, "model_id": model_id})
     }
 
-    fn _default_assistant() -> Value {
-        _assistant("ok", "grok-4.6-build")
+    fn default_assistant() -> Value {
+        assistant("ok", "grok-4.6-build")
     }
 
     // --- discovery -----------------------------------------------------------
@@ -350,8 +350,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
         env.set("GROK_HOME", &home);
-        let target = _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
-        _write_session(&home, "sess-b", OTHER_CWD, &[_default_assistant()]);
+        let target = write_session(&home, "sess-a", CWD, &[default_assistant()]);
+        write_session(&home, "sess-b", OTHER_CWD, &[default_assistant()]);
 
         assert_eq!(
             GrokAdapter.find_session_file("sess-a", Some(CWD)),
@@ -365,7 +365,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
         env.set("GROK_HOME", &home);
-        let target = _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
+        let target = write_session(&home, "sess-a", CWD, &[default_assistant()]);
 
         assert_eq!(
             GrokAdapter.find_session_file("sess-a", None),
@@ -383,7 +383,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
         env.set("GROK_HOME", &home);
-        _write_session(&home, "sess-a", CWD, &[_default_assistant()]);
+        write_session(&home, "sess-a", CWD, &[default_assistant()]);
 
         assert_eq!(GrokAdapter.find_session_file("sess-missing", None), None);
         assert_eq!(GrokAdapter.find_session_file("", None), None);
@@ -395,7 +395,7 @@ mod tests {
     fn test_read_meta_prefers_summary_json() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        let history = _write_session(&home, "sess-a", CWD, &[_assistant("ok", "grok-4.6-build")]);
+        let history = write_session(&home, "sess-a", CWD, &[assistant("ok", "grok-4.6-build")]);
         fs::write(
             history.parent().unwrap().join("summary.json"),
             json!({
@@ -417,14 +417,14 @@ mod tests {
     fn test_read_meta_falls_back_to_first_assistant_model() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        let history = _write_session(
+        let history = write_session(
             &home,
             "sess-b",
             CWD,
             &[
                 json!({"type": "system", "content": "You are Grok 4.6."}),
                 json!({"type": "user", "content": [{"type": "text", "text": "hi"}]}),
-                _assistant("ok", "grok-4.6-build"),
+                assistant("ok", "grok-4.6-build"),
             ],
         );
 
@@ -450,7 +450,7 @@ mod tests {
     fn test_iter_messages_maps_every_record_type() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".grok");
-        let history = _write_session(
+        let history = write_session(
             &home,
             "sess-c",
             CWD,
@@ -459,7 +459,7 @@ mod tests {
                 json!({"type": "user", "content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}),
                 json!({"type": "reasoning", "content": [{"type": "text", "text": "thinking hard"}]}),
                 json!({"type": "tool_result", "tool_name": "read_file", "content": [{"type": "text", "text": "file body"}]}),
-                _assistant("NONCE-7q3x", "grok-4.6-build"),
+                assistant("NONCE-7q3x", "grok-4.6-build"),
                 json!({"type": "rewind_marker", "content": "ignored"}),
             ],
         );
@@ -495,7 +495,7 @@ mod tests {
             Value::Object(map) => map,
             _ => unreachable!(),
         };
-        let listed = _message_from_record(&payload).expect("message");
+        let listed = message_from_record(&payload).expect("message");
         assert_eq!(listed.role, "assistant");
         let kinds: Vec<&str> = listed.parts.iter().map(|p| p.kind.as_str()).collect();
         assert_eq!(kinds, ["text", "unknown"]);
@@ -504,8 +504,8 @@ mod tests {
             Value::Object(map) => map,
             _ => unreachable!(),
         };
-        assert!(_message_from_record(&rewind).is_none());
-        assert!(_message_from_record(&Map::new()).is_none());
+        assert!(message_from_record(&rewind).is_none());
+        assert!(message_from_record(&Map::new()).is_none());
     }
 
     #[test]

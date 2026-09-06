@@ -63,7 +63,7 @@ enum Node {
     },
 }
 
-fn _is_landscape(width: i64, height: i64) -> bool {
+fn is_landscape(width: i64, height: i64) -> bool {
     if width <= 0 || height <= 0 {
         return true;
     }
@@ -86,7 +86,7 @@ fn pane_index(pane_id: &str) -> String {
 
 /// `n` extents over `total` with one separator between neighbours: equal
 /// shares, the remainder to the last.
-fn _equal(n: usize, total: i64) -> Vec<i64> {
+fn equal(n: usize, total: i64) -> Vec<i64> {
     let n_i = n as i64;
     let base = (total - (n_i - 1)) / n_i;
     let mut out = vec![base; n];
@@ -110,14 +110,14 @@ struct Grid {
     score: f64,
 }
 
-fn _grid_score(cols: usize, rows: usize, area_w: i64, area_h: i64) -> f64 {
+fn grid_score(cols: usize, rows: usize, area_w: i64, area_h: i64) -> f64 {
     let cell_w = (area_w - (cols as i64 - 1)) / cols as i64;
     let cell_h = (area_h - (rows as i64 - 1)) / rows as i64;
     (cell_w as f64 / MIN_COLS as f64).min(cell_h as f64 / MIN_ROWS as f64)
 }
 
 /// Tie-break between two grids of equal score.
-fn _prefer(cols: usize, over: usize, n: usize, landscape: bool) -> bool {
+fn prefer(cols: usize, over: usize, n: usize, landscape: bool) -> bool {
     if !landscape {
         return cols < over;
     }
@@ -134,10 +134,10 @@ fn best_grid(n: usize, area_w: i64, area_h: i64, landscape: bool) -> Grid {
         if cols * (rows - 1) >= n {
             continue;
         }
-        let score = _grid_score(cols, rows, area_w, area_h);
+        let score = grid_score(cols, rows, area_w, area_h);
         let better = match best {
             None => true,
-            Some(b) => score > b.score || (score == b.score && _prefer(cols, b.cols, n, landscape)),
+            Some(b) => score > b.score || (score == b.score && prefer(cols, b.cols, n, landscape)),
         };
         if better {
             best = Some(Grid { cols, rows, score });
@@ -150,19 +150,19 @@ fn best_grid(n: usize, area_w: i64, area_h: i64, landscape: bool) -> Grid {
     })
 }
 
-fn _grid_node(members: &[String], grid: Grid, area_w: i64, area_h: i64) -> Node {
+fn grid_node(members: &[String], grid: Grid, area_w: i64, area_h: i64) -> Node {
     if members.len() == 1 {
         return Node::Leaf(pane_index(&members[0]));
     }
     let counts = grid_rows(members.len(), grid.cols);
-    let heights = _equal(counts.len(), area_h);
+    let heights = equal(counts.len(), area_h);
     let mut rows = Vec::new();
     let mut idx = 0;
     for (count, height) in counts.into_iter().zip(heights) {
         let row = if count == 1 {
             Node::Leaf(pane_index(&members[idx]))
         } else {
-            let widths = _equal(count, area_w);
+            let widths = equal(count, area_w);
             Node::Split {
                 beside: true,
                 children: members[idx..idx + count]
@@ -187,14 +187,14 @@ fn _grid_node(members: &[String], grid: Grid, area_w: i64, area_h: i64) -> Node 
 /// The mirror's extent along the split axis and the members' grid beside
 /// it: `(extent, variant, grid)`. `area` maps the members' remaining
 /// extent to their `(w, h)`.
-fn _mirror_share(
+fn mirror_share(
     total: i64,
     min: i64,
     n: usize,
     landscape: bool,
     area: impl Fn(i64) -> (i64, i64),
 ) -> (i64, &'static str, Grid) {
-    let shares = _equal(2, total);
+    let shares = equal(2, total);
     let (half, rest) = (shares[0], shares[1]);
     let (w, h) = area(rest);
     let at_half = best_grid(n, w, h, landscape);
@@ -211,7 +211,7 @@ fn _mirror_share(
 
 /// Render `node` into the layout grammar over `rect`, collecting every
 /// leaf's cell in leaf order.
-fn _render(node: &Node, rect: Rect, cells: &mut Vec<Rect>) -> String {
+fn render(node: &Node, rect: Rect, cells: &mut Vec<Rect>) -> String {
     let Rect { x, y, w, h } = rect;
     match node {
         Node::Leaf(index) => {
@@ -237,7 +237,7 @@ fn _render(node: &Node, rect: Rect, cells: &mut Vec<Rect>) -> String {
                         h: *extent,
                     }
                 };
-                parts.push(_render(child, child_rect, cells));
+                parts.push(render(child, child_rect, cells));
                 offset += extent + 1;
             }
             let (open, close) = if *beside { ('{', '}') } else { ('[', ']') };
@@ -249,12 +249,12 @@ fn _render(node: &Node, rect: Rect, cells: &mut Vec<Rect>) -> String {
 /// The plan for `size` over `panes` (window order, roles read), with the
 /// cell of every leaf in leaf order. None with fewer than two panes, a
 /// window too small, or a cell squeezed below one column or row.
-fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)> {
+fn plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)> {
     let (w, h) = size;
     if panes.len() < 2 || w < 4 || h < 6 {
         return None;
     }
-    let landscape = _is_landscape(w, h);
+    let landscape = is_landscape(w, h);
     let mirror = panes
         .iter()
         .find(|p| p.role == "mirror")
@@ -274,7 +274,7 @@ fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)
     let (body, variant, grid) = match (mirror, n) {
         (None, _) => {
             let grid = best_grid(n, w, body_h, landscape);
-            (_grid_node(&members, grid, w, body_h), "no-mirror", grid)
+            (grid_node(&members, grid, w, body_h), "no-mirror", grid)
         }
         (Some(mirror), 0) => (
             Node::Leaf(pane_index(mirror)),
@@ -287,14 +287,14 @@ fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)
         ),
         (Some(mirror), _) if landscape => {
             let (extent, variant, grid) =
-                _mirror_share(w, MIN_COLS, n, landscape, |rest| (rest, body_h));
+                mirror_share(w, MIN_COLS, n, landscape, |rest| (rest, body_h));
             let node = Node::Split {
                 beside: true,
                 children: vec![
                     (extent, Node::Leaf(pane_index(mirror))),
                     (
                         w - 1 - extent,
-                        _grid_node(&members, grid, w - 1 - extent, body_h),
+                        grid_node(&members, grid, w - 1 - extent, body_h),
                     ),
                 ],
             };
@@ -310,14 +310,14 @@ fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)
         }
         (Some(mirror), _) => {
             let (extent, variant, grid) =
-                _mirror_share(body_h, MIN_ROWS, n, landscape, |rest| (w, rest));
+                mirror_share(body_h, MIN_ROWS, n, landscape, |rest| (w, rest));
             let node = Node::Split {
                 beside: false,
                 children: vec![
                     (extent, Node::Leaf(pane_index(mirror))),
                     (
                         body_h - 1 - extent,
-                        _grid_node(&members, grid, w, body_h - 1 - extent),
+                        grid_node(&members, grid, w, body_h - 1 - extent),
                     ),
                 ],
             };
@@ -343,7 +343,7 @@ fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)
         None => body,
     };
     let mut cells = Vec::new();
-    let body_text = _render(&root, Rect { x: 0, y: 0, w, h }, &mut cells);
+    let body_text = render(&root, Rect { x: 0, y: 0, w, h }, &mut cells);
     if cells.iter().any(|c| c.w < 1 || c.h < 1) {
         return None;
     }
@@ -363,9 +363,9 @@ fn _plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)
 }
 
 /// The plan for `size` over `panes` in window order, or None when there is
-/// nothing to lay out (see `_plan_cells`).
+/// nothing to lay out (see `plan_cells`).
 pub fn plan(size: (i64, i64), panes: &[PaneInfo]) -> Option<Plan> {
-    _plan_cells(size, panes).map(|(plan, _)| plan)
+    plan_cells(size, panes).map(|(plan, _)| plan)
 }
 
 /// Whether a member pane split off the window's last member (or mirror)
@@ -377,7 +377,7 @@ pub fn plan(size: (i64, i64), panes: &[PaneInfo]) -> Option<Plan> {
 /// plan.
 pub fn split_beside(size: (i64, i64), panes: &[PaneInfo]) -> bool {
     let dock = usize::from(panes.iter().any(|p| p.role == "dock"));
-    match _plan_cells(size, panes) {
+    match plan_cells(size, panes) {
         Some((_, cells)) if cells.len() >= 2 + dock => {
             let last = cells[cells.len() - 1 - dock];
             let before = cells[cells.len() - 2 - dock];
@@ -697,12 +697,12 @@ mod tests {
 
     #[test]
     fn test_grid_helpers_tie_break_rows_and_shares() {
-        assert!(_prefer(2, 4, 4, true));
-        assert!(_prefer(1, 2, 4, false));
-        assert!(!_prefer(2, 1, 4, false));
+        assert!(prefer(2, 4, 4, true));
+        assert!(prefer(1, 2, 4, false));
+        assert!(!prefer(2, 1, 4, false));
         assert_eq!(grid_rows(5, 3), vec![3, 2]);
         assert_eq!(grid_rows(3, 1), vec![1, 1, 1]);
-        assert_eq!(_equal(3, 100), vec![32, 32, 34]);
-        assert_eq!(_equal(1, 7), vec![7]);
+        assert_eq!(equal(3, 100), vec![32, 32, 34]);
+        assert_eq!(equal(1, 7), vec![7]);
     }
 }

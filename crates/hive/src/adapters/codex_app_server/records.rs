@@ -90,7 +90,7 @@ pub fn thread_id_for_pane(pane: &str) -> Option<String> {
 }
 
 /// Inverse of [`pane_thread_path`]: `hive-pane-19.thread` -> `%19`.
-fn _pane_from_record_name(name: &str) -> Option<String> {
+fn pane_from_record_name(name: &str) -> Option<String> {
     let slug = name.strip_prefix("hive-pane-")?.strip_suffix(".thread")?;
     if slug.is_empty() || slug == "default" {
         return None;
@@ -108,7 +108,7 @@ pub fn list_recorded_panes() -> Vec<String> {
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if let Some(pane) = _pane_from_record_name(name) {
+                if let Some(pane) = pane_from_record_name(name) {
                     panes.push(pane);
                 }
             }
@@ -141,7 +141,7 @@ pub fn pane_for_thread(thread_id: &str) -> Option<String> {
 // --------------------------------------------------------------------------
 
 /// Matches `^\s*trust_level\s*=`.
-fn _trust_level_line(line: &str) -> bool {
+fn trust_level_line(line: &str) -> bool {
     match line.trim_start().strip_prefix("trust_level") {
         Some(rest) => rest.trim_start().starts_with('='),
         None => false,
@@ -153,7 +153,7 @@ fn _trust_level_line(line: &str) -> bool {
 /// Codex writes the TOML basic-string form; the literal-string form is also
 /// matched (when representable) so a hand-edited entry is not duplicated — a
 /// duplicate table would make the whole config.toml unparsable.
-fn _trusted_section_headers(directory: &str) -> Vec<String> {
+fn trusted_section_headers(directory: &str) -> Vec<String> {
     let escaped = directory.replace('\\', "\\\\").replace('"', "\\\"");
     let mut headers = vec![format!("[projects.\"{escaped}\"]")];
     if !directory.contains('\'') {
@@ -163,7 +163,7 @@ fn _trusted_section_headers(directory: &str) -> Vec<String> {
 }
 
 /// Split into lines, each keeping its terminator (`\n`, `\r\n`, or `\r`).
-fn _split_keepends(text: &str) -> Vec<String> {
+fn split_keepends(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0;
@@ -209,8 +209,8 @@ pub fn ensure_dir_trusted(directory: &str) -> Result<()> {
         }
     }
     let original = content.clone();
-    let headers = _trusted_section_headers(directory);
-    let lines = _split_keepends(&content);
+    let headers = trusted_section_headers(directory);
+    let lines = split_keepends(&content);
     let mut start = None;
     for (i, line) in lines.iter().enumerate() {
         let stripped = line.trim();
@@ -244,7 +244,7 @@ pub fn ensure_dir_trusted(directory: &str) -> Result<()> {
             let mut body: Vec<String> = lines[start..end].to_vec();
             let mut replaced = false;
             for line in body.iter_mut() {
-                if _trust_level_line(line) {
+                if trust_level_line(line) {
                     if line.trim() == "trust_level = \"trusted\"" {
                         return Ok(());
                     }

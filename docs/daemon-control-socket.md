@@ -37,12 +37,12 @@ by `respawn-stale`.
   `sha256(path.resolve(configDir)).hex[:8]` and configDir is
   `$CLAUDE_CONFIG_DIR` or `~/.claude`. `<base>` is `/tmp`, except under
   Termux (`TERMUX_VERSION` and `PREFIX` both set) where it is `$PREFIX/tmp`.
-  `$TMPDIR` is never consulted. Hive's `_daemon_control_sock` hardcodes
+  `$TMPDIR` is never consulted. Hive's `daemon_control_sock` hardcodes
   `/tmp`, correct everywhere but Termux, which hive does not target. The
   namespace directory also holds `pty/`, `rv/` and `spare/`, the two live
   reply transports and the spare pool.
 - **configDir**: the binary never reads `CLAUDE_HOME` (zero occurrences in
-  2.1.240 and 2.1.259); hive's `_config_dir` prefers it over `CLAUDE_CONFIG_DIR`. A dev
+  2.1.240 and 2.1.259); hive's `config_dir` prefers it over `CLAUDE_CONFIG_DIR`. A dev
   lane that sets only `CLAUDE_HOME` makes hive hash a directory the daemon has
   never heard of, so `daemon_reply` finds no socket and every delivery quietly
   takes the wrapped inbox lane. Set `CLAUDE_CONFIG_DIR` too when sandboxing.

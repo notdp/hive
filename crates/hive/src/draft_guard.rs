@@ -4,9 +4,9 @@
 //! the supervisor daemon's `op:"reply"` (the inbox socket is the fallback),
 //! codex goes through the shared app-server daemon, grok through its
 //! leader daemon. Two keystroke surfaces remain and are the callers here:
-//! `agent::_submit_interactive_text` (`hive inject`, and `/compact`, which
+//! `agent::submit_interactive_text` (`hive inject`, and `/compact`, which
 //! is TUI vocabulary and has to be typed) uses the save/clear/restore
-//! trio, and the claude bg keyboard lane's `_composer_has_draft` uses
+//! trio, and the claude bg keyboard lane's `composer_has_draft` uses
 //! `suspected_draft` to gate its kill-ring paste. On those paths a naive
 //! `send-keys -l <msg>` + Enter would concatenate whatever the user was
 //! typing with the injected text, so this saves the draft, clears the

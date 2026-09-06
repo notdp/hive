@@ -72,7 +72,7 @@ pub fn ticker_head(body: &str) -> String {
 /// mirror's `hive view` repaint would read as output, and a mirror or
 /// terminal pane has no chip to mark unread; the ticker lands on the window
 /// of the first bound engine pane.
-pub fn _status_tick(
+pub(crate) fn status_tick(
     workspace: &str,
     members: &[(String, Map<String, Value>)],
     monitor: Option<&dyn OutputMonitor>,
@@ -100,7 +100,7 @@ pub fn _status_tick(
         .iter()
         .filter(|p| roles.get(p.as_str()) == Some(&"agent"))
     {
-        let busy = _is_output_busy(pane, monitor, None);
+        let busy = is_output_busy(pane, monitor, None);
         if busy {
             unread_pending()
                 .lock()

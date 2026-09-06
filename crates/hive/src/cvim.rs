@@ -54,7 +54,7 @@ fn adapter_for(name: &str) -> Option<Box<dyn SessionAdapter>> {
     }
 }
 
-fn _detect_adapter_for_transcript(path: &Path) -> Option<Box<dyn SessionAdapter>> {
+fn detect_adapter_for_transcript(path: &Path) -> Option<Box<dyn SessionAdapter>> {
     for name in ADAPTER_NAMES {
         let adapter = adapter_for(name)?;
         if adapter.read_meta(path).is_some() {
@@ -64,7 +64,7 @@ fn _detect_adapter_for_transcript(path: &Path) -> Option<Box<dyn SessionAdapter>
     None
 }
 
-fn _resolve_hive_runtime_session_id(pane_id: &str) -> (bool, Option<String>) {
+fn resolve_hive_runtime_session_id(pane_id: &str) -> (bool, Option<String>) {
     let workspace = crate::tmux::display_value(pane_id, "#{@hive-workspace}").unwrap_or_default();
     if workspace.is_empty() {
         return (false, None);
@@ -103,21 +103,21 @@ pub(crate) struct RecentEntry {
 /// lists nothing. (`cvim-list` defaults to 10 and the bash driver never
 /// passes a limit.)
 pub(crate) fn list_recent_assistant_messages(file_path: &Path, limit: usize) -> Vec<RecentEntry> {
-    let adapter = _detect_adapter_for_transcript(file_path);
-    _with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
+    let adapter = detect_adapter_for_transcript(file_path);
+    with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
         hits.take(limit)
             .enumerate()
             .map(|(offset, (text, timestamp))| RecentEntry {
                 offset,
                 timestamp,
-                preview: _build_preview(&text),
+                preview: build_preview(&text),
                 text,
             })
             .collect()
     })
 }
 
-fn _read_lossy(path: &Path) -> Option<String> {
+fn read_lossy(path: &Path) -> Option<String> {
     fs::read(path)
         .ok()
         .map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -129,7 +129,7 @@ fn _read_lossy(path: &Path) -> Option<String> {
 /// reverse, so the whole file is parsed before `take` sees the first hit;
 /// only the raw claude JSONL fallback (the file is still read whole) parses
 /// its lines lazily from the tail, stopping where `take` stops.
-fn _with_assistant_texts_newest_first<R>(
+fn with_assistant_texts_newest_first<R>(
     file_path: &Path,
     adapter: Option<&dyn SessionAdapter>,
     take: impl FnOnce(&mut dyn Iterator<Item = (String, String)>) -> R,
@@ -142,14 +142,14 @@ fn _with_assistant_texts_newest_first<R>(
                 .rev()
                 .filter(|message| message.role == "assistant")
                 .filter_map(|message| {
-                    let text = _assistant_text_from_normalized_message(message);
+                    let text = assistant_text_from_normalized_message(message);
                     (!text.is_empty())
-                        .then(|| (text, _format_timestamp_dt(message.timestamp.as_ref())))
+                        .then(|| (text, format_timestamp_dt(message.timestamp.as_ref())))
                 });
             take(&mut hits)
         }
         None => {
-            let content = _read_lossy(file_path).unwrap_or_default();
+            let content = read_lossy(file_path).unwrap_or_default();
             let mut hits = content.lines().rev().filter_map(|line| {
                 let obj = crate::adapters::base::safe_json_loads(line)?;
                 if obj.get("type").and_then(Value::as_str) != Some("message") {
@@ -159,8 +159,8 @@ fn _with_assistant_texts_newest_first<R>(
                 if message.get("role").and_then(Value::as_str) != Some("assistant") {
                     return None;
                 }
-                let text = _assistant_text_from_raw_claude_message(message);
-                (!text.is_empty()).then(|| (text, _format_timestamp_value(obj.get("timestamp"))))
+                let text = assistant_text_from_raw_claude_message(message);
+                (!text.is_empty()).then(|| (text, format_timestamp_value(obj.get("timestamp"))))
             });
             take(&mut hits)
         }
@@ -168,7 +168,7 @@ fn _with_assistant_texts_newest_first<R>(
 }
 
 /// `HH:MM` of `epoch_secs` in the local timezone.
-fn _local_hhmm(epoch_secs: f64) -> String {
+fn local_hhmm(epoch_secs: f64) -> String {
     let t = epoch_secs.floor() as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
@@ -177,24 +177,24 @@ fn _local_hhmm(epoch_secs: f64) -> String {
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
-fn _format_timestamp_dt(value: Option<&DateTime>) -> String {
+fn format_timestamp_dt(value: Option<&DateTime>) -> String {
     match value {
         None => String::new(),
         // A timestamp without a UTC offset is taken as already local: its
         // own wall-clock fields survive.
         Some(dt) if dt.utc_offset_secs.is_none() => format!("{:02}:{:02}", dt.hour, dt.minute),
-        Some(dt) => _local_hhmm(dt.timestamp()),
+        Some(dt) => local_hhmm(dt.timestamp()),
     }
 }
 
-fn _format_timestamp_value(value: Option<&Value>) -> String {
+fn format_timestamp_value(value: Option<&Value>) -> String {
     match crate::adapters::base::parse_iso_timestamp(value) {
-        Some(dt) => _format_timestamp_dt(Some(&dt)),
+        Some(dt) => format_timestamp_dt(Some(&dt)),
         None => String::new(),
     }
 }
 
-fn _build_preview(text: &str) -> String {
+fn build_preview(text: &str) -> String {
     const WIDTH: usize = 80;
     for line in text.split('\n') {
         let stripped = line.trim();
@@ -212,7 +212,7 @@ fn _build_preview(text: &str) -> String {
     String::new()
 }
 
-fn _plan_part(tool_input: &Map<String, Value>) -> Option<String> {
+fn plan_part(tool_input: &Map<String, Value>) -> Option<String> {
     let plan = tool_input.get("plan").and_then(Value::as_str)?;
     if plan.trim().is_empty() {
         return None;
@@ -229,7 +229,7 @@ fn _plan_part(tool_input: &Map<String, Value>) -> Option<String> {
     ))
 }
 
-fn _assistant_text_from_raw_claude_message(message: &Map<String, Value>) -> String {
+fn assistant_text_from_raw_claude_message(message: &Map<String, Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     let content = match message.get("content") {
         Some(Value::Array(items)) => items.as_slice(),
@@ -251,7 +251,7 @@ fn _assistant_text_from_raw_claude_message(message: &Map<String, Value>) -> Stri
                 ) =>
             {
                 if let Some(Value::Object(tool_input)) = item.get("input") {
-                    if let Some(part) = _plan_part(tool_input) {
+                    if let Some(part) = plan_part(tool_input) {
                         parts.push(part);
                     }
                 }
@@ -262,7 +262,7 @@ fn _assistant_text_from_raw_claude_message(message: &Map<String, Value>) -> Stri
     parts.join("\n\n").trim().to_string()
 }
 
-fn _assistant_text_from_normalized_message(message: &Message) -> String {
+fn assistant_text_from_normalized_message(message: &Message) -> String {
     let mut parts: Vec<String> = Vec::new();
     for item in &message.parts {
         match item.kind.as_str() {
@@ -279,7 +279,7 @@ fn _assistant_text_from_normalized_message(message: &Message) -> String {
                 ) =>
             {
                 if let Some(tool_input) = &item.tool_input {
-                    if let Some(part) = _plan_part(tool_input) {
+                    if let Some(part) = plan_part(tool_input) {
                         parts.push(part);
                     }
                 }
@@ -292,12 +292,12 @@ fn _assistant_text_from_normalized_message(message: &Message) -> String {
 
 /// The Nth assistant message from the end (0=last, 1=second-to-last, ...).
 pub(crate) fn extract_last_assistant_text(file_path: &Path, offset: usize) -> String {
-    let adapter = _detect_adapter_for_transcript(file_path);
+    let adapter = detect_adapter_for_transcript(file_path);
     let offset = match adapter.as_deref() {
         Some(adapter) => resolve_assistant_offset(file_path, offset, Some(adapter)),
         None => offset,
     };
-    _with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
+    with_assistant_texts_newest_first(file_path, adapter.as_deref(), |hits| {
         hits.nth(offset).map(|(text, _)| text).unwrap_or_default()
     })
 }
@@ -310,7 +310,7 @@ pub(crate) fn resolve_assistant_offset(
     let owned;
     let adapter = match adapter {
         Some(adapter) => adapter,
-        None => match _detect_adapter_for_transcript(file_path) {
+        None => match detect_adapter_for_transcript(file_path) {
             Some(found) => {
                 owned = found;
                 &*owned
@@ -322,29 +322,29 @@ pub(crate) fn resolve_assistant_offset(
         return offset;
     }
     let messages: Vec<Message> = adapter.iter_messages(file_path).collect();
-    _resolve_codex_skill_turn_offset(&messages, offset)
+    resolve_codex_skill_turn_offset(&messages, offset)
 }
 
-fn _resolve_codex_skill_turn_offset(messages: &[Message], offset: usize) -> usize {
-    let tail_turn_id = messages.iter().rev().find_map(_message_turn_id);
+fn resolve_codex_skill_turn_offset(messages: &[Message], offset: usize) -> usize {
+    let tail_turn_id = messages.iter().rev().find_map(message_turn_id);
     let Some(tail_turn_id) = tail_turn_id else {
         return offset;
     };
     let tail_turn: Vec<&Message> = messages
         .iter()
-        .filter(|m| _message_turn_id(m).as_deref() == Some(&tail_turn_id))
+        .filter(|m| message_turn_id(m).as_deref() == Some(&tail_turn_id))
         .collect();
-    if !_turn_invokes_codex_command_skill(&tail_turn) {
+    if !turn_invokes_codex_command_skill(&tail_turn) {
         return offset;
     }
     let synthetic = tail_turn
         .iter()
-        .filter(|m| _is_codex_commentary_assistant_message(m))
+        .filter(|m| is_codex_commentary_assistant_message(m))
         .count();
     offset + synthetic
 }
 
-fn _message_turn_id(message: &Message) -> Option<String> {
+fn message_turn_id(message: &Message) -> Option<String> {
     match message.raw.get("turn_id") {
         Some(Value::String(turn_id)) if !turn_id.is_empty() => Some(turn_id.clone()),
         _ => None,
@@ -352,7 +352,7 @@ fn _message_turn_id(message: &Message) -> Option<String> {
 }
 
 /// `^\s*\$(?:cvim|vim)(?:\s|$)`
-fn _matches_codex_command_skill(text: &str) -> bool {
+fn matches_codex_command_skill(text: &str) -> bool {
     let trimmed = text.trim_start();
     for prefix in ["$cvim", "$vim"] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
@@ -364,7 +364,7 @@ fn _matches_codex_command_skill(text: &str) -> bool {
     false
 }
 
-fn _turn_invokes_codex_command_skill(messages: &[&Message]) -> bool {
+fn turn_invokes_codex_command_skill(messages: &[&Message]) -> bool {
     for message in messages {
         if message.role != "user" {
             continue;
@@ -374,7 +374,7 @@ fn _turn_invokes_codex_command_skill(messages: &[&Message]) -> bool {
                 continue;
             }
             if let Some(text) = &item.text {
-                if _matches_codex_command_skill(text) {
+                if matches_codex_command_skill(text) {
                     return true;
                 }
             }
@@ -383,7 +383,7 @@ fn _turn_invokes_codex_command_skill(messages: &[&Message]) -> bool {
     false
 }
 
-fn _is_codex_commentary_assistant_message(message: &Message) -> bool {
+fn is_codex_commentary_assistant_message(message: &Message) -> bool {
     if message.role != "assistant" {
         return false;
     }
@@ -414,7 +414,7 @@ fn resolve_transcript_path_for_pane(pane_id: &str, cwd: &str) -> Option<String> 
     }
     let profile = crate::agent_cli::detect_profile_for_pane(pane_id)?;
     let adapter = adapter_for(profile.name)?;
-    let (hive_managed, mut session_id) = _resolve_hive_runtime_session_id(pane_id);
+    let (hive_managed, mut session_id) = resolve_hive_runtime_session_id(pane_id);
     if !hive_managed {
         session_id = adapter.resolve_current_session_id(pane_id);
     }
@@ -436,7 +436,7 @@ const NO_NATIVE_ADDRESS: i32 = 10;
 
 type Fields = Vec<(&'static str, String)>;
 
-fn _claude_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
+fn claude_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     use crate::adapters::{claude_bg, claude_view};
 
     let Some(job_id) = claude_bg::job_id_for_pane(pane) else {
@@ -498,9 +498,9 @@ fn _claude_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fi
     (OK, fields)
 }
 
-fn _codex_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
+fn codex_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     use crate::adapters::codex_app_server;
-    _daemon_sendback(
+    daemon_sendback(
         pane,
         text,
         interrupt,
@@ -511,9 +511,9 @@ fn _codex_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fie
     )
 }
 
-fn _grok_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
+fn grok_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     use crate::adapters::grok_leader;
-    _daemon_sendback(
+    daemon_sendback(
         pane,
         text,
         interrupt,
@@ -527,7 +527,7 @@ fn _grok_sendback(pane: &str, text: Option<&str>, interrupt: bool) -> (i32, Fiel
 /// The daemon-addressed CLIs share one sendback shape: a pane with no
 /// recorded address falls back to the composer, otherwise the interrupt
 /// and the send each go through the daemon and report their verdict.
-fn _daemon_sendback(
+fn daemon_sendback(
     pane: &str,
     text: Option<&str>,
     interrupt: bool,
@@ -558,7 +558,7 @@ fn _daemon_sendback(
     (if accepted.is_some() { OK } else { REFUSED }, fields)
 }
 
-fn _is_slash_command(text: &str) -> bool {
+fn is_slash_command(text: &str) -> bool {
     let stripped = text.trim();
     stripped.starts_with('/') && !stripped.contains('\n')
 }
@@ -567,7 +567,7 @@ fn _is_slash_command(text: &str) -> bool {
 fn sendback(pane: &str, profile: &str, text: Option<&str>, interrupt: bool) -> (i32, Fields) {
     if matches!(profile, "codex" | "grok") {
         if let Some(text) = text {
-            if _is_slash_command(text) {
+            if is_slash_command(text) {
                 // A slash command is TUI vocabulary, not a prompt: it goes to
                 // the composer, the same route `hive compact` falls back to.
                 return (
@@ -581,9 +581,9 @@ fn sendback(pane: &str, profile: &str, text: Option<&str>, interrupt: bool) -> (
         }
     }
     match profile {
-        "claude" => _claude_sendback(pane, text, interrupt),
-        "codex" => _codex_sendback(pane, text, interrupt),
-        "grok" => _grok_sendback(pane, text, interrupt),
+        "claude" => claude_sendback(pane, text, interrupt),
+        "codex" => codex_sendback(pane, text, interrupt),
+        "grok" => grok_sendback(pane, text, interrupt),
         _ => (
             NO_NATIVE_ADDRESS,
             vec![
@@ -614,7 +614,7 @@ pub fn sendback_main(args: &[String]) -> i32 {
     let (pane, profile, send_file, content_changed, interrupt) =
         (&args[0], &args[1], &args[2], &args[3], &args[4]);
     let text: Option<String> = if content_changed == "1" && !send_file.is_empty() {
-        match _read_lossy(Path::new(send_file)) {
+        match read_lossy(Path::new(send_file)) {
             // Same trailing-newline trim the keystroke path applies.
             Some(content) => Some(content.trim_end_matches('\n').to_string()),
             None => {
@@ -648,7 +648,7 @@ struct Protocol {
     offset_target_format: String,
 }
 
-fn _protocol() -> Protocol {
+fn protocol() -> Protocol {
     let value: Value = serde_json::from_str(PROTOCOL_JSON).expect("embedded protocol json");
     let get = |key: &str| {
         value
@@ -665,7 +665,7 @@ fn _protocol() -> Protocol {
     }
 }
 
-fn _resolve_target(protocol: &Protocol, offset: usize) -> String {
+fn resolve_target(protocol: &Protocol, offset: usize) -> String {
     if offset == 0 {
         return protocol.default_target.clone();
     }
@@ -674,7 +674,7 @@ fn _resolve_target(protocol: &Protocol, offset: usize) -> String {
         .replace("{n}", &(offset + 1).to_string())
 }
 
-fn _build_hunks_only_diff(orig: &str, edited: &str) -> String {
+fn build_hunks_only_diff(orig: &str, edited: &str) -> String {
     let raw = difflib::unified_diff(orig, edited);
     let lines: Vec<&str> = raw
         .iter()
@@ -684,11 +684,11 @@ fn _build_hunks_only_diff(orig: &str, edited: &str) -> String {
     lines.concat().trim_end_matches('\n').to_string()
 }
 
-fn _build_payload(orig: &str, edited: &str, mode: &str, offset: usize) -> String {
+fn build_payload(orig: &str, edited: &str, mode: &str, offset: usize) -> String {
     if mode == "diff" {
-        let protocol = _protocol();
-        let target = _resolve_target(&protocol, offset);
-        let diff = _build_hunks_only_diff(orig, edited);
+        let protocol = protocol();
+        let target = resolve_target(&protocol, offset);
+        let diff = build_hunks_only_diff(orig, edited);
         return format!(
             "<{tag} {attr}=\"{target}\">\n{diff}\n</{tag}>",
             tag = protocol.tag,
@@ -704,8 +704,8 @@ pub fn payload_main(args: &[String]) -> i32 {
         return 1;
     }
     let (Some(orig), Some(edited)) = (
-        _read_lossy(Path::new(&args[0])),
-        _read_lossy(Path::new(&args[1])),
+        read_lossy(Path::new(&args[0])),
+        read_lossy(Path::new(&args[1])),
     ) else {
         eprintln!("cvim-payload: cannot read input files");
         return 1;
@@ -723,7 +723,7 @@ pub fn payload_main(args: &[String]) -> i32 {
             offset = resolve_assistant_offset(Path::new(transcript.trim()), offset, None);
         }
     }
-    let payload = _build_payload(&orig, &edited, mode, offset);
+    let payload = build_payload(&orig, &edited, mode, offset);
     let payload = payload.strip_suffix('\n').unwrap_or(&payload);
     if fs::write(&dst, payload).is_err() {
         eprintln!("cvim-payload: cannot write {}", dst.display());
@@ -1439,8 +1439,8 @@ mod tests {
         assert_eq!(code, NO_NATIVE_ADDRESS);
         assert_eq!(fields[1], ("why", "slash_command".to_string()));
         // Multi-line text starting with "/" is not a slash command.
-        assert!(!_is_slash_command("/compact\nmore"));
-        assert!(_is_slash_command("  /compact  "));
+        assert!(!is_slash_command("/compact\nmore"));
+        assert!(is_slash_command("  /compact  "));
     }
 
     // -- materialization ------------------------------------------------------

@@ -10,12 +10,12 @@ use serde_json::{Map, Value};
 
 use super::*;
 
-pub fn _request_hived(
+pub(crate) fn request_hived(
     workspace: &str,
     payload: &Map<String, Value>,
     timeout: f64,
 ) -> Option<Map<String, Value>> {
-    let path = _socket_path(workspace);
+    let path = socket_path(workspace);
     if !path.exists() {
         return None;
     }
@@ -56,10 +56,11 @@ pub(super) fn action_payload(action: &str) -> Map<String, Value> {
 }
 
 pub fn request_ping_impl(workspace: &str) -> Option<Map<String, Value>> {
-    _request_hived(workspace, &action_payload("ping"), SOCKET_RETRY_INTERVAL)
+    request_hived(workspace, &action_payload("ping"), SOCKET_RETRY_INTERVAL)
 }
 
-pub fn _socket_alive(workspace: &str) -> bool {
+#[cfg(test)]
+pub(crate) fn socket_alive(workspace: &str) -> bool {
     let response = hooked_request_ping(workspace);
     match response {
         Some(map) => {
@@ -76,7 +77,7 @@ pub fn _socket_alive(workspace: &str) -> bool {
 /// member's first turn. Best-effort: returns None when the hived is down,
 /// and the lazy connect on the next runtime tick covers that case.
 pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
-    _request_hived(workspace, &action_payload("connect-codex"), 3.0)
+    request_hived(workspace, &action_payload("connect-codex"), 3.0)
 }
 
 /// Ask the hived to bring the grok 2nd client for the pane's daemon key online now.
@@ -89,10 +90,10 @@ pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
 pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("connect-grok");
     payload.insert("pane".to_string(), Value::from(pane));
-    _request_hived(workspace, &payload, 3.0)
+    request_hived(workspace, &payload, 3.0)
 }
 
-pub fn _hived_identity_matches(response: Option<&Map<String, Value>>, team: &str) -> bool {
+pub(crate) fn hived_identity_matches(response: Option<&Map<String, Value>>, team: &str) -> bool {
     // Hived identity is (workspace socket, team) — never the window.
     //
     // The window is display: it can die, move, or be recreated by attach
@@ -119,7 +120,7 @@ pub fn request_send(
     artifact: &str,
     reply_to: &str,
 ) -> Option<Map<String, Value>> {
-    let timeout = _send_request_timeout();
+    let timeout = send_request_timeout();
     let mut payload = action_payload("send");
     payload.insert("team".to_string(), Value::from(team));
     payload.insert("senderAgent".to_string(), Value::from(sender_agent));
@@ -127,7 +128,7 @@ pub fn request_send(
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
     payload.insert("replyTo".to_string(), Value::from(reply_to));
-    _request_hived(workspace, &payload, timeout)
+    request_hived(workspace, &payload, timeout)
 }
 
 pub fn request_doctor(
@@ -140,23 +141,23 @@ pub fn request_doctor(
     payload.insert("team".to_string(), Value::from(team));
     payload.insert("agent".to_string(), Value::from(target_agent));
     payload.insert("verbose".to_string(), Value::from(verbose));
-    _request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
 pub fn request_team_runtime(workspace: &str, team: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("team-runtime");
     payload.insert("team".to_string(), Value::from(team));
-    _request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
 pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("runtime-snapshot");
     payload.insert("pane".to_string(), Value::from(pane_id));
-    _request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
 pub fn request_thread(workspace: &str, message_id: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("thread");
     payload.insert("msgId".to_string(), Value::from(message_id));
-    _request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }

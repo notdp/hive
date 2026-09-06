@@ -25,7 +25,7 @@ pub(crate) const IDENTITY_VARS: [&str; 5] = [
     "CLAUDE_CODE_MESSAGING_SOCKET",
 ];
 
-/// The claude config-tree knobs (`claude_sessions::_config_dir`) plus the
+/// The claude config-tree knobs (`claude_sessions::config_dir`) plus the
 /// inbox socket that names the current session.
 pub(crate) const CLAUDE_VARS: [&str; 3] = [
     "CLAUDE_HOME",

@@ -110,7 +110,7 @@ impl OutputMonitor for FakeMonitor {
     }
 }
 
-/// The autouse fixture: fresh path cache, `_native_daemon_busy` → None.
+/// The autouse fixture: fresh path cache, `native_daemon_busy` → None.
 fn gate_hook() -> Hook {
     Hook {
         native_daemon_busy: Some(Arc::new(|_pane| None)),
@@ -144,7 +144,7 @@ fn test_progressed_returns_none_when_path_unknown() {
     let mut hook = gate_hook();
     stub_path(&mut hook, None);
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), None);
+    assert_eq!(transcript_progressed_recently("%1", 3.0), None);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn test_progressed_returns_none_when_stat_fails() {
     let mut hook = gate_hook();
     stub_path(&mut hook, Some(ghost.to_string_lossy().to_string()));
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), None);
+    assert_eq!(transcript_progressed_recently("%1", 3.0), None);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn test_progressed_returns_true_when_mtime_fresh() {
     let mut hook = gate_hook();
     stub_path(&mut hook, Some(fresh.to_string_lossy().to_string()));
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(true));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(true));
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn test_progressed_returns_false_when_mtime_stale() {
     let mut hook = gate_hook();
     stub_path(&mut hook, Some(stale.to_string_lossy().to_string()));
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(false));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(false));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn test_progressed_recovers_from_session_switch() {
         Some(new.to_string_lossy().to_string()),
     );
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(true));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(true));
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn test_progressed_returns_false_when_re_resolve_yields_same_path() {
         Some(stale.to_string_lossy().to_string()),
     );
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(false));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(false));
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn test_progressed_returns_false_when_new_session_also_stale() {
         Some(new.to_string_lossy().to_string()),
     );
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(false));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(false));
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn test_progressed_returns_false_when_fresh_resolve_yields_no_path() {
     let mut hook = gate_hook();
     stub_path_with_force(&mut hook, Some(stale.to_string_lossy().to_string()), None);
     let _guard = testhook::install(hook);
-    assert_eq!(_transcript_progressed_recently("%1", 3.0), Some(false));
+    assert_eq!(transcript_progressed_recently("%1", 3.0), Some(false));
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn test_truly_busy_true_when_app_server_busy() {
     stub_path(&mut hook, None);
     stub_app_server_busy(&mut hook, Some(true));
     let _guard = testhook::install(hook);
-    assert!(_pane_is_truly_busy("%1", Some(&FakeMonitor::new(false))));
+    assert!(pane_is_truly_busy("%1", Some(&FakeMonitor::new(false))));
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn test_truly_busy_false_when_app_server_idle() {
     stub_path(&mut hook, Some(fresh.to_string_lossy().to_string()));
     stub_app_server_busy(&mut hook, Some(false));
     let _guard = testhook::install(hook);
-    assert!(!_pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
+    assert!(!pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
@@ -269,7 +269,7 @@ fn test_truly_busy_falls_through_when_no_app_server() {
     stub_path(&mut hook, Some(fresh.to_string_lossy().to_string()));
     stub_app_server_busy(&mut hook, None);
     let _guard = testhook::install(hook);
-    assert!(_pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
+    assert!(pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn test_is_output_busy_true_when_app_server_busy() {
     stub_path(&mut hook, None);
     stub_app_server_busy(&mut hook, Some(true));
     let _guard = testhook::install(hook);
-    assert!(_is_output_busy("%1", Some(&FakeMonitor::new(false)), None));
+    assert!(is_output_busy("%1", Some(&FakeMonitor::new(false)), None));
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn test_is_output_busy_false_when_app_server_idle() {
     stub_path(&mut hook, None);
     stub_app_server_busy(&mut hook, Some(false));
     let _guard = testhook::install(hook);
-    assert!(!_is_output_busy("%1", Some(&FakeMonitor::new(true)), None));
+    assert!(!is_output_busy("%1", Some(&FakeMonitor::new(true)), None));
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn test_truly_busy_false_when_monitor_idle() {
     let mut hook = gate_hook();
     stub_path(&mut hook, None);
     let _guard = testhook::install(hook);
-    assert!(!_pane_is_truly_busy("%1", Some(&FakeMonitor::new(false))));
+    assert!(!pane_is_truly_busy("%1", Some(&FakeMonitor::new(false))));
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn test_truly_busy_falls_back_to_monitor_when_path_unknown() {
     let mut hook = gate_hook();
     stub_path(&mut hook, None);
     let _guard = testhook::install(hook);
-    assert!(_pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
+    assert!(pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn test_truly_busy_true_when_monitor_busy_and_transcript_fresh() {
     let mut hook = gate_hook();
     stub_path(&mut hook, Some(fresh.to_string_lossy().to_string()));
     let _guard = testhook::install(hook);
-    assert!(_pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
+    assert!(pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
@@ -328,13 +328,13 @@ fn test_truly_busy_false_when_monitor_busy_but_transcript_stale() {
     let mut hook = gate_hook();
     stub_path(&mut hook, Some(stale.to_string_lossy().to_string()));
     let _guard = testhook::install(hook);
-    assert!(!_pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
+    assert!(!pane_is_truly_busy("%1", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
 fn test_truly_busy_false_when_monitor_none() {
     let _guard = testhook::install(gate_hook());
-    assert!(!_pane_is_truly_busy("%1", None));
+    assert!(!pane_is_truly_busy("%1", None));
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn test_truly_busy_false_when_pane_id_empty() {
     let mut hook = gate_hook();
     stub_path(&mut hook, None);
     let _guard = testhook::install(hook);
-    assert!(!_pane_is_truly_busy("", Some(&FakeMonitor::new(true))));
+    assert!(!pane_is_truly_busy("", Some(&FakeMonitor::new(true))));
 }
 
 #[test]
@@ -357,8 +357,8 @@ fn test_is_output_busy_respects_inactive_age_when_truly_busy() {
         busy: true,
         last_output_age: Some(2.0),
     };
-    assert!(_is_output_busy("%1", Some(&monitor), Some(5.0)));
-    assert!(!_is_output_busy("%1", Some(&monitor), Some(1.0)));
+    assert!(is_output_busy("%1", Some(&monitor), Some(5.0)));
+    assert!(!is_output_busy("%1", Some(&monitor), Some(1.0)));
 }
 
 #[test]
@@ -373,7 +373,7 @@ fn test_is_output_busy_native_busy_bypasses_inactive_age() {
         busy: false,
         last_output_age: Some(20.0),
     };
-    assert!(_is_output_busy("%1", Some(&monitor), Some(5.0)));
+    assert!(is_output_busy("%1", Some(&monitor), Some(5.0)));
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn test_is_output_busy_skips_inactive_age_when_phantom() {
         busy: true,
         last_output_age: Some(0.5),
     };
-    assert!(!_is_output_busy("%1", Some(&monitor), Some(5.0)));
+    assert!(!is_output_busy("%1", Some(&monitor), Some(5.0)));
 }
 
 #[test]
@@ -401,8 +401,8 @@ fn test_path_cache_hits_within_ttl() {
     }));
     let _guard = testhook::install(hook);
 
-    assert_eq!(_resolve_transcript_path_cached("%1", false), None);
-    assert_eq!(_resolve_transcript_path_cached("%1", false), None);
+    assert_eq!(resolve_transcript_path_cached("%1", false), None);
+    assert_eq!(resolve_transcript_path_cached("%1", false), None);
     assert_eq!(CALLS.load(Ordering::SeqCst), 1);
 }
 
@@ -416,14 +416,14 @@ fn test_path_cache_refreshes_after_ttl() {
     }));
     let _guard = testhook::install(hook);
 
-    _resolve_transcript_path_cached("%1", false);
+    resolve_transcript_path_cached("%1", false);
     assert_eq!(CALLS.load(Ordering::SeqCst), 1);
 
     transcript_path_cache().lock().unwrap().insert(
         "%1".to_string(),
         (String::new(), monotonic() - 1.0, String::new()),
     );
-    _resolve_transcript_path_cached("%1", false);
+    resolve_transcript_path_cached("%1", false);
     assert_eq!(CALLS.load(Ordering::SeqCst), 2);
 }
 
@@ -455,7 +455,7 @@ fn test_runtime_snapshot_payload_reads_store_without_live_probe() {
     let _guard = testhook::install(Hook::default());
     seed_snapshot("%1", "sid-tick", 10.0, None);
 
-    let payload = _runtime_snapshot_payload("%1");
+    let payload = runtime_snapshot_payload("%1");
 
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["pane"], Value::from("%1"));
@@ -471,7 +471,7 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
     let _guard = testhook::install(Hook::default());
     seed_aged_snapshot("%1", "sid-old");
 
-    let payload = _runtime_snapshot_payload("%1");
+    let payload = runtime_snapshot_payload("%1");
 
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["snapshot"]["sessionId"], Value::from("sid-old"));
@@ -482,7 +482,7 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
 fn test_runtime_snapshot_payload_returns_none_when_snapshot_missing() {
     let _guard = testhook::install(Hook::default());
 
-    let payload = _runtime_snapshot_payload("%1");
+    let payload = runtime_snapshot_payload("%1");
 
     let mut expected = Map::new();
     expected.insert("ok".to_string(), Value::Bool(true));
@@ -537,7 +537,7 @@ fn test_resolve_transcript_path_cached_ignores_stale_snapshot_and_cached_path() 
     );
 
     assert_eq!(
-        _resolve_transcript_path_cached("%1", false),
+        resolve_transcript_path_cached("%1", false),
         Some(new_transcript.to_string_lossy().to_string())
     );
 }
@@ -554,7 +554,7 @@ fn test_resolve_transcript_path_cached_ignores_stale_snapshot_negative_cache() {
     );
 
     assert_eq!(
-        _resolve_transcript_path_cached("%1", false),
+        resolve_transcript_path_cached("%1", false),
         Some(new_transcript.to_string_lossy().to_string())
     );
 }
@@ -596,7 +596,7 @@ fn test_resolve_transcript_path_cached_requires_same_snapshot_session() {
     );
 
     assert_eq!(
-        _resolve_transcript_path_cached("%1", false),
+        resolve_transcript_path_cached("%1", false),
         Some(new_transcript.to_string_lossy().to_string())
     );
 }
@@ -630,7 +630,7 @@ fn test_agent_runtime_payload_does_not_consume_stale_snapshot_or_pidfile() {
     let _guard = testhook::install(hook);
     let stale = seed_aged_snapshot("%1", "sid-old");
 
-    let runtime = _agent_runtime_payload("%1", Some(&stale));
+    let runtime = agent_runtime_payload("%1", Some(&stale));
 
     assert_eq!(runtime["sessionId"], Value::from("unresolved"));
     assert_eq!(runtime["inputState"], Value::from("unknown"));
@@ -665,7 +665,7 @@ fn test_agent_runtime_payload_stamps_a_freshness_window_on_a_probed_session() {
     let _guard = testhook::install(hook);
 
     assert_eq!(
-        _agent_runtime_payload("%1", None)["sessionId"],
+        agent_runtime_payload("%1", None)["sessionId"],
         Value::from("sid-new")
     );
 
@@ -726,7 +726,7 @@ fn test_bg_runtime_live_engine_reports_status_and_session() {
     );
     let _guard = testhook::install(hook);
 
-    let rt = _claude_bg_runtime("%1").unwrap();
+    let rt = claude_bg_runtime("%1").unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     assert_eq!(rt["busy"], Value::Bool(true));
@@ -746,7 +746,7 @@ fn test_bg_runtime_waiting_engine_maps_waiting_for() {
     );
     let _guard = testhook::install(hook);
 
-    let rt = _claude_bg_runtime("%1").unwrap();
+    let rt = claude_bg_runtime("%1").unwrap();
 
     assert_eq!(rt["busy"], Value::Bool(false));
     assert_eq!(rt["inputState"], Value::from("waiting_user"));
@@ -770,7 +770,7 @@ fn test_bg_runtime_asleep_is_reachable_not_dead() {
     );
     let _guard = testhook::install(hook);
 
-    let rt = _claude_bg_runtime("%1").unwrap();
+    let rt = claude_bg_runtime("%1").unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(true)); // asleep, wake-on-delivery — never reaped
     assert_eq!(rt["busy"], Value::Bool(false));
@@ -790,7 +790,7 @@ fn test_bg_runtime_gone_job_is_offline() {
     );
     let _guard = testhook::install(hook);
 
-    let rt = _claude_bg_runtime("%1").unwrap();
+    let rt = claude_bg_runtime("%1").unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(false));
     assert_eq!(rt["inputState"], Value::from("offline"));
@@ -804,7 +804,7 @@ fn test_bg_runtime_ledger_failure_is_unknown_not_dead() {
     pin(&mut hook, record("cafe1234", ""), None, None);
     let _guard = testhook::install(hook);
 
-    let rt = _claude_bg_runtime("%1").unwrap();
+    let rt = claude_bg_runtime("%1").unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(true)); // benefit of the doubt: never a reap signal
     assert_eq!(rt["inputState"], Value::from("unknown"));
@@ -816,7 +816,7 @@ fn test_bg_runtime_none_for_unmanaged_pane() {
     let mut hook = Hook::default();
     pin(&mut hook, None, None, Some(vec![]));
     let _guard = testhook::install(hook);
-    assert!(_claude_bg_runtime("%1").is_none());
+    assert!(claude_bg_runtime("%1").is_none());
 }
 
 #[test]
@@ -830,8 +830,8 @@ fn test_jobs_ledger_is_cached_between_reads() {
     }));
     let _guard = testhook::install(hook);
 
-    _claude_bg_runtime("%1");
-    _claude_bg_runtime("%1");
+    claude_bg_runtime("%1");
+    claude_bg_runtime("%1");
 
     // the ~270ms CLI call never runs per tick per pane
     assert_eq!(CALLS.load(Ordering::SeqCst), 1);
@@ -868,7 +868,7 @@ fn test_agent_runtime_payload_reaches_bg_branch_without_a_viewer() {
     quiet_view_hook(&mut hook);
     let _guard = testhook::install(hook);
 
-    let rt = _agent_runtime_payload("%1", None);
+    let rt = agent_runtime_payload("%1", None);
 
     assert_eq!(rt["_cli"], Value::from("claude"));
     assert_eq!(rt["cliAlive"], Value::Bool(true));
@@ -885,7 +885,7 @@ fn test_claude_registry_busy_prefers_job_engine() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(_claude_registry_busy("%1"), Some(true));
+    assert_eq!(claude_registry_busy("%1"), Some(true));
 }
 
 #[test]
@@ -903,7 +903,7 @@ fn test_claude_registry_busy_falls_back_to_interactive_entry() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(_claude_registry_busy("%1"), Some(true));
+    assert_eq!(claude_registry_busy("%1"), Some(true));
 }
 
 #[test]
@@ -915,7 +915,7 @@ fn test_claude_registry_busy_none_without_any_source() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(_claude_registry_busy("%1"), None);
+    assert_eq!(claude_registry_busy("%1"), None);
 }
 
 /// A live interactive (non-member) claude on the pane tty: no job
@@ -973,7 +973,7 @@ fn test_interactive_claude_takes_input_state_from_its_registry_entry() {
     forbid_gate(&mut hook, "the registry answered; the gate must not run");
     let _guard = testhook::install(hook);
 
-    let rt = _agent_runtime_payload("%7", None);
+    let rt = agent_runtime_payload("%7", None);
 
     assert_eq!(rt["inputState"], Value::from("waiting_user"));
     assert_eq!(rt["inputReason"], Value::from("registry:input needed"));
@@ -991,7 +991,7 @@ fn test_interactive_claude_status_maps_like_the_bg_engine() {
         forbid_gate(&mut hook, "the registry answered; the gate must not run");
         let _guard = testhook::install(hook);
 
-        let rt = _agent_runtime_payload("%7", None);
+        let rt = agent_runtime_payload("%7", None);
 
         assert_eq!(rt["busy"], Value::Bool(expected), "status={status}");
         // `shell` is neither mid-turn nor a wait
@@ -1011,7 +1011,7 @@ fn test_interactive_claude_without_a_registry_status_falls_back_to_the_gate() {
     }));
     let _guard = testhook::install(hook);
 
-    let rt = _agent_runtime_payload("%7", None);
+    let rt = agent_runtime_payload("%7", None);
 
     assert_eq!(rt["inputState"], Value::from("waiting_user"));
     assert_eq!(rt["inputReason"], Value::from("ask_pending"));
@@ -1047,7 +1047,7 @@ fn test_claude_supervisor_tick_parks_jobs_of_dead_panes() {
     };
     let _guard = testhook::install(hook);
 
-    _claude_supervisor_tick("/tmp/ws");
+    claude_supervisor_tick("/tmp/ws");
 
     // the live pane's record is untouched
     assert_eq!(*cleared.lock().unwrap(), vec!["%9".to_string()]);
@@ -1069,7 +1069,7 @@ fn test_claude_supervisor_tick_treats_empty_listing_as_tmux_failure() {
     };
     let _guard = testhook::install(hook);
 
-    _claude_supervisor_tick("/tmp/ws");
+    claude_supervisor_tick("/tmp/ws");
 
     // unknown is not dead: nothing pruned, nothing parked
     assert!(cleared.lock().unwrap().is_empty());
@@ -1094,7 +1094,7 @@ fn test_codex_app_server_runtime_maps_fields() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let out = _codex_app_server_runtime("%5").unwrap();
+    let out = codex_app_server_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
     assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
@@ -1108,7 +1108,7 @@ fn test_codex_app_server_runtime_none_without_daemon() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert!(_codex_app_server_runtime("%5").is_none());
+    assert!(codex_app_server_runtime("%5").is_none());
 }
 
 #[test]
@@ -1119,7 +1119,7 @@ fn test_codex_app_server_runtime_waiting_user() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let out = _codex_app_server_runtime("%5").unwrap();
+    let out = codex_app_server_runtime("%5").unwrap();
     assert_eq!(out["inputState"], Value::from("waiting_user"));
     assert_eq!(out["inputReason"], Value::from("app_server_active_flag"));
 }
@@ -1157,7 +1157,7 @@ fn test_doctor_verbose_reports_codex_daemon() {
     };
     let _guard = testhook::install(hook);
 
-    let diag = _doctor_payload(&tmp.path().to_string_lossy(), "t", "a", true, None).unwrap();
+    let diag = doctor_payload(&tmp.path().to_string_lossy(), "t", "a", true, None).unwrap();
 
     let mut expected = Map::new();
     expected.insert("socket".to_string(), Value::from("/x/hive-shared.sock"));
@@ -1185,7 +1185,7 @@ fn test_grok_leader_runtime_maps_fields() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let out = _grok_leader_runtime("%5").unwrap();
+    let out = grok_leader_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
     assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
@@ -1200,7 +1200,7 @@ fn test_grok_leader_runtime_none_without_daemon() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert!(_grok_leader_runtime("%5").is_none());
+    assert!(grok_leader_runtime("%5").is_none());
 }
 
 #[test]
@@ -1212,7 +1212,7 @@ fn test_grok_leader_runtime_defaults_empty_input_state_to_ready() {
     };
     let _guard = testhook::install(hook);
     assert_eq!(
-        _grok_leader_runtime("%5").unwrap()["inputState"],
+        grok_leader_runtime("%5").unwrap()["inputState"],
         Value::from("ready")
     );
 }
@@ -1225,7 +1225,7 @@ fn test_grok_leader_runtime_waiting_user() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let out = _grok_leader_runtime("%5").unwrap();
+    let out = grok_leader_runtime("%5").unwrap();
     assert_eq!(out["inputState"], Value::from("waiting_user"));
     assert_eq!(out["inputReason"], Value::from("leader_permission_request"));
 }
@@ -1249,7 +1249,7 @@ fn test_agent_payload_grok_branch_reports_minted_session() {
         Some("sid-grok-1".to_string()),
     );
     let _guard = testhook::install(hook);
-    let rt = _agent_runtime_payload("%5", None);
+    let rt = agent_runtime_payload("%5", None);
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     assert_eq!(rt["busy"], Value::Bool(true));
     assert_eq!(rt["turnPhase"], Value::from("tool_open"));
@@ -1262,7 +1262,7 @@ fn test_agent_payload_grok_session_unresolved_without_record() {
     let hook = live_grok_pane(Some(session_runtime(false, "turn_closed", "ready")), None);
     let _guard = testhook::install(hook);
     assert_eq!(
-        _agent_runtime_payload("%5", None)["sessionId"],
+        agent_runtime_payload("%5", None)["sessionId"],
         Value::from("unresolved")
     );
 }
@@ -1277,7 +1277,7 @@ fn test_agent_payload_grok_reports_unknown_without_leader_runtime() {
     forbid_gate(&mut hook, "grok must not reach the transcript gate");
     let _guard = testhook::install(hook);
 
-    let rt = _agent_runtime_payload("%5", None);
+    let rt = agent_runtime_payload("%5", None);
     assert_eq!(rt["sessionId"], Value::from("sid-grok-2"));
     assert_eq!(rt["inputState"], Value::from("unknown"));
     assert_eq!(rt["inputReason"], Value::from("no_leader_runtime"));
@@ -1299,7 +1299,7 @@ fn test_native_daemon_busy_consults_grok_after_codex() {
             ..Default::default()
         };
         let _guard = testhook::install(hook);
-        assert_eq!(_native_daemon_busy("%5"), Some(busy));
+        assert_eq!(native_daemon_busy("%5"), Some(busy));
     }
 }
 
@@ -1314,7 +1314,7 @@ fn test_native_daemon_busy_none_when_no_daemon_holds_the_pane() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(_native_daemon_busy("%5"), None);
+    assert_eq!(native_daemon_busy("%5"), None);
 }
 
 // ---- claude view tick --------------------------------------------------
@@ -1411,7 +1411,7 @@ fn view_tick_env() -> ViewTickEnv {
 
 fn run_view_tick(env: &mut ViewTickEnv) {
     let members = view_members();
-    _claude_view_tick("/tmp/ws", "probe", &members, &mut env.state);
+    claude_view_tick("/tmp/ws", "probe", &members, &mut env.state);
 }
 
 #[test]
@@ -1591,8 +1591,8 @@ fn test_a_placeholder_named_member_job_is_renamed_once() {
     let mut state = ClaudeTickState::default();
     let members = name_members("%183", "claude", "worker");
 
-    _claude_name_tick(&members, "honey", &mut state);
-    _claude_name_tick(&members, "honey", &mut state);
+    claude_name_tick(&members, "honey", &mut state);
+    claude_name_tick(&members, "honey", &mut state);
 
     assert_eq!(
         *started.lock().unwrap(),
@@ -1610,7 +1610,7 @@ fn test_an_already_named_job_is_left_alone() {
         )]),
     );
 
-    _claude_name_tick(
+    claude_name_tick(
         &name_members("%183", "claude", "worker"),
         "honey",
         &mut ClaudeTickState::default(),
@@ -1629,7 +1629,7 @@ fn test_an_asleep_engine_is_retried_on_a_later_tick() {
             HashMap::from([("%183".to_string(), "485865b2".to_string())]),
             HashMap::new(),
         );
-        _claude_name_tick(&members, "honey", &mut state);
+        claude_name_tick(&members, "honey", &mut state);
         assert!(state.named.is_empty());
     }
 
@@ -1637,7 +1637,7 @@ fn test_an_asleep_engine_is_retried_on_a_later_tick() {
         HashMap::from([("%183".to_string(), "485865b2".to_string())]),
         HashMap::from([("485865b2".to_string(), named_engine("485865b2", "hive-183"))]),
     );
-    _claude_name_tick(&members, "honey", &mut state);
+    claude_name_tick(&members, "honey", &mut state);
     assert_eq!(state.named, HashSet::from(["485865b2".to_string()]));
 }
 
@@ -1648,7 +1648,7 @@ fn test_non_claude_members_are_not_renamed() {
         HashMap::new(),
     );
 
-    _claude_name_tick(
+    claude_name_tick(
         &name_members("%184", "grok", "validator"),
         "honey",
         &mut ClaudeTickState::default(),
@@ -1721,7 +1721,7 @@ fn test_cleanup_skips_live_pane() {
     let env = reap_env(true);
     *env.keys.lock().unwrap() = vec!["p4".to_string()];
 
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
 
     assert!(env.calls.lock().unwrap().is_empty());
 }
@@ -1731,7 +1731,7 @@ fn test_cleanup_reaps_dead_pane_and_logs_before_kill() {
     let env = reap_env(false);
     *env.keys.lock().unwrap() = vec!["p4".to_string()];
 
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
 
     assert_eq!(
         *env.calls.lock().unwrap(),
@@ -1758,7 +1758,7 @@ fn test_cleanup_member_daemon_reaped_when_registry_lists_no_such_member() {
         "written"
     );
 
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
 
     assert_eq!(
         *env.calls.lock().unwrap(),
@@ -1783,7 +1783,7 @@ fn test_cleanup_member_daemon_kept_while_registry_lists_it() {
         "written"
     );
 
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
 
     assert!(env.calls.lock().unwrap().is_empty());
 }
@@ -1798,7 +1798,7 @@ fn test_cleanup_member_daemon_survives_unreadable_registry() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{not json").unwrap();
 
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
 
     assert!(env.calls.lock().unwrap().is_empty());
 }
@@ -1814,7 +1814,7 @@ fn test_cleanup_leaves_another_team_s_member_daemon_alone() {
     *env.keys.lock().unwrap() = vec!["m-honey.sage".to_string()];
     write_pidfile(env.tmp.path(), "m-honey.sage", 999.0);
 
-    _cleanup_dead_daemons("/tmp/ws", "acc-throwaway");
+    cleanup_dead_daemons("/tmp/ws", "acc-throwaway");
 
     assert!(
         env.calls.lock().unwrap().is_empty(),
@@ -1830,12 +1830,12 @@ fn test_cleanup_member_daemon_missing_registry_reaps_after_grace() {
     // newborn: inside the grace window, spawn registration may be in
     // flight
     write_pidfile(env.tmp.path(), "m-honey.rex", 5.0);
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
     assert!(env.calls.lock().unwrap().is_empty());
 
     // past the grace window with no registry entry: orphan
     write_pidfile(env.tmp.path(), "m-honey.rex", 999.0);
-    _cleanup_dead_daemons("/tmp/ws", "honey");
+    cleanup_dead_daemons("/tmp/ws", "honey");
     assert!(env
         .calls
         .lock()
@@ -1952,7 +1952,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
 #[test]
 fn test_supervisor_healthy_world_does_nothing() {
     let (_guard, calls) = super_env(super_state());
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -1961,7 +1961,7 @@ fn test_supervisor_prunes_records_of_dead_panes() {
     let mut state = super_state();
     state.recorded = vec!["%1".to_string(), "%dead".to_string()];
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
     assert!(calls.contains(&"clear %dead".to_string()));
     assert!(!calls.contains(&"clear %1".to_string()));
@@ -1977,7 +1977,7 @@ fn test_supervisor_leaves_daemon_alone_without_codex_members() {
     state.recorded = Vec::new();
     state.daemon_alive = false;
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -1986,7 +1986,7 @@ fn test_supervisor_respawns_dead_daemon_with_live_member() {
     let mut state = super_state();
     state.daemon_alive = false;
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
     // stale client must reconnect post-respawn
     assert!(calls.contains(&"drop_client".to_string()));
@@ -1999,7 +1999,7 @@ fn test_supervisor_reattaches_retained_shell() {
     let mut state = super_state();
     state.cli_process = HashMap::new(); // CLI exited; pane keeps its shell
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
     assert!(calls.contains(&"send %1 hive codex resume tid-1".to_string()));
     assert!(calls.contains(
@@ -2013,8 +2013,8 @@ fn test_supervisor_reattach_respects_cooldown() {
     let mut state = super_state();
     state.cli_process = HashMap::new();
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     let sends = calls
         .lock()
         .unwrap()
@@ -2027,7 +2027,7 @@ fn test_supervisor_reattach_respects_cooldown() {
 #[test]
 fn test_supervisor_never_types_over_a_live_cli() {
     let (_guard, calls) = super_env(super_state());
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     assert!(!calls.lock().unwrap().iter().any(|c| c.starts_with("send ")));
 }
 
@@ -2037,7 +2037,7 @@ fn test_supervisor_never_types_into_a_non_shell() {
     state.cli_process = HashMap::new();
     state.pane_command = HashMap::from([("%1".to_string(), "vim".to_string())]);
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     assert!(!calls.lock().unwrap().iter().any(|c| c.starts_with("send ")));
 }
 
@@ -2047,7 +2047,7 @@ fn test_supervisor_skips_member_without_record() {
     state.cli_process = HashMap::new();
     state.threads = HashMap::new();
     let (_guard, calls) = super_env(state);
-    _codex_supervisor_tick("/tmp/ws", "t");
+    codex_supervisor_tick("/tmp/ws", "t");
     assert!(!calls.lock().unwrap().iter().any(|c| c.starts_with("send ")));
 }
 
@@ -2185,7 +2185,7 @@ fn idle_setup_default() -> IdleSetup {
 }
 
 fn idle_tick(state: &mut HashMap<String, IdleRecord>, monitor: &IdleBusyMonitor, now: f64) {
-    _idle_notify_tick("team-a", "dev", state, Some(monitor), now, "", None, None);
+    idle_notify_tick("team-a", "dev", state, Some(monitor), now, "", None, None);
 }
 
 fn idle_tick_dbg(
@@ -2194,7 +2194,7 @@ fn idle_tick_dbg(
     now: f64,
     debug_state: &mut NotifyDebugState,
 ) {
-    _idle_notify_tick(
+    idle_notify_tick(
         "team-a",
         "dev",
         state,
@@ -2620,7 +2620,7 @@ fn test_idle_notify_agent_panes_filters_to_live_agent_roles() {
     };
     let _guard = testhook::install(hook);
 
-    assert_eq!(_idle_notify_agent_panes("team-a"), vec!["%1".to_string()]);
+    assert_eq!(idle_notify_agent_panes("team-a"), vec!["%1".to_string()]);
 }
 
 // ---- socket server / lifecycle -----------------------------------------
@@ -2711,15 +2711,14 @@ fn test_serve_requests_answers_a_read_while_a_send_holds_the_transport() {
     let _guard = testhook::install(hook);
     let tmp = short_workspace();
     let workspace = tmp.path().to_string_lossy().to_string();
-    let server = Arc::new(_open_server_socket(&workspace).unwrap());
+    let server = Arc::new(open_server_socket(&workspace).unwrap());
 
     let ws_slow = workspace.clone();
-    let slow_client =
-        thread::spawn(move || _request_hived(&ws_slow, &action_payload("send"), 10.0));
+    let slow_client = thread::spawn(move || request_hived(&ws_slow, &action_payload("send"), 10.0));
     let ws_serve = workspace.clone();
     let server_serve = Arc::clone(&server);
     let serve_thread = thread::spawn(move || {
-        _serve_requests(
+        serve_requests(
             server_serve.as_ref(),
             &ws_serve,
             "team-a",
@@ -2741,7 +2740,7 @@ fn test_serve_requests_answers_a_read_while_a_send_holds_the_transport() {
     }
 
     let began = monotonic();
-    let response = _request_hived(
+    let response = request_hived(
         &workspace,
         &action_payload("team-runtime"),
         SOCKET_READY_TIMEOUT,
@@ -2772,10 +2771,10 @@ fn test_serve_requests_answers_a_read_while_a_send_holds_the_transport() {
     );
     let keep_running = serve_thread.join().unwrap();
     server.close();
-    _cleanup_socket_impl(&workspace);
+    cleanup_socket_impl(&workspace);
 
     assert!(keep_running);
-    assert!(!_requests_in_flight());
+    assert!(!requests_in_flight());
 }
 
 #[test]
@@ -2789,12 +2788,12 @@ fn test_serve_requests_still_retires_the_loop_on_shutdown() {
     let _guard = testhook::install(hook);
     let tmp = short_workspace();
     let workspace = tmp.path().to_string_lossy().to_string();
-    let server = Arc::new(_open_server_socket(&workspace).unwrap());
+    let server = Arc::new(open_server_socket(&workspace).unwrap());
 
     let ws_serve = workspace.clone();
     let server_serve = Arc::clone(&server);
     let serve_thread = thread::spawn(move || {
-        _serve_requests(
+        serve_requests(
             server_serve.as_ref(),
             &ws_serve,
             "team-a",
@@ -2805,7 +2804,7 @@ fn test_serve_requests_still_retires_the_loop_on_shutdown() {
         )
     });
 
-    let response = _request_hived(&workspace, &action_payload("shutdown"), 2.0);
+    let response = request_hived(&workspace, &action_payload("shutdown"), 2.0);
     let keep_running = serve_thread.join().unwrap();
 
     assert_eq!(response, Some(json_obj(&[("ok", Value::Bool(true))])));
@@ -2813,7 +2812,7 @@ fn test_serve_requests_still_retires_the_loop_on_shutdown() {
 
     _SHUTDOWN.store(false, Ordering::SeqCst);
     server.close();
-    _cleanup_socket_impl(&workspace);
+    cleanup_socket_impl(&workspace);
 }
 
 #[test]
@@ -2823,7 +2822,7 @@ fn test_socket_alive_requires_matching_api_version() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert!(!_socket_alive("/tmp/ws"));
+    assert!(!socket_alive("/tmp/ws"));
 
     testhook::update(|h| {
         h.request_ping = Some(Arc::new(|_ws| {
@@ -2833,19 +2832,19 @@ fn test_socket_alive_requires_matching_api_version() {
             ]))
         }));
     });
-    assert!(_socket_alive("/tmp/ws"));
+    assert!(socket_alive("/tmp/ws"));
 }
 
 #[test]
 fn test_hived_identity_matches_team_and_ignores_window() {
-    assert!(!_hived_identity_matches(
+    assert!(!hived_identity_matches(
         Some(&json_obj(&[
             ("ok", Value::Bool(true)),
             ("apiVersion", Value::from(HIVED_API_VERSION)),
         ])),
         "team-a",
     ));
-    assert!(!_hived_identity_matches(
+    assert!(!hived_identity_matches(
         Some(&json_obj(&[
             ("ok", Value::Bool(true)),
             ("apiVersion", Value::from(HIVED_API_VERSION)),
@@ -2853,7 +2852,7 @@ fn test_hived_identity_matches_team_and_ignores_window() {
         ])),
         "team-a",
     ));
-    assert!(!_hived_identity_matches(
+    assert!(!hived_identity_matches(
         Some(&json_obj(&[
             ("ok", Value::Bool(true)),
             ("apiVersion", Value::from(HIVED_API_VERSION)),
@@ -2864,7 +2863,7 @@ fn test_hived_identity_matches_team_and_ignores_window() {
     ));
     // The window is display, not identity: a moved/killed/recreated
     // window must not bounce a healthy hived.
-    assert!(_hived_identity_matches(
+    assert!(hived_identity_matches(
         Some(&json_obj(&[
             ("ok", Value::Bool(true)),
             ("apiVersion", Value::from(HIVED_API_VERSION)),
@@ -2874,7 +2873,7 @@ fn test_hived_identity_matches_team_and_ignores_window() {
         ])),
         "team-a",
     ));
-    assert!(_hived_identity_matches(
+    assert!(hived_identity_matches(
         Some(&json_obj(&[
             ("ok", Value::Bool(true)),
             ("apiVersion", Value::from(HIVED_API_VERSION)),
@@ -2887,7 +2886,7 @@ fn test_hived_identity_matches_team_and_ignores_window() {
 
 #[test]
 fn test_handle_request_ping_returns_hived_identity() {
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -2929,7 +2928,7 @@ fn test_handle_request_connect_codex_brings_2nd_client_online() {
     };
     let _guard = testhook::install(hook);
 
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -2959,7 +2958,7 @@ fn test_handle_request_connect_grok_brings_2nd_client_online() {
     };
     let _guard = testhook::install(hook);
 
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -2979,7 +2978,7 @@ fn test_handle_request_connect_grok_brings_2nd_client_online() {
     assert_eq!(*connected.lock().unwrap(), vec!["%5".to_string()]);
 
     // No pane, no client: the leader is never asked and the CLI is told so.
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -3031,7 +3030,7 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
     let _guard = testhook::install(hook);
 
     // No `team` in the request: the hived's own team is the default.
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         &workspace.to_string_lossy(),
         "team-a",
         "dev:3",
@@ -3083,7 +3082,7 @@ fn test_handle_request_doctor_embeds_hived_identity_and_defaults_the_team() {
     let _guard = testhook::install(hook);
 
     // No `team` in the request: the hived's own team is the default.
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -3123,7 +3122,7 @@ fn test_handle_request_reports_a_failing_handler_without_retiring_the_loop() {
     let _guard = testhook::install(hook);
 
     // A `team` in the request overrides the hived's own team.
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
         "dev:3",
@@ -3161,7 +3160,7 @@ fn test_start_hived_spawns_current_exe_with_hived_argv() {
     };
     let _guard = testhook::install(hook);
 
-    let pid = _start_hived("/tmp/ws", "team-a", "dev:3", "@99");
+    let pid = start_hived("/tmp/ws", "team-a", "dev:3", "@99");
 
     assert_eq!(pid, Some(4321));
     let captured = captured.lock().unwrap();
@@ -3201,7 +3200,7 @@ fn test_run_spawned_hived_ignores_sigint_and_runs_loop() {
     };
     let _guard = testhook::install(hook);
 
-    let exit_code = _run_spawned_hived(&[
+    let exit_code = run_spawned_hived(&[
         "--hived".to_string(),
         "/tmp/ws".to_string(),
         "team-a".to_string(),
@@ -3231,11 +3230,11 @@ fn test_stale_disk_build_hash_requires_stable_changed_hash() {
         ..Default::default()
     };
 
-    assert_eq!(_stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
+    assert_eq!(stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
     assert_eq!(state.candidate_hash.as_deref(), Some("new-hash"));
-    assert_eq!(_stale_disk_build_hash_for_reexec(&mut state, 14.9), None);
+    assert_eq!(stale_disk_build_hash_for_reexec(&mut state, 14.9), None);
     assert_eq!(
-        _stale_disk_build_hash_for_reexec(&mut state, 15.0),
+        stale_disk_build_hash_for_reexec(&mut state, 15.0),
         Some("new-hash".to_string())
     );
 }
@@ -3252,7 +3251,7 @@ fn test_stale_disk_build_hash_clears_candidate_when_code_matches() {
         candidate_hash: Some("new-hash".to_string()),
     };
 
-    assert_eq!(_stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
+    assert_eq!(stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
     assert!(state.candidate_hash.is_none());
 }
 
@@ -3260,11 +3259,11 @@ fn test_stale_disk_build_hash_clears_candidate_when_code_matches() {
 fn test_try_acquire_reexec_lock_returns_inheritable_lock_fd() {
     let _guard = testhook::install(Hook::default());
     let tmp = tempfile::tempdir().unwrap();
-    let lock_fd = _try_acquire_reexec_lock(&tmp.path().to_string_lossy());
+    let lock_fd = try_acquire_reexec_lock(&tmp.path().to_string_lossy());
     let fd = lock_fd.expect("lock fd");
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     assert_eq!(flags & libc::FD_CLOEXEC, 0); // inheritable
-    _release_reexec_lock_fd(lock_fd);
+    release_reexec_lock_fd(lock_fd);
 }
 
 #[test]
@@ -3272,14 +3271,14 @@ fn test_try_acquire_reexec_lock_returns_none_when_lock_is_busy() {
     let _guard = testhook::install(Hook::default());
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_string_lossy().to_string();
-    let lock_path = _lock_path(&workspace);
+    let lock_path = lock_path(&workspace);
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let cpath = CString::new(lock_path.as_os_str().as_bytes()).unwrap();
     let held_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644) };
     assert!(held_fd >= 0);
     assert_eq!(unsafe { libc::flock(held_fd, libc::LOCK_EX) }, 0);
 
-    assert_eq!(_try_acquire_reexec_lock(&workspace), None);
+    assert_eq!(try_acquire_reexec_lock(&workspace), None);
 
     unsafe {
         libc::flock(held_fd, libc::LOCK_UN);
@@ -3328,7 +3327,7 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
         calls: Arc::clone(&calls),
     });
 
-    let replacement = _reexec_hived(
+    let replacement = reexec_hived(
         "/ws",
         "team-a",
         "dev:3",
@@ -3373,7 +3372,7 @@ fn test_reexec_hived_skips_when_reexec_lock_is_busy() {
         calls: Arc::clone(&calls),
     });
 
-    let replacement = _reexec_hived(
+    let replacement = reexec_hived(
         "/ws",
         "team-a",
         "dev:3",
@@ -3428,7 +3427,7 @@ fn test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails() {
         calls: Arc::clone(&calls),
     });
 
-    let replacement = _reexec_hived(
+    let replacement = reexec_hived(
         "/ws",
         "team-a",
         "dev:3",
@@ -3444,17 +3443,17 @@ fn test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails() {
         assert!(calls.contains(&"open /ws".to_string()));
         assert!(calls.contains(&"monitor.start".to_string()));
     }
-    let installed = _get_output_busy_monitor().expect("monitor restored");
+    let installed = get_output_busy_monitor().expect("monitor restored");
     assert!(Arc::ptr_eq(&installed, &monitor));
     assert!(std::env::var(_HIVED_REEXEC_LOCK_ENV).is_err());
-    _set_output_busy_monitor(None);
+    set_output_busy_monitor(None);
 }
 
 #[test]
 fn test_cleanup_socket_if_owner_skips_foreign_owner() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_string_lossy().to_string();
-    _write_hived_owner_impl(
+    write_hived_owner_impl(
         &workspace,
         getpid() + 1000,
         "2026-04-28T00:00:00Z",
@@ -3470,7 +3469,7 @@ fn test_cleanup_socket_if_owner_skips_foreign_owner() {
     };
     let _guard = testhook::install(hook);
 
-    _cleanup_socket_if_owner(&workspace, "mine");
+    cleanup_socket_if_owner(&workspace, "mine");
 
     assert!(calls.lock().unwrap().is_empty());
 }
@@ -3496,8 +3495,8 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
             }) as Box<dyn HivedServerApi>)
         })),
         write_hived_owner: Some(Arc::new(|workspace, pid, started_at, token| {
-            _write_hived_owner_impl(workspace, pid, started_at, token);
-            _write_hived_owner_impl(workspace, pid + 1, started_at, "foreign");
+            write_hived_owner_impl(workspace, pid, started_at, token);
+            write_hived_owner_impl(workspace, pid + 1, started_at, "foreign");
         })),
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
         is_tmux_window_alive: Some(Arc::new(|_id| true)),
@@ -3529,7 +3528,7 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
     };
     let _guard = testhook::install(hook);
 
-    _hived_loop(&workspace, "team-a", "dev:3", "@99");
+    hived_loop(&workspace, "team-a", "dev:3", "@99");
 
     let events = events.lock().unwrap();
     let retire: Vec<_> = events
@@ -3552,15 +3551,15 @@ fn test_open_server_socket_relocates_and_links_for_a_long_workspace() {
         .path()
         .join("w".repeat(crate::devlog::max_socket_path_len()));
     let workspace = workspace.to_string_lossy().to_string();
-    let sock = _socket_path(&workspace);
-    let link = _socket_link_path(&workspace);
+    let sock = socket_path(&workspace);
+    let link = socket_link_path(&workspace);
     assert_ne!(
         sock, link,
         "a workspace this deep cannot host its socket in tree"
     );
     assert!(sock.as_os_str().len() <= crate::devlog::max_socket_path_len());
 
-    let server = _open_server_socket(&workspace).unwrap();
+    let server = open_server_socket(&workspace).unwrap();
     assert!(sock.exists(), "real socket bound at {}", sock.display());
     assert_eq!(
         fs::read_link(&link).unwrap(),
@@ -3575,7 +3574,7 @@ fn test_open_server_socket_relocates_and_links_for_a_long_workspace() {
 
     // a client derives the same path from the workspace alone and gets through
     let ws_client = workspace.clone();
-    let client = thread::spawn(move || _request_hived(&ws_client, &action_payload("ping"), 5.0));
+    let client = thread::spawn(move || request_hived(&ws_client, &action_payload("ping"), 5.0));
     let conn = server
         .accept_timeout(5.0)
         .expect("client connected to the relocated socket");
@@ -3596,7 +3595,7 @@ fn test_open_server_socket_relocates_and_links_for_a_long_workspace() {
     assert_eq!(response.get("ok"), Some(&Value::Bool(true)));
 
     server.close();
-    _cleanup_socket_impl(&workspace);
+    cleanup_socket_impl(&workspace);
     assert!(!sock.exists());
     assert!(
         fs::symlink_metadata(&link).is_err(),
@@ -3640,7 +3639,7 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
     };
     let _guard = testhook::install(hook);
 
-    _hived_loop(&workspace, "team-a", "", "");
+    hived_loop(&workspace, "team-a", "", "");
 
     let events = events.lock().unwrap();
     let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
@@ -3698,7 +3697,7 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
     };
     let _guard = testhook::install(hook);
 
-    _hived_loop(&workspace, "team-a", "", "");
+    hived_loop(&workspace, "team-a", "", "");
 
     assert_eq!(
         *calls.lock().unwrap(),
@@ -3720,7 +3719,7 @@ fn test_send_request_budget_covers_native_submission() {
     let native = crate::adapters::claude_sessions::SUBMIT_TIMEOUT
         .max(crate::adapters::codex_app_server::SUBMIT_TIMEOUT)
         .max(crate::adapters::grok_leader::SUBMIT_TIMEOUT);
-    assert!(_send_request_timeout() > native);
+    assert!(send_request_timeout() > native);
 }
 
 #[test]
@@ -3763,7 +3762,7 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
     // The server held the reply past the ping budget (SOCKET_RETRY_INTERVAL)
     // but inside the send budget; the oracle is the reply arriving at all.
     let held_for = held_rx.recv().unwrap();
-    assert!(held_for < _send_request_timeout());
+    assert!(held_for < send_request_timeout());
     let response = response.expect("delayed acceptance must not be dropped");
     assert_eq!(response["delivery"], Value::from("queued"));
 }
@@ -3774,12 +3773,12 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
     let _guard = testhook::install(Hook::default());
     let tmp = short_workspace();
     let workspace = tmp.path().to_string_lossy().to_string();
-    let server = Arc::new(_open_server_socket(&workspace).unwrap());
+    let server = Arc::new(open_server_socket(&workspace).unwrap());
 
     let ws_serve = workspace.clone();
     let server_serve = Arc::clone(&server);
     let serve_thread = thread::spawn(move || {
-        _serve_requests(
+        serve_requests(
             server_serve.as_ref(),
             &ws_serve,
             "team-a",
@@ -3790,7 +3789,7 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
         )
     });
 
-    let ping = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
+    let ping = request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
         .expect("ping must be answered over the socket");
     assert_eq!(ping["ok"], Value::Bool(true));
     assert_eq!(ping["apiVersion"], Value::from(HIVED_API_VERSION));
@@ -3807,7 +3806,7 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
 
     // A truncated frame is answered as an unknown action and the loop
     // stays up for the next client.
-    let mut raw = UnixStream::connect(_socket_path(&workspace)).unwrap();
+    let mut raw = UnixStream::connect(socket_path(&workspace)).unwrap();
     raw.set_read_timeout(Some(Duration::from_secs_f64(SOCKET_READY_TIMEOUT)))
         .unwrap();
     raw.write_all(b"{\"action\": \"ping\"\n").unwrap();
@@ -3820,11 +3819,11 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
     );
     assert!(!_SHUTDOWN.load(Ordering::SeqCst));
 
-    let again = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
+    let again = request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
         .expect("the loop must survive a malformed frame");
     assert_eq!(again["tmuxWindowId"], Value::from("@99"));
 
-    let bye = _request_hived(
+    let bye = request_hived(
         &workspace,
         &action_payload("shutdown"),
         SOCKET_READY_TIMEOUT,
@@ -3832,21 +3831,21 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
     assert_eq!(bye, Some(json_obj(&[("ok", Value::Bool(true))])));
     // The loop is parked in accept: one more client wakes it to notice
     // the shutdown flag instead of waiting out the accept timeout.
-    let _ = _request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT);
+    let _ = request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT);
     let keep_running = serve_thread.join().unwrap();
     assert!(!keep_running);
     // The wake-up ping's handler thread retires on its own; the loop does
     // not wait for it.
     let settle = std::time::Instant::now();
-    while _requests_in_flight() && settle.elapsed().as_secs_f64() < SOCKET_READY_TIMEOUT {
+    while requests_in_flight() && settle.elapsed().as_secs_f64() < SOCKET_READY_TIMEOUT {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(
-        !_requests_in_flight(),
+        !requests_in_flight(),
         "handler thread still counted in flight"
     );
     server.close();
-    _cleanup_socket_impl(&workspace);
+    cleanup_socket_impl(&workspace);
 }
 
 // ---- thread view -------------------------------------------------------
@@ -3897,7 +3896,7 @@ fn test_thread_payload_projects_pure_send_chain() {
     )
     .unwrap();
 
-    let payload = _thread_payload(&workspace.to_string_lossy(), "a003").unwrap();
+    let payload = thread_payload(&workspace.to_string_lossy(), "a003").unwrap();
 
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["rootMsgId"], Value::from("a001"));
@@ -3945,7 +3944,7 @@ fn send_payload_for_test(
     artifact: &str,
     reply_to: &str,
 ) -> Map<String, Value> {
-    _send_payload(
+    send_payload(
         &workspace.to_string_lossy(),
         "team-x",
         sender,
@@ -4130,7 +4129,7 @@ fn test_payload_pane_dead_is_fully_offline() {
     hook.is_pane_alive = Some(Arc::new(|_p| false));
     hook.codex_app_server_runtime = None;
     let _guard = testhook::install(hook);
-    let rt = _agent_runtime_payload("%9", None);
+    let rt = agent_runtime_payload("%9", None);
     assert_eq!(rt["alive"], Value::Bool(false));
     assert_eq!(rt["cliAlive"], Value::Bool(false));
     assert_eq!(rt["busy"], Value::Bool(false));
@@ -4145,7 +4144,7 @@ fn test_payload_retained_shell_with_stale_codex_title() {
     let mut hook = retained_shell_hook();
     hook.detect_cli_process_for_pane = Some(Arc::new(|_p| None));
     let _guard = testhook::install(hook);
-    let rt = _agent_runtime_payload("%9", None);
+    let rt = agent_runtime_payload("%9", None);
     assert_eq!(rt["alive"], Value::Bool(true));
     assert_eq!(rt["cliAlive"], Value::Bool(false));
     assert_eq!(rt["busy"], Value::Bool(false));
@@ -4167,7 +4166,7 @@ fn test_payload_live_codex_process_reaches_daemon_runtime() {
     }));
     hook.cas_session_id_for_pane = Some(Arc::new(|_p| Some("sid-1".to_string())));
     let _guard = testhook::install(hook);
-    let rt = _agent_runtime_payload("%9", None);
+    let rt = agent_runtime_payload("%9", None);
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     assert_eq!(rt["busy"], Value::Bool(true));
     assert_eq!(rt["sessionId"], Value::from("sid-1"));
@@ -4181,7 +4180,7 @@ fn test_payload_live_claude_process_is_cli_alive() {
     hook.resolve_model_for_pane = Some(Arc::new(|_p, _c, _m| String::new()));
     hook.adapters_get = Some(Arc::new(|_name| None));
     let _guard = testhook::install(hook);
-    let rt = _agent_runtime_payload("%9", None);
+    let rt = agent_runtime_payload("%9", None);
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     // flow passed the liveness gate and stopped at the adapter, not at
     // offline
@@ -4307,7 +4306,7 @@ fn test_idle_notify_excludes_retained_shell_pane() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(_idle_notify_agent_panes("t"), vec!["%1".to_string()]);
+    assert_eq!(idle_notify_agent_panes("t"), vec!["%1".to_string()]);
 }
 
 #[test]
@@ -4329,7 +4328,7 @@ fn test_doctor_payload_exposes_cli_alive() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let diag = _doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
+    let diag = doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
     assert_eq!(diag["alive"], Value::Bool(true));
     assert_eq!(diag["cliAlive"], Value::Bool(false));
 }
@@ -4376,7 +4375,7 @@ fn test_team_runtime_reads_a_mirror_pane_member_off_its_live_session() {
     member.session_id = Some("sess-desk".to_string());
     let _guard = testhook::install(mirror_pane_hook(member));
 
-    let payload = _team_runtime_payload("t").unwrap();
+    let payload = team_runtime_payload("t").unwrap();
     let rt = payload["members"]["orch"].as_object().unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(true));
@@ -4393,7 +4392,7 @@ fn test_team_runtime_leaves_a_pane_member_with_no_live_session_dead() {
     member.session_id = Some("sess-gone".to_string());
     let _guard = testhook::install(mirror_pane_hook(member));
 
-    let payload = _team_runtime_payload("t").unwrap();
+    let payload = team_runtime_payload("t").unwrap();
     let rt = payload["members"]["orch"].as_object().unwrap();
 
     assert_eq!(rt["cliAlive"], Value::Bool(false));
@@ -4430,7 +4429,7 @@ fn test_headless_member_runtime_grok() {
     };
     let _guard = testhook::install(hook);
 
-    let payload = _headless_member_runtime(&headless_member("grok", Some("sid-1")));
+    let payload = headless_member_runtime(&headless_member("grok", Some("sid-1")));
 
     assert_eq!(payload["headless"], Value::Bool(true));
     assert_eq!(payload["alive"], Value::Bool(true));
@@ -4442,7 +4441,7 @@ fn test_headless_member_runtime_grok() {
 fn test_headless_member_runtime_unknown_engine() {
     let _guard = testhook::install(Hook::default());
 
-    let payload = _headless_member_runtime(&headless_member("codex", None));
+    let payload = headless_member_runtime(&headless_member("codex", None));
 
     assert_eq!(payload["alive"], Value::Bool(false));
     assert_eq!(payload["inputState"], Value::from("unknown"));
@@ -4518,7 +4517,7 @@ fn test_writer_backfills_roster_and_display() {
         );
         let _guard = testhook::install(hook);
 
-        _write_registry_backfill("/ws", "honey");
+        write_registry_backfill("/ws", "honey");
     }
 
     let entry = crate::registry::load("honey").unwrap();
@@ -4536,7 +4535,7 @@ fn test_writer_backfills_roster_and_display() {
             &[("%1", "sid-w2")],
         );
         let _guard = testhook::install(hook);
-        _write_registry_backfill("/ws", "honey");
+        write_registry_backfill("/ws", "honey");
     }
     let by_name2 = roster_by_name("honey");
     assert_eq!(by_name2["validator"]["sessionId"], Value::from("sid-v")); // dead member survives
@@ -4555,7 +4554,7 @@ fn test_writer_without_registry_entry_writes_nothing() {
     );
     let _guard = testhook::install(hook);
 
-    _write_registry_backfill("/ws", "honey");
+    write_registry_backfill("/ws", "honey");
 
     assert!(crate::registry::load("honey").is_none());
 }
@@ -4652,8 +4651,8 @@ fn status_members(rows: &[(&str, &str)]) -> Vec<(String, Map<String, Value>)> {
         .collect()
 }
 
-fn status_tick(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], now: i64) {
-    _status_tick(
+fn tick_status(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], now: i64) {
+    status_tick(
         &env.workspace.to_string_lossy(),
         members,
         None,
@@ -4675,17 +4674,17 @@ fn test_status_tick_writes_busy_and_unread_only_on_edges() {
     let (mut env, _guard) = status_env(&[("%1", "agent")], Some(true));
     let members = status_members(&[("sage", "%1")]);
 
-    status_tick(&mut env, &members, 1_000);
+    tick_status(&mut env, &members, 1_000);
     assert_eq!(
         drain(&env.pane_writes),
         vec![row("%1", "hive-busy", "1"), row("%1", "hive-unread", "0")]
     );
 
-    status_tick(&mut env, &members, 1_001);
+    tick_status(&mut env, &members, 1_001);
     assert_eq!(drain(&env.pane_writes), Vec::new());
 
     testhook::update(|h| stub_app_server_busy(h, Some(false)));
-    status_tick(&mut env, &members, 1_002);
+    tick_status(&mut env, &members, 1_002);
     assert_eq!(drain(&env.pane_writes), vec![row("%1", "hive-busy", "0")]);
 }
 
@@ -4695,7 +4694,7 @@ fn test_status_tick_clears_unread_when_the_member_goes_busy() {
     let members = status_members(&[("sage", "%1")]);
     unread_pending().lock().unwrap().insert("%1".to_string());
 
-    status_tick(&mut env, &members, 1_000);
+    tick_status(&mut env, &members, 1_000);
     assert_eq!(
         drain(&env.pane_writes),
         vec![row("%1", "hive-busy", "0"), row("%1", "hive-unread", "1")]
@@ -4703,7 +4702,7 @@ fn test_status_tick_clears_unread_when_the_member_goes_busy() {
 
     // The turn that reads the message: busy consumes the pending mark…
     testhook::update(|h| stub_app_server_busy(h, Some(true)));
-    status_tick(&mut env, &members, 1_001);
+    tick_status(&mut env, &members, 1_001);
     assert_eq!(
         drain(&env.pane_writes),
         vec![row("%1", "hive-busy", "1"), row("%1", "hive-unread", "0")]
@@ -4711,7 +4710,7 @@ fn test_status_tick_clears_unread_when_the_member_goes_busy() {
 
     // …so idle again is not unread again.
     testhook::update(|h| stub_app_server_busy(h, Some(false)));
-    status_tick(&mut env, &members, 1_002);
+    tick_status(&mut env, &members, 1_002);
     assert_eq!(drain(&env.pane_writes), vec![row("%1", "hive-busy", "0")]);
 }
 
@@ -4724,7 +4723,7 @@ fn test_status_tick_skips_mirror_terminal_and_dock_panes() {
     let members = status_members(&[("orch", "%1"), ("shell", "%2"), ("board", "%3")]);
     unread_pending().lock().unwrap().insert("%1".to_string());
 
-    status_tick(&mut env, &members, 1_000);
+    tick_status(&mut env, &members, 1_000);
 
     assert_eq!(drain(&env.pane_writes), Vec::new());
     // No engine pane, no ticker anchor: the parked mirror's window never
@@ -4746,7 +4745,7 @@ fn test_status_tick_anchors_the_ticker_on_an_engine_pane_not_the_parked_mirror()
     // pane's window.
     let members = status_members(&[("orch", "%1"), ("sage", "%2")]);
 
-    status_tick(&mut env, &members, 1_000);
+    tick_status(&mut env, &members, 1_000);
 
     let writes = drain(&env.window_writes);
     assert_eq!(writes.len(), 1);
@@ -4762,7 +4761,7 @@ fn test_status_tick_writes_nothing_on_an_empty_listing() {
     let members = status_members(&[("sage", "%1")]);
     unread_pending().lock().unwrap().insert("%1".to_string());
 
-    status_tick(&mut env, &members, 1_000);
+    tick_status(&mut env, &members, 1_000);
 
     assert_eq!(drain(&env.pane_writes), Vec::new());
     assert_eq!(drain(&env.window_writes), Vec::new());
@@ -4782,7 +4781,7 @@ fn test_status_tick_writes_the_ticker_once_per_text() {
         .as_secs() as i64;
     let events = bus::latest_send_events(&env.workspace, TICKER_ROWS).unwrap();
 
-    status_tick(&mut env, &members, now);
+    tick_status(&mut env, &members, now);
     let text = ticker_text(&events, now);
     assert!(
         text.starts_with("sage → orch · now · \"second\"   │   orch → sage · now · \"first ##1\""),
@@ -4793,11 +4792,11 @@ fn test_status_tick_writes_the_ticker_once_per_text() {
         vec![row("dev:1", "@hive-ticker", &text)]
     );
 
-    status_tick(&mut env, &members, now);
+    tick_status(&mut env, &members, now);
     assert_eq!(drain(&env.window_writes), Vec::new());
 
     // The age bucket moved: one write, with the new text.
-    status_tick(&mut env, &members, now + 120);
+    tick_status(&mut env, &members, now + 120);
     assert_eq!(
         drain(&env.window_writes),
         vec![row(

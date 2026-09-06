@@ -363,7 +363,7 @@ impl Rig {
     /// The team's hived socket — `hive attach` starts the hived and returns
     /// only after it answers, so the socket is an immediate oracle.
     fn hived_socket_exists(&self) -> bool {
-        hive::hived::_socket_path(self.ws().to_str().unwrap()).exists()
+        hive::hived::socket_path(self.ws().to_str().unwrap()).exists()
     }
 
     fn delete(&self) {
@@ -653,7 +653,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     // the key ran before (this server loads the developer's tmux.conf, so
     // that is whatever they bound, else tmux's stock mark-pane), which the
     // build also remembered in the server option.
-    let previous = hive::tmux::_bound_command(&prefix_before).expect("prefix+m was bound");
+    let previous = hive::tmux::bound_command(&prefix_before).expect("prefix+m was bound");
     let prefix_after = rig.tmux_ok(&["list-keys", "-T", "prefix", "m"]);
     assert!(prefix_after.contains("mirror --window"), "{prefix_after}");
     // `list-keys` prints the else branch double-quoted, inner quotes escaped.

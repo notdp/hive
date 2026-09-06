@@ -24,7 +24,7 @@ const _KEY_TTL: f64 = 5.0;
 
 static _KEY_CACHE: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
 
-pub(super) fn _key_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
+pub(crate) fn key_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     _KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -54,7 +54,7 @@ pub fn member_from_key(key: &str) -> Option<(String, String)> {
 /// The pane-option read seam: the real tmux round-trip in production, a
 /// per-test override (default: untagged) under cfg(test) — tests must never
 /// hit the real tmux server.
-fn _pane_option(pane: &str, key: &str) -> Option<String> {
+fn pane_option(pane: &str, key: &str) -> Option<String> {
     #[cfg(test)]
     {
         super::tests::pane_option_override(pane, key)
@@ -70,7 +70,7 @@ fn _pane_option(pane: &str, key: &str) -> Option<String> {
 pub fn resolve_pane_key(pane: &str) -> String {
     let now = Instant::now();
     {
-        let cache = _key_cache().lock().unwrap();
+        let cache = key_cache().lock().unwrap();
         if let Some((at, key)) = cache.get(pane) {
             if now.duration_since(*at).as_secs_f64() < _KEY_TTL {
                 return key.clone();
@@ -79,13 +79,13 @@ pub fn resolve_pane_key(pane: &str) -> String {
     }
     let mut key = pane_key(pane);
     if !pane.is_empty() {
-        let team = _pane_option(pane, "hive-team").unwrap_or_default();
-        let member = _pane_option(pane, "hive-agent").unwrap_or_default();
+        let team = pane_option(pane, "hive-team").unwrap_or_default();
+        let member = pane_option(pane, "hive-agent").unwrap_or_default();
         if !team.is_empty() && !member.is_empty() {
             key = member_key(&team, &member);
         }
     }
-    _key_cache()
+    key_cache()
         .lock()
         .unwrap()
         .insert(pane.to_string(), (now, key.clone()));
@@ -166,14 +166,14 @@ pub fn read_pane_session(pane: &str) -> Option<SessionRecord> {
 /// GROK_SESSION_ID would each make every hive call inside this grok member
 /// resolve to the *spawner*. Wash them: the leader exports its own session
 /// id into the tools it runs, and that is the only identity they need.
-pub(super) fn _daemon_env_for_pane(pane: &str) -> HashMap<String, String> {
+pub(crate) fn daemon_env_for_pane(pane: &str) -> HashMap<String, String> {
     let mut env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID"]);
     env.insert("TMUX_PANE".to_string(), pane.to_string());
     env
 }
 
 /// Inverse of [`socket_path_for_key`]: `p19.sock` -> `p19`.
-pub(super) fn _key_from_socket_name(name: &str) -> Option<String> {
+pub(crate) fn key_from_socket_name(name: &str) -> Option<String> {
     let key = name.strip_suffix(".sock")?;
     if key.starts_with("m-") {
         return if member_from_key(key).is_some() {

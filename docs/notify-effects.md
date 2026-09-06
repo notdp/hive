@@ -57,6 +57,6 @@ sides: the marks exist only while the human is not looking at the window.
   window with `break-pane` while marked keeps its `@hive-notify-active` until
   a later fire on that pane overwrites it — except the parked mirror, whose
   mark `hive mirror on` and the attach heal clear when they join it back
-  (`_join_parked_pane`).
+  (`join_parked_pane`).
 - **A second fire replaces the first.** The token, text and pane mark are
   rewritten; nothing accumulates, and the bar shows the newest message only.

@@ -1181,7 +1181,7 @@ mod tests {
             "written"
         );
         let window_row = format!("dev:1\t@7\t{team}\t{workspace}\t\t1700000000\n");
-        crate::team::_set_fake_tmux_run(move |args, _check| {
+        crate::team::set_fake_tmux_run(move |args, _check| {
             let stdout = if args.first().map(String::as_str) == Some("list-windows") {
                 window_row.clone()
             } else {
@@ -1198,7 +1198,7 @@ mod tests {
         // is not covered by this recorder.
         let real_tmux_argv: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
         let recorded = std::rc::Rc::clone(&real_tmux_argv);
-        crate::tmux::_set_run_override(move |args, _check, _timeout| {
+        crate::tmux::set_run_override(move |args, _check, _timeout| {
             recorded.borrow_mut().push(args.to_vec());
             Err(crate::tmux::TmuxError::Os(
                 "no tmux in this test".to_string(),
@@ -1235,12 +1235,12 @@ mod tests {
             })),
             ..Default::default()
         });
-        let server = Arc::new(crate::hived::_open_server_socket(&workspace).unwrap());
+        let server = Arc::new(crate::hived::open_server_socket(&workspace).unwrap());
         let serve_thread = {
             let server = Arc::clone(&server);
             let workspace = workspace.clone();
             std::thread::spawn(move || {
-                crate::hived::_serve_requests(
+                crate::hived::serve_requests(
                     server.as_ref(),
                     &workspace,
                     team,
@@ -1313,7 +1313,7 @@ mod tests {
 
         let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);
         let bye =
-            crate::hived::_request_hived(&workspace, &shutdown, crate::hived::SOCKET_READY_TIMEOUT);
+            crate::hived::request_hived(&workspace, &shutdown, crate::hived::SOCKET_READY_TIMEOUT);
         assert_eq!(
             bye.and_then(|m| m.get("ok").cloned()),
             Some(Value::Bool(true))
@@ -1321,9 +1321,9 @@ mod tests {
         // The loop is parked in accept: one more client wakes it to notice
         // the shutdown flag instead of waiting out the accept timeout.
         let ping = Map::from_iter([("action".to_string(), Value::from("ping"))]);
-        let _ = crate::hived::_request_hived(&workspace, &ping, crate::hived::SOCKET_READY_TIMEOUT);
+        let _ = crate::hived::request_hived(&workspace, &ping, crate::hived::SOCKET_READY_TIMEOUT);
         assert!(!serve_thread.join().unwrap());
         server.close();
-        crate::hived::_cleanup_socket_impl(&workspace);
+        crate::hived::cleanup_socket_impl(&workspace);
     }
 }

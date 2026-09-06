@@ -8,7 +8,7 @@ use super::*;
 use crate::tmux;
 
 pub fn mirror_cmd(mode: &str, window: &str) {
-    match _mirror(mode, window) {
+    match mirror(mode, window) {
         Ok(line) => println!("{line}"),
         Err(message) => fail(&message),
     }
@@ -17,7 +17,7 @@ pub fn mirror_cmd(mode: &str, window: &str) {
 /// The verb's one line of output, or its refusal. *window_arg* names the
 /// team window when there is no caller pane (the status-bar click and
 /// prefix+m run from a run-shell job, which has no TMUX_PANE).
-pub(crate) fn _mirror(mode: &str, window_arg: &str) -> Result<String, String> {
+pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     let window = if window_arg.is_empty() {
         tmux::get_current_window_target()
             .filter(|w| !w.is_empty())
@@ -27,8 +27,8 @@ pub(crate) fn _mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     };
     let team = tmux::get_window_option(&window, "hive-team")
         .ok_or_else(|| format!("window {window} is not a team window (see `hive ls`)"))?;
-    let entry = _team_entry(&team)?;
-    let shown = _shown_mirrors(&window);
+    let entry = team_entry(&team)?;
+    let shown = shown_mirrors(&window);
     let on = match mode {
         "on" => true,
         "off" => false,
@@ -47,9 +47,9 @@ pub(crate) fn _mirror(mode: &str, window_arg: &str) -> Result<String, String> {
         // A roster member's parked pane joins back, a missing one is
         // rebuilt the way an attach heal would; the rig mirror is no
         // roster member.
-        _backfill_missing_member_panes(&window, &entry, Some(true));
-        _join_rig_mirror(&window, &team);
-        if _shown_mirrors(&window).is_empty() {
+        backfill_missing_member_panes(&window, &entry, Some(true));
+        join_rig_mirror(&window, &team);
+        if shown_mirrors(&window).is_empty() {
             return Ok(format!("mirror on ({team}): no session mirror to show"));
         }
         tmux::set_window_option(&window, "@hive-mirror", "on");
@@ -89,7 +89,7 @@ pub(crate) fn _mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     Ok(format!("mirror off ({team})"))
 }
 
-fn _shown_mirrors(window: &str) -> Vec<String> {
+fn shown_mirrors(window: &str) -> Vec<String> {
     tmux::list_panes_full(window)
         .into_iter()
         .filter(|p| p.role == "mirror")
@@ -99,8 +99,8 @@ fn _shown_mirrors(window: &str) -> Vec<String> {
 
 /// A flow rig's mirror (`flow_rig.rs`) names no member: its parked pane
 /// joins back by team. A parked pane naming a member is that member's
-/// (`_join_hidden_mirror`), never joined here.
-fn _join_rig_mirror(window: &str, team: &str) {
+/// (`join_hidden_mirror`), never joined here.
+fn join_rig_mirror(window: &str, team: &str) {
     let Some(hidden) = tmux::hidden_mirror_pane(team) else {
         return;
     };
@@ -110,6 +110,6 @@ fn _join_rig_mirror(window: &str, team: &str) {
     let Some(first) = tmux::list_panes(window).into_iter().next() else {
         return;
     };
-    _join_parked_pane(&hidden, &first);
+    join_parked_pane(&hidden, &first);
     let _ = crate::layout::ensure(window, false);
 }

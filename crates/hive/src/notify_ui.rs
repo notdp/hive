@@ -62,7 +62,7 @@ pub fn attention_text(agent: &str, message: &str) -> String {
     text.replace('#', "##")
 }
 
-fn _target_window_is_focused(session_name: &str, window_target: &str) -> bool {
+fn target_window_is_focused(session_name: &str, window_target: &str) -> bool {
     if session_name.is_empty() || window_target.is_empty() {
         return false;
     }
@@ -72,7 +72,7 @@ fn _target_window_is_focused(session_name: &str, window_target: &str) -> bool {
     }
 }
 
-fn _select_hook_command() -> String {
+fn select_hook_command() -> String {
     // run-shell executes with the tmux server's environment, not this
     // process's — the hook must name this binary by absolute path.
     let cleanup_cmd = format!(
@@ -96,8 +96,8 @@ pub fn ensure_notify_select_hook(session: &str) {
     if session.is_empty() {
         return;
     }
-    let hook_command = _select_hook_command();
-    let _ = tmux::_run(
+    let hook_command = select_hook_command();
+    let _ = tmux::run(
         &[
             "set-hook",
             "-t",
@@ -193,7 +193,7 @@ pub fn cleanup_selected_window(window_target: &str, client: &str) -> bool {
     true
 }
 
-fn _ring_terminal_bell(pane_id: &str, window_target: &str, workspace: &str) {
+fn ring_terminal_bell(pane_id: &str, window_target: &str, workspace: &str) {
     let tty_path = tmux::get_pane_tty(pane_id).unwrap_or_default();
     if tty_path.is_empty() {
         notify_debug::emit_for_window(
@@ -323,7 +323,7 @@ pub fn notify(message: &str, pane_id: &str, workspace: &str) -> anyhow::Result<N
         .unwrap_or_else(|| "target".to_string());
     let agent_name = tmux::get_pane_option(pane_id, "hive-agent").unwrap_or_default();
     let client_mode = tmux::get_client_mode(Some(pane_id));
-    let suppressed = _target_window_is_focused(&session_name, &window_target);
+    let suppressed = target_window_is_focused(&session_name, &window_target);
     notify_debug::emit_for_window(
         &window_target,
         "notify.call",
@@ -353,7 +353,7 @@ pub fn notify(message: &str, pane_id: &str, workspace: &str) -> anyhow::Result<N
     if !window_target.is_empty() {
         mark_attention(message, pane_id, &window_target, &agent_name, workspace)?;
     }
-    _ring_terminal_bell(pane_id, &window_target, workspace);
+    ring_terminal_bell(pane_id, &window_target, workspace);
     Ok(NotifyPayload {
         agent: agent_name,
         pane_id: pane_id.to_string(),
@@ -554,7 +554,7 @@ mod tests {
             with_state(|state| state.pane_session_name.clone())
         }
 
-        pub fn _run(
+        pub(crate) fn run(
             args: &[&str],
             _check: bool,
             _timeout: u64,

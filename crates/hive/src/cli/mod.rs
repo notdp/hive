@@ -45,7 +45,7 @@ fn json_default_options(cmd: Command) -> Command {
 pub(crate) fn build_cli() -> Command {
     Command::new("hive")
         .about("Hive - tmux-first multi-agent collaboration runtime.")
-        .version(_hive_version())
+        .version(hive_version())
         .disable_version_flag(true)
         .disable_help_subcommand(true)
         .subcommand(
@@ -639,7 +639,7 @@ const _HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["worktree"], &["done", "set-base", "start", "status"]),
 ];
 
-fn _group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
+fn group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
     _HELP_GROUPS
         .iter()
         .find(|(group, _)| *group == path)
@@ -676,7 +676,7 @@ fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
         if help_opts.contains(&tok.as_str()) {
             return Some(path);
         }
-        match _group_subs(&path) {
+        match group_subs(&path) {
             Some(subs) if subs.contains(&tok.as_str()) => path.push(tok.as_str()),
             // a non-sub token on a group stops the scan; click's own parse
             // error for it (out of the equivalence corpus) falls to clap.
@@ -692,12 +692,12 @@ fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
 fn bare_group_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
     let mut path = vec![invoked];
     for tok in tail {
-        if !_group_subs(&path)?.contains(&tok.as_str()) {
+        if !group_subs(&path)?.contains(&tok.as_str()) {
             return None;
         }
         path.push(tok.as_str());
     }
-    _group_subs(&path).map(|_| path)
+    group_subs(&path).map(|_| path)
 }
 
 fn arg_str<'a>(m: &'a ArgMatches, key: &str) -> &'a str {
@@ -720,7 +720,7 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 /// name — that is the shape a killed member's leftover subprocess arrives
 /// in, and the tmux line would send it hunting for a terminal it is never
 /// going to have.
-fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
+fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
     if _TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
         return None;
     }
@@ -728,11 +728,11 @@ fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
         return Some(_TMUX_REQUIRED_MESSAGE);
     }
     if crate::adapters::claude_sessions::self_session().is_some()
-        || !_session_member_binding().is_empty()
+        || !session_member_binding().is_empty()
     {
         return None;
     }
-    if _engine_marker_env() {
+    if engine_marker_env() {
         Some(_UNROSTERED_ENGINE_MESSAGE)
     } else {
         Some(_TMUX_REQUIRED_MESSAGE)
@@ -741,8 +741,8 @@ fn _no_tmux_refusal(invoked: &str) -> Option<&'static str> {
 
 /// Root-group gates from the Python `cli()` callback.
 fn run_root_gates(invoked: &str) {
-    _require_codex_native(Some(invoked));
-    if let Some(message) = _no_tmux_refusal(invoked) {
+    require_codex_native(Some(invoked));
+    if let Some(message) = no_tmux_refusal(invoked) {
         fail(message);
     }
 }
@@ -769,7 +769,7 @@ fn main_with_argv(argv: Vec<String>) {
             std::process::exit(0);
         }
         "--version" => {
-            println!("hive, version {}", _hive_version());
+            println!("hive, version {}", hive_version());
             std::process::exit(0);
         }
         _ => {}
@@ -1160,23 +1160,23 @@ mod tests {
         crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
 
         // no identity at all: the generic tmux refusal
-        assert_eq!(_no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
 
         env.set("GROK_SESSION_ID", "s-bee");
-        assert_eq!(_no_tmux_refusal("send"), None);
+        assert_eq!(no_tmux_refusal("send"), None);
 
         // the leader's env outlived the member it names
         env.set("GROK_SESSION_ID", "s-ant");
-        assert_eq!(_no_tmux_refusal("send"), Some(_UNROSTERED_ENGINE_MESSAGE));
+        assert_eq!(no_tmux_refusal("send"), Some(_UNROSTERED_ENGINE_MESSAGE));
 
         // the session lane is a send lane only; other verbs still need tmux
         env.set("GROK_SESSION_ID", "s-bee");
-        assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
-        assert_eq!(_no_tmux_refusal("config"), None);
+        assert_eq!(no_tmux_refusal("config"), None);
         // `mirror` moves panes on the server: tmux-only (a run-shell job
         // carries TMUX)
-        assert_eq!(_no_tmux_refusal("mirror"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("mirror"), Some(_TMUX_REQUIRED_MESSAGE));
     }
 
     /// Root help lists a command exactly when its clap node is not hidden:

@@ -4,7 +4,7 @@
 //! option the CLI or the hived wrote — no `#()` shell-outs, the bar never
 //! forks.
 
-use super::run::_run;
+use super::run::run;
 
 /// The bar's colours, one set per appearance. The bar follows the same
 /// switch as the viewer (`view.theme`, `HIVE_VIEW_THEME`, then detection),
@@ -154,7 +154,7 @@ pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) ->
 /// is discarded: run-shell shows any stdout in view mode over the active
 /// pane — a member's TUI — until someone presses q, and a nonzero exit
 /// the same way; the binding must never do that to a member.
-pub fn _mirror_run_shell(hive: &str) -> String {
+pub(crate) fn mirror_run_shell(hive: &str) -> String {
     let hive = crate::cli::util::tmux_dquote_escape(hive);
     format!("run-shell -b \"{hive} mirror --window '#{{q:session_name}}:#{{window_index}}' >/dev/null 2>&1 || true\"")
 }
@@ -170,7 +170,7 @@ pub fn status_click_binding(hive: &str) -> Vec<String> {
         "if-shell".to_string(),
         "-F".to_string(),
         "#{==:#{mouse_status_range},hive-mirror}".to_string(),
-        _mirror_run_shell(hive),
+        mirror_run_shell(hive),
         format!(
             "if-shell -F \"#{{==:#{{mouse_status_range}},pane}}\" \"select-pane -t =\" \"{_STOCK_STATUS_CLICK}\""
         ),
@@ -186,7 +186,7 @@ pub const PREFIX_M_FALLBACK_OPTION: &str = "@hive-prefix-m";
 /// The command `list-keys -T prefix m` prints (`bind-key [-r] -T prefix m
 /// <command>`), with tmux's `\;` command separator turned into the ` ; `
 /// an if-shell branch string splits on. None when the key is unbound.
-pub fn _bound_command(listed: &str) -> Option<String> {
+pub fn bound_command(listed: &str) -> Option<String> {
     let mut rest = listed.trim().strip_prefix("bind-key")?.trim_start();
     if let Some(after) = rest.strip_prefix("-r ") {
         rest = after.trim_start();
@@ -201,24 +201,24 @@ pub fn _bound_command(listed: &str) -> Option<String> {
 /// when it is not hive's (tmux's stock `select-pane -m`, or the user's),
 /// remembered in `PREFIX_M_FALLBACK_OPTION`; what that option remembers
 /// when the key already carries hive's binding; "" when the key is unbound.
-pub fn _prefix_m_fallback() -> String {
-    let listed = _run(&["list-keys", "-T", "prefix", "m"], false, 5)
+pub(crate) fn prefix_m_fallback() -> String {
+    let listed = run(&["list-keys", "-T", "prefix", "m"], false, 5)
         .ok()
         .filter(|r| r.returncode == 0)
         .map(|r| r.stdout)
         .unwrap_or_default();
-    let Some(command) = _bound_command(&listed) else {
+    let Some(command) = bound_command(&listed) else {
         return String::new();
     };
     if !command.contains("mirror --window") {
-        let _ = _run(
+        let _ = run(
             &["set-option", "-s", PREFIX_M_FALLBACK_OPTION, &command],
             false,
             5,
         );
         return command;
     }
-    _run(
+    run(
         &["show-options", "-s", "-v", PREFIX_M_FALLBACK_OPTION],
         false,
         5,
@@ -241,7 +241,7 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
         "if-shell".to_string(),
         "-F".to_string(),
         "#{@hive-team}".to_string(),
-        _mirror_run_shell(hive),
+        mirror_run_shell(hive),
     ];
     if !fallback.is_empty() {
         row.push(fallback.to_string());
@@ -256,9 +256,9 @@ pub fn install_team_status(session_id: &str) {
     let hive = crate::cli::util::shlex_quote(&crate::cli::util::self_exe());
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive));
-    rows.push(mirror_key_binding(&hive, &_prefix_m_fallback()));
+    rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
     for row in rows {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
-        let _ = _run(&args, false, 5);
+        let _ = run(&args, false, 5);
     }
 }

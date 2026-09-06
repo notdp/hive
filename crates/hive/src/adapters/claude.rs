@@ -1,7 +1,7 @@
 //! Claude Code session adapter.
 //!
 //! Claude stores session history under `<claude-config>/projects/<cwd-slug>/<id>.jsonl`
-//! (the tree `claude_sessions::_config_dir` resolves).
+//! (the tree `claude_sessions::config_dir` resolves).
 //! Every record carries `sessionId`, `cwd`, `parentUuid`, `timestamp` and
 //! `gitBranch`; the `message.content` field is an Anthropic-style list of blocks
 //! or (rarely) a plain string.
@@ -23,17 +23,17 @@ use super::base::{
     Message, MessagePart, SessionAdapter, SessionMeta,
 };
 
-fn _claude_home() -> PathBuf {
+fn claude_home() -> PathBuf {
     // One resolver for every reader of the claude config tree (delivery reads
     // the session registry through the same function).
-    crate::adapters::claude_sessions::_config_dir()
+    crate::adapters::claude_sessions::config_dir()
 }
 
 pub struct ClaudeAdapter;
 
 impl ClaudeAdapter {
-    fn _projects_root(&self) -> PathBuf {
-        _claude_home().join("projects")
+    fn projects_root(&self) -> PathBuf {
+        claude_home().join("projects")
     }
 }
 
@@ -55,10 +55,10 @@ impl SessionAdapter for ClaudeAdapter {
         }
         // Interactive claude on the pane tty (guest pane, a human's own
         // session): its registry entry is claude's own current-session truth.
-        let sessions_dir = _claude_home().join("sessions");
+        let sessions_dir = claude_home().join("sessions");
         let tty = crate::tmux::get_pane_tty(pane_id).unwrap_or_default();
         for process in crate::tmux::list_tty_processes(&tty) {
-            if !_is_claude_process(&process.command, &process.argv) {
+            if !is_claude_process(&process.command, &process.argv) {
                 continue;
             }
             let payload =
@@ -77,22 +77,22 @@ impl SessionAdapter for ClaudeAdapter {
         if session_id.is_empty() {
             return None;
         }
-        let root = self._projects_root();
+        let root = self.projects_root();
         if !root.is_dir() {
             return None;
         }
         let candidate = format!("{session_id}.jsonl");
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            let direct = root.join(_cwd_slug(cwd)).join(&candidate);
+            let direct = root.join(cwd_slug(cwd)).join(&candidate);
             if direct.exists() {
                 return Some(direct);
             }
         }
         // Per-send gate path: one stat per project dir before the deep walk,
         // which is the last resort for a session nested below a project dir.
-        _stat_project_dirs(&root, &candidate).or_else(|| {
+        stat_project_dirs(&root, &candidate).or_else(|| {
             let mut matches: Vec<PathBuf> = Vec::new();
-            _walk_files(&root, &mut |path| {
+            walk_files(&root, &mut |path| {
                 if path.file_name().and_then(|n| n.to_str()) == Some(candidate.as_str()) {
                     matches.push(path.to_path_buf());
                 }
@@ -161,7 +161,7 @@ impl SessionAdapter for ClaudeAdapter {
             let Some(payload) = safe_json_loads(line) else {
                 continue;
             };
-            if let Some(message) = _claude_message_from_payload(&payload) {
+            if let Some(message) = claude_message_from_payload(&payload) {
                 return Some(message);
             }
         }))
@@ -170,7 +170,7 @@ impl SessionAdapter for ClaudeAdapter {
 
 const _META_SCAN_LIMIT: usize = 20;
 
-fn _claude_message_from_payload(payload: &Map<String, Value>) -> Option<Message> {
+fn claude_message_from_payload(payload: &Map<String, Value>) -> Option<Message> {
     let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
     if record_type != "user" && record_type != "assistant" {
         return None;
@@ -182,13 +182,13 @@ fn _claude_message_from_payload(payload: &Map<String, Value>) -> Option<Message>
         message_id: str_or_none(payload.get("uuid")),
         parent_id: str_or_none(payload.get("parentUuid")),
         role: str_or_none(msg.get("role")).unwrap_or_else(|| record_type.to_string()),
-        parts: _iter_claude_parts(msg.get("content")),
+        parts: iter_claude_parts(msg.get("content")),
         timestamp: parse_iso_timestamp(payload.get("timestamp")),
         raw: payload.clone(),
     })
 }
 
-fn _iter_claude_parts(content: Option<&Value>) -> Vec<MessagePart> {
+fn iter_claude_parts(content: Option<&Value>) -> Vec<MessagePart> {
     let mut parts: Vec<MessagePart> = Vec::new();
     match content {
         Some(Value::String(text)) => {
@@ -279,7 +279,7 @@ const _CLAUDE_TOKENS: [&str; 2] = ["claude", "claude.exe"];
 ///
 /// Later argv tokens are the process's own arguments — `rg claude src` is
 /// a search, not a claude — so they are never scanned.
-fn _is_claude_process(command: &str, argv: &str) -> bool {
+fn is_claude_process(command: &str, argv: &str) -> bool {
     if _CLAUDE_TOKENS.contains(&normalize_command_token(command).as_str()) {
         return true;
     }
@@ -299,7 +299,7 @@ fn _is_claude_process(command: &str, argv: &str) -> bool {
 /// `~/.claude/projects` dirs against the `cwd` their transcripts record):
 /// every character outside `[A-Za-z0-9]` becomes `-`, so `/`, `.` and `_`
 /// all collapse — `/Users/x/.dotfiles/a_b` is `-Users-x--dotfiles-a-b`.
-fn _cwd_slug(cwd: &str) -> String {
+fn cwd_slug(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
@@ -307,9 +307,9 @@ fn _cwd_slug(cwd: &str) -> String {
 
 /// Stat `<root>/<project>/<candidate>` for each top-level project dir; no
 /// recursion, so a miss costs one readdir plus one stat per project.
-/// Dot-dirs are skipped: project dirs are cwd slugs (`_cwd_slug`, never a
+/// Dot-dirs are skipped: project dirs are cwd slugs (`cwd_slug`, never a
 /// leading dot), so a dot-dir under `projects/` is foreign to Claude Code.
-pub(crate) fn _stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf> {
+pub(crate) fn stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf> {
     let entries = fs::read_dir(root).ok()?;
     let mut paths: Vec<PathBuf> = entries
         .flatten()
@@ -322,7 +322,7 @@ pub(crate) fn _stat_project_dirs(root: &Path, candidate: &str) -> Option<PathBuf
 }
 
 /// Recursive file walk standing in for `Path.rglob`.
-fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+fn walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -331,7 +331,7 @@ fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            _walk_files(&path, visit);
+            walk_files(&path, visit);
         } else {
             visit(&path);
         }
@@ -344,7 +344,7 @@ mod tests {
     use crate::testenv::EnvGuard;
     use serde_json::json;
 
-    fn _write_jsonl(path: &Path, lines: &[Value]) {
+    fn write_jsonl(path: &Path, lines: &[Value]) {
         let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
         fs::write(path, text).unwrap();
     }
@@ -355,7 +355,7 @@ mod tests {
     fn test_claude_iter_messages_normalizes_text_and_tool_use() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("claude.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({
@@ -402,7 +402,7 @@ mod tests {
     fn test_claude_iter_messages_handles_string_content() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("claude.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[json!({
                 "type": "user",
@@ -421,7 +421,7 @@ mod tests {
     fn test_claude_iter_messages_skips_unknown_record_types() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("claude.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "permission-mode", "permissionMode": "bypass"}),
@@ -439,7 +439,7 @@ mod tests {
 
     // --- find_session_file / session_meta ---
 
-    fn _write_claude_jsonl(path: &Path, session_id: &str, cwd: &str) {
+    fn write_claude_jsonl(path: &Path, session_id: &str, cwd: &str) {
         fs::write(
             path,
             json!({
@@ -464,13 +464,13 @@ mod tests {
         let hidden = root.join(".trash");
         fs::create_dir_all(&hidden).unwrap();
         fs::write(hidden.join("sid.jsonl"), "").unwrap();
-        assert_eq!(_stat_project_dirs(&root, "sid.jsonl"), None);
+        assert_eq!(stat_project_dirs(&root, "sid.jsonl"), None);
 
         let real = root.join("-work-hive");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("sid.jsonl"), "").unwrap();
         assert_eq!(
-            _stat_project_dirs(&root, "sid.jsonl"),
+            stat_project_dirs(&root, "sid.jsonl"),
             Some(real.join("sid.jsonl"))
         );
     }
@@ -487,7 +487,7 @@ mod tests {
             .join("-Users-notdp-Developer-hive--claude-worktrees-wt-1");
         fs::create_dir_all(&projects).unwrap();
         let target = projects.join("cafe-babe.jsonl");
-        _write_claude_jsonl(&target, "cafe-babe", cwd);
+        write_claude_jsonl(&target, "cafe-babe", cwd);
 
         let adapter = ClaudeAdapter;
         assert_eq!(
@@ -502,11 +502,11 @@ mod tests {
     #[test]
     fn test_claude_cwd_slug_collapses_non_alphanumerics() {
         assert_eq!(
-            _cwd_slug("/Users/notdp/Developer/hive"),
+            cwd_slug("/Users/notdp/Developer/hive"),
             "-Users-notdp-Developer-hive"
         );
         assert_eq!(
-            _cwd_slug("/Users/notdp/.github-runners/ordo_ai/_work"),
+            cwd_slug("/Users/notdp/.github-runners/ordo_ai/_work"),
             "-Users-notdp--github-runners-ordo-ai--work"
         );
     }
@@ -521,13 +521,13 @@ mod tests {
         let projects = root.join("-Users-notdp-Developer-hive--claude-worktrees-wt-1");
         fs::create_dir_all(&projects).unwrap();
         let target = projects.join("cafe-babe.jsonl");
-        _write_claude_jsonl(&target, "cafe-babe", cwd);
+        write_claude_jsonl(&target, "cafe-babe", cwd);
         // A same-named file nested deeper under another project sorts first
         // for the walk; the direct hit must win without ever reaching it.
         let decoy_dir = root.join("-Users-notdp-Developer-hive").join("nested");
         fs::create_dir_all(&decoy_dir).unwrap();
         let decoy = decoy_dir.join("cafe-babe.jsonl");
-        _write_claude_jsonl(&decoy, "cafe-babe", "/Users/notdp/Developer/hive/nested");
+        write_claude_jsonl(&decoy, "cafe-babe", "/Users/notdp/Developer/hive/nested");
 
         let adapter = ClaudeAdapter;
         assert_eq!(
@@ -548,7 +548,7 @@ mod tests {
     fn test_claude_read_meta_scans_first_records() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("claude.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "permission-mode", "permissionMode": "bypass"}),
@@ -582,7 +582,7 @@ mod tests {
     fn test_claude_read_meta_missing_session_id_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("no-id.jsonl");
-        _write_jsonl(&path, &[json!({"type": "permission-mode"})]);
+        write_jsonl(&path, &[json!({"type": "permission-mode"})]);
         assert!(ClaudeAdapter.read_meta(&path).is_none());
     }
 }

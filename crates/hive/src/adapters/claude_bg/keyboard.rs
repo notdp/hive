@@ -9,8 +9,8 @@ use crate::adapters::base::SessionAdapter;
 use crate::adapters::claude::ClaudeAdapter;
 
 use super::attach::{
-    hooked_wait_client_ready, hooked_wait_engine_behind, Client, _attach_pipe, _clear_composer,
-    _close_pipe, _feed, _restore_draft,
+    attach_pipe, clear_composer, close_pipe, feed, hooked_wait_client_ready,
+    hooked_wait_engine_behind, restore_draft, Client,
 };
 use super::engine::{hooked_engine_for_job, pane_for_job, EngineSession};
 use super::lifecycle::{bg_env, run_capture};
@@ -137,7 +137,7 @@ impl KeyResult {
 
 /// The full terminal-escape strip: CSI, OSC, APC/DCS/SOS/PM (claude emits
 /// `cc-daemon-hint`), charset selection and keypad-mode toggles.
-pub(super) fn _strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     fn match_escape(chars: &[char], start: usize) -> Option<usize> {
         let n = chars.len();
         match *chars.get(start + 1)? {
@@ -210,7 +210,7 @@ pub(super) fn _strip_ansi(text: &str) -> String {
 /// The attach client's own pty stream (`Client::text_since`) is raw terminal
 /// output: the layout lives in cursor moves, not in spaces, so whitespace and
 /// box drawing are noise for a substring test.
-fn _squash(text: &str) -> String {
+fn squash(text: &str) -> String {
     text.chars()
         .filter(|c| !(c.is_whitespace() || ('\u{2500}'..='\u{259f}').contains(c)))
         .collect()
@@ -227,7 +227,7 @@ fn _squash(text: &str) -> String {
 /// claude's kill ring survives a C-u on an *empty* composer unchanged, so
 /// pasting without the gate would resurrect whatever the ring happened to
 /// hold (real-machine verified).
-pub(super) fn _composer_has_draft(job_id: &str) -> bool {
+pub(crate) fn composer_has_draft(job_id: &str) -> bool {
     let Some(pane) = hooked_pane_for_job(job_id) else {
         return false;
     };
@@ -289,7 +289,7 @@ fn hooked_composer_draft(job_id: &str) -> bool {
             return v;
         }
     }
-    _composer_has_draft(job_id)
+    composer_has_draft(job_id)
 }
 
 /// What "the composer is showing *text*" can look like on the pty screen.
@@ -298,8 +298,8 @@ fn hooked_composer_draft(job_id: &str) -> bool {
 /// paste scrolls the composer viewport to the cursor, so the head is off
 /// screen), and the `[Pasted text #N]` placeholder the TUI folds a long paste
 /// into, which carries none of the text at all.
-fn _echo_needles(text: &str) -> Vec<String> {
-    let squashed = _squash(text);
+fn echo_needles(text: &str) -> Vec<String> {
+    let squashed = squash(text);
     if squashed.is_empty() {
         return Vec::new();
     }
@@ -319,7 +319,7 @@ fn _echo_needles(text: &str) -> Vec<String> {
 
 /// The job's transcript file and its current size — the offset new records
 /// are read from once the submit lands.
-fn _transcript_cursor(engine: Option<&EngineSession>) -> (Option<PathBuf>, u64) {
+fn transcript_cursor(engine: Option<&EngineSession>) -> (Option<PathBuf>, u64) {
     let Some(engine) = engine else {
         return (None, 0);
     };
@@ -350,11 +350,11 @@ fn hooked_transcript_cursor(engine: Option<&EngineSession>) -> (Option<PathBuf>,
             return v;
         }
     }
-    _transcript_cursor(engine)
+    transcript_cursor(engine)
 }
 
 /// Whatever the transcript gained after *offset*.
-fn _transcript_since(path: Option<&Path>, offset: u64) -> String {
+fn transcript_since(path: Option<&Path>, offset: u64) -> String {
     let Some(path) = path else {
         return String::new();
     };
@@ -371,7 +371,7 @@ fn _transcript_since(path: Option<&Path>, offset: u64) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-fn _user_text(record: &Value) -> Option<String> {
+fn user_text(record: &Value) -> Option<String> {
     if record.get("type").and_then(Value::as_str) != Some("user") {
         return None;
     }
@@ -390,7 +390,7 @@ fn _user_text(record: &Value) -> Option<String> {
     }
 }
 
-fn _is_slash_command(text: &str) -> bool {
+fn is_slash_command(text: &str) -> bool {
     let stripped = text.trim();
     stripped.starts_with('/') && !stripped.contains('\n')
 }
@@ -411,8 +411,8 @@ enum SubmitVerdict {
 /// the typed text but carries something in front of it is a leftover
 /// composer draft that got submitted along with the delivery — the one thing
 /// a substring match would wave through.
-fn _submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> SubmitVerdict {
-    let chunk = _transcript_since(path, offset);
+fn submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> SubmitVerdict {
+    let chunk = transcript_since(path, offset);
     if chunk.is_empty() {
         return SubmitVerdict::None;
     }
@@ -422,12 +422,12 @@ fn _submit_verdict(path: Option<&Path>, offset: u64, text: &str) -> SubmitVerdic
             continue; // a half-written tail line; the next poll sees it whole
         };
         if record.is_object() {
-            if let Some(turn) = _user_text(&record) {
+            if let Some(turn) = user_text(&record) {
                 turns.push(turn);
             }
         }
     }
-    if _is_slash_command(text) {
+    if is_slash_command(text) {
         let command = text.split_whitespace().next().unwrap_or("");
         if chunk.contains(&format!("<command-name>{command}</command-name>")) {
             return SubmitVerdict::Landed;
@@ -473,15 +473,15 @@ pub fn type_into_job(job_id: &str, text: &str, claude_bin: &str) -> KeyResult {
             "nothing to type"
         });
     }
-    let Some(mut proc) = _attach_pipe(job_id, claude_bin) else {
+    let Some(mut proc) = attach_pipe(job_id, claude_bin) else {
         return KeyResult::failure(format!("could not run `{claude_bin} attach {job_id}`"));
     };
-    let result = _type_inner(&mut proc, job_id, text);
-    _close_pipe(proc);
+    let result = type_inner(&mut proc, job_id, text);
+    close_pipe(proc);
     result
 }
 
-fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
+fn type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     let Some(engine) = hooked_wait_engine_behind(job_id, proc) else {
         return KeyResult::failure(format!("job {job_id} has no engine (removed?)"));
     };
@@ -491,7 +491,7 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     }
 
     let draft = hooked_composer_draft(job_id);
-    let needles = _echo_needles(text);
+    let needles = echo_needles(text);
     let ready = Duration::from_secs_f64(type_ready_timeout().max(0.0));
     let retry = type_retry_after().max(0.0);
     let start = Instant::now();
@@ -502,13 +502,13 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     while start.elapsed() < ready {
         if next_retype.is_none_or(|t| Instant::now() >= t) {
             mark = proc.mark(); // only output after this counts as our echo
-            if !_clear_composer(proc) || !_feed(proc, text) {
+            if !clear_composer(proc) || !feed(proc, text) {
                 return KeyResult::failure("the attach client closed its stdin");
             }
             clears += 1;
             next_retype = Some(Instant::now() + Duration::from_secs_f64(retry));
         }
-        let screen = _squash(&_strip_ansi(&proc.text_since(mark)));
+        let screen = squash(&strip_ansi(&proc.text_since(mark)));
         if needles.is_empty() || needles.iter().any(|n| screen.contains(n.as_str())) {
             echoed = true;
             break;
@@ -521,16 +521,16 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
             "job {job_id} never echoed the typed text back into its composer"
         ));
     }
-    if !_feed(proc, _SUBMIT) {
+    if !feed(proc, _SUBMIT) {
         return KeyResult::failure("the attach client closed its stdin before Enter");
     }
     if transcript.is_none() {
         if restore {
-            _restore_draft(proc);
+            restore_draft(proc);
         }
         return KeyResult::success("written", "no transcript to confirm against");
     }
-    let slash = _is_slash_command(text);
+    let slash = is_slash_command(text);
     let confirm = Duration::from_secs_f64(
         (if slash {
             slash_confirm_timeout()
@@ -541,10 +541,10 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
     );
     let confirm_start = Instant::now();
     while confirm_start.elapsed() < confirm {
-        match _submit_verdict(transcript.as_deref(), offset, text) {
+        match submit_verdict(transcript.as_deref(), offset, text) {
             SubmitVerdict::Landed => {
                 if restore {
-                    _restore_draft(proc);
+                    restore_draft(proc);
                 }
                 return KeyResult::success("transcript", "");
             }
@@ -565,7 +565,7 @@ fn _type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
         // a turn by now. If a lost `/compact` ever needs catching, the
         // missing signal is "the composer emptied after Enter".
         if restore {
-            _restore_draft(proc);
+            restore_draft(proc);
         }
         return KeyResult::success("written", "a slash command with no transcript record yet");
     }
@@ -642,15 +642,15 @@ pub fn interrupt_job(job_id: &str, claude_bin: &str) -> KeyResult {
     if job_id.is_empty() {
         return KeyResult::failure("no job id");
     }
-    let Some(mut proc) = _attach_pipe(job_id, claude_bin) else {
+    let Some(mut proc) = attach_pipe(job_id, claude_bin) else {
         return KeyResult::failure(format!("could not run `{claude_bin} attach {job_id}`"));
     };
-    let result = _interrupt_inner(&mut proc, job_id);
-    _close_pipe(proc);
+    let result = interrupt_inner(&mut proc, job_id);
+    close_pipe(proc);
     result
 }
 
-fn _interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
+fn interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
     let Some(engine) = hooked_wait_engine_behind(job_id, proc) else {
         return KeyResult::failure(format!("job {job_id} has no engine (removed?)"));
     };
@@ -659,7 +659,7 @@ fn _interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
     if !hooked_wait_client_ready(proc) {
         return KeyResult::failure(format!("`attach {job_id}` never came up"));
     }
-    if !_feed(proc, _ESCAPE) {
+    if !feed(proc, _ESCAPE) {
         return KeyResult::failure("the attach client closed its stdin");
     }
     if !was_busy {
@@ -672,7 +672,7 @@ fn _interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
     let confirm = Duration::from_secs_f64(interrupt_confirm_timeout().max(0.0));
     let start = Instant::now();
     while start.elapsed() < confirm {
-        if _transcript_since(transcript.as_deref(), offset).contains(_INTERRUPT_MARKER) {
+        if transcript_since(transcript.as_deref(), offset).contains(_INTERRUPT_MARKER) {
             return KeyResult::success("transcript", "");
         }
         if let Some(current) = hooked_engine_for_job(job_id) {

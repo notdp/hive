@@ -283,7 +283,7 @@ pub struct GateResult {
 
 /// Claude's `message.content` block list (codex records never carry one;
 /// their `response_item` payload is read directly by the caller).
-fn _extract_content_blocks(payload: &Map<String, Value>) -> &[Value] {
+fn extract_content_blocks(payload: &Map<String, Value>) -> &[Value] {
     if let Some(Value::Object(msg)) = payload.get("message") {
         if let Some(Value::Array(content)) = msg.get("content") {
             return content;
@@ -301,12 +301,12 @@ fn is_ask_tool(name: Option<&Value>) -> bool {
 /// Handles both CLI formats:
 /// - claude: {"type": "assistant", "message": {"role": "assistant", "content": [...]}}
 /// - codex: {"type": "response_item", "payload": {"type": "function_call", "name": ...}}
-pub fn _is_assistant_ask(payload: &Map<String, Value>) -> bool {
+fn is_assistant_ask(payload: &Map<String, Value>) -> bool {
     let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
 
     // claude: type == "assistant"
     if record_type == "assistant" {
-        return _extract_content_blocks(payload).iter().any(|block| {
+        return extract_content_blocks(payload).iter().any(|block| {
             block.get("type").and_then(Value::as_str) == Some("tool_use")
                 && is_ask_tool(block.get("name"))
         });
@@ -325,7 +325,7 @@ pub fn _is_assistant_ask(payload: &Map<String, Value>) -> bool {
 }
 
 /// Check whether a raw JSONL record is a function_call_output (codex tool result).
-fn _is_function_call_output(payload: &Map<String, Value>) -> bool {
+fn is_function_call_output(payload: &Map<String, Value>) -> bool {
     if payload.get("type").and_then(Value::as_str) == Some("response_item") {
         if let Some(Value::Object(inner)) = payload.get("payload") {
             return inner.get("type").and_then(Value::as_str) == Some("function_call_output");
@@ -337,7 +337,7 @@ fn _is_function_call_output(payload: &Map<String, Value>) -> bool {
 /// Check whether a raw JSONL record represents a user turn.
 ///
 /// Checks both CLI formats; only one will match for any given file.
-fn _is_user_turn(payload: &Map<String, Value>) -> bool {
+fn is_user_turn(payload: &Map<String, Value>) -> bool {
     let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
     // claude: {"type": "user", ...}
     if record_type == "user" {
@@ -415,13 +415,13 @@ pub fn check_input_gate(path: &Path) -> GateResult {
 
         // Scan in reverse for the last relevant record
         for record in records.iter().rev() {
-            if _is_user_turn(record) || _is_function_call_output(record) {
+            if is_user_turn(record) || is_function_call_output(record) {
                 return GateResult {
                     status: "clear",
                     reason: "last record is user response".to_string(),
                 };
             }
-            if _is_assistant_ask(record) {
+            if is_assistant_ask(record) {
                 return GateResult {
                     status: "waiting",
                     reason: "AskUserQuestion pending".to_string(),
@@ -455,13 +455,13 @@ mod tests {
         }
     }
 
-    fn _write_jsonl(path: &Path, records: &[Value]) {
+    fn write_jsonl(path: &Path, records: &[Value]) {
         let mut file = File::create(path).unwrap();
         let text: String = records.iter().map(|r| r.to_string() + "\n").collect();
         file.write_all(text.as_bytes()).unwrap();
     }
 
-    // --- _is_assistant_ask: claude format ---
+    // --- is_assistant_ask: claude format ---
 
     #[test]
     fn test_is_assistant_ask_claude() {
@@ -475,10 +475,10 @@ mod tests {
                 ],
             },
         }));
-        assert!(_is_assistant_ask(&payload));
+        assert!(is_assistant_ask(&payload));
     }
 
-    // --- _is_assistant_ask: codex format ---
+    // --- is_assistant_ask: codex format ---
 
     #[test]
     fn test_is_assistant_ask_codex() {
@@ -490,7 +490,7 @@ mod tests {
                 "arguments": "{\"question\": \"proceed?\"}",
             },
         }));
-        assert!(_is_assistant_ask(&payload));
+        assert!(is_assistant_ask(&payload));
     }
 
     // --- rejects other tools ---
@@ -506,7 +506,7 @@ mod tests {
                 "arguments": "{\"prompt\": \"choose option\"}",
             },
         }));
-        assert!(_is_assistant_ask(&payload));
+        assert!(is_assistant_ask(&payload));
     }
 
     #[test]
@@ -521,13 +521,13 @@ mod tests {
                 ],
             },
         }));
-        assert!(!_is_assistant_ask(&payload));
+        assert!(!is_assistant_ask(&payload));
     }
 
     #[test]
     fn test_rejects_user_turn() {
         let payload = obj(json!({"type": "user", "message": {"role": "user", "content": "hello"}}));
-        assert!(!_is_assistant_ask(&payload));
+        assert!(!is_assistant_ask(&payload));
     }
 
     // --- check_input_gate: end-to-end on JSONL files ---
@@ -536,7 +536,7 @@ mod tests {
     fn test_waiting_when_ask_is_last() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "user", "message": {"role": "user", "content": "do something"}}),
@@ -559,7 +559,7 @@ mod tests {
     fn test_not_waiting_when_answered() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({
@@ -583,7 +583,7 @@ mod tests {
         // Codex answers come as function_call_output, not user messages.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({
@@ -614,7 +614,7 @@ mod tests {
         // Codex request_user_input without answer should block.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[json!({
                 "type": "response_item",
@@ -634,7 +634,7 @@ mod tests {
     fn test_clear_when_no_ask() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "user", "message": {"role": "user", "content": "hello"}}),
@@ -676,7 +676,7 @@ mod tests {
         let path = tmp.path().join("session.jsonl");
         // Build a transcript >8KB with Chinese text so seek lands mid-character
         let chinese_text = "你好世界".repeat(500); // ~6000 bytes of Chinese
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "user", "message": {"role": "user", "content": chinese_text}}),
@@ -703,7 +703,7 @@ mod tests {
         let path = tmp.path().join("session.jsonl");
         // Write a user turn, then a large assistant ask that exceeds 8KB
         let large_text = "x".repeat(12000);
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "user", "message": {"role": "user", "content": "start"}}),
@@ -733,7 +733,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let claude_path = tmp.path().join("claude.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &claude_path,
             &[json!({
                 "type": "user",
@@ -742,7 +742,7 @@ mod tests {
             })],
         );
         let codex_path = tmp.path().join("codex.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &codex_path,
             &[
                 json!({"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}}),

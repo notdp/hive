@@ -1,4 +1,4 @@
-use super::run::_run;
+use super::run::run;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PaneInfo {
@@ -53,7 +53,7 @@ pub struct TeamWindow {
     pub pr: String,
 }
 
-fn _split_fields(line: &str, count: usize) -> Vec<String> {
+fn split_fields(line: &str, count: usize) -> Vec<String> {
     let mut parts: Vec<String> = line.split('\t').map(str::to_string).collect();
     while parts.len() < count {
         parts.push(String::new());
@@ -73,7 +73,7 @@ pub fn list_panes_full(target: &str) -> Vec<PaneInfo> {
 /// caller cannot tell missing panes from a transient tmux failure and must
 /// not take irreversible action on it (same contract as `is_pane_alive`).
 pub fn list_panes_full_or_none(target: &str) -> Option<Vec<PaneInfo>> {
-    let r = _run(
+    let r = run(
         &["list-panes", "-t", target, "-F", _PANE_BASE_FMT],
         false,
         5,
@@ -82,7 +82,7 @@ pub fn list_panes_full_or_none(target: &str) -> Option<Vec<PaneInfo>> {
     if r.returncode != 0 {
         return None;
     }
-    Some(_parse_panes_full(&r.stdout))
+    Some(parse_panes_full(&r.stdout))
 }
 
 /// List every pane across all sessions/windows with hive identity tags.
@@ -96,7 +96,7 @@ pub fn list_panes_all() -> Vec<PaneInfo> {
 /// "error connecting to <path> (No such file or directory)" (socket gone).
 /// Anything else — permission denied, connection refused, unexpected text —
 /// stays unknown: a server may well be alive behind the failure.
-fn _stderr_means_no_server(stderr: &str) -> bool {
+fn stderr_means_no_server(stderr: &str) -> bool {
     let low = stderr.to_lowercase();
     if low.contains("no server running") {
         return true;
@@ -110,14 +110,14 @@ fn _stderr_means_no_server(stderr: &str) -> bool {
 /// live), `(None, "unknown")` on any other failure — callers must not
 /// read unknown as "dead" (same contract as `is_pane_alive`).
 pub fn list_panes_all_status() -> (Option<Vec<PaneInfo>>, &'static str) {
-    let r = match _run(&["list-panes", "-a", "-F", _PANE_BASE_FMT], false, 5) {
+    let r = match run(&["list-panes", "-a", "-F", _PANE_BASE_FMT], false, 5) {
         Ok(r) => r,
         Err(_) => return (None, "unknown"),
     };
     if r.returncode == 0 {
-        return (Some(_parse_panes_full(&r.stdout)), "ok");
+        return (Some(parse_panes_full(&r.stdout)), "ok");
     }
-    if _stderr_means_no_server(&r.stderr) {
+    if stderr_means_no_server(&r.stderr) {
         return (None, "no-server");
     }
     (None, "unknown")
@@ -130,12 +130,12 @@ pub fn list_panes_all_status() -> (Option<Vec<PaneInfo>>, &'static str) {
 /// options — everything `hive ls` needs to match a live
 /// team instance against a snapshot.
 pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
-    let r = match _run(&["list-windows", "-a", "-F", _TEAM_WINDOW_FMT], false, 5) {
+    let r = match run(&["list-windows", "-a", "-F", _TEAM_WINDOW_FMT], false, 5) {
         Ok(r) => r,
         Err(_) => return (None, "unknown"),
     };
     if r.returncode != 0 {
-        if _stderr_means_no_server(&r.stderr) {
+        if stderr_means_no_server(&r.stderr) {
             return (None, "no-server");
         }
         return (None, "unknown");
@@ -145,7 +145,7 @@ pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
         if line.is_empty() {
             continue;
         }
-        let p = _split_fields(line, _TEAM_WINDOW_FIELD_COUNT);
+        let p = split_fields(line, _TEAM_WINDOW_FIELD_COUNT);
         if p[3].is_empty() {
             continue;
         }
@@ -172,13 +172,13 @@ pub fn team_window_target(team: &str) -> Option<String> {
         .map(|w| w.window)
 }
 
-fn _parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
+fn parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
     let mut result: Vec<PaneInfo> = Vec::new();
     for line in stdout.trim().split('\n') {
         if line.is_empty() {
             continue;
         }
-        let p = _split_fields(line, _PANE_FIELD_COUNT);
+        let p = split_fields(line, _PANE_FIELD_COUNT);
         result.push(PaneInfo {
             pane_id: p[0].clone(),
             title: p[1].clone(),
@@ -197,12 +197,12 @@ fn _parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
 
 pub fn set_pane_option(pane_id: &str, key: &str, value: &str) {
     let opt = format!("@{key}");
-    let _ = _run(&["set-option", "-p", "-t", pane_id, &opt, value], false, 5);
+    let _ = run(&["set-option", "-p", "-t", pane_id, &opt, value], false, 5);
 }
 
 pub fn get_pane_option(pane_id: &str, key: &str) -> Option<String> {
     let opt = format!("@{key}");
-    let r = _run(&["show-options", "-p", "-v", "-t", pane_id, &opt], false, 5).ok()?;
+    let r = run(&["show-options", "-p", "-v", "-t", pane_id, &opt], false, 5).ok()?;
     if r.returncode != 0 {
         return None;
     }
@@ -216,7 +216,7 @@ pub fn get_pane_option(pane_id: &str, key: &str) -> Option<String> {
 
 pub fn clear_pane_option(pane_id: &str, key: &str) {
     let opt = format!("@{key}");
-    let _ = _run(&["set-option", "-p", "-t", pane_id, "-u", &opt], false, 5);
+    let _ = run(&["set-option", "-p", "-t", pane_id, "-u", &opt], false, 5);
 }
 
 // `hive-view`, `hive-busy` and `hive-unread` are derived state (the claude
@@ -265,7 +265,7 @@ pub fn clear_pane_tags(pane_id: &str) {
 /// (`@hive-hidden <team>`, written by `hive mirror off`).
 pub fn hidden_mirror_windows(team: &str) -> Vec<String> {
     let fmt = format!("#{{window_id}}\t#{{@{}}}", super::HIDDEN_WINDOW_KEY);
-    let r = match _run(&["list-windows", "-a", "-F", &fmt], false, 5) {
+    let r = match run(&["list-windows", "-a", "-F", &fmt], false, 5) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -285,7 +285,7 @@ pub fn hidden_mirror_pane(team: &str) -> Option<String> {
     if windows.is_empty() {
         return None;
     }
-    let r = _run(
+    let r = run(
         &[
             "list-panes",
             "-a",

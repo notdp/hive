@@ -15,7 +15,7 @@ use crate::{bus, devlog};
 
 use super::*;
 
-pub fn _thread_payload(workspace: &str, message_id: &str) -> Result<Map<String, Value>> {
+pub(crate) fn thread_payload(workspace: &str, message_id: &str) -> Result<Map<String, Value>> {
     let events = bus::read_events_with_seq(workspace)?;
     let mut send_events: HashMap<String, (i64, Map<String, Value>)> = HashMap::new();
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -119,7 +119,7 @@ pub fn _thread_payload(workspace: &str, message_id: &str) -> Result<Map<String, 
     Ok(payload)
 }
 
-pub fn _resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
+pub(crate) fn resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
     let team = hooked_team_load(team_name)?;
     let agent = team.get(agent_name)?;
     if !hooked_agent_is_alive(&agent) {
@@ -134,11 +134,11 @@ pub fn _resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Result<(Te
 /// codex, grok and claude; transcript gate for unmanaged panes) instead of
 /// re-deriving it — one judgement for every CLI, and no silent skip when a
 /// transcript cannot be resolved.
-pub fn _check_send_gate_impl(target: &Agent) -> Result<()> {
+pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
     let runtime = if !target.pane_id.is_empty() {
         hooked_member_runtime_payload(&target.pane_id, "agent")
     } else {
-        _headless_member_runtime(target)
+        headless_member_runtime(target)
     };
     if runtime.get("inputState").and_then(Value::as_str) != Some("waiting_user") {
         return Ok(());
@@ -151,7 +151,7 @@ pub fn _check_send_gate_impl(target: &Agent) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn _send_payload(
+pub(crate) fn send_payload(
     workspace: &str,
     team_name: &str,
     sender_agent: &str,
@@ -250,7 +250,7 @@ pub fn _send_payload(
     Ok(payload)
 }
 
-pub fn _doctor_payload(
+pub(crate) fn doctor_payload(
     workspace: &str,
     team_name: &str,
     target_agent: &str,

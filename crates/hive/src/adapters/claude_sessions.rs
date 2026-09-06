@@ -78,12 +78,12 @@ impl ClaudeSession {
     }
 }
 
-pub fn _config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     // CLAUDE_HOME is hive's own sandbox lever (tests and dev lanes point it at
     // a disposable tree); CLAUDE_CONFIG_DIR is Claude Code's relocation knob.
     // Honour both so a sandboxed run never reads — or messages — the
     // developer's real sessions. Every other reader of the tree
-    // (`claude::_claude_home`, `core_hooks::claude_home`) delegates here.
+    // (`claude::claude_home`, `core_hooks::claude_home`) delegates here.
     for key in ["CLAUDE_HOME", "CLAUDE_CONFIG_DIR"] {
         if let Ok(v) = env::var(key) {
             if !v.is_empty() {
@@ -94,8 +94,8 @@ pub fn _config_dir() -> PathBuf {
     PathBuf::from(format!("{}/.claude", env::var("HOME").unwrap_or_default()))
 }
 
-pub fn _registry_dir() -> PathBuf {
-    _config_dir().join("sessions")
+pub(crate) fn registry_dir() -> PathBuf {
+    config_dir().join("sessions")
 }
 
 /// Python's `str(value or "")` for the scalar fields the claude registry,
@@ -120,7 +120,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-fn _title_in(chunk: &[u8]) -> String {
+fn title_in(chunk: &[u8]) -> String {
     let mut title = String::new();
     for line in chunk.split(|&b| b == b'\n') {
         if !contains_subslice(line, b"\"custom-title\"") {
@@ -147,7 +147,7 @@ pub fn session_title(session_id: &str) -> String {
     }
     let fname = format!("{session_id}.jsonl");
     let Some(path) =
-        crate::adapters::claude::_stat_project_dirs(&_config_dir().join("projects"), &fname)
+        crate::adapters::claude::stat_project_dirs(&config_dir().join("projects"), &fname)
     else {
         return String::new();
     };
@@ -160,17 +160,17 @@ fn read_title(path: &Path) -> std::io::Result<String> {
     fh.seek(SeekFrom::Start(size.saturating_sub(_TITLE_TAIL_BYTES)))?;
     let mut tail = Vec::new();
     fh.read_to_end(&mut tail)?;
-    let mut title = _title_in(&tail);
+    let mut title = title_in(&tail);
     if title.is_empty() && size > _TITLE_TAIL_BYTES {
         fh.seek(SeekFrom::Start(0))?;
         let mut head = Vec::new();
         (&mut fh).take(_TITLE_HEAD_BYTES).read_to_end(&mut head)?;
-        title = _title_in(&head);
+        title = title_in(&head);
     }
     Ok(title)
 }
 
-pub fn _pid_alive(pid: i32) -> bool {
+pub(crate) fn pid_alive(pid: i32) -> bool {
     if unsafe { libc::kill(pid, 0) } == 0 {
         return true;
     }
@@ -185,7 +185,7 @@ pub fn _pid_alive(pid: i32) -> bool {
 /// bare mode) or is a warm spare is not a session anyone is talking to, and
 /// is left out — the same three cuts `/list-agents` makes.
 pub fn list_sessions() -> Vec<ClaudeSession> {
-    let root = _registry_dir();
+    let root = registry_dir();
     if !root.is_dir() {
         return Vec::new();
     }
@@ -213,7 +213,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
         if crate::pyval::truthy(obj.get("spare")) {
             continue; // a warm spare claude pre-started; nobody is behind it yet
         }
-        if !_pid_alive(pid) {
+        if !pid_alive(pid) {
             continue;
         }
         let session_id = truthy_str(obj.get("sessionId"));
@@ -242,8 +242,8 @@ pub fn session_status(pid: Option<i32>) -> Option<(String, String)> {
     if pid == 0 {
         return None;
     }
-    let obj = read_json_object(&_registry_dir().join(format!("{pid}.json")))?;
-    if !_pid_alive(pid) {
+    let obj = read_json_object(&registry_dir().join(format!("{pid}.json")))?;
+    if !pid_alive(pid) {
         return None;
     }
     let status = obj.get("status").and_then(Value::as_str)?;
@@ -389,11 +389,11 @@ fn send_with_write_timeout(
     }
 }
 
-pub fn _daemon_control_sock() -> PathBuf {
+fn daemon_control_sock() -> PathBuf {
     // The supervisor daemon namespaces itself by config dir: sha256 of the
     // resolved path, first 8 hex (observed on 2.1.240). /tmp is fixed — the
     // daemon does not honour $TMPDIR.
-    let cfg = _config_dir();
+    let cfg = config_dir();
     let abs = if cfg.is_absolute() {
         cfg
     } else {
@@ -415,13 +415,13 @@ pub fn _daemon_control_sock() -> PathBuf {
         .join("control.sock")
 }
 
-fn _daemon_control_key() -> String {
-    fs::read_to_string(_config_dir().join("daemon").join("control.key"))
+fn daemon_control_key() -> String {
+    fs::read_to_string(config_dir().join("daemon").join("control.key"))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
-fn _daemon_roundtrip(sock_path: &Path, frame: &Value) -> Option<Map<String, Value>> {
+fn daemon_roundtrip(sock_path: &Path, frame: &Value) -> Option<Map<String, Value>> {
     let mut conn = UnixStream::connect(sock_path).ok()?;
     let _ = conn.set_write_timeout(Some(write_timeout()));
     let _ = conn.set_read_timeout(Some(write_timeout()));
@@ -457,7 +457,7 @@ pub fn daemon_reply(session_id: &str, text: &str) -> Option<&'static str> {
     daemon_reply_via(
         session_id,
         text,
-        &_daemon_control_sock(),
+        &daemon_control_sock(),
         Duration::from_secs_f64(_DAEMON_RETRY_DELAY),
     )
 }
@@ -472,7 +472,7 @@ fn daemon_reply_via(
     if short.chars().count() != 8 {
         return None;
     }
-    let auth = _daemon_control_key();
+    let auth = daemon_control_key();
     if auth.is_empty() {
         return None;
     }
@@ -485,7 +485,7 @@ fn daemon_reply_via(
     });
     let mut reauthed = false;
     for _ in 0.._DAEMON_RETRY_LIMIT {
-        let resp = _daemon_roundtrip(sock_path, &frame)?;
+        let resp = daemon_roundtrip(sock_path, &frame)?;
         if resp.get("ok") == Some(&Value::Bool(true)) {
             return Some(ACCEPTED_DAEMON_REPLY);
         }
@@ -493,7 +493,7 @@ fn daemon_reply_via(
         if code == "EAUTH" && !reauthed {
             // One re-read: the daemon may have rotated the key under us.
             reauthed = true;
-            let auth = _daemon_control_key();
+            let auth = daemon_control_key();
             if auth.is_empty() {
                 return None;
             }
@@ -540,7 +540,7 @@ mod tests {
     fn dead_pid() -> i32 {
         // a pid nothing is using, by the adapter's own liveness rule
         let mut pid = 4_000_000;
-        while _pid_alive(pid) {
+        while pid_alive(pid) {
             pid += 1;
         }
         pid
@@ -1182,7 +1182,7 @@ mod tests {
             .take(8)
             .collect();
         assert_eq!(
-            _daemon_control_sock(),
+            daemon_control_sock(),
             PathBuf::from("/tmp")
                 .join(format!("cc-daemon-{}", unsafe { libc::getuid() }))
                 .join(ns)

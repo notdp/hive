@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context as _, Result};
 use serde_json::{Map, Value};
 
-fn _settings_path() -> PathBuf {
+fn settings_path() -> PathBuf {
     crate::team::hive_home().join("settings.json")
 }
 
@@ -19,7 +19,7 @@ fn key_parts(key: &str) -> Vec<&str> {
 }
 
 pub fn load_user_settings() -> Map<String, Value> {
-    let text = match fs::read_to_string(_settings_path()) {
+    let text = match fs::read_to_string(settings_path()) {
         Ok(t) => t,
         Err(_) => return Map::new(),
     };
@@ -65,7 +65,7 @@ pub fn set_setting(key: &str, value: Value) -> Result<()> {
         }
         node.insert(parts[parts.len() - 1].to_string(), value);
     }
-    _write_atomic(&data)
+    write_atomic(&data)
 }
 
 pub fn unset_setting(key: &str) -> Result<bool> {
@@ -86,12 +86,12 @@ pub fn unset_setting(key: &str) -> Result<bool> {
             return Ok(false);
         }
     }
-    _write_atomic(&data)?;
+    write_atomic(&data)?;
     Ok(true)
 }
 
-fn _write_atomic(data: &Map<String, Value>) -> Result<()> {
-    let path = _settings_path();
+fn write_atomic(data: &Map<String, Value>) -> Result<()> {
+    let path = settings_path();
     let parent = path.parent().context("settings path has no parent")?;
     fs::create_dir_all(parent)?;
     let (mut file, tmp) = crate::registry::mkstemp_in(parent, ".settings.", ".json.tmp")?;

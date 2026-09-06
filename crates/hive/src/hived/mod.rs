@@ -27,14 +27,14 @@ pub(crate) mod testhook;
 #[cfg(test)]
 mod tests;
 
-pub use busy::*;
+pub(crate) use busy::*;
 pub use client::*;
 pub use idle_notify::*;
 pub use lifecycle::*;
 pub use paths::*;
-pub use payloads::*;
+pub(crate) use payloads::*;
 pub use reexec::*;
-pub use runtime::*;
+pub(crate) use runtime::*;
 pub use seams::*;
 pub use server::*;
 pub use state::*;
@@ -84,7 +84,7 @@ fn monotonic() -> f64 {
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
 
-fn _native_submit_timeout() -> f64 {
+fn native_submit_timeout() -> f64 {
     // claude's worst case is a delivery that has to wake a parked engine
     // first (ledger check + tty-less attach + entry poll) before the inbox
     // write itself.
@@ -95,6 +95,6 @@ fn _native_submit_timeout() -> f64 {
         .max(crate::adapters::grok_leader::SUBMIT_TIMEOUT)
 }
 
-pub fn _send_request_timeout() -> f64 {
-    _native_submit_timeout() + REQUEST_SLACK
+fn send_request_timeout() -> f64 {
+    native_submit_timeout() + REQUEST_SLACK
 }

@@ -1,10 +1,10 @@
-//! Low-level tmux subprocess execution: `Run`, `TmuxError`, `_run`.
+//! Low-level tmux subprocess execution: `Run`, `TmuxError`, `run`.
 
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Mirror of Python's `subprocess.CompletedProcess` as `_run` returns it.
+/// Mirror of Python's `subprocess.CompletedProcess` as `run` returns it.
 #[derive(Debug, Clone)]
 pub struct Run {
     pub returncode: i32,
@@ -49,11 +49,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Test seam: route every `_run` through *f*, which sees `(argv, check,
+/// Test seam: route every `run` through *f*, which sees `(argv, check,
 /// timeout)`. Crate-visible because the command-layer tests drive whole
 /// handlers and assert on the tmux argv those handlers issue.
 #[cfg(test)]
-pub(crate) fn _set_run_override(
+pub(crate) fn set_run_override(
     f: impl FnMut(&[String], bool, u64) -> Result<Run, TmuxError> + 'static,
 ) {
     RUN_OVERRIDE.with(|o| *o.borrow_mut() = Some(Box::new(f)));
@@ -150,7 +150,7 @@ pub(super) fn exec_capture(
 /// timeout errors like a nonzero exit does — a busy tmux server must never
 /// look like a successful send-keys. `check=false` callers are probes that
 /// read "unknown" out of the rc-1 sentinel, so they keep it.
-pub fn _run(args: &[&str], check: bool, timeout: u64) -> Result<Run, TmuxError> {
+pub(crate) fn run(args: &[&str], check: bool, timeout: u64) -> Result<Run, TmuxError> {
     #[cfg(test)]
     {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -191,7 +191,7 @@ pub fn _run(args: &[&str], check: bool, timeout: u64) -> Result<Run, TmuxError> 
     }
 }
 
-pub fn _run_output(args: &[&str]) -> anyhow::Result<String> {
-    let r = _run(args, true, 5)?;
+pub(crate) fn run_output(args: &[&str]) -> anyhow::Result<String> {
+    let r = run(args, true, 5)?;
     Ok(r.stdout.trim().to_string())
 }

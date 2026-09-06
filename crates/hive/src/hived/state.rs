@@ -39,13 +39,13 @@ fn output_busy_monitor() -> &'static Mutex<Option<Arc<dyn OutputMonitor>>> {
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-pub fn _set_output_busy_monitor(monitor: Option<Arc<dyn OutputMonitor>>) {
+pub(crate) fn set_output_busy_monitor(monitor: Option<Arc<dyn OutputMonitor>>) {
     *output_busy_monitor()
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = monitor;
 }
 
-pub(super) fn _get_output_busy_monitor() -> Option<Arc<dyn OutputMonitor>> {
+pub(crate) fn get_output_busy_monitor() -> Option<Arc<dyn OutputMonitor>> {
     output_busy_monitor()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -86,6 +86,6 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
 pub(super) static _SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(super) static _INFLIGHT_REQUESTS: AtomicI64 = AtomicI64::new(0);
 
-pub fn _requests_in_flight() -> bool {
+pub(crate) fn requests_in_flight() -> bool {
     _INFLIGHT_REQUESTS.load(Ordering::SeqCst) > 0
 }

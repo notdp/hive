@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::keys::{
-    _daemon_env_for_pane, _key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
+    daemon_env_for_pane, key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
 };
 use super::{grok_home, _DAEMON_START_TIMEOUT};
 use crate::adapters::base::washed_spawner_env;
@@ -28,11 +28,11 @@ const _PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// not consulted, because a pid can be dead or reused by an unrelated
 /// process while the file still names it.
 pub fn probe_socket(socket_path: &Path) -> bool {
-    socket_path.exists() && _connect_within(socket_path, _PROBE_TIMEOUT).is_ok()
+    socket_path.exists() && connect_within(socket_path, _PROBE_TIMEOUT).is_ok()
 }
 
 /// Non-blocking unix connect that gives up after *timeout*.
-fn _connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
+fn connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::{FromRawFd, OwnedFd};
 
@@ -98,7 +98,7 @@ fn _connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     Ok(())
 }
 
-/// The spawned leader as `_spawn_daemon_key` sees it: pid, exit poll, terminate.
+/// The spawned leader as `spawn_daemon_key` sees it: pid, exit poll, terminate.
 pub(super) trait DaemonChild: Send {
     fn pid(&self) -> u32;
     fn poll(&self) -> Option<i32>;
@@ -137,7 +137,7 @@ impl DaemonChild for RealDaemonChild {
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn _spawn_leader_real(
+fn spawn_leader_real(
     argv: &[String],
     env: &HashMap<String, String>,
 ) -> io::Result<Box<dyn DaemonChild>> {
@@ -162,7 +162,7 @@ fn _spawn_leader_real(
     Ok(Box::new(RealDaemonChild(Mutex::new(cmd.spawn()?))))
 }
 
-fn _spawn_leader(
+fn spawn_leader(
     argv: &[String],
     env: &HashMap<String, String>,
 ) -> io::Result<Box<dyn DaemonChild>> {
@@ -172,7 +172,7 @@ fn _spawn_leader(
     }
     #[cfg(not(test))]
     {
-        _spawn_leader_real(argv, env)
+        spawn_leader_real(argv, env)
     }
 }
 
@@ -182,9 +182,9 @@ fn _spawn_leader(
 /// member pane and its spawner reach the same member daemon). The daemon env
 /// carries `TMUX_PANE`, so shell tools report the right pane.
 pub fn spawn_daemon(pane: &str) -> bool {
-    _spawn_daemon_key(
+    spawn_daemon_key(
         &resolve_pane_key(pane),
-        _daemon_env_for_pane(pane),
+        daemon_env_for_pane(pane),
         "grok",
         _DAEMON_START_TIMEOUT,
     )
@@ -196,14 +196,14 @@ pub fn spawn_daemon(pane: &str) -> bool {
 /// The engine-first lane: a team member's engine lives on
 /// `m-<team>.<member>` and is raised before any pane exists; a pane that
 /// later runs the TUI is one more client of this daemon. The identity
-/// markers are washed as for the pane lane (see `_daemon_env_for_pane`),
+/// markers are washed as for the pane lane (see `daemon_env_for_pane`),
 /// and no `TMUX_PANE` is pinned: the member's tool subprocesses identify
 /// by the `GROK_SESSION_ID` the leader exports, matched against the roster,
 /// and find their pane from that row (`tmux::get_current_pane_id`) — the
 /// pane is display resolved on top of identity, never the other way round.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
-    _spawn_daemon_key(
+    spawn_daemon_key(
         &member_key(team, member),
         env,
         "grok",
@@ -212,7 +212,7 @@ pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
 }
 
 /// The pid's command line as `ps` reports it; None once the pid is gone.
-fn _process_args(pid: libc::pid_t) -> Option<String> {
+fn process_args(pid: libc::pid_t) -> Option<String> {
     #[cfg(test)]
     {
         if let Some(args) = super::tests::process_args_override(pid) {
@@ -235,19 +235,19 @@ fn _process_args(pid: libc::pid_t) -> Option<String> {
 ///
 /// The reap needs every process bound to a socket, and nothing records
 /// their pids: only the machine's own process table names them.
-fn _process_listing() -> Vec<(libc::pid_t, String)> {
+fn process_listing() -> Vec<(libc::pid_t, String)> {
     #[cfg(test)]
     {
         super::tests::process_listing_override()
     }
     #[cfg(not(test))]
     {
-        _process_listing_real()
+        process_listing_real()
     }
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn _process_listing_real() -> Vec<(libc::pid_t, String)> {
+fn process_listing_real() -> Vec<(libc::pid_t, String)> {
     // `-ww`: an argv cut off at the terminal width would hide the socket.
     let Ok(out) = Command::new("ps")
         .args(["-A", "-ww", "-o", "pid=,args="])
@@ -270,7 +270,7 @@ fn _process_listing_real() -> Vec<(libc::pid_t, String)> {
 
 /// True when *args* passes `--leader-socket <sock>` — that exact path, never
 /// another key's socket and never one this path is a prefix of.
-fn _names_leader_socket(args: &str, sock: &str) -> bool {
+fn names_leader_socket(args: &str, sock: &str) -> bool {
     let mut tokens = args.split_whitespace();
     while let Some(token) = tokens.next() {
         if token == "--leader-socket" {
@@ -294,48 +294,48 @@ fn _names_leader_socket(args: &str, sock: &str) -> bool {
 /// the path in `GROK_LEADER_SOCKET`, which `ps` does not print. A bare
 /// `grok agent leader` is therefore trusted only for coming out of grok's
 /// own `<sock>.lock`, which the holder of *this* socket's flock writes —
-/// see [`_leader_pid`] — while one naming a *different* socket is a
+/// see [`leader_pid`] — while one naming a *different* socket is a
 /// stranger a stale record points at and is never signalled.
-fn _is_leader_args(args: &str, sock: &str) -> bool {
+fn is_leader_args(args: &str, sock: &str) -> bool {
     args.contains("agent leader")
-        && (_names_leader_socket(args, sock) || !args.contains("--leader-socket"))
+        && (names_leader_socket(args, sock) || !args.contains("--leader-socket"))
 }
 
 /// True when the pid runs a leader that may hold *sock*: either shape of
-/// [`_is_leader_args`].
-fn _is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
-    _leader_args_of(pid).is_some_and(|args| _is_leader_args(&args, &sock.to_string_lossy()))
+/// [`is_leader_args`].
+fn is_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
+    leader_args_of(pid).is_some_and(|args| is_leader_args(&args, &sock.to_string_lossy()))
 }
 
 /// True when the pid runs the leader hive itself spawned on *sock*: the
 /// exact socket in argv, never the bare shape. Hive's `.pid` is never
 /// cleared by a crash, so a recycled pid running some other key's
 /// grok-raised leader (bare argv too) must not pass through it.
-fn _is_spawned_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
-    _leader_args_of(pid).is_some_and(|args| {
-        args.contains("agent leader") && _names_leader_socket(&args, &sock.to_string_lossy())
+fn is_spawned_leader_of(pid: libc::pid_t, sock: &Path) -> bool {
+    leader_args_of(pid).is_some_and(|args| {
+        args.contains("agent leader") && names_leader_socket(&args, &sock.to_string_lossy())
     })
 }
 
-fn _leader_args_of(pid: libc::pid_t) -> Option<String> {
+fn leader_args_of(pid: libc::pid_t) -> Option<String> {
     if pid <= 0 {
         return None;
     }
-    _process_args(pid)
+    process_args(pid)
 }
 
 /// Pids of every client attached to *sock*, whoever started them: the pane's
 /// grok TUI (`grok --leader --leader-socket <sock>`) and each stdio client
 /// (`grok agent --leader stdio --leader-socket <sock>`) — hive's own, the
 /// hived's pool client, one a member engine's `hive` call left behind.
-fn _socket_clients(sock: &Path) -> Vec<libc::pid_t> {
+fn socket_clients(sock: &Path) -> Vec<libc::pid_t> {
     let sock = sock.to_string_lossy();
-    _process_listing()
+    process_listing()
         .into_iter()
         .filter(|(pid, args)| {
             *pid > 0
-                && !_is_leader_args(args, sock.as_ref())
-                && _names_leader_socket(args, sock.as_ref())
+                && !is_leader_args(args, sock.as_ref())
+                && names_leader_socket(args, sock.as_ref())
         })
         .map(|(pid, _args)| pid)
         .collect()
@@ -346,18 +346,18 @@ fn _socket_clients(sock: &Path) -> Vec<libc::pid_t> {
 /// *signalled* carries across the passes of one kill — a pid already
 /// terminated has had SIGTERM and SIGKILL both, so seeing it again means
 /// only that a stale record still names it.
-fn _reap_socket_once(sock: &Path, signalled: &mut Vec<libc::pid_t>) {
+fn reap_socket_once(sock: &Path, signalled: &mut Vec<libc::pid_t>) {
     let mut terminate = |pid: libc::pid_t| {
         if !signalled.contains(&pid) {
             signalled.push(pid);
-            _terminate_process_group(pid);
+            terminate_process_group(pid);
         }
     };
-    for pid in _socket_clients(sock) {
+    for pid in socket_clients(sock) {
         terminate(pid);
     }
     // Read after the clients are down: killing one can raise a leader.
-    if let Some(pid) = _leader_pid(sock) {
+    if let Some(pid) = leader_pid(sock) {
         terminate(pid);
     }
 }
@@ -370,7 +370,7 @@ fn _reap_socket_once(sock: &Path, signalled: &mut Vec<libc::pid_t>) {
 /// case that needs reclaiming. Nothing clears either file when a leader
 /// crashes, so a recorded pid is only trusted when the process behind it
 /// is the leader of this socket — a dead or recycled pid is never signalled.
-fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
+fn leader_pid(sock: &Path) -> Option<libc::pid_t> {
     let recorded = |ext: &str| {
         fs::read_to_string(sock.with_extension(ext))
             .ok()?
@@ -382,8 +382,8 @@ fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
     // pass on the exact socket; grok's lock names whichever leader holds
     // this socket's flock, including one a client raised with a bare argv.
     recorded("pid")
-        .filter(|pid| _is_spawned_leader_of(*pid, sock))
-        .or_else(|| recorded("lock").filter(|pid| _is_leader_of(*pid, sock)))
+        .filter(|pid| is_spawned_leader_of(*pid, sock))
+        .or_else(|| recorded("lock").filter(|pid| is_leader_of(*pid, sock)))
 }
 
 /// Start (or reuse) the leader daemon on *key*'s socket.
@@ -392,12 +392,7 @@ fn _leader_pid(sock: &Path) -> Option<libc::pid_t> {
 /// short-lived CLI; the hived
 /// reaps member daemons the registry no longer lists, and pane-keyed ones
 /// when their pane dies.
-fn _spawn_daemon_key(
-    key: &str,
-    env: HashMap<String, String>,
-    grok_bin: &str,
-    timeout: f64,
-) -> bool {
+fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, timeout: f64) -> bool {
     let sock = socket_path_for_key(key);
     if let Some(parent) = sock.parent() {
         if fs::create_dir_all(parent).is_err() {
@@ -414,8 +409,8 @@ fn _spawn_daemon_key(
     // every later spawn times out into plain grok. Reclaim the key first;
     // a recorded pid that is not this key's leader is stale and only its
     // files go.
-    if let Some(pid) = _leader_pid(&sock) {
-        _terminate_process_group(pid);
+    if let Some(pid) = leader_pid(&sock) {
+        terminate_process_group(pid);
     }
     for path in [
         sock.clone(),
@@ -433,7 +428,7 @@ fn _spawn_daemon_key(
         "--no-auto-update".to_string(),
         "--no-exit-on-disconnect".to_string(),
     ];
-    let child = match _spawn_leader(&argv, &env) {
+    let child = match spawn_leader(&argv, &env) {
         Ok(child) => child,
         Err(_) => return false,
     };
@@ -443,7 +438,7 @@ fn _spawn_daemon_key(
             return false; // died before binding
         }
         if sock.exists() {
-            // Names only a leader hive spawned: `_leader_pid` trusts it after
+            // Names only a leader hive spawned: `leader_pid` trusts it after
             // an identity check, and the hived reads its mtime as the newborn
             // grace. Liveness is the socket connect, never this pid.
             let _ = fs::write(sock.with_extension("pid"), child.pid().to_string());
@@ -465,7 +460,7 @@ pub fn list_daemon_keys() -> Vec<String> {
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if let Some(key) = _key_from_socket_name(name) {
+                if let Some(key) = key_from_socket_name(name) {
                     keys.push(key);
                 }
             }
@@ -476,13 +471,13 @@ pub fn list_daemon_keys() -> Vec<String> {
 
 /// SIGTERM the pid, escalating to SIGKILL if it lingers.
 ///
-/// A leader hive spawned is `setsid()`'d in `_spawn_leader_real`, so it
+/// A leader hive spawned is `setsid()`'d in `spawn_leader_real`, so it
 /// leads a group of
 /// itself and whatever it forked, and `killpg` reaps them together. A holder
 /// adopted from grok's lock file may sit in the pane shell's group instead,
 /// where `killpg` would take the shell out with it, so a pid that is not its
 /// own group leader is signalled alone.
-fn _terminate_process_group(pid: libc::pid_t) {
+fn terminate_process_group(pid: libc::pid_t) {
     #[cfg(test)]
     {
         if super::tests::terminate_pg_override(pid) {
@@ -530,8 +525,8 @@ fn _terminate_process_group(pid: libc::pid_t) {
 pub fn kill_daemon_key(key: &str) {
     let sock = socket_path_for_key(key);
     let mut signalled: Vec<libc::pid_t> = Vec::new();
-    _reap_socket_once(&sock, &mut signalled);
-    _reap_socket_once(&sock, &mut signalled);
+    reap_socket_once(&sock, &mut signalled);
+    reap_socket_once(&sock, &mut signalled);
     for path in [
         sock.clone(),
         sock.with_extension("lock"),

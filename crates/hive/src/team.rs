@@ -73,7 +73,7 @@ fn new_agent(
     }
 }
 
-/// Drop every `@hive-*` window tag `_write_window_options` (or a Python-era
+/// Drop every `@hive-*` window tag `write_window_options` (or a Python-era
 /// hive, which also wrote `@hive-peers`) left on *window*, with the display
 /// carriers the hived and notify wrote on it, and the layout hooks with
 /// their `@hive-layout` key: a window that stops being hive's keeps its
@@ -124,7 +124,7 @@ pub fn validate_team_name(name: &str) -> String {
     String::new()
 }
 
-/// What Team.load reads back from `_find_team_window` (the Python window-data
+/// What Team.load reads back from `find_team_window` (the Python window-data
 /// dict: window_id / workspace / desc / created).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TeamWindowData {
@@ -153,7 +153,7 @@ struct SpawnCall {
 
 // --- cross-module seams: each wrapper runs the real call unless the test
 // installed an answer for that seam (`tests::Hook`); the tmux those real
-// calls reach is `crate::tmux`, answered in tests by `_set_run_override`.
+// calls reach is `crate::tmux`, answered in tests by `set_run_override`.
 
 fn agent_spawn(call: SpawnCall) -> Result<Agent> {
     #[cfg(test)]
@@ -236,12 +236,12 @@ pub(crate) fn usable_runtime(response: Option<Map<String, Value>>) -> Option<Map
         .filter(|r| r.get("ok") != Some(&Value::Bool(false)))
 }
 
-/// Test seam for callers outside this module: `_find_team_window` resolves
+/// Test seam for callers outside this module: `find_team_window` resolves
 /// tmux through `tests::fake_tmux` in test builds, so a command-layer test
 /// that needs a window listing has to answer *this* double, not
 /// `crate::tmux`'s.
 #[cfg(test)]
-pub(crate) fn _set_fake_tmux_run(
+pub(crate) fn set_fake_tmux_run(
     f: impl Fn(&[String], bool) -> Result<crate::tmux::Run, crate::tmux::TmuxError> + 'static,
 ) {
     tests::with_state(|st| st.run_fn = Some(Box::new(f)));
@@ -250,7 +250,7 @@ pub(crate) fn _set_fake_tmux_run(
 /// Sibling seam for `Team::anchor_pane`'s window listing, which reads
 /// `list_panes_full` off the same fake.
 #[cfg(test)]
-pub(crate) fn _set_fake_tmux_panes(f: impl Fn(&str) -> Vec<PaneInfo> + 'static) {
+pub(crate) fn set_fake_tmux_panes(f: impl Fn(&str) -> Vec<PaneInfo> + 'static) {
     tests::with_state(|st| st.list_panes_full_fn = Some(Box::new(f)));
 }
 
@@ -307,7 +307,7 @@ impl Team {
 
     // --- Window-level tmux options ---
 
-    fn _write_window_options(&self) {
+    fn write_window_options(&self) {
         let target = &self.tmux_window;
         if target.is_empty() {
             return;
@@ -403,7 +403,7 @@ impl Team {
             );
         }
 
-        team._write_window_options();
+        team.write_window_options();
         Ok(team)
     }
 
@@ -440,7 +440,7 @@ impl Team {
         } else {
             tmux::get_current_pane_id().unwrap_or_default()
         };
-        let (window_target, window_data) = _find_team_window(name, &hint)?;
+        let (window_target, window_data) = find_team_window(name, &hint)?;
         if snap.is_none() && window_target.is_empty() {
             bail!("Team '{name}' not found");
         }
@@ -773,7 +773,7 @@ impl Team {
     /// name. Ok(false) means no claim was made and the spawn goes on guarded
     /// only by the in-memory check: the team has no registry entry (or a
     /// recycled successor's), or the store lock/write failed — best-effort,
-    /// like the spawn path's other registry writes (`_registry_record_member`
+    /// like the spawn path's other registry writes (`registry_record_member`
     /// warns, the rollback `remove_member` is discarded).
     fn claim_name(&self, name: &str, cli: &str, model: &str) -> Result<bool> {
         if self.name.is_empty() {
@@ -875,7 +875,7 @@ impl Team {
 /// same name. Callers destroy window options on False, so a failed tmux
 /// listing (unknown) conservatively counts as live: only a successful listing
 /// can prove a window stale.
-pub fn _window_has_live_team_members(window_target: &str, team_name: &str) -> bool {
+pub(crate) fn window_has_live_team_members(window_target: &str, team_name: &str) -> bool {
     match tmux::list_panes_full_or_none(window_target) {
         None => true,
         Some(panes) => panes
@@ -892,12 +892,12 @@ pub fn _window_has_live_team_members(window_target: &str, team_name: &str) -> bo
 /// that actually has panes tagged for the team.  Provably-stale duplicates
 /// (no live member panes) get their `@hive-team` tag stripped; live
 /// duplicates are preserved so two colliding teams never lose their tags.
-pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
+pub(crate) fn find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
     let fmt = format!(
         "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}\t#{{@hive-desc}}\t#{{@hive-created}}",
         crate::tmux::_WINDOW_TEAM_FMT
     );
-    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
+    let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
     let mut candidates: Vec<(String, TeamWindowData)> = Vec::new();
     for line in r.stdout.trim().split('\n') {
@@ -938,7 +938,7 @@ pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamW
         {
             for (wt, data) in &candidates {
                 if *wt == pane_window {
-                    _gc_stale_team_windows(name, wt, &all_windows);
+                    gc_stale_team_windows(name, wt, &all_windows);
                     return Ok((wt.clone(), data.clone()));
                 }
             }
@@ -947,8 +947,8 @@ pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamW
 
     // 2) Prefer the window that has panes actually tagged for this team.
     for (wt, data) in &candidates {
-        if _window_has_live_team_members(wt, name) {
-            _gc_stale_team_windows(name, wt, &all_windows);
+        if window_has_live_team_members(wt, name) {
+            gc_stale_team_windows(name, wt, &all_windows);
             return Ok((wt.clone(), data.clone()));
         }
     }
@@ -963,12 +963,12 @@ pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamW
 /// A window that still hosts live member panes is left untouched: two live
 /// teams that collide on a name must both survive so neither loses its routing
 /// tags. `hive doctor` surfaces such collisions for manual repair.
-pub fn _gc_stale_team_windows(name: &str, keep: &str, all_windows: &[String]) {
+pub(crate) fn gc_stale_team_windows(name: &str, keep: &str, all_windows: &[String]) {
     for wt in all_windows {
         if wt == keep {
             continue;
         }
-        if _window_has_live_team_members(wt, name) {
+        if window_has_live_team_members(wt, name) {
             continue;
         }
         clear_window_tags(wt);
@@ -988,7 +988,7 @@ pub fn duplicate_team_bindings() -> Result<Vec<Map<String, Value>>> {
         "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}",
         crate::tmux::_WINDOW_TEAM_FMT
     );
-    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
+    let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
     // serde_json's preserve_order Map keeps team insertion order like the
     // Python dict.
@@ -1071,7 +1071,7 @@ pub fn list_teams() -> Result<Vec<Map<String, Value>>> {
         "#{{session_name}}:#{{window_index}}\t{}\t#{{@hive-workspace}}",
         crate::tmux::_WINDOW_TEAM_FMT
     );
-    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
+    let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
     for line in r.stdout.trim().split('\n') {
         if line.is_empty() {
             continue;
@@ -1252,8 +1252,8 @@ mod tests {
 
     /// What `list-windows -a -F <fmt>` prints for the fake window options:
     /// `#{session_name}:#{window_index}` is the target, `#{window_id}` its
-    /// derived id, `#{@key}` the option — so `_find_team_window` reads back
-    /// what `_write_window_options` wrote. Any other `_run` prints nothing.
+    /// derived id, `#{@key}` the option — so `find_team_window` reads back
+    /// what `write_window_options` wrote. Any other `run` prints nothing.
     fn fake_run_stdout(st: &FakeState, args: &[String]) -> String {
         if args.first().map(String::as_str) != Some("list-windows") {
             return String::new();
@@ -1462,7 +1462,7 @@ mod tests {
             Some(panes)
         }
 
-        pub fn _run(args: &[&str], check: bool, _timeout: u64) -> Result<Run, TmuxError> {
+        pub(crate) fn run(args: &[&str], check: bool, _timeout: u64) -> Result<Run, TmuxError> {
             let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
             with_state(|st| match &st.run_fn {
                 Some(f) => f(&owned, check),
@@ -1556,7 +1556,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// Isolate every engine home under a temp dir, reset the fake tmux
-    /// state, install an empty seam hook, and make every `crate::tmux::_run`
+    /// state, install an empty seam hook, and make every `crate::tmux::run`
     /// the seams' real calls reach fail as it would with no server — holding
     /// the env lock for the test's lifetime.
     fn configure_hive_home(tmux_inside: bool, current_pane: &str) -> (tempfile::TempDir, EnvGuard) {
@@ -1595,7 +1595,7 @@ mod tests {
             .iter()
             .map(|(pane, command)| (pane.to_string(), command.to_string()))
             .collect();
-        crate::tmux::_set_run_override(move |args, _check, _timeout| {
+        crate::tmux::set_run_override(move |args, _check, _timeout| {
             let pane = args
                 .iter()
                 .position(|a| a == "-t")
@@ -1739,7 +1739,7 @@ mod tests {
             "claude", "team-a", "%1", "claude", "/tmp", "m1", None,
         ));
 
-        team._write_window_options();
+        team.write_window_options();
         assert_eq!(
             with_state(|st| st.borders.clone()),
             vec!["dev:0".to_string()]
@@ -2017,7 +2017,7 @@ mod tests {
             st.list_panes_full_or_none_fn = Some(Box::new(|_target| Some(Vec::new())));
         });
 
-        let (wt, _data) = _find_team_window("my-team", "%99").unwrap();
+        let (wt, _data) = find_team_window("my-team", "%99").unwrap();
 
         assert_eq!(wt, "dev:3");
         let cleared = with_state(|st| st.cleared.clone());
@@ -2041,7 +2041,7 @@ mod tests {
             }));
         });
 
-        let (wt, _data) = _find_team_window("my-team", "").unwrap();
+        let (wt, _data) = find_team_window("my-team", "").unwrap();
 
         assert_eq!(wt, "dev:3");
         let cleared = with_state(|st| st.cleared.clone());
@@ -2056,7 +2056,7 @@ mod tests {
             st.list_panes_full_or_none_fn = Some(Box::new(|_target| Some(Vec::new())));
         });
 
-        _gc_stale_team_windows(
+        gc_stale_team_windows(
             "my-team",
             "dev:3",
             &[
@@ -2125,7 +2125,7 @@ mod tests {
             }));
         });
 
-        _gc_stale_team_windows(
+        gc_stale_team_windows(
             "my-team",
             "dev:3",
             &[
@@ -2149,7 +2149,7 @@ mod tests {
             st.list_panes_full_or_none_fn = Some(Box::new(|_target| None));
         });
 
-        _gc_stale_team_windows(
+        gc_stale_team_windows(
             "my-team",
             "dev:3",
             &[
@@ -2190,7 +2190,7 @@ mod tests {
             }));
         });
 
-        let (wt, _data) = _find_team_window("0-2", "%40").unwrap();
+        let (wt, _data) = find_team_window("0-2", "%40").unwrap();
 
         assert_eq!(wt, "dev:3"); // prefer_pane window wins for routing
         let cleared: Vec<String> =
@@ -2359,7 +2359,7 @@ mod tests {
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].get("tmuxWindow").unwrap(), "dev:1");
         assert!(duplicate_team_bindings().unwrap().is_empty());
-        let (wt, _) = _find_team_window("honey", "").unwrap();
+        let (wt, _) = find_team_window("honey", "").unwrap();
         assert_eq!(wt, "dev:1");
         assert!(with_state(|st| st.cleared.is_empty()));
     }

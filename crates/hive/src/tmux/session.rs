@@ -1,10 +1,10 @@
-use super::run::_run;
+use super::run::run;
 use std::process::Command;
 
 // --- Session ---
 
 pub fn has_session(name: &str) -> bool {
-    match _run(&["has-session", "-t", name], false, 5) {
+    match run(&["has-session", "-t", name], false, 5) {
         Ok(r) => r.returncode == 0,
         // Python would raise OSError here (missing tmux); read it as "no".
         Err(_) => false,
@@ -15,7 +15,7 @@ pub fn has_session(name: &str) -> bool {
 pub fn new_session(name: &str, width: u32, height: u32) -> anyhow::Result<String> {
     let w = width.to_string();
     let h = height.to_string();
-    let r = _run(
+    let r = run(
         &[
             "new-session",
             "-d",
@@ -36,11 +36,11 @@ pub fn new_session(name: &str, width: u32, height: u32) -> anyhow::Result<String
 }
 
 pub fn kill_session(name: &str) {
-    let _ = _run(&["kill-session", "-t", name], false, 5);
+    let _ = run(&["kill-session", "-t", name], false, 5);
 }
 
 pub fn kill_window(target: &str) {
-    let _ = _run(&["kill-window", "-t", target], false, 5);
+    let _ = run(&["kill-window", "-t", target], false, 5);
 }
 
 /// Create a new tmux window in *session*. Returns (window_target, pane_id).
@@ -72,7 +72,7 @@ pub fn new_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"]);
-    let r = _run(&args, true, 5)?;
+    let r = run(&args, true, 5)?;
     let out = r.stdout.trim().to_string();
     match out.split_once('\t') {
         None => Ok((out, String::new())),
@@ -104,7 +104,7 @@ pub fn break_pane(
         args.push(name);
     }
     args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"]);
-    let r = _run(&args, true, 5)?;
+    let r = run(&args, true, 5)?;
     let out = r.stdout.trim().to_string();
     match out.split_once('\t') {
         None => Ok((out, pane_id.to_string())),
@@ -122,7 +122,7 @@ pub fn break_pane(
 /// Move pane *src* into *dst*'s window, left of *dst*, without selecting
 /// it. The window *src* leaves closes by itself when it was its only pane.
 pub fn join_pane_before(src: &str, dst: &str) {
-    let _ = _run(
+    let _ = run(
         &["join-pane", "-h", "-b", "-d", "-s", src, "-t", dst],
         false,
         5,
@@ -131,7 +131,7 @@ pub fn join_pane_before(src: &str, dst: &str) {
 
 /// Return (width, height) for *window_target*, or (0, 0) on error.
 pub fn window_size(window_target: &str) -> (u32, u32) {
-    let r = match _run(
+    let r = match run(
         &[
             "display-message",
             "-t",
@@ -157,7 +157,7 @@ pub fn window_size(window_target: &str) -> (u32, u32) {
 
 /// True when a pane in *window_target* is zoomed (unknown reads as False).
 pub fn window_zoomed(window_target: &str) -> bool {
-    match _run(
+    match run(
         &[
             "display-message",
             "-t",
@@ -195,7 +195,7 @@ pub fn exec_attach(session: &str, window_target: &str) -> anyhow::Result<()> {
 }
 
 pub fn select_window(window_target: &str) {
-    let _ = _run(&["select-window", "-t", window_target], false, 5);
+    let _ = run(&["select-window", "-t", window_target], false, 5);
 }
 
 /// Move the *calling client* to *window_target*.
@@ -204,5 +204,5 @@ pub fn select_window(window_target: &str) {
 /// job: it sets the current window of the window's own session, so a client
 /// attached to another session stays where it is.
 pub fn switch_client(window_target: &str) {
-    let _ = _run(&["switch-client", "-t", window_target], false, 5);
+    let _ = run(&["switch-client", "-t", window_target], false, 5);
 }

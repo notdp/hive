@@ -247,7 +247,7 @@ pub fn render(
     format!("\x1b[H\x1b[J{}", out.join("\n"))
 }
 
-extern "C" fn _restore_and_exit(_: libc::c_int) {
+extern "C" fn restore_and_exit(_: libc::c_int) {
     const RESTORE: &[u8] = b"\x1b[?1049l\x1b[?25h";
     unsafe {
         libc::write(1, RESTORE.as_ptr() as *const libc::c_void, RESTORE.len());
@@ -330,7 +330,7 @@ pub fn board_cmd(team: Option<&str>) -> i32 {
     print!("\x1b[?1049h\x1b[?25l");
     let _ = std::io::stdout().flush();
     unsafe {
-        let handler = _restore_and_exit as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        let handler = restore_and_exit as extern "C" fn(libc::c_int) as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }

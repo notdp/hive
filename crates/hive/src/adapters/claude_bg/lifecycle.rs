@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::adapters::claude_sessions::{_config_dir, truthy_str};
+use crate::adapters::claude_sessions::{config_dir, truthy_str};
 
 use super::engine::{hooked_engine_for_job, EngineSession};
-use super::keyboard::_strip_ansi;
+use super::keyboard::strip_ansi;
 use super::{
     looks_like_job_id, sleep_s, _AGENTS_TIMEOUT, _ENTRY_POLL_INTERVAL, _SPAWN_TIMEOUT,
     _WAKE_ENTRY_TIMEOUT, _WAKE_TIMEOUT,
@@ -42,7 +42,7 @@ pub fn bg_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String
                 || k == "GROK_SESSION_ID")
         })
         .collect();
-    let config = _config_dir();
+    let config = config_dir();
     let home_default = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude");
     if config != home_default {
         env.insert(
@@ -127,7 +127,7 @@ pub fn list_jobs(claude_bin: &str) -> Option<Vec<Map<String, Value>>> {
     if code != 0 {
         return None;
     }
-    let rows: Value = serde_json::from_str(&_strip_ansi(&stdout)).ok()?;
+    let rows: Value = serde_json::from_str(&strip_ansi(&stdout)).ok()?;
     let rows = rows.as_array()?;
     Some(
         rows.iter()
@@ -164,7 +164,7 @@ pub fn job_exists(job_id: &str, claude_bin: &str) -> bool {
 }
 
 /// `backgrounded\s*·\s*(\S+)` over the ANSI-stripped spawn stdout.
-fn _spawn_announced(plain: &str) -> String {
+fn spawn_announced(plain: &str) -> String {
     let chars: Vec<char> = plain.chars().collect();
     let key: Vec<char> = "backgrounded".chars().collect();
     let n = chars.len();
@@ -223,7 +223,7 @@ pub fn spawn_job(
     if code != 0 {
         return None;
     }
-    let announced = _spawn_announced(&_strip_ansi(&stdout));
+    let announced = spawn_announced(&strip_ansi(&stdout));
     // The announcement is stdout, not a contract: an escape hive does not
     // strip (the FORCE_COLOR class) or a reworded line yields a token no
     // registry row can ever carry as its `jobId`, and the caller would poll

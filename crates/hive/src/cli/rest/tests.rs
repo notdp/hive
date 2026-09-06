@@ -16,7 +16,7 @@ fn args(items: &[&str]) -> Vec<String> {
 fn test_attach_backfills_only_missing_attachable_members() {
     let rendered: std::collections::HashSet<String> =
         ["orch".to_string(), "scout".to_string()].into();
-    let picked = _members_to_backfill(
+    let picked = members_to_backfill(
         &rendered,
         vec![
             member_row("orch", "claude", "sid-1"),  // already rendered
@@ -79,7 +79,7 @@ type Argv = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
 /// rows the team window already has (`_PANE_BASE_FMT` order, tab-joined).
 /// The caller's own session `dev` exists.
 ///
-/// Two seams, because `_find_team_window` resolves tmux through `team.rs`'s
+/// Two seams, because `find_team_window` resolves tmux through `team.rs`'s
 /// own fake in test builds while `attach.rs` calls the real module. Only the
 /// real module's argv is recorded — which is the half that writes.
 fn fake_tmux(windows: &'static str, panes: &'static [&'static str]) -> Argv {
@@ -142,7 +142,7 @@ fn fake_tmux_sessions(
     };
     {
         let listing = listing.clone();
-        crate::team::_set_fake_tmux_run(move |args, _check| {
+        crate::team::set_fake_tmux_run(move |args, _check| {
             Ok(crate::tmux::Run {
                 returncode: 0,
                 stdout: if args[0] == "list-windows" {
@@ -156,7 +156,7 @@ fn fake_tmux_sessions(
     }
     {
         let built = std::rc::Rc::clone(&built);
-        crate::team::_set_fake_tmux_panes(move |target| {
+        crate::team::set_fake_tmux_panes(move |target| {
             built
                 .borrow()
                 .iter()
@@ -189,7 +189,7 @@ fn fake_tmux_sessions(
         .map_or(1, |n| n + 1);
     let mut live_sessions: Vec<String> = sessions.iter().map(|s| s.to_string()).collect();
     let mut created_session: Option<String> = None;
-    crate::tmux::_set_run_override(move |args, _check, _timeout| {
+    crate::tmux::set_run_override(move |args, _check, _timeout| {
         recorded.borrow_mut().push(args.to_vec());
         let mut returncode = 0;
         let session = created_session.clone().unwrap_or_else(|| "dev".to_string());
@@ -428,7 +428,7 @@ fn test_attach_names_the_missing_team_before_looking_at_tmux() {
     let _env = display_env();
     let argv = fake_tmux("", &[]);
 
-    let message = _team_entry("ghost").unwrap_err();
+    let message = team_entry("ghost").unwrap_err();
 
     assert!(message.contains("hive ls"), "{message}");
     assert!(argv.borrow().is_empty());
@@ -569,7 +569,7 @@ fn test_attach_heal_outside_tmux_builds_the_team_session() {
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
     // Not `attach_cmd`: outside tmux it would exec `tmux attach`.
-    let (window, built) = _ensure_team_display(&crate::registry::load("honey").unwrap());
+    let (window, built) = ensure_team_display(&crate::registry::load("honey").unwrap());
 
     assert!(built);
     // The window's index is read back from tmux, never assumed to be 0.
@@ -632,7 +632,7 @@ fn test_attach_heal_outside_tmux_reuses_a_session_named_after_the_team() {
     .unwrap();
     let argv = fake_tmux_sessions("", &[], &[], &["honey"]);
 
-    let (_window, built) = _ensure_team_display(&crate::registry::load("honey").unwrap());
+    let (_window, built) = ensure_team_display(&crate::registry::load("honey").unwrap());
 
     assert!(built);
     assert_eq!(count(&argv, "new-session"), 0);
@@ -658,7 +658,7 @@ fn test_team_session_is_matched_by_exact_name_never_by_prefix() {
     // bare `-t hornet` would resolve to it and put the team window there.
     let argv = fake_tmux_sessions("", &[], &[], &["hornet-x"]);
 
-    let (window, first_pane, created) = _new_team_session_window("hornet").unwrap();
+    let (window, first_pane, created) = new_team_session_window("hornet").unwrap();
 
     assert!(created);
     assert_eq!(window, "hornet:1");
@@ -755,7 +755,7 @@ fn test_delete_from_inside_the_team_window_leaves_it_to_the_caller() {
         &["dev", "honey"],
     );
 
-    core_cmds::_delete_team("honey", &ws, false).unwrap();
+    core_cmds::delete_team("honey", &ws, false).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert_eq!(count(&argv, "kill-window"), 0);
@@ -774,7 +774,7 @@ fn test_delete_from_outside_closes_the_window_hive_built() {
         &["honey"],
     );
 
-    core_cmds::_delete_team("honey", &ws, false).unwrap();
+    core_cmds::delete_team("honey", &ws, false).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
@@ -794,7 +794,7 @@ fn test_delete_leaves_a_window_the_callers_session_lent() {
         &["dev"],
     );
 
-    core_cmds::_delete_team("honey", &ws, false).unwrap();
+    core_cmds::delete_team("honey", &ws, false).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert_eq!(count(&argv, "kill-window"), 0);
@@ -818,7 +818,7 @@ fn test_delete_kills_the_hidden_mirror_window_before_the_team_window() {
         &["honey"],
     );
 
-    core_cmds::_delete_team("honey", &ws, false).unwrap();
+    core_cmds::delete_team("honey", &ws, false).unwrap();
 
     let kills: Vec<Vec<String>> = argv
         .borrow()
@@ -857,7 +857,7 @@ fn test_delete_without_the_flag_removes_only_team_json_from_the_team_dir() {
     let ws = team_on_its_own_dir(&env);
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_delete_team("honey", "", false).unwrap();
+    core_cmds::delete_team("honey", "", false).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert!(!ws.join("team.json").exists());
@@ -872,7 +872,7 @@ fn test_delete_with_the_flag_removes_the_whole_team_dir() {
     let ws = team_on_its_own_dir(&env);
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_delete_team("honey", "", true).unwrap();
+    core_cmds::delete_team("honey", "", true).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert!(!ws.exists(), "{}", ws.display());
@@ -889,7 +889,7 @@ fn test_delete_without_an_entry_ignores_a_workspace_named_by_the_environment() {
     env.env.set("CR_WORKSPACE", &stranger);
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_delete_team("honey", "", true).unwrap();
+    core_cmds::delete_team("honey", "", true).unwrap();
 
     assert!(stranger.join("artifacts").is_dir());
     assert!(!team_dir(&env, "honey").exists());
@@ -911,7 +911,7 @@ fn test_delete_never_removes_an_external_workspace_without_the_flag() {
     .unwrap();
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_delete_team("honey", "", false).unwrap();
+    core_cmds::delete_team("honey", "", false).unwrap();
 
     assert!(crate::registry::load("honey").is_none());
     assert!(external.join("hive.db").is_file());
@@ -921,7 +921,7 @@ fn test_delete_never_removes_an_external_workspace_without_the_flag() {
 
     // with the flag, the external workspace goes too
     crate::registry::record_team("honey", external.to_str().unwrap(), "200.0", &[], "@7").unwrap();
-    core_cmds::_delete_team("honey", "", true).unwrap();
+    core_cmds::delete_team("honey", "", true).unwrap();
     assert!(!external.exists());
     assert!(!team_dir(&env, "honey").exists());
 }
@@ -939,7 +939,7 @@ fn test_attach_heal_builds_a_window_for_a_team_with_no_attachable_member() {
     .unwrap();
     let argv = fake_tmux("", &[]);
 
-    let (_window, built) = _ensure_team_display(&crate::registry::load("honey").unwrap());
+    let (_window, built) = ensure_team_display(&crate::registry::load("honey").unwrap());
 
     // The window exists for the team, not for its members: nobody rides a
     // pane, so the first pane stays a shell and no viewer is launched.
@@ -958,26 +958,26 @@ fn test_attach_heal_builds_a_window_for_a_team_with_no_attachable_member() {
 #[test]
 fn test_a_following_flag_is_not_the_value() {
     let a = args(&["--resume", "-m", "grok-4"]);
-    assert_eq!(_grok_opt_value(&a, &["--resume"]), None);
-    assert_eq!(_codex_opt_value(&a, &["--resume"]), None);
+    assert_eq!(grok_opt_value(&a, &["--resume"]), None);
+    assert_eq!(codex_opt_value(&a, &["--resume"]), None);
 }
 
 #[test]
 fn test_a_trailing_bare_option_has_no_value() {
     let a = args(&["--resume"]);
-    assert_eq!(_grok_opt_value(&a, &["--resume"]), None);
-    assert_eq!(_codex_opt_value(&a, &["--resume"]), None);
+    assert_eq!(grok_opt_value(&a, &["--resume"]), None);
+    assert_eq!(codex_opt_value(&a, &["--resume"]), None);
 }
 
 #[test]
 fn test_a_real_value_still_reads() {
     let a = args(&["--resume", "old-sid", "-m", "grok-4"]);
     assert_eq!(
-        _grok_opt_value(&a, &["--resume"]),
+        grok_opt_value(&a, &["--resume"]),
         Some("old-sid".to_string())
     );
     assert_eq!(
-        _codex_opt_value(&a, &["--resume"]),
+        codex_opt_value(&a, &["--resume"]),
         Some("old-sid".to_string())
     );
 }
@@ -986,11 +986,11 @@ fn test_a_real_value_still_reads() {
 fn test_the_equals_form_still_reads() {
     let a = args(&["--resume=old-sid"]);
     assert_eq!(
-        _grok_opt_value(&a, &["--resume"]),
+        grok_opt_value(&a, &["--resume"]),
         Some("old-sid".to_string())
     );
     assert_eq!(
-        _codex_opt_value(&a, &["--resume"]),
+        codex_opt_value(&a, &["--resume"]),
         Some("old-sid".to_string())
     );
 }
@@ -998,11 +998,11 @@ fn test_the_equals_form_still_reads() {
 #[test]
 fn test_codex_cwd_does_not_swallow_the_next_flag() {
     assert_eq!(
-        _codex_opt_value(&args(&["--cd", "--model", "x"]), &["--cd", "-C"]),
+        codex_opt_value(&args(&["--cd", "--model", "x"]), &["--cd", "-C"]),
         None
     );
     assert_eq!(
-        _codex_opt_value(&args(&["--cd", "/tmp/w", "--model", "x"]), &["--cd", "-C"]),
+        codex_opt_value(&args(&["--cd", "/tmp/w", "--model", "x"]), &["--cd", "-C"]),
         Some("/tmp/w".to_string())
     );
 }
@@ -1012,7 +1012,7 @@ fn test_grok_resume_before_a_flag_leaves_the_pane_unrecorded() {
     // a bare --resume opens grok's picker: hive cannot know the session id,
     // so it records nothing rather than recording the next flag
     assert_eq!(
-        _grok_launch_session(&args(&["--resume", "-m", "grok-4"])),
+        grok_launch_session(&args(&["--resume", "-m", "grok-4"])),
         (None, false)
     );
 }
@@ -1020,14 +1020,14 @@ fn test_grok_resume_before_a_flag_leaves_the_pane_unrecorded() {
 #[test]
 fn test_grok_resume_with_an_id_records_that_session() {
     assert_eq!(
-        _grok_launch_session(&args(&["--resume", "old-sid"])),
+        grok_launch_session(&args(&["--resume", "old-sid"])),
         (Some("old-sid".to_string()), false)
     );
 }
 
 #[test]
 fn test_grok_bare_launch_mints_a_session_and_passes_the_flag() {
-    let (sid, pass_flag) = _grok_launch_session(&args(&["-m", "grok-4"]));
+    let (sid, pass_flag) = grok_launch_session(&args(&["-m", "grok-4"]));
     assert!(pass_flag);
     assert_eq!(sid.expect("minted session id").len(), 36);
 }
@@ -1037,14 +1037,14 @@ fn test_grok_bare_launch_mints_a_session_and_passes_the_flag() {
 #[test]
 fn test_derives_plain_padded_format() {
     assert_eq!(
-        _derive_pr_window_status(Some("  #I #W  ")),
+        derive_pr_window_status(Some("  #I #W  ")),
         Some("  #{?#{@hive-pr},PR#{@hive-pr},#I} #W  ".to_string())
     );
 }
 
 #[test]
 fn test_preserves_style_wrappers_and_padding() {
-    let derived = _derive_pr_window_status(Some("#[bg=yellow,fg=black,bold]  #I #W  #[default]"));
+    let derived = derive_pr_window_status(Some("#[bg=yellow,fg=black,bold]  #I #W  #[default]"));
     assert_eq!(
         derived,
         Some(
@@ -1056,7 +1056,7 @@ fn test_preserves_style_wrappers_and_padding() {
 
 #[test]
 fn test_derives_tmux_default_format() {
-    let derived = _derive_pr_window_status(Some("#I:#W#{?window_flags,#{window_flags}, }"));
+    let derived = derive_pr_window_status(Some("#I:#W#{?window_flags,#{window_flags}, }"));
     assert_eq!(
         derived,
         Some("#{?#{@hive-pr},PR#{@hive-pr},#I}:#W#{?window_flags,#{window_flags}, }".to_string())
@@ -1066,31 +1066,31 @@ fn test_derives_tmux_default_format() {
 #[test]
 fn test_skips_when_global_already_references_hive_pr() {
     assert_eq!(
-        _derive_pr_window_status(Some("#{?#{@hive-pr},PR#{@hive-pr},#I}:#W")),
+        derive_pr_window_status(Some("#{?#{@hive-pr},PR#{@hive-pr},#I}:#W")),
         None
     );
 }
 
 #[test]
 fn test_skips_when_no_index_token() {
-    assert_eq!(_derive_pr_window_status(Some("#W only")), None);
+    assert_eq!(derive_pr_window_status(Some("#W only")), None);
 }
 
 #[test]
 fn test_skips_empty_or_missing_global() {
-    assert_eq!(_derive_pr_window_status(None), None);
-    assert_eq!(_derive_pr_window_status(Some("")), None);
+    assert_eq!(derive_pr_window_status(None), None);
+    assert_eq!(derive_pr_window_status(Some("")), None);
 }
 
 #[test]
 fn test_escaped_literal_hash_i_is_not_rewritten() {
     // `##I` renders a literal `#I` — not a replaceable index token, so skip.
-    assert_eq!(_derive_pr_window_status(Some("##I #W")), None);
+    assert_eq!(derive_pr_window_status(Some("##I #W")), None);
 }
 
 #[test]
 fn test_replaces_real_tokens_and_leaves_escaped_ones() {
-    let derived = _derive_pr_window_status(Some("#I #W ##I #I"));
+    let derived = derive_pr_window_status(Some("#I #W ##I #I"));
     assert_eq!(
         derived,
         Some(format!("{_PR_INDEX_TOKEN} #W ##I {_PR_INDEX_TOKEN}"))
@@ -1116,8 +1116,8 @@ fn test_a_member_pane_mints_the_member_name_for_claude() {
         (("%179", "hive-team"), "honey"),
         (("%179", "hive-agent"), "worker"),
     ];
-    let label = _pane_member_label_via(tags_lookup(&mapping), "%179");
-    assert_eq!(_mint_name(label, "%179"), "honey.worker");
+    let label = pane_member_label_via(tags_lookup(&mapping), "%179");
+    assert_eq!(mint_name(label, "%179"), "honey.worker");
 }
 
 #[test]
@@ -1126,22 +1126,22 @@ fn test_a_member_pane_mints_the_member_name_for_codex() {
         (("%9", "hive-team"), "comb"),
         (("%9", "hive-agent"), "validator"),
     ];
-    let label = _pane_member_label_via(tags_lookup(&mapping), "%9");
-    assert_eq!(_mint_name(label, "%9"), "comb.validator");
+    let label = pane_member_label_via(tags_lookup(&mapping), "%9");
+    assert_eq!(mint_name(label, "%9"), "comb.validator");
 }
 
 #[test]
 fn test_an_untagged_pane_falls_back_to_the_pane_placeholder() {
     let mapping: [((&str, &str), &str); 0] = [];
-    let label = _pane_member_label_via(tags_lookup(&mapping), "%42");
-    assert_eq!(_mint_name(label, "%42"), "hive-42");
+    let label = pane_member_label_via(tags_lookup(&mapping), "%42");
+    assert_eq!(mint_name(label, "%42"), "hive-42");
 }
 
 #[test]
 fn test_a_half_tagged_pane_is_not_a_member() {
     let mapping = [(("%7", "hive-team"), "honey")];
-    let label = _pane_member_label_via(tags_lookup(&mapping), "%7");
-    assert_eq!(_mint_name(label, "%7"), "hive-7");
+    let label = pane_member_label_via(tags_lookup(&mapping), "%7");
+    assert_eq!(mint_name(label, "%7"), "hive-7");
 }
 
 // --- launcher scanning / resume parsing ---
@@ -1149,34 +1149,34 @@ fn test_a_half_tagged_pane_is_not_a_member() {
 #[test]
 fn test_codex_subcommand_index_skips_global_options() {
     assert_eq!(
-        _codex_subcommand_index(&args(&["-c", "k=v", "exec"])),
+        codex_subcommand_index(&args(&["-c", "k=v", "exec"])),
         Some(2)
     );
-    assert_eq!(_codex_subcommand_index(&args(&["resume", "sid"])), Some(0));
-    assert_eq!(_codex_subcommand_index(&args(&["-m", "gpt"])), None);
+    assert_eq!(codex_subcommand_index(&args(&["resume", "sid"])), Some(0));
+    assert_eq!(codex_subcommand_index(&args(&["-m", "gpt"])), None);
 }
 
 #[test]
 fn test_codex_positional_after_skips_flags() {
     let a = args(&["resume", "--model", "x", "sid-1"]);
-    assert_eq!(_codex_positional_after(&a, 0), Some("sid-1".to_string()));
-    assert_eq!(_codex_positional_after(&args(&["resume"]), 0), None);
+    assert_eq!(codex_positional_after(&a, 0), Some("sid-1".to_string()));
+    assert_eq!(codex_positional_after(&args(&["resume"]), 0), None);
 }
 
 #[test]
 fn test_claude_resume_arg_shapes() {
-    assert_eq!(_claude_resume_arg(&args(&[])), (false, None));
-    assert_eq!(_claude_resume_arg(&args(&["--resume"])), (true, None));
+    assert_eq!(claude_resume_arg(&args(&[])), (false, None));
+    assert_eq!(claude_resume_arg(&args(&["--resume"])), (true, None));
     assert_eq!(
-        _claude_resume_arg(&args(&["-r", "abc"])),
+        claude_resume_arg(&args(&["-r", "abc"])),
         (true, Some("abc".to_string()))
     );
     assert_eq!(
-        _claude_resume_arg(&args(&["--resume=abc"])),
+        claude_resume_arg(&args(&["--resume=abc"])),
         (true, Some("abc".to_string()))
     );
-    assert_eq!(_claude_resume_arg(&args(&["--resume", "-m"])), (true, None));
-    assert_eq!(_claude_resume_arg(&args(&["--resume="])), (true, None));
+    assert_eq!(claude_resume_arg(&args(&["--resume", "-m"])), (true, None));
+    assert_eq!(claude_resume_arg(&args(&["--resume="])), (true, None));
 }
 
 // --- fork split choice ---
@@ -1184,27 +1184,27 @@ fn test_claude_resume_arg_shapes() {
 #[test]
 fn test_choose_fork_split_prefers_fitting_direction() {
     // Both fit: wide window goes horizontal only at >= 2.5x aspect.
-    assert!(_choose_fork_split(300, 60));
-    assert!(!_choose_fork_split(200, 100));
+    assert!(choose_fork_split(300, 60));
+    assert!(!choose_fork_split(200, 100));
     // Only horizontal fits.
-    assert!(_choose_fork_split(200, 30));
+    assert!(choose_fork_split(200, 30));
     // Only vertical fits.
-    assert!(!_choose_fork_split(100, 60));
+    assert!(!choose_fork_split(100, 60));
     // Neither fits: highest score wins (h_score 0.9875 vs v_score 0.45).
-    assert!(_choose_fork_split(159, 20));
-    assert!(!_choose_fork_split(80, 41));
+    assert!(choose_fork_split(159, 20));
+    assert!(!choose_fork_split(80, 41));
 }
 
 // --- config value parsing ---
 
 #[test]
 fn test_parse_config_value_shapes() {
-    assert_eq!(_parse_config_value("true"), Value::Bool(true));
-    assert_eq!(_parse_config_value(" FALSE "), Value::Bool(false));
-    assert_eq!(_parse_config_value("42"), json!(42));
-    assert_eq!(_parse_config_value("1.5"), json!(1.5));
+    assert_eq!(parse_config_value("true"), Value::Bool(true));
+    assert_eq!(parse_config_value(" FALSE "), Value::Bool(false));
+    assert_eq!(parse_config_value("42"), json!(42));
+    assert_eq!(parse_config_value("1.5"), json!(1.5));
     assert_eq!(
-        _parse_config_value("hello"),
+        parse_config_value("hello"),
         Value::String("hello".to_string())
     );
 }
@@ -1331,11 +1331,11 @@ fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
 
     // no --task: nothing is required, nothing is resolved
     assert_eq!(
-        spawn::_task_dispatch_workspace(&workspaceless, None).unwrap(),
+        spawn::task_dispatch_workspace(&workspaceless, None).unwrap(),
         None
     );
 
-    let err = spawn::_task_dispatch_workspace(&workspaceless, Some("/tmp/task.md"))
+    let err = spawn::task_dispatch_workspace(&workspaceless, Some("/tmp/task.md"))
         .expect_err("a task dispatch with no workspace must refuse");
     assert!(err.to_string().contains("workspace not found"), "{err}");
 
@@ -1345,7 +1345,7 @@ fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
         ..Default::default()
     };
     assert_eq!(
-        spawn::_task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
+        spawn::task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
         Some("/tmp/ws-hn".to_string())
     );
 }
@@ -1357,7 +1357,7 @@ fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
 // crosses answered by their own hooks. The oracle is always something the
 // handler left behind — a registry row, a recorded request, an argv.
 
-/// Healthy identity for the hived hook's ping, so `_ensure_team_hived`
+/// Healthy identity for the hived hook's ping, so `start_team_hived`
 /// believes a hived is up and starts none. Every other request still goes
 /// to the real workspace socket: unanswered when nothing listens there,
 /// answered by `fake_hived` when a test binds it.
@@ -1395,7 +1395,7 @@ struct FakeHived {
 impl FakeHived {
     fn bind(workspace: &str) -> FakeHived {
         use std::io::{Read, Write};
-        let path = crate::hived::_socket_path(workspace);
+        let path = crate::hived::socket_path(workspace);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -1460,7 +1460,7 @@ fn test_doctor_without_a_reachable_hived_reports_run_dir_and_logs() {
         ..Default::default()
     };
 
-    let (report, healthy) = core_cmds::_doctor_report(&mut t, &ws, "orch");
+    let (report, healthy) = core_cmds::doctor_report(&mut t, &ws, "orch");
 
     assert!(!healthy);
     let workspace = std::path::Path::new(&ws);
@@ -1485,7 +1485,7 @@ fn test_doctor_without_a_reachable_hived_reports_run_dir_and_logs() {
     assert!(report.get("duplicateTeams").is_none());
     // The hook answered the ping, so no hived was started, and the socket
     // the doctor request then looked for is still absent.
-    assert!(!crate::hived::_socket_path(&ws).exists());
+    assert!(!crate::hived::socket_path(&ws).exists());
     // Read-only on tmux: window identity and duplicate-binding lookups.
     assert!(argv
         .borrow()
@@ -1638,7 +1638,7 @@ fn test_create_outside_tmux_builds_the_team_session_and_records_the_display() {
     let env = display_env_outside();
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_create_detached_team("honey", "", "", false, &["k=v".to_string()]);
+    core_cmds::create_detached_team("honey", "", "", false, &["k=v".to_string()]);
 
     assert!(has_row(
         &argv,
@@ -1709,7 +1709,7 @@ fn test_create_outside_tmux_resets_a_recycled_names_leftover_workspace() {
     std::fs::write(ws.join("hive.db"), "stale").unwrap();
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_create_detached_team("honey", "", "", false, &[]);
+    core_cmds::create_detached_team("honey", "", "", false, &[]);
 
     assert!(crate::registry::load("honey").is_some());
     assert!(!ws.join("artifacts").join("old.md").exists());
@@ -1724,7 +1724,7 @@ fn test_create_outside_tmux_honours_an_explicit_workspace_beside_the_team_dir() 
     std::fs::write(external.join("artifacts").join("keep.md"), "x").unwrap();
     let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_create_detached_team("honey", "", external.to_str().unwrap(), false, &[]);
+    core_cmds::create_detached_team("honey", "", external.to_str().unwrap(), false, &[]);
 
     let entry = crate::registry::load("honey").expect("team recorded");
     assert_eq!(
@@ -1820,7 +1820,7 @@ fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_on_a_mirror_p
     let _hived = hived_answering_ping("honey");
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_create_detached_team("honey", "", "", false, &[]);
+    core_cmds::create_detached_team("honey", "", "", false, &[]);
 
     let entry = crate::registry::load("honey").expect("team recorded");
     let mut orch = Map::new();
@@ -1876,7 +1876,7 @@ fn test_create_outside_tmux_without_a_session_installs_the_bar_but_no_mirror_chi
     env.env.set("HIVE_BIN", "/x/hive");
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_create_detached_team("honey", "", "", false, &[]);
+    core_cmds::create_detached_team("honey", "", "", false, &[]);
 
     assert_status_bar_installed(&argv);
     assert!(argv
@@ -1892,12 +1892,12 @@ fn test_pane_role_draws_the_mirror_unless_the_preference_is_off() {
     let argv = fake_tmux_tagged("dev:1\t@7\thoney\t\t\t\n", &[], &[]);
     let orch = member_row("orch", "claude", "s-me");
 
-    assert_eq!(_pane_role(None, &orch), Some("mirror"));
-    assert_eq!(_pane_role(Some(true), &orch), Some("mirror"));
-    assert_eq!(_pane_role(Some(false), &orch), None);
+    assert_eq!(pane_role(None, &orch), Some("mirror"));
+    assert_eq!(pane_role(Some(true), &orch), Some("mirror"));
+    assert_eq!(pane_role(Some(false), &orch), None);
     // An engine member never mirrors, whatever the window records.
     assert_eq!(
-        _pane_role(Some(false), &member_row("sage", "grok", "sid")),
+        pane_role(Some(false), &member_row("sage", "grok", "sid")),
         Some("agent")
     );
     assert_eq!(count(&argv, "set-window-option"), 0);
@@ -2171,7 +2171,7 @@ fn test_mirror_off_breaks_the_pane_into_the_team_session_records_off_and_retiles
         &["dev", "honey"],
     );
 
-    assert_eq!(_mirror("off", ""), Ok("mirror off (honey)".to_string()));
+    assert_eq!(mirror("off", ""), Ok("mirror off (honey)".to_string()));
 
     assert!(has_row(
         &argv,
@@ -2214,7 +2214,7 @@ fn test_mirror_off_without_a_team_session_parks_the_pane_in_the_callers_session(
         &[("dev:1", "hive-team", "honey")],
     );
 
-    assert_eq!(_mirror("off", ""), Ok("mirror off (honey)".to_string()));
+    assert_eq!(mirror("off", ""), Ok("mirror off (honey)".to_string()));
 
     let mut row = vec!["break-pane", "-s", "%1", "-d"];
     row.extend(&_BREAK_PANE_TAIL);
@@ -2235,7 +2235,7 @@ fn test_mirror_off_refuses_when_the_mirror_is_the_only_pane() {
         &[("dev:1", "hive-team", "honey")],
     );
 
-    let err = _mirror("off", "").unwrap_err();
+    let err = mirror("off", "").unwrap_err();
 
     assert!(err.contains("only pane"), "{err}");
     // A refusal records nothing: the mirror is still on screen.
@@ -2254,7 +2254,7 @@ fn test_mirror_off_without_a_mirror_records_off_and_leaves_the_window_alone() {
     );
 
     assert_eq!(
-        _mirror("off", ""),
+        mirror("off", ""),
         Ok("mirror off (honey): no mirror".to_string())
     );
 
@@ -2280,16 +2280,13 @@ fn test_mirror_off_refuses_from_the_mirror_pane_but_not_with_window() {
         &[("dev:1", "hive-team", "honey")],
     );
 
-    let err = _mirror("off", "").unwrap_err();
+    let err = mirror("off", "").unwrap_err();
     assert!(err.contains("mirror"), "{err}");
     assert_eq!(count(&argv, "break-pane"), 0);
     assert!(argv.borrow().iter().all(|a| a[0] != "set-window-option"));
 
     // The bindings name the window; a click is never "from" a pane.
-    assert_eq!(
-        _mirror("off", "dev:1"),
-        Ok("mirror off (honey)".to_string())
-    );
+    assert_eq!(mirror("off", "dev:1"), Ok("mirror off (honey)".to_string()));
     assert_eq!(count(&argv, "break-pane"), 1);
 }
 
@@ -2309,7 +2306,7 @@ fn test_mirror_on_joins_the_hidden_pane_first_and_retiles() {
         ],
     );
 
-    assert_eq!(_mirror("on", ""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(mirror("on", ""), Ok("mirror on (honey)".to_string()));
 
     assert!(has_row(
         &argv,
@@ -2338,7 +2335,7 @@ fn test_mirror_on_with_the_mirror_shown_says_so_and_leaves_the_window_alone() {
     );
 
     assert_eq!(
-        _mirror("on", ""),
+        mirror("on", ""),
         Ok("mirror on (honey): already shown".to_string())
     );
 
@@ -2365,7 +2362,7 @@ fn test_mirror_on_rebuilds_the_mirror_when_no_hidden_pane_exists() {
         ],
     );
 
-    assert_eq!(_mirror("on", ""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(mirror("on", ""), Ok("mirror on (honey)".to_string()));
 
     assert!(has_row(
         &argv,
@@ -2396,7 +2393,7 @@ fn test_mirror_on_with_nothing_to_show_says_so() {
     );
 
     assert_eq!(
-        _mirror("on", ""),
+        mirror("on", ""),
         Ok("mirror on (honey): no session mirror to show".to_string())
     );
 
@@ -2421,7 +2418,7 @@ fn test_mirror_on_joins_a_parked_rig_mirror_that_names_no_member() {
         ],
     );
 
-    assert_eq!(_mirror("on", ""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(mirror("on", ""), Ok("mirror on (honey)".to_string()));
 
     assert!(has_row(
         &argv,
@@ -2453,7 +2450,7 @@ fn test_mirror_on_leaves_another_members_parked_pane_alone() {
         ],
     );
 
-    assert_eq!(_mirror("on", ""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(mirror("on", ""), Ok("mirror on (honey)".to_string()));
 
     assert_eq!(count(&argv, "join-pane"), 0);
     assert_eq!(count(&argv, "split-window"), 1);
@@ -2475,10 +2472,10 @@ fn test_mirror_toggles_by_presence() {
     );
 
     // No mirror: the toggle shows one…
-    assert_eq!(_mirror("", ""), Ok("mirror on (honey)".to_string()));
+    assert_eq!(mirror("", ""), Ok("mirror on (honey)".to_string()));
     assert_eq!(count(&argv, "split-window"), 1);
     // …and with the mirror on screen the next toggle parks it.
-    assert_eq!(_mirror("", ""), Ok("mirror off (honey)".to_string()));
+    assert_eq!(mirror("", ""), Ok("mirror off (honey)".to_string()));
     assert_eq!(count(&argv, "break-pane"), 1);
     assert!(argv
         .borrow()
@@ -2501,15 +2498,12 @@ fn test_mirror_window_flag_names_the_window() {
         &[("dev:1", "hive-team", "honey")],
     );
 
-    assert!(_mirror("on", "").is_err());
+    assert!(mirror("on", "").is_err());
     assert_eq!(
-        _mirror("on", "dev:1"),
+        mirror("on", "dev:1"),
         Ok("mirror on (honey): already shown".to_string())
     );
-    assert_eq!(
-        _mirror("off", "dev:1"),
-        Ok("mirror off (honey)".to_string())
-    );
+    assert_eq!(mirror("off", "dev:1"), Ok("mirror off (honey)".to_string()));
     assert_eq!(count(&argv, "break-pane"), 1);
 }
 
@@ -2518,7 +2512,7 @@ fn test_mirror_outside_a_team_window_fails() {
     let _env = display_env();
     let _argv = fake_tmux("dev:1\t@7\t\t\t\t\n", &[]);
 
-    let err = _mirror("on", "").unwrap_err();
+    let err = mirror("on", "").unwrap_err();
 
     assert!(err.contains("hive ls"), "{err}");
 }
@@ -2556,7 +2550,7 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
         &["honey"],
     );
 
-    core_cmds::_join_as_ccd("honey", "");
+    core_cmds::join_as_ccd("honey", "");
 
     let joined = joined_session_row("honey");
     assert_eq!(joined["cli"], Value::from("claude"));
@@ -2593,7 +2587,7 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
     .unwrap();
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    core_cmds::_join_as_ccd("honey", "");
+    core_cmds::join_as_ccd("honey", "");
 
     joined_session_row("honey");
     assert!(has_row(
@@ -2645,7 +2639,7 @@ fn test_inject_types_into_the_members_pane_and_refuses_a_pane_with_no_composer()
 
     // A grok member: the text and Enter go to that member's pane.
     crate::agent::testhook::with(|h| h.resolve_profile_name = Some("grok".to_string()));
-    let report = _inject_report(&t, "sage", "hello sage").unwrap();
+    let report = inject_report(&t, "sage", "hello sage").unwrap();
     assert_eq!(report["pane"], Value::from("%2"));
     assert_eq!(report["member"], Value::from("sage"));
     assert_eq!(report["success"], Value::Bool(true));
@@ -2658,7 +2652,7 @@ fn test_inject_types_into_the_members_pane_and_refuses_a_pane_with_no_composer()
         h.job_id_for_pane = None;
         h.interactive_claude_pid = None;
     });
-    let err = _inject_report(&t, "bee", "hello bee")
+    let err = inject_report(&t, "bee", "hello bee")
         .unwrap_err()
         .to_string();
     assert!(
@@ -2668,9 +2662,7 @@ fn test_inject_types_into_the_members_pane_and_refuses_a_pane_with_no_composer()
     assert_eq!(calls(), Vec::<String>::new());
 
     // Not on the roster: named, and no pane is touched.
-    let err = _inject_report(&t, "ghost", "hello")
-        .unwrap_err()
-        .to_string();
+    let err = inject_report(&t, "ghost", "hello").unwrap_err().to_string();
     assert!(
         err.contains("member 'ghost' not found in team 'honey'"),
         "{err}"
@@ -2684,7 +2676,7 @@ fn test_capture_reads_the_members_own_pane() {
     let argv = fake_tmux("", &[]);
     let t = rendered_team();
 
-    let text = _capture_text(&t, "sage", 40).unwrap();
+    let text = capture_text(&t, "sage", 40).unwrap();
 
     // One capture, of sage's pane — not the caller's (%0) nor orch's.
     assert_eq!(
@@ -2692,7 +2684,7 @@ fn test_capture_reads_the_members_own_pane() {
         &[args(&["capture-pane", "-t", "%2", "-p", "-S", "-40"])]
     );
     assert_eq!(text, "");
-    let err = _capture_text(&t, "ghost", 40).unwrap_err().to_string();
+    let err = capture_text(&t, "ghost", 40).unwrap_err().to_string();
     assert!(
         err.contains("member 'ghost' not found in team 'honey'"),
         "{err}"
@@ -2708,7 +2700,7 @@ fn test_capture_reads_the_members_own_pane() {
 fn test_shell_init_script_parses_in_zsh_and_bash_and_defines_the_launchers() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("hive-init.sh");
-    std::fs::write(&path, _shell_init_script("zsh")).unwrap();
+    std::fs::write(&path, shell_init_script("zsh")).unwrap();
     let quoted = shlex_quote(&path.to_string_lossy());
     let run = |shell: &str, argv: &[&str]| {
         let out = std::process::Command::new(shell)
@@ -2757,13 +2749,13 @@ fn test_shell_init_script_parses_in_zsh_and_bash_and_defines_the_launchers() {
 #[test]
 fn test_shell_init_resolves_the_dialect_from_shell_env() {
     let mut env = EnvGuard::new();
-    assert_ne!(_shell_init_script("fish"), _shell_init_script("zsh"));
+    assert_ne!(shell_init_script("fish"), shell_init_script("zsh"));
     env.set("SHELL", "/opt/homebrew/bin/fish");
-    assert_eq!(_shell_init_script(""), _shell_init_script("fish"));
+    assert_eq!(shell_init_script(""), shell_init_script("fish"));
     env.set("SHELL", "/bin/bash");
-    assert_eq!(_shell_init_script(""), _shell_init_script("zsh"));
+    assert_eq!(shell_init_script(""), shell_init_script("zsh"));
     env.remove("SHELL");
-    assert_eq!(_shell_init_script(""), _shell_init_script("zsh"));
+    assert_eq!(shell_init_script(""), shell_init_script("zsh"));
 }
 
 #[test]
@@ -2777,10 +2769,10 @@ fn test_resume_hint_needs_a_tagged_member_pane_and_its_job_record() {
     );
 
     // A member pane with no job record: nothing to resume, no hint.
-    assert_eq!(_resume_hint("claude", "/tmp/w"), None);
+    assert_eq!(resume_hint("claude", "/tmp/w"), None);
 
     crate::adapters::claude_bg::write_pane_job("%5", "job-77", "sess-77", "/tmp/w").unwrap();
-    let hint = _resume_hint("claude", "/tmp/w").expect("a recorded job is resumable");
+    let hint = resume_hint("claude", "/tmp/w").expect("a recorded job is resumable");
     assert!(hint.starts_with("Resume from anywhere:\n  "), "{hint}");
     assert!(
         hint.contains("cd /tmp/w && hive claude --resume job-77"),
@@ -2790,5 +2782,5 @@ fn test_resume_hint_needs_a_tagged_member_pane_and_its_job_record() {
     // The record alone is not enough: an untagged pane is nobody's member.
     env.env.set("TMUX_PANE", "%6");
     crate::adapters::claude_bg::write_pane_job("%6", "job-78", "sess-78", "/tmp/w").unwrap();
-    assert_eq!(_resume_hint("claude", "/tmp/w"), None);
+    assert_eq!(resume_hint("claude", "/tmp/w"), None);
 }

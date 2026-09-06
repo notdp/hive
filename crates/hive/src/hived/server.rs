@@ -56,11 +56,11 @@ impl HivedServerApi for ServerSocket {
     }
 }
 
-pub fn _open_server_socket(workspace: &str) -> Result<ServerSocket> {
+pub(crate) fn open_server_socket(workspace: &str) -> Result<ServerSocket> {
     fs::create_dir_all(hooked_run_dir(workspace))?;
-    _cleanup_socket_impl(workspace);
-    let sock = _socket_path(workspace);
-    let link = _socket_link_path(workspace);
+    cleanup_socket_impl(workspace);
+    let sock = socket_path(workspace);
+    let link = socket_link_path(workspace);
     if sock != link {
         // Relocated socket: its directory is ours alone (0700), and the
         // in-tree name points at it so a human looking in run/ still
@@ -91,7 +91,7 @@ pub(super) fn err_response(error: impl std::fmt::Display) -> Map<String, Value> 
     map
 }
 
-pub fn _handle_request(
+pub(crate) fn handle_request(
     workspace: &str,
     team: &str,
     tmux_window: &str,
@@ -103,7 +103,7 @@ pub fn _handle_request(
     if let Some(f) = hookget(|h| h.handle_request.clone()).flatten() {
         return f(request);
     }
-    let hived = _hived_metadata(hived_started_at);
+    let hived = hived_metadata(hived_started_at);
     let action = request.get("action").and_then(Value::as_str).unwrap_or("");
     let team_in_request = || {
         let requested = map_get_str(request, "team");
@@ -126,7 +126,7 @@ pub fn _handle_request(
             (response, true)
         }
         "send" => {
-            let response = _send_payload(
+            let response = send_payload(
                 workspace,
                 &team_in_request(),
                 &map_get_str(request, "senderAgent"),
@@ -139,7 +139,7 @@ pub fn _handle_request(
             (response, true)
         }
         "doctor" => {
-            let response = _doctor_payload(
+            let response = doctor_payload(
                 workspace,
                 &team_in_request(),
                 &map_get_str(request, "agent"),
@@ -153,15 +153,15 @@ pub fn _handle_request(
             (response, true)
         }
         "team-runtime" => {
-            let response = _team_runtime_payload(&team_in_request()).unwrap_or_else(err_response);
+            let response = team_runtime_payload(&team_in_request()).unwrap_or_else(err_response);
             (response, true)
         }
         "runtime-snapshot" => {
-            let response = _runtime_snapshot_payload(&map_get_str(request, "pane"));
+            let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
             (response, true)
         }
         "thread" => {
-            let response = _thread_payload(workspace, &map_get_str(request, "msgId"))
+            let response = thread_payload(workspace, &map_get_str(request, "msgId"))
                 .unwrap_or_else(err_response);
             (response, true)
         }
@@ -188,7 +188,7 @@ pub fn _handle_request(
     }
 }
 
-fn _serve_connection(
+fn serve_connection(
     conn: UnixStream,
     workspace: &str,
     team: &str,
@@ -215,7 +215,7 @@ fn _serve_connection(
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     };
-    let (response, keep_running) = _handle_request(
+    let (response, keep_running) = handle_request(
         workspace,
         team,
         tmux_window,
@@ -238,11 +238,11 @@ fn _serve_connection(
 ///
 /// Handlers run on their own thread because their budgets differ by an order
 /// of magnitude: a delivery may hold the native transport for
-/// ``_send_request_timeout()`` while ``hive team`` / ``hive doctor`` give up
+/// ``send_request_timeout()`` while ``hive team`` / ``hive doctor`` give up
 /// after ``SOCKET_READY_TIMEOUT`` and report a missing hived. Serving them
 /// in accept order made one slow send fake the hived's death for every
 /// short read behind it.
-pub fn _serve_requests(
+pub(crate) fn serve_requests(
     server: &dyn HivedServerApi,
     workspace: &str,
     team: &str,
@@ -268,7 +268,7 @@ pub fn _serve_requests(
         let _ = thread::Builder::new()
             .name("hived-request".to_string())
             .spawn(move || {
-                _serve_connection(
+                serve_connection(
                     conn,
                     &workspace,
                     &team,

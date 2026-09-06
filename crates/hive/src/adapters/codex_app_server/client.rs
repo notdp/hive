@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 
-use super::transport::{WsConn, _ws_send_frame};
+use super::transport::{ws_send_frame, WsConn};
 use super::{_CALL_TIMEOUT, _HANDSHAKE_TIMEOUT, _RESUME_COOLDOWN};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,14 +37,14 @@ impl Default for ThreadRuntime {
     }
 }
 
-fn _now_epoch() -> f64 {
+fn now_epoch() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
-pub fn _apply_status(rt: &mut ThreadRuntime, status: &Value) {
+pub(crate) fn apply_status(rt: &mut ThreadRuntime, status: &Value) {
     match status.get("type").and_then(Value::as_str) {
         Some("active") => {
             rt.busy = true;
@@ -108,7 +108,7 @@ pub struct CodexDaemonClient {
     inner: Arc<Inner>,
 }
 
-fn _on_notification_state(inner: &Inner, method: &str, params: &Value) {
+fn on_notification_state(inner: &Inner, method: &str, params: &Value) {
     // thread/status/changed is the only busy-relevant notification a
     // non-turn-owning client receives on the shared daemon (turn/* and item/*
     // go to the turn's own client only).
@@ -121,11 +121,11 @@ fn _on_notification_state(inner: &Inner, method: &str, params: &Value) {
     };
     let mut state = inner.state.lock().unwrap();
     let rt = state.threads.entry(tid.to_string()).or_default();
-    rt.observed_at = _now_epoch();
-    _apply_status(rt, params.get("status").unwrap_or(&Value::Null));
+    rt.observed_at = now_epoch();
+    apply_status(rt, params.get("status").unwrap_or(&Value::Null));
 }
 
-fn _reader_loop(inner: Arc<Inner>, mut conn: WsConn) {
+fn reader_loop(inner: Arc<Inner>, mut conn: WsConn) {
     while !inner.closed.load(Ordering::SeqCst) {
         let txt = match conn.recv_text() {
             Ok(txt) => txt,
@@ -148,7 +148,7 @@ fn _reader_loop(inner: Arc<Inner>, mut conn: WsConn) {
         } else if let Some(method) = msg.get("method").and_then(Value::as_str) {
             if !method.is_empty() {
                 let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
-                _on_notification_state(&inner, method, &params);
+                on_notification_state(&inner, method, &params);
             }
         }
     }
@@ -168,7 +168,7 @@ impl CodexDaemonClient {
             call_override: Mutex::new(None),
         });
         let reader_inner = inner.clone();
-        let handle = thread::spawn(move || _reader_loop(reader_inner, conn));
+        let handle = thread::spawn(move || reader_loop(reader_inner, conn));
         *inner.reader.lock().unwrap() = Some(handle);
         Ok(CodexDaemonClient { inner })
     }
@@ -199,7 +199,7 @@ impl CodexDaemonClient {
             rid = *next_id;
             self.inner.pending.lock().unwrap().insert(rid, slot.clone());
             let payload = json!({"id": rid, "method": method, "params": params});
-            if let Err(err) = _ws_send_frame(stream, 0x1, payload.to_string().as_bytes()) {
+            if let Err(err) = ws_send_frame(stream, 0x1, payload.to_string().as_bytes()) {
                 self.inner.pending.lock().unwrap().remove(&rid);
                 return json!({"__error__": err.to_string()});
             }
@@ -225,18 +225,19 @@ impl CodexDaemonClient {
     }
 
     // ---- notification -> state ----
-    pub fn _on_notification(&self, method: &str, params: &Value) {
-        _on_notification_state(&self.inner, method, params);
+    #[cfg(test)]
+    pub(crate) fn on_notification(&self, method: &str, params: &Value) {
+        on_notification_state(&self.inner, method, params);
     }
 
-    fn _seed_status(&self, thread_id: &str, status: &Value) {
+    fn seed_status(&self, thread_id: &str, status: &Value) {
         if !status.is_object() {
             return;
         }
         let mut state = self.inner.state.lock().unwrap();
         let rt = state.threads.entry(thread_id.to_string()).or_default();
-        rt.observed_at = _now_epoch();
-        _apply_status(rt, status);
+        rt.observed_at = now_epoch();
+        apply_status(rt, status);
     }
 
     pub fn runtime_for(&self, thread_id: &str) -> Option<ThreadRuntime> {
@@ -326,7 +327,7 @@ impl CodexDaemonClient {
             None => return false,
         };
         if let Some(thread) = result.get("thread").filter(|t| t.is_object()) {
-            self._seed_status(thread_id, thread.get("status").unwrap_or(&Value::Null));
+            self.seed_status(thread_id, thread.get("status").unwrap_or(&Value::Null));
         }
         true
     }
@@ -338,7 +339,7 @@ impl CodexDaemonClient {
     /// (`thread/resume {excludeTurns}`), which reads the source rollout from
     /// disk and fails on a thread that has none. The name write is metadata
     /// only (state DB) and never materializes the file, so the flush is
-    /// `_flush_thread`, and the rollout's presence on disk is the oracle.
+    /// `flush_thread`, and the rollout's presence on disk is the oracle.
     /// *name* must be non-empty (the daemon rejects empty names).
     pub fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
         let mut params = Map::new();
@@ -352,10 +353,10 @@ impl CodexDaemonClient {
             .and_then(Value::as_object)?
             .get("thread")
             .and_then(Value::as_object)?;
-        let tid = _thread_id_from(thread)?;
-        self._seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let rollout = _thread_path_from(thread);
-        self._flush_thread(&tid, name, rollout.as_deref())
+        let tid = thread_id_from(thread)?;
+        self.seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
+        let rollout = thread_path_from(thread);
+        self.flush_thread(&tid, name, rollout.as_deref())
             .then_some(tid)
     }
 
@@ -371,7 +372,7 @@ impl CodexDaemonClient {
     /// itself, at the path `thread/start` reported: which call materializes
     /// has changed across codex versions, the file's presence is what the
     /// TUI's resume actually needs.
-    fn _flush_thread(&self, tid: &str, name: &str, rollout: Option<&Path>) -> bool {
+    fn flush_thread(&self, tid: &str, name: &str, rollout: Option<&Path>) -> bool {
         let named = self.call("thread/name/set", json!({"threadId": tid, "name": name}));
         if named.get("result").is_none() {
             return false;
@@ -394,10 +395,10 @@ impl CodexDaemonClient {
             .and_then(Value::as_object)?
             .get("thread")
             .and_then(Value::as_object)?;
-        let tid = _thread_id_from(thread)?;
-        self._seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let rollout = _thread_path_from(thread);
-        self._flush_thread(&tid, name, rollout.as_deref())
+        let tid = thread_id_from(thread)?;
+        self.seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
+        let rollout = thread_path_from(thread);
+        self.flush_thread(&tid, name, rollout.as_deref())
             .then_some(tid)
     }
 
@@ -476,7 +477,7 @@ impl CodexDaemonClient {
     pub fn close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
         if let Some(stream) = self.inner.stream.as_ref() {
-            let _ = _ws_send_frame(stream, 0x8, b"");
+            let _ = ws_send_frame(stream, 0x8, b"");
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
@@ -484,14 +485,14 @@ impl CodexDaemonClient {
 
 /// The rollout path the daemon precomputed for the thread (`Thread.path`),
 /// present before the file exists.
-fn _thread_path_from(thread: &Map<String, Value>) -> Option<std::path::PathBuf> {
+fn thread_path_from(thread: &Map<String, Value>) -> Option<std::path::PathBuf> {
     match thread.get("path") {
         Some(Value::String(path)) if !path.is_empty() => Some(std::path::PathBuf::from(path)),
         _ => None,
     }
 }
 
-fn _thread_id_from(thread: &Map<String, Value>) -> Option<String> {
+fn thread_id_from(thread: &Map<String, Value>) -> Option<String> {
     match thread.get("id") {
         Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
         Some(Value::Number(id)) => Some(id.to_string()),
@@ -499,7 +500,7 @@ fn _thread_id_from(thread: &Map<String, Value>) -> Option<String> {
     }
 }
 
-/// The client surface the pane-keyed API dials through `_shared_client`,
+/// The client surface the pane-keyed API dials through `shared_client`,
 /// and the seam tests substitute fakes through. `Err` is a transport
 /// failure a fake raises; the real client never errs here — `call` folds
 /// its failures into an `__error__` payload.

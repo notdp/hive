@@ -127,11 +127,11 @@ Design truth lives in these docs, one question each:
 ## Coding style & naming conventions
 
 Rust 2021, rustfmt defaults. Match the existing style: small focused
-functions, minimal comments, snake_case function names carried over from the
-retired Python implementation, leading underscore included
-(`_daemon_control_sock`), where it marks a Python-private ancestor and says
-nothing about Rust visibility. Do not strip those prefixes.
-`crates/hive/PORTING.md` records the port-era naming and JSON-compat rules.
+functions, minimal comments, plain snake_case names. Visibility is the
+keyword, never the name: no leading underscore on a function (the port-era
+`_name` prefixes are gone, and a `_` prefix also silences the dead-code
+lint, which hid unused code). A helper only tests call is `#[cfg(test)]`,
+not `pub`. `crates/hive/PORTING.md` records the port-era JSON-compat rules.
 Test names stay explicit, e.g. `test_wait_status_times_out_without_match`. Do
 not leave dead code: if a function becomes a no-op or unused, delete it along
 with all call sites instead of leaving an empty body.

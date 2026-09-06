@@ -2,7 +2,7 @@
 //!
 //! Context is stored **per tmux pane** so that multiple agents in the same
 //! window don't overwrite each other's identity. Pane identity resolves
-//! through the tmux facade (see `_context_file`); with no pane the file is
+//! through the tmux facade (see `context_file`); with no pane the file is
 //! `default.json`.
 
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ fn pane_slug(pane_id: &str) -> String {
 /// subprocess — codex (whose env TMUX_PANE is the shared daemon's frozen
 /// value, stripped by hive) or a claude bg engine (which has none at all) —
 /// still resolves its own pane via its thread/job record.
-pub fn _context_file() -> PathBuf {
+fn context_file() -> PathBuf {
     let pane = crate::tmux::get_current_pane_id().unwrap_or_default();
     context_dir().join(format!("{}.json", pane_slug(&pane)))
 }
@@ -95,7 +95,7 @@ fn read_context_map(path: &Path) -> Option<HashMap<String, String>> {
 }
 
 pub fn load_current_context() -> HashMap<String, String> {
-    let path = _context_file();
+    let path = context_file();
     if !path.exists() {
         // Migrate from legacy single-file if it exists
         let legacy = current_context_file();
@@ -125,7 +125,7 @@ fn write_context(path: PathBuf, team: &str, workspace: &str, agent: &str) -> Res
 }
 
 pub fn save_current_context(team: &str, workspace: &str, agent: &str) -> Result<PathBuf> {
-    write_context(_context_file(), team, workspace, agent)
+    write_context(context_file(), team, workspace, agent)
 }
 
 /// Write context for an arbitrary pane (used by hive create to pre-bind agents).
@@ -137,7 +137,7 @@ pub fn save_context_for_pane(
 ) -> Result<PathBuf> {
     let path = context_dir().join(format!("{}.json", pane_slug(pane_id)));
     let written = write_context(path, team, workspace, agent)?;
-    _prune_dead_pane_contexts(&written, _live_pane_ids());
+    prune_dead_pane_contexts(&written, live_pane_ids());
     Ok(written)
 }
 
@@ -148,7 +148,7 @@ pub fn save_context_for_pane(
 /// itself rather than the private prune underneath it. A test that installs
 /// no listing gets None — a unit test never queries the real tmux server,
 /// and "no listing" is the answer that prunes nothing.
-fn _live_pane_ids() -> Option<Vec<String>> {
+fn live_pane_ids() -> Option<Vec<String>> {
     #[cfg(test)]
     {
         tests::mocked_live_pane_ids()
@@ -169,7 +169,7 @@ fn _live_pane_ids() -> Option<Vec<String>> {
 /// `$HIVE_HOME` accumulates thousands. The listing is the only authority:
 /// a failed or empty one proves no pane dead and prunes nothing, and the
 /// file just written is kept whatever it says.
-fn _prune_dead_pane_contexts(keep: &Path, live_panes: Option<Vec<String>>) {
+fn prune_dead_pane_contexts(keep: &Path, live_panes: Option<Vec<String>>) {
     let Some(live) = live_panes.filter(|panes| !panes.is_empty()) else {
         return;
     };
@@ -202,7 +202,7 @@ pub fn clear_context_for_pane(pane_id: &str) {
 }
 
 pub fn clear_current_context() -> Result<()> {
-    let path = _context_file();
+    let path = context_file();
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -238,7 +238,7 @@ mod tests {
         static LIVE_PANES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     }
 
-    /// The listing `_live_pane_ids` answers with under test.
+    /// The listing `live_pane_ids` answers with under test.
     pub(super) fn mocked_live_pane_ids() -> Option<Vec<String>> {
         LIVE_PANES.with(|p| p.borrow().clone())
     }
@@ -259,7 +259,7 @@ mod tests {
     fn test_context_file_uses_tmux_pane_slug() {
         let (tmp, _guard) = setup(Some("%12"));
         assert_eq!(
-            _context_file(),
+            context_file(),
             tmp.path().join("contexts").join("pane-12.json")
         );
     }
@@ -268,7 +268,7 @@ mod tests {
     fn test_context_file_falls_back_to_default_without_tmux() {
         let (tmp, _guard) = setup(None);
         assert_eq!(
-            _context_file(),
+            context_file(),
             tmp.path().join("contexts").join("default.json")
         );
     }
@@ -389,7 +389,7 @@ mod tests {
         }
         let keep = dir.join("pane-99.json");
 
-        _prune_dead_pane_contexts(&keep, Some(vec!["%1".to_string(), "%7".to_string()]));
+        prune_dead_pane_contexts(&keep, Some(vec!["%1".to_string(), "%7".to_string()]));
 
         assert!(dir.join("pane-1.json").exists()); // live
         assert!(!dir.join("pane-2.json").exists()); // gone
@@ -406,9 +406,9 @@ mod tests {
         let keep = dir.join("pane-99.json");
 
         // failed listing, then a listing of nothing: neither proves a pane dead
-        _prune_dead_pane_contexts(&keep, None);
+        prune_dead_pane_contexts(&keep, None);
         assert!(dir.join("pane-2.json").exists());
-        _prune_dead_pane_contexts(&keep, Some(Vec::new()));
+        prune_dead_pane_contexts(&keep, Some(Vec::new()));
         assert!(dir.join("pane-2.json").exists());
     }
 }

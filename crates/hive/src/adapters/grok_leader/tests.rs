@@ -206,7 +206,7 @@ struct TestBed {
 
 fn setup() -> TestBed {
     let mut env = EnvGuard::new();
-    _key_cache().lock().unwrap().clear();
+    key_cache().lock().unwrap().clear();
     PANE_OPTION_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     STDIO_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
     DAEMON_SPAWN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
@@ -312,7 +312,7 @@ impl LeaderProc for FakeProc {
     fn close_stdin(&self) {}
 }
 
-fn _ok(msg: &Value, result: Value) -> Value {
+fn ok(msg: &Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 }
 
@@ -320,10 +320,10 @@ fn _ok(msg: &Value, result: Value) -> Value {
 fn responder(extra: Option<Responder>, replay: Vec<Value>) -> Responder {
     Box::new(
         move |msg: &Value| match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
             Some("session/load") => {
                 let mut replies = replay.clone();
-                replies.push(_ok(msg, json!({"models": {"currentModelId": "grok-4.6"}})));
+                replies.push(ok(msg, json!({"models": {"currentModelId": "grok-4.6"}})));
                 replies
             }
             _ => extra.as_ref().map(|e| e(msg)).unwrap_or_default(),
@@ -348,10 +348,7 @@ fn make(
     (client, proc)
 }
 
-fn _loaded(
-    respond: Option<Responder>,
-    replay: Vec<Value>,
-) -> (Arc<GrokStdioClient>, Arc<FakeProc>) {
+fn loaded(respond: Option<Responder>, replay: Vec<Value>) -> (Arc<GrokStdioClient>, Arc<FakeProc>) {
     let respond = respond.unwrap_or_else(|| responder(None, replay));
     let (client, proc) = make(Some(respond), Some((SID, CWD)), "%19");
     assert!(client.handshake());
@@ -366,10 +363,7 @@ fn teardown(client: &GrokStdioClient, proc: &FakeProc) {
     }
 }
 
-fn _settle(
-    client: &GrokStdioClient,
-    predicate: impl Fn(&SessionRuntime) -> bool,
-) -> SessionRuntime {
+fn settle(client: &GrokStdioClient, predicate: impl Fn(&SessionRuntime) -> bool) -> SessionRuntime {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if let Some(runtime) = client.runtime() {
@@ -382,7 +376,7 @@ fn _settle(
     panic!("runtime never matched: {:?}", client.runtime());
 }
 
-fn _settle_sent(proc: &FakeProc, predicate: impl Fn(&Value) -> bool) -> Value {
+fn settle_sent(proc: &FakeProc, predicate: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         for msg in proc.sent() {
@@ -395,7 +389,7 @@ fn _settle_sent(proc: &FakeProc, predicate: impl Fn(&Value) -> bool) -> Value {
     panic!("no matching write: {:?}", proc.sent());
 }
 
-fn _update_for(session_id: &str, kind: &str, fields: Value) -> Value {
+fn update_for(session_id: &str, kind: &str, fields: Value) -> Value {
     let mut update = json!({"sessionUpdate": kind});
     if let (Some(target), Some(extra)) = (update.as_object_mut(), fields.as_object()) {
         for (key, value) in extra {
@@ -409,11 +403,11 @@ fn _update_for(session_id: &str, kind: &str, fields: Value) -> Value {
     })
 }
 
-fn _update(kind: &str, fields: Value) -> Value {
-    _update_for(SID, kind, fields)
+fn update(kind: &str, fields: Value) -> Value {
+    update_for(SID, kind, fields)
 }
 
-fn _activity_for(activity: &str, session_id: &str) -> Value {
+fn activity_for(activity: &str, session_id: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "_x.ai/sessions/changed",
@@ -423,8 +417,8 @@ fn _activity_for(activity: &str, session_id: &str) -> Value {
     })
 }
 
-fn _activity(activity: &str) -> Value {
-    _activity_for(activity, SID)
+fn activity(activity: &str) -> Value {
+    activity_for(activity, SID)
 }
 
 // ----------------------------------------------------------------------
@@ -434,7 +428,7 @@ fn _activity(activity: &str) -> Value {
 #[test]
 fn test_handshake_sends_initialize_then_session_load() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     let sent = proc.sent();
     let methods: Vec<&str> = sent
         .iter()
@@ -470,7 +464,7 @@ fn test_handshake_false_when_load_errors() {
     let _bed = setup();
     let respond: Responder = Box::new(|msg: &Value| {
         if msg.get("method").and_then(Value::as_str) == Some("initialize") {
-            return vec![_ok(msg, json!({"protocolVersion": 1}))];
+            return vec![ok(msg, json!({"protocolVersion": 1}))];
         }
         vec![json!({
             "jsonrpc": "2.0",
@@ -487,13 +481,13 @@ fn test_handshake_false_when_load_errors() {
 fn test_notifications_before_load_response_are_discarded() {
     let _bed = setup();
     let replay = vec![
-        _update(
+        update(
             "agent_message_chunk",
             json!({"content": {"type": "text", "text": "old turn"}}),
         ),
-        _activity("working"),
+        activity("working"),
     ];
-    let (client, proc) = _loaded(None, replay);
+    let (client, proc) = loaded(None, replay);
     assert!(client.runtime().is_none()); // replay is not evidence of a live turn
     teardown(&client, &proc);
 }
@@ -505,17 +499,17 @@ fn test_notification_right_behind_the_load_response_is_folded() {
     let respond: Responder =
         Box::new(
             |msg: &Value| match msg.get("method").and_then(Value::as_str) {
-                Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+                Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
                 Some("session/load") => vec![
-                    _ok(msg, json!({"models": {"currentModelId": "grok-4.6"}})),
-                    _activity("working"),
+                    ok(msg, json!({"models": {"currentModelId": "grok-4.6"}})),
+                    activity("working"),
                 ],
                 _ => vec![],
             },
         );
     let (client, proc) = make(Some(respond), Some((SID, CWD)), "%19");
     assert!(client.handshake());
-    _settle(&client, |rt| rt.busy);
+    settle(&client, |rt| rt.busy);
     teardown(&client, &proc);
 }
 
@@ -547,14 +541,14 @@ fn test_handshake_fails_fast_when_the_child_dies() {
 #[test]
 fn test_activity_working_marks_busy_and_idle_closes_turn() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_activity("working"));
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&activity("working"));
     assert_eq!(
-        _settle(&client, |rt| rt.busy).session_id.as_deref(),
+        settle(&client, |rt| rt.busy).session_id.as_deref(),
         Some(SID)
     );
-    proc.feed(&_activity("idle"));
-    let runtime = _settle(&client, |rt| !rt.busy);
+    proc.feed(&activity("idle"));
+    let runtime = settle(&client, |rt| !rt.busy);
     assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
     teardown(&client, &proc);
@@ -563,12 +557,12 @@ fn test_activity_working_marks_busy_and_idle_closes_turn() {
 #[test]
 fn test_message_chunks_mark_user_prompt_pending() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_update(
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
         "agent_thought_chunk",
         json!({"content": {"type": "text", "text": "The"}}),
     ));
-    let runtime = _settle(&client, |rt| rt.busy);
+    let runtime = settle(&client, |rt| rt.busy);
     assert_eq!(runtime.turn_phase, "user_prompt_pending");
     teardown(&client, &proc);
 }
@@ -576,18 +570,18 @@ fn test_message_chunks_mark_user_prompt_pending() {
 #[test]
 fn test_tool_call_phases_survive_streamed_chunks() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_update(
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    assert!(_settle(&client, |rt| rt.turn_phase == "tool_open").busy);
-    proc.feed(&_update(
+    assert!(settle(&client, |rt| rt.turn_phase == "tool_open").busy);
+    proc.feed(&update(
         "tool_call_update",
         json!({"toolCallId": "c1", "status": "completed"}),
     ));
-    _settle(&client, |rt| rt.turn_phase == "tool_result_pending_reply");
-    proc.feed(&_update(
+    settle(&client, |rt| rt.turn_phase == "tool_result_pending_reply");
+    proc.feed(&update(
         "agent_message_chunk",
         json!({"content": {"type": "text", "text": "done"}}),
     ));
@@ -600,7 +594,7 @@ fn test_tool_call_phases_survive_streamed_chunks() {
         "method": "session/request_permission",
         "params": {"sessionId": SID, "toolCall": {"toolCallId": "c2"}, "options": []},
     }));
-    let runtime = _settle(&client, |rt| rt.input_state == "waiting_user");
+    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
     assert_eq!(runtime.turn_phase, "tool_result_pending_reply");
     teardown(&client, &proc);
 }
@@ -610,41 +604,41 @@ fn test_late_joined_tool_call_update_marks_busy() {
     // attaching mid-tool: the opening tool_call was never seen, the update is
     // the only evidence that a turn is running
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_update(
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
         "tool_call_update",
         json!({"toolCallId": "c1", "status": "in_progress"}),
     ));
-    _settle(&client, |rt| rt.busy);
+    settle(&client, |rt| rt.busy);
     teardown(&client, &proc);
 }
 
 #[test]
 fn test_tool_call_update_clears_a_decided_permission() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     proc.feed(&json!({
         "jsonrpc": "2.0",
         "id": 78,
         "method": "session/request_permission",
         "params": {"sessionId": SID, "toolCall": {"toolCallId": "c1"}, "options": []},
     }));
-    _settle(&client, |rt| rt.input_state == "waiting_user");
+    settle(&client, |rt| rt.input_state == "waiting_user");
     // the human answered at the TUI: the tool ran, so nothing waits on input
-    proc.feed(&_update(
+    proc.feed(&update(
         "tool_call_update",
         json!({"toolCallId": "c1", "status": "completed"}),
     ));
-    _settle(&client, |rt| rt.input_state == "ready");
+    settle(&client, |rt| rt.input_state == "ready");
     teardown(&client, &proc);
 }
 
 #[test]
 fn test_turn_completed_clears_busy() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_activity("working"));
-    _settle(&client, |rt| rt.busy);
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&activity("working"));
+    settle(&client, |rt| rt.busy);
     proc.feed(&json!({
         "jsonrpc": "2.0",
         "method": "_x.ai/session_notification",
@@ -653,7 +647,7 @@ fn test_turn_completed_clears_busy() {
             "update": {"sessionUpdate": "turn_completed", "stop_reason": "end_turn"},
         },
     }));
-    let runtime = _settle(&client, |rt| !rt.busy);
+    let runtime = settle(&client, |rt| !rt.busy);
     assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
     teardown(&client, &proc);
@@ -662,7 +656,7 @@ fn test_turn_completed_clears_busy() {
 #[test]
 fn test_queued_entries_mark_input_backlog() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     proc.feed(&json!({
         "jsonrpc": "2.0",
         "method": "_x.ai/queue/changed",
@@ -671,29 +665,29 @@ fn test_queued_entries_mark_input_backlog() {
             "entries": [{"id": "p1", "kind": "prompt", "text": "next", "position": 0}],
         },
     }));
-    _settle(&client, |rt| rt.turn_phase == "input_backlog");
+    settle(&client, |rt| rt.turn_phase == "input_backlog");
     teardown(&client, &proc);
 }
 
 #[test]
 fn test_other_session_notifications_are_ignored() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_update(
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    let baseline = _settle(&client, |rt| rt.turn_phase == "tool_open");
-    proc.feed(&_activity_for("idle", "other-session"));
-    proc.feed(&_update_for(
+    let baseline = settle(&client, |rt| rt.turn_phase == "tool_open");
+    proc.feed(&activity_for("idle", "other-session"));
+    proc.feed(&update_for(
         "other-session",
         "agent_message_chunk",
         json!({"content": {"text": "hi"}}),
     ));
     // same-session no-op marker: the reader folds it only after the two lines
     // above, so its observed_at bump proves they were seen and dropped
-    proc.feed(&_activity("working"));
-    let runtime = _settle(&client, |rt| rt.observed_at > baseline.observed_at);
+    proc.feed(&activity("working"));
+    let runtime = settle(&client, |rt| rt.observed_at > baseline.observed_at);
     assert!(runtime.busy);
     assert_eq!(runtime.turn_phase, "tool_open"); // the foreign idle never closed it
     assert_eq!(runtime.input_state, "");
@@ -703,12 +697,12 @@ fn test_other_session_notifications_are_ignored() {
 #[test]
 fn test_unknown_updates_are_ignored() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
-    proc.feed(&_update(
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
         "available_commands_update",
         json!({"availableCommands": [{"name": "compact"}]}),
     ));
-    let first = _settle(&client, |_rt| true);
+    let first = settle(&client, |_rt| true);
     // the second ignored line is its own marker: an in-session notification
     // bumps observed_at even when nothing folds it
     proc.feed(&json!({
@@ -716,7 +710,7 @@ fn test_unknown_updates_are_ignored() {
         "method": "_x.ai/announcements/update",
         "params": {"sessionId": SID},
     }));
-    let runtime = _settle(&client, |rt| rt.observed_at > first.observed_at);
+    let runtime = settle(&client, |rt| rt.observed_at > first.observed_at);
     assert!(!runtime.busy);
     assert_eq!(runtime.turn_phase, "unknown_evidence");
     teardown(&client, &proc);
@@ -746,7 +740,7 @@ fn on_prompt_queue_echo() -> Responder {
 #[test]
 fn test_prompt_acks_on_queue_changed_echo() {
     let _bed = setup();
-    let (client, proc) = _loaded(
+    let (client, proc) = loaded(
         Some(responder(Some(on_prompt_queue_echo()), vec![])),
         vec![],
     );
@@ -782,7 +776,7 @@ fn test_prompt_acks_on_running_text_echo() {
             },
         })]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(GrokStdioClient::prompt(&client, "hello grok"));
     teardown(&client, &proc);
 }
@@ -795,12 +789,12 @@ fn test_prompt_acks_on_user_message_chunk() {
             return vec![];
         }
         let text = msg["params"]["prompt"][0]["text"].clone();
-        vec![_update(
+        vec![update(
             "user_message_chunk",
             json!({"content": {"type": "text", "text": text}}),
         )]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(GrokStdioClient::prompt(&client, "hello grok"));
     teardown(&client, &proc);
 }
@@ -818,7 +812,7 @@ fn test_prompt_false_on_error_response() {
             "error": {"code": -32602, "message": "unknown session id"},
         })]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(!GrokStdioClient::prompt(&client, "hello grok"));
     teardown(&client, &proc);
 }
@@ -827,7 +821,7 @@ fn test_prompt_false_on_error_response() {
 fn test_prompt_false_when_never_acked() {
     let _bed = setup();
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.set(Some(0.05)));
-    let (client, proc) = _loaded(None, vec![]); // nothing answers session/prompt
+    let (client, proc) = loaded(None, vec![]); // nothing answers session/prompt
     assert!(!GrokStdioClient::prompt(&client, "hello grok"));
     teardown(&client, &proc);
 }
@@ -840,12 +834,12 @@ fn test_prompt_echo_of_another_text_does_not_ack() {
         if msg.get("method").and_then(Value::as_str) != Some("session/prompt") {
             return vec![];
         }
-        vec![_update(
+        vec![update(
             "user_message_chunk",
             json!({"content": {"type": "text", "text": "someone else"}}),
         )]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(!GrokStdioClient::prompt(&client, "hello grok"));
     teardown(&client, &proc);
 }
@@ -857,7 +851,7 @@ fn test_prompt_echo_of_another_text_does_not_ack() {
 #[test]
 fn test_permission_request_is_cancelled_and_marks_waiting_user() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     proc.feed(&json!({
         "jsonrpc": "2.0",
         "id": 77,
@@ -868,14 +862,14 @@ fn test_permission_request_is_cancelled_and_marks_waiting_user() {
             "options": [{"optionId": "a", "name": "Allow", "kind": "allow_once"}],
         },
     }));
-    let answer = _settle_sent(&proc, |msg| {
+    let answer = settle_sent(&proc, |msg| {
         msg.get("id").and_then(Value::as_i64) == Some(77)
     });
     assert_eq!(
         answer["result"],
         json!({"outcome": {"outcome": "cancelled"}})
     );
-    _settle(&client, |rt| rt.input_state == "waiting_user");
+    settle(&client, |rt| rt.input_state == "waiting_user");
     teardown(&client, &proc);
 }
 
@@ -888,7 +882,7 @@ fn test_cancel_writes_a_bare_notification_for_the_session() {
     // ACP cancel is a notification: the leader answers a cancel carrying an
     // id with -32601 and keeps running the turn, so the write must have no id.
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     assert!(GrokStdioClient::cancel(&client));
     let sent = proc.sent();
     let cancel = sent.last().unwrap();
@@ -914,7 +908,7 @@ fn test_cancel_false_without_a_loaded_session() {
 #[test]
 fn test_cancel_false_when_the_pipe_is_dead() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     proc.set_write_fail();
     assert!(!GrokStdioClient::cancel(&client));
     teardown(&client, &proc);
@@ -927,7 +921,7 @@ fn test_cancel_false_when_the_pipe_is_dead() {
 fn on_compact_ok() -> Responder {
     Box::new(|msg: &Value| {
         if msg.get("method").and_then(Value::as_str) == Some("x.ai/compact_conversation") {
-            vec![_ok(msg, json!({}))]
+            vec![ok(msg, json!({}))]
         } else {
             vec![]
         }
@@ -937,7 +931,7 @@ fn on_compact_ok() -> Responder {
 #[test]
 fn test_compact_returns_compacted_when_idle() {
     let _bed = setup();
-    let (client, proc) = _loaded(Some(responder(Some(on_compact_ok()), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_compact_ok()), vec![])), vec![]);
     assert_eq!(GrokStdioClient::compact(&client), "compacted");
     let sent = proc.sent();
     assert_eq!(sent.last().unwrap()["params"], json!({"sessionId": SID}));
@@ -953,9 +947,9 @@ fn test_compact_defers_while_busy() {
         }
         vec![]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_compact), vec![])), vec![]);
-    proc.feed(&_activity("working"));
-    _settle(&client, |rt| rt.busy);
+    let (client, proc) = loaded(Some(responder(Some(on_compact), vec![])), vec![]);
+    proc.feed(&activity("working"));
+    settle(&client, |rt| rt.busy);
     assert_eq!(GrokStdioClient::compact(&client), "busy");
     teardown(&client, &proc);
 }
@@ -973,7 +967,7 @@ fn test_compact_unavailable_on_error() {
             "error": {"code": -32601, "message": "unsupported"},
         })]
     });
-    let (client, proc) = _loaded(Some(responder(Some(on_compact), vec![])), vec![]);
+    let (client, proc) = loaded(Some(responder(Some(on_compact), vec![])), vec![]);
     assert_eq!(GrokStdioClient::compact(&client), "unavailable");
     teardown(&client, &proc);
 }
@@ -996,7 +990,7 @@ fn test_client_close_terminates_the_subprocess() {
 #[test]
 fn test_client_dies_on_stdout_eof() {
     let _bed = setup();
-    let (client, proc) = _loaded(None, vec![]);
+    let (client, proc) = loaded(None, vec![]);
     proc.eof();
     let deadline = Instant::now() + Duration::from_secs(2);
     while client.is_alive() && Instant::now() < deadline {
@@ -1094,19 +1088,19 @@ fn test_read_pane_session_none_when_missing_or_invalid() {
 
 #[test]
 fn test_key_from_socket_name_roundtrip() {
-    assert_eq!(_key_from_socket_name("p19.sock").as_deref(), Some("p19"));
+    assert_eq!(key_from_socket_name("p19.sock").as_deref(), Some("p19"));
     assert_eq!(
-        _key_from_socket_name("m-honey.rex.sock").as_deref(),
+        key_from_socket_name("m-honey.rex.sock").as_deref(),
         Some("m-honey.rex")
     );
     assert_eq!(
-        _key_from_socket_name("m-honey.rex.dot.sock").as_deref(),
+        key_from_socket_name("m-honey.rex.dot.sock").as_deref(),
         Some("m-honey.rex.dot")
     );
-    assert_eq!(_key_from_socket_name("pdefault.sock"), None);
-    assert_eq!(_key_from_socket_name("m-noseparator.sock"), None);
-    assert_eq!(_key_from_socket_name("p19.pid"), None);
-    assert_eq!(_key_from_socket_name("leader.sock"), None);
+    assert_eq!(key_from_socket_name("pdefault.sock"), None);
+    assert_eq!(key_from_socket_name("m-noseparator.sock"), None);
+    assert_eq!(key_from_socket_name("p19.pid"), None);
+    assert_eq!(key_from_socket_name("leader.sock"), None);
 }
 
 #[test]
@@ -1684,13 +1678,13 @@ fn test_pool_skips_panes_without_socket_or_session() {
     let _bed = setup();
     set_stdio_spawn(|_argv| panic!("no client without a daemon"));
     let grok_pool = GrokClientPool::new();
-    assert!(grok_pool._client_for_key("p19").is_none()); // no socket at all
+    assert!(grok_pool.client_for_key("p19").is_none()); // no socket at all
     let sock = pane_socket_path("%19");
     fs::create_dir_all(sock.parent().unwrap()).unwrap();
     fs::write(&sock, "").unwrap();
     grok_pool.state.lock().unwrap().cooldown.clear();
     // socket but no session record
-    assert!(grok_pool._client_for_key("p19").is_none());
+    assert!(grok_pool.client_for_key("p19").is_none());
 }
 
 #[test]
@@ -1702,7 +1696,7 @@ fn test_pool_skips_a_pane_whose_socket_has_no_listener() {
     fs::write(pane_socket_path("%19"), "").unwrap();
     fs::write(pane_pidfile_path("%19"), std::process::id().to_string()).unwrap();
     set_stdio_spawn(|_argv| panic!("no client without a live leader"));
-    assert!(GrokClientPool::new()._client_for_key("p19").is_none());
+    assert!(GrokClientPool::new().client_for_key("p19").is_none());
 }
 
 #[test]
@@ -1724,7 +1718,7 @@ fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
 
     // team file missing entirely: the member is gone with its team
     let grok_pool = GrokClientPool::new();
-    assert!(grok_pool._client_for_key(&key).is_none());
+    assert!(grok_pool.client_for_key(&key).is_none());
     assert!(spawned.lock().unwrap().is_empty());
 
     // team back, but the roster does not list rex
@@ -1732,7 +1726,7 @@ fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
     other.insert("name".to_string(), Value::String("ada".to_string()));
     crate::registry::record_team("honey", CWD, "1.0", &[other], "").unwrap();
     grok_pool.state.lock().unwrap().cooldown.clear();
-    assert!(grok_pool._client_for_key(&key).is_none());
+    assert!(grok_pool.client_for_key(&key).is_none());
     assert!(spawned.lock().unwrap().is_empty());
 
     // listed again: the client binds
@@ -1740,7 +1734,7 @@ fn test_pool_refuses_a_member_key_the_roster_no_longer_lists() {
     rex.insert("name".to_string(), Value::String("rex".to_string()));
     crate::registry::record_team("honey", CWD, "1.0", &[rex], "").unwrap();
     grok_pool.state.lock().unwrap().cooldown.clear();
-    let client = grok_pool._client_for_key(&key).unwrap();
+    let client = grok_pool.client_for_key(&key).unwrap();
     assert_eq!(spawned.lock().unwrap().len(), 1);
 
     grok_pool.drop_key(&key);
@@ -1771,7 +1765,7 @@ fn test_pool_rebinds_when_the_pane_session_record_rotates() {
     let clients: Arc<Mutex<Vec<Arc<GrokStdioClient>>>> = Arc::new(Mutex::new(Vec::new()));
 
     let bind = |grok_pool: &GrokClientPool| -> Option<Arc<GrokStdioClient>> {
-        let client = grok_pool._client_for_key("p19");
+        let client = grok_pool.client_for_key("p19");
         if let Some(client) = client.as_ref() {
             let mut known = clients.lock().unwrap();
             if !known.iter().any(|c| Arc::ptr_eq(c, client)) {
@@ -1817,7 +1811,7 @@ fn test_daemon_env_washes_inherited_identity_markers() {
     bed.env.set("GROK_SESSION_ID", "spawner-session");
     bed.env.set("TMUX_PANE", "%stale");
 
-    let env_map = _daemon_env_for_pane("%42");
+    let env_map = daemon_env_for_pane("%42");
 
     assert_eq!(env_map.get("TMUX_PANE").map(String::as_str), Some("%42"));
     assert!(!env_map.contains_key("CLAUDE_CODE_MESSAGING_SOCKET"));
@@ -1952,8 +1946,8 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
 fn minting_responder() -> Responder {
     Box::new(
         |msg: &Value| match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
-            Some("session/new") => vec![_ok(
+            Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
+            Some("session/new") => vec![ok(
                 msg,
                 json!({"sessionId": msg["params"]["_meta"]["sessionId"]}),
             )],
@@ -2035,7 +2029,7 @@ fn test_create_member_session_mints_on_the_identity_key_before_any_pane() {
         })
     );
     // and the creating client is the pool's, already bound to the session
-    let pooled = pool()._client_for_key(&key).unwrap();
+    let pooled = pool().client_for_key(&key).unwrap();
     assert_eq!(pooled.session_id().as_deref(), Some(SID));
     assert_eq!(stdio_argvs.lock().unwrap().len(), 1); // adopted, not re-spawned
 
@@ -2054,7 +2048,7 @@ fn test_create_member_session_leaves_no_record_when_session_new_fails() {
     let _spawns = set_listening_daemon_spawn();
     let proc = FakeProc::new(Some(Box::new(|msg: &Value| {
         match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
             Some("session/new") => vec![json!({
                 "jsonrpc": "2.0",
                 "id": msg["id"],
@@ -2077,7 +2071,7 @@ fn test_create_member_session_leaves_no_record_when_session_new_fails() {
 
     assert_eq!(read_session_key(&key), None);
     assert!(proc.terminated.load(Ordering::SeqCst)); // the failed client is closed
-    assert!(pool()._client_for_key(&key).is_none());
+    assert!(pool().client_for_key(&key).is_none());
     // the leader this mint raised goes with it: nothing is left for the
     // hived's orphan reap to find
     assert_eq!(*killed.lock().unwrap(), vec![7778]);
@@ -2099,7 +2093,7 @@ fn test_create_member_session_leaves_a_reused_leader_alone_when_session_new_fail
     set_terminate_pg(|pid| panic!("signalled {pid}, a leader this mint did not raise"));
     let proc = FakeProc::new(Some(Box::new(|msg: &Value| {
         match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => vec![_ok(msg, json!({"protocolVersion": 1}))],
+            Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
             Some("session/new") => vec![json!({
                 "jsonrpc": "2.0",
                 "id": msg["id"],
@@ -2115,7 +2109,7 @@ fn test_create_member_session_leaves_a_reused_leader_alone_when_session_new_fail
 
     assert_eq!(read_session_key(&key), None);
     assert!(proc.terminated.load(Ordering::SeqCst));
-    assert!(pool()._client_for_key(&key).is_none());
+    assert!(pool().client_for_key(&key).is_none());
     assert!(sock.exists());
     assert_eq!(
         fs::read_to_string(sock.with_extension("pid")).unwrap(),
@@ -2175,7 +2169,7 @@ fn test_member_pane_is_a_client_of_the_identity_minted_engine() {
     assert!(spawn_daemon("%19"));
     assert_eq!(*spawns.lock().unwrap(), 1); // reused, not a second leader
 
-    let pooled = pool()._client_for_key(&key).unwrap();
+    let pooled = pool().client_for_key(&key).unwrap();
     pool().drop_key(&key);
     proc.eof();
     let handle = pooled.reader.lock().unwrap().take();

@@ -13,7 +13,7 @@ use anyhow::bail;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
 
-use super::support::{_wait_codex_attached, _wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
+use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
 use super::testhook;
 
@@ -121,7 +121,7 @@ pub(super) fn hooked_wait_pane_exit(pane_id: &str, pid: Option<u32>, timeout: f6
     let deadline = std::time::Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
     loop {
         let gone = match pid {
-            Some(pid) => !_process_alive(pid),
+            Some(pid) => !process_alive(pid),
             None => !crate::tmux::is_pane_alive(pane_id),
         };
         if gone || std::time::Instant::now() >= deadline {
@@ -134,7 +134,7 @@ pub(super) fn hooked_wait_pane_exit(pane_id: &str, pid: Option<u32>, timeout: f6
 /// True while the pid names a process, signal 0 being the "is it there"
 /// probe. `EPERM` is a live process this user may not signal, not an
 /// absence; only `ESRCH` says it is gone.
-fn _process_alive(pid: u32) -> bool {
+fn process_alive(pid: u32) -> bool {
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
         return true;
     }
@@ -328,7 +328,7 @@ pub(super) fn hooked_wait_codex_attached(pane_id: &str) -> bool {
     }) {
         return v;
     }
-    _wait_codex_attached(pane_id, AGENT_STARTUP_TIMEOUT, 0.5)
+    wait_codex_attached(pane_id, AGENT_STARTUP_TIMEOUT, 0.5)
 }
 
 pub(super) fn hooked_wait_grok_session_ready(pane_id: &str, session_id: &str) -> bool {
@@ -342,7 +342,7 @@ pub(super) fn hooked_wait_grok_session_ready(pane_id: &str, session_id: &str) ->
     }) {
         return v;
     }
-    _wait_grok_session_ready(pane_id, session_id, AGENT_STARTUP_TIMEOUT, 0.5)
+    wait_grok_session_ready(pane_id, session_id, AGENT_STARTUP_TIMEOUT, 0.5)
 }
 
 // --- claude_bg seams -------------------------------------------------------

@@ -67,19 +67,19 @@ fn grok_runtime_fields(rt: &crate::adapters::grok_leader::SessionRuntime) -> Map
 }
 
 /// Native codex runtime from the shared daemon, or None if unmanaged.
-pub fn _codex_app_server_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
+pub(crate) fn codex_app_server_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
     hooked_cas_runtime_for_pane(pane_id).map(|rt| codex_runtime_fields(&rt))
 }
 
 /// Native grok runtime from the pane's leader, or None if no daemon.
-pub fn _grok_leader_runtime(pane_id: &str) -> Option<Map<String, Value>> {
+pub(crate) fn grok_leader_runtime(pane_id: &str) -> Option<Map<String, Value>> {
     hooked_gl_runtime_for_pane(pane_id).map(|rt| grok_runtime_fields(&rt))
 }
 
 /// Native claude runtime from the pane's bg job, or None if unmanaged.
-pub fn _claude_bg_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
+pub(crate) fn claude_bg_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
     let record = hooked_cb_read_pane_job(pane_id)?;
-    Some(_claude_job_runtime(&record.job_id, &record.session_id))
+    Some(claude_job_runtime(&record.job_id, &record.session_id))
 }
 
 /// Native claude runtime keyed by the job itself (pane optional).
@@ -90,7 +90,7 @@ pub fn _claude_bg_runtime_impl(pane_id: &str) -> Option<Map<String, Value>> {
 /// and is never reaped); no ledger row (gone). The ledger costs a CLI call
 /// (~270ms), so it is consulted only when the engine entry is missing,
 /// behind a short cache.
-pub fn _claude_job_runtime(job_id: &str, record_session: &str) -> Map<String, Value> {
+fn claude_job_runtime(job_id: &str, record_session: &str) -> Map<String, Value> {
     if let Some(engine) = hooked_cb_engine_session_for_job(job_id) {
         let mut fields = crate::adapters::claude_bg::runtime_from_engine(&engine, None);
         fields.insert("cliAlive".to_string(), Value::Bool(true));
@@ -116,7 +116,7 @@ pub fn _claude_job_runtime(job_id: &str, record_session: &str) -> Map<String, Va
             "unresolved".to_string()
         }
     };
-    let Some(rows) = _claude_jobs_cached() else {
+    let Some(rows) = claude_jobs_cached() else {
         fields.insert("cliAlive".to_string(), Value::Bool(true));
         fields.insert("inputState".to_string(), Value::from("unknown"));
         fields.insert("inputReason".to_string(), Value::from("ledger_unavailable"));
@@ -146,7 +146,7 @@ pub fn _claude_job_runtime(job_id: &str, record_session: &str) -> Map<String, Va
 
 /// What the pane's attach viewer is actually showing (the human can switch
 /// it to any other bg session).
-pub fn _claude_view_fields(pane_id: &str) -> Map<String, Value> {
+fn claude_view_fields(pane_id: &str) -> Map<String, Value> {
     let view = hooked_cv_view_for_pane(pane_id, None);
     let mut fields = Map::new();
     fields.insert("_viewKind".to_string(), Value::from(view.kind));
@@ -160,7 +160,7 @@ pub fn _claude_view_fields(pane_id: &str) -> Map<String, Value> {
 ///
 /// Cached briefly: the ledger is only read when an engine entry is missing
 /// (rare state), and a ~270ms node start must not run per tick per pane.
-pub fn _claude_jobs_cached() -> Option<HashMap<String, Map<String, Value>>> {
+fn claude_jobs_cached() -> Option<HashMap<String, Map<String, Value>>> {
     let now = monotonic();
     {
         let cache = claude_jobs_cache()
@@ -189,7 +189,7 @@ pub fn _claude_jobs_cached() -> Option<HashMap<String, Map<String, Value>>> {
     indexed
 }
 
-pub fn _agent_runtime_payload(
+pub(crate) fn agent_runtime_payload(
     pane_id: &str,
     runtime_snapshot: Option<&RuntimeSnapshot>,
 ) -> Map<String, Value> {
@@ -228,7 +228,7 @@ pub fn _agent_runtime_payload(
             for (key, value) in bg_runtime {
                 runtime.insert(key, value);
             }
-            for (key, value) in _claude_view_fields(pane_id) {
+            for (key, value) in claude_view_fields(pane_id) {
                 runtime.insert(key, value);
             }
             return runtime;
@@ -329,7 +329,7 @@ fn grok_pane_runtime(pane_id: &str, runtime: &mut Map<String, Value>) {
                 .unwrap_or_else(|| "unresolved".to_string()),
         ),
     );
-    match _grok_leader_runtime(pane_id) {
+    match grok_leader_runtime(pane_id) {
         Some(fields) => {
             for (key, value) in fields {
                 runtime.insert(key, value);
@@ -450,7 +450,7 @@ fn transcript_gate_fields(
 ///
 /// Such a member has no bg job: its registry status is the runtime and its
 /// channel liveness is the pulse.
-pub fn _claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
+fn claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
     let live = hooked_cs_list_sessions()
         .into_iter()
         .find(|s| s.session_id == session_id)?;
@@ -481,7 +481,7 @@ pub fn _claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
 /// ``alive`` mirrors engine liveness (there is no pane to be alive), and
 /// ``headless`` marks the row so consumers can tell a closed display from a
 /// dead engine.
-pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
+pub(crate) fn headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     let mut runtime = Map::new();
     runtime.insert("alive".to_string(), Value::Bool(false));
     runtime.insert("headless".to_string(), Value::Bool(true));
@@ -489,9 +489,9 @@ pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     let sid = agent.session_id.clone().unwrap_or_default();
     let cli = agent.cli.as_str();
     if cli == "claude" && !sid.is_empty() {
-        let mut job_rt = _claude_job_runtime(&sid, "");
+        let mut job_rt = claude_job_runtime(&sid, "");
         if job_rt.get("cliAlive") != Some(&Value::Bool(true)) {
-            if let Some(session_rt) = _claude_session_runtime(&sid) {
+            if let Some(session_rt) = claude_session_runtime(&sid) {
                 job_rt = session_rt;
             }
         }
@@ -548,7 +548,7 @@ pub fn _headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     runtime
 }
 
-pub fn _member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Value> {
+pub(crate) fn member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Value> {
     if role != "agent" {
         let mut payload = Map::new();
         payload.insert(
@@ -565,7 +565,7 @@ pub fn _member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Va
         .unwrap_or_else(|e| e.into_inner())
         .get(pane_id)
         .cloned();
-    _agent_runtime_payload(pane_id, snapshot.as_ref())
+    agent_runtime_payload(pane_id, snapshot.as_ref())
 }
 
 /// Overlay the engine's own runtime on a claude member whose pane is only a
@@ -578,7 +578,7 @@ pub fn _member_runtime_payload_impl(pane_id: &str, role: &str) -> Map<String, Va
 /// is. The roster sessionId is that engine's identity: while it names a live
 /// session, that session's runtime is the member's. `alive` stays the pane's
 /// own fact.
-fn _mirror_pane_runtime(agent: &Agent, mut runtime: Map<String, Value>) -> Map<String, Value> {
+fn mirror_pane_runtime(agent: &Agent, mut runtime: Map<String, Value>) -> Map<String, Value> {
     if agent.cli != "claude" || runtime.get("cliAlive") == Some(&Value::Bool(true)) {
         return runtime;
     }
@@ -586,7 +586,7 @@ fn _mirror_pane_runtime(agent: &Agent, mut runtime: Map<String, Value>) -> Map<S
     if sid.is_empty() {
         return runtime;
     }
-    let Some(session_rt) = _claude_session_runtime(&sid) else {
+    let Some(session_rt) = claude_session_runtime(&sid) else {
         return runtime;
     };
     for (key, value) in session_rt {
@@ -595,7 +595,7 @@ fn _mirror_pane_runtime(agent: &Agent, mut runtime: Map<String, Value>) -> Map<S
     runtime
 }
 
-pub fn _team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
+pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
     let team = hooked_team_load(team_name)?;
     let mut members = Map::new();
     let mut needs_answer: Vec<String> = Vec::new();
@@ -613,12 +613,12 @@ pub fn _team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
     sorted_agents.sort_by(|a, b| a.name.cmp(&b.name));
     for agent in sorted_agents {
         let runtime = if !agent.pane_id.is_empty() {
-            _mirror_pane_runtime(
+            mirror_pane_runtime(
                 agent,
                 hooked_member_runtime_payload(&agent.pane_id, "agent"),
             )
         } else {
-            _headless_member_runtime(agent)
+            headless_member_runtime(agent)
         };
         if runtime.get("inputState").and_then(Value::as_str) == Some("waiting_user") {
             needs_answer.push(agent.name.clone());
@@ -639,7 +639,7 @@ pub fn _team_runtime_payload(team_name: &str) -> Result<Map<String, Value>> {
     Ok(payload)
 }
 
-pub fn _runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
+pub(crate) fn runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
     if pane_id.is_empty() {
         return err_response("pane required");
     }
@@ -661,7 +661,9 @@ pub fn _runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
     payload
 }
 
-pub fn _team_member_bindings_impl(team_name: &str) -> Result<Vec<(String, Map<String, Value>)>> {
+pub(crate) fn team_member_bindings_impl(
+    team_name: &str,
+) -> Result<Vec<(String, Map<String, Value>)>> {
     let team = hooked_team_load(team_name)?;
     let mut members: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut upsert = |name: String, row: Map<String, Value>| match members
@@ -698,7 +700,7 @@ pub fn _team_member_bindings_impl(team_name: &str) -> Result<Vec<(String, Map<St
     Ok(members)
 }
 
-pub fn _idle_notify_agent_panes_impl(team_name: &str) -> Vec<String> {
+pub(crate) fn idle_notify_agent_panes_impl(team_name: &str) -> Vec<String> {
     let bindings = hooked_team_member_bindings(team_name).unwrap_or_default();
     agent_panes_from_bindings(&bindings)
 }

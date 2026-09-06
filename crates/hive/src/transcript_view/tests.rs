@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::{json, Value};
 
-fn _row_at(kind: &str, content: Value, usage: Option<Value>, ts: Option<&str>) -> String {
+fn row_at(kind: &str, content: Value, usage: Option<Value>, ts: Option<&str>) -> String {
     let mut msg = json!({ "content": content });
     if let Some(u) = usage {
         msg["usage"] = u;
@@ -13,20 +13,20 @@ fn _row_at(kind: &str, content: Value, usage: Option<Value>, ts: Option<&str>) -
     row.to_string()
 }
 
-fn _row(kind: &str, content: Value, usage: Option<Value>) -> String {
-    _row_at(kind, content, usage, None)
+fn row(kind: &str, content: Value, usage: Option<Value>) -> String {
+    row_at(kind, content, usage, None)
 }
 
-fn _tool_use(name: &str, id: &str, input: Value) -> String {
-    _row(
+fn tool_use(name: &str, id: &str, input: Value) -> String {
+    row(
         "assistant",
         json!([{"type": "tool_use", "id": id, "name": name, "input": input}]),
         None,
     )
 }
 
-fn _tool_result(id: &str, content: Value, is_error: bool) -> String {
-    _row(
+fn tool_result(id: &str, content: Value, is_error: bool) -> String {
+    row(
         "user",
         json!([{"type": "tool_result", "tool_use_id": id,
                 "content": content, "is_error": is_error}]),
@@ -34,8 +34,8 @@ fn _tool_result(id: &str, content: Value, is_error: bool) -> String {
     )
 }
 
-fn _text(kind: &str, body: &str) -> String {
-    _row(kind, json!([{"type": "text", "text": body}]), None)
+fn text(kind: &str, body: &str) -> String {
+    row(kind, json!([{"type": "text", "text": body}]), None)
 }
 
 // ---- plain-stream tests ---------------------------------------------
@@ -44,7 +44,7 @@ fn _text(kind: &str, body: &str) -> String {
 fn test_assistant_text_renders_with_marker_and_markdown() {
     let mut p = StreamPrinter::new();
     let out = p
-        .push_rendered(&_text("assistant", "done: **all green**"))
+        .push_rendered(&text("assistant", "done: **all green**"))
         .unwrap();
     assert!(out.contains("⏺"), "{out}");
     // grok markdown engine: bold content survives, markers are hidden
@@ -56,7 +56,7 @@ fn test_assistant_text_renders_with_marker_and_markdown() {
 #[test]
 fn test_tool_use_prefers_the_human_readable_hint() {
     let mut p = StreamPrinter::new();
-    let pushed = p.push_rendered(&_tool_use(
+    let pushed = p.push_rendered(&tool_use(
         "Bash",
         "t1",
         json!({"command": "ls", "description": "List files"}),
@@ -102,7 +102,7 @@ fn test_table_frame_is_one_style() {
 fn test_a_picture_becomes_an_inline_chip() {
     let mut p = TranscriptParser::new();
     let data = "A".repeat(4000); // ~3 KB decoded
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "user",
         json!([{"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": data}}]),
         None,
@@ -116,7 +116,7 @@ fn test_a_picture_becomes_an_inline_chip() {
 #[test]
 fn test_a_picture_and_its_words_are_one_band() {
     let mut p = TranscriptParser::new();
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "user",
         json!([
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(400)}},
@@ -142,12 +142,12 @@ fn test_a_picture_and_its_words_are_one_band() {
 fn test_tool_result_images_never_reach_the_outcome_text() {
     let mut p = TranscriptParser::new();
     let payload = "B".repeat(200_000);
-    p.push(&_tool_use(
+    p.push(&tool_use(
         "Read",
         "t1",
         json!({"file_path": "/tmp/shot.png"}),
     ));
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "user",
         json!([{ "type": "tool_result", "tool_use_id": "t1", "content": [
             {"type": "text", "text": "here it is"},
@@ -240,7 +240,7 @@ fn test_every_hive_sender_draws_a_different_agent_icon() {
         "worker",
         "probe",
     ] {
-        let out = p.push(&_row(
+        let out = p.push(&row(
             "user",
             json!(format!("<HIVE from={sender} to=orch>hi</HIVE>")),
             None,
@@ -255,7 +255,7 @@ fn test_every_hive_sender_draws_a_different_agent_icon() {
     unique.dedup();
     assert_eq!(unique.len(), AGENT_ICONS.len(), "{icons:?} collided");
     // and the same sender keeps its icon.
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "user",
         json!("<HIVE from=sage to=orch>again</HIVE>"),
         None,
@@ -328,7 +328,7 @@ fn test_mid_turn_queued_command_is_the_fifth_carrier() {
     );
     assert!(matches!(&out[0], DisplayBlock::User(u) if u.hive.is_none()));
     // …and when it also shows up as a user row, it draws only once.
-    let again = p.push(&_row("user", json!("顺便把 badge 挪一下"), None));
+    let again = p.push(&row("user", json!("顺便把 badge 挪一下"), None));
     assert!(
         !again.iter().any(|b| matches!(b, DisplayBlock::User(_))),
         "{again:?}"
@@ -412,7 +412,7 @@ fn test_parse_hive_message_ignores_prose_that_quotes_an_envelope() {
 fn test_hive_envelope_collapses_to_a_tagged_line() {
     let mut p = StreamPrinter::new();
     let body = "<HIVE from=comb.dodo to=comb.rex msgId=a1>review the spec</HIVE>";
-    let out = p.push_rendered(&_row("user", json!(body), None)).unwrap();
+    let out = p.push_rendered(&row("user", json!(body), None)).unwrap();
     assert!(out.contains("✉") && out.contains("comb.dodo") && out.contains("review the spec"));
     assert!(!out.contains("<HIVE"));
     assert!(p.working);
@@ -421,21 +421,21 @@ fn test_hive_envelope_collapses_to_a_tagged_line() {
 #[test]
 fn test_user_turn_flips_working_and_final_text_flips_idle() {
     let mut p = StreamPrinter::new();
-    p.push_rendered(&_row("user", json!("hi"), None));
+    p.push_rendered(&row("user", json!("hi"), None));
     assert!(p.working);
-    p.push_rendered(&_text("assistant", "hello"));
+    p.push_rendered(&text("assistant", "hello"));
     assert!(!p.working);
 }
 
 #[test]
 fn test_output_tokens_accumulate_into_the_status_line() {
     let mut p = StreamPrinter::new();
-    p.push_rendered(&_row(
+    p.push_rendered(&row(
         "assistant",
         json!([{"type": "text", "text": "a"}]),
         Some(json!({"output_tokens": 40})),
     ));
-    p.push_rendered(&_row(
+    p.push_rendered(&row(
         "assistant",
         json!([{"type": "text", "text": "b"}]),
         Some(json!({"output_tokens": 2})),
@@ -467,12 +467,12 @@ fn group(block: &DisplayBlock) -> &ToolGroupBlock {
 fn test_consecutive_read_tools_collapse_into_one_group() {
     let mut p = TranscriptParser::new();
     assert!(p
-        .push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})))
+        .push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})))
         .is_empty());
     assert!(p
-        .push(&_tool_use("Grep", "t2", json!({"pattern": "fn main"})))
+        .push(&tool_use("Grep", "t2", json!({"pattern": "fn main"})))
         .is_empty());
-    let out = p.push(&_text("assistant", "done"));
+    let out = p.push(&text("assistant", "done"));
     assert_eq!(out.len(), 2, "{out:?}");
     assert_eq!(group(&out[0]).label(), "Read 1 file, Searched 1 pattern");
     assert!(matches!(out[1], DisplayBlock::Assistant(_)));
@@ -481,9 +481,9 @@ fn test_consecutive_read_tools_collapse_into_one_group() {
 #[test]
 fn test_group_label_pluralizes_bucket_counts() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    p.push(&_tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
-    p.push(&_tool_use("Glob", "t3", json!({"pattern": "*.rs"})));
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
+    p.push(&tool_use("Glob", "t3", json!({"pattern": "*.rs"})));
     let out = p.flush();
     assert_eq!(group(&out[0]).label(), "Read 2 files, Searched 1 pattern");
 }
@@ -491,8 +491,8 @@ fn test_group_label_pluralizes_bucket_counts() {
 #[test]
 fn test_group_bucket_order_follows_first_appearance() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Grep", "t1", json!({"pattern": "x"})));
-    p.push(&_tool_use("Read", "t2", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Grep", "t1", json!({"pattern": "x"})));
+    p.push(&tool_use("Read", "t2", json!({"file_path": "/a.rs"})));
     let out = p.flush();
     assert_eq!(group(&out[0]).label(), "Searched 1 pattern, Read 1 file");
 }
@@ -500,8 +500,8 @@ fn test_group_bucket_order_follows_first_appearance() {
 #[test]
 fn test_group_closes_when_a_bash_tool_arrives() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    let out = p.push(&_row(
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    let out = p.push(&row(
         "assistant",
         json!([{"type": "tool_use", "id": "t2", "name": "Bash",
                 "input": {"command": "cargo build"}}]),
@@ -519,12 +519,12 @@ fn test_group_closes_when_a_bash_tool_arrives() {
 #[test]
 fn test_tool_results_do_not_break_an_open_group() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
     assert!(p
-        .push(&_tool_result("t1", json!("1\tfn a"), false))
+        .push(&tool_result("t1", json!("1\tfn a"), false))
         .is_empty());
-    p.push(&_tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
-    let out = p.push(&_text("assistant", "done"));
+    p.push(&tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
+    let out = p.push(&text("assistant", "done"));
     let g = group(&out[0]);
     assert_eq!(g.members.len(), 2);
     assert_eq!(g.label(), "Read 2 files");
@@ -537,9 +537,9 @@ fn test_tool_results_do_not_break_an_open_group() {
 #[test]
 fn test_group_counts_failed_members() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    p.push(&_tool_use("Read", "t2", json!({"file_path": "/gone.rs"})));
-    p.push(&_tool_result("t2", json!("no such file"), true));
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Read", "t2", json!({"file_path": "/gone.rs"})));
+    p.push(&tool_result("t2", json!("no such file"), true));
     let out = p.flush();
     let g = group(&out[0]);
     assert_eq!(g.failed(), 1);
@@ -549,7 +549,7 @@ fn test_group_counts_failed_members() {
 #[test]
 fn test_skill_read_buckets_as_skill() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use(
+    p.push(&tool_use(
         "Read",
         "t1",
         json!({"file_path": "/plugins/x/skills/y/SKILL.md"}),
@@ -570,7 +570,7 @@ fn run(block: &DisplayBlock) -> &RunBlock {
 #[test]
 fn test_bash_description_strips_run_prefix_and_newlines() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use(
+    p.push(&tool_use(
         "Bash",
         "t1",
         json!({"command": "cargo test", "description": "Run the\ntests"}),
@@ -582,8 +582,8 @@ fn test_bash_description_strips_run_prefix_and_newlines() {
 #[test]
 fn test_bash_falls_back_to_command_first_line() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Bash", "t1", json!({"command": "ls -la\npwd"})));
-    p.push(&_tool_use("Bash", "t2", json!({})));
+    p.push(&tool_use("Bash", "t1", json!({"command": "ls -la\npwd"})));
+    p.push(&tool_use("Bash", "t2", json!({})));
     let out = p.flush();
     assert_eq!(run(&out[0]).description, "ls -la");
     assert_eq!(run(&out[1]).description, "…");
@@ -593,9 +593,9 @@ fn test_bash_falls_back_to_command_first_line() {
 fn test_run_finalizes_when_its_result_attaches() {
     let mut p = TranscriptParser::new();
     assert!(p
-        .push(&_tool_use("Bash", "t1", json!({"command": "cargo build"})))
+        .push(&tool_use("Bash", "t1", json!({"command": "cargo build"})))
         .is_empty());
-    let out = p.push(&_tool_result("t1", json!("Compiling hive"), false));
+    let out = p.push(&tool_result("t1", json!("Compiling hive"), false));
     assert_eq!(out.len(), 1, "{out:?}");
     let r = run(&out[0]);
     assert_eq!(r.result.as_ref().unwrap().first_line(), "Compiling hive");
@@ -605,7 +605,7 @@ fn test_run_finalizes_when_its_result_attaches() {
 #[test]
 fn test_other_tools_keep_name_and_hint() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Edit", "t1", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Edit", "t1", json!({"file_path": "/a.rs"})));
     let out = p.flush();
     match &out[0] {
         DisplayBlock::Tool(t) => {
@@ -621,13 +621,13 @@ fn test_other_tools_keep_name_and_hint() {
 #[test]
 fn test_thinking_duration_comes_from_adjacent_row_timestamps() {
     let mut p = TranscriptParser::new();
-    p.push(&_row_at(
+    p.push(&row_at(
         "user",
         json!("go"),
         None,
         Some("2026-08-30T12:40:00.000Z"),
     ));
-    let out = p.push(&_row_at(
+    let out = p.push(&row_at(
         "assistant",
         json!([{"type": "thinking", "thinking": "hmm"}]),
         None,
@@ -645,7 +645,7 @@ fn test_thinking_duration_comes_from_adjacent_row_timestamps() {
 #[test]
 fn test_thinking_without_timestamps_has_no_duration() {
     let mut p = TranscriptParser::new();
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "assistant",
         json!([{"type": "thinking", "thinking": "hmm"}]),
         None,
@@ -662,8 +662,8 @@ fn test_thinking_without_timestamps_has_no_duration() {
 #[test]
 fn test_thinking_breaks_an_open_tool_group() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    let out = p.push(&_row(
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    let out = p.push(&row(
         "assistant",
         json!([{"type": "thinking", "thinking": "hmm"}]),
         None,
@@ -678,19 +678,19 @@ fn test_thinking_breaks_an_open_tool_group() {
 #[test]
 fn test_worked_for_spans_user_msg_to_final_assistant_text() {
     let mut p = TranscriptParser::new();
-    p.push(&_row_at(
+    p.push(&row_at(
         "user",
         json!("go"),
         None,
         Some("2026-08-30T12:40:00.000Z"),
     ));
-    p.push(&_row_at(
+    p.push(&row_at(
         "assistant",
         json!([{"type": "text", "text": "done"}]),
         None,
         Some("2026-08-30T12:44:06.000Z"),
     ));
-    let out = p.push(&_row_at(
+    let out = p.push(&row_at(
         "user",
         json!("next"),
         None,
@@ -710,8 +710,8 @@ fn test_worked_for_spans_user_msg_to_final_assistant_text() {
 #[test]
 fn test_worked_for_skipped_without_assistant_text() {
     let mut p = TranscriptParser::new();
-    p.push(&_row("user", json!("go"), None));
-    let out = p.push(&_row("user", json!("actually wait"), None));
+    p.push(&row("user", json!("go"), None));
+    let out = p.push(&row("user", json!("actually wait"), None));
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(matches!(out[0], DisplayBlock::User(_)));
 }
@@ -751,7 +751,7 @@ fn test_user_and_assistant_blocks_carry_timestamps() {
     let mut env = crate::testenv::EnvGuard::new();
     env.set("TZ", "UTC");
     let mut p = TranscriptParser::new();
-    let out = p.push(&_row_at(
+    let out = p.push(&row_at(
         "user",
         json!("hello"),
         None,
@@ -764,7 +764,7 @@ fn test_user_and_assistant_blocks_carry_timestamps() {
         }
         other => panic!("expected User, got {other:?}"),
     }
-    let out = p.push(&_row_at(
+    let out = p.push(&row_at(
         "assistant",
         json!([{"type": "text", "text": "hi"}]),
         None,
@@ -782,8 +782,8 @@ fn test_user_and_assistant_blocks_carry_timestamps() {
 #[test]
 fn test_pending_blocks_snapshot_shows_open_group() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    p.push(&_tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
+    p.push(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    p.push(&tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
     let pending = p.pending_blocks();
     assert_eq!(pending.len(), 1, "{pending:?}");
     let g = group(&pending[0]);
@@ -797,7 +797,7 @@ fn test_pending_blocks_snapshot_shows_open_group() {
 #[test]
 fn test_thinking_block_captures_full_text() {
     let mut p = TranscriptParser::new();
-    let out = p.push(&_row(
+    let out = p.push(&row(
         "assistant",
         json!([{"type": "thinking", "thinking": "deep\nthought\nhere"}]),
         None,
@@ -811,8 +811,8 @@ fn test_thinking_block_captures_full_text() {
 #[test]
 fn test_tool_outcome_stores_full_text_and_derives_first_line() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Bash", "t1", json!({"command": "cargo build"})));
-    let out = p.push(&_tool_result(
+    p.push(&tool_use("Bash", "t1", json!({"command": "cargo build"})));
+    let out = p.push(&tool_result(
         "t1",
         json!("Compiling hive\nFinished dev\nwarning: unused"),
         false,
@@ -856,12 +856,12 @@ fn test_tool_outcome_truncation_respects_char_boundaries() {
 #[test]
 fn test_run_block_keeps_full_command() {
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use(
+    p.push(&tool_use(
         "Bash",
         "t1",
         json!({"command": "ls -la\npwd", "description": "List files"}),
     ));
-    p.push(&_tool_use("Bash", "t2", json!({})));
+    p.push(&tool_use("Bash", "t2", json!({})));
     let out = p.flush();
     assert_eq!(run(&out[0]).command, "ls -la\npwd");
     assert_eq!(run(&out[1]).command, "", "absent command stores empty");
@@ -872,7 +872,7 @@ fn test_tool_block_keeps_full_input_json() {
     let input = json!({"file_path": "/a.rs", "old_string": "line1\nline2",
                        "new_string": "line3"});
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Edit", "t1", input.clone()));
+    p.push(&tool_use("Edit", "t1", input.clone()));
     let out = p.flush();
     match &out[0] {
         DisplayBlock::Tool(t) => {
@@ -887,7 +887,7 @@ fn test_tool_block_keeps_full_input_json() {
 fn test_group_member_keeps_full_input_json() {
     let input = json!({"pattern": "fn main", "path": "/src", "-n": true});
     let mut p = TranscriptParser::new();
-    p.push(&_tool_use("Grep", "t1", input.clone()));
+    p.push(&tool_use("Grep", "t1", input.clone()));
     let out = p.flush();
     let g = group(&out[0]);
     let parsed: Value = serde_json::from_str(&g.members[0].input_json).unwrap();
@@ -900,16 +900,16 @@ fn test_group_member_keeps_full_input_json() {
 fn test_entry_ids_stable_from_pending_through_finalization() {
     let mut p = TranscriptParser::new();
     assert!(p
-        .push_entries(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})))
+        .push_entries(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})))
         .is_empty());
     let snap = p.pending_entries();
     assert_eq!(snap.len(), 1);
     let group_id = snap[0].id;
     // Aggregating another member keeps the group's id.
-    p.push_entries(&_tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
+    p.push_entries(&tool_use("Read", "t2", json!({"file_path": "/b.rs"})));
     assert_eq!(p.pending_entries()[0].id, group_id);
     // Finalization emits the same id, and later blocks mint higher ones.
-    let out = p.push_entries(&_text("assistant", "done"));
+    let out = p.push_entries(&text("assistant", "done"));
     assert_eq!(out.len(), 2, "{out:?}");
     assert_eq!(out[0].id, group_id);
     assert!(matches!(out[0].block, DisplayBlock::ToolGroup(_)));
@@ -920,13 +920,13 @@ fn test_entry_ids_stable_from_pending_through_finalization() {
 #[test]
 fn test_entry_ids_never_collide_between_pending_and_finalized() {
     let mut p = TranscriptParser::new();
-    p.push_entries(&_tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
-    let finalized = p.push_entries(&_row(
+    p.push_entries(&tool_use("Read", "t1", json!({"file_path": "/a.rs"})));
+    let finalized = p.push_entries(&row(
         "assistant",
         json!([{"type": "thinking", "thinking": "hmm"}]),
         None,
     ));
-    p.push_entries(&_tool_use("Bash", "t2", json!({"command": "ls"})));
+    p.push_entries(&tool_use("Bash", "t2", json!({"command": "ls"})));
     let pending = p.pending_entries();
     let mut ids: Vec<u64> = finalized
         .iter()
@@ -952,14 +952,14 @@ fn test_entry_ids_never_collide_between_pending_and_finalized() {
 #[test]
 fn test_user_blocks_start_turns() {
     let mut p = TranscriptParser::new();
-    let out = p.push_entries(&_row_at(
+    let out = p.push_entries(&row_at(
         "user",
         json!("go"),
         None,
         Some("2026-08-30T12:40:00.000Z"),
     ));
     assert!(out[0].block.starts_turn());
-    let out = p.push_entries(&_row_at(
+    let out = p.push_entries(&row_at(
         "assistant",
         json!([{"type": "text", "text": "done"}]),
         None,
@@ -967,7 +967,7 @@ fn test_user_blocks_start_turns() {
     ));
     assert!(!out[0].block.starts_turn());
     // WorkedFor emitted ahead of the next user prompt is not a turn start.
-    let out = p.push_entries(&_row_at(
+    let out = p.push_entries(&row_at(
         "user",
         json!("next"),
         None,
@@ -982,7 +982,7 @@ fn test_user_blocks_start_turns() {
 
 #[test]
 fn test_line_accumulator_row_written_in_two_chunks_parses_once() {
-    let row = format!("{}\n", _text("assistant", "two chunks"));
+    let row = format!("{}\n", text("assistant", "two chunks"));
     let (head, tail) = row.as_bytes().split_at(row.len() / 2);
     let mut lines = LineAccumulator::new();
     let mut p = TranscriptParser::new();
@@ -995,7 +995,7 @@ fn test_line_accumulator_row_written_in_two_chunks_parses_once() {
 
 #[test]
 fn test_line_accumulator_row_cut_inside_a_multibyte_char_parses_once() {
-    let row = format!("{}\n", _text("assistant", "你好世界"));
+    let row = format!("{}\n", text("assistant", "你好世界"));
     let cut = row.find('好').unwrap() + 1;
     assert!(!row.is_char_boundary(cut));
     let (head, tail) = row.as_bytes().split_at(cut);
@@ -1014,8 +1014,8 @@ fn test_line_accumulator_row_cut_inside_a_multibyte_char_parses_once() {
 
 #[test]
 fn test_line_accumulator_backlog_holds_trailing_partial_row() {
-    let first = _text("user", "first");
-    let second = _text("assistant", "second");
+    let first = text("user", "first");
+    let second = text("assistant", "second");
     let cut = second.len() / 2;
     let backlog = format!("{first}\n{}", &second[..cut]);
     let mut lines = LineAccumulator::new();
@@ -1035,10 +1035,10 @@ fn test_line_accumulator_backlog_holds_trailing_partial_row() {
 
 #[test]
 fn test_line_accumulator_backlog_holds_partial_row_cut_inside_a_char() {
-    let second = _text("assistant", "尾行");
+    let second = text("assistant", "尾行");
     let cut = second.find('尾').unwrap() + 2;
     assert!(!second.is_char_boundary(cut));
-    let mut backlog = format!("{}\n", _text("user", "head")).into_bytes();
+    let mut backlog = format!("{}\n", text("user", "head")).into_bytes();
     backlog.extend_from_slice(&second.as_bytes()[..cut]);
     let mut lines = LineAccumulator::new();
     let whole = lines.split_backlog(&backlog);
@@ -1051,7 +1051,7 @@ fn test_line_accumulator_backlog_holds_partial_row_cut_inside_a_char() {
 #[test]
 fn test_line_accumulator_complete_row_emits_immediately() {
     let mut lines = LineAccumulator::new();
-    let row = _text("assistant", "whole");
+    let row = text("assistant", "whole");
     assert_eq!(
         lines.push(format!("{row}\n").as_bytes()).as_deref(),
         Some(row.as_str())

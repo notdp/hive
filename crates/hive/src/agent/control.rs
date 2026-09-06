@@ -50,7 +50,7 @@ impl Agent {
         // never route into a stale `hive-pane-<n>.job`, whichever way the
         // probe happens to read that pane.
         if self.pane_id.is_empty() {
-            return self._send_headless(text, &sender);
+            return self.send_headless(text, &sender);
         }
         let probe = hooked_detect_cli_process_for_pane(&self.pane_id);
         let profile_name = probe.as_ref().map(|p| p.name).unwrap_or_default();
@@ -65,7 +65,7 @@ impl Agent {
         }
         if claude_member {
             if let Some(job_id) = hooked_job_id_for_pane(&self.pane_id).filter(|j| !j.is_empty()) {
-                return self._deliver_claude_job(&job_id, text, &sender);
+                return self.deliver_claude_job(&job_id, text, &sender);
             }
         }
         if profile_name == "codex" {
@@ -98,7 +98,7 @@ impl Agent {
             // address, only the picture.
             let sid = self.session_id.clone().unwrap_or_default();
             if !sid.is_empty() && hooked_job_row(&sid).is_none() {
-                return self._deliver_claude_session(&sid, text, &sender);
+                return self.deliver_claude_session(&sid, text, &sender);
             }
             return Err(DeliveryError(format!(
                 "claude pane {} has no bg job record; a hive \
@@ -139,7 +139,7 @@ impl Agent {
         }
     }
 
-    fn _deliver_claude_job(
+    fn deliver_claude_job(
         &self,
         job_id: &str,
         text: &str,
@@ -163,7 +163,7 @@ impl Agent {
                  job ledger, or the wake failed); the message stays on the bus"
             )));
         };
-        _deliver_claude_two_lanes(
+        deliver_claude_two_lanes(
             &engine.session_id,
             || Ok(engine.socket_path.clone()),
             text,
@@ -176,7 +176,7 @@ impl Agent {
     ///
     /// Same two lanes as a job engine; the inbox socket is looked up in the
     /// live session list only once the daemon lane has refused.
-    fn _deliver_claude_session(
+    fn deliver_claude_session(
         &self,
         session_id: &str,
         text: &str,
@@ -184,7 +184,7 @@ impl Agent {
     ) -> Result<String, DeliveryError> {
         let sid8: String = session_id.chars().take(8).collect();
         let who = format!("claude member '{}' (session {sid8})", self.name);
-        _deliver_claude_two_lanes(
+        deliver_claude_two_lanes(
             session_id,
             || {
                 hooked_list_sessions()
@@ -208,7 +208,7 @@ impl Agent {
     /// Identity comes from the registry row (claude jobId / codex threadId /
     /// grok member key) — there is no pane to probe, and nothing to guard
     /// against pane-id recycling.
-    fn _send_headless(&self, text: &str, sender: &str) -> Result<String, DeliveryError> {
+    fn send_headless(&self, text: &str, sender: &str) -> Result<String, DeliveryError> {
         if self.cli == "claude" {
             let sid = self.session_id.clone().unwrap_or_default();
             if sid.is_empty() {
@@ -219,9 +219,9 @@ impl Agent {
                 )));
             }
             if hooked_job_row(&sid).is_some() {
-                return self._deliver_claude_job(&sid, text, sender);
+                return self.deliver_claude_job(&sid, text, sender);
             }
-            return self._deliver_claude_session(&sid, text, sender);
+            return self.deliver_claude_session(&sid, text, sender);
         }
         if self.cli == "codex" {
             let thread_id = self.session_id.clone().unwrap_or_default();
@@ -303,7 +303,7 @@ impl Agent {
                     "codex {} did not accept turn/interrupt \
                      (no recorded thread, daemon down, RPC error, or \
                      connection failure)",
-                    self._address()
+                    self.address()
                 );
             }
             return Ok(());
@@ -321,7 +321,7 @@ impl Agent {
                 bail!(
                     "grok {} did not accept session/cancel \
                      (no leader/session, or connection failure)",
-                    self._address()
+                    self.address()
                 );
             }
             return Ok(());
@@ -336,7 +336,7 @@ impl Agent {
 
     /// How an error names this member: its pane when it has one, else the
     /// member itself.
-    fn _address(&self) -> String {
+    fn address(&self) -> String {
         if !self.pane_id.is_empty() {
             format!("pane {}", self.pane_id)
         } else {
@@ -353,11 +353,11 @@ impl Agent {
         if !self.pane_id.is_empty() {
             return crate::tmux::is_pane_alive(&self.pane_id);
         }
-        self._engine_alive()
+        self.engine_alive()
     }
 
     /// A pane-less member is alive iff its engine answers for it.
-    fn _engine_alive(&self) -> bool {
+    fn engine_alive(&self) -> bool {
         if self.cli == "claude" {
             let job_id = self.session_id.clone().unwrap_or_default();
             if job_id.is_empty() {
@@ -415,7 +415,7 @@ impl Agent {
                 crate::adapters::claude_bg::clear_pane_job(&self.pane_id);
             }
         } else if self.cli == "grok" {
-            return self._kill_grok();
+            return self.kill_grok();
         }
         if !self.pane_id.is_empty() {
             hooked_kill_pane(&self.pane_id);
@@ -434,7 +434,7 @@ impl Agent {
     /// `kill_daemon_key`, which is the authority on the rest: it takes down
     /// every remaining client of the socket, in this process or any other,
     /// ahead of the leader.
-    fn _kill_grok(&self) {
+    fn kill_grok(&self) {
         // Resolve while the pane tags still exist; a pane-less member is
         // addressed by its member key.
         let key = if !self.pane_id.is_empty() {
@@ -460,7 +460,7 @@ impl Agent {
 /// session's own inbox socket, which still delivers (wrapped) with today's
 /// error semantics. *socket_path* is resolved only when the daemon lane
 /// refused; *who* names the target in every failure.
-fn _deliver_claude_two_lanes(
+fn deliver_claude_two_lanes(
     session_id: &str,
     socket_path: impl FnOnce() -> Result<String, DeliveryError>,
     text: &str,
