@@ -479,18 +479,85 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
 }
 
 #[test]
-fn test_turn_open_payload_reads_the_grok_pools_busy_flag() {
+fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
+    use crate::adapters::claude_bg::{runtime_from_engine, STATUS_STALE_AFTER_SECONDS};
+    let engine = |status: &str, updated_at: f64| EngineSession {
+        status: status.to_string(),
+        status_updated_at: updated_at,
+        ..crate::agent::testhook::fake_engine(4242, "b9beb2b8", "sess-1")
+    };
+    let now = 1_000_000.0;
+    let open = |status: &str, updated_at: f64| {
+        claude_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
+    };
+    assert_eq!(open("busy", now - 1.0), Some(true));
+    assert_eq!(open("idle", now - 1.0), Some(false));
+    assert_eq!(open("waiting", now - 1.0), Some(false));
+    // An engine with no status record answers "not busy" — its runtime
+    // folds an unknown status to busy=false, which is still the daemon's
+    // own word.
+    assert_eq!(open("", 0.0), Some(false));
+    // A status that stopped advancing is a wedged engine, no answer.
+    assert_eq!(open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0), None);
+    assert_eq!(claude_turn_open(&Map::new()), None);
+}
+
+fn turn_open_team(name: &str) -> Team {
+    let with_session = |agent: Agent, sid: &str| Agent {
+        session_id: Some(sid.to_string()),
+        ..agent
+    };
+    fake_team(
+        name,
+        vec![
+            with_session(fake_agent("c", "%4", "codex"), "thr-1"),
+            with_session(fake_agent("c-mute", "%5", "codex"), "thr-mute"),
+            fake_agent("c-blank", "", "codex"),
+            with_session(fake_agent("k", "%6", "claude"), "cafe1234"),
+            with_session(fake_agent("k-idle", "%7", "claude"), "beef5678"),
+            with_session(fake_agent("k-stale", "%8", "claude"), "dead0000"),
+            with_session(fake_agent("k-gone", "%9", "claude"), "0000aaaa"),
+            with_session(
+                fake_agent("k-joined", "%10", "claude"),
+                "0f4e2a9c-6b1d-4e0a-9c3b-1d2e3f4a5b6c",
+            ),
+            fake_agent("g", "%3", "grok"),
+            fake_agent("quiet", "", "grok"),
+            fake_agent("sh", "%11", "bash"),
+        ],
+    )
+}
+
+#[test]
+fn test_turn_open_payload_asks_each_engine_directly() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     let hook = Hook {
-        team_load: Some(Arc::new(|name| {
-            Ok(fake_team(
-                name,
-                vec![
-                    fake_agent("g", "%3", "grok"),
-                    fake_agent("quiet", "", "grok"),
-                    fake_agent("c", "%4", "codex"),
-                ],
-            ))
+        team_load: Some(Arc::new(|name| Ok(turn_open_team(name)))),
+        // codex: the app-server's `thread/read` on the roster thread id.
+        cas_turn_open_for_thread: Some(Arc::new(|thread| match thread {
+            "thr-1" => Some(true),
+            "thr-mute" => None,
+            _ => panic!("unexpected thread {thread}"),
         })),
+        // claude: the bg job's engine record, keyed by the roster job id.
+        cb_engine_session_for_job: Some(Arc::new(move |job| {
+            let engine = |status: &str, updated_at: f64| EngineSession {
+                status: status.to_string(),
+                status_updated_at: updated_at,
+                ..crate::agent::testhook::fake_engine(4242, job, "sess-1")
+            };
+            match job {
+                "cafe1234" => Some(engine("busy", now)),
+                "beef5678" => Some(engine("idle", now)),
+                "dead0000" => Some(engine("busy", 1.0)),
+                "0000aaaa" => None,
+                _ => panic!("unexpected job {job}"),
+            }
+        })),
+        // grok: the leader pool's push-fed state.
         gl_runtime_for_key: Some(Arc::new(|key| match key {
             "m-honey.g" => Some(session_runtime(true, "ready")),
             _ => None,
@@ -498,21 +565,32 @@ fn test_turn_open_payload_reads_the_grok_pools_busy_flag() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
+    let open = |agent: &str| turn_open_payload("honey", agent).unwrap()["open"].clone();
 
-    let payload = turn_open_payload("honey", "g").unwrap();
+    let payload = turn_open_payload("honey", "c").unwrap();
     assert_eq!(payload["ok"], Value::Bool(true));
-    assert_eq!(payload["agent"], Value::from("g"));
+    assert_eq!(payload["agent"], Value::from("c"));
     assert_eq!(payload["open"], Value::Bool(true));
+    // No daemon answer, or no thread to ask about, is no answer.
+    assert_eq!(open("c-mute"), Value::Null);
+    assert_eq!(open("c-blank"), Value::Null);
+
+    assert_eq!(open("k"), Value::Bool(true));
+    assert_eq!(open("k-idle"), Value::Bool(false));
+    // A stale status is a wedged engine's last word; no engine entry is a
+    // daemon that cannot be asked; a row naming the engine session rather
+    // than a job has no engine record to read.
+    assert_eq!(open("k-stale"), Value::Null);
+    assert_eq!(open("k-gone"), Value::Null);
+    assert_eq!(open("k-joined"), Value::Null);
+
+    assert_eq!(open("g"), Value::Bool(true));
     // A grok leader that has reported nothing yet is no answer.
-    assert_eq!(
-        turn_open_payload("honey", "quiet").unwrap()["open"],
-        Value::Null
-    );
-    // Other engines are asked directly by the caller, never through here.
-    assert_eq!(
-        turn_open_payload("honey", "c").unwrap()["open"],
-        Value::Null
-    );
+    assert_eq!(open("quiet"), Value::Null);
+
+    // An engine hive cannot ask has no answer; a member off the roster is
+    // an error, not a null.
+    assert_eq!(open("sh"), Value::Null);
     assert!(turn_open_payload("honey", "nobody").is_err());
 }
 

@@ -78,6 +78,7 @@ pub struct Hook {
     // codex_app_server
     pub cas_runtime_for_pane: Option<S1<Option<ThreadRuntime>>>,
     pub cas_runtime_for_thread: Option<S1<Option<ThreadRuntime>>>,
+    pub cas_turn_open_for_thread: Option<S1<Option<bool>>>,
     pub cas_session_id_for_pane: Option<S1<Option<String>>>,
     pub cas_shared_socket_path: Option<F0<PathBuf>>,
     pub cas_daemon_alive: Option<F0<bool>>,

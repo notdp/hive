@@ -349,6 +349,14 @@ pub(super) fn hooked_cas_runtime_for_thread(
     crate::adapters::codex_app_server::runtime_for_thread(thread_id)
 }
 
+pub(super) fn hooked_cas_turn_open_for_thread(thread_id: &str) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_turn_open_for_thread.clone()).flatten() {
+        return f(thread_id);
+    }
+    crate::adapters::codex_app_server::turn_open_for_thread(thread_id)
+}
+
 pub(super) fn hooked_cas_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_session_id_for_pane.clone()).flatten() {

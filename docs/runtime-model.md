@@ -216,11 +216,13 @@ own transcript. Nothing travels back over the bus.
   and its own bookkeeping leaves a pending record behind, never a gap a
   same-name run could walk through.
 - **Readiness.** The runner dispatches only between turns, and only on a
-  positive reading from the engine's own daemon that no turn is open
-  (codex: the app-server's `thread/read`; claude: the bg job's engine
-  record, whose `busy` flag is no answer once its status is stale; grok:
-  the hived's ACP connection). No answer says nothing about the turn and
-  never opens the dispatch. A member still in a turn after 600s ends the
+  positive reading from the engine's own daemon that no turn is open. The
+  runner asks the hived's `turn-open` for the member and the hived queries
+  the engine directly, with no tick cache in between (codex: the
+  app-server's `thread/read`; claude: the bg job's engine record, whose
+  `busy` flag is no answer once its status is stale; grok: the leader
+  pool's push-fed state). No answer says nothing about the turn and never
+  opens the dispatch. A member still in a turn after 600s ends the
   run `member_busy` without dispatching — a task dropped into a running
   turn would be folded into it, and the fold detection below is a net,
   not a plan.

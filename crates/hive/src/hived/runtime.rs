@@ -635,23 +635,49 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
     Ok(payload)
 }
 
-/// Whether the named member has a turn open, for the one engine whose turn
-/// state only the hived can read: a grok member's ACP connection is held by
-/// the hived's leader pool (a second process must not `session/load` the
-/// same session), and the pool client's runtime is push-fed by
-/// `session/update` notifications. `open` is null when the member is not
-/// a grok member of the team or its leader has reported nothing yet; a
+/// Whether a claude bg engine has a turn open, read off the runtime fields
+/// `claude_bg::runtime_from_engine` folds its registry status into: the
+/// `busy` flag, unless the status is stale (`inputReason: stale_status`),
+/// which is a wedged engine's last word and no answer.
+pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Option<bool> {
+    if fields.get("inputReason").and_then(Value::as_str) == Some("stale_status") {
+        return None;
+    }
+    fields.get("busy").and_then(Value::as_bool)
+}
+
+/// Whether the named member has a turn open, asked of its engine directly
+/// — no tick cache in between. codex: the shared app-server's
+/// `thread/read` on the roster thread id. claude: the bg job's engine
+/// record (the roster row's session field is the job id when it is
+/// job-id shaped), whose `busy` flag is no answer once its status is
+/// stale. grok: the member's ACP connection is held by the hived's leader
+/// pool (a second process must not `session/load` the same session), and
+/// the pool client's runtime is push-fed by `session/update`
+/// notifications. `open` is null whenever the engine cannot be asked (no
+/// daemon, no engine entry, nothing reported yet) — never a guess; a
 /// member off the roster is an error.
 pub(crate) fn turn_open_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
     let team = hooked_team_load(team_name)?;
     let agent = team
         .agent_named(agent_name)
         .ok_or_else(|| anyhow::anyhow!("unknown member '{agent_name}'"))?;
-    let open = if agent.cli == "grok" {
-        let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
-        hooked_gl_runtime_for_key(&key).map(|rt| rt.busy)
-    } else {
-        None
+    let sid = agent.session_id.as_deref().filter(|s| !s.is_empty());
+    let open = match agent.cli.as_str() {
+        "codex" => sid.and_then(hooked_cas_turn_open_for_thread),
+        "claude" => sid
+            .filter(|s| crate::adapters::claude_bg::looks_like_job_id(s))
+            .and_then(hooked_cb_engine_session_for_job)
+            .and_then(|engine| {
+                claude_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
+                    &engine, None,
+                ))
+            }),
+        "grok" => {
+            let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
+            hooked_gl_runtime_for_key(&key).map(|rt| rt.busy)
+        }
+        _ => None,
     };
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));

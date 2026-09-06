@@ -29,7 +29,7 @@ pub(crate) fn set_shared_client_override(
     SHARED_CLIENT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(factory)));
 }
 
-pub(crate) fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
+fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
     set_shared_client_override(move || {
         let client: Arc<dyn DaemonClient> = fake.clone();
         Some(client)
