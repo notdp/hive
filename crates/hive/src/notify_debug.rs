@@ -66,7 +66,7 @@ pub fn emit(workspace: &str, event: &str, fields: &[(&str, Value)]) {
     let mut record: Vec<(String, Value)> = vec![
         (
             "ts".to_string(),
-            Value::String(crate::devlog::utc_timestamp_ms()),
+            Value::String(crate::clock::utc_timestamp_ms()),
         ),
         ("pid".to_string(), Value::from(std::process::id())),
         ("component".to_string(), Value::String("notify".to_string())),

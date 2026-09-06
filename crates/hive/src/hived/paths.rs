@@ -12,7 +12,7 @@ use crate::devlog;
 use super::*;
 
 pub(crate) fn now_iso() -> String {
-    format!("{}Z", devlog::utc_now_iso_seconds())
+    format!("{}Z", crate::clock::utc_now_iso_seconds())
 }
 
 pub(super) fn getpid() -> i64 {

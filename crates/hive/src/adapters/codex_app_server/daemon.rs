@@ -350,7 +350,7 @@ pub fn freshen_models_cache() -> bool {
         let obj = entry.as_object_mut()?;
         obj.insert(
             "fetched_at".to_string(),
-            Value::String(format!("{}.000000Z", crate::devlog::utc_now_iso_seconds())),
+            Value::String(format!("{}.000000Z", crate::clock::utc_now_iso_seconds())),
         );
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_string(&entry).ok()?).ok()?;

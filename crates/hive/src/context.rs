@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::team::hive_home;
+use crate::paths::hive_home;
 
 pub fn context_dir() -> PathBuf {
     hive_home().join("contexts")

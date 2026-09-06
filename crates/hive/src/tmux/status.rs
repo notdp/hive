@@ -155,7 +155,7 @@ pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) ->
 /// pane — a member's TUI — until someone presses q, and a nonzero exit
 /// the same way; the binding must never do that to a member.
 pub(crate) fn mirror_run_shell(hive: &str) -> String {
-    let hive = crate::cli::util::tmux_dquote_escape(hive);
+    let hive = crate::shell::tmux_dquote_escape(hive);
     format!("run-shell -b \"{hive} mirror --window '#{{q:session_name}}:#{{window_index}}' >/dev/null 2>&1 || true\"")
 }
 
@@ -253,7 +253,7 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
 /// (idempotent: every row is a plain set, and the prefix+m probe reads the
 /// same fallback back from behind hive's own binding).
 pub fn install_team_status(session_id: &str) {
-    let hive = crate::cli::util::shlex_quote(&crate::cli::util::self_exe());
+    let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));

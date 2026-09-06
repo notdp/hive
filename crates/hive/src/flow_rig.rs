@@ -85,7 +85,7 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     crate::bus::init_workspace(Path::new(&workspace))
         .with_context(|| format!("initializing workspace {workspace}"))?;
 
-    let hive = shell_quote(&crate::cli::util::self_exe());
+    let hive = shell_quote(&crate::paths::self_exe());
     // The board tags its own pane (@hive-role dock) and re-tiles the window
     // as it starts; tagging here too keeps the first spawn's layout right
     // even before the board's first tick.

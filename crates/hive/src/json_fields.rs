@@ -19,6 +19,24 @@ pub fn is_set(value: Option<&Value>) -> bool {
     }
 }
 
+/// Rebuild maps in sorted key order, recursively — this build's serde_json
+/// (`preserve_order`) keeps insertion order otherwise.
+pub fn sort_keys(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => {
+            let mut keys: Vec<&String> = o.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sort_keys(&o[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(a) => Value::Array(a.iter().map(sort_keys).collect()),
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

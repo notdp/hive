@@ -1221,16 +1221,6 @@ fn test_shlex_quote_matches_python() {
 }
 
 #[test]
-fn test_tmux_dquote_escape_protects_dollar_backslash_and_quote() {
-    assert_eq!(tmux_dquote_escape("/x/hive"), "/x/hive");
-    assert_eq!(
-        tmux_dquote_escape("'/x/we ird$x/hive'"),
-        "'/x/we ird\\$x/hive'"
-    );
-    assert_eq!(tmux_dquote_escape("a\\b\"c"), "a\\\\b\\\"c");
-}
-
-#[test]
 fn test_uuid4_shape() {
     let sid = uuid4();
     assert_eq!(sid.len(), 36);

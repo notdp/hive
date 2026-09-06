@@ -246,28 +246,9 @@ extern "C" fn on_sigint(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-pub fn follow(session_id: &str) -> i32 {
-    let path = match transcript_path(session_id) {
-        Some(p) => p,
-        None => {
-            println!("no transcript for session '{}'", session_id);
-            return 1;
-        }
-    };
-    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
-        return match crate::transcript_tui::run(&path) {
-            Ok(code) => code,
-            Err(err) => {
-                eprintln!("{}: {}", path.display(), err);
-                1
-            }
-        };
-    }
-    follow_plain(session_id, &path)
-}
-
-/// Plain ANSI stream, used when stdout is not a tty (pipes, logs).
-fn follow_plain(session_id: &str, path: &Path) -> i32 {
+/// Plain ANSI stream of the transcript at *path*, followed live: the
+/// non-tty form of `hive view` (pipes, logs).
+pub fn follow_plain(session_id: &str, path: &Path) -> i32 {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())

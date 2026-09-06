@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 #[cfg(test)]
 use self::tests::fake_tmux as tmux;
-use crate::cli::util::shlex_quote;
+use crate::shell::shlex_quote;
 use crate::notify_debug;
 #[cfg(not(test))]
 use crate::tmux;
@@ -79,7 +79,7 @@ fn select_hook_command() -> String {
         "{} notify-hook \
          --cleanup-selected '#{{session_name}}:#{{window_index}}' \
          --client '#{{client_tty}}'",
-        shlex_quote(&crate::cli::util::self_exe())
+        shlex_quote(&crate::paths::self_exe())
     );
     // This string is parsed by tmux's hook command parser, then by run-shell.
     // Keep the attached-client e2e test in sync if this quoting changes.

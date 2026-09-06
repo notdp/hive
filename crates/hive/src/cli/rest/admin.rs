@@ -34,7 +34,7 @@ pub fn config_get(key: &str) {
     };
     match &value {
         Value::Object(_) | Value::Array(_) => {
-            println!("{}", json_pretty(&crate::registry::sort_keys(&value)));
+            println!("{}", json_pretty(&crate::json_fields::sort_keys(&value)));
         }
         _ => println!("{}", value),
     }

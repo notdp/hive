@@ -99,7 +99,7 @@ pub fn ensure_codex_plugin_current() {
 /// `$HIVE_HOME/core_assets/marketplace/` (heal-on-drift) and return the
 /// payload plugin directory.
 pub fn materialize_marketplace() -> Result<PathBuf> {
-    let root = crate::team::hive_home()
+    let root = crate::paths::hive_home()
         .join("core_assets")
         .join("marketplace");
     let mut files: Vec<(String, &str, bool)> = vec![
@@ -147,11 +147,11 @@ static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
 }];
 
 fn state_path() -> PathBuf {
-    crate::team::hive_home().join("plugins").join("state.json")
+    crate::paths::hive_home().join("plugins").join("state.json")
 }
 
 fn installed_root() -> PathBuf {
-    crate::team::hive_home().join("plugins").join("installed")
+    crate::paths::hive_home().join("plugins").join("installed")
 }
 
 fn default_state() -> Map<String, Value> {
@@ -433,7 +433,7 @@ mod tests {
         // cache missing -> marketplace healed + one re-add
         ensure_codex_plugin_current();
         assert_eq!(fs::read_to_string(&log).unwrap(), "plugin add hive@hive\n");
-        assert!(crate::team::hive_home()
+        assert!(crate::paths::hive_home()
             .join("core_assets/marketplace/codex/plugins/hive/.codex-plugin/plugin.json")
             .is_file());
 
