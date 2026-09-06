@@ -10,43 +10,68 @@ use serde_json::{Map, Value};
 
 use super::*;
 
+/// Why a request got no answer. `NotSent`: it never reached the hived —
+/// no socket, the connect or the write failed — so nothing was served.
+/// `AnswerLost`: the request went out whole and the answer did not come
+/// back (read failed or timed out, empty, unparsable), so the hived may
+/// have served it. A caller with a side effect on the line (a node
+/// dispatch) must not take `AnswerLost` for a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestFailure {
+    NotSent(String),
+    AnswerLost(String),
+}
+
+pub(crate) fn request_hived_answer(
+    workspace: &str,
+    payload: &Map<String, Value>,
+    timeout: f64,
+) -> Result<Map<String, Value>, RequestFailure> {
+    let path = socket_path(workspace);
+    if !path.exists() {
+        return Err(RequestFailure::NotSent(format!(
+            "no hived socket at {}",
+            path.display()
+        )));
+    }
+    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
+    let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
+    let mut client = UnixStream::connect(&path).map_err(not_sent)?;
+    client.set_read_timeout(dur).map_err(not_sent)?;
+    client.set_write_timeout(dur).map_err(not_sent)?;
+    let mut body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    body.push('\n');
+    client.write_all(body.as_bytes()).map_err(not_sent)?;
+    // From here the whole request is with the hived: every failure is a
+    // lost answer, not an unsent request.
+    let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
+    client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
+    let mut chunks = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = client.read(&mut buf).map_err(lost)?;
+        if n == 0 {
+            break;
+        }
+        chunks.extend_from_slice(&buf[..n]);
+    }
+    if chunks.is_empty() {
+        return Err(RequestFailure::AnswerLost("empty answer".to_string()));
+    }
+    match serde_json::from_slice::<Value>(&chunks) {
+        Ok(Value::Object(map)) => Ok(map),
+        _ => Err(RequestFailure::AnswerLost(
+            "answer is not a JSON object".to_string(),
+        )),
+    }
+}
+
 pub(crate) fn request_hived(
     workspace: &str,
     payload: &Map<String, Value>,
     timeout: f64,
 ) -> Option<Map<String, Value>> {
-    let path = socket_path(workspace);
-    if !path.exists() {
-        return None;
-    }
-    let inner = || -> std::io::Result<Vec<u8>> {
-        let mut client = UnixStream::connect(&path)?;
-        let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
-        client.set_read_timeout(dur)?;
-        client.set_write_timeout(dur)?;
-        let mut body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
-        body.push('\n');
-        client.write_all(body.as_bytes())?;
-        client.shutdown(std::net::Shutdown::Write)?;
-        let mut chunks = Vec::new();
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = client.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            chunks.extend_from_slice(&buf[..n]);
-        }
-        Ok(chunks)
-    };
-    let chunks = inner().ok()?;
-    if chunks.is_empty() {
-        return None;
-    }
-    match serde_json::from_slice::<Value>(&chunks) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+    request_hived_answer(workspace, payload, timeout).ok()
 }
 
 pub(super) fn action_payload(action: &str) -> Map<String, Value> {
@@ -130,20 +155,22 @@ pub fn request_send(
 }
 
 /// A `hive node run` dispatch: the same transport as a send, no sender.
-pub fn request_node_dispatch(
+/// The failure kind is kept: a dispatch whose answer was lost may have
+/// been injected, and the node must not repeat it.
+pub(crate) fn request_node_dispatch(
     workspace: &str,
     team: &str,
     target_agent: &str,
     body: &str,
     artifact: &str,
-) -> Option<Map<String, Value>> {
+) -> Result<Map<String, Value>, RequestFailure> {
     let timeout = send_request_timeout();
     let mut payload = action_payload("node-dispatch");
     payload.insert("team".to_string(), Value::from(team));
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
-    request_hived(workspace, &payload, timeout)
+    request_hived_answer(workspace, &payload, timeout)
 }
 
 pub fn request_doctor(
@@ -179,4 +206,107 @@ pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<St
     let mut payload = action_payload("runtime-snapshot");
     payload.insert("pane".to_string(), Value::from(pane_id));
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hived::testhook::{install, Hook};
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+
+    /// A run dir under /tmp (short enough for the socket to live in-tree)
+    /// hooked in as the workspace's, and a listener on its socket path
+    /// that serves one connection with `reply`: drains the request, then
+    /// runs the reply against the connection.
+    fn one_shot_hived(
+        reply: impl FnOnce(&mut UnixStream) + Send + 'static,
+    ) -> (tempfile::TempDir, crate::hived::testhook::Guard) {
+        let run_tmp = tempfile::Builder::new()
+            .prefix("hrq")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = run_tmp.path().to_path_buf();
+        let guard = install(Hook {
+            run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+            ..Default::default()
+        });
+        let listener = UnixListener::bind(run_tmp.path().join("hived.sock")).unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 65536];
+            loop {
+                match conn.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+            reply(&mut conn);
+        });
+        (run_tmp, guard)
+    }
+
+    #[test]
+    fn test_request_hived_answer_is_not_sent_without_a_socket() {
+        let run_tmp = tempfile::Builder::new()
+            .prefix("hrq")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = run_tmp.path().to_path_buf();
+        let _guard = install(Hook {
+            run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+            ..Default::default()
+        });
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.5).unwrap_err();
+        assert!(
+            matches!(&err, RequestFailure::NotSent(reason) if reason.contains("no hived socket")),
+            "{err:?}"
+        );
+
+        // A socket file nobody listens on: the connect fails, nothing was sent.
+        let _ = std::fs::write(run_tmp.path().join("hived.sock"), "");
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.5).unwrap_err();
+        assert!(matches!(err, RequestFailure::NotSent(_)), "{err:?}");
+    }
+
+    #[test]
+    fn test_request_hived_answer_returns_the_served_object() {
+        let (_run, _guard) = one_shot_hived(|conn| {
+            let _ = conn.write_all(b"{\"ok\": true, \"seq\": 7}\n");
+        });
+        let answer = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 2.0).unwrap();
+        assert_eq!(answer["ok"], Value::Bool(true));
+        assert_eq!(answer["seq"], Value::from(7));
+    }
+
+    #[test]
+    fn test_request_hived_answer_reports_a_lost_answer_after_the_request_went_out() {
+        // The request was drained and the connection closed with no reply.
+        let (_run, _guard) = one_shot_hived(|_conn| {});
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 2.0).unwrap_err();
+        assert_eq!(err, RequestFailure::AnswerLost("empty answer".to_string()));
+
+        // A reply that is not a JSON object.
+        let (_run, _guard) = one_shot_hived(|conn| {
+            let _ = conn.write_all(b"[1, 2]\n");
+        });
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 2.0).unwrap_err();
+        assert_eq!(
+            err,
+            RequestFailure::AnswerLost("answer is not a JSON object".to_string())
+        );
+
+        // A reply held past the read timeout.
+        let (_run, _guard) = one_shot_hived(|conn| {
+            std::thread::sleep(Duration::from_secs_f64(1.0));
+            let _ = conn.write_all(b"{\"ok\": true}\n");
+        });
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.2).unwrap_err();
+        assert!(matches!(err, RequestFailure::AnswerLost(_)), "{err:?}");
+        // The Option form folds every failure kind away.
+        assert_eq!(
+            request_hived("/tmp/ws-x", &action_payload("ping"), 0.2),
+            None
+        );
+    }
 }

@@ -22,7 +22,10 @@
 //! pending record of a dead member is stale and replaced. Past the
 //! dispatch nothing is an `Err` any more: exit 1 means "not dispatched",
 //! so a record write that fails later is logged and the run still ends in
-//! a verdict. `NodeOp` is the typed vocabulary of one hive interaction,
+//! a verdict. A dispatch the hived refused is not dispatched; one whose
+//! answer was lost may be, is never repeated, and keeps its pending
+//! record until the transcript shows the task or the member is killed.
+//! `NodeOp` is the typed vocabulary of one hive interaction,
 //! `run_op` executes one, and `run_node` (`hive node run`) strings them
 //! together for an external orchestrator. `NodeEnv` is the seam over
 //! cli/bus/team/readers; tests inject a fake.
@@ -41,6 +44,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::adapters::turn::{InputBinding, ReadError, TurnAnchor, TurnOutcome, TurnReader};
+use crate::send::DispatchFailure;
 
 const POLL_SECONDS: f64 = 1.0;
 /// How long the reader may keep failing (`ReadError`) before the node
@@ -61,6 +65,11 @@ const IDLE_WAIT_SECONDS: f64 = 600.0;
 /// (`TurnOutcome::Flushing`), counted from the first such reading; past it
 /// the run ends `ambiguous`.
 const FLUSH_BUDGET_SECONDS: f64 = 30.0;
+/// How long a dispatch whose answer was lost (`DispatchFailure::Unknown`)
+/// may go unseen in the transcript, counted in polls from the dispatch;
+/// past it the run ends `ambiguous` with the record left pending, since
+/// the member may be on the task.
+const DISPATCH_UNKNOWN_SECONDS: f64 = 120.0;
 const ATTEMPTS: usize = 3;
 const RETRY_GAP: f64 = 3.0;
 
@@ -81,8 +90,9 @@ pub const STATUS_MEMBER_BUSY: &str = "member_busy";
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 /// The node could not reach a dispatch: bad team, spawn, ready gate, no
-/// reader for the member's CLI, or the dispatch itself refused. Everything
-/// after the dispatch is a verdict in the result, never an error.
+/// reader for the member's CLI, or the dispatch itself refused by the
+/// hived. Everything after the dispatch — including one whose answer was
+/// lost — is a verdict in the result, never an error.
 #[derive(Debug)]
 pub struct NodeError(pub String);
 
@@ -117,8 +127,9 @@ pub struct MemberInfo {
     pub cwd: String,
 }
 
-/// The seams a node reaches through. `Err(String)` from `spawn`/`dispatch`
-/// is a transient failure the retry loops absorb.
+/// The seams a node reaches through. `Err(String)` from `spawn` and
+/// `DispatchFailure::Refused` from `dispatch` are transient failures the
+/// retry loops absorb; `DispatchFailure::Unknown` is never retried.
 pub trait NodeEnv: Send + Sync {
     fn context(&self) -> Result<Ctx, NodeError>;
     fn spawn(&self, name: &str, cli: Option<&str>, model: &str) -> Result<SpawnedAgent, String>;
@@ -126,7 +137,9 @@ pub trait NodeEnv: Send + Sync {
     /// Agents still not ready when the gate expires.
     fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String>;
     /// Dispatch the task with no sender; returns the ledger seq of the row.
-    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String>;
+    /// `Refused` means the task is not with the member; `Unknown` means
+    /// the hived gave no usable answer and the task may have landed.
+    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, DispatchFailure>;
     /// Runtime liveness (`Team::member_alive`): can this member still take a
     /// dispatch and run a turn.
     fn alive(&self, name: &str) -> bool;
@@ -187,7 +200,10 @@ pub fn mint_dispatch_id() -> String {
 /// member may still be on the task, and the next run of that name is
 /// allowed to dispatch on top of it. Keeping the occupation open past the
 /// verdict needs a resolution step (a kill, or a read that proves the turn
-/// ended) that `hive node run` does not have yet.
+/// ended) that `hive node run` does not have yet. The one verdict that
+/// leaves the record pending is a dispatch whose answer was lost and whose
+/// input never showed (`await_turn`): there the run ends `ambiguous` with
+/// the name still owned, since the member may be on the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub dispatch_id: String,
@@ -423,15 +439,32 @@ fn dispatch_body(dispatch_id: &str, prompt: &str) -> String {
     format!("task {dispatch_id}\n{first}")
 }
 
-/// Dispatch with bounded retries: a cloud-backed transport can refuse
-/// transiently under provider throttling, and a single blip must not kill
-/// a whole orchestration. Still loud on exhaustion.
-fn dispatch(env: &dyn NodeEnv, name: &str, body: &str, artifact: &str) -> Result<i64, NodeError> {
+/// What a dispatch left behind: the ledger seq of a delivered task, or
+/// the reason the hived's answer never arrived — the task may be with
+/// the member all the same, so it is not sent again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Dispatched {
+    Delivered(i64),
+    AnswerLost(String),
+}
+
+/// Dispatch with bounded retries of a refusal: a cloud-backed transport
+/// can refuse transiently under provider throttling, and a single blip
+/// must not kill a whole orchestration. Still loud on exhaustion. A lost
+/// answer is not a refusal and is never retried: the same task twice is
+/// worse than one whose delivery the transcript has to confirm.
+fn dispatch(
+    env: &dyn NodeEnv,
+    name: &str,
+    body: &str,
+    artifact: &str,
+) -> Result<Dispatched, NodeError> {
     let mut last = String::new();
     for attempt in 0..ATTEMPTS {
         match env.dispatch(name, body, artifact) {
-            Ok(seq) => return Ok(seq),
-            Err(exc) => {
+            Ok(seq) => return Ok(Dispatched::Delivered(seq)),
+            Err(DispatchFailure::Unknown(reason)) => return Ok(Dispatched::AnswerLost(reason)),
+            Err(DispatchFailure::Refused(exc)) => {
                 last = exc;
                 if attempt + 1 < ATTEMPTS {
                     log(&format!(
@@ -509,8 +542,16 @@ pub fn run_op(env: &dyn NodeEnv, op: &NodeOp) -> Result<Map<String, Value>, Node
             dispatch_id,
         } => {
             let artifact = task_artifact(env, name, dispatch_id, prompt)?;
-            let seq = dispatch(env, name, &dispatch_body(dispatch_id, prompt), &artifact)?;
-            result.insert("seq".to_string(), Value::from(seq));
+            match dispatch(env, name, &dispatch_body(dispatch_id, prompt), &artifact)? {
+                Dispatched::Delivered(seq) => {
+                    result.insert("seq".to_string(), Value::from(seq));
+                }
+                // No seq to report: the answer that carried it was lost.
+                Dispatched::AnswerLost(reason) => {
+                    result.insert("seq".to_string(), Value::Null);
+                    result.insert("answerLost".to_string(), Value::String(reason));
+                }
+            }
             result.insert("artifact".to_string(), Value::String(artifact));
         }
     }
@@ -838,12 +879,34 @@ fn take_cursor(
     }
 }
 
+/// How a wait ended: the verdict, and whether it settles the record. The
+/// one verdict that does not (`terminal: false`) is a dispatch whose
+/// answer was lost and whose input never showed in the transcript: the
+/// member may be on the task, so the record stays pending and the name
+/// owned until `hive kill`.
+struct Ending {
+    verdict: Verdict,
+    terminal: bool,
+}
+
+impl Ending {
+    fn terminal(verdict: Verdict) -> Ending {
+        Ending {
+            verdict,
+            terminal: true,
+        }
+    }
+}
+
 /// Bind the turn the dispatch started, then wait for its end. Every poll
 /// re-reads the member: one that dies or moves to another session gets one
 /// last read of the phase it was in — a terminal outcome on the old anchor
 /// still wins — before the run ends `member_gone` / `session_changed`. A
 /// closed turn whose text is still flushing is polled on under
-/// `FLUSH_BUDGET_SECONDS`, then `ambiguous`.
+/// `FLUSH_BUDGET_SECONDS`, then `ambiguous`. A dispatch whose answer was
+/// lost (`answer_lost`) is bound like any other when its input shows, and
+/// given up on under `DISPATCH_UNKNOWN_SECONDS` when it never does — with
+/// the record left pending, since the member may be on the task.
 fn await_turn(
     env: &dyn NodeEnv,
     reader: &dyn TurnReader,
@@ -851,16 +914,19 @@ fn await_turn(
     name: &str,
     record: &mut NodeRecord,
     cwd: Option<&str>,
-) -> Verdict {
+    answer_lost: bool,
+) -> Ending {
     let mut budget = ErrorBudget::default();
+    let unobserved_polls = (DISPATCH_UNKNOWN_SECONDS / POLL_SECONDS) as u32;
+    let mut unobserved = 0u32;
     let anchor = loop {
         match probe_input(reader, record, cwd, &mut budget) {
             InputProbe::Bound(anchor) => break anchor,
-            InputProbe::Terminal(verdict) => return verdict,
+            InputProbe::Terminal(verdict) => return Ending::terminal(verdict),
             InputProbe::Wait => {}
         }
         if let Some(cut) = cut_off(env, name, record, "before its turn was bound") {
-            return match probe_input(reader, record, cwd, &mut budget) {
+            return Ending::terminal(match probe_input(reader, record, cwd, &mut budget) {
                 InputProbe::Terminal(verdict) => verdict,
                 InputProbe::Bound(anchor) => {
                     match probe_outcome(reader, &anchor, cwd, &mut budget) {
@@ -869,7 +935,22 @@ fn await_turn(
                     }
                 }
                 InputProbe::Wait => cut,
-            };
+            });
+        }
+        if answer_lost {
+            unobserved += 1;
+            if unobserved >= unobserved_polls {
+                return Ending {
+                    verdict: Verdict::reason(
+                        STATUS_AMBIGUOUS,
+                        format!(
+                            "dispatch answer lost and the task was not observed in the transcript within {}s",
+                            DISPATCH_UNKNOWN_SECONDS as u64
+                        ),
+                    ),
+                    terminal: false,
+                };
+            }
         }
         env.sleep(POLL_SECONDS);
     };
@@ -884,18 +965,18 @@ fn await_turn(
     let mut flush = FlushBudget::default();
     loop {
         let flushing = match probe_outcome(reader, &anchor, cwd, &mut budget) {
-            OutcomeProbe::Terminal(verdict) => return verdict,
+            OutcomeProbe::Terminal(verdict) => return Ending::terminal(verdict),
             OutcomeProbe::Flushing(reason) => Some(reason),
             OutcomeProbe::Wait => None,
         };
         if flush.charge(flushing) {
-            return flush.verdict();
+            return Ending::terminal(flush.verdict());
         }
         if let Some(cut) = cut_off(env, name, record, "before its turn ended") {
-            return match probe_outcome(reader, &anchor, cwd, &mut budget) {
+            return Ending::terminal(match probe_outcome(reader, &anchor, cwd, &mut budget) {
                 OutcomeProbe::Terminal(verdict) => verdict,
                 _ => cut,
-            };
+            });
         }
         env.sleep(POLL_SECONDS);
     }
@@ -1032,7 +1113,8 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
     // The pending record goes down before the dispatch has any side effect
     // (task artifact, hived delivery): a runner killed in between leaves
     // the name owned, never a delivered task with no record. A refused
-    // dispatch takes the record back with it.
+    // dispatch takes the record back with it; one whose answer was lost
+    // keeps it, since the task may be with the member.
     let mut record = NodeRecord {
         dispatch_id: dispatch_id.clone(),
         cli,
@@ -1064,18 +1146,41 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
             return Err(err);
         }
     };
-    record.seq = dispatched.get("seq").and_then(Value::as_i64);
-    update_record(workspace, name, &record);
-    log(&format!(
-        "{name} dispatched {dispatch_id}; waiting for its turn"
-    ));
+    let answer_lost = dispatched.get("answerLost").and_then(Value::as_str);
+    match answer_lost {
+        Some(reason) => log(&format!(
+            "{name} dispatch answer lost ({reason}); the task may have landed, watching the transcript for {dispatch_id}"
+        )),
+        None => {
+            record.seq = dispatched.get("seq").and_then(Value::as_i64);
+            update_record(workspace, name, &record);
+            log(&format!(
+                "{name} dispatched {dispatch_id}; waiting for its turn"
+            ));
+        }
+    }
 
-    let verdict = await_turn(env, reader.as_ref(), workspace, name, &mut record, cwd);
-    record.status = verdict.status.to_string();
-    record.body = verdict.body.clone();
-    record.reason = verdict.reason.clone();
-    update_record(workspace, name, &record);
-    log(&format!("{name} {}", verdict.status));
+    let Ending { verdict, terminal } = await_turn(
+        env,
+        reader.as_ref(),
+        workspace,
+        name,
+        &mut record,
+        cwd,
+        answer_lost.is_some(),
+    );
+    if terminal {
+        record.status = verdict.status.to_string();
+        record.body = verdict.body.clone();
+        record.reason = verdict.reason.clone();
+        update_record(workspace, name, &record);
+        log(&format!("{name} {}", verdict.status));
+    } else {
+        log(&format!(
+            "{name} {}; the record stays pending and the name owned until `hive kill {name}`",
+            verdict.status
+        ));
+    }
     Ok(NodeResult {
         name,
         pane,
@@ -1224,13 +1329,12 @@ impl NodeEnv for RealEnv {
         }
     }
 
-    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
+    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, DispatchFailure> {
         self.with_ctx(|c| {
             crate::send::request_node_dispatch(&c.workspace, &c.team, target, body, artifact)
                 .map(|payload| payload.get("seq").and_then(Value::as_i64).unwrap_or(0))
-                .map_err(|e| e.to_string())
         })
-        .map_err(|e| e.0)
+        .map_err(|e| DispatchFailure::Refused(e.0))
         .and_then(|inner| inner)
     }
 
@@ -1417,7 +1521,12 @@ pub(crate) mod test_env {
         pub workspace: PathBuf,
         pub ready: bool,
         pub spawn_fail_first: u32,
+        /// Refuse that many dispatches first (`DispatchFailure::Refused`).
         pub dispatch_fail_first: u32,
+        /// Lose the answer of every delivered dispatch: the task is on the
+        /// fake transport (`dispatches`), and the env answers
+        /// `DispatchFailure::Unknown` instead of the seq.
+        pub lose_answer: bool,
         pub spawn_err: String,
         pub dispatch_err: String,
         pub spawn_without_session: bool,
@@ -1453,6 +1562,7 @@ pub(crate) mod test_env {
             ready: true,
             spawn_fail_first: 0,
             dispatch_fail_first: 0,
+            lose_answer: false,
             spawn_err: "mint refused".to_string(),
             dispatch_err: "refused".to_string(),
             spawn_without_session: false,
@@ -1541,14 +1651,19 @@ pub(crate) mod test_env {
             }
         }
 
-        fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
+        fn dispatch(
+            &self,
+            target: &str,
+            body: &str,
+            artifact: &str,
+        ) -> Result<i64, DispatchFailure> {
             self.dispatch_records
                 .lock()
                 .unwrap()
                 .push(read_record(&self.workspace_str(), target));
             let n = self.send_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if n <= self.dispatch_fail_first {
-                return Err(self.dispatch_err.clone());
+                return Err(DispatchFailure::Refused(self.dispatch_err.clone()));
             }
             let seq = i64::from(self.msg_seq.fetch_add(1, Ordering::SeqCst) + 1);
             self.dispatches.lock().unwrap().push(DispatchCall {
@@ -1559,6 +1674,9 @@ pub(crate) mod test_env {
             });
             if self.break_records_on_dispatch {
                 break_records(&self.workspace_str());
+            }
+            if self.lose_answer {
+                return Err(DispatchFailure::Unknown("read timed out".to_string()));
             }
             Ok(seq)
         }
@@ -1822,6 +1940,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.0.contains("after 3 attempts"), "{err}");
+
+        // A lost answer is not a refusal: one attempt, no seq, the reason
+        // handed on for the run to watch the transcript.
+        let mut env = fake_env(tmp.path());
+        env.lose_answer = true;
+        let r = run_op(
+            &env,
+            &NodeOp::DispatchTask {
+                name: "impl".into(),
+                prompt: "t".into(),
+                dispatch_id: "nd-000000000003".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        assert_eq!(r["seq"], Value::Null);
+        assert_eq!(r["answerLost"], "read timed out");
     }
 
     #[test]
@@ -2545,6 +2681,136 @@ mod tests {
         assert!(read_record(&env.workspace_str(), "audit").is_none());
         assert!(!env.alive("audit"));
         assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+    }
+
+    #[test]
+    fn test_run_node_backfills_the_seq_of_a_dispatch_accepted_after_a_refusal() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.add_live("audit");
+        env.dispatch_fail_first = 1;
+        script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        // Two attempts, one delivery, and the seq of that one delivery.
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        let at_dispatch = env.dispatch_records.lock().unwrap();
+        assert_eq!(at_dispatch.len(), 2);
+        assert!(at_dispatch
+            .iter()
+            .all(|r| r.as_ref().map(|r| r.status.as_str()) == Some("pending")));
+        assert!(at_dispatch
+            .iter()
+            .all(|r| r.as_ref().unwrap().seq.is_none()));
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.seq, Some(1));
+        assert_eq!(record.status, "completed");
+    }
+
+    #[test]
+    fn test_run_node_never_repeats_a_dispatch_whose_answer_was_lost() {
+        // The hived took the task and the answer never came back: the
+        // dispatch is not retried, the record stays pending with no seq,
+        // and the marker binding later is the delivery confirmation — the
+        // run then ends like any delivered dispatch.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.lose_answer = true;
+        env.add_live("audit");
+        watch_record(&env, "audit");
+        env.reader.inputs.lock().unwrap().extend([
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))),
+        ]);
+        env.reader
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(TurnOutcome::Completed { text: "ok".into() })));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "ok");
+        assert_eq!(r["turn"], "u-1");
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        assert_eq!(env.reader.input_calls.lock().unwrap().len(), 3);
+        // No record at the cursor read, pending through the whole input
+        // wait, input_bound for the outcome read.
+        assert_eq!(
+            *env.reader.statuses_seen.lock().unwrap(),
+            vec![
+                "(none)".to_string(),
+                "pending".to_string(),
+                "input_bound".to_string()
+            ]
+        );
+        // No seq was ever learned, and the record says so.
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.seq, None);
+        assert_eq!(record.status, "completed");
+    }
+
+    #[test]
+    fn test_run_node_leaves_a_lost_dispatch_pending_when_its_input_never_shows() {
+        // A spawn of this run, the answer lost, the marker never in the
+        // transcript: the polls of the unknown-dispatch budget, then
+        // ambiguous — with the record still pending and the member not
+        // retired, since it may be on the task.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.lose_answer = true;
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "ambiguous");
+        assert_eq!(r["reused"], false);
+        assert_eq!(r["turn"], Value::Null);
+        assert_eq!(
+            r["reason"],
+            "dispatch answer lost and the task was not observed in the transcript within 120s"
+        );
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            env.reader.input_calls.lock().unwrap().len(),
+            (DISPATCH_UNKNOWN_SECONDS / POLL_SECONDS) as usize
+        );
+        assert!(env.alive("audit"));
+        assert!(env.retired.lock().unwrap().is_empty());
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "pending");
+        assert_eq!(record.seq, None);
+        assert_eq!(record.dispatch_id, r["dispatchId"]);
+        assert!(record.is_pending());
+
+        // The name stays owned: the next run of it is member_busy on that
+        // very record, and dispatches nothing.
+        let r2 = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r2["status"], "member_busy");
+        assert_eq!(r2["dispatchId"], r["dispatchId"]);
+        assert_eq!(r2["reused"], true);
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            read_record(&env.workspace_str(), "audit").unwrap().status,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn test_run_node_ends_a_lost_dispatch_as_member_gone_when_the_member_dies() {
+        // The unknown-dispatch wait is cut short like any other: a member
+        // that dies during it ends the run member_gone, and that verdict
+        // is terminal.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.lose_answer = true;
+        env.add_live("audit");
+        env.die_after_sleeps = Some(5);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_gone");
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "member_gone");
+        assert!(!record.is_pending());
     }
 
     #[test]

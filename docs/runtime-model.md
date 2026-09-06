@@ -215,6 +215,28 @@ own transcript. Nothing travels back over the bus.
   cursor — before that write, so a runner that dies between the delivery
   and its own bookkeeping leaves a pending record behind, never a gap a
   same-name run could walk through.
+- **A refused dispatch and a lost answer are different failures.** The
+  hived's answer to the dispatch is what the runner keys on
+  (`send.rs::DispatchFailure`). `Refused` is a definite no — the hived
+  answered `ok:false` (transport refused, unknown member, send gate) or
+  the request never reached it (no socket, connect or write failed): the
+  task is not with the member, the dispatch is retried up to three times,
+  and a final refusal takes the pending record back, retires a member
+  this run spawned, and exits 1. `Unknown` is the request going out whole
+  and no usable answer coming back (read timeout, dropped connection,
+  empty or unparsable reply): the hived may have injected the task, so it
+  is never sent again. The run keeps its pending record (`seq` stays
+  null, since the seq rode the lost answer) and goes into the normal wait:
+  the id binding in the transcript is the delivery confirmation, and the
+  run then proceeds exactly as a delivered dispatch. If the input is not
+  observed within 120 polls at the 1s interval while the member lives, the
+  run ends `ambiguous` ("dispatch answer lost and the task was not
+  observed in the transcript within 120s"), exit 0, with the record left
+  `pending` — not terminal — so the name stays owned and the next
+  same-name run is `member_busy` until `hive kill` of the member; a
+  spawned member is not retired, since it may be working. The member
+  dying during that wait is `member_gone` as usual, a terminal record. An
+  unknown answer never frees the name.
 - **Readiness.** The runner dispatches only between turns, and only on a
   positive reading from the engine's own daemon that no turn is open. The
   runner asks the hived's `turn-open` for the member and the hived queries
@@ -248,8 +270,10 @@ own transcript. Nothing travels back over the bus.
   before its final message is fully written: grok writes `turn_ended`
   before the history line, claude writes a message one content block per
   record. A reader in that state returns `TurnOutcome::Flushing`, which is
-  not a result: the core keeps polling under a 30s flush budget from the
-  first `Flushing` reading and ends `ambiguous` when the text never lands.
+  not a result: the core keeps polling under a flush budget of 30 polls at
+  the 1s poll interval, counted from the first `Flushing` reading (polls,
+  not wall clock: a slow read stretches it), and ends `ambiguous` when the
+  text never lands.
   Earlier text of the same turn (a tool-calling step's narration, a block
   of an earlier message) never stands in for the final message.
 - **The result.** `body` is every text block of the bound turn's final
@@ -287,7 +311,9 @@ own transcript. Nothing travels back over the bus.
   `<workspace>/run/nodes/<name>.lock` held for the whole run; the lock
   file itself is never deleted, the record is. A stale pending record whose
   member is dead is replaced by the next run; `hive kill` of the member
-  removes its record. A same-name node reuses a live member. Two v1
+  removes its record. A same-name node reuses a live member. A dispatch
+  whose answer was lost and whose input never showed leaves the record
+  pending on purpose (above). Two v1
   limitations: Ctrl-C on the runner leaves the record pending until
   `hive kill` of the member, and a terminal verdict frees the name even
   though the member may still be working (an `ambiguous` or
