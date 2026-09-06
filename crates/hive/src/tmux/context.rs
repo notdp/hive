@@ -1,4 +1,58 @@
+use std::env;
+use std::path::{Path, PathBuf};
+
 use super::run::{exec_capture, run};
+
+/// The socket of the tmux server this process's tmux commands reach.
+///
+/// Inside tmux that is the first field of `TMUX`; outside, what the server
+/// tmux resolves by default (`-L`/`TMUX_TMPDIR`) reports as its
+/// `socket_path`. None when neither answers.
+pub fn own_socket_path() -> Option<String> {
+    if let Ok(tmux) = env::var("TMUX") {
+        let path = tmux.split(',').next().unwrap_or("").trim();
+        if !path.is_empty() {
+            return Some(path.to_string());
+        }
+    }
+    let r = run(&["display-message", "-p", "#{socket_path}"], false, 5).ok()?;
+    if r.returncode != 0 {
+        return None;
+    }
+    let path = r.stdout.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// tmux's default socket for this uid: `/tmp/tmux-<uid>/default`.
+///
+/// Deliberately ignores `TMUX_TMPDIR`: a server under a redirected tmpdir
+/// is a private server from hive's point of view even when its label is
+/// `default`.
+pub fn default_socket_path() -> PathBuf {
+    PathBuf::from(format!("/tmp/tmux-{}", unsafe { libc::getuid() })).join("default")
+}
+
+/// Whether two socket paths name the same socket.
+///
+/// tmux reports a resolved path (`/private/tmp/...` on macOS) while the
+/// default location is spelled `/tmp/...`; canonicalize where the path
+/// exists and drop the `/private` prefix either way.
+pub fn same_socket(a: &str, b: &str) -> bool {
+    fn normalize(path: &str) -> PathBuf {
+        let resolved = Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(path));
+        match resolved.strip_prefix("/private") {
+            Ok(rest) => Path::new("/").join(rest),
+            Err(_) => resolved,
+        }
+    }
+    !a.is_empty() && !b.is_empty() && normalize(a) == normalize(b)
+}
 
 pub fn display_value(target: &str, fmt: &str) -> Option<String> {
     let r = run(&["display-message", "-t", target, "-p", fmt], false, 5).ok()?;

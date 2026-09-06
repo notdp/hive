@@ -86,19 +86,50 @@ fn test_pane_thread_record_roundtrip() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "tid-1", "/work").unwrap();
+    write_pane_thread("%19", "tid-1", "/work", Some("/tmp/tmux-501/default")).unwrap();
     assert_eq!(
         read_pane_thread("%19"),
         Some(PaneThread {
             thread_id: "tid-1".to_string(),
             cwd: "/work".to_string(),
+            tmux_socket: Some("/tmp/tmux-501/default".to_string()),
         })
     );
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string(pane_thread_path("%19")).unwrap()).unwrap();
+    assert_eq!(raw["tmuxSocket"], json!("/tmp/tmux-501/default"));
     assert_eq!(thread_id_for_pane("%19").as_deref(), Some("tid-1"));
     assert_eq!(session_id_for_pane("%19").as_deref(), Some("tid-1")); // threadId == sessionId
     clear_pane_thread("%19").unwrap();
     assert_eq!(read_pane_thread("%19"), None);
     clear_pane_thread("%19").unwrap(); // idempotent
+}
+
+#[test]
+fn test_pane_thread_record_without_socket_reads_back_none() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    guard.set("CODEX_HOME", tmp.path());
+    // the pre-field shape, as the previous binary wrote it
+    let path = pane_thread_path("%4");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, json!({"threadId": "tid-4", "cwd": "/w"}).to_string()).unwrap();
+    assert_eq!(
+        read_pane_thread("%4"),
+        Some(PaneThread {
+            thread_id: "tid-4".to_string(),
+            cwd: "/w".to_string(),
+            tmux_socket: None,
+        })
+    );
+    // a writer with no server to name writes no field
+    write_pane_thread("%5", "tid-5", "/w", None).unwrap();
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string(pane_thread_path("%5")).unwrap()).unwrap();
+    assert!(raw.get("tmuxSocket").is_none());
+    assert_eq!(read_pane_thread("%5").unwrap().tmux_socket, None);
+    write_pane_thread("%6", "tid-6", "/w", Some("")).unwrap();
+    assert_eq!(read_pane_thread("%6").unwrap().tmux_socket, None);
 }
 
 #[test]
@@ -119,8 +150,8 @@ fn test_pane_for_thread_reverse_lookup() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "tid-a", "/work").unwrap();
-    write_pane_thread("%7", "tid-b", "/work").unwrap();
+    write_pane_thread("%19", "tid-a", "/work", None).unwrap();
+    write_pane_thread("%7", "tid-b", "/work", None).unwrap();
     assert_eq!(pane_for_thread("tid-b").as_deref(), Some("%7"));
     assert_eq!(pane_for_thread("tid-a").as_deref(), Some("%19"));
     assert_eq!(pane_for_thread("missing"), None);
@@ -132,8 +163,8 @@ fn test_list_recorded_panes() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "t1", "/w").unwrap();
-    write_pane_thread("%7", "t2", "/w").unwrap();
+    write_pane_thread("%19", "t1", "/w", None).unwrap();
+    write_pane_thread("%7", "t2", "/w", None).unwrap();
     fs::write(
         tmp.path()
             .join("app-server-control")
@@ -590,7 +621,7 @@ fn test_fork_thread_fails_on_rpc_error() {
 
 fn record(guard: &mut EnvGuard, tmp: &Path, pane: &str, tid: &str) {
     guard.set("CODEX_HOME", tmp);
-    write_pane_thread(pane, tid, "/work").unwrap();
+    write_pane_thread(pane, tid, "/work", None).unwrap();
 }
 
 #[test]

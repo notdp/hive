@@ -53,6 +53,7 @@ pub struct Hook {
     pub set_window_option: Option<S3<()>>,
     pub send_keys: Option<S2<()>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
+    pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
@@ -84,6 +85,7 @@ pub struct Hook {
     pub cas_daemon_alive: Option<F0<bool>>,
     pub cas_thread_id_for_pane: Option<S1<Option<String>>>,
     pub cas_list_recorded_panes: Option<F0<Vec<String>>>,
+    pub cas_pane_thread_socket: Option<S1<Option<String>>>,
     pub cas_clear_pane_thread: Option<S1<()>>,
     pub cas_drop_client: Option<F0<()>>,
     pub cas_spawn_daemon: Option<F0<bool>>,

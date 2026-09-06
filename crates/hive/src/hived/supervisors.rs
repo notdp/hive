@@ -105,6 +105,29 @@ pub(crate) fn cleanup_dead_daemons(workspace: &str, team: &str) {
     }
 }
 
+/// Whether a thread record whose pane is absent from this hived's server
+/// belongs to this server and may be reaped.
+///
+/// Pane ids repeat across tmux servers while CODEX_HOME (the record store)
+/// is shared, so the absence of `%3` here says nothing about `%3` on the
+/// default server. A record names its server (`tmuxSocket`) and is reaped
+/// only by a hived on that server. A record without the field predates the
+/// field; only a hived on the default server reaps those, because hive is
+/// single-user and every live member of the pre-field binary sat on the
+/// default server, while a private-server hived (the e2e suite, a dev
+/// lane) is exactly the one that must not touch them. The next spawn
+/// rewrites every record with the field, so the legacy branch is one
+/// release of exposure.
+fn reap_stale_record(record_socket: Option<&str>, own_socket: &str) -> bool {
+    match record_socket {
+        Some(socket) => crate::tmux::same_socket(socket, own_socket),
+        None => crate::tmux::same_socket(
+            own_socket,
+            &crate::tmux::default_socket_path().to_string_lossy(),
+        ),
+    }
+}
+
 /// Keep this team's codex members riding the shared daemon.
 pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
     let panes = hooked_list_panes_all();
@@ -112,14 +135,25 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
         return; // an empty listing is a tmux failure, not an empty server
     }
     let live_panes: HashSet<String> = panes.iter().map(|p| p.pane_id.clone()).collect();
+    let mut own_socket: Option<Option<String>> = None;
     for pane in hooked_cas_list_recorded_panes() {
-        if !live_panes.contains(&pane) {
-            hooked_cas_clear_pane_thread(&pane);
-            codex_reattach_at()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&pane);
+        if live_panes.contains(&pane) {
+            continue;
         }
+        // Looked up once per tick and only when a candidate exists: outside
+        // tmux this is a subprocess.
+        let own = own_socket.get_or_insert_with(hooked_tmux_socket_path);
+        let Some(own) = own.as_deref() else {
+            continue; // unknown own server: reap nothing
+        };
+        if !reap_stale_record(hooked_cas_pane_thread_socket(&pane).as_deref(), own) {
+            continue;
+        }
+        hooked_cas_clear_pane_thread(&pane);
+        codex_reattach_at()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pane);
     }
 
     let Ok(t) = hooked_team_load(team) else {
