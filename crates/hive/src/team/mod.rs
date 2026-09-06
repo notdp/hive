@@ -115,7 +115,7 @@ pub fn validate_team_name(name: &str) -> String {
     }
     if name == "flow" {
         return format!(
-            "team name '{name}' is invalid: 'flow' is the flow runner's \
+            "team name '{name}' is invalid: 'flow' is the node runner's \
              send-address kind (flow.run), not a team name"
         );
     }
@@ -235,7 +235,7 @@ fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, 
 /// no socket, an empty body, or an `{ok: false, error}` envelope (the hived
 /// failed to load the team — that says nothing about the members). Every
 /// reader that turns the answer into per-member state — `Team::member_alive`,
-/// the flow board's roster, the `team/scope.rs` payload augmenter — goes
+/// the `team/scope.rs` payload augmenter — goes
 /// through this so an error never reads as "everyone offline".
 pub(crate) fn usable_runtime(response: Option<Map<String, Value>>) -> Option<Map<String, Value>> {
     response
@@ -350,8 +350,8 @@ impl Team {
         tag_lead: bool,
     ) -> Result<Team> {
         // An explicit window target is addressable from anywhere (`hive
-        // flow rig` binds a team to a session it just created, from outside
-        // tmux); only the implicit "the window I am in" needs a client.
+        // create` outside tmux binds a team to a session it just created);
+        // only the implicit "the window I am in" needs a client.
         if window_target.is_empty() && !identity::is_inside_tmux() {
             bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
@@ -621,7 +621,7 @@ impl Team {
     ) -> Result<Agent> {
         if name == "flow" || name.starts_with("flow.") {
             bail!(
-                "'{name}' collides with the flow runner's mailbox address kind (flow.run), not a member name"
+                "'{name}' collides with the node runner's mailbox address kind (flow.run), not a member name"
             );
         }
         if self.agent_named(name).is_some() {
@@ -640,7 +640,7 @@ impl Team {
         }
         // Cross-process name claim under the registry lock: the in-memory
         // check above cannot see a concurrent spawner (a workflow fanning out
-        // one `hive flow node run` process per node). The claim is a paneless
+        // one `hive node run` process per node). The claim is a paneless
         // placeholder row — replaced by the real row after the spawn, removed
         // if the spawn fails.
         let claimed = self.claim_name(name, cli, model)?;

@@ -161,7 +161,7 @@ pub fn read_pane_session(pane: &str) -> Option<SessionRecord> {
 /// Leader env: this pane, and nothing inherited that lies about identity.
 ///
 /// The spawner may itself run inside another member's engine (an orch's
-/// flow runner), whose env carries that engine's identity markers —
+/// `hive node run`), whose env carries that engine's identity markers —
 /// CLAUDE_CODE_MESSAGING_SOCKET, CODEX_THREAD_ID or the spawner's own
 /// GROK_SESSION_ID would each make every hive call inside this grok member
 /// resolve to the *spawner*. Wash them: the leader exports its own session

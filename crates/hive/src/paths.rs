@@ -15,8 +15,7 @@ pub fn hive_home() -> PathBuf {
     PathBuf::from(home)
 }
 
-/// The hive binary that tmux hooks, the flow dock and the cvim asset call
-/// back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
+/// The hive binary that tmux hooks and the cvim asset call back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
 /// the bash asset, and integration tests (whose current_exe is the test
 /// harness) point hooks at the real binary with it.
 pub fn self_exe() -> String {

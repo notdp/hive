@@ -7,9 +7,7 @@ use super::util::{fail, ok_or_fail};
 use crate::identity;
 use crate::json_fields::map_str;
 use crate::team::{resolve_scoped_team, start_team_hived, Team};
-use crate::team_display::{
-    backfill_missing_member_panes, ensure_team_display, join_parked_pane, team_entry,
-};
+use crate::team_display::{backfill_missing_member_panes, ensure_team_display, team_entry};
 use crate::tmux;
 
 /// `hive layout <preset|auto> [--on-change] [--window TARGET]`. `auto`
@@ -141,10 +139,8 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
             return Ok(format!("mirror on ({team}): already shown"));
         }
         // A roster member's parked pane joins back, a missing one is
-        // rebuilt the way an attach heal would; the rig mirror is no
-        // roster member.
+        // rebuilt the way an attach heal would.
         backfill_missing_member_panes(&window, &entry, Some(true)).map_err(|e| e.to_string())?;
-        join_rig_mirror(&window, &team);
         if shown_mirrors(&window).is_empty() {
             return Ok(format!("mirror on ({team}): no session mirror to show"));
         }
@@ -191,23 +187,6 @@ fn shown_mirrors(window: &str) -> Vec<String> {
         .filter(|p| p.role == "mirror")
         .map(|p| p.pane_id)
         .collect()
-}
-
-/// A flow rig's mirror (`flow_rig.rs`) names no member: its parked pane
-/// joins back by team. A parked pane naming a member is that member's
-/// (`join_hidden_mirror`), never joined here.
-fn join_rig_mirror(window: &str, team: &str) {
-    let Some(hidden) = tmux::hidden_mirror_pane(team) else {
-        return;
-    };
-    if tmux::get_pane_option(&hidden, "hive-agent").is_some_and(|a| !a.is_empty()) {
-        return;
-    }
-    let Some(first) = tmux::list_panes(window).into_iter().next() else {
-        return;
-    };
-    join_parked_pane(&hidden, &first);
-    let _ = crate::layout::ensure(window, false);
 }
 
 #[cfg(test)]

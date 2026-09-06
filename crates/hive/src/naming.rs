@@ -173,7 +173,7 @@ pub(crate) fn roster_names(entry: &Map<String, Value>) -> HashSet<String> {
 fn member_name_conflict(name_override: &str, seen_names: &HashSet<String>) -> Option<String> {
     if name_override == "flow" || name_override.starts_with("flow.") {
         return Some(format!(
-            "'{name_override}' collides with the flow runner's mailbox address kind (flow.run), not a member name"
+            "'{name_override}' collides with the node runner's mailbox address kind (flow.run), not a member name"
         ));
     }
     if seen_names.contains(name_override) {

@@ -3,7 +3,7 @@
 //! now (`plan.rs`, from the window size and the panes' roles) differs from
 //! the plan it last applied, whose key sits on the window as
 //! `@hive-layout`. `ensure` is that comparison; the explicit call sites
-//! (spawn, retire, attach, mirror, rig, board) and the two window hooks
+//! (spawn, retire, attach, mirror) and the two window hooks
 //! (`hooks.rs`) all come through it, and only a differing key — or
 //! `force`, the human's `hive layout auto` — writes to tmux at all.
 
@@ -11,7 +11,7 @@ mod hooks;
 mod plan;
 
 pub use hooks::{hook_argv, install_hooks, remove_hooks, unhook_argv, LAYOUT_HOOKS};
-pub use plan::{layout_checksum, plan, split_beside, Plan, DOCK_ROWS, MIN_COLS, MIN_ROWS};
+pub use plan::{layout_checksum, plan, split_beside, Plan, MIN_COLS, MIN_ROWS};
 
 use std::path::PathBuf;
 
@@ -101,12 +101,11 @@ impl TmuxOps for RealTmux {
     }
 }
 
-/// Cross-process lock for one window's apply. Two appliers racing (a
-/// board starting while the rig splits its mirror, the hook fired by one
-/// apply's own `select-layout` landing beside the next spawn) would each
-/// see the dock out of place and both swap it — a double swap puts it
-/// back where it was — and the hook must see the key its predecessor
-/// wrote. The lock file is named by the window's `@N` id (`lock_key`):
+/// Cross-process lock for one window's apply. Two appliers racing (the
+/// hook fired by one apply's own `select-layout` landing beside the next
+/// spawn) would each see the mirror out of place and both swap it — a
+/// double swap puts it back where it was — and the hook must see the key
+/// its predecessor wrote. The lock file is named by the window's `@N` id (`lock_key`):
 /// the hooks address the window by id and every explicit site by
 /// `session:index`, and both spellings must take the same lock.
 struct WindowLock(std::fs::File);
@@ -193,7 +192,7 @@ fn take_rerun(key: &str) -> bool {
 /// Bring the window to the plan it should have: apply when `force` or when
 /// the plan's key differs from `@hive-layout`, else touch nothing. Waits
 /// for the window lock: the caller has just changed the window (a split,
-/// a join, a dock tag) and its apply must land after an apply in flight.
+/// a join, a mirror tag) and its apply must land after an apply in flight.
 pub fn ensure(window_target: &str, force: bool) -> Outcome {
     if window_target.is_empty() {
         return Outcome::Skipped("no-window");
@@ -278,7 +277,7 @@ fn ensure_with(window_target: &str, force: bool, tmux: &mut dyn TmuxOps) -> Outc
     if !force && tmux.layout_key(window_target).as_deref() == Some(planned.key.as_str()) {
         return Outcome::Unchanged(planned);
     }
-    // Cells apply in window order: the mirror must be first, the dock last.
+    // Cells apply in window order: the mirror must be first.
     let panes = cell_order(window_target, panes, tmux);
     let Some(planned) = plan(size, &panes) else {
         return Outcome::Skipped("no-plan");
@@ -290,23 +289,13 @@ fn ensure_with(window_target: &str, force: bool, tmux: &mut dyn TmuxOps) -> Outc
     Outcome::Applied(planned)
 }
 
-/// Swap the mirror to the front and the dock to the back of the window
-/// order, re-reading after each swap rather than trusting it: the layout
-/// string is applied by window order, so it must describe what tmux has
-/// now.
+/// Swap the mirror to the front of the window order, re-reading after
+/// the swap rather than trusting it: the layout string is applied by
+/// window order, so it must describe what tmux has now.
 fn cell_order(window: &str, mut panes: Vec<PaneInfo>, tmux: &mut dyn TmuxOps) -> Vec<PaneInfo> {
     if let Some(at) = panes.iter().position(|p| p.role == "mirror") {
         if at != 0 {
             tmux.swap_pane(&panes[at].pane_id.clone(), &panes[0].pane_id.clone());
-            panes = tmux.list_panes_full(window);
-        }
-    }
-    if let (Some(at), Some(last)) = (
-        panes.iter().position(|p| p.role == "dock"),
-        panes.len().checked_sub(1),
-    ) {
-        if at != last {
-            tmux.swap_pane(&panes[at].pane_id.clone(), &panes[last].pane_id.clone());
             panes = tmux.list_panes_full(window);
         }
     }
@@ -635,59 +624,47 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_with_dock_pane_swaps_it_last_and_generates_layout() {
+    fn test_ensure_swaps_the_mirror_first_and_generates_layout() {
         let mut tmux = FakeTmux::new(
-            (200, 50),
-            &[("%1", "dock"), ("%2", "agent"), ("%3", "agent")],
+            (220, 60),
+            &[("%1", "agent"), ("%2", "agent"), ("%3", "mirror")],
         );
         let outcome = ensure_with("dev:0", false, &mut tmux);
         assert!(outcome.applied(), "{outcome:?}");
         assert_eq!(tmux.calls.len(), 3);
-        // the dock (first in window order) swaps with the last pane…
-        assert_eq!(tmux.calls[0], vec!["swap", "%1", "%3"]);
+        // the mirror (last in window order) swaps with the first pane…
+        assert_eq!(tmux.calls[0], vec!["swap", "%3", "%1"]);
         assert_eq!(tmux.order(), vec!["%3", "%2", "%1"]);
-        // …so the members tile in the new order and the dock cell is last
+        // …so the mirror's cell comes first and the members stack in the
+        // new order beside it
         let layout = &tmux.calls[1][2];
-        assert!(layout.contains("{99x35,0,0,3,100x35,100,0,2}"), "{layout}");
-        assert!(layout.ends_with(",200x14,0,36,1]"), "{layout}");
+        assert!(layout.contains("{109x60,0,0,3,"), "{layout}");
+        assert!(
+            layout.ends_with("[110x29,110,0,2,110x30,110,30,1]}"),
+            "{layout}"
+        );
     }
 
     #[test]
-    fn test_ensure_with_dock_already_last_does_not_swap() {
+    fn test_ensure_with_mirror_already_first_does_not_swap() {
         let mut tmux = FakeTmux::new(
-            (200, 50),
-            &[("%1", "agent"), ("%2", "agent"), ("%3", "dock")],
+            (220, 60),
+            &[("%1", "mirror"), ("%2", "agent"), ("%3", "agent")],
         );
         ensure_with("dev:0", false, &mut tmux);
         assert_eq!(tmux.calls.len(), 2);
         assert_eq!(tmux.calls[0][0], "layout");
         assert!(
-            tmux.calls[0][2].ends_with(",200x14,0,36,3]"),
+            tmux.calls[0][2].contains("{109x60,0,0,1,"),
             "{}",
             tmux.calls[0][2]
         );
     }
 
     #[test]
-    fn test_ensure_swaps_the_mirror_first_then_the_dock_last() {
-        let mut tmux = FakeTmux::new(
-            (220, 60),
-            &[("%1", "agent"), ("%2", "dock"), ("%3", "mirror")],
-        );
-        let outcome = ensure_with("dev:0", false, &mut tmux);
-        assert!(outcome.applied(), "{outcome:?}");
-        assert_eq!(tmux.calls[0], vec!["swap", "%3", "%1"]);
-        assert_eq!(tmux.calls[1], vec!["swap", "%2", "%1"]);
-        assert_eq!(tmux.order(), vec!["%3", "%1", "%2"]);
-        let layout = &tmux.calls[2][2];
-        assert!(layout.contains("{109x45,0,0,3,110x45,110,0,1}"), "{layout}");
-        assert!(layout.ends_with(",220x14,0,46,2]"), "{layout}");
-    }
-
-    #[test]
-    fn test_ensure_matching_key_skips_the_swaps_too() {
-        let spec = [("%1", "agent"), ("%2", "dock")];
-        let mut tmux = FakeTmux::new((200, 50), &[("%1", "dock"), ("%2", "agent")]);
+    fn test_ensure_matching_key_skips_the_swap_too() {
+        let spec = [("%1", "mirror"), ("%2", "agent")];
+        let mut tmux = FakeTmux::new((200, 50), &[("%1", "agent"), ("%2", "mirror")]);
         tmux.key = Some(expected((200, 50), &spec).key);
         let outcome = ensure_with("dev:0", false, &mut tmux);
         assert!(!outcome.applied(), "{outcome:?}");

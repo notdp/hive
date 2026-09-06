@@ -1,16 +1,16 @@
 //! CLI entry point for hive: the clap command tree for the whole surface,
 //! `pub fn main()`, the root gates every subcommand passes (tmux, codex
 //! native), the help interception, and the dispatch into one module per
-//! domain — `team`, `member`, `attach`, `fork`, `flow`, `launch`, `setup`,
+//! domain — `team`, `member`, `attach`, `fork`, `node`, `launch`, `setup`,
 //! `worktree`. The handlers print and exit; the logic they call lives in
 //! the crate (`team`, `naming`, `send`, `identity`, `team_display`).
 
 mod attach;
-mod flow;
 mod fork;
 pub mod help_text;
 mod launch;
 mod member;
+mod node;
 mod setup;
 mod team;
 mod util;
@@ -33,9 +33,9 @@ const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on a
 
 // Verbs that never need a tmux context — plus the team verbs, which read the
 // registry (the truth layer) and address the team's window by id, so a
-// caller outside tmux or in another session reaches it the same way. `flow`
-// rides the same doctrine, and `flow node --team` exists for callers without
-// a pane identity (a workflow proxy subagent, a desktop session).
+// caller outside tmux or in another session reaches it the same way. `node`
+// rides the same doctrine: `node run --team` exists for callers without a
+// pane identity (a workflow proxy subagent, a desktop session).
 const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
@@ -55,7 +55,7 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "delete",
     "attach",
     "view",
-    "flow",
+    "node",
 ];
 
 const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
@@ -211,6 +211,12 @@ pub(crate) fn build_cli() -> Command {
                         .long("delete-workspace")
                         .action(ArgAction::SetTrue)
                         .help("Also delete the workspace directory"),
+                )
+                .arg(
+                    Arg::new("down")
+                        .long("down")
+                        .action(ArgAction::SetTrue)
+                        .help("Retire every member first and kill the team's tmux session"),
                 ),
         )
         .subcommand(
@@ -364,56 +370,17 @@ pub(crate) fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("flow")
-                .about("Deterministic member orchestration over live panes.")
+            Command::new("node")
+                .about("One task on one live member, as a single blocking call.")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new("run")
-                        .about("Run SCRIPT against the current team.")
-                        .arg(Arg::new("script").required(true))
-                        .arg(
-                            Arg::new("resume")
-                                .long("resume")
-                                .value_name("RUN_ID")
-                                .help("Resume a previous run from its journal"),
-                        ),
-                )
-                .subcommand(
-                    Command::new("board")
-                        .about("Live progress board for the team's flow nodes (run it in a pane).")
+                        .about("Place the task on stdin onto member NAME and block for its reply.")
+                        .arg(Arg::new("name").long("name").required(true))
+                        .arg(Arg::new("cli").long("cli"))
+                        .arg(Arg::new("model").long("model"))
                         .arg(Arg::new("team").long("team")),
-                )
-                .subcommand(
-                    Command::new("node")
-                        .about("One task on one live member, as a single blocking call.")
-                        .subcommand_required(true)
-                        .arg_required_else_help(true)
-                        .subcommand(
-                            Command::new("run")
-                                .about("Place the task on stdin onto member NAME and block for its reply.")
-                                .arg(Arg::new("name").long("name").required(true))
-                                .arg(Arg::new("cli").long("cli"))
-                                .arg(Arg::new("model").long("model"))
-                                .arg(
-                                    Arg::new("phase")
-                                        .long("phase")
-                                        .help("Phase label; lands on the pane group for `hive flow board`"),
-                                )
-                                .arg(Arg::new("team").long("team")),
-                        ),
-                )
-                .subcommand(
-                    Command::new("rig")
-                        .about("Create (or tear down) a workflow team: tmux session, team, board.")
-                        .arg(Arg::new("run").required(true))
-                        .arg(Arg::new("orch").long("orch").value_name("SESSION_ID"))
-                        .arg(Arg::new("workspace").long("workspace").value_name("DIR"))
-                        .arg(
-                            Arg::new("down")
-                                .long("down")
-                                .action(clap::ArgAction::SetTrue),
-                        ),
                 ),
         )
         .subcommand(
@@ -642,7 +609,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "team",
     "layout",
     "mirror",
-    "flow",
+    "node",
     "pr",
     "view",
     "attach",
@@ -673,8 +640,7 @@ const KNOWN_COMMANDS: &[&str] = &[
 const HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["ccd"], &["ls"]),
     (&["config"], &["get", "set", "unset"]),
-    (&["flow"], &["board", "node", "rig", "run"]),
-    (&["flow", "node"], &["run"]),
+    (&["node"], &["run"]),
     (
         &["plugin"],
         &["disable", "enable", "list", "ls", "setup", "sync"],
@@ -698,7 +664,7 @@ fn group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
 /// A group prints its own help unless a known subcommand appears first.
 /// Only a known command has a help arm. An unknown token never reaches this
 /// function (the known-command gate in `main_with_argv` rejects it first); a
-/// dash-first one (`hive --bogus -h`, `hive -- flow -h`) is left to clap,
+/// dash-first one (`hive --bogus -h`, `hive -- node -h`) is left to clap,
 /// which rejects it with exit 2 like any other unexpected argument.
 fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
     if !KNOWN_COMMANDS.contains(&invoked) {
@@ -732,7 +698,7 @@ fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
 }
 
 /// Click's `no_args_is_help` on a group: the group path *tail* stops on
-/// (`hive flow`, `hive flow node`), or None when it reaches a leaf command.
+/// (`hive node`, `hive plugin`), or None when it reaches a leaf command.
 fn bare_group_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
     let mut path = vec![invoked];
     for tok in tail {
@@ -959,6 +925,7 @@ fn dispatch(matches: &ArgMatches) {
             arg_str(m, "name"),
             arg_str(m, "workspace"),
             m.get_flag("delete_workspace"),
+            m.get_flag("down"),
         ),
         Some(("spawn", m)) => {
             // Click declares --task as `type=click.Path(exists=True,
@@ -1002,38 +969,15 @@ fn dispatch(matches: &ArgMatches) {
             arg_str(m, "window"),
         ),
         Some(("mirror", m)) => attach::mirror_cmd(arg_str(m, "mode"), arg_str(m, "window")),
-        Some(("flow", m)) => match m.subcommand() {
-            Some(("run", m)) => {
-                let script = arg_str(m, "script");
-                if !Path::new(script).exists() {
-                    eprintln!("Error: Invalid value for 'SCRIPT': Path '{script}' does not exist.");
-                    std::process::exit(2);
-                }
-                flow::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
-            }
-            Some(("board", m)) => std::process::exit(crate::flow_board::board_cmd(
+        Some(("node", m)) => match m.subcommand() {
+            Some(("run", m)) => node::node_run_cmd(
+                arg_str(m, "name"),
+                m.get_one::<String>("cli").map(String::as_str),
+                m.get_one::<String>("model")
+                    .map(String::as_str)
+                    .unwrap_or(""),
                 m.get_one::<String>("team").map(String::as_str),
-            )),
-            Some(("node", m)) => match m.subcommand() {
-                Some(("run", m)) => flow::flow_node_run_cmd(
-                    arg_str(m, "name"),
-                    m.get_one::<String>("cli").map(String::as_str),
-                    m.get_one::<String>("model")
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                    m.get_one::<String>("phase")
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                    m.get_one::<String>("team").map(String::as_str),
-                ),
-                _ => unreachable!("subcommand required"),
-            },
-            Some(("rig", m)) => std::process::exit(crate::flow_rig::rig_cmd(
-                arg_str(m, "run"),
-                m.get_one::<String>("orch").map(String::as_str),
-                m.get_one::<String>("workspace").map(String::as_str),
-                m.get_flag("down"),
-            )),
+            ),
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {
@@ -1146,7 +1090,7 @@ mod tests {
         let cli = build_cli();
         let tail = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(help_path("--bogus", &tail(&["-h"])), None);
-        assert_eq!(help_path("--", &tail(&["flow", "-h"])), None);
+        assert_eq!(help_path("--", &tail(&["node", "-h"])), None);
         assert_eq!(help_path("bogus", &tail(&["--help"])), None);
         assert_eq!(bare_group_path("--bogus", &tail(&[])), None);
         for name in KNOWN_COMMANDS {
@@ -1175,33 +1119,22 @@ mod tests {
     }
 
     #[test]
-    fn test_help_path_walks_nested_groups() {
+    fn test_help_path_walks_groups_and_stops_on_leaves() {
         let tail = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            help_path("flow", &tail(&["node", "run", "--name", "x", "--help"])),
-            Some(vec!["flow", "node", "run"])
+            help_path("node", &tail(&["run", "--name", "x", "--help"])),
+            Some(vec!["node", "run"])
         );
-        assert_eq!(
-            help_path("flow", &tail(&["node", "-h"])),
-            Some(vec!["flow", "node"])
-        );
-        assert_eq!(
-            help_path("flow", &tail(&["-h", "node"])),
-            Some(vec!["flow"])
-        );
-        assert_eq!(help_path("flow", &tail(&["bogus", "-h"])), None);
-        assert_eq!(help_path("flow", &tail(&["run", "--", "-h"])), None);
+        assert_eq!(help_path("node", &tail(&["-h", "run"])), Some(vec!["node"]));
+        assert_eq!(help_path("node", &tail(&["bogus", "-h"])), None);
+        assert_eq!(help_path("node", &tail(&["run", "--", "-h"])), None);
         assert_eq!(
             help_path("plugin", &tail(&["sync", "--help"])),
             Some(vec!["plugin", "sync"])
         );
         assert_eq!(help_path("codex", &tail(&["--help"])), None);
-        assert_eq!(
-            bare_group_path("flow", &tail(&["node"])),
-            Some(vec!["flow", "node"])
-        );
-        assert_eq!(bare_group_path("flow", &tail(&[])), Some(vec!["flow"]));
-        assert_eq!(bare_group_path("flow", &tail(&["run"])), None);
+        assert_eq!(bare_group_path("node", &tail(&[])), Some(vec!["node"]));
+        assert_eq!(bare_group_path("node", &tail(&["run"])), None);
         assert_eq!(bare_group_path("send", &tail(&[])), None);
     }
 
@@ -1349,7 +1282,7 @@ mod tests {
         // panic (exit 101); now clap rejects the token like `hive -x` does.
         for (args, token) in [
             (&["--bogus", "-h"][..], "--bogus"),
-            (&["--", "flow", "-h"][..], "flow"),
+            (&["--", "node", "-h"][..], "node"),
         ] {
             let (code, out, err) = run_hive_child(args, false);
             assert_eq!(code, 2, "{args:?}: stderr {err}");

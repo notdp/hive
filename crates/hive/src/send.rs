@@ -2,7 +2,7 @@
 //! a `hive send` (a qualified `<group>.<name>` across windows, a bare name
 //! in the caller's team, a Claude-session guest's target), the long-body
 //! hint, and the request every dispatch — `hive send`, a spawn's `--task`,
-//! a flow node — hands the hived.
+//! a `hive node run` task — hands the hived.
 
 use std::collections::HashSet;
 

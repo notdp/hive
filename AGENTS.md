@@ -42,9 +42,9 @@ behavior is documented in the modules themselves.
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
   takes explicit targets, and reads neither markers nor the registry.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
-  `fork`, `flow`, `launch`, `setup`, `worktree`) that parse, print and
-  exit; the logic they call lives in the crate and is what the flow engine
-  and the rig reach for too: `team/` (`scope` for which team a verb acts
+  `fork`, `node`, `launch`, `setup`, `worktree`) that parse, print and
+  exit; the logic they call lives in the crate and is what `run_node`
+  reaches for too: `team/` (`scope` for which team a verb acts
   on, `roster` for membership writes, `delete`), `naming.rs` (the name
   pools and the uniqueness claim), `send.rs` (send addressing and the
   hived send seam), `team_display.rs` (the eager window on top of the
@@ -55,19 +55,16 @@ behavior is documented in the modules themselves.
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;
   the viewer must stay usable against a transcript file alone.
-- The flow engine is Rust; its scripting surface is JavaScript, evaluated
-  in-process by the embedded QuickJS runtime (`flow_script.rs`). The whole
-  dialect lives in that module's JS prelude; the only host primitive is one
-  op seam into `flow.rs::run_op`, and both sides are covered by the same
-  test suite — there is no external client to keep in sync. Flow scripts
-  are deterministic by contract (`Date.now()`/`Math.random()`/argless
-  `new Date()` throw) so a run's op journal can replay on
-  `hive flow run --resume`; keep op args free of run-relative values (paths
-  with counters, timestamps), because the typed op's serialization
-  (`flow.rs::FlowOp`) is the journal key. `hive flow node run` is the same
-  op core as one blocking command; the plugin's `hive-node` agent is only a
-  relay for it, and `hive flow board` reads phases off the members' pane
-  groups (`@hive-group`), never a sidecar file.
+- Orchestration is not hive's: `hive node run` is one node as one blocking
+  command (`--team`, `--name`, `--cli`, `--model`; the task on stdin, the
+  member's reply as one JSON line on stdout), and a Claude Code Workflow
+  drives those nodes through the plugin's `hive-node` agent, which is only
+  a relay for the command. The node's reply address is the `flow.run`
+  mailbox (`FLOW_SENDER`): the member's `hive send` to it is a durable bus
+  row the hived's mailbox branch stores without a transport or an ack, and
+  `run_node` polls the bus for it. A same-name node reuses a live member;
+  the run's team comes from `hive create <run>` and goes with
+  `hive delete <run> --down`.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
   differs from the embedded bytes is rewritten. Editing a materialized asset
@@ -157,9 +154,10 @@ with all call sites instead of leaving an empty body.
 - Documents hive does not own end to end (registry entries, claude/codex
   session records, plugin state, settings) are read and written as
   `serde_json::Value`, never a derived struct, so keys hive does not know
-  survive a read-modify-write; `Serialize`/`Deserialize` are derived only
-  on wire types hive owns (`flow.rs::FlowOp`, whose serialization is the
-  op-journal key). `serde_json` carries the `preserve_order` feature so
+  survive a read-modify-write; `Serialize` is derived only on output
+  types hive owns end to end (`bus.rs::Event`, the `worktree.rs` result
+  payloads, `notify_ui.rs::NotifyPayload`), and nothing derives
+  `Deserialize`. `serde_json` carries the `preserve_order` feature so
   insertion order survives a round trip; dropping it reorders files that
   existing readers diff. A field's presence is read through
   `json_fields::is_set`, and a team instance is named by

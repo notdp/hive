@@ -39,8 +39,8 @@ Workflow:
 
   attach    Jump to a team's tmux window, rebuilding it first when it is
             gone.
-  flow      Deterministic member orchestration over live panes.
   ls        List hive teams from the registry, with their display state.
+  node      One task on one live member, as a single blocking call.
   pr        Pin a PR number on the team window's status bar.
   view      Read-only viewer for a Claude session transcript (follows live).
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
@@ -254,9 +254,17 @@ Options:
   removes the whole team directory — or the external workspace the entry
   records, which is never removed without the flag.
 
+  --down is the teardown of a workflow run (`hive create RUN`, `hive node
+  run` nodes, `hive delete RUN --down`): every member is retired first, and
+  the team's own tmux session — the one `hive create` built outside tmux,
+  named after the team — is killed after, by its exact name, never a prefix
+  match. Refuses when neither a team nor such a session exists.
+
 Options:
   -w, --workspace TEXT  Workspace path to remove (default: the entry's)
   --delete-workspace    Also delete the workspace directory
+  --down                Retire every member first and kill the team's tmux
+                        session
   -h, --help            Show this message and exit.
 "#
         }
@@ -276,61 +284,25 @@ Options:
   -h, --help  Show this message and exit.
 "#
         }
-        ["flow"] => {
-            r#"Usage: hive flow [OPTIONS] COMMAND [ARGS]...
+        ["node"] => {
+            r#"Usage: hive node [OPTIONS] COMMAND [ARGS]...
 
-  Deterministic member orchestration over live panes.
+  One task on one live member, as a single blocking call.
 
-  Two ways in. `hive flow run SCRIPT` evaluates a JavaScript flow script in
-  the embedded engine: `agent()` spawns a member, dispatches a task and
-  blocks for the reply; `parallel()` fans out; `phase()` labels a stage.
-  `hive flow node run` is one node as a single blocking command — the seam an
-  external orchestrator (Claude Code's Workflow tool via the `hive-node`
-  agent) runs in the background. Every node is a visible pane; `hive flow
-  board` shows them by phase in a dock strip, and `hive flow rig` stands up
-  the tmux session + team + board for a run in one verb.
+  The seam an external orchestrator — Claude Code's Workflow tool through
+  the `hive-node` agent the hive plugin ships — runs in the background: a
+  workflow run is `hive create RUN`, one `hive node run` per node, `hive
+  delete RUN --down`. Every node is a visible pane on the team window.
 
 Options:
   -h, --help  Show this message and exit.
 
 Commands:
-  run    Run SCRIPT against the current team.
-  node   One task on one live member, as a single blocking call.
-  board  Live progress board for the team's flow nodes (run it in a pane).
-  rig    Create (or tear down) a workflow team: tmux session, team, board.
-"#
-        }
-        ["flow", "board"] => {
-            r#"Usage: hive flow board [OPTIONS]
-
-  Live progress board for the team's flow nodes (run it in a pane).
-
-  Renders the roster and the flow.run mailbox as per-node state
-  (spawned / working / done / gone) with elapsed times. Phases come from the
-  members' pane groups — the --phase of `hive flow node run`, the enclosing
-  `phase()` of a flow script — so serial/parallel structure needs nothing
-  extra written. A dispatch and the member's first send back after it give
-  each node its state; liveness comes from the hived.
-
-  The pane tags itself @hive-role dock: the adaptive layout keeps it as a
-  full-width strip at the bottom and tiles the members above it.
-
-Options:
-  --team <TEAM>  Team to watch (default: the team in scope)
-  -h, --help     Show this message and exit.
-"#
-        }
-        ["flow", "node"] => {
-            r#"Usage: hive flow node COMMAND [ARGS]...
-
-  One task on one live member, as a single blocking call.
-
-Commands:
   run  Place the task on stdin onto member NAME and block for its reply.
 "#
         }
-        ["flow", "node", "run"] => {
-            r#"Usage: hive flow node run [OPTIONS] --name <NAME> < task.md
+        ["node", "run"] => {
+            r#"Usage: hive node run [OPTIONS] --name <NAME> < task.md
 
   Place the task on stdin onto member NAME and block for its reply.
 
@@ -339,7 +311,8 @@ Commands:
   object on stdout: {"status":"replied","body":…,"artifact":…,"name":…,
   "pane":…,"reused":…}. Progress goes to stderr. A member that
   dies before replying ends the call with an error and exit 1; a spawn or
-  dispatch that fails retires the member it created.
+  dispatch that fails retires the member it created. The member replies
+  with an ordinary `hive send flow.run`, the runner's mailbox address.
 
   This is the seam the `hive-node` agent (shipped by the hive plugin) runs in
   the background from a Claude Code Workflow script.
@@ -348,30 +321,8 @@ Options:
   --name <NAME>    Member name (stable; a live member of that name is reused)
   --cli <CLI>      claude | codex | grok (default: claude)
   --model <MODEL>  Model for the member's CLI
-  --phase <PHASE>  Phase label; lands on the pane group for `hive flow board`
   --team <TEAM>    Team (default: the team in scope)
   -h, --help       Show this message and exit.
-"#
-        }
-        ["flow", "rig"] => {
-            r#"Usage: hive flow rig [OPTIONS] RUN
-
-  Create (or tear down) a workflow team: tmux session, team, board.
-
-  Creates a detached tmux session named RUN, binds a team of the same name
-  to its window (session = team = run), starts `hive flow board --team RUN`
-  in a dock strip at the bottom, and — with --orch — a read-only `hive view`
-  mirror of the orchestrating Claude session in a second pane. Attach
-  with `hive attach RUN`; members spawn above the dock as nodes run.
-
-  --down retires every member, deletes the team and kills the session.
-
-Options:
-  --orch <SESSION_ID>  Claude session to mirror in an orch pane
-  --workspace <DIR>    Team workspace (default: $HIVE_HOME/teams/RUN, kept
-                       across --down so a run can --resume)
-  --down               Tear the rig down
-  -h, --help           Show this message and exit.
 "#
         }
         ["fork"] => {
@@ -496,10 +447,10 @@ Options:
   Plan the team window's layout, or apply a tmux preset over it.
 
   hive owns the layout: from the window's size and its panes' roles it
-  plans a mirror column (landscape) or row (portrait), a member grid
-  sized toward 80x24 cells, and a flow dock strip at the bottom, and
-  re-plans on every layout event — a resize, a spawn or kill, a mirror or
-  dock coming and going — through two window hooks. A dragged pane
+  plans a mirror column (landscape) or row (portrait) and a member grid
+  sized toward 80x24 cells, and re-plans on every layout event — a
+  resize, a spawn or kill, a mirror coming and going — through two window
+  hooks. A dragged pane
   border holds until the plan changes. ``auto`` applies the plan now
   (the repair for a window dragged out of shape); an explicit preset
   applies as given and holds until the next event.
@@ -520,7 +471,7 @@ Options:
   Show or hide the team's read-only orch mirror pane.
 
   The mirror is the `hive view` pane of a session member (a Claude session
-  that created or joined the team, or a flow rig's --orch). `off` moves it
+  that created or joined the team). `off` moves it
   with break-pane into a hidden window of the team session (tagged
   `@hive-hidden`), the viewer keeps running, and the window records
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
@@ -537,8 +488,7 @@ Options:
   window's only pane; a refusal records nothing. Prints one line: `mirror
   on (TEAM)` / `mirror off (TEAM)`, with `: already shown`, `: no mirror`
   or `: no session mirror to show` when nothing had to move — the last one
-  records nothing either. A flow rig mirror is not a roster member: once
-  its hidden pane is gone, only a fresh rig brings it back.
+  records nothing either.
 
 Options:
   --window <TARGET>  The team window (default: the caller's)
@@ -643,9 +593,9 @@ Options:
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
   outside any team is `ccd.<name or title or pid>` (how a member reaches out).
-  `flow.run` is the flow runner's mailbox — an address kind, not a member;
-  sends to it confirm with one `delivered to flow mailbox` line and never get
-  a HIVE ack back.
+  `flow.run` is the mailbox of a `hive node run` runner — an address kind,
+  not a member; sends to it confirm with one `delivered to flow mailbox`
+  line and never get a HIVE ack back.
 
   New-thread sends must keep `body` to a short summary and put details in
   `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,
@@ -856,47 +806,6 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#
-        }
-        ["flow", "run"] => {
-            r#"Usage: hive flow run [OPTIONS] SCRIPT
-
-  Run SCRIPT against the current team.
-
-  The script is trusted JavaScript (you or your orch wrote it). Members it
-  spawns reply to the reserved `flow.run` mailbox; the runner blocks until
-  the script finishes. Typical use from an orch: run it in a background
-  shell and read the output when it completes. Progress goes to stderr; the
-  script's return value is the last line of stdout.
-
-  Every run journals its ops under <workspace>/artifacts/flow/ and prints its
-  run id; `--resume <run-id>` replays the unchanged prefix — members still
-  alive are reused instead of respawned.
-
-  Example script:
-    export const meta = { name: 'auth-work', description: 'explore, then build' }
-    phase('Explore')
-    const f = await agent('explore auth; write findings to <workspace>/artifacts/f.md', { name: 'explore' })
-    phase('Build')
-    const [a, b] = await parallel([
-      () => agent(`impl auth, material: ${f.artifact}`, { name: 'impl-auth' }),
-      () => agent('impl db layer', { name: 'impl-db', cli: 'codex' }),
-    ])
-    phase('Verify')
-    const v = await agent(`verify ${a.artifact} ${b.artifact}`, { name: 'verify', cli: 'codex',
-      schema: { type: 'object', required: ['verdict'], properties: { verdict: { enum: ['pass', 'fail'] } } } })
-    if (v.verdict === 'fail') await ask('impl-auth', `rework per ${a.artifact}`)
-    await kill('verify')
-    return { verdict: v.verdict }
-
-  Surface: agent(prompt, {name, cli, model, schema}) -> {body, artifact}
-  (or the schema-validated object); ask(name, prompt, {schema}); kill(name);
-  parallel(thunks); pipeline(items, ...stages); phase(title); log(msg).
-  Date.now() / Math.random() / new Date() throw — runs must replay.
-
-Options:
-  --resume <RUN_ID>  Resume a previous run from its journal
-  -h, --help         Show this message and exit.
 "#
         }
         ["plugin", "disable"] => {

@@ -211,7 +211,7 @@ fn should_show_description(desc: Option<&Value>) -> bool {
 pub(crate) fn team_status_payload(t: &mut Team) -> Map<String, Value> {
     let status = t.status();
     let mut payload = augment_team_payload_with_runtime(t, status);
-    // The flow runner's mailbox is a reserved address, not a member — list
+    // The node runner's mailbox is a reserved address, not a member — list
     // it beside the roster so "hive team can't find flow" never reads as
     // "my report was lost".
     payload.insert(

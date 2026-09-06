@@ -948,11 +948,7 @@ fn test_gc_stale_team_windows_clears_non_kept() {
 fn test_clear_window_tags_unsets_the_layout_hooks_and_key() {
     let (_tmp, _guard) = configure_hive_home(true, "%0");
     fake_tmux::set_window_option("dev:2", "@hive-team", "my-team");
-    fake_tmux::set_window_option(
-        "dev:2",
-        "@hive-layout",
-        "landscape/m2/no-mirror/no-dock/2x1",
-    );
+    fake_tmux::set_window_option("dev:2", "@hive-layout", "landscape/m2/no-mirror/2x1");
 
     clear_window_tags("dev:2");
 

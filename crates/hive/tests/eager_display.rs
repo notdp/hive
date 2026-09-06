@@ -781,50 +781,6 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert!(!session_alive(&rig, &rig.team));
 }
 
-#[test]
-fn test_flow_rig_mirror_pane_is_an_ordinary_pane_and_records_mirror_on() {
-    let rig = Rig::new("flowrig");
-    // The mirror pane is `hive view s-rig` with nothing else keeping the
-    // pane open, and the viewer looks under `$HOME/.claude/projects` — so
-    // the run's HOME is the rig and the transcript exists (empty: the
-    // viewer follows it live).
-    let project = rig.tmp.path().join(".claude").join("projects").join("p");
-    std::fs::create_dir_all(&project).expect("projects dir");
-    std::fs::write(project.join("s-rig.jsonl"), "").expect("transcript");
-    let out = rig
-        .hive_cmd(&["flow", "rig", &rig.team, "--orch", "s-rig"], None)
-        .env("HOME", rig.tmp.path())
-        .output()
-        .expect("hive runs");
-    assert!(
-        out.status.success(),
-        "flow rig failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let (_, window_id) = rig.team_windows().into_iter().next().expect("rig window");
-    let panes = rig.panes(&window_id);
-    assert_eq!(panes.len(), 2, "{panes:?}");
-    assert_eq!(
-        (panes[0].1.as_str(), panes[0].3),
-        ("mirror", 220),
-        "{panes:?}"
-    );
-    assert_eq!(
-        (panes[1].1.as_str(), panes[1].3),
-        ("dock", 220),
-        "{panes:?}"
-    );
-    let dock_height = rig.tmux_ok(&["display-message", "-p", "-t", &panes[1].0, "#{pane_height}"]);
-    assert_eq!(dock_height, hive::layout::DOCK_ROWS.to_string());
-    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
-    let line = rig.status_line(&window_id, 0);
-    assert!(line.contains(" ◂ orch "), "{line}");
-    assert!(line.contains(" ⬡ board "), "{line}");
-    rig.hive_ok(&["flow", "rig", &rig.team, "--down"], None);
-    assert!(rig.registry_entry().is_none());
-    assert!(!session_alive(&rig, &rig.team));
-}
-
 /// What the bar draws is tmux's rendering of options alone: set them the
 /// way the hived and notify do, read the lines back.
 #[test]

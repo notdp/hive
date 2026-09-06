@@ -7,7 +7,7 @@ description: Hive team 协作协议,唯一入口 /hive:hive [team]——无参=�
 
 一个 team = 注册表里的名册 + 各自跑在引擎里的成员。tmux 窗口是显示器,建团即有:窗口被关、tmux 重启都不丢团,`hive attach` 会把它重建出来。
 
-主线动词(`worktree` 见 references/worktree.md,编排与 `flow` 见 references/orchestration.md):
+主线动词(`worktree` 见 references/worktree.md,编排见 references/orchestration.md):
 
 ```bash
 hive team            # 名册 + runtime:你是谁、队里有谁、各自什么状态
@@ -47,7 +47,7 @@ tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 se
 - tmux pane 成员发队友用裸名(`hive send dodo …`);本队前缀等价裸名。自己拼的别队前缀会被拒——照抄 from 不受此限(guest 编排者的回信地址就是别队前缀,照抄即达)。
 - tmux 外(joined session、guest、引擎的工具进程)用 `<team>.<member>`;裸名全局唯一时也行。
 - team 外的 Claude session 用 `ccd.<name>`(见「互通」)。
-- `flow.run` 是 flow 脚本的收件箱地址,不是成员。收到 `from=flow.run` 照抄回信;它只列在 `mailboxes`、不列在 `members`,这是正常的。
+- `flow.run` 是 `hive node run` 节点的收件箱地址,不是成员。收到 `from=flow.run` 照抄回信;它只列在 `mailboxes`、不列在 `members`,这是正常的。
 
 其余字段怎么用:
 
@@ -69,7 +69,7 @@ review the spec
 </HIVE>
 ```
 
-- 收活以 `<HIVE>` block 为准——它就是完整投递;`hive thread` 只用于排障。
+- 收活以 `<HIVE>` block 为准——它就是完整投递,没有别处要查。
 - 正文只是短摘要,`artifact=<path>` 指的文件才是全文——要细节就打开它,按摘要开工会做偏。
 - 任务 = 派发消息 + 它的 artifact:scope、交付物形态与路径、验收标准、上游材料位置,全以该 artifact 为准。
 - artifact 引用的文件(上游产出、材料)直接打开读——凭摘要猜会漏关键细节。
@@ -147,4 +147,4 @@ kill 是派发人的动词:验收通过后派发人会 `hive kill` 你。在那�
 
 ## 你要当派发人时
 
-你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥、flow 脚本、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。
+你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥(⑥ 是 Claude Code Workflow 驱动 `hive node run` 节点)、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。

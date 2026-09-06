@@ -1,6 +1,8 @@
 //! `hive delete`'s body: the registry entry goes (that is what makes the
 //! team deleted), the display hive built closes, the hived stops, the
 //! workspace goes only on request, and the team's grok leaders are swept.
+//! `--down` is the whole-run teardown around it: every member retired
+//! first, the team's own tmux session killed last.
 
 use std::path::Path;
 
@@ -42,10 +44,37 @@ fn sweep_team_grok_daemons(team: &str) {
 /// team directory, or the external one the entry records — is removed,
 /// and the team directory with it. An external workspace is never removed
 /// without the flag.
-pub(crate) fn delete_team(name: &str, workspace: &str, delete_workspace: bool) -> Result<()> {
+///
+/// With `down`, every member is retired before the entry goes and the
+/// team's tmux session (the one `hive create` built outside tmux, named
+/// after the team) is killed after it — the teardown of a workflow run.
+/// Every session target is exact (`=<name>`): once the team window has
+/// closed, and with it the session, a bare `-t <name>` would prefix-match
+/// a stranger's `<name>-x` session and kill that instead.
+pub(crate) fn delete_team(
+    name: &str,
+    workspace: &str,
+    delete_workspace: bool,
+    down: bool,
+) -> Result<()> {
     let error = crate::team::validate_team_name(name);
     if !error.is_empty() {
         bail!("cannot delete: {error}");
+    }
+    let session = format!("={name}");
+    let had_session = down && tmux::has_session(&session);
+    if down {
+        if crate::registry::load(name).is_none() && !had_session {
+            bail!("no team named '{name}' (no registry entry, no tmux session)");
+        }
+        if let Ok(mut team) = Team::load(name, "") {
+            let names: Vec<String> = team.agents.iter().map(|a| a.name.clone()).collect();
+            for member in names {
+                if team.retire(&member) {
+                    println!("retired {member}");
+                }
+            }
+        }
     }
     let mut team_workspace = String::new();
     let mut team_window = String::new();
@@ -124,6 +153,12 @@ pub(crate) fn delete_team(name: &str, workspace: &str, delete_workspace: bool) -
     sweep_team_grok_daemons(name);
 
     println!("Team '{name}' deleted.");
+    if down && tmux::has_session(&session) {
+        tmux::kill_session(&session);
+    }
+    if had_session {
+        println!("session '{name}' killed");
+    }
     Ok(())
 }
 
@@ -150,7 +185,7 @@ mod tests {
         }
 
         for name in ["../evil", outside.to_str().unwrap(), "a.b", ""] {
-            let err = delete_team(name, "", true).unwrap_err().to_string();
+            let err = delete_team(name, "", true, false).unwrap_err().to_string();
             assert!(err.starts_with("cannot delete:"), "{name}: {err}");
         }
 
@@ -238,7 +273,7 @@ mod tests {
             &["dev", "honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-window"), 0);
@@ -257,7 +292,7 @@ mod tests {
             &["honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
@@ -277,7 +312,7 @@ mod tests {
             &["dev"],
         );
 
-        crate::team::delete_team("honey", &ws, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-window"), 0);
@@ -301,7 +336,7 @@ mod tests {
             &["honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false).unwrap();
 
         let kills: Vec<Vec<String>> = argv
             .borrow()
@@ -340,7 +375,7 @@ mod tests {
         let ws = team_on_its_own_dir(&env);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", false).unwrap();
+        crate::team::delete_team("honey", "", false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(!ws.join("team.json").exists());
@@ -355,7 +390,7 @@ mod tests {
         let ws = team_on_its_own_dir(&env);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", true).unwrap();
+        crate::team::delete_team("honey", "", true, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(!ws.exists(), "{}", ws.display());
@@ -372,7 +407,7 @@ mod tests {
         env.env.set("CR_WORKSPACE", &stranger);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", true).unwrap();
+        crate::team::delete_team("honey", "", true, false).unwrap();
 
         assert!(stranger.join("artifacts").is_dir());
         assert!(!team_dir(&env, "honey").exists());
@@ -394,7 +429,7 @@ mod tests {
         .unwrap();
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", false).unwrap();
+        crate::team::delete_team("honey", "", false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(external.join("hive.db").is_file());
@@ -405,8 +440,80 @@ mod tests {
         // with the flag, the external workspace goes too
         crate::registry::record_team("honey", external.to_str().unwrap(), "200.0", &[], "@7")
             .unwrap();
-        crate::team::delete_team("honey", "", true).unwrap();
+        crate::team::delete_team("honey", "", true, false).unwrap();
         assert!(!external.exists());
         assert!(!team_dir(&env, "honey").exists());
+    }
+
+    #[test]
+    fn test_delete_down_without_a_team_never_kills_a_prefix_matched_session() {
+        let _env = display_env_outside();
+        let argv = fake_tmux_sessions("", &[], &[], &["abc-keep"]);
+
+        let err = delete_team("abc", "", false, true).unwrap_err().to_string();
+
+        assert!(err.contains("no team named 'abc'"), "{err}");
+        assert_eq!(count(&argv, "kill-session"), 0);
+        assert_eq!(count(&argv, "kill-window"), 0);
+    }
+
+    #[test]
+    fn test_delete_down_retires_the_members_and_kills_the_exact_session() {
+        let _env = display_env_outside();
+        crate::registry::record_team(
+            "abc",
+            "",
+            "100.0",
+            &[
+                member_row("orch", "claude", ""),
+                member_row("bee", "claude", ""),
+            ],
+            "@7",
+        )
+        .unwrap();
+        let argv = fake_tmux_sessions(
+            "abc:1	@7	abc			
+    ",
+            &[],
+            &[("abc:1", "hive-built", "1")],
+            &["abc", "abc-keep"],
+        );
+
+        delete_team("abc", "", false, true).unwrap();
+
+        assert!(crate::registry::load("abc").is_none());
+        assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
+        // Every session target is exact: `abc-keep` is never in reach.
+        let session_targets: Vec<String> = argv
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a[0].as_str(), "has-session" | "kill-session"))
+            .map(|a| a[2].clone())
+            .collect();
+        assert!(!session_targets.is_empty());
+        assert!(
+            session_targets.iter().all(|t| t == "=abc"),
+            "{session_targets:?}"
+        );
+        assert_eq!(count(&argv, "kill-session"), 1);
+    }
+
+    #[test]
+    fn test_delete_without_down_leaves_the_session_alone() {
+        let env = display_env_outside();
+        let ws = env._tmp.path().join("ws").to_string_lossy().into_owned();
+        team_on_a_built_window();
+        let argv = fake_tmux_sessions(
+            "honey:1	@7	honey			
+    ",
+            &[],
+            &[("honey:1", "hive-built", "1")],
+            &["honey"],
+        );
+
+        delete_team("honey", &ws, false, false).unwrap();
+
+        assert_eq!(count(&argv, "kill-session"), 0);
+        assert_eq!(count(&argv, "has-session"), 0);
     }
 }

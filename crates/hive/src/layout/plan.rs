@@ -4,11 +4,8 @@
 //!
 //! Space rules:
 //! - Landscape = `w >= 2*h` (a tmux cell is about 1:2 in pixels).
-//! - The dock (`@hive-role dock`, the `hive flow board` strip) is a
-//!   full-width strip at the bottom, `DOCK_ROWS` capped at a third. The
-//!   rest is the body.
-//! - The mirror (`@hive-role mirror`) sits in the body: a left column in
-//!   landscape, a top row in portrait. Its share is half the body, unless
+//! - The mirror (`@hive-role mirror`) is a left column in landscape, a
+//!   top row in portrait. Its share is half the window, unless
 //!   the members' best grid at half scores below 1.0 and shrinking the
 //!   mirror to `MIN_COLS`/`MIN_ROWS` scores them better.
 //! - The members take a grid over what is left: for every row count, the
@@ -21,7 +18,7 @@
 //! the parent's height and their widths plus one separator each sum to
 //! the parent's width; `[]` the same with the axes swapped. tmux ignores
 //! the pane indices and hands cells to panes in window order, depth-first
-//! through the string — so the leaves come out mirror, members, dock, and
+//! through the string — so the leaves come out mirror then members, and
 //! the apply (`layout::ensure`) puts the window in that order first.
 
 use crate::tmux::PaneInfo;
@@ -32,8 +29,6 @@ use crate::tmux::PaneInfo;
 /// 2x1's 1.36) instead of sitting side by side.
 pub const MIN_COLS: i64 = 80;
 pub const MIN_ROWS: i64 = 24;
-/// Rows the dock strip asks for; a short window gives it a third.
-pub const DOCK_ROWS: i64 = 14;
 
 /// What `plan` decided: `key` names every decision except absolute sizes
 /// (a proportional resize keeps it), `layout` is the `select-layout`
@@ -259,43 +254,25 @@ fn plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)>
         .iter()
         .find(|p| p.role == "mirror")
         .map(|p| &p.pane_id);
-    let dock = panes.iter().find(|p| p.role == "dock").map(|p| &p.pane_id);
     let members: Vec<String> = panes
         .iter()
-        .filter(|p| Some(&p.pane_id) != mirror && Some(&p.pane_id) != dock)
+        .filter(|p| Some(&p.pane_id) != mirror)
         .map(|p| p.pane_id.clone())
         .collect();
     let n = members.len();
 
-    let body_h = match dock {
-        Some(_) => h - DOCK_ROWS.min(h / 3).max(2) - 1,
-        None => h,
-    };
-    let (body, variant, grid) = match (mirror, n) {
-        (None, _) => {
-            let grid = best_grid(n, w, body_h, landscape);
-            (grid_node(&members, grid, w, body_h), "no-mirror", grid)
+    let (root, variant, grid) = match mirror {
+        None => {
+            let grid = best_grid(n, w, h, landscape);
+            (grid_node(&members, grid, w, h), "no-mirror", grid)
         }
-        (Some(mirror), 0) => (
-            Node::Leaf(pane_index(mirror)),
-            "mirror-all",
-            Grid {
-                cols: 0,
-                rows: 0,
-                score: 0.0,
-            },
-        ),
-        (Some(mirror), _) if landscape => {
-            let (extent, variant, grid) =
-                mirror_share(w, MIN_COLS, n, landscape, |rest| (rest, body_h));
+        Some(mirror) if landscape => {
+            let (extent, variant, grid) = mirror_share(w, MIN_COLS, n, landscape, |rest| (rest, h));
             let node = Node::Split {
                 beside: true,
                 children: vec![
                     (extent, Node::Leaf(pane_index(mirror))),
-                    (
-                        w - 1 - extent,
-                        grid_node(&members, grid, w - 1 - extent, body_h),
-                    ),
+                    (w - 1 - extent, grid_node(&members, grid, w - 1 - extent, h)),
                 ],
             };
             (
@@ -308,17 +285,13 @@ fn plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)>
                 grid,
             )
         }
-        (Some(mirror), _) => {
-            let (extent, variant, grid) =
-                mirror_share(body_h, MIN_ROWS, n, landscape, |rest| (w, rest));
+        Some(mirror) => {
+            let (extent, variant, grid) = mirror_share(h, MIN_ROWS, n, landscape, |rest| (w, rest));
             let node = Node::Split {
                 beside: false,
                 children: vec![
                     (extent, Node::Leaf(pane_index(mirror))),
-                    (
-                        body_h - 1 - extent,
-                        grid_node(&members, grid, w, body_h - 1 - extent),
-                    ),
+                    (h - 1 - extent, grid_node(&members, grid, w, h - 1 - extent)),
                 ],
             };
             (
@@ -331,16 +304,6 @@ fn plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)>
                 grid,
             )
         }
-    };
-    let root = match dock {
-        Some(dock) => Node::Split {
-            beside: false,
-            children: vec![
-                (body_h, body),
-                (h - body_h - 1, Node::Leaf(pane_index(dock))),
-            ],
-        },
-        None => body,
     };
     let mut cells = Vec::new();
     let body_text = render(&root, Rect { x: 0, y: 0, w, h }, &mut cells);
@@ -348,12 +311,7 @@ fn plan_cells(size: (i64, i64), panes: &[PaneInfo]) -> Option<(Plan, Vec<Rect>)>
         return None;
     }
     let orientation = if landscape { "landscape" } else { "portrait" };
-    let key = format!(
-        "{orientation}/m{n}/{variant}/{}/{}x{}",
-        if dock.is_some() { "dock" } else { "no-dock" },
-        grid.cols,
-        grid.rows
-    );
+    let key = format!("{orientation}/m{n}/{variant}/{}x{}", grid.cols, grid.rows);
     let plan = Plan {
         key,
         layout: format!("{:04x},{body_text}", layout_checksum(&body_text)),
@@ -372,15 +330,12 @@ pub fn plan(size: (i64, i64), panes: &[PaneInfo]) -> Option<Plan> {
 /// pane should go beside it (`-h`) rather than below (`-v`) to match the
 /// plan for the window with that pane in it: `panes` are the window's
 /// panes plus the one about to be split. The new member's cell is the
-/// last member leaf — the dock strip, when there is one, comes after it
-/// and is never on its row. `true` (the legacy default) when there is no
-/// plan.
+/// last leaf. `true` (the legacy default) when there is no plan.
 pub fn split_beside(size: (i64, i64), panes: &[PaneInfo]) -> bool {
-    let dock = usize::from(panes.iter().any(|p| p.role == "dock"));
     match plan_cells(size, panes) {
-        Some((_, cells)) if cells.len() >= 2 + dock => {
-            let last = cells[cells.len() - 1 - dock];
-            let before = cells[cells.len() - 2 - dock];
+        Some((_, cells)) if cells.len() >= 2 => {
+            let last = cells[cells.len() - 1];
+            let before = cells[cells.len() - 2];
             last.y == before.y
         }
         _ => true,
@@ -402,18 +357,14 @@ mod tests {
             .collect()
     }
 
-    /// `n` member panes, a mirror first when `mirror`, a dock last when
-    /// `dock`.
-    fn window(n: usize, mirror: bool, dock: bool) -> Vec<PaneInfo> {
+    /// `n` member panes, a mirror first when `mirror`.
+    fn window(n: usize, mirror: bool) -> Vec<PaneInfo> {
         let mut spec: Vec<(String, &str)> = Vec::new();
         if mirror {
             spec.push(("%1".to_string(), "mirror"));
         }
         for i in 0..n {
             spec.push((format!("%{}", 10 + i), "agent"));
-        }
-        if dock {
-            spec.push(("%9".to_string(), "dock"));
         }
         let borrowed: Vec<(&str, &str)> = spec.iter().map(|(id, r)| (id.as_str(), *r)).collect();
         panes(&borrowed)
@@ -443,27 +394,27 @@ mod tests {
 
     #[test]
     fn test_plan_none_below_two_panes_or_a_tiny_window() {
-        assert_eq!(plan((220, 60), &window(1, false, false)), None);
+        assert_eq!(plan((220, 60), &window(1, false)), None);
         assert_eq!(plan((220, 60), &[]), None);
-        assert_eq!(plan((3, 60), &window(2, false, false)), None);
-        assert_eq!(plan((220, 5), &window(2, false, false)), None);
+        assert_eq!(plan((3, 60), &window(2, false)), None);
+        assert_eq!(plan((220, 5), &window(2, false)), None);
         // eight members over six rows: a cell would be shorter than a row
-        assert_eq!(plan((4, 6), &window(8, false, false)), None);
+        assert_eq!(plan((4, 6), &window(8, false)), None);
     }
 
     #[test]
     fn test_plan_two_members_landscape_side_by_side_portrait_stacked() {
-        let landscape = plan((220, 60), &window(2, false, false)).unwrap();
+        let landscape = plan((220, 60), &window(2, false)).unwrap();
         assert_eq!(landscape.orientation, "landscape");
-        assert_eq!(landscape.key, "landscape/m2/no-mirror/no-dock/2x1");
+        assert_eq!(landscape.key, "landscape/m2/no-mirror/2x1");
         // 109 + 1 + 110 = 220
         assert_eq!(
             landscape.layout,
             checked("220x60,0,0{109x60,0,0,10,110x60,110,0,11}")
         );
-        let portrait = plan((100, 90), &window(2, false, false)).unwrap();
+        let portrait = plan((100, 90), &window(2, false)).unwrap();
         assert_eq!(portrait.orientation, "portrait");
-        assert_eq!(portrait.key, "portrait/m2/no-mirror/no-dock/1x2");
+        assert_eq!(portrait.key, "portrait/m2/no-mirror/1x2");
         assert_eq!(
             portrait.layout,
             checked("100x90,0,0[100x44,0,0,10,100x45,0,45,11]")
@@ -471,21 +422,21 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_grid_choice_landscape_220x60_one_to_six_members() {
-        let grids: Vec<String> = (1..=6)
-            .map(|n| grid_of(&plan((220, 60), &window(n, false, true)).unwrap()))
+    fn test_plan_grid_choice_landscape_220x60_two_to_six_members() {
+        let grids: Vec<String> = (2..=6)
+            .map(|n| grid_of(&plan((220, 60), &window(n, false)).unwrap()))
             .collect();
-        // body = 60 - 14 - 1 = 45 rows: 220x45 for one; two side by side
-        // (109x45 scores 1.36 over 220x22's 0.92); three to four in 2x2
-        // (109x22 = 0.92 beats 72x45 = 0.9 and 54x45 = 0.68); five and six
-        // in 3x2 (72x22 = 0.9 against 54x22's 0.68 in 4x2).
-        assert_eq!(grids, vec!["1x1", "2x1", "2x2", "2x2", "3x2", "3x2"]);
+        // two side by side (109x60 scores 1.36 over 220x29's 1.21); three
+        // to four in 2x2 (109x29 = 1.21 beats 72x60 = 0.9 and 54x60 =
+        // 0.68); five and six in 3x2 (72x29 = 0.9 against 54x29's 0.68 in
+        // 4x2).
+        assert_eq!(grids, vec!["2x1", "2x2", "2x2", "3x2", "3x2"]);
     }
 
     #[test]
     fn test_plan_grid_choice_portrait_100x90_stacks_until_rows_run_out() {
         let grids: Vec<String> = (2..=6)
-            .map(|n| grid_of(&plan((100, 90), &window(n, false, false)).unwrap()))
+            .map(|n| grid_of(&plan((100, 90), &window(n, false)).unwrap()))
             .collect();
         // 100 columns fit one 80-column cell, so members stack until the
         // strips get shorter than two 49-column cells are narrow: at six,
@@ -496,15 +447,15 @@ mod tests {
     #[test]
     fn test_plan_grid_choice_narrow_portrait_80x200_never_splits_columns() {
         for n in 2..=6 {
-            let plan = plan((80, 200), &window(n, false, false)).unwrap();
+            let plan = plan((80, 200), &window(n, false)).unwrap();
             assert_eq!(grid_of(&plan), format!("1x{n}"), "{}", plan.key);
         }
     }
 
     #[test]
     fn test_plan_mirror_column_landscape_220x60_two_members_stack_beside_it() {
-        let plan = plan((220, 60), &window(2, true, false)).unwrap();
-        assert_eq!(plan.key, "landscape/m2/mirror-half/no-dock/1x2");
+        let plan = plan((220, 60), &window(2, true)).unwrap();
+        assert_eq!(plan.key, "landscape/m2/mirror-half/1x2");
         // mirror 109 wide, members 110x29 + 110x30 stacked in the rest
         assert_eq!(
             plan.layout,
@@ -514,10 +465,10 @@ mod tests {
 
     #[test]
     fn test_plan_mirror_row_portrait_100x90_two_members_stack_below_it() {
-        let plan = plan((100, 90), &window(2, true, false)).unwrap();
-        // Half the body (44 rows) leaves the members 100x22 (0.92); a
+        let plan = plan((100, 90), &window(2, true)).unwrap();
+        // Half the window (44 rows) leaves the members 100x22 (0.92); a
         // 24-row mirror leaves them 100x32 (1.25), so the mirror shrinks.
-        assert_eq!(plan.key, "portrait/m2/mirror-min/no-dock/1x2");
+        assert_eq!(plan.key, "portrait/m2/mirror-min/1x2");
         assert_eq!(
             plan.layout,
             checked("100x90,0,0[100x24,0,0,1,100x65,0,25[100x32,0,25,10,100x32,0,58,11]]")
@@ -528,8 +479,8 @@ mod tests {
     fn test_plan_mirror_shrinks_to_min_cols_when_that_scores_members_better() {
         // Four members beside a half mirror get 54x29 (0.68); beside an
         // 80-column mirror 69x29 (0.86).
-        let plan = plan((220, 60), &window(4, true, false)).unwrap();
-        assert_eq!(plan.key, "landscape/m4/mirror-min/no-dock/2x2");
+        let plan = plan((220, 60), &window(4, true)).unwrap();
+        assert_eq!(plan.key, "landscape/m4/mirror-min/2x2");
         assert!(
             plan.layout.contains("{80x60,0,0,1,139x60,81,0["),
             "{}",
@@ -542,8 +493,8 @@ mod tests {
         // 20 rows bound the members' score (0.83) whatever the mirror's
         // width: 99x20 beside a half mirror, 159x20 beside an 80-column
         // one — no gain, so the mirror keeps its half.
-        let plan = plan((400, 20), &window(2, true, false)).unwrap();
-        assert_eq!(plan.key, "landscape/m2/mirror-half/no-dock/2x1");
+        let plan = plan((400, 20), &window(2, true)).unwrap();
+        assert_eq!(plan.key, "landscape/m2/mirror-half/2x1");
         assert!(
             plan.layout.contains("{199x20,0,0,1,200x20,200,0{"),
             "{}",
@@ -552,86 +503,38 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_mirror_alone_with_a_dock_takes_the_body() {
-        let plan = plan((220, 60), &window(0, true, true)).unwrap();
-        assert_eq!(plan.key, "landscape/m0/mirror-all/dock/0x0");
-        assert_eq!(
-            plan.layout,
-            checked("220x60,0,0[220x45,0,0,1,220x14,0,46,9]")
-        );
-    }
-
-    #[test]
-    fn test_plan_dock_strip_two_members_landscape() {
-        let plan = plan((200, 50), &window(2, false, true)).unwrap();
-        // members: 50 - 14 - 1 = 35 rows; widths 99 + 1 + 100 = 200
-        assert_eq!(
-            plan.layout,
-            checked("200x50,0,0[200x35,0,0{99x35,0,0,10,100x35,100,0,11},200x14,0,36,9]")
-        );
-    }
-
-    #[test]
-    fn test_plan_dock_layout_portrait_stacks_and_short_window_shrinks_dock() {
-        let tall = plan((100, 60), &window(2, false, true)).unwrap();
-        // 100x60 is portrait: stacked rows over 45 lines = 22 + 1 + 22
-        assert_eq!(
-            tall.layout,
-            checked("100x60,0,0[100x45,0,0[100x22,0,0,10,100x22,0,23,11],100x14,0,46,9]")
-        );
-        // 100x30 is landscape and short: the dock takes a third (10 rows)
-        let short = plan((100, 30), &window(2, false, true)).unwrap();
-        assert_eq!(
-            short.layout,
-            checked("100x30,0,0[100x19,0,0{49x19,0,0,10,50x19,50,0,11},100x10,0,20,9]")
-        );
-    }
-
-    #[test]
-    fn test_plan_three_members_and_a_dock_go_side_by_side_in_a_short_window() {
-        // 35 body rows halve to 17 (0.71): three 66-column cells (0.83) win
-        let plan = plan((200, 50), &window(3, false, true)).unwrap();
+    fn test_plan_three_members_go_side_by_side_in_a_short_window() {
+        // 35 rows halve to 17 (0.71): three 66-column cells (0.83) win
+        let plan = plan((200, 35), &window(3, false)).unwrap();
         assert_eq!(grid_of(&plan), "3x1");
         assert_eq!(
             plan.layout,
-            checked(
-                "200x50,0,0[200x35,0,0{66x35,0,0,10,66x35,67,0,11,66x35,134,0,12},200x14,0,36,9]"
-            )
+            checked("200x35,0,0{66x35,0,0,10,66x35,67,0,11,66x35,134,0,12}")
         );
     }
 
     #[test]
-    fn test_plan_three_members_and_a_dock_wrap_the_last_row_in_a_tall_window() {
-        let plan = plan((220, 60), &window(3, false, true)).unwrap();
+    fn test_plan_three_members_wrap_the_last_row_in_a_tall_window() {
+        let plan = plan((220, 60), &window(3, false)).unwrap();
         assert_eq!(grid_of(&plan), "2x2");
-        // two rows over 45 lines: 22 + 1 + 22; the lone third pane spans the row
+        // two rows over 60 lines: 29 + 1 + 30; the lone third pane spans the row
         assert_eq!(
             plan.layout,
-            checked("220x60,0,0[220x45,0,0[220x22,0,0{109x22,0,0,10,110x22,110,0,11},220x22,0,23,12],220x14,0,46,9]")
+            checked("220x60,0,0[220x29,0,0{109x29,0,0,10,110x29,110,0,11},220x30,0,30,12]")
         );
     }
 
     #[test]
-    fn test_plan_leaves_come_out_mirror_members_dock_whatever_the_window_order() {
-        let ordered = plan((220, 60), &window(2, true, true)).unwrap();
+    fn test_plan_leaves_come_out_mirror_then_members_whatever_the_window_order() {
+        let ordered = plan((220, 60), &window(2, true)).unwrap();
         let shuffled = plan(
             (220, 60),
-            &panes(&[
-                ("%10", "agent"),
-                ("%9", "dock"),
-                ("%1", "mirror"),
-                ("%11", "agent"),
-            ]),
+            &panes(&[("%10", "agent"), ("%1", "mirror"), ("%11", "agent")]),
         )
         .unwrap();
         assert_eq!(ordered, shuffled);
         assert!(
-            ordered.layout.contains("{109x45,0,0,1,"),
-            "{}",
-            ordered.layout
-        );
-        assert!(
-            ordered.layout.ends_with(",220x14,0,46,9]"),
+            ordered.layout.contains("{109x60,0,0,1,"),
             "{}",
             ordered.layout
         );
@@ -639,60 +542,36 @@ mod tests {
 
     #[test]
     fn test_plan_key_survives_a_proportional_resize() {
-        let before = plan((220, 60), &window(2, true, false)).unwrap();
-        let after = plan((200, 55), &window(2, true, false)).unwrap();
+        let before = plan((220, 60), &window(2, true)).unwrap();
+        let after = plan((200, 55), &window(2, true)).unwrap();
         assert_eq!(before.key, after.key);
         assert_ne!(before.layout, after.layout);
-        let before = plan((220, 60), &window(2, false, false)).unwrap();
-        let after = plan((200, 55), &window(2, false, false)).unwrap();
+        let before = plan((220, 60), &window(2, false)).unwrap();
+        let after = plan((200, 55), &window(2, false)).unwrap();
         assert_eq!(before.key, after.key);
     }
 
     #[test]
-    fn test_plan_key_changes_on_flip_member_count_mirror_and_dock() {
-        let base = plan((220, 60), &window(2, true, false)).unwrap();
-        let flipped = plan((60, 80), &window(2, true, false)).unwrap();
+    fn test_plan_key_changes_on_flip_member_count_and_mirror() {
+        let base = plan((220, 60), &window(2, true)).unwrap();
+        let flipped = plan((60, 80), &window(2, true)).unwrap();
         assert_ne!(base.key, flipped.key);
         assert_eq!(flipped.orientation, "portrait");
-        assert_ne!(
-            base.key,
-            plan((220, 60), &window(3, true, false)).unwrap().key
-        );
-        assert_ne!(
-            base.key,
-            plan((220, 60), &window(2, false, false)).unwrap().key
-        );
-        assert_ne!(
-            base.key,
-            plan((220, 60), &window(2, true, true)).unwrap().key
-        );
+        assert_ne!(base.key, plan((220, 60), &window(3, true)).unwrap().key);
+        assert_ne!(base.key, plan((220, 60), &window(2, false)).unwrap().key);
     }
 
     #[test]
     fn test_split_beside_follows_the_plan_for_the_pane_about_to_split() {
         // landscape, two members: beside; portrait: below
-        assert!(split_beside((220, 60), &window(2, false, false)));
-        assert!(!split_beside((100, 90), &window(2, false, false)));
+        assert!(split_beside((220, 60), &window(2, false)));
+        assert!(!split_beside((100, 90), &window(2, false)));
         // a member beside a landscape mirror
-        assert!(split_beside((220, 60), &window(1, true, false)));
+        assert!(split_beside((220, 60), &window(1, true)));
         // a second member stacks under the first in the mirror's column
-        assert!(!split_beside((220, 60), &window(2, true, false)));
+        assert!(!split_beside((220, 60), &window(2, true)));
         // no plan: the legacy default
-        assert!(split_beside((0, 0), &window(1, false, false)));
-    }
-
-    #[test]
-    fn test_split_beside_skips_the_dock_strip_and_compares_members() {
-        // A board's dock is the last leaf; the members still tile 2x1 over
-        // the body, so the second one goes beside the first…
-        let plan = plan((220, 60), &window(2, false, true)).unwrap();
-        assert_eq!(grid_of(&plan), "2x1");
-        assert!(split_beside((220, 60), &window(2, false, true)));
-        assert!(split_beside((200, 50), &window(2, false, true)));
-        // …a first member beside a landscape mirror over a dock…
-        assert!(split_beside((220, 60), &window(1, true, true)));
-        // …while a portrait body stacks them under the same dock.
-        assert!(!split_beside((100, 60), &window(2, false, true)));
+        assert!(split_beside((0, 0), &window(1, false)));
     }
 
     #[test]
