@@ -53,7 +53,7 @@ pub const ENTRY_FILE: &str = "team.json";
 
 /// `$HIVE_HOME/teams/`: one directory per team, plus the store lock.
 pub fn store_dir() -> PathBuf {
-    crate::team::hive_home().join("teams")
+    crate::paths::hive_home().join("teams")
 }
 
 /// The team's directory, `$HIVE_HOME/teams/<team>/`, or None when the name
@@ -540,54 +540,14 @@ pub fn backfill(
     Ok("written")
 }
 
-/// `tempfile.mkstemp(prefix=…, suffix=…, dir=…)`: exclusive 0600 temp file.
-pub(crate) fn mkstemp_in(dir: &Path, prefix: &str, suffix: &str) -> Result<(fs::File, PathBuf)> {
-    for attempt in 0..128u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let candidate = dir.join(format!(
-            "{prefix}{}-{nanos:x}-{attempt}{suffix}",
-            std::process::id()
-        ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&candidate)
-        {
-            Ok(f) => return Ok((f, candidate)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    bail!("could not create temp file in {}", dir.display());
-}
-
-/// `json.dump(..., sort_keys=True)`: recursively rebuild maps in sorted key
-/// order — this build's serde_json (`preserve_order`) keeps insertion order.
-pub(crate) fn sort_keys(v: &Value) -> Value {
-    match v {
-        Value::Object(o) => {
-            let mut keys: Vec<&String> = o.keys().collect();
-            keys.sort();
-            Value::Object(
-                keys.into_iter()
-                    .map(|k| (k.clone(), sort_keys(&o[k])))
-                    .collect(),
-            )
-        }
-        Value::Array(a) => Value::Array(a.iter().map(sort_keys).collect()),
-        other => other.clone(),
-    }
-}
-
 fn write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {
     let parent = path.parent().context("registry path has no parent")?;
     fs::create_dir_all(parent)?;
-    let (mut file, tmp) = mkstemp_in(parent, ".reg.", ".tmp")?;
+    let (mut file, tmp) = crate::paths::mkstemp_in(parent, ".reg.", ".tmp")?;
     // json.dump(..., ensure_ascii=False, indent=2, sort_keys=True)
-    let mut text = serde_json::to_string_pretty(&sort_keys(&Value::Object(entry.clone())))?;
+    let mut text = serde_json::to_string_pretty(&crate::json_fields::sort_keys(&Value::Object(
+        entry.clone(),
+    )))?;
     text.push('\n');
     let result = file
         .write_all(text.as_bytes())

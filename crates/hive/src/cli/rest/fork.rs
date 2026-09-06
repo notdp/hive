@@ -217,7 +217,7 @@ fn fork_boundary_file(team_bound: bool) -> PathBuf {
     } else {
         "fork-boundary-orphan.txt"
     };
-    let path = crate::team::hive_home().join(filename);
+    let path = crate::paths::hive_home().join(filename);
     let stale = match std::fs::read_to_string(&path) {
         Ok(existing) => existing != text,
         Err(_) => true,

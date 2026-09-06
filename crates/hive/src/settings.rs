@@ -11,7 +11,7 @@ use anyhow::{bail, Context as _, Result};
 use serde_json::{Map, Value};
 
 fn settings_path() -> PathBuf {
-    crate::team::hive_home().join("settings.json")
+    crate::paths::hive_home().join("settings.json")
 }
 
 fn key_parts(key: &str) -> Vec<&str> {
@@ -93,10 +93,10 @@ fn write_atomic(data: &Map<String, Value>) -> Result<()> {
     let path = settings_path();
     let parent = path.parent().context("settings path has no parent")?;
     fs::create_dir_all(parent)?;
-    let (mut file, tmp) = crate::registry::mkstemp_in(parent, ".settings.", ".json.tmp")?;
+    let (mut file, tmp) = crate::paths::mkstemp_in(parent, ".settings.", ".json.tmp")?;
     // Pretty-printed with sorted keys so the file diffs cleanly.
     let result = (|| -> Result<()> {
-        let sorted = crate::registry::sort_keys(&Value::Object(data.clone()));
+        let sorted = crate::json_fields::sort_keys(&Value::Object(data.clone()));
         let mut text = serde_json::to_string_pretty(&sorted)?;
         text.push('\n');
         file.write_all(text.as_bytes())?;

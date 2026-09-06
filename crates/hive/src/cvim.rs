@@ -26,7 +26,7 @@ const PROTOCOL_JSON: &str = include_str!("../assets/cvim/resources/cvim_edit_pro
 /// (rewriting any file whose on-disk copy drifted from the embedded content)
 /// and return the `cvim-command` path.
 pub fn materialize_assets() -> anyhow::Result<PathBuf> {
-    let root = crate::team::hive_home().join("core_assets").join("cvim");
+    let root = crate::paths::hive_home().join("core_assets").join("cvim");
     crate::assets::materialize_asset_tree(
         &root,
         &[

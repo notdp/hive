@@ -1,7 +1,6 @@
 //! Team: a registry roster with an optional tmux display window.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
@@ -22,14 +21,6 @@ use crate::tmux;
 
 pub const LEAD_AGENT_NAME: &str = "orch";
 const _TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
-
-/// `$HIVE_HOME`, read per call so tests can redirect it (nextest runs one
-/// process per test).
-pub fn hive_home() -> PathBuf {
-    let home = std::env::var("HIVE_HOME")
-        .unwrap_or_else(|_| format!("{}/.hive", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home)
-}
 
 /// The registry's instance key for a team created at *created_at*
 /// (epoch seconds): an empty key for a team with no known creation time,

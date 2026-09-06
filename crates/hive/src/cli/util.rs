@@ -100,6 +100,8 @@ pub(crate) fn getcwd() -> String {
 }
 
 pub(crate) use crate::json_fields::is_set;
+pub(crate) use crate::paths::expanduser;
+pub(crate) use crate::shell::shlex_quote;
 pub(crate) use crate::team::created_at_key;
 
 /// Replace this process with *program*; print the error and exit 1 when
@@ -133,48 +135,6 @@ pub(crate) fn value_as_env_string(value: &Value) -> String {
     }
 }
 
-/// The hive binary that tmux hooks, the flow dock and the cvim asset call
-/// back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
-/// the bash asset, and integration tests (whose current_exe is the test
-/// harness) point hooks at the real binary with it.
-pub(crate) fn self_exe() -> String {
-    let overridden = env_string("HIVE_BIN");
-    if !overridden.is_empty() {
-        return overridden;
-    }
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "hive".to_string())
-}
-
-/// POSIX shell quoting: alphanumerics and `_@%+=:,./-` pass through bare,
-/// anything else is wrapped in single quotes.
-pub(crate) fn shlex_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    let safe = value.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '_' | '-')
-    });
-    if safe {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-/// Escape `value` for the inside of a tmux double-quoted string: tmux's
-/// command parser expands `$name` and honours `\` there even when the
-/// value is single-quoted for the shell it reaches, so a binary path with
-/// a `$` would otherwise reach `run-shell` rewritten.
-pub(crate) fn tmux_dquote_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-}
-
 pub(crate) fn env_string(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }
@@ -192,20 +152,6 @@ pub(crate) fn map_str(map: &Map<String, Value>, key: &str) -> String {
 /// `json.dumps(payload, indent=2, ensure_ascii=False)`.
 pub(crate) fn json_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
-}
-
-/// Expand a leading `~` (bare `~` and `~/...` forms).
-pub(crate) fn expanduser(path: &str) -> String {
-    if path == "~" {
-        return env_string("HOME");
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = env_string("HOME");
-        if !home.is_empty() {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
 }
 
 /// os.urandom-grade bytes for name picks and artifact filenames.

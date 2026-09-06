@@ -1465,9 +1465,25 @@ fn format_ls_human(payload: &Map<String, Value>) -> Vec<String> {
 // view
 // ---------------------------------------------------------------------------
 
-/// Read-only viewer for a Claude session transcript (follows live).
+/// Read-only viewer for a Claude session transcript (follows live): the
+/// TUI on a terminal, a plain ANSI stream into a pipe.
 pub fn view_cmd(session_id: &str) {
-    std::process::exit(crate::transcript_view::follow(session_id));
+    let Some(path) = crate::transcript_view::transcript_path(session_id) else {
+        println!("no transcript for session '{session_id}'");
+        std::process::exit(1);
+    };
+    let code = if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+        match crate::transcript_tui::run(&path) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{}: {}", path.display(), err);
+                1
+            }
+        }
+    } else {
+        crate::transcript_view::follow_plain(session_id, &path)
+    };
+    std::process::exit(code);
 }
 
 // ---------------------------------------------------------------------------

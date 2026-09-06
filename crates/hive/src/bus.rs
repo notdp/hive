@@ -23,7 +23,7 @@ fn msg_id_space() -> i64 {
 }
 
 pub(crate) fn now_iso() -> String {
-    format!("{}Z", crate::devlog::utc_now_iso_seconds())
+    format!("{}Z", crate::clock::utc_now_iso_seconds())
 }
 
 /// Expand only a leading bare `~`.

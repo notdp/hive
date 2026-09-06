@@ -20,7 +20,7 @@ pub const LAYOUT_HOOKS: [&str; 2] = ["window-resized", "window-layout-changed"];
 /// pane, a member's TUI, until someone presses q, and a nonzero exit
 /// the same way; a hook firing per drag step must never do that.
 fn layout_run_shell(hive: &str) -> String {
-    let hive = crate::cli::util::tmux_dquote_escape(hive);
+    let hive = crate::shell::tmux_dquote_escape(hive);
     format!(
         "run-shell -b \"{hive} layout auto --on-change --window '#{{window_id}}' >/dev/null 2>&1 || true\""
     )
@@ -70,7 +70,7 @@ fn run_rows(rows: Vec<Vec<String>>) {
 
 /// Install the hooks on `window` (idempotent: plain sets).
 pub fn install_hooks(window: &str) {
-    let hive = crate::cli::util::shlex_quote(&crate::cli::util::self_exe());
+    let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
     run_rows(hook_argv(window, &hive));
 }
 
