@@ -6,34 +6,111 @@
 
 use super::run::_run;
 
+/// The bar's colours, one set per appearance. The bar follows the same
+/// switch as the viewer (`view.theme`, `HIVE_VIEW_THEME`, then detection),
+/// resolved once at install: a theme change takes effect at the next
+/// session build.
+pub struct StatusPalette {
+    pub bar: &'static str,
+    pub team_bg: &'static str,
+    pub team_fg: &'static str,
+    pub chip_bg: &'static str,
+    pub chip_active_bg: &'static str,
+    pub mirror_bg: &'static str,
+    pub muted: &'static str,
+    pub busy: &'static str,
+    pub open: &'static str,
+    pub alert: &'static str,
+    pub ticker_bg: &'static str,
+    pub ticker_fg: &'static str,
+}
+
+pub const STATUS_DARK: StatusPalette = StatusPalette {
+    bar: "bg=colour235,fg=colour250",
+    team_bg: "colour214",
+    team_fg: "colour235",
+    chip_bg: "colour236",
+    chip_active_bg: "colour240",
+    mirror_bg: "colour238",
+    muted: "colour245",
+    busy: "colour214",
+    open: "colour114",
+    alert: "colour203",
+    ticker_bg: "colour234",
+    ticker_fg: "colour250",
+};
+
+pub const STATUS_LIGHT: StatusPalette = StatusPalette {
+    bar: "bg=colour254,fg=colour236",
+    team_bg: "colour172",
+    team_fg: "colour255",
+    chip_bg: "colour252",
+    chip_active_bg: "colour248",
+    mirror_bg: "colour250",
+    muted: "colour243",
+    busy: "colour166",
+    open: "colour28",
+    alert: "colour160",
+    ticker_bg: "colour255",
+    ticker_fg: "colour238",
+};
+
+pub fn status_palette(kind: crate::view_theme::ThemeKind) -> &'static StatusPalette {
+    match kind {
+        crate::view_theme::ThemeKind::Dark => &STATUS_DARK,
+        crate::view_theme::ThemeKind::Light => &STATUS_LIGHT,
+    }
+}
+
 /// Line 0: the team chip, the orch mirror chip, one chip per pane of the
 /// current window (mirror excluded, active pane bold), then `PR<n>`,
 /// session name and clock.
-pub const TEAM_STATUS_FORMAT_0: &str = concat!(
-    "#[bg=colour214,fg=colour235,bold] #{@hive-team} #[default] ",
-    // orch chip only when the window records a mirror choice (`hive mirror`,
-    // or `on` written at build for a session mirror); ▸ = closed, ◂ = open
-    "#{?@hive-mirror,#[range=user|hive-mirror]",
-    "#{?#{==:#{@hive-mirror},off},#[bg=colour238#,fg=colour245] ▸ orch ,#[bg=colour238#,fg=colour114] ◂ orch }",
-    "#[norange]#[default] ,}",
-    "#{P:#{?#{==:#{@hive-role},mirror},,",
-    "#[range=pane|#{pane_id}]#{?pane_active,#[bg=colour240#,bold],#[bg=colour236]}",
-    "#{?@hive-agent,",
-    "#{?@hive-notify-active,#[fg=colour203#,bold] ✱ ,",
-    "#{?@hive-unread,#[fg=colour203] ✱ ,",
-    "#{?@hive-busy,#[fg=colour214] ● ,#[fg=colour245] ○ }}}#{@hive-agent} ,",
-    "#{?#{==:#{@hive-role},dock},#[fg=colour245] ⬡ board ,#[fg=colour245] #{pane_current_command} }}",
-    "#[norange]#[default] }}",
-    "#[align=right]#[fg=colour245]#{?@hive-pr,PR#{@hive-pr} · ,}#{session_name} · %H:%M "
-);
+pub fn team_status_format_0(p: &StatusPalette) -> String {
+    format!(
+        concat!(
+            "#[bg={team_bg},fg={team_fg},bold] #{{@hive-team}} #[default] ",
+            // orch chip only when the window records a mirror choice (`hive
+            // mirror`, or `on` written at build for a session mirror);
+            // ▸ = closed, ◂ = open
+            "#{{?@hive-mirror,#[range=user|hive-mirror]",
+            "#{{?#{{==:#{{@hive-mirror}},off}},#[bg={mirror_bg}#,fg={muted}] ▸ orch ,#[bg={mirror_bg}#,fg={open}] ◂ orch }}",
+            "#[norange]#[default] ,}}",
+            "#{{P:#{{?#{{==:#{{@hive-role}},mirror}},,",
+            "#[range=pane|#{{pane_id}}]#{{?pane_active,#[bg={chip_active_bg}#,bold],#[bg={chip_bg}]}}",
+            "#{{?@hive-agent,",
+            "#{{?@hive-notify-active,#[fg={alert}#,bold] ✱ ,",
+            "#{{?@hive-unread,#[fg={alert}] ✱ ,",
+            "#{{?@hive-busy,#[fg={busy}] ● ,#[fg={muted}] ○ }}}}}}#{{@hive-agent}} ,",
+            "#{{?#{{==:#{{@hive-role}},dock}},#[fg={muted}] ⬡ board ,#[fg={muted}] #{{pane_current_command}} }}}}",
+            "#[norange]#[default] }}}}",
+            "#[align=right]#[fg={muted}]#{{?@hive-pr,PR#{{@hive-pr}} · ,}}#{{session_name}} · %H:%M "
+        ),
+        team_bg = p.team_bg,
+        team_fg = p.team_fg,
+        mirror_bg = p.mirror_bg,
+        muted = p.muted,
+        open = p.open,
+        chip_active_bg = p.chip_active_bg,
+        chip_bg = p.chip_bg,
+        alert = p.alert,
+        busy = p.busy,
+    )
+}
+
 /// Line 1: the pending notify text (cleared by the select hook), then the
 /// hived's ticker.
-pub const TEAM_STATUS_FORMAT_1: &str = concat!(
-    "#[bg=colour234,fg=colour250] ",
-    "#{?@hive-notify-text,#[fg=colour203#,bold]✱ #{@hive-notify-text}#[default]#[bg=colour234#,fg=colour250]   │   ,}",
-    "#{@hive-ticker}"
-);
-pub const TEAM_STATUS_STYLE: &str = "bg=colour235,fg=colour250";
+pub fn team_status_format_1(p: &StatusPalette) -> String {
+    format!(
+        concat!(
+            "#[bg={ticker_bg},fg={ticker_fg}] ",
+            "#{{?@hive-notify-text,#[fg={alert}#,bold]✱ #{{@hive-notify-text}}#[default]#[bg={ticker_bg}#,fg={ticker_fg}]   │   ,}}",
+            "#{{@hive-ticker}}"
+        ),
+        ticker_bg = p.ticker_bg,
+        ticker_fg = p.ticker_fg,
+        alert = p.alert,
+    )
+}
 /// tmux's stock root-table status click, verbatim (`list-keys -T root
 /// MouseDown1Status`, 3.4): the else branch of the hive click, so every
 /// other status line keeps the click it always had.
@@ -44,26 +121,27 @@ pub const HIDDEN_WINDOW_KEY: &str = "hive-hidden";
 
 /// The session options, targeted by session id (`set-option -t =name`
 /// is refused).
-pub fn team_status_argv(session_id: &str) -> Vec<Vec<String>> {
+pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) -> Vec<Vec<String>> {
+    let p = status_palette(kind);
     [
         // The chips are click targets: `mouse` is a session option, so the
         // team session turns it on for itself whatever the global says.
-        ("mouse", "on"),
-        ("status", "2"),
-        ("status-style", TEAM_STATUS_STYLE),
-        ("status-left", ""),
-        ("status-right", ""),
-        ("status-format[0]", TEAM_STATUS_FORMAT_0),
-        ("status-format[1]", TEAM_STATUS_FORMAT_1),
+        ("mouse", "on".to_string()),
+        ("status", "2".to_string()),
+        ("status-style", p.bar.to_string()),
+        ("status-left", String::new()),
+        ("status-right", String::new()),
+        ("status-format[0]", team_status_format_0(p)),
+        ("status-format[1]", team_status_format_1(p)),
     ]
-    .iter()
+    .into_iter()
     .map(|(option, value)| {
         vec![
             "set-option".to_string(),
             "-t".to_string(),
             session_id.to_string(),
-            (*option).to_string(),
-            (*value).to_string(),
+            option.to_string(),
+            value,
         ]
     })
     .collect()
@@ -171,7 +249,7 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
 /// same fallback back from behind hive's own binding).
 pub fn install_team_status(session_id: &str) {
     let hive = crate::cli::util::shlex_quote(&crate::cli::util::self_exe());
-    let mut rows = team_status_argv(session_id);
+    let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive));
     rows.push(mirror_key_binding(&hive, &_prefix_m_fallback()));
     for row in rows {

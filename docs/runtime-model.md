@@ -133,7 +133,10 @@ The team session hive builds — `hive create` outside tmux, `hive attach`
 rebuilding a lost window, `hive flow rig` — carries hive's own two-line
 status bar, installed by session id at build (`tmux/status.rs`; `status*`
 are session options, so a window a human's session lent the team gets none
-and the human's global status is untouched) and rendered from tmux options
+and the human's global status is untouched). Its colours follow the
+viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
+detection (`view_theme.rs`), resolved once at install, so a theme change
+shows at the next session build — and the bar is rendered from tmux options
 alone, with no `#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
 ▸ parked / ◂ open, absent while unset); per pane `@hive-role`, `@hive-agent`,
 `@hive-busy`, `@hive-unread` and `@hive-notify-active` (✱, the attention

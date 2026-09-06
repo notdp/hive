@@ -634,19 +634,50 @@ const _MIRROR_RUN_SHELL: &str =
 
 #[test]
 fn test_team_status_argv_targets_the_session_id() {
+    use crate::view_theme::ThemeKind;
     let rows = |option: &str, value: &str| v(&["set-option", "-t", "$3", option, value]);
+    let p = status_palette(ThemeKind::Dark);
     assert_eq!(
-        team_status_argv("$3"),
+        team_status_argv("$3", ThemeKind::Dark),
         vec![
             rows("mouse", "on"),
             rows("status", "2"),
-            rows("status-style", TEAM_STATUS_STYLE),
+            rows("status-style", p.bar),
             rows("status-left", ""),
             rows("status-right", ""),
-            rows("status-format[0]", TEAM_STATUS_FORMAT_0),
-            rows("status-format[1]", TEAM_STATUS_FORMAT_1),
+            rows("status-format[0]", &team_status_format_0(p)),
+            rows("status-format[1]", &team_status_format_1(p)),
         ]
     );
+}
+
+/// Light and dark differ in colours only: with every `#[…]` style stripped
+/// the two bars are the same text, so a theme can never change what the
+/// bar shows or which ranges it marks.
+#[test]
+fn test_team_status_palettes_differ_in_colours_only() {
+    use crate::view_theme::ThemeKind;
+    fn strip(format: &str) -> String {
+        let mut out = String::new();
+        let mut rest = format;
+        while let Some(i) = rest.find("#[") {
+            out.push_str(&rest[..i]);
+            let j = rest[i..].find(']').expect("closed style") + i;
+            rest = &rest[j + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+    let dark = status_palette(ThemeKind::Dark);
+    let light = status_palette(ThemeKind::Light);
+    for (d, l) in [
+        (team_status_format_0(dark), team_status_format_0(light)),
+        (team_status_format_1(dark), team_status_format_1(light)),
+    ] {
+        assert_ne!(d, l);
+        assert_eq!(strip(&d), strip(&l));
+    }
+    assert!(team_status_format_0(light).contains(&format!("bg={}", light.team_bg)));
 }
 
 #[test]
@@ -799,7 +830,10 @@ fn test_install_team_status_runs_options_then_bindings() {
             "select-pane -m",
         ]),
     ];
-    expected.extend(team_status_argv("$3"));
+    expected.extend(team_status_argv(
+        "$3",
+        crate::view_theme::active_theme_kind(),
+    ));
     expected.push(status_click_binding("/x/hive"));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
     assert_eq!(argvs(&calls), expected);
@@ -821,7 +855,8 @@ fn test_team_status_format_reads_only_options() {
         "hive-notify-text",
         "hive-ticker",
     ];
-    for format in [TEAM_STATUS_FORMAT_0, TEAM_STATUS_FORMAT_1] {
+    let p = status_palette(crate::view_theme::ThemeKind::Dark);
+    for format in [team_status_format_0(p), team_status_format_1(p)] {
         assert!(!format.contains("#("), "{format}");
         for (i, _) in format.match_indices("@hive-") {
             let key: String = format[i + 1..]
