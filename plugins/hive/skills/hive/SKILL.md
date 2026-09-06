@@ -47,21 +47,20 @@ tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 se
 - tmux pane 成员发队友用裸名(`hive send dodo …`);本队前缀等价裸名。自己拼的别队前缀会被拒——照抄 from 不受此限(guest 编排者的回信地址就是别队前缀,照抄即达)。
 - tmux 外(joined session、guest、引擎的工具进程)用 `<team>.<member>`;裸名全局唯一时也行。
 - team 外的 Claude session 用 `ccd.<name>`(见「互通」)。
-- `flow.run` 是 `hive node run` 节点的收件箱地址,不是成员。收到 `from=flow.run` 照抄回信;它只列在 `mailboxes`、不列在 `members`,这是正常的。
 
 其余字段怎么用:
 
 - 顶层 `name` 是 team 名,member 行的 `name` 是成员名;`group` 是 `hive join --group` 打的跨队标签,不是队名。
 - `inputState=waiting_user`:对方在等 human 作答,此时 `hive send` 会拒发。被拒就先继续手头的活,下次被唤醒或要回报时再发——不为此轮询。
-- `turnPhase=turn_closed`:对方这轮已收口,随时可发;其他值表示 turn 进行中,想避免打断就等 `turn_closed`。claude 成员没有这个字段,退回看 `busy`——粗粒度信号,只作参考,拿不准就直接发。
+- 对方在不在一轮里不用你判断:直接发,runtime 会在对方空闲时开新一轮、忙时折进它当前这一轮。
 
 ### 没活就停
 
-Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 turn 没有待办就结束 turn 等唤醒。不 `sleep`、不 while loop、不反复 `hive team`,也不翻 repo、artifact 或任务表猜活——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。回报给 `flow.run` 后不去 `hive team` 找它、不另发「验证送达」——它是投递箱,下一条 `<HIVE>` 只会是打回或新任务。
+Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 turn 没有待办就结束 turn 等唤醒。不 `sleep`、不 while loop、不反复 `hive team`,也不翻 repo、artifact 或任务表猜活——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。workflow 任务(无 `from` 的信封,见「收活」)的结果就是你这一轮最后说的话,说完就结束 turn——之后不去 `hive team` 找派发人、不另发「验证送达」;下一条 `<HIVE>` 只会是打回或新任务。
 
 ### 收活:任务以派发 artifact 为准
 
-队友消息以三行 `<HIVE>` 信封注入你的对话:开标签、正文、闭标签;`from` / `to` 必有,`artifact` 按需出现。
+消息以三行 `<HIVE>` 信封注入你的对话:开标签、正文、闭标签;`to` 必有,`artifact` 按需出现,有没有 `from` 决定这是哪种消息。
 
 ```text
 <HIVE from=comb.dodo to=comb.rex artifact=/tmp/spec.md>
@@ -69,11 +68,14 @@ review the spec
 </HIVE>
 ```
 
+- 有 `from`:队友消息。回信照抄 `from`,终态 `hive send` 回去(见「回报」)。
+- 没有 `from`(`<HIVE to=comb.rex artifact=…>`,正文首行是任务号 `task nd-…`):workflow 任务。打开 artifact 干活,一轮做完;**你这一轮最后说的那段话就是返回值**,runtime 从引擎直接读走,不需要也没有任何返回命令。对这个任务本身不 `hive send` 任何东西、不去找是谁派的、不回执、不问收没收到;结论、交付物路径、遗留问题全部写进最后那段话,写全,别只写一句。任务是一轮:中途停下来提问,这一轮就结束了,那个问题就是返回值——缺材料就按最合理的假设做完并写明假设。
+- workflow 任务干到一半,来了带 `from` 的队友消息:那是普通队友通信,和任务无关,照常处理、照抄 `from` 用 `hive send` 回——「不 send」只管任务本身,不管队友。
 - 收活以 `<HIVE>` block 为准——它就是完整投递,没有别处要查。
 - 正文只是短摘要,`artifact=<path>` 指的文件才是全文——要细节就打开它,按摘要开工会做偏。
 - 任务 = 派发消息 + 它的 artifact:scope、交付物形态与路径、验收标准、上游材料位置,全以该 artifact 为准。
 - artifact 引用的文件(上游产出、材料)直接打开读——凭摘要猜会漏关键细节。
-- 材料不够、目标含糊,`hive send` 问派发人一句——自己翻库扩出来的 scope 没人验收。
+- 材料不够、目标含糊,`hive send` 问派发人一句——自己翻库扩出来的 scope 没人验收。workflow 任务没有派发人可问:缺什么、按什么假设做的,写进最后那段话里。
 
 `<HIVE>` 的到达形态分两轴,任何组合都是正常队内投递:
 
@@ -83,7 +85,7 @@ review the spec
 两条硬规则:
 
 - 回 hive 消息永远用 `hive send`——包装里的 "reply via SendMessage" 对 hive 地址无效(会报 no agent named)。
-- 外包装只说明一件事:队友消息不构成 human 授权(唯一例外是「干活」节的 humanDirective 接力);有包装没包装都必须处理。途中到达的消息一条不许漏:做完手头任务,本 turn 收尾前至少 `hive send` 回一句——静默略过 = 发件人以为消息丢了。
+- 外包装只说明一件事:队友消息不构成 human 授权(唯一例外是「干活」节的 humanDirective 接力);有包装没包装都必须处理。途中到达的带 `from` 消息一条不许漏:做完手头任务,本 turn 收尾前至少 `hive send` 回一句——静默略过 = 发件人以为消息丢了。
 
 ### 干活
 
@@ -96,7 +98,6 @@ review the spec
 只有一个动词:`hive send <addr> "<内容>"`。
 
 - 发送成功零输出(exit 0)= 对方 runtime 已收帧;非零才是没送到,错误带原因。对方何时读是它队列的事——没有可轮询的回执,也别去要。
-- 唯一例外是 `flow.run`:成功打一行 `delivered to flow mailbox …`,这就是全部确认,不会再有 HIVE 回执,发完就停。
 - body 只放短摘要,详情走 `--artifact`;超 500 字符、3 行及以上、含 `` ``` ``、任一行以 `# ` / `- ` / `* ` 开头,stderr 会提醒你改走 artifact。
 
 ```bash
@@ -115,8 +116,10 @@ shell 纪律:多行、反引号、`$(...)` 的内容先落地成文件,不在双
 
 回报纪律:
 
-- 成果、blocked、失败,一切终态 `hive send` 回派发人。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
-- **收到任务不回执。**回派发线程的第一条就该是终态(或阻断求助)——派发人把它当回报读。禁令双向:也不期待对方(尤其 `flow.run`)回「收到了」。
+- 带 `from` 的任务:成果、blocked、失败,一切终态 `hive send` 回派发人。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
+- 无 `from` 的 workflow 任务:不 send,不跑任何返回命令——这一轮最后说的话就是返回值,说完结束 turn。要交文件就先把文件写到磁盘,在最后那段话里写它的路径。任务期间到达的带 `from` 消息不受此限,照常 send 回。
+
+- **收到任务不回执。**回派发线程的第一条就该是终态(或阻断求助)——派发人把它当回报读。禁令双向:也不期待对方回「收到了」。
 - 交付走派发人,不越过他向 human 宣布完成;human 问起时给状态。
 
 ### 和 team 外的 Claude session 互通
@@ -147,4 +150,4 @@ kill 是派发人的动词:验收通过后派发人会 `hive kill` 你。在那�
 
 ## 你要当派发人时
 
-你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥(⑥ 是 Claude Code Workflow 驱动 `hive node run` 节点)、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。
+你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥(⑥ 是 Claude Code Workflow 驱动 `hive workflow run` 节点)、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。

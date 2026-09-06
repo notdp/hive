@@ -40,9 +40,10 @@ Workflow:
   attach    Jump to a team's tmux window, rebuilding it first when it is
             gone.
   ls        List hive teams from the registry, with their display state.
-  node      One task on one live member, as a single blocking call.
   pr        Pin a PR number on the team window's status bar.
   view      Read-only viewer for a Claude session transcript (follows live).
+  workflow  One task on one live codex or grok member, one turn, its result
+            read off the engine.
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
             state.
 
@@ -98,7 +99,7 @@ Examples:
   # Team lifecycle
   hive create                                  # make this pane the orch of a new team
   hive spawn explore --task /tmp/task.md       # spawn a member and dispatch its task atomically
-  hive team                                    # members + runtime state (busy / inputState / turnPhase)
+  hive team                                    # members + runtime state (busy / inputState)
 
   # Messaging (root thread: body is a short summary, details go in --artifact)
   hive send dodo "review this diff" --artifact /tmp/diff.md
@@ -254,7 +255,7 @@ Options:
   removes the whole team directory — or the external workspace the entry
   records, which is never removed without the flag.
 
-  --down is the teardown of a workflow run (`hive create RUN`, `hive node
+  --down is the teardown of a workflow run (`hive create RUN`, `hive workflow
   run` nodes, `hive delete RUN --down`): every member is retired first, and
   the team's own tmux session — the one `hive create` built outside tmux,
   named after the team — is killed after, by its exact name, never a prefix
@@ -282,47 +283,6 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#
-        }
-        ["node"] => {
-            r#"Usage: hive node [OPTIONS] COMMAND [ARGS]...
-
-  One task on one live member, as a single blocking call.
-
-  The seam an external orchestrator — Claude Code's Workflow tool through
-  the `hive-node` agent the hive plugin ships — runs in the background: a
-  workflow run is `hive create RUN`, one `hive node run` per node, `hive
-  delete RUN --down`. Every node is a visible pane on the team window.
-
-Options:
-  -h, --help  Show this message and exit.
-
-Commands:
-  run  Place the task on stdin onto member NAME and block for its reply.
-"#
-        }
-        ["node", "run"] => {
-            r#"Usage: hive node run [OPTIONS] --name <NAME> < task.md
-
-  Place the task on stdin onto member NAME and block for its reply.
-
-  Spawns the member (or reuses one of that name that is still alive),
-  dispatches the task atomically, waits without timeout, and prints one JSON
-  object on stdout: {"status":"replied","body":…,"artifact":…,"name":…,
-  "pane":…,"reused":…}. Progress goes to stderr. A member that
-  dies before replying ends the call with an error and exit 1; a spawn or
-  dispatch that fails retires the member it created. The member replies
-  with an ordinary `hive send flow.run`, the runner's mailbox address.
-
-  This is the seam the `hive-node` agent (shipped by the hive plugin) runs in
-  the background from a Claude Code Workflow script.
-
-Options:
-  --name <NAME>    Member name (stable; a live member of that name is reused)
-  --cli <CLI>      claude | codex | grok (default: claude)
-  --model <MODEL>  Model for the member's CLI
-  --team <TEAM>    Team (default: the team in scope)
-  -h, --help       Show this message and exit.
 "#
         }
         ["fork"] => {
@@ -593,9 +553,9 @@ Options:
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
   outside any team is `ccd.<name or title or pid>` (how a member reaches out).
-  `flow.run` is the mailbox of a `hive node run` runner — an address kind,
-  not a member; sends to it confirm with one `delivered to flow mailbox`
-  line and never get a HIVE ack back.
+  An envelope with no `from=` is a `hive workflow run` task: its result is
+  the last thing you say in that turn, read off your engine — nothing to
+  send back.
 
   New-thread sends must keep `body` to a short summary and put details in
   `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,
@@ -689,9 +649,9 @@ Options:
   Returns a JSON payload with `members[]`, `self` (your own name), the bound
   `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.
 
-  Each member row carries the runtime fields `busy`, `inputState`, and
-  `turnPhase` — see docs/runtime-model.md for semantics. `self` is a string
-  pointer: look yourself up in `members[]` for your own state.
+  Each member row carries the runtime fields `busy` and `inputState` — see
+  docs/runtime-model.md for semantics. `self` is a string pointer: look
+  yourself up in `members[]` for your own state.
 
   If the current tmux window has no team bound, returns a bootstrap payload
   instead: `team=null`, a pane list, and a `hint` telling you to run `hive
@@ -738,6 +698,72 @@ Options:
 
 Options:
   --help  Show this message and exit.
+"#
+        }
+        ["workflow"] => {
+            r#"Usage: hive workflow [OPTIONS] COMMAND [ARGS]...
+
+  One task on one live codex or grok member, one turn, its result read off
+  the engine.
+
+  `run` is the seam an external orchestrator — Claude Code's Workflow tool
+  through the `hive-node` agent the hive plugin ships — runs in the
+  background: a workflow run is `hive create RUN`, one `hive workflow run`
+  per node, `hive delete RUN --down`. Every node is a visible pane on the
+  team window. A node runs codex or grok; a claude node is Claude Code's
+  own subagent.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  run  Place the task on stdin onto member NAME and block until its turn ends.
+"#
+        }
+        ["workflow", "run"] => {
+            r#"Usage: hive workflow run [OPTIONS] --name <NAME> --cli <CLI> < task.md
+
+  Place the task on stdin onto member NAME and block until its turn ends.
+
+  Spawns the member (or reuses one of that name that is still alive), waits
+  until it is between turns, dispatches the task as a `<HIVE>` envelope with
+  no sender as one turn, and waits for the engine's own word that the turn
+  ended: codex `turn/completed`, grok the `session/prompt` response. The
+  result is the last thing the member said in that turn — the task is the
+  turn, and a member that stops to ask has ended it with that question.
+  Nothing is read from a transcript, and the member runs nothing to return.
+  The wait has no timeout. Progress goes to stderr; stdout is one JSON
+  object: {"status":…,"name":…,"pane":…,"reused":…,"dispatchId":"nd-…"}
+  plus "body" (the member's text) when the turn ended, and "reason" for
+  every status but completed.
+
+  status: completed (codex completed, grok end_turn) | interrupted (the
+  turn was cut short: codex interrupted, grok cancelled) | failed (the
+  engine ended the turn on an error; reason carries its word) | no_result
+  (the turn is not running and nothing holds its result: the hived was
+  restarted since the dispatch) | unknown (120 result polls went
+  unanswered; the record still owns the member) | member_gone (the
+  member died before its turn ended) | member_busy (a pending or unknown
+  dispatch owns the member, another runner holds its lock, or its turn
+  stayed open for 600s). Every status exits 0; exit 1 with the error on
+  stderr only when no dispatch happened: bad team, a claude member, spawn
+  or ready failure, the dispatch refused three times. A spawn made here
+  is retired when the run ends before the dispatch.
+  A same-name retry checks the old dispatch once: ended results are saved;
+  unknown results with a closed turn permit reuse. While the result or
+  turn remains unresolved it returns member_busy with the old dispatchId.
+
+  The run's record is `<workspace>/run/workflow/<NAME>.json` (dispatch id,
+  status, body/reason); `hive kill` of the member removes it. The task
+  text lands in `<workspace>/artifacts/tasks/<NAME>-<dispatchId>.md`, the
+  artifact of the envelope.
+
+Options:
+  --name <NAME>    Member name (stable; a live member of that name is reused)
+  --cli <CLI>      codex | grok (required for a spawn; a reused member keeps its own)
+  --model <MODEL>  Model for the member's CLI
+  --team <TEAM>    Team (default: the team in scope)
+  -h, --help       Show this message and exit.
 "#
         }
         ["worktree"] => {

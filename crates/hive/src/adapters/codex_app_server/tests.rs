@@ -23,7 +23,9 @@ pub(super) fn shared_client_override() -> Option<Option<Arc<dyn DaemonClient>>> 
     SHARED_CLIENT_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|factory| factory()))
 }
 
-fn set_shared_client_override(factory: impl Fn() -> Option<Arc<dyn DaemonClient>> + 'static) {
+pub(crate) fn set_shared_client_override(
+    factory: impl Fn() -> Option<Arc<dyn DaemonClient>> + 'static,
+) {
     SHARED_CLIENT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(factory)));
 }
 
@@ -84,19 +86,50 @@ fn test_pane_thread_record_roundtrip() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "tid-1", "/work").unwrap();
+    write_pane_thread("%19", "tid-1", "/work", Some("/tmp/tmux-501/default")).unwrap();
     assert_eq!(
         read_pane_thread("%19"),
         Some(PaneThread {
             thread_id: "tid-1".to_string(),
             cwd: "/work".to_string(),
+            tmux_socket: Some("/tmp/tmux-501/default".to_string()),
         })
     );
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string(pane_thread_path("%19")).unwrap()).unwrap();
+    assert_eq!(raw["tmuxSocket"], json!("/tmp/tmux-501/default"));
     assert_eq!(thread_id_for_pane("%19").as_deref(), Some("tid-1"));
     assert_eq!(session_id_for_pane("%19").as_deref(), Some("tid-1")); // threadId == sessionId
     clear_pane_thread("%19").unwrap();
     assert_eq!(read_pane_thread("%19"), None);
     clear_pane_thread("%19").unwrap(); // idempotent
+}
+
+#[test]
+fn test_pane_thread_record_without_socket_reads_back_none() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    guard.set("CODEX_HOME", tmp.path());
+    // the pre-field shape, as the previous binary wrote it
+    let path = pane_thread_path("%4");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, json!({"threadId": "tid-4", "cwd": "/w"}).to_string()).unwrap();
+    assert_eq!(
+        read_pane_thread("%4"),
+        Some(PaneThread {
+            thread_id: "tid-4".to_string(),
+            cwd: "/w".to_string(),
+            tmux_socket: None,
+        })
+    );
+    // a writer with no server to name writes no field
+    write_pane_thread("%5", "tid-5", "/w", None).unwrap();
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string(pane_thread_path("%5")).unwrap()).unwrap();
+    assert!(raw.get("tmuxSocket").is_none());
+    assert_eq!(read_pane_thread("%5").unwrap().tmux_socket, None);
+    write_pane_thread("%6", "tid-6", "/w", Some("")).unwrap();
+    assert_eq!(read_pane_thread("%6").unwrap().tmux_socket, None);
 }
 
 #[test]
@@ -117,8 +150,8 @@ fn test_pane_for_thread_reverse_lookup() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "tid-a", "/work").unwrap();
-    write_pane_thread("%7", "tid-b", "/work").unwrap();
+    write_pane_thread("%19", "tid-a", "/work", None).unwrap();
+    write_pane_thread("%7", "tid-b", "/work", None).unwrap();
     assert_eq!(pane_for_thread("tid-b").as_deref(), Some("%7"));
     assert_eq!(pane_for_thread("tid-a").as_deref(), Some("%19"));
     assert_eq!(pane_for_thread("missing"), None);
@@ -130,8 +163,8 @@ fn test_list_recorded_panes() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     guard.set("CODEX_HOME", tmp.path());
-    write_pane_thread("%19", "t1", "/w").unwrap();
-    write_pane_thread("%7", "t2", "/w").unwrap();
+    write_pane_thread("%19", "t1", "/w", None).unwrap();
+    write_pane_thread("%7", "t2", "/w", None).unwrap();
     fs::write(
         tmp.path()
             .join("app-server-control")
@@ -186,7 +219,6 @@ fn test_apply_status_active_ready() {
     apply_status(&mut rt, &json!({"type": "active", "activeFlags": []}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "tool_open");
 }
 
 #[test]
@@ -218,7 +250,6 @@ fn test_apply_status_idle() {
     apply_status(&mut rt, &json!({"type": "idle"}));
     assert!(!rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "turn_closed");
 }
 
 #[test]
@@ -226,13 +257,11 @@ fn test_apply_status_unknown_kind_preserves_prior_fields() {
     let mut rt = ThreadRuntime {
         busy: true,
         input_state: "ready".to_string(),
-        turn_phase: "tool_open".to_string(),
         ..Default::default()
     };
     apply_status(&mut rt, &json!({"type": "systemError"}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "tool_open");
 }
 
 #[test]
@@ -251,16 +280,24 @@ fn test_on_notification_status_changed() {
 }
 
 #[test]
-fn test_on_notification_ignores_turn_events() {
-    // turn/* only reaches the turn-owning client on a shared daemon;
-    // folding them here would be dead code pretending to be signal.
+fn test_on_notification_turn_events_leave_thread_runtime_alone() {
+    // turn/* only reaches the turn-owning client on a shared daemon; it
+    // feeds the turn results, never the busy signal, which stays on
+    // thread/status/changed for every client alike.
     let client = bare_client();
     client.on_notification(
         "turn/started",
         &json!({"threadId": "t1", "turn": {"id": "x"}}),
     );
-    client.on_notification("turn/completed", &json!({"threadId": "t1"}));
+    client.on_notification(
+        "turn/completed",
+        &json!({"threadId": "t1", "turn": {"id": "x", "status": "completed"}}),
+    );
     assert!(client.threads_is_empty());
+    assert_eq!(
+        client.turn_result("x").unwrap().status.as_deref(),
+        Some("completed")
+    );
 }
 
 #[test]
@@ -285,12 +322,377 @@ fn test_runtime_for_returns_copy_not_reference() {
     assert!(!client.runtime_for("t1").unwrap().busy); // internal state untouched
 }
 
+// --- turn results on the starting client ---------------------------------
+
+const TURN: &str = "01a07735-6638-4c6b-9d2a-3f1e5b7c9a10";
+
+fn turn_started(client: &CodexDaemonClient, turn_id: &str) {
+    client.on_notification(
+        "turn/started",
+        &json!({
+            "threadId": "t1",
+            "turn": {"id": turn_id, "items": [], "status": "inProgress"},
+        }),
+    );
+}
+
+fn item_completed(client: &CodexDaemonClient, turn_id: &str, item: Value) {
+    client.on_notification(
+        "item/completed",
+        &json!({"item": item, "threadId": "t1", "turnId": turn_id}),
+    );
+}
+
+fn turn_completed(client: &CodexDaemonClient, turn: Value) {
+    client.on_notification("turn/completed", &json!({"threadId": "t1", "turn": turn}));
+}
+
+fn agent_message(id: &str, text: &str) -> Value {
+    json!({"type": "agentMessage", "id": id, "text": text, "phase": "final_answer"})
+}
+
+#[test]
+fn test_turn_result_collects_the_completed_turn() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    assert_eq!(
+        client.turn_result(TURN),
+        Some(TurnResult {
+            thread_id: "t1".to_string(),
+            status: None,
+            error: None,
+            messages: vec![],
+        })
+    );
+    item_completed(
+        &client,
+        TURN,
+        json!({"type": "userMessage", "id": "u1", "text": "task"}),
+    );
+    item_completed(
+        &client,
+        TURN,
+        agent_message("msg_1", "SAGE_CODEX_FIRST\nSAGE_CODEX_SECOND"),
+    );
+    turn_completed(
+        &client,
+        json!({
+            "id": TURN,
+            "items": [agent_message("msg_1", "SAGE_CODEX_FIRST\nSAGE_CODEX_SECOND")],
+            "itemsView": "summary",
+            "status": "completed",
+            "error": null,
+            "startedAt": 1788706383,
+            "completedAt": 1788706397,
+        }),
+    );
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(result.thread_id, "t1");
+    assert_eq!(result.status.as_deref(), Some("completed"));
+    assert_eq!(result.error, None);
+    assert_eq!(
+        result.messages,
+        vec!["SAGE_CODEX_FIRST\nSAGE_CODEX_SECOND".to_string()]
+    );
+    assert_eq!(result.final_text(), "SAGE_CODEX_FIRST\nSAGE_CODEX_SECOND");
+}
+
+#[test]
+fn test_turn_result_final_text_is_the_last_agent_message() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    item_completed(
+        &client,
+        TURN,
+        json!({"type": "agentMessage", "id": "msg_1", "text": "looking", "phase": "commentary"}),
+    );
+    item_completed(
+        &client,
+        TURN,
+        json!({"type": "commandExecution", "id": "cmd_1", "command": "ls"}),
+    );
+    item_completed(&client, TURN, agent_message("msg_2", "done"));
+    turn_completed(
+        &client,
+        json!({
+            "id": TURN,
+            "status": "completed",
+            "error": null,
+            "items": [
+                {"type": "agentMessage", "id": "msg_1", "text": "looking", "phase": "commentary"},
+                {"type": "commandExecution", "id": "cmd_1", "command": "ls"},
+                agent_message("msg_2", "done"),
+            ],
+        }),
+    );
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(
+        result.messages,
+        vec!["looking".to_string(), "done".to_string()]
+    );
+    assert_eq!(result.final_text(), "done");
+}
+
+#[test]
+fn test_turn_result_keeps_collected_messages_when_the_terminal_frame_has_no_items() {
+    // turn/completed after turn/interrupt carries `items: []`; the
+    // item/completed texts already collected are the only record.
+    let client = bare_client();
+    turn_started(&client, TURN);
+    item_completed(&client, TURN, agent_message("msg_1", "partial"));
+    turn_completed(
+        &client,
+        json!({"id": TURN, "items": [], "itemsView": "notLoaded", "status": "interrupted", "error": null}),
+    );
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(result.status.as_deref(), Some("interrupted"));
+    assert_eq!(result.messages, vec!["partial".to_string()]);
+}
+
+#[test]
+fn test_turn_result_item_completed_replaces_the_same_item_in_place() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    item_completed(&client, TURN, agent_message("msg_1", "first"));
+    item_completed(&client, TURN, agent_message("msg_2", "second"));
+    item_completed(&client, TURN, agent_message("msg_1", "first, revised"));
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(
+        result.messages,
+        vec!["first, revised".to_string(), "second".to_string()]
+    );
+}
+
+#[test]
+fn test_turn_result_created_by_turn_completed_before_turn_started() {
+    // Notifications can land before the turn/start response returns, so
+    // no frame may depend on the id having been registered first.
+    let client = bare_client();
+    turn_completed(
+        &client,
+        json!({"id": TURN, "status": "completed", "items": []}),
+    );
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(result.thread_id, "t1");
+    assert_eq!(result.status.as_deref(), Some("completed"));
+    turn_started(&client, TURN);
+    assert_eq!(
+        client.turn_result(TURN).unwrap().status.as_deref(),
+        Some("completed"),
+        "a late turn/started must not reopen an ended turn"
+    );
+}
+
+#[test]
+fn test_turn_result_created_by_item_completed_before_turn_started() {
+    let client = bare_client();
+    item_completed(&client, TURN, agent_message("msg_1", "early"));
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(result.thread_id, "t1");
+    assert_eq!(result.status, None);
+    assert_eq!(result.messages, vec!["early".to_string()]);
+}
+
+#[test]
+fn test_turn_result_collects_an_agent_message_without_a_phase() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    item_completed(
+        &client,
+        TURN,
+        json!({"type": "agentMessage", "id": "msg_1", "text": "no phase"}),
+    );
+    assert_eq!(
+        client.turn_result(TURN).unwrap().messages,
+        vec!["no phase".to_string()]
+    );
+    turn_completed(
+        &client,
+        json!({
+            "id": TURN,
+            "status": "completed",
+            "items": [{"type": "agentMessage", "id": "msg_1", "text": "no phase"}],
+        }),
+    );
+    assert_eq!(client.turn_result(TURN).unwrap().final_text(), "no phase");
+}
+
+#[test]
+fn test_turn_result_renders_the_turn_error() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    turn_completed(
+        &client,
+        json!({
+            "id": TURN,
+            "status": "failed",
+            "items": [],
+            "error": {"code": "modelError", "message": "rate limited"},
+        }),
+    );
+    let result = client.turn_result(TURN).unwrap();
+    assert_eq!(result.status.as_deref(), Some("failed"));
+    let error = result.error.unwrap();
+    assert!(error.contains("modelError"), "{error}");
+    assert!(error.contains("rate limited"), "{error}");
+
+    let client = bare_client();
+    turn_completed(
+        &client,
+        json!({"id": TURN, "status": "failed", "error": "plain string"}),
+    );
+    assert_eq!(
+        client.turn_result(TURN).unwrap().error.as_deref(),
+        Some("plain string")
+    );
+}
+
+#[test]
+fn test_turn_result_none_for_a_turn_this_client_never_saw() {
+    let client = bare_client();
+    turn_started(&client, TURN);
+    assert_eq!(client.turn_result("someone-elses-turn"), None);
+}
+
+#[test]
+fn test_turn_result_ignores_frames_without_a_turn_id() {
+    let client = bare_client();
+    client.on_notification("turn/started", &json!({"threadId": "t1", "turn": {}}));
+    item_completed(&client, "", agent_message("msg_1", "orphan"));
+    client.on_notification(
+        "item/completed",
+        &json!({"threadId": "t1", "item": agent_message("msg_1", "orphan")}),
+    );
+    turn_completed(&client, json!({"status": "completed"}));
+    assert_eq!(client.turn_result(""), None);
+    assert_eq!(client.turn_result(TURN), None);
+}
+
+#[test]
+fn test_turn_start_tracked_returns_the_turn_id_and_tracks_it() {
+    let client = bare_client();
+    let calls = recording_override(
+        &client,
+        |_method| json!({"result": {"turn": {"id": TURN, "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": null}}}),
+    );
+    assert_eq!(client.turn_start_tracked("t1", "go"), Ok(TURN.to_string()));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(
+            "turn/start".to_string(),
+            json!({"threadId": "t1", "input": [{"type": "text", "text": "go"}]})
+        )]
+    );
+    assert_eq!(
+        client.turn_result(TURN),
+        Some(TurnResult {
+            thread_id: "t1".to_string(),
+            status: None,
+            error: None,
+            messages: vec![],
+        })
+    );
+}
+
+#[test]
+fn test_turn_start_tracked_keeps_frames_that_beat_the_response() {
+    // The reader thread may deliver turn/started and even item/completed
+    // before the turn/start response reaches the caller; registering the
+    // id afterwards must not wipe what they collected.
+    let client = bare_client();
+    let early = client.clone();
+    client.set_call_override(move |_method, _params| {
+        turn_started(&early, TURN);
+        item_completed(&early, TURN, agent_message("msg_1", "quick"));
+        json!({"result": {"turn": {"id": TURN, "status": "inProgress"}}})
+    });
+    assert_eq!(client.turn_start_tracked("t1", "go"), Ok(TURN.to_string()));
+    assert_eq!(
+        client.turn_result(TURN).unwrap().messages,
+        vec!["quick".to_string()]
+    );
+}
+
+#[test]
+fn test_turn_start_tracked_refused_on_rpc_error() {
+    let client = bare_client();
+    client.set_call_override(
+        |_method, _params| json!({"__error__": {"code": -32600, "message": "thread not found"}, "__rejected__": true}),
+    );
+    match client.turn_start_tracked("t1", "go") {
+        Err(TurnStartFailure::Refused(reason)) => {
+            assert!(reason.contains("thread not found"), "{reason}")
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    assert_eq!(client.turn_result(TURN), None);
+}
+
+#[test]
+fn test_turn_start_tracked_unknown_on_timeout() {
+    let client = bare_client();
+    client.set_call_override(|_method, _params| json!({"__timeout__": true}));
+    match client.turn_start_tracked("t1", "go") {
+        Err(TurnStartFailure::Unknown(reason)) => assert!(reason.contains("timed out"), "{reason}"),
+        other => panic!("expected Unknown, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_turn_start_tracked_untracked_when_the_result_has_no_turn_id() {
+    // A result without turn.id is a turn that runs but cannot be followed:
+    // the caller must know it was accepted and that nothing will come back.
+    let client = bare_client();
+    client.set_call_override(
+        |_method, _params| json!({"result": {"turn": {"status": "inProgress"}}}),
+    );
+    assert!(matches!(
+        client.turn_start_tracked("t1", "go"),
+        Err(TurnStartFailure::Untracked(_))
+    ));
+    let client = bare_client();
+    client.set_call_override(|_method, _params| json!({"result": {}}));
+    assert!(matches!(
+        client.turn_start_tracked("t1", "go"),
+        Err(TurnStartFailure::Untracked(_))
+    ));
+}
+
+#[test]
+fn test_turn_result_prunes_the_oldest_ended_turns_but_never_a_running_one() {
+    let client = bare_client();
+    turn_started(&client, "running");
+    for n in 1..=65 {
+        let id = format!("ended-{n}");
+        turn_started(&client, &id);
+        turn_completed(
+            &client,
+            json!({"id": id, "status": "completed", "items": []}),
+        );
+    }
+    assert_eq!(
+        client.turn_result("ended-1"),
+        None,
+        "the oldest ended turn is pruned"
+    );
+    assert!(client.turn_result("ended-2").is_some());
+    assert!(client.turn_result("ended-65").is_some());
+    let running = client.turn_result("running").unwrap();
+    assert_eq!(running.status, None);
+    // A repeated terminal frame for one turn is not a second ended turn.
+    turn_completed(
+        &client,
+        json!({"id": "ended-65", "status": "completed", "items": []}),
+    );
+    assert!(client.turn_result("ended-2").is_some());
+}
+
 // --- resume backfill ----------------------------------------------------
 
 #[test]
 fn test_resume_backfills_active_runtime_from_thread_status() {
     // Late-join recovery: resume must seed _threads from the thread's
-    // status so runtime reads report native busy/turnPhase instead of None.
+    // status so runtime reads report native busy/inputState instead of None.
     let client = bare_client();
     client.set_call_override(|_method, _params| {
         json!({
@@ -311,7 +713,7 @@ fn test_resume_backfills_idle_runtime_from_thread_status() {
     assert!(client.resume("t1"));
     let rt = client.runtime_for("t1").unwrap();
     assert!(!rt.busy);
-    assert_eq!(rt.turn_phase, "turn_closed");
+    assert_eq!(rt.input_state, "ready");
 }
 
 #[test]
@@ -366,7 +768,8 @@ fn test_runtime_or_backfill_returns_backfilled_state() {
         |_method, _params| json!({"result": {"thread": {"status": {"type": "idle"}}}}),
     );
     let rt = client.runtime_or_backfill("t1").unwrap();
-    assert_eq!(rt.turn_phase, "turn_closed");
+    assert!(!rt.busy);
+    assert_eq!(rt.input_state, "ready");
 }
 
 // --- mint / fork protocol -----------------------------------------------
@@ -591,7 +994,7 @@ fn test_fork_thread_fails_on_rpc_error() {
 
 fn record(guard: &mut EnvGuard, tmp: &Path, pane: &str, tid: &str) {
     guard.set("CODEX_HOME", tmp);
-    write_pane_thread(pane, tid, "/work").unwrap();
+    write_pane_thread(pane, tid, "/work", None).unwrap();
 }
 
 #[test]
@@ -677,6 +1080,127 @@ fn test_send_to_pane_fails_on_rpc_exception() {
     }
     override_client(Arc::new(FakeClient));
     assert_eq!(send_to_pane("%1", "hi"), None);
+}
+
+// --- node dispatch over the shared client --------------------------------
+
+/// A client that tracks one turn per `turn_start_tracked` and answers
+/// `turn_result` from a scripted table. The fake omits `turn_start`: a
+/// dispatch must go through the tracked route, never the plain send.
+struct DispatchClient {
+    started: Mutex<Vec<(String, String)>>,
+    results: Mutex<Vec<(String, TurnResult)>>,
+}
+
+impl DispatchClient {
+    fn new() -> Arc<DispatchClient> {
+        Arc::new(DispatchClient {
+            started: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl DaemonClient for DispatchClient {
+    fn turn_start_tracked(&self, tid: &str, text: &str) -> Result<String, TurnStartFailure> {
+        let mut started = self.started.lock().unwrap();
+        started.push((tid.to_string(), text.to_string()));
+        Ok(format!("turn-{}", started.len()))
+    }
+    fn turn_result(&self, turn_id: &str) -> Option<TurnResult> {
+        self.results
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == turn_id)
+            .map(|(_, result)| result.clone())
+    }
+}
+
+#[test]
+fn test_dispatch_to_pane_tracks_the_turn_on_the_recorded_thread() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    record(&mut guard, tmp.path(), "%1", "t1");
+    let fake = DispatchClient::new();
+    override_client(fake.clone());
+    assert_eq!(
+        dispatch_to_pane("%1", "task"),
+        Ok(("t1".to_string(), "turn-1".to_string()))
+    );
+    assert_eq!(
+        *fake.started.lock().unwrap(),
+        vec![("t1".to_string(), "task".to_string())]
+    );
+}
+
+#[test]
+fn test_dispatch_to_pane_refused_without_record() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    guard.set("CODEX_HOME", tmp.path());
+    set_shared_client_override(|| -> Option<Arc<dyn DaemonClient>> {
+        panic!("no record -> the daemon must not even be dialed")
+    });
+    match dispatch_to_pane("%1", "task") {
+        Err(TurnStartFailure::Refused(reason)) => assert!(reason.contains("%1"), "{reason}"),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_dispatch_to_pane_refused_without_daemon() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    record(&mut guard, tmp.path(), "%1", "t1");
+    set_shared_client_override(|| None);
+    assert!(matches!(
+        dispatch_to_pane("%1", "task"),
+        Err(TurnStartFailure::Refused(_))
+    ));
+}
+
+#[test]
+fn test_dispatch_to_pane_passes_the_clients_failure_through() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    record(&mut guard, tmp.path(), "%1", "t1");
+
+    struct FakeClient;
+    impl DaemonClient for FakeClient {
+        fn turn_start_tracked(&self, _tid: &str, _text: &str) -> Result<String, TurnStartFailure> {
+            Err(TurnStartFailure::Untracked("no turn.id".to_string()))
+        }
+    }
+    override_client(Arc::new(FakeClient));
+    assert_eq!(
+        dispatch_to_pane("%1", "task"),
+        Err(TurnStartFailure::Untracked("no turn.id".to_string()))
+    );
+}
+
+#[test]
+fn test_turn_result_reads_the_shared_clients_record() {
+    let fake = DispatchClient::new();
+    let ended = TurnResult {
+        thread_id: "t1".to_string(),
+        status: Some("completed".to_string()),
+        error: None,
+        messages: vec!["done".to_string()],
+    };
+    fake.results
+        .lock()
+        .unwrap()
+        .push(("turn-1".to_string(), ended.clone()));
+    override_client(fake);
+    assert_eq!(turn_result("turn-1"), Some(ended));
+    assert_eq!(turn_result("turn-2"), None);
+}
+
+#[test]
+fn test_turn_result_none_without_daemon() {
+    set_shared_client_override(|| None);
+    assert_eq!(turn_result("turn-1"), None);
 }
 
 #[test]
@@ -791,7 +1315,10 @@ fn test_active_turn_id_reads_the_in_progress_turn() {
         {"id": "old", "status": "completed"},
         {"id": "live", "status": "inProgress"},
     ]));
-    assert_eq!(client.active_turn_id("t1").as_deref(), Some("live"));
+    assert_eq!(
+        client.active_turn_id("t1").unwrap().as_deref(),
+        Some("live")
+    );
     assert_eq!(
         *calls.lock().unwrap(),
         vec![(
@@ -804,14 +1331,68 @@ fn test_active_turn_id_reads_the_in_progress_turn() {
 #[test]
 fn test_active_turn_id_none_when_every_turn_is_finished() {
     let (client, _calls) = client_reading(json!([{"id": "old", "status": "completed"}]));
-    assert_eq!(client.active_turn_id("t1"), None);
+    assert_eq!(client.active_turn_id("t1"), Ok(None));
 }
 
 #[test]
-fn test_active_turn_id_none_on_rpc_error() {
+fn test_active_turn_id_errs_without_turns() {
+    // `includeTurns` makes thread.turns part of the answer; a result without
+    // it is a schema error, not a thread with nothing in progress.
+    let client = bare_client();
+    client.set_call_override(|_method, _params| json!({"result": {"thread": {"id": "t1"}}}));
+    assert!(client
+        .active_turn_id("t1")
+        .unwrap_err()
+        .contains("thread.turns"));
+}
+
+#[test]
+fn test_active_turn_id_errs_when_the_in_progress_turn_has_no_id() {
+    let (client, _calls) = client_reading(json!([{"status": "inProgress"}]));
+    assert!(client
+        .active_turn_id("t1")
+        .unwrap_err()
+        .contains("without an id"));
+    let (client, _calls) = client_reading(json!([{"id": "", "status": "inProgress"}]));
+    assert!(client.active_turn_id("t1").is_err());
+}
+
+#[test]
+fn test_active_turn_id_errs_on_rpc_error() {
+    // No result is no answer, distinct from "no turn is open".
     let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "boom"}));
-    assert_eq!(client.active_turn_id("t1"), None);
+    assert!(client.active_turn_id("t1").unwrap_err().contains("boom"));
+}
+
+#[test]
+fn test_turn_open_for_thread_reads_the_daemons_answer() {
+    struct FakeClient {
+        answer: Result<Option<String>, String>,
+    }
+    impl DaemonClient for FakeClient {
+        fn active_turn_id(&self, tid: &str) -> Result<Option<String>, String> {
+            assert_eq!(tid, "t1");
+            self.answer.clone()
+        }
+    }
+    override_client(Arc::new(FakeClient {
+        answer: Ok(Some("live".to_string())),
+    }));
+    assert_eq!(turn_open_for_thread("t1"), Some(true));
+    override_client(Arc::new(FakeClient { answer: Ok(None) }));
+    assert_eq!(turn_open_for_thread("t1"), Some(false));
+    // An RPC error is no answer, never "idle".
+    override_client(Arc::new(FakeClient {
+        answer: Err("boom".to_string()),
+    }));
+    assert_eq!(turn_open_for_thread("t1"), None);
+}
+
+#[test]
+fn test_turn_open_for_thread_none_without_daemon() {
+    set_shared_client_override(|| None);
+    assert_eq!(turn_open_for_thread("t1"), None);
 }
 
 #[test]
@@ -1178,4 +1759,47 @@ fn test_freshen_models_cache_tolerates_missing_and_garbage() {
     assert!(!freshen_models_cache()); // no file
     fs::write(tmp.path().join("models_cache.json"), "not json").unwrap();
     assert!(!freshen_models_cache());
+}
+
+#[test]
+fn test_turn_start_tracked_keeps_transport_uncertainty_after_execution() {
+    for failure in [
+        json!({"__timeout__": true}),
+        json!({"__error__": "broken pipe"}),
+        json!({}),
+    ] {
+        let client = bare_client();
+        let early = client.clone();
+        client.set_call_override(move |_method, _params| {
+            turn_started(&early, TURN);
+            item_completed(
+                &early,
+                TURN,
+                agent_message("result", "task already executed"),
+            );
+            turn_completed(
+                &early,
+                json!({"id": TURN, "status": "completed", "items": []}),
+            );
+            failure.clone()
+        });
+        assert!(matches!(
+            client.turn_start_tracked("t1", "task"),
+            Err(TurnStartFailure::Unknown(_))
+        ));
+        assert_eq!(
+            client.turn_result(TURN).unwrap().final_text(),
+            "task already executed"
+        );
+    }
+}
+
+#[test]
+fn test_turn_start_tracked_refuses_a_request_not_written() {
+    let client = bare_client();
+    // No socket on a bare client; exercise call's real pre-write check.
+    assert!(matches!(
+        client.turn_start_tracked("t1", "go"),
+        Err(TurnStartFailure::Refused(_))
+    ));
 }

@@ -6,7 +6,7 @@ use serde_json::json;
 use super::util::{fail, ok_or_fail};
 use crate::identity;
 use crate::json_fields::map_str;
-use crate::team::{resolve_scoped_team, start_team_hived, Team};
+use crate::team::{resolve_scoped_team, start_team_hived_or_warn, Team};
 use crate::team_display::{backfill_missing_member_panes, ensure_team_display, team_entry};
 use crate::tmux;
 
@@ -90,7 +90,7 @@ pub(crate) fn attach_cmd(team_name: &str) {
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {
         if let Ok(mut t) = Team::load(team_name, "") {
-            let _ = start_team_hived(&mut t, &ws);
+            start_team_hived_or_warn(&mut t, &ws);
         }
     }
     jump_to_window(&window, if built { "built" } else { "found" });

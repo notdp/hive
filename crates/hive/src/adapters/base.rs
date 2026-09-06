@@ -108,7 +108,7 @@ pub trait SessionAdapter {
 
 /// The spawner's env with every inherited identity marker washed, for a
 /// daemon that serves tool shells of its own: the spawner may itself run
-/// inside another member's engine (an orch's `hive node run`), and an
+/// inside another member's engine (an orch's `hive workflow run`), and an
 /// inherited CLAUDE_CODE_MESSAGING_SOCKET — or any other CLAUDE*/ANTHROPIC*
 /// marker — would make every hive call from those shells resolve to the
 /// *spawner*.

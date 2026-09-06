@@ -69,7 +69,6 @@ const GROK_REAP_GRACE_SECONDS: f64 = 120.0;
 // One send_keys attempt per pane per cooldown window, so a slow-starting
 // codex is not typed at twice while the process check cannot see it yet.
 const CODEX_REATTACH_COOLDOWN_SECONDS: f64 = 60.0;
-pub const FLOW_MAILBOX_AGENT: &str = "flow.run";
 
 // waitingFor values that do not gate a send: a /status-style dialog open in
 // an attached viewer parks the status on "waiting", but the inbox still

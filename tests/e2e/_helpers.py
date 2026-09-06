@@ -14,10 +14,14 @@ def base_env(tmp_path: Path) -> dict[str, str]:
     # TMUX_TMPDIR puts every session — and the server-global key binding a
     # window build installs — on a private tmux server, never the
     # developer's.
+    # CODEX_HOME must be private too: a hived's codex supervisor reaps the
+    # pane→thread records of every pane its own tmux server cannot see,
+    # and on the shared ~/.codex that is every live member's record.
     return {
         "HIVE_HOME": str(tmp_path / ".hive"),
         "XDG_CACHE_HOME": str(tmp_path / ".cache"),
         "TMUX_TMPDIR": str(tmp_path),
+        "CODEX_HOME": str(tmp_path / ".codex"),
     }
 
 

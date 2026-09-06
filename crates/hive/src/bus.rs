@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -182,33 +182,6 @@ pub fn latest_send_events(workspace: impl AsRef<Path>, limit: usize) -> Result<V
     let mut stmt = conn.prepare("SELECT * FROM messages ORDER BY seq DESC LIMIT ?1")?;
     let rows = stmt.query_map(params![limit as i64], row_to_event)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// The first `from_agent` → `to_agent` row written after `seq`, or None.
-///
-/// This is what "the reply to `seq`" means on the bus: order, not a link.
-/// Nothing else is filtered — a clarifying question sent after the
-/// dispatch is "the reply" as far as this query knows.
-pub fn first_send_after(
-    workspace: impl AsRef<Path>,
-    seq: i64,
-    from_agent: &str,
-    to_agent: &str,
-) -> Result<Option<Event>> {
-    let conn = connect(workspace.as_ref())?;
-    let event = conn
-        .query_row(
-            "SELECT * FROM messages
-            WHERE from_agent = ?1
-              AND to_agent = ?2
-              AND seq > ?3
-            ORDER BY seq ASC
-            LIMIT 1",
-            params![from_agent, to_agent, seq],
-            row_to_event,
-        )
-        .optional()?;
-    Ok(event)
 }
 
 #[cfg(test)]
@@ -401,36 +374,5 @@ mod tests {
             .collect();
 
         assert_eq!(bodies, vec!["third".to_string(), "second".to_string()]);
-    }
-
-    #[test]
-    fn test_first_send_after_is_the_reply_by_order() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("ws");
-        init_workspace(&ws).unwrap();
-        let root = write_send_event(&ws, "flow", "impl", "task", "").unwrap();
-        assert!(first_send_after(&ws, root, "impl", "flow")
-            .unwrap()
-            .is_none());
-        // Traffic on other routes, or older than the dispatch, is not it.
-        write_send_event(&ws, "bystander", "flow", "not mine", "").unwrap();
-        write_send_event(&ws, "impl", "orch", "aside", "").unwrap();
-        assert!(first_send_after(&ws, root, "impl", "flow")
-            .unwrap()
-            .is_none());
-
-        write_send_event(&ws, "impl", "flow", "done", "/tmp/a.md").unwrap();
-        write_send_event(&ws, "impl", "flow", "ps", "").unwrap();
-        let row = first_send_after(&ws, root, "impl", "flow")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.body, "done");
-        assert_eq!(row.artifact, "/tmp/a.md");
-        assert_eq!(row.from, "impl");
-        // A later dispatch only sees what comes after it.
-        let next = write_send_event(&ws, "flow", "impl", "again", "").unwrap();
-        assert!(first_send_after(&ws, next, "impl", "flow")
-            .unwrap()
-            .is_none());
     }
 }

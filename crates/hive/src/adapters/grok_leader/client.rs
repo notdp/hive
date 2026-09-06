@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
-use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, TOOL_PHASES};
+use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS};
 
 // --------------------------------------------------------------------------
 // per-session runtime state, kept current by the reader thread
@@ -18,20 +18,36 @@ use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNK
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionRuntime {
     pub busy: bool,
-    pub turn_phase: String,
     pub input_state: String,
     pub session_id: Option<String>,
     pub observed_at: f64,
+    /// Turn evidence for the workflow runner's dispatch gate, distinct from the
+    /// display `busy` flag: `busy` defaults to false and `observed_at` is
+    /// bumped by any in-session notification, so a client that has only
+    /// seen a command table, an announcement, or a permission prompt would
+    /// otherwise read as positively idle. `Some(true)` only on turn activity
+    /// (message chunks, tool calls, `activity: working`) or a queue with a
+    /// prompt queued or running — a backlog counts as open because the
+    /// leader runs it FIFO, so nothing dispatched now runs between turns;
+    /// `Some(false)` only on `turn_completed` / `activity: idle`; `None`
+    /// until one of those has been seen. The `session/load` replay counts:
+    /// it is the engine's own turn history, and its last turn event says
+    /// whether a turn was open at load time, so a client (re)connected to
+    /// an idle session answers `Some(false)` without waiting for the next
+    /// turn — while `busy` and the other display fields ignore the replay.
+    /// Read through `GrokStdioClient::turn_open`, not `runtime()`, which
+    /// stays None until a live notification. Not a runtime field.
+    pub turn_open: Option<bool>,
 }
 
 impl Default for SessionRuntime {
     fn default() -> Self {
         SessionRuntime {
             busy: false,
-            turn_phase: "unknown_evidence".to_string(),
             input_state: String::new(),
             session_id: None,
             observed_at: 0.0,
+            turn_open: None,
         }
     }
 }
@@ -203,9 +219,51 @@ struct ClientShared {
     runtime: SessionRuntime,
     ack: Option<Ack>,
     loaded: bool,
+    /// Session id of the `session/load` in flight: the one whose replayed
+    /// history is turn evidence until the load response binds it.
+    loading: Option<String>,
+    /// Every prompt sent through `prompt_tracked`, by request id.
+    tracked: HashMap<u64, PromptResult>,
+    /// Ended tracked rids oldest first, so the map stays bounded.
+    ended: VecDeque<u64>,
+    /// Text of the turns running while a tracked prompt is: per promptId,
+    /// the `agent_message_chunk`s as segments split at each `tool_call`.
+    segments: HashMap<String, Vec<String>>,
 }
 
+/// Ended results kept for `prompt_result` after the turn.
+const ENDED_KEEP: usize = 64;
+
+impl ClientShared {
+    fn tracking(&self) -> bool {
+        self.tracked
+            .values()
+            .any(|result| *result == PromptResult::Running)
+    }
+
+    /// Close *rid*'s tracked prompt; a no-op unless it is still running.
+    fn end_tracked(&mut self, rid: u64, ended: PromptResult) {
+        match self.tracked.get(&rid) {
+            Some(PromptResult::Running) => {}
+            _ => return,
+        }
+        self.tracked.insert(rid, ended);
+        self.ended.push_back(rid);
+        while self.ended.len() > ENDED_KEEP {
+            if let Some(old) = self.ended.pop_front() {
+                self.tracked.remove(&old);
+            }
+        }
+        if !self.tracking() {
+            self.segments.clear();
+        }
+    }
+}
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 pub(super) struct ClientInner {
+    generation: u64,
     proc: Arc<dyn LeaderProc>,
     /// Held across each stdin write: one message per line, never interleaved.
     io_lock: Mutex<()>,
@@ -241,6 +299,23 @@ fn fail_pending(inner: &ClientInner) {
         *slot.msg.lock().unwrap() = Some(json!({"error": "closed"}));
         slot.event.set();
     }
+    let mut state = inner.state.lock().unwrap();
+    let running: Vec<u64> = state
+        .tracked
+        .iter()
+        .filter(|(_rid, result)| **result == PromptResult::Running)
+        .map(|(rid, _result)| *rid)
+        .collect();
+    for rid in running {
+        state.end_tracked(
+            rid,
+            PromptResult::Ended {
+                stop_reason: "error".to_string(),
+                text: String::new(),
+                error: Some("closed".to_string()),
+            },
+        );
+    }
 }
 
 /// Answer a permission prompt with `cancelled`.
@@ -268,7 +343,12 @@ fn on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
 fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
     let mut state = inner.state.lock().unwrap();
     if !state.loaded {
-        return; // session/load replays past updates; replay is not evidence
+        // session/load replays past updates: no live turn for the display
+        // (`busy`, `input_state`, `observed_at` stay put), only turn
+        // evidence — the history's last turn event is the session's state
+        // at load time.
+        fold_replayed_turn(&mut state, method, params);
+        return;
     }
     if method == "_x.ai/sessions/changed" {
         let entries: Vec<Value> = params
@@ -294,6 +374,7 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
         "session/update" => {
             let update = params.get("update").cloned().unwrap_or_else(|| json!({}));
             apply_update(&mut state, &update);
+            collect_prompt_text(&mut state, &update, params.get("_meta"));
         }
         "_x.ai/session_notification" => {
             let kind = params
@@ -302,7 +383,7 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
                 .and_then(Value::as_str);
             if kind == Some("turn_completed") {
                 state.runtime.busy = false;
-                state.runtime.turn_phase = "turn_closed".to_string();
+                state.runtime.turn_open = Some(false);
                 state.runtime.input_state = "ready".to_string();
             }
         }
@@ -315,14 +396,45 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
 fn apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
     state.runtime.observed_at = now_epoch();
     match activity.and_then(Value::as_str) {
-        Some("working") => state.runtime.busy = true,
+        Some("working") => {
+            state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
+        }
         Some("idle") => {
             state.runtime.busy = false;
-            state.runtime.turn_phase = "turn_closed".to_string();
+            state.runtime.turn_open = Some(false);
             state.runtime.input_state = "ready".to_string();
         }
         _ => {}
     }
+}
+
+/// Fold one replayed notification of the loading session into `turn_open`
+/// and nothing else.
+fn fold_replayed_turn(state: &mut ClientShared, method: &str, params: &Value) {
+    let Some(loading) = state.loading.as_deref() else {
+        return;
+    };
+    if params.get("sessionId").and_then(Value::as_str) != Some(loading) {
+        return;
+    }
+    let kind = params
+        .get("update")
+        .and_then(|update| update.get("sessionUpdate"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match method {
+        "session/update" if update_opens_turn(kind) => state.runtime.turn_open = Some(true),
+        "_x.ai/session_notification" if kind == "turn_completed" => {
+            state.runtime.turn_open = Some(false)
+        }
+        _ => {}
+    }
+}
+
+/// A `session/update` kind that only a running turn produces.
+fn update_opens_turn(kind: &str) -> bool {
+    kind == "tool_call" || kind == "tool_call_update" || MESSAGE_CHUNKS.contains(&kind)
 }
 
 fn apply_update(state: &mut ClientShared, update: &Value) {
@@ -333,22 +445,18 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
     match kind {
         "tool_call" => {
             state.runtime.busy = true;
-            state.runtime.turn_phase = "tool_open".to_string();
+            state.runtime.turn_open = Some(true);
         }
         "tool_call_update" => {
             // An update on a tool call means the turn is running and any
             // permission it was blocked on has been decided.
             state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
             state.runtime.input_state = "ready".to_string();
-            if update.get("status").and_then(Value::as_str) == Some("completed") {
-                state.runtime.turn_phase = "tool_result_pending_reply".to_string();
-            }
         }
         kind if MESSAGE_CHUNKS.contains(&kind) => {
             state.runtime.busy = true;
-            if !TOOL_PHASES.contains(&state.runtime.turn_phase.as_str()) {
-                state.runtime.turn_phase = "user_prompt_pending".to_string();
-            }
+            state.runtime.turn_open = Some(true);
             if kind == "user_message_chunk" {
                 let text = update
                     .get("content")
@@ -360,20 +468,22 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
     }
 }
 
+/// Fold a queue snapshot: a queued entry or a running prompt is turn
+/// evidence (the backlog runs FIFO behind the current turn), an empty
+/// snapshot says nothing — the turn that drained it may still be running.
+/// The ack match is separate and never touches the turn evidence.
 fn apply_queue(state: &mut ClientShared, params: &Value) {
-    let entries: Vec<Value> = params
+    let entries: Vec<&Value> = params
         .get("entries")
         .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter(|entry| entry.is_object())
-                .cloned()
-                .collect()
-        })
+        .map(|entries| entries.iter().filter(|entry| entry.is_object()).collect())
         .unwrap_or_default();
-    if !entries.is_empty() {
-        state.runtime.turn_phase = "input_backlog".to_string();
+    let running = params
+        .get("runningText")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty());
+    if !entries.is_empty() || running {
+        state.runtime.turn_open = Some(true);
     }
     for entry in &entries {
         note_ack(state, entry.get("text"));
@@ -387,6 +497,76 @@ fn note_ack(state: &ClientShared, text: Option<&Value>) {
             ack.event.set();
         }
     }
+}
+
+/// Keep a running turn's text while a tracked prompt is open. Chunks are
+/// grouped by `_meta.promptId` — the human's own prompt can run first, and
+/// only the response says which id was ours — and a chunk with no id (the
+/// user echo, a bare `tool_call_update`) is not the member speaking.
+fn collect_prompt_text(state: &mut ClientShared, update: &Value, meta: Option<&Value>) {
+    if !state.tracking() {
+        return;
+    }
+    let Some(prompt_id) = meta
+        .and_then(|meta| meta.get("promptId"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("agent_message_chunk") => {
+            let text = update
+                .get("content")
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let segments = state.segments.entry(prompt_id.to_string()).or_default();
+            if segments.is_empty() {
+                segments.push(String::new());
+            }
+            segments.last_mut().unwrap().push_str(text);
+        }
+        Some("tool_call") => {
+            if let Some(segments) = state.segments.get_mut(prompt_id) {
+                if segments.last().is_some_and(|segment| !segment.is_empty()) {
+                    segments.push(String::new());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fold the `session/prompt` response of a tracked rid: the turn's end.
+fn end_tracked_response(state: &mut ClientShared, rid: u64, msg: &Value) {
+    let ended = match (msg.get("error"), msg.get("result")) {
+        (Some(error), _) => PromptResult::Ended {
+            stop_reason: "error".to_string(),
+            text: String::new(),
+            error: Some(error.to_string()),
+        },
+        (None, result) => {
+            let result = result.cloned().unwrap_or(Value::Null);
+            let prompt_id = result
+                .get("_meta")
+                .and_then(|meta| meta.get("promptId"))
+                .and_then(Value::as_str);
+            let text = prompt_id
+                .and_then(|prompt_id| state.segments.remove(prompt_id))
+                .and_then(|segments| segments.into_iter().rev().find(|s| !s.is_empty()))
+                .unwrap_or_default();
+            PromptResult::Ended {
+                stop_reason: result
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                text,
+                error: None,
+            }
+        }
+    };
+    state.end_tracked(rid, ended);
 }
 
 fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
@@ -418,17 +598,19 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
                 // Pop atomically: a `call()` that timed out concurrently may have
                 // removed this rid already, and a missing slot only means the
                 // waiter is gone — drop the late response instead of raising.
-                let slot = msg
-                    .get("id")
-                    .and_then(Value::as_u64)
-                    .and_then(|rid| inner.pending.lock().unwrap().remove(&rid));
+                let rid = msg.get("id").and_then(Value::as_u64);
+                let slot = rid.and_then(|rid| inner.pending.lock().unwrap().remove(&rid));
                 if let Some(slot) = slot {
                     if let Some(session_id) = slot.loads.as_ref() {
+                        let mut state = inner.state.lock().unwrap();
+                        state.loading = None;
                         if msg.get("error").is_none() {
-                            let mut state = inner.state.lock().unwrap();
                             state.runtime.session_id = Some(session_id.clone());
                             state.loaded = true;
                         }
+                    }
+                    if let Some(rid) = rid {
+                        end_tracked_response(&mut inner.state.lock().unwrap(), rid, &msg);
                     }
                     *slot.msg.lock().unwrap() = Some(msg);
                     slot.event.set();
@@ -449,6 +631,10 @@ pub struct GrokStdioClient {
 }
 
 impl GrokStdioClient {
+    pub fn generation(&self) -> u64 {
+        self.inner.generation
+    }
+
     pub fn new(key: &str) -> io::Result<GrokStdioClient> {
         let socket_path = socket_path_for_key(key).to_string_lossy().into_owned();
         let argv: Vec<String> = vec![
@@ -464,6 +650,7 @@ impl GrokStdioClient {
             .take_stdout()
             .ok_or_else(|| io::Error::other("stdout unavailable"))?;
         let inner = Arc::new(ClientInner {
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             proc,
             io_lock: Mutex::new(()),
             next_id: Mutex::new(0),
@@ -496,6 +683,9 @@ impl GrokStdioClient {
             msg: Mutex::new(None),
             loads: loads.map(str::to_string),
         });
+        if let Some(session_id) = loads {
+            self.inner.state.lock().unwrap().loading = Some(session_id.to_string());
+        }
         self.inner.pending.lock().unwrap().insert(rid, slot.clone());
         let message = json!({"jsonrpc": "2.0", "id": rid, "method": method, "params": params});
         if !self.inner.write(&message) {
@@ -594,6 +784,12 @@ impl GrokStdioClient {
     /// accept boundary is the echo — a queue entry carrying the text, or the
     /// turn's `user_message_chunk`. The response id stays registered just long
     /// enough to catch an immediate rpc error; its eventual result is dropped.
+    ///
+    /// The echo is also the turn evidence: both shapes open `turn_open` on
+    /// the reader thread, in order with everything after them. This method
+    /// writes none itself — by the time the ack wakes it the turn may already
+    /// have completed (a short turn's `turn_completed`, or the prompt
+    /// response landing first), and a late `Some(true)` would outlive it.
     pub fn prompt(&self, text: &str) -> bool {
         let done = Event::new();
         let session_id = {
@@ -679,6 +875,13 @@ impl GrokStdioClient {
         }
     }
 
+    /// Turn evidence, replay included: `Some(false)` for a session whose
+    /// history ends in a completed turn, `Some(true)` for one mid-turn,
+    /// `None` while no turn event has been seen at all.
+    pub fn turn_open(&self) -> Option<bool> {
+        self.inner.state.lock().unwrap().runtime.turn_open
+    }
+
     /// Snapshot, or None while nothing has been observed for this session.
     pub fn runtime(&self) -> Option<SessionRuntime> {
         let state = self.inner.state.lock().unwrap();
@@ -732,4 +935,89 @@ fn ack_timeout() -> f64 {
         }
     }
     ACK_TIMEOUT
+}
+
+// --------------------------------------------------------------------------
+// prompt results: what a prompt this client sent came back with
+// --------------------------------------------------------------------------
+
+/// One `session/prompt`'s outcome, read by the client that sent it. The
+/// prompt request's own response is the turn's end (ACP: it returns when
+/// the turn ends, with `stopReason`); the text is not in that response but
+/// in the `session/update` `agent_message_chunk`s whose `_meta.promptId`
+/// matches the response's. A turn with tool calls says something before
+/// the tool and something after it: the chunks are split into segments at
+/// each `tool_call`, and the result is the last non-empty segment — the
+/// last thing the member said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptResult {
+    Running,
+    /// `stop_reason` is the response's `stopReason` (`end_turn`,
+    /// `cancelled`, `max_tokens`, `max_turn_requests`, `refusal`), or
+    /// `error` with `error` set when the response was a JSON-RPC error or
+    /// the leader went away first.
+    Ended {
+        stop_reason: String,
+        text: String,
+        error: Option<String>,
+    },
+}
+
+impl GrokStdioClient {
+    /// Send `session/prompt` and keep its request id registered until the
+    /// response lands, collecting the turn's text meanwhile; no echo wait —
+    /// the response is the accept and the end in one. `Err` is nothing
+    /// written (no loaded session, dead leader).
+    pub fn prompt_tracked(&self, text: &str) -> Result<u64, String> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("closed".to_string());
+        }
+        let rid = self.inner.next_rid();
+        let session_id = {
+            let mut state = self.inner.state.lock().unwrap();
+            let session_id = state
+                .runtime
+                .session_id
+                .clone()
+                .ok_or_else(|| "no loaded session".to_string())?;
+            state.tracked.insert(rid, PromptResult::Running);
+            session_id
+        };
+        let slot = Arc::new(Slot {
+            event: Event::new(),
+            msg: Mutex::new(None),
+            loads: None,
+        });
+        self.inner.pending.lock().unwrap().insert(rid, slot);
+        let sent = self.inner.write(&json!({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": text}],
+            },
+        }));
+        if sent {
+            // A leader that died mid-write may have run fail_pending before
+            // this rid was registered; a second pass ends it like the rest.
+            if self.inner.closed.load(Ordering::SeqCst) {
+                fail_pending(&self.inner);
+            }
+            return Ok(rid);
+        }
+        self.inner.pending.lock().unwrap().remove(&rid);
+        let mut state = self.inner.state.lock().unwrap();
+        state.tracked.remove(&rid);
+        if !state.tracking() {
+            state.segments.clear();
+        }
+        Err("write failed".to_string())
+    }
+
+    /// What this client has seen of the prompt sent as *rid*; None when
+    /// it never sent it (a fresh client since).
+    pub fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
+        self.inner.state.lock().unwrap().tracked.get(&rid).cloned()
+    }
 }

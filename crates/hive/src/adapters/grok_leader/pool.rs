@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::client::{GrokStdioClient, SessionRuntime};
+use super::client::{GrokStdioClient, PromptResult, SessionRuntime};
 use super::daemon::{kill_daemon_key, probe_socket, spawn_member_daemon};
 use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
@@ -16,13 +16,30 @@ use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 // per-key client pool (hived-side)
 // --------------------------------------------------------------------------
 
+/// A request id is unique only within one connection. These handles live
+/// in the hived process and must not be restored across daemon restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptId {
+    pub generation: u64,
+    pub rid: u64,
+}
+
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
 /// only production implementation; tests substitute fakes through
 /// `acting_client`'s override. `Err` is a transport failure: the client
 /// could not reach its leader at all.
 pub trait LeaderClient: Send + Sync {
+    fn generation(&self) -> u64 {
+        unreachable!("generation not expected on this client")
+    }
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
+    }
+    fn prompt_tracked(&self, _text: &str) -> Result<u64> {
+        unreachable!("prompt_tracked not expected on this client")
+    }
+    fn prompt_result(&self, _rid: u64) -> Option<PromptResult> {
+        unreachable!("prompt_result not expected on this client")
     }
     fn cancel(&self) -> Result<bool> {
         unreachable!("cancel not expected on this client")
@@ -33,11 +50,25 @@ pub trait LeaderClient: Send + Sync {
     fn runtime(&self) -> Option<SessionRuntime> {
         unreachable!("runtime not expected on this client")
     }
+    fn turn_open(&self) -> Option<bool> {
+        unreachable!("turn_open not expected on this client")
+    }
 }
 
 impl LeaderClient for GrokStdioClient {
+    fn generation(&self) -> u64 {
+        GrokStdioClient::generation(self)
+    }
     fn prompt(&self, text: &str) -> Result<bool> {
         Ok(GrokStdioClient::prompt(self, text))
+    }
+
+    fn prompt_tracked(&self, text: &str) -> Result<u64> {
+        GrokStdioClient::prompt_tracked(self, text).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
+        GrokStdioClient::prompt_result(self, rid)
     }
 
     fn cancel(&self) -> Result<bool> {
@@ -50,6 +81,10 @@ impl LeaderClient for GrokStdioClient {
 
     fn runtime(&self) -> Option<SessionRuntime> {
         GrokStdioClient::runtime(self)
+    }
+
+    fn turn_open(&self) -> Option<bool> {
+        GrokStdioClient::turn_open(self)
     }
 }
 
@@ -111,6 +146,13 @@ impl GrokClientPool {
         self.acting_client(key)?.runtime()
     }
 
+    /// The key's turn evidence: `None` with no client on the key (no
+    /// daemon, no session record), `Some(None)` from a client that has
+    /// seen no turn event, else the evidence.
+    pub fn turn_open_for_key(&self, key: &str) -> Option<Option<bool>> {
+        Some(self.acting_client(key)?.turn_open())
+    }
+
     /// Bring the stdio client online for a key (called at spawn time).
     pub fn connect_key(&self, key: &str) -> bool {
         self.acting_client(key).is_some()
@@ -128,6 +170,30 @@ impl GrokClientPool {
             Ok(true) => Some(PROMPT_QUEUED),
             _ => None,
         }
+    }
+
+    /// A workflow node's task as a tracked prompt over the key's leader:
+    /// the connection and request ids let `prompt_result_for_key` read the
+    /// turn's outcome. `Err` covers no daemon and no session record too.
+    pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<PromptId, String> {
+        let client = self
+            .acting_client(key)
+            .ok_or_else(|| format!("no grok leader client on {key}"))?;
+        let rid = client.prompt_tracked(text).map_err(|e| e.to_string())?;
+        Ok(PromptId {
+            generation: client.generation(),
+            rid,
+        })
+    }
+
+    /// The outcome of a prompt `dispatch_to_key` sent; None with no client
+    /// on the key or one that never sent it (reconnected since).
+    pub fn prompt_result_for_key(&self, key: &str, id: PromptId) -> Option<PromptResult> {
+        let client = self.acting_client(key)?;
+        if client.generation() != id.generation {
+            return None;
+        }
+        client.prompt_result(id.rid)
     }
 
     /// Cancel the running turn over the key's leader.
@@ -277,6 +343,10 @@ pub fn runtime_for_key(key: &str) -> Option<SessionRuntime> {
     pool().runtime_for_key(key)
 }
 
+pub fn turn_open_for_key(key: &str) -> Option<Option<bool>> {
+    pool().turn_open_for_key(key)
+}
+
 pub fn connect_pane(pane: &str) -> bool {
     pool().connect_key(&resolve_pane_key(pane))
 }
@@ -287,6 +357,20 @@ pub fn send_to_pane(pane: &str, text: &str) -> Option<&'static str> {
 
 pub fn send_to_key(key: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(key, text)
+}
+
+pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, PromptId), String> {
+    let key = resolve_pane_key(pane);
+    let id = pool().dispatch_to_key(&key, text)?;
+    Ok((key, id))
+}
+
+pub fn dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
+    pool().dispatch_to_key(key, text)
+}
+
+pub fn prompt_result_for_key(key: &str, id: PromptId) -> Option<PromptResult> {
+    pool().prompt_result_for_key(key, id)
 }
 
 pub fn interrupt_pane(pane: &str) -> Option<&'static str> {

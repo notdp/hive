@@ -12,8 +12,11 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
+use crate::adapters::codex_app_server::TurnResult;
+use crate::adapters::grok_leader::PromptId;
+use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::agent::{Agent, DeliveryError};
+use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 
 use super::*;
@@ -145,6 +148,14 @@ pub(super) fn hooked_list_panes_all() -> Vec<crate::tmux::PaneInfo> {
         return f();
     }
     crate::tmux::list_panes_all()
+}
+
+pub(super) fn hooked_tmux_socket_path() -> Option<String> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.tmux_socket_path.clone()).flatten() {
+        return f();
+    }
+    crate::tmux::own_socket_path()
 }
 
 pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
@@ -349,6 +360,22 @@ pub(super) fn hooked_cas_runtime_for_thread(
     crate::adapters::codex_app_server::runtime_for_thread(thread_id)
 }
 
+pub(super) fn hooked_cas_turn_open_for_thread(thread_id: &str) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_turn_open_for_thread.clone()).flatten() {
+        return f(thread_id);
+    }
+    crate::adapters::codex_app_server::turn_open_for_thread(thread_id)
+}
+
+pub(super) fn hooked_cas_turn_result(turn_id: &str) -> Option<TurnResult> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_turn_result.clone()).flatten() {
+        return f(turn_id);
+    }
+    crate::adapters::codex_app_server::turn_result(turn_id)
+}
+
 pub(super) fn hooked_cas_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_session_id_for_pane.clone()).flatten() {
@@ -387,6 +414,16 @@ pub(super) fn hooked_cas_list_recorded_panes() -> Vec<String> {
         return f();
     }
     crate::adapters::codex_app_server::list_recorded_panes()
+}
+
+/// The tmux socket a pane's thread record was written on; None for a
+/// record without the field (or no record).
+pub(super) fn hooked_cas_pane_thread_socket(pane: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_pane_thread_socket.clone()).flatten() {
+        return f(pane);
+    }
+    crate::adapters::codex_app_server::read_pane_thread(pane).and_then(|record| record.tmux_socket)
 }
 
 pub(super) fn hooked_cas_clear_pane_thread(pane: &str) {
@@ -443,6 +480,22 @@ pub(super) fn hooked_gl_runtime_for_key(
         return f(key);
     }
     crate::adapters::grok_leader::runtime_for_key(key)
+}
+
+pub(super) fn hooked_gl_turn_open_for_key(key: &str) -> Option<Option<bool>> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_turn_open_for_key.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::turn_open_for_key(key)
+}
+
+pub(super) fn hooked_gl_prompt_result(key: &str, rid: PromptId) -> Option<PromptResult> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_prompt_result.clone()).flatten() {
+        return f(key, rid);
+    }
+    crate::adapters::grok_leader::prompt_result_for_key(key, rid)
 }
 
 pub(super) fn hooked_gl_session_id_for_pane(pane: &str) -> Option<String> {
@@ -580,6 +633,17 @@ pub(super) fn hooked_agent_send(
         return f(agent, text, sender);
     }
     agent.send_from(text, sender)
+}
+
+pub(super) fn hooked_agent_dispatch_turn(
+    agent: &Agent,
+    text: &str,
+) -> std::result::Result<TurnHandle, DeliveryError> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.agent_dispatch_turn.clone()).flatten() {
+        return f(agent, text);
+    }
+    agent.dispatch_turn(text)
 }
 
 // --- self seams (this module's own entry points, replaceable in tests) ----

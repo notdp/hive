@@ -113,12 +113,6 @@ pub fn validate_team_name(name: &str) -> String {
              address for Claude sessions outside any team"
         );
     }
-    if name == "flow" {
-        return format!(
-            "team name '{name}' is invalid: 'flow' is the node runner's \
-             send-address kind (flow.run), not a team name"
-        );
-    }
     if name.contains('.') {
         return format!(
             "team name '{name}' is invalid: dots separate send-address \
@@ -619,11 +613,6 @@ impl Team {
         extra_env: Option<&HashMap<String, String>>,
         cli: &str,
     ) -> Result<Agent> {
-        if name == "flow" || name.starts_with("flow.") {
-            bail!(
-                "'{name}' collides with the node runner's mailbox address kind (flow.run), not a member name"
-            );
-        }
         if self.agent_named(name).is_some() {
             bail!("Agent '{name}' already exists in team '{}'", self.name);
         }
@@ -640,7 +629,7 @@ impl Team {
         }
         // Cross-process name claim under the registry lock: the in-memory
         // check above cannot see a concurrent spawner (a workflow fanning out
-        // one `hive node run` process per node). The claim is a paneless
+        // one `hive workflow run` process per node). The claim is a paneless
         // placeholder row — replaced by the real row after the spawn, removed
         // if the spawn fails.
         let claimed = self.claim_name(name, cli, model)?;
@@ -749,7 +738,7 @@ impl Team {
 
     /// Retire a member: kill its engine/pane, drop the roster row here and
     /// in the registry, re-tile the display. The one retirement path —
-    /// `hive kill`, `hive delete --down`, and a failed node start all come here.
+    /// `hive kill`, `hive delete --down`, and a failed workflow start all come here.
     /// Returns whether the member was on the roster.
     pub fn retire(&mut self, name: &str) -> bool {
         let Some(pos) = self.agents.iter().position(|a| a.name == name) else {
@@ -759,6 +748,9 @@ impl Team {
         self.agents.remove(pos);
         if !self.name.is_empty() {
             let _ = crate::registry::remove_member(&self.name, name, &self.created_at_key());
+        }
+        if !self.workspace.is_empty() {
+            crate::workflow::remove_record(&self.workspace, name);
         }
         let window = self.display_window();
         if !window.is_empty() {
@@ -1148,7 +1140,7 @@ pub(crate) use roster::{
 pub(crate) use scope::{
     add_runtime_location_fields, ensure_pane_in_scope, ensure_team_hived, load_team,
     remember_context, resolve_scoped_team, resolve_workspace, start_team_hived,
-    team_status_payload,
+    start_team_hived_or_warn, team_status_payload,
 };
 
 #[cfg(test)]

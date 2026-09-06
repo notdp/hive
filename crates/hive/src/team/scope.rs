@@ -131,15 +131,25 @@ fn team_window_identity(t: &mut Team) -> (String, String) {
 }
 
 /// Start (or find) the team's hived, filling the team's window identity.
-pub(crate) fn start_team_hived(t: &mut Team, workspace: &str) -> Option<i32> {
+/// The error is a hived this hive must not touch (`hived::ensure_hived`).
+pub(crate) fn start_team_hived(t: &mut Team, workspace: &str) -> Result<Option<i32>> {
     let (window_target, window_id) = team_window_identity(t);
     crate::hived::ensure_hived(workspace, &t.name, &window_target, &window_id)
 }
 
-/// Seam used by flow.rs (return ignored there; team not mutated).
-pub(crate) fn ensure_team_hived(t: &Team, workspace: &Path) {
+/// `start_team_hived` for a verb that goes on without the hived: the
+/// refusal is reported on stderr, and the request it was needed for
+/// fails on its own.
+pub(crate) fn start_team_hived_or_warn(t: &mut Team, workspace: &str) {
+    if let Err(err) = start_team_hived(t, workspace) {
+        eprintln!("warning: {err}");
+    }
+}
+
+/// Seam used by send.rs and node.rs (team not mutated).
+pub(crate) fn ensure_team_hived(t: &Team, workspace: &Path) -> Result<()> {
     let mut clone = t.clone();
-    let _ = start_team_hived(&mut clone, &workspace.to_string_lossy());
+    start_team_hived(&mut clone, &workspace.to_string_lossy()).map(|_| ())
 }
 
 fn augment_team_payload_with_runtime(
@@ -150,7 +160,7 @@ fn augment_team_payload_with_runtime(
     if ws.is_empty() {
         return payload;
     }
-    let _ = start_team_hived(t, &ws);
+    start_team_hived_or_warn(t, &ws);
     let Some(runtime) = super::usable_runtime(crate::hived::request_team_runtime(&ws, &t.name))
     else {
         return payload;
@@ -178,7 +188,6 @@ fn augment_team_payload_with_runtime(
                 "sessionId",
                 "inputState",
                 "inputReason",
-                "turnPhase",
             ] {
                 match runtime_fields.get(key) {
                     None | Some(Value::Null) => continue,
@@ -211,13 +220,6 @@ fn should_show_description(desc: Option<&Value>) -> bool {
 pub(crate) fn team_status_payload(t: &mut Team) -> Map<String, Value> {
     let status = t.status();
     let mut payload = augment_team_payload_with_runtime(t, status);
-    // The node runner's mailbox is a reserved address, not a member — list
-    // it beside the roster so "hive team can't find flow" never reads as
-    // "my report was lost".
-    payload.insert(
-        "mailboxes".to_string(),
-        serde_json::json!([{"addr": "flow.run", "kind": "flow", "delivery": "bus"}]),
-    );
     if !should_show_description(payload.get("description")) {
         payload.shift_remove("description");
     }

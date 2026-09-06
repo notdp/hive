@@ -791,7 +791,8 @@ mod tests {
     fn test_codex_thread_with_pane_record_is_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _env = iso(tmp.path());
-        crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp").unwrap();
+        crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp", None)
+            .unwrap();
         assert!(codex_thread_is_hive_managed("01aa-pane"));
     }
 

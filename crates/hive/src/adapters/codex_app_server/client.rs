@@ -2,7 +2,7 @@
 // per-thread runtime state, kept current by the reader thread
 // --------------------------------------------------------------------------
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -21,7 +21,6 @@ use super::{CALL_TIMEOUT, HANDSHAKE_TIMEOUT, RESUME_COOLDOWN};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadRuntime {
     pub busy: bool,
-    pub turn_phase: String,
     pub input_state: String,
     pub observed_at: f64,
 }
@@ -30,7 +29,6 @@ impl Default for ThreadRuntime {
     fn default() -> Self {
         ThreadRuntime {
             busy: false,
-            turn_phase: "unknown_evidence".to_string(),
             input_state: String::new(),
             observed_at: 0.0,
         }
@@ -48,7 +46,6 @@ pub(crate) fn apply_status(rt: &mut ThreadRuntime, status: &Value) {
     match status.get("type").and_then(Value::as_str) {
         Some("active") => {
             rt.busy = true;
-            rt.turn_phase = "tool_open".to_string();
             let waiting = status
                 .get("activeFlags")
                 .and_then(Value::as_array)
@@ -64,7 +61,6 @@ pub(crate) fn apply_status(rt: &mut ThreadRuntime, status: &Value) {
         }
         Some("idle") => {
             rt.busy = false;
-            rt.turn_phase = "turn_closed".to_string();
             rt.input_state = "ready".to_string();
         }
         // notLoaded / systemError: leave prior fields, only observed_at advanced
@@ -83,10 +79,118 @@ struct Slot {
     cv: Condvar,
 }
 
+/// Ended turns kept for `turn_result` after the oldest are pruned; running
+/// turns are never pruned.
+const MAX_ENDED_TURNS: usize = 64;
+
 #[derive(Default)]
 struct ClientState {
     threads: HashMap<String, ThreadRuntime>,
     resume_cooldown: HashMap<String, Instant>,
+    /// Turns this client started (or saw end), keyed by turn id and kept
+    /// current by the reader thread like `threads`.
+    turn_results: HashMap<String, TrackedTurn>,
+    /// Ended turn ids in the order they ended, for pruning.
+    ended_turns: VecDeque<String>,
+}
+
+/// A `TurnResult` under construction: messages keyed by item id so a
+/// repeated `item/completed` for one item replaces its text in place.
+#[derive(Default)]
+struct TrackedTurn {
+    thread_id: String,
+    status: Option<String>,
+    error: Option<String>,
+    messages: Vec<(String, String)>,
+}
+
+impl TrackedTurn {
+    fn result(&self) -> TurnResult {
+        TurnResult {
+            thread_id: self.thread_id.clone(),
+            status: self.status.clone(),
+            error: self.error.clone(),
+            messages: self.messages.iter().map(|(_, text)| text.clone()).collect(),
+        }
+    }
+
+    fn upsert_message(&mut self, item_id: &str, text: String) {
+        if !item_id.is_empty() {
+            if let Some(slot) = self.messages.iter_mut().find(|(id, _)| id == item_id) {
+                slot.1 = text;
+                return;
+            }
+        }
+        self.messages.push((item_id.to_string(), text));
+    }
+}
+
+impl ClientState {
+    /// The tracked entry for *turn_id*, created on first sight — `turn/*`
+    /// notifications can land before the `turn/start` response returns.
+    fn tracked(&mut self, turn_id: &str, thread_id: &str) -> &mut TrackedTurn {
+        let turn = self.turn_results.entry(turn_id.to_string()).or_default();
+        if turn.thread_id.is_empty() {
+            turn.thread_id = thread_id.to_string();
+        }
+        turn
+    }
+
+    fn end_turn(&mut self, turn_id: &str, thread_id: &str, turn: &Value) {
+        let tracked = self.tracked(turn_id, thread_id);
+        let first_end = tracked.status.is_none();
+        tracked.status = Some(
+            turn.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        tracked.error = turn
+            .get("error")
+            .filter(|err| !err.is_null())
+            .map(render_error);
+        if let Some(items) = turn.get("items").and_then(Value::as_array) {
+            if !items.is_empty() {
+                // The terminal frame is authoritative over what
+                // item/completed collected.
+                tracked.messages = items.iter().filter_map(agent_message).collect();
+            }
+        }
+        if first_end {
+            self.ended_turns.push_back(turn_id.to_string());
+        }
+        while self.ended_turns.len() > MAX_ENDED_TURNS {
+            if let Some(oldest) = self.ended_turns.pop_front() {
+                self.turn_results.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// `(item id, text)` of an `agentMessage` item, whatever its `phase` (a
+/// model may omit `final_answer`); None for every other item type.
+fn agent_message(item: &Value) -> Option<(String, String)> {
+    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
+        return None;
+    }
+    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+    let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+    Some((id.to_string(), text.to_string()))
+}
+
+/// A daemon error as one string: `turn.error` and `__error__` may be an
+/// object or a plain string.
+fn render_error(err: &Value) -> String {
+    match err {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn turn_id_of(turn: &Value) -> Option<&str> {
+    turn.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
 }
 
 struct Inner {
@@ -110,19 +214,45 @@ pub struct CodexDaemonClient {
 
 fn on_notification_state(inner: &Inner, method: &str, params: &Value) {
     // thread/status/changed is the only busy-relevant notification a
-    // non-turn-owning client receives on the shared daemon (turn/* and item/*
-    // go to the turn's own client only).
-    if method != "thread/status/changed" {
-        return;
-    }
+    // non-turn-owning client receives on the shared daemon; turn/* and
+    // item/* go to the turn's own client only, so here they are the turns
+    // this client started, and they feed the turn results and nothing else.
     let tid = match params.get("threadId").and_then(Value::as_str) {
         Some(tid) if !tid.is_empty() => tid,
         _ => return,
     };
-    let mut state = inner.state.lock().unwrap();
-    let rt = state.threads.entry(tid.to_string()).or_default();
-    rt.observed_at = now_epoch();
-    apply_status(rt, params.get("status").unwrap_or(&Value::Null));
+    match method {
+        "thread/status/changed" => {
+            let mut state = inner.state.lock().unwrap();
+            let rt = state.threads.entry(tid.to_string()).or_default();
+            rt.observed_at = now_epoch();
+            apply_status(rt, params.get("status").unwrap_or(&Value::Null));
+        }
+        "turn/started" => {
+            if let Some(turn_id) = params.get("turn").and_then(turn_id_of) {
+                inner.state.lock().unwrap().tracked(turn_id, tid);
+            }
+        }
+        "item/completed" => {
+            let turn_id = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty());
+            let item = params.get("item").and_then(agent_message);
+            if let (Some(turn_id), Some((item_id, text))) = (turn_id, item) {
+                let mut state = inner.state.lock().unwrap();
+                state.tracked(turn_id, tid).upsert_message(&item_id, text);
+            }
+        }
+        "turn/completed" => {
+            if let Some(turn) = params.get("turn") {
+                if let Some(turn_id) = turn_id_of(turn) {
+                    inner.state.lock().unwrap().end_turn(turn_id, tid, turn);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn reader_loop(inner: Arc<Inner>, mut conn: WsConn) {
@@ -183,7 +313,7 @@ impl CodexDaemonClient {
         }
         let stream = match self.inner.stream.as_ref() {
             Some(stream) => stream,
-            None => return json!({"__error__": "closed"}),
+            None => return json!({"__error__": "closed", "__not_sent__": true}),
         };
         let slot = Arc::new(Slot {
             msg: Mutex::new(None),
@@ -193,7 +323,7 @@ impl CodexDaemonClient {
         {
             let mut next_id = self.inner.next_id.lock().unwrap();
             if self.inner.closed.load(Ordering::SeqCst) {
-                return json!({"__error__": "closed"});
+                return json!({"__error__": "closed", "__not_sent__": true});
             }
             *next_id += 1;
             rid = *next_id;
@@ -219,7 +349,7 @@ impl CodexDaemonClient {
             }
         };
         if let Some(err) = msg.get("error") {
-            return json!({"__error__": err.clone()});
+            return json!({"__error__": err.clone(), "__rejected__": true});
         }
         json!({"result": msg.get("result").cloned().unwrap_or(Value::Null)})
     }
@@ -412,33 +542,48 @@ impl CodexDaemonClient {
         )
     }
 
-    /// Id of the thread's in-progress turn, read from the daemon.
+    /// Id of the thread's in-progress turn, read from the daemon: `Ok(None)`
+    /// is the daemon answering that no turn is open, `Err` is no answer
+    /// (RPC error, closed connection, or a result missing `thread.turns` or
+    /// an in-progress turn's id — with `includeTurns` a real daemon always
+    /// returns both, so their absence is a schema error, never idle).
     ///
     /// `turn/interrupt` requires the turnId and `ThreadStatus::Active`
     /// carries none, so the id has to be read back — hive never owns the turn
     /// (the pane's TUI started it) and only the starting client gets `turn/*`
     /// notifications. `thread/read` with `includeTurns` is the one route.
-    pub fn active_turn_id(&self, thread_id: &str) -> Option<String> {
+    pub fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
         let res = self.call(
             "thread/read",
             json!({"threadId": thread_id, "includeTurns": true}),
         );
-        let result = res.get("result").and_then(Value::as_object)?;
-        let turns = result
+        let Some(result) = res.get("result").and_then(Value::as_object) else {
+            return Err(res
+                .get("__error__")
+                .or_else(|| res.get("error"))
+                .map(Value::to_string)
+                .unwrap_or_else(|| "thread/read answered without a result".to_string()));
+        };
+        let Some(turns) = result
             .get("thread")
             .and_then(|thread| thread.get("turns"))
-            .and_then(Value::as_array);
-        for turn in turns.map(Vec::as_slice).unwrap_or(&[]).iter().rev() {
+            .and_then(Value::as_array)
+        else {
+            return Err("thread/read answered without thread.turns".to_string());
+        };
+        for turn in turns.iter().rev() {
             if turn.get("status").and_then(Value::as_str) == Some("inProgress") {
-                let id = turn.get("id").and_then(Value::as_str).unwrap_or("");
-                return if id.is_empty() {
-                    None
-                } else {
-                    Some(id.to_string())
+                return match turn
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    Some(id) => Ok(Some(id.to_string())),
+                    None => Err("thread/read reports an inProgress turn without an id".to_string()),
                 };
             }
         }
-        None
+        Ok(None)
     }
 
     /// Abort *turn_id* on *thread_id*.
@@ -508,6 +653,16 @@ pub trait DaemonClient: Send + Sync {
     fn turn_start(&self, _thread_id: &str, _text: &str) -> Result<Value, String> {
         unimplemented!("turn_start")
     }
+    fn turn_start_tracked(
+        &self,
+        _thread_id: &str,
+        _text: &str,
+    ) -> Result<String, TurnStartFailure> {
+        unimplemented!("turn_start_tracked")
+    }
+    fn turn_result(&self, _turn_id: &str) -> Option<TurnResult> {
+        unimplemented!("turn_result")
+    }
     fn active_turn_id(&self, _thread_id: &str) -> Result<Option<String>, String> {
         unimplemented!("active_turn_id")
     }
@@ -532,8 +687,14 @@ impl DaemonClient for CodexDaemonClient {
     fn turn_start(&self, thread_id: &str, text: &str) -> Result<Value, String> {
         Ok(CodexDaemonClient::turn_start(self, thread_id, text))
     }
+    fn turn_start_tracked(&self, thread_id: &str, text: &str) -> Result<String, TurnStartFailure> {
+        CodexDaemonClient::turn_start_tracked(self, thread_id, text)
+    }
+    fn turn_result(&self, turn_id: &str) -> Option<TurnResult> {
+        CodexDaemonClient::turn_result(self, turn_id)
+    }
     fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
-        Ok(CodexDaemonClient::active_turn_id(self, thread_id))
+        CodexDaemonClient::active_turn_id(self, thread_id)
     }
     fn turn_interrupt(&self, thread_id: &str, turn_id: &str) -> Result<Value, String> {
         Ok(CodexDaemonClient::turn_interrupt(self, thread_id, turn_id))
@@ -580,5 +741,94 @@ impl CodexDaemonClient {
 
     pub(super) fn threads_is_empty(&self) -> bool {
         self.inner.state.lock().unwrap().threads.is_empty()
+    }
+}
+
+// --------------------------------------------------------------------------
+// turn results: what a turn this client started came back with
+// --------------------------------------------------------------------------
+
+/// One turn's outcome as the daemon reported it to this client — the
+/// client that started it is the only one `turn/*` and `item/*`
+/// notifications reach. `status` is None while the turn is in progress
+/// and the `turn/completed` status word (`completed`, `interrupted`,
+/// `failed`) once it ended; `messages` are the turn's `agentMessage`
+/// texts in item order, whatever their `phase` (a model may omit
+/// `final_answer`), so the result of the turn is the last one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TurnResult {
+    pub thread_id: String,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub messages: Vec<String>,
+}
+
+impl TurnResult {
+    /// The last non-empty assistant message of the turn, or empty.
+    pub fn final_text(&self) -> String {
+        self.messages
+            .iter()
+            .rev()
+            .find(|text| !text.trim().is_empty())
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// Why a `turn/start` did not hand back a trackable turn: `Refused` is
+/// a request not written or explicitly rejected by the daemon. `Unknown`
+/// means it may have been accepted (write failure, timeout, lost response).
+/// `Untracked` is an accepted request whose result carries no turn id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStartFailure {
+    Refused(String),
+    Unknown(String),
+    Untracked(String),
+}
+
+impl CodexDaemonClient {
+    /// `turn/start` whose turn id is kept: the turn's notifications are
+    /// collected under it until `turn_result` reads them back.
+    pub fn turn_start_tracked(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> Result<String, TurnStartFailure> {
+        let res = self.turn_start(thread_id, text);
+        let Some(result) = res.get("result") else {
+            let reason = if res.get("__timeout__").is_some() {
+                "turn/start timed out".to_string()
+            } else {
+                res.get("__error__")
+                    .map(render_error)
+                    .unwrap_or_else(|| "turn/start answered without a result".to_string())
+            };
+            return Err(
+                if res.get("__not_sent__") == Some(&Value::Bool(true))
+                    || res.get("__rejected__") == Some(&Value::Bool(true))
+                {
+                    TurnStartFailure::Refused(reason)
+                } else {
+                    TurnStartFailure::Unknown(reason)
+                },
+            );
+        };
+        let turn_id = result.get("turn").and_then(turn_id_of).ok_or_else(|| {
+            TurnStartFailure::Untracked("turn/start answered without turn.id".to_string())
+        })?;
+        self.inner.state.lock().unwrap().tracked(turn_id, thread_id);
+        Ok(turn_id.to_string())
+    }
+
+    /// What this client has seen of *turn_id*; None when it never saw the
+    /// turn (started by another client, or before this connection).
+    pub fn turn_result(&self, turn_id: &str) -> Option<TurnResult> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .turn_results
+            .get(turn_id)
+            .map(TrackedTurn::result)
     }
 }

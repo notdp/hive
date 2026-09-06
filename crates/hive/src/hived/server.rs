@@ -120,16 +120,39 @@ pub(crate) fn handle_request(
             response.insert("apiVersion".to_string(), Value::from(HIVED_API_VERSION));
             response.insert("buildHash".to_string(), Value::from(hived_build_hash()));
             response.insert("team".to_string(), Value::from(team));
+            response.insert(
+                "hiveHome".to_string(),
+                Value::from(crate::paths::hive_home().to_string_lossy().into_owned()),
+            );
             response.insert("tmuxWindow".to_string(), Value::from(tmux_window));
             response.insert("tmuxWindowId".to_string(), Value::from(tmux_window_id));
             response.insert("hived".to_string(), Value::Object(hived));
             (response, true)
         }
         "send" => {
+            let sender = map_get_str(request, "senderAgent");
             let response = send_payload(
                 workspace,
                 &team_in_request(),
-                &map_get_str(request, "senderAgent"),
+                SendOrigin::Member(&sender),
+                &map_get_str(request, "targetAgent"),
+                &map_get_str(request, "body"),
+                &map_get_str(request, "artifact"),
+            )
+            .unwrap_or_else(err_response);
+            (response, true)
+        }
+        "node-dispatch" => {
+            let dispatch_id = map_get_str(request, "dispatchId");
+            if dispatch_id.is_empty() {
+                return (err_response("node-dispatch needs a dispatchId"), true);
+            }
+            let response = send_payload(
+                workspace,
+                &team_in_request(),
+                SendOrigin::Node {
+                    dispatch_id: &dispatch_id,
+                },
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),
@@ -157,6 +180,22 @@ pub(crate) fn handle_request(
         }
         "runtime-snapshot" => {
             let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
+            (response, true)
+        }
+        "node-result" => {
+            let dispatch_id = map_get_str(request, "dispatchId");
+            if dispatch_id.is_empty() {
+                return (err_response("node-result needs a dispatchId"), true);
+            }
+            (node_result_payload(&dispatch_id), true)
+        }
+        "turn-open" => {
+            let response = turn_open_payload(
+                workspace,
+                &team_in_request(),
+                &map_get_str(request, "agent"),
+            )
+            .unwrap_or_else(err_response);
             (response, true)
         }
         "connect-codex" => {

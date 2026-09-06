@@ -68,7 +68,6 @@ pub const PROMPT_QUEUED: &str = "sessionPromptQueued";
 /// only accept class there is — see [`GrokStdioClient::cancel`].
 pub const CANCEL_SENT: &str = "sessionCancelSent";
 
-const TOOL_PHASES: [&str; 2] = ["tool_open", "tool_result_pending_reply"];
 const MESSAGE_CHUNKS: [&str; 3] = [
     "agent_message_chunk",
     "agent_thought_chunk",

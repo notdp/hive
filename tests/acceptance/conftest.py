@@ -5,16 +5,30 @@ panes, real claude/codex/grok sessions) against the live install, so they
 never run from a plain `pytest tests/`. Run after every install:
 
     HIVE_ACCEPTANCE=1 python -m pytest tests/acceptance -q
-    HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok \
+    HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=codex,grok \
         python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
 scratch team, one naturally-worded nonce task per CLI, each driven the way
-a Claude Code Workflow drives a node — one concurrent `hive node run`
+a Claude Code Workflow drives a node — one concurrent `hive workflow run`
 subprocess per member, task on stdin, one JSON line back on stdout. The
 task wording is deliberately NOT "mechanical, do not improvise" — drift
-(acks, misaddressed replies, self-invented scope) only shows itself when
-the member has room to move.
+(acks, stray replies, self-invented scope) only shows itself when the
+member has room to move.
+
+The node's result is the engine's own end of the turn (codex
+`turn/completed`, grok the `session/prompt` response), read by the hived
+that started it, with the last thing the member said as the body — the
+member runs nothing to return. The oracle does not take the node's word
+for that: after the nodes return, the rig reads the ledger and the node
+record under the workspace's `run/workflow/`, and — the one transcript
+read left — counts how often the dispatch id landed in the member's own
+conversation, by the engine session resolved from its registry row
+(`member_transcripts`). The task carries a bait string the member is told
+never to repeat, so the body is shown to be the member's words and not the
+task's. A node runs codex or grok (a claude node is Claude Code's own
+subagent), so HIVE_ACCEPTANCE_CLIS names those two; a claude entry is
+rejected by the rig before anything is spawned.
 """
 
 from __future__ import annotations
@@ -30,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+
+from member_transcripts import count_dispatch_inputs, engine_session
 
 pytestmark = pytest.mark.acceptance
 
@@ -61,9 +77,12 @@ class Rig:
     flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
     flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
     node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
-    node_results: dict[str, dict] = field(default_factory=dict)  # member -> node run JSON
-    bus_rows: list[tuple] = field(default_factory=list)
+    node_results: dict[str, dict] = field(default_factory=dict)  # member -> workflow run JSON
+    bus_rows: list[tuple] = field(default_factory=list)  # (seq, from, to, body, artifact)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
+    roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
+    dispatch_inputs: dict[str, int] = field(default_factory=dict)  # member -> transcript input records carrying the id
+    records: dict[str, dict] = field(default_factory=dict)  # member -> run/workflow/<member>.json after the run
 
     def member(self, cli: str) -> str:
         return f"probe-{cli}"
@@ -71,27 +90,26 @@ class Rig:
     def want(self, cli: str) -> str:
         return f"{self.nonce}-{cli}"
 
-    def dispatches_for(self, member: str) -> list[tuple]:
-        # A refused delivery leaves its bus row behind (the bus is a ledger,
-        # not a queue) and the node retries with a fresh row — several
-        # same-body dispatch rows are legal. The one that reached the member
-        # is the last one before its reply.
-        return [r for r in self.bus_rows if r[1] == "flow.run" and r[2] == member]
+    def bait(self, cli: str) -> str:
+        return f"bait-{self.nonce[4:]}-{cli}"
 
-    def replies_for(self, member: str) -> list[tuple]:
-        # The bus keeps order, not links: a reply is what reached the
-        # mailbox after the member's dispatch. Other members' own replies
-        # are excluded by name so an identity hijack (a reply signed by
-        # someone who is not a member) still shows up here.
-        dispatches = self.dispatches_for(member)
-        if not dispatches:
-            return []
-        since = min(d[0] for d in dispatches)
-        others = {self.member(c) for c in self.clis} - {member}
+    def dispatch_id(self, member: str) -> str:
+        return str(self.node_results.get(member, {}).get("dispatchId", ""))
+
+    def dispatch_rows(self, member: str) -> list[tuple]:
+        # The node's one ledger write: no sender, the member as recipient,
+        # the task artifact named after the dispatch id.
+        did = self.dispatch_id(member)
         return [
             r for r in self.bus_rows
-            if r[2] == "flow.run" and r[0] > since and r[1] not in others
+            if r[1] == "" and r[2] == member and did and did in str(r[4])
         ]
+
+    def rows_from(self, member: str) -> list[tuple]:
+        return [r for r in self.bus_rows if r[1] == member]
+
+    def record_path(self, member: str) -> Path:
+        return self.workspace / "run" / "workflow" / f"{member}.json"
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
@@ -116,7 +134,10 @@ class Rig:
 
 @pytest.fixture(scope="session")
 def rig():
-    clis = [c.strip() for c in os.environ.get("HIVE_ACCEPTANCE_CLIS", "claude").split(",") if c.strip()]
+    clis = [c.strip() for c in os.environ.get("HIVE_ACCEPTANCE_CLIS", "codex,grok").split(",") if c.strip()]
+    unsupported = [c for c in clis if c not in ("codex", "grok")]
+    if unsupported:
+        raise RuntimeError(f"a workflow node runs codex or grok; HIVE_ACCEPTANCE_CLIS names {unsupported}")
     run_id = uuid.uuid4().hex[:6]
     r = Rig(
         clis=clis,
@@ -141,7 +162,10 @@ def rig():
                 raise RuntimeError("hive create never finished in the rig pane")
             time.sleep(1)
 
-        task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
+        task = (
+            "请把这段口令写进 {path}：{nonce}。写完后，你这一轮最后说的话就是结果：在最后一段话里原样写出口令 {nonce}，"
+            "顺便说一句你对这个任务的看法。另外有一个干扰词 {bait}——它不是口令，任何地方都不要复述它。"
+        )
         # Reproduce the honest parentage: a Workflow's node runner lives
         # inside an engine's tool subprocess — no $TMUX. Only the pinned pane
         # identity rides in, exactly what a spawned daemon's tools get.
@@ -156,7 +180,7 @@ def rig():
         # raises "I/O operation on closed file" on Python 3.12.
         procs = {
             r.member(c): subprocess.Popen(
-                ["hive", "node", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
+                ["hive", "workflow", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=env,
             )
@@ -166,7 +190,7 @@ def rig():
         waits = {
             r.member(c): _NodeWait(
                 procs[r.member(c)],
-                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)),
+                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c), bait=r.bait(c)),
                 deadline,
             )
             for c in r.clis
@@ -185,8 +209,25 @@ def rig():
         db = r.workspace / "hive.db"
         if db.exists():
             r.bus_rows = sqlite3.connect(db).execute(
-                "select seq, from_agent, to_agent, body from messages"
+                "select seq, from_agent, to_agent, body, artifact from messages"
             ).fetchall()
+        # The record is read the moment the nodes return, before teardown
+        # retires the members and removes the records.
+        for member in procs:
+            r.records[member] = _read_json(r.record_path(member))
+        # The registry row names the member's engine session; the
+        # transcript read counts how often the dispatch id landed there.
+        r.roster = _registry_members(r.team)
+        for member in procs:
+            row = r.roster.get(member, {})
+            did = r.dispatch_id(member)
+            engine = engine_session(str(row.get("cli", "")), str(row.get("sessionId", "")))
+            if row and did and engine:
+                r.dispatch_inputs[member] = count_dispatch_inputs(
+                    str(row.get("cli", "")), engine, str(row.get("cwd", "")), did
+                )
+            else:
+                r.dispatch_inputs[member] = 0
         for line in _tmux("list-panes", "-t", r.session, "-F",
                           "#{pane_id} #{@hive-agent}", check=False).splitlines():
             pid, _, name = line.strip().partition(" ")
@@ -229,11 +270,34 @@ class _NodeWait:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.out, self.err = self.proc.communicate()
-            self.err += f"\n[rig] node run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
+            self.err += f"\n[rig] workflow run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
 
     def result(self) -> tuple[str, str, int]:
         self.thread.join()
         return self.out, self.err, self.proc.returncode
+
+
+def _registry_members(team: str) -> dict[str, dict]:
+    """`$HIVE_HOME/teams/<team>/team.json` members by name (cli, sessionId, cwd)."""
+    hive_home = Path(os.environ.get("HIVE_HOME") or Path.home() / ".hive")
+    try:
+        entry = json.loads((hive_home / "teams" / team / "team.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {
+        str(m.get("name")): m
+        for m in entry.get("members", [])
+        if isinstance(m, dict) and m.get("name")
+    }
+
+
+def _read_json(path: Path) -> dict:
+    """The file's JSON object; {} when it is missing or not an object."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _last_json_object(stdout: str) -> dict:

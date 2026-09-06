@@ -1,10 +1,11 @@
 use anyhow::bail;
 
 use crate::adapters::claude_sessions;
+use crate::adapters::codex_app_server::TurnStartFailure;
 
 use super::seams::*;
 use super::spawn::Agent;
-use super::support::DeliveryError;
+use super::support::{DeliveryError, TurnHandle};
 
 /// How long a kill waits for a pane's process to be gone before moving on
 /// to the engine behind it. A tmux pane teardown is milliseconds; this is
@@ -126,6 +127,101 @@ impl Agent {
                 &profile_name
             }
         )))
+    }
+
+    /// A workflow node's task as one tracked turn: the same native
+    /// transport as `send_from`, but the engine's own id for the turn comes
+    /// back, and the turn's end and text are read under it (codex
+    /// `turn/start` → `turn/completed` on the starting client; grok
+    /// `session/prompt` → its response). A workflow node runs codex or
+    /// grok: a claude member has no turn-end signal hive can read (a bg
+    /// job reports no turn end over any RPC), and Claude Code runs its own
+    /// subagents natively. `Err` is the task not with the member; an
+    /// engine that took it and handed back no id is `Untracked`. A lost
+    /// answer is `Unknown`, never a retryable delivery error.
+    pub fn dispatch_turn(&self, text: &str) -> Result<TurnHandle, DeliveryError> {
+        match self.cli.as_str() {
+            "codex" | "grok" => {}
+            other => {
+                return Err(DeliveryError(format!(
+                    "member '{}' runs {other}; a workflow node runs codex or grok",
+                    self.name
+                )))
+            }
+        }
+        if self.pane_id.is_empty() {
+            return self.dispatch_turn_headless(text);
+        }
+        let probe = hooked_detect_cli_process_for_pane(&self.pane_id);
+        let profile_name = probe.as_ref().map(|p| p.name).unwrap_or_default();
+        if probe.is_none() {
+            return Err(DeliveryError(format!(
+                "no live CLI process on pane {} (cli_exited): \
+                 refusing native transport to a retained shell",
+                self.pane_id
+            )));
+        }
+        if profile_name != self.cli {
+            return Err(DeliveryError(format!(
+                "pane {} shows {} but its member '{}' is a {} member \
+                 (recycled pane id); hive does not deliver across CLIs",
+                self.pane_id,
+                if profile_name.is_empty() {
+                    "no agent CLI"
+                } else {
+                    &profile_name
+                },
+                self.name,
+                self.cli
+            )));
+        }
+        if self.cli == "codex" {
+            return match hooked_codex_dispatch_to_pane(&self.pane_id, text) {
+                Ok((thread_id, turn_id)) => Ok(TurnHandle::Codex { thread_id, turn_id }),
+                Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
+                Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
+                    "codex pane {} did not accept the turn ({reason})",
+                    self.pane_id
+                ))),
+            };
+        }
+        match hooked_grok_dispatch_to_pane(&self.pane_id, text) {
+            Ok((key, prompt_id)) => Ok(TurnHandle::Grok { key, prompt_id }),
+            Err(reason) => Err(DeliveryError(format!(
+                "grok pane {} did not accept the prompt ({reason})",
+                self.pane_id
+            ))),
+        }
+    }
+
+    fn dispatch_turn_headless(&self, text: &str) -> Result<TurnHandle, DeliveryError> {
+        if self.cli == "codex" {
+            let thread_id = self.session_id.clone().unwrap_or_default();
+            if thread_id.is_empty() {
+                return Err(DeliveryError(format!(
+                    "codex member '{}' has no recorded thread",
+                    self.name
+                )));
+            }
+            return match hooked_codex_dispatch_to_thread(&thread_id, text) {
+                Ok(turn_id) => Ok(TurnHandle::Codex { thread_id, turn_id }),
+                Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
+                Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
+                    "codex member '{}' did not accept the turn ({reason})",
+                    self.name
+                ))),
+            };
+        }
+        let key = crate::adapters::grok_leader::member_key(&self.team_name, &self.name);
+        match hooked_grok_dispatch_to_key(&key, text) {
+            Ok(prompt_id) => Ok(TurnHandle::Grok { key, prompt_id }),
+            Err(reason) => Err(DeliveryError(format!(
+                "grok member '{}' did not accept the prompt ({reason})",
+                self.name
+            ))),
+        }
     }
 
     /// Origin label for a claude inbox frame: the sender as given, or the

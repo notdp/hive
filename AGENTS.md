@@ -55,15 +55,30 @@ behavior is documented in the modules themselves.
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;
   the viewer must stay usable against a transcript file alone.
-- Orchestration is not hive's: `hive node run` is one node as one blocking
-  command (`--team`, `--name`, `--cli`, `--model`; the task on stdin, the
-  member's reply as one JSON line on stdout), and a Claude Code Workflow
-  drives those nodes through the plugin's `hive-node` agent, which is only
-  a relay for the command. The node's reply address is the `flow.run`
-  mailbox (`FLOW_SENDER`): the member's `hive send` to it is a durable bus
-  row the hived's mailbox branch stores without a transport or an ack, and
-  `run_node` polls the bus for it. A same-name node reuses a live member;
-  the run's team comes from `hive create <run>` and goes with
+- Orchestration is not hive's: `hive workflow run` is one node as one
+  blocking command (`--team`, `--name`, `--cli codex|grok`, `--model`;
+  the task on stdin, the result as one JSON line on stdout), and a Claude
+  Code Workflow drives those nodes through the plugin's `hive-node` agent,
+  which is only a relay for the command. A node has no reply address: the
+  dispatch envelope carries no `from` (its ledger row has an empty
+  `from_agent`), the member is never asked to send anything back and runs
+  nothing to return. The task is one turn, dispatched as a tracked turn
+  (`Agent::dispatch_turn`: codex `turn/start`, grok `session/prompt`) whose
+  engine handle the hived holds under the dispatch id (`nd-<12 hex>`, also
+  in the task artifact path and the first body line); the engine's own
+  turn-end signal (codex `turn/completed` on the client that started the
+  turn, grok the `session/prompt` response) is the result's boundary, the
+  member's last message of the turn its text, and the runner reads both
+  back through the hived's `node-result`. Nothing reads the engine's
+  transcript. A claude node is Claude Code's own subagent, not hive's: a
+  claude bg job reports no turn end over any RPC, and the runner refuses
+  a claude member before spawning. Each run is recorded at
+  `<workspace>/run/workflow/<name>.json` under the flock
+  `<workspace>/run/workflow/<name>.lock`, written `pending` before the bus
+  write so exit 1 always means "not dispatched"; a pending record whose
+  member is alive is `member_busy`, one whose member is dead is replaced,
+  and `hive kill` removes it. A same-name node reuses a live member; the
+  run's team comes from `hive create <run>` and goes with
   `hive delete <run> --down`.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
@@ -98,8 +113,9 @@ Design truth lives in these docs, one question each:
 
 - `docs/runtime-model.md` — what hive knows about an engine: team identity
   (registry vs tmux display), the runtime fields and their per-CLI native
-  sources, send addressing, active-turn fork routing. Runtime-field semantics
-  belong there; keep them in sync with the code that computes them.
+  sources, send addressing, the workflow node dispatch and its explicit
+  return, active-turn fork routing. Runtime-field semantics belong there;
+  keep them in sync with the code that computes them.
 - `docs/transcript-view.md` — what a reader sees on screen: the JSONL →
   `DisplayBlock` parse model, the TUI's chrome and interaction layer, theme
   and appearance resolution. The boundary against `runtime-model.md` follows
@@ -125,11 +141,13 @@ Design truth lives in these docs, one question each:
   state, not per-test, and plain `cargo test` races them in one process.
 - `python -m pytest tests/e2e -q` — black-box tmux flows against
   `target/debug/hive` (`cargo build` first, or point `HIVE_E2E_BIN` elsewhere).
-- `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok python -m pytest tests/acceptance -q`
-  — post-install live acceptance: one real agent per CLI, spawned through the
-  installed `hive`. It asserts what unit suites structurally cannot see (reply
-  identity, absence of acks, pane color as tmux actually renders it, picker
-  residue, nonce causality) plus a headless-claude semantic coroner. Run it
+- `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=codex,grok python -m pytest tests/acceptance -q`
+  — post-install live acceptance: one real node per CLI, spawned through the
+  installed `hive`. It asserts what unit suites structurally cannot see (the
+  node's result against the record and the dispatch landing
+  once in its transcript, absence of acks and replies, pane color as tmux
+  actually renders it, picker residue, nonce causality) plus a
+  headless-claude semantic coroner. Run it
   after every live install; it is skipped everywhere else.
 - Plugin/skill materialization and hived behavior that must exercise new
   source code need an isolated dev lane: disposable `HIVE_HOME`,

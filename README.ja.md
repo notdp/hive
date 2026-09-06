@@ -96,7 +96,7 @@ hive 自身が作るチームセッション (tmux の外での `hive create`、
 
 ## ドキュメント
 
-- [`docs/runtime-model.md`](docs/runtime-model.md) — レジストリと表示層のアイデンティティ、CLI ごとのネイティブランタイム源、`busy` / `inputState` / `turnPhase`
+- [`docs/runtime-model.md`](docs/runtime-model.md) — レジストリと表示層のアイデンティティ、CLI ごとのネイティブランタイム源、`busy` / `inputState`
 - [`docs/transcript-view.md`](docs/transcript-view.md) — `hive view` が描くもの: JSONL → `DisplayBlock` の解析モデル、ビューアのクローム、テーマ解決
 - [`docs/daemon-control-socket.md`](docs/daemon-control-socket.md) — Claude supervisor daemon の制御プロトコル。その `op:"reply"` が hive の配信本線
 - [`plugins/hive/skills/hive/SKILL.md`](plugins/hive/skills/hive/SKILL.md) — `/hive:hive` がエージェントに読み込ませる協調プロトコル

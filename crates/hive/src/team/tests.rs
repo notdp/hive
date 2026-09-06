@@ -1295,14 +1295,6 @@ fn test_team_status_payload_shape() {
     assert_eq!(claude.get("role").unwrap(), "agent");
 }
 
-// tests/cli/test_message_commands.py::test_flow_is_not_a_team_name
-#[test]
-fn test_flow_is_not_a_team_name() {
-    let (_tmp, _guard) = configure_hive_home(true, "%0");
-
-    assert!(validate_team_name("flow").contains("flow"));
-}
-
 fn team_with_pane_member(pane_id: &str) -> Team {
     let mut team = Team {
         name: "team-a".to_string(),

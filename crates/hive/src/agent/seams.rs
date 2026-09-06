@@ -12,6 +12,8 @@ use anyhow::bail;
 
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
+use crate::adapters::codex_app_server::TurnStartFailure;
+use crate::adapters::grok_leader::PromptId;
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -589,7 +591,12 @@ pub(super) fn hooked_write_pane_thread(
     {
         return Ok(());
     }
-    crate::adapters::codex_app_server::write_pane_thread(pane_id, thread_id, cwd)
+    crate::adapters::codex_app_server::write_pane_thread(
+        pane_id,
+        thread_id,
+        cwd,
+        crate::tmux::own_socket_path().as_deref(),
+    )
 }
 
 pub(super) fn hooked_codex_send_to_pane(pane_id: &str, text: &str) -> Option<&'static str> {
@@ -613,6 +620,45 @@ pub(super) fn hooked_codex_send_to_thread(thread_id: &str, text: &str) -> Option
         return v;
     }
     crate::adapters::codex_app_server::send_to_thread(thread_id, text)
+}
+
+pub(super) fn hooked_codex_dispatch_to_pane(
+    pane_id: &str,
+    text: &str,
+) -> Result<(String, String), TurnStartFailure> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.codex_sent.push((pane_id.to_string(), text.to_string()));
+        h.codex_dispatch.clone()
+    }) {
+        return v
+            .unwrap_or_else(|| {
+                Err(TurnStartFailure::Refused(
+                    "codex dispatch not hooked".into(),
+                ))
+            })
+            .map(|turn_id| (format!("thread-of-{pane_id}"), turn_id));
+    }
+    crate::adapters::codex_app_server::dispatch_to_pane(pane_id, text)
+}
+
+pub(super) fn hooked_codex_dispatch_to_thread(
+    thread_id: &str,
+    text: &str,
+) -> Result<String, TurnStartFailure> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.codex_sent_thread
+            .push((thread_id.to_string(), text.to_string()));
+        h.codex_dispatch.clone()
+    }) {
+        return v.unwrap_or_else(|| {
+            Err(TurnStartFailure::Refused(
+                "codex dispatch not hooked".into(),
+            ))
+        });
+    }
+    crate::adapters::codex_app_server::dispatch_to_thread(thread_id, text)
 }
 
 pub(super) fn hooked_codex_interrupt_pane(pane_id: &str) -> Option<&'static str> {
@@ -724,6 +770,33 @@ pub(super) fn hooked_grok_send_to_key(key: &str, text: &str) -> Option<&'static 
         return v;
     }
     crate::adapters::grok_leader::send_to_key(key, text)
+}
+
+pub(super) fn hooked_grok_dispatch_to_pane(
+    pane_id: &str,
+    text: &str,
+) -> Result<(String, PromptId), String> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.grok_sent.push((pane_id.to_string(), text.to_string()));
+        h.grok_dispatch.clone()
+    }) {
+        return v
+            .unwrap_or_else(|| Err("grok dispatch not hooked".to_string()))
+            .map(|rid| (format!("key-of-{pane_id}"), rid));
+    }
+    crate::adapters::grok_leader::dispatch_to_pane(pane_id, text)
+}
+
+pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.grok_sent_key.push((key.to_string(), text.to_string()));
+        h.grok_dispatch.clone()
+    }) {
+        return v.unwrap_or_else(|| Err("grok dispatch not hooked".to_string()));
+    }
+    crate::adapters::grok_leader::dispatch_to_key(key, text)
 }
 
 pub(super) fn hooked_grok_interrupt_pane(pane_id: &str) -> Option<&'static str> {

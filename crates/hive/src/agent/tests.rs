@@ -2286,3 +2286,22 @@ fn test_uuid4_shape() {
     assert_eq!(sid.as_bytes()[14], b'4');
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
+
+#[test]
+fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
+    use crate::adapters::codex_app_server::TurnStartFailure;
+    for pane in ["%1", ""] {
+        let hook = Hook {
+            cli_probe: Some("codex".to_string()),
+            codex_dispatch: Some(Err(TurnStartFailure::Unknown("answer lost".to_string()))),
+            ..Hook::default()
+        };
+        let _guard = testhook::install(hook);
+        let mut agent = testhook::fake_agent("node", "team", pane, "codex");
+        agent.session_id = Some("thread".to_string());
+        assert_eq!(
+            agent.dispatch_turn("task"),
+            Ok(TurnHandle::Unknown("answer lost".to_string()))
+        );
+    }
+}

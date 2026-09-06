@@ -2,14 +2,16 @@
 //! a `hive send` (a qualified `<group>.<name>` across windows, a bare name
 //! in the caller's team, a Claude-session guest's target), the long-body
 //! hint, and the request every dispatch — `hive send`, a spawn's `--task`,
-//! a `hive node run` task — hands the hived.
+//! a `hive workflow run` task — hands the hived.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
 use crate::agent::Agent;
+use crate::hived::RequestFailure;
 use crate::json_fields::{is_set, map_str};
 use crate::team::{ensure_team_hived, load_team, resolve_scoped_team, Team};
 use crate::tmux;
@@ -29,7 +31,7 @@ pub(crate) fn request_send_payload(
     if warn_on_long_body {
         maybe_warn_long_body(body, command_name);
     }
-    ensure_team_hived(team, std::path::Path::new(workspace));
+    ensure_team_hived(team, std::path::Path::new(workspace))?;
     let payload = crate::hived::request_send(
         workspace,
         &team.name,
@@ -38,12 +40,91 @@ pub(crate) fn request_send_payload(
         body,
         artifact,
     );
-    let payload = match payload {
-        Some(p) if !p.is_empty() => p,
-        _ => bail!(
-            "{}",
-            crate::devlog::hived_unavailable_message(std::path::Path::new(workspace))
-        ),
+    hived_send_result(workspace, payload, command_name)
+}
+
+/// Why a node dispatch has no seq. `Refused`: the hived answered `ok:false`
+/// (a transport refusal, an unknown member, the send gate) or the request
+/// never reached it — the task is definitely not with the member.
+/// `Unknown`: the request went out and no usable answer came back (a read
+/// timeout, a dropped connection, an empty or unparsable reply) — the
+/// hived may have injected the task, and holds its turn under the
+/// dispatch id if it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchFailure {
+    Refused(String),
+    Unknown(String),
+}
+
+impl fmt::Display for DispatchFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DispatchFailure::Refused(reason) | DispatchFailure::Unknown(reason) => {
+                f.write_str(reason)
+            }
+        }
+    }
+}
+
+/// The dispatch of a `hive workflow run` task: the hived's node-dispatch action, which
+/// writes a senderless ledger row and injects a from-less envelope.
+pub(crate) fn request_node_dispatch(
+    workspace: &str,
+    team: &Team,
+    target_agent: &str,
+    body: &str,
+    artifact: &str,
+    dispatch_id: &str,
+) -> Result<Map<String, Value>, DispatchFailure> {
+    ensure_team_hived(team, std::path::Path::new(workspace))
+        .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
+    let answer = crate::hived::request_node_dispatch(
+        workspace,
+        &team.name,
+        target_agent,
+        body,
+        artifact,
+        dispatch_id,
+    );
+    hived_answer(workspace, answer, "node dispatch")
+}
+
+fn hived_send_result(
+    workspace: &str,
+    payload: Option<Map<String, Value>>,
+    command_name: &str,
+) -> Result<Map<String, Value>> {
+    // An ordinary send has nothing to keep pending on a lost answer: both
+    // failure kinds are one refusal to the caller.
+    let answer = payload.ok_or_else(|| RequestFailure::NotSent(String::new()));
+    hived_answer(workspace, answer, command_name).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The hived's answer as a result: `ok:false` and an unsent request are
+/// `Refused`, a lost answer is `Unknown`, and `ok` is stripped from a
+/// success.
+fn hived_answer(
+    workspace: &str,
+    answer: Result<Map<String, Value>, RequestFailure>,
+    command_name: &str,
+) -> Result<Map<String, Value>, DispatchFailure> {
+    let payload = match answer {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            return Err(DispatchFailure::Unknown(format!(
+                "{command_name}: empty answer from the hived"
+            )))
+        }
+        Err(RequestFailure::AnswerLost(reason)) => {
+            return Err(DispatchFailure::Unknown(format!(
+                "{command_name}: answer lost ({reason})"
+            )))
+        }
+        Err(RequestFailure::NotSent(_)) => {
+            return Err(DispatchFailure::Refused(
+                crate::devlog::hived_unavailable_message(std::path::Path::new(workspace)),
+            ))
+        }
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
         let error = match payload.get("error") {
@@ -51,7 +132,10 @@ pub(crate) fn request_send_payload(
             Some(other) => other.to_string(),
             None => format!("{command_name} failed"),
         };
-        bail!("{error}");
+        return Err(DispatchFailure::Refused(error));
+    }
+    if let Some(reason) = payload.get("dispatchUnknown").and_then(Value::as_str) {
+        return Err(DispatchFailure::Unknown(reason.to_string()));
     }
     let mut normalized = payload;
     normalized.shift_remove("ok");
@@ -172,7 +256,7 @@ pub(crate) fn split_team_address(addr: &str) -> (String, String) {
 /// load the target pane's team directly, so cross-team sends work across
 /// tmux windows. Bare names fall back to the caller's scoped team.
 pub(crate) fn resolve_send_target_team(to_agent: &str) -> Result<(String, Team)> {
-    if to_agent.contains('.') && to_agent != "flow.run" {
+    if to_agent.contains('.') {
         let resolved = match find_qualified_agent_target(to_agent) {
             Ok(resolved) => resolved,
             Err(err) => bail!("{err}"),
@@ -196,20 +280,6 @@ pub(crate) fn resolve_send_target_team(to_agent: &str) -> Result<(String, Team)>
 
 /// Target resolution for a Claude-session guest (outside tmux).
 pub(crate) fn resolve_guest_send_target(to_agent: &str, team: &str) -> Result<(String, Team)> {
-    if to_agent == "flow.run" {
-        let me = crate::adapters::claude_sessions::self_session();
-        let membership = me
-            .as_ref()
-            .and_then(|s| crate::registry::member_for_session(&s.session_id, None));
-        let membership = match membership {
-            Some(m) => m,
-            None => {
-                bail!("the flow mailbox is a team-internal address; only members deliver to it")
-            }
-        };
-        let loaded = load_team(&membership.0, "")?;
-        return Ok((membership.0, loaded));
-    }
     if !team.is_empty() {
         let t = load_team(team, "")?;
         if existing_team_agent(&t, to_agent).is_none() {
@@ -291,6 +361,72 @@ mod tests {
             cli: String::new(),
             group: group.to_string(),
         }
+    }
+
+    #[test]
+    fn test_hived_answer_splits_refused_from_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_string_lossy().to_string();
+        let refused = |reason: &str| {
+            Map::from_iter([
+                ("ok".to_string(), Value::Bool(false)),
+                ("error".to_string(), Value::from(reason)),
+            ])
+        };
+        // The hived said no: the task never left.
+        assert_eq!(
+            hived_answer(&ws, Ok(refused("transport refused")), "node dispatch"),
+            Err(DispatchFailure::Refused("transport refused".to_string()))
+        );
+        assert_eq!(
+            hived_answer(
+                &ws,
+                Ok(Map::from_iter([("ok".to_string(), Value::Bool(false))])),
+                "node dispatch"
+            ),
+            Err(DispatchFailure::Refused("node dispatch failed".to_string()))
+        );
+        // The request never reached the hived: refused, with the
+        // unavailable diagnosis.
+        assert_eq!(
+            hived_answer(
+                &ws,
+                Err(RequestFailure::NotSent("connect refused".to_string())),
+                "node dispatch"
+            ),
+            Err(DispatchFailure::Refused("hived unavailable".to_string()))
+        );
+        // The request went out and the answer did not come back: unknown.
+        assert_eq!(
+            hived_answer(
+                &ws,
+                Err(RequestFailure::AnswerLost("read timed out".to_string())),
+                "node dispatch"
+            ),
+            Err(DispatchFailure::Unknown(
+                "node dispatch: answer lost (read timed out)".to_string()
+            ))
+        );
+        assert_eq!(
+            hived_answer(&ws, Ok(Map::new()), "node dispatch"),
+            Err(DispatchFailure::Unknown(
+                "node dispatch: empty answer from the hived".to_string()
+            ))
+        );
+        // A success is handed on without its `ok`.
+        let ok = Map::from_iter([
+            ("ok".to_string(), Value::Bool(true)),
+            ("seq".to_string(), Value::from(3)),
+        ]);
+        assert_eq!(
+            hived_answer(&ws, Ok(ok), "node dispatch"),
+            Ok(Map::from_iter([("seq".to_string(), Value::from(3))]))
+        );
+        // An ordinary send folds both kinds into one error string.
+        let err = hived_send_result(&ws, None, "send").unwrap_err();
+        assert_eq!(err.to_string(), "hived unavailable");
+        let err = hived_send_result(&ws, Some(refused("gate closed")), "send").unwrap_err();
+        assert_eq!(err.to_string(), "gate closed");
     }
 
     #[test]

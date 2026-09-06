@@ -95,7 +95,7 @@ skill 更新随二进制走：claude 侧 marketplace 的 command source 每个 s
 
 ## 文档
 
-- [`docs/runtime-model.md`](docs/runtime-model.md) —— 注册表与显示层的身份之分、各 CLI 的原生 runtime 来源，以及 `busy` / `inputState` / `turnPhase`
+- [`docs/runtime-model.md`](docs/runtime-model.md) —— 注册表与显示层的身份之分、各 CLI 的原生 runtime 来源，以及 `busy` / `inputState`
 - [`docs/transcript-view.md`](docs/transcript-view.md) —— `hive view` 画的是什么：JSONL → `DisplayBlock` 的解析模型、viewer 的 chrome、主题解析
 - [`docs/daemon-control-socket.md`](docs/daemon-control-socket.md) —— Claude supervisor daemon 的控制协议，其 `op:"reply"` 是 hive 的投递主道
 - [`plugins/hive/skills/hive/SKILL.md`](plugins/hive/skills/hive/SKILL.md) —— `/hive:hive` 载入 agent 的协作协议

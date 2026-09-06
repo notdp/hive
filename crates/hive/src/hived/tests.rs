@@ -15,8 +15,9 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
+use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::agent::{Agent, DeliveryError};
+use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::runtime_snapshot::RuntimeSnapshot;
 use crate::team::Team;
 use crate::testenv::EnvGuard;
@@ -26,8 +27,8 @@ use super::testhook::{self, FakeAdapter, Hook};
 use super::*;
 use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::ThreadRuntime;
-use crate::adapters::grok_leader::SessionRuntime;
+use crate::adapters::codex_app_server::{ThreadRuntime, TurnResult};
+use crate::adapters::grok_leader::{PromptResult, SessionRuntime};
 
 /// Collectors the hook closures push into: `(target, option, value)` tmux
 /// writes, `(event, payload)` notify emits, `(argv, stderr path)` spawns and
@@ -476,6 +477,194 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["snapshot"]["sessionId"], Value::from("sid-old"));
     assert_eq!(payload["snapshot"]["_sessionIdFresh"], Value::Bool(false));
+}
+
+fn turn_open_team(name: &str) -> Team {
+    let with_session = |agent: Agent, sid: &str| Agent {
+        session_id: Some(sid.to_string()),
+        ..agent
+    };
+    fake_team(
+        name,
+        vec![
+            with_session(fake_agent("c", "%4", "codex"), "thr-1"),
+            with_session(fake_agent("c-mute", "%5", "codex"), "thr-mute"),
+            fake_agent("c-blank", "", "codex"),
+            with_session(fake_agent("k", "%6", "claude"), "cafe1234"),
+            fake_agent("g", "%3", "grok"),
+            fake_agent("g-idle", "%12", "grok"),
+            fake_agent("g-seen", "%13", "grok"),
+            fake_agent("quiet", "", "grok"),
+            fake_agent("sh", "%11", "bash"),
+        ],
+    )
+}
+
+#[test]
+fn test_turn_open_payload_asks_each_engine_directly() {
+    let debug_events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
+    let debug_sink = Arc::clone(&debug_events);
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| Ok(turn_open_team(name)))),
+        // codex: the app-server's `thread/read` on the roster thread id.
+        cas_turn_open_for_thread: Some(Arc::new(|thread| match thread {
+            "thr-1" => Some(true),
+            "thr-mute" => None,
+            _ => panic!("unexpected thread {thread}"),
+        })),
+        // grok: the leader pool's push-fed turn evidence.
+        gl_turn_open_for_key: Some(Arc::new(|key| match key {
+            "m-honey.g" => Some(Some(true)),
+            "m-honey.g-idle" => Some(Some(false)),
+            // a client on the key (loaded and reporting a command table,
+            // an announcement) that has seen no turn event
+            "m-honey.g-seen" => Some(None),
+            _ => None,
+        })),
+        notify_debug_emit: Some(Arc::new(move |ws, event, fields| {
+            assert_eq!(ws, "/ws");
+            debug_sink.lock().unwrap().push((
+                event.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let open = |agent: &str| turn_open_payload("/ws", "honey", agent).unwrap()["open"].clone();
+    // A null answer carries its reason, and the same reason went out as a
+    // `turn_open.null` event for the member.
+    let null_reason = |agent: &str, cli: &str| -> String {
+        let payload = turn_open_payload("/ws", "honey", agent).unwrap();
+        assert_eq!(payload["open"], Value::Null, "{agent}");
+        let reason = payload["reason"].as_str().unwrap().to_string();
+        let events = debug_events.lock().unwrap();
+        let (_, fields) = events
+            .iter()
+            .rev()
+            .find(|(event, _)| event == "turn_open.null")
+            .expect("turn_open.null emitted");
+        let field = |k: &str| fields.iter().find(|(key, _)| key == k).unwrap().1.clone();
+        assert_eq!(field("team"), Value::from("honey"));
+        assert_eq!(field("cli"), Value::from(cli));
+        assert_eq!(field("agent"), Value::from(agent));
+        assert_eq!(field("reason"), Value::from(reason.as_str()));
+        reason
+    };
+
+    let payload = turn_open_payload("/ws", "honey", "c").unwrap();
+    assert_eq!(payload["ok"], Value::Bool(true));
+    assert_eq!(payload["agent"], Value::from("c"));
+    assert_eq!(payload["open"], Value::Bool(true));
+    assert!(payload.get("reason").is_none());
+    // No daemon answer, or no thread to ask about, is no answer.
+    assert!(null_reason("c-mute", "codex").contains("thr-mute"));
+    assert!(null_reason("c-blank", "codex").contains("no session id"));
+
+    // A claude bg job reports no turn end over any RPC, and a claude
+    // member is no workflow node: no turn evidence, like any other engine
+    // hive cannot ask.
+    assert!(null_reason("k", "claude").contains("no turn evidence"));
+
+    assert_eq!(open("g"), Value::Bool(true));
+    assert_eq!(open("g-idle"), Value::Bool(false));
+    // A leader client that has seen no turn event is no answer, and so is
+    // a key with no client at all.
+    assert!(null_reason("g-seen", "grok").contains("no turn evidence yet"));
+    assert!(null_reason("quiet", "grok").contains("no leader client for m-honey.quiet"));
+
+    // An engine hive cannot ask has no answer; a member off the roster is
+    // an error, not a null.
+    assert!(null_reason("sh", "bash").contains("no turn evidence"));
+    assert!(turn_open_payload("/ws", "honey", "nobody").is_err());
+    // Nothing positive emitted an event.
+    let events = debug_events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(event, _)| event == "turn_open.null")
+            .count(),
+        6
+    );
+}
+
+#[test]
+fn test_turn_open_payload_records_a_failed_team_load() {
+    let debug_events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
+    let debug_sink = Arc::clone(&debug_events);
+    let _guard = testhook::install(Hook {
+        team_load: Some(Arc::new(|name| Err(anyhow::anyhow!("no entry for {name}")))),
+        notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
+            debug_sink.lock().unwrap().push((
+                event.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
+        })),
+        ..Default::default()
+    });
+    let err = turn_open_payload("/ws", "honey", "g")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no entry for honey"), "{err}");
+    let events = debug_events.lock().unwrap();
+    let (event, fields) = &events[0];
+    assert_eq!(event, "turn_open.null");
+    let field = |k: &str| fields.iter().find(|(key, _)| key == k).unwrap().1.clone();
+    assert_eq!(field("agent"), Value::from("g"));
+    assert!(field("reason")
+        .as_str()
+        .unwrap()
+        .starts_with("team load failed: no entry for honey"));
+}
+
+#[test]
+fn test_handle_request_turn_open_answers_for_the_team() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| {
+            Ok(fake_team(name, vec![fake_agent("g", "%3", "grok")]))
+        })),
+        gl_turn_open_for_key: Some(Arc::new(|key| {
+            assert_eq!(key, "m-honey.g");
+            Some(Some(false))
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let request = json_obj(&[
+        ("action", Value::from("turn-open")),
+        ("team", Value::from("honey")),
+        ("agent", Value::from("g")),
+    ]);
+    let (response, keep_serving) = handle_request(
+        "/ws",
+        "honey",
+        "dev:1",
+        "@7",
+        "2026-01-01T00:00:00Z",
+        &request,
+    );
+    assert!(keep_serving);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["open"], Value::Bool(false));
+    let missing = json_obj(&[
+        ("action", Value::from("turn-open")),
+        ("agent", Value::from("nobody")),
+    ]);
+    let (response, _) = handle_request(
+        "/ws",
+        "honey",
+        "dev:1",
+        "@7",
+        "2026-01-01T00:00:00Z",
+        &missing,
+    );
+    assert_eq!(response["ok"], Value::Bool(false));
 }
 
 #[test]
@@ -1077,10 +1266,9 @@ fn test_claude_supervisor_tick_treats_empty_listing_as_tmux_failure() {
 
 // ---- codex runtime -----------------------------------------------------
 
-fn thread_runtime(busy: bool, turn_phase: &str, input_state: &str) -> ThreadRuntime {
+fn thread_runtime(busy: bool, input_state: &str) -> ThreadRuntime {
     ThreadRuntime {
         busy,
-        turn_phase: turn_phase.to_string(),
         input_state: input_state.to_string(),
         ..Default::default()
     }
@@ -1088,7 +1276,7 @@ fn thread_runtime(busy: bool, turn_phase: &str, input_state: &str) -> ThreadRunt
 
 #[test]
 fn test_codex_app_server_runtime_maps_fields() {
-    let rt = thread_runtime(true, "tool_open", "ready");
+    let rt = thread_runtime(true, "ready");
     let hook = Hook {
         cas_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1096,7 +1284,6 @@ fn test_codex_app_server_runtime_maps_fields() {
     let _guard = testhook::install(hook);
     let out = codex_app_server_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
-    assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
     assert_eq!(out["_runtimeSource"], Value::from("codex_app_server"));
 }
@@ -1113,7 +1300,7 @@ fn test_codex_app_server_runtime_none_without_daemon() {
 
 #[test]
 fn test_codex_app_server_runtime_waiting_user() {
-    let rt = thread_runtime(true, "tool_open", "waiting_user");
+    let rt = thread_runtime(true, "waiting_user");
     let hook = Hook {
         cas_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1168,10 +1355,9 @@ fn test_doctor_verbose_reports_codex_daemon() {
 
 // ---- grok runtime ------------------------------------------------------
 
-fn session_runtime(busy: bool, turn_phase: &str, input_state: &str) -> SessionRuntime {
+fn session_runtime(busy: bool, input_state: &str) -> SessionRuntime {
     SessionRuntime {
         busy,
-        turn_phase: turn_phase.to_string(),
         input_state: input_state.to_string(),
         ..Default::default()
     }
@@ -1179,7 +1365,7 @@ fn session_runtime(busy: bool, turn_phase: &str, input_state: &str) -> SessionRu
 
 #[test]
 fn test_grok_leader_runtime_maps_fields() {
-    let rt = session_runtime(true, "tool_open", "ready");
+    let rt = session_runtime(true, "ready");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1187,7 +1373,6 @@ fn test_grok_leader_runtime_maps_fields() {
     let _guard = testhook::install(hook);
     let out = grok_leader_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
-    assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
     assert_eq!(out["inputReason"], Value::from(""));
     assert_eq!(out["_runtimeSource"], Value::from("grok-leader"));
@@ -1205,7 +1390,7 @@ fn test_grok_leader_runtime_none_without_daemon() {
 
 #[test]
 fn test_grok_leader_runtime_defaults_empty_input_state_to_ready() {
-    let rt = session_runtime(true, "user_prompt_pending", "");
+    let rt = session_runtime(true, "");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1219,7 +1404,7 @@ fn test_grok_leader_runtime_defaults_empty_input_state_to_ready() {
 
 #[test]
 fn test_grok_leader_runtime_waiting_user() {
-    let rt = session_runtime(true, "tool_open", "waiting_user");
+    let rt = session_runtime(true, "waiting_user");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1245,21 +1430,20 @@ fn live_grok_pane(runtime: Option<SessionRuntime>, session_id: Option<String>) -
 #[test]
 fn test_agent_payload_grok_branch_reports_minted_session() {
     let hook = live_grok_pane(
-        Some(session_runtime(true, "tool_open", "ready")),
+        Some(session_runtime(true, "ready")),
         Some("sid-grok-1".to_string()),
     );
     let _guard = testhook::install(hook);
     let rt = agent_runtime_payload("%5", None);
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     assert_eq!(rt["busy"], Value::Bool(true));
-    assert_eq!(rt["turnPhase"], Value::from("tool_open"));
     assert_eq!(rt["_runtimeSource"], Value::from("grok-leader"));
     assert_eq!(rt["sessionId"], Value::from("sid-grok-1"));
 }
 
 #[test]
 fn test_agent_payload_grok_session_unresolved_without_record() {
-    let hook = live_grok_pane(Some(session_runtime(false, "turn_closed", "ready")), None);
+    let hook = live_grok_pane(Some(session_runtime(false, "ready")), None);
     let _guard = testhook::install(hook);
     assert_eq!(
         agent_runtime_payload("%5", None)["sessionId"],
@@ -1849,6 +2033,8 @@ fn test_cleanup_member_daemon_missing_registry_reaps_after_grace() {
 struct SuperState {
     panes: Vec<(String, String, String)>, // pane_id, agent, cli
     recorded: Vec<String>,
+    record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = legacy record
+    own_socket: Option<String>,
     threads: HashMap<String, String>,
     daemon_alive: bool,
     spawn_ok: bool,
@@ -1861,6 +2047,12 @@ fn super_state() -> SuperState {
     SuperState {
         panes: vec![("%1".to_string(), "val".to_string(), "codex".to_string())],
         recorded: vec!["%1".to_string()],
+        record_sockets: HashMap::new(),
+        own_socket: Some(
+            crate::tmux::default_socket_path()
+                .to_string_lossy()
+                .into_owned(),
+        ),
         threads: HashMap::from([("%1".to_string(), "tid-1".to_string())]),
         daemon_alive: true,
         spawn_ok: true,
@@ -1898,6 +2090,8 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let send_sink = Arc::clone(&calls);
     let emit_sink = Arc::clone(&calls);
     let s_recorded = Arc::clone(&state);
+    let s_sockets = Arc::clone(&state);
+    let s_own = Arc::clone(&state);
     let s_threads = Arc::clone(&state);
     let s_alive = Arc::clone(&state);
     let s_spawn = Arc::clone(&state);
@@ -1906,6 +2100,10 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let hook = Hook {
         list_panes_all: Some(Arc::new(list_panes)),
         cas_list_recorded_panes: Some(Arc::new(move || s_recorded.recorded.clone())),
+        cas_pane_thread_socket: Some(Arc::new(move |pane| {
+            s_sockets.record_sockets.get(pane).cloned()
+        })),
+        tmux_socket_path: Some(Arc::new(move || s_own.own_socket.clone())),
         cas_clear_pane_thread: Some(Arc::new(move |pane| {
             clear_sink.lock().unwrap().push(format!("clear {pane}"))
         })),
@@ -2167,6 +2365,11 @@ fn idle_setup(
             })
         })),
         is_plugin_enabled: Some(Arc::new(move |_name| plugin_enabled)),
+        // Both busy oracles answered here: an unhooked native_daemon_busy
+        // resolves "%1" through the real codex pane record and asks the
+        // live daemon, so the verdict would follow whatever member sits on
+        // that pane of the developer's tmux.
+        native_daemon_busy: Some(Arc::new(|_pane| None)),
         transcript_progressed_recently: Some(Arc::new(|_pane, _threshold| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
         ..Default::default()
@@ -2885,7 +3088,161 @@ fn test_hived_identity_matches_team_and_ignores_window() {
 }
 
 #[test]
+fn test_hived_identity_refuses_another_hive_home_before_reading_the_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let home = tmp.path().to_string_lossy().into_owned();
+    let identity = |build: &str, home: &str| {
+        json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from(build)),
+            ("team", Value::from("team-a")),
+            ("hiveHome", Value::from(home)),
+        ])
+    };
+    assert_eq!(
+        hived_identity(Some(&identity(hived_build_hash(), &home)), "team-a"),
+        HivedIdentity::Matches
+    );
+    // A trailing slash is the same home.
+    assert_eq!(
+        hived_identity(
+            Some(&identity(hived_build_hash(), &format!("{home}/"))),
+            "team-a"
+        ),
+        HivedIdentity::Matches
+    );
+    assert_eq!(
+        hived_identity(Some(&identity("stale", &home)), "team-a"),
+        HivedIdentity::Restart
+    );
+    assert_eq!(hived_identity(None, "team-a"), HivedIdentity::Restart);
+    // Another home is refused whatever the build says — even this one.
+    assert_eq!(
+        hived_identity(
+            Some(&identity(hived_build_hash(), "/elsewhere/.hive")),
+            "team-a"
+        ),
+        HivedIdentity::ForeignHome("/elsewhere/.hive".to_string())
+    );
+    assert_eq!(
+        hived_identity(Some(&identity("stale", "/elsewhere/.hive")), "team-a"),
+        HivedIdentity::ForeignHome("/elsewhere/.hive".to_string())
+    );
+    // A hived that reports no home (an older build) is restarted as before.
+    let mut unhomed = identity("stale", &home);
+    unhomed.shift_remove("hiveHome");
+    assert_eq!(
+        hived_identity(Some(&unhomed), "team-a"),
+        HivedIdentity::Restart
+    );
+}
+
+/// `ensure_hived` against a hooked ping: `identity` is what the socket
+/// answers before a start, `after_start` once the popen hook has run.
+/// Returns the result and the popen / cleanup_socket call counts.
+fn ensure_hived_against(
+    identity: Map<String, Value>,
+    after_start: Map<String, Value>,
+) -> (Result<Option<i32>>, usize, usize) {
+    let run_tmp = tempfile::Builder::new()
+        .prefix("hens")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = run_tmp.path().to_path_buf();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ping_started = Arc::clone(&started);
+    let popen_started = Arc::clone(&started);
+    let popen_spawns = Arc::clone(&spawns);
+    let cleanup_count = Arc::clone(&cleanups);
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        request_ping: Some(Arc::new(move |_ws| {
+            if ping_started.load(Ordering::SeqCst) {
+                Some(after_start.clone())
+            } else {
+                Some(identity.clone())
+            }
+        })),
+        cleanup_socket: Some(Arc::new(move |_ws| {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        })),
+        popen: Some(Arc::new(move |_command, _stderr| {
+            popen_spawns.fetch_add(1, Ordering::SeqCst);
+            popen_started.store(true, Ordering::SeqCst);
+            4242
+        })),
+        ..Default::default()
+    });
+    let result = ensure_hived("/tmp/ws-ensure", "team-a", "dev:3", "@99");
+    (
+        result,
+        spawns.load(Ordering::SeqCst),
+        cleanups.load(Ordering::SeqCst),
+    )
+}
+
+#[test]
+fn test_ensure_hived_restarts_a_stale_hived_of_the_same_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let home = tmp.path().to_string_lossy().into_owned();
+    let identity = |build: &str| {
+        json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from(build)),
+            ("team", Value::from("team-a")),
+            ("hiveHome", Value::from(home.clone())),
+        ])
+    };
+    let (result, spawns, cleanups) =
+        ensure_hived_against(identity("stale"), identity(hived_build_hash()));
+    assert_eq!(result.unwrap(), Some(4242));
+    assert_eq!(spawns, 1);
+    assert_eq!(cleanups, 1);
+
+    // Already this build: nothing to do.
+    let (result, spawns, _) =
+        ensure_hived_against(identity(hived_build_hash()), identity(hived_build_hash()));
+    assert_eq!(result.unwrap(), None);
+    assert_eq!(spawns, 0);
+}
+
+#[test]
+fn test_ensure_hived_refuses_a_hived_of_another_home_and_starts_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let foreign = json_obj(&[
+        ("ok", Value::Bool(true)),
+        ("apiVersion", Value::from(HIVED_API_VERSION)),
+        ("buildHash", Value::from("stale")),
+        ("team", Value::from("team-a")),
+        ("hiveHome", Value::from("/elsewhere/.hive")),
+    ]);
+    let (result, spawns, cleanups) = ensure_hived_against(foreign.clone(), foreign);
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("/tmp/ws-ensure"), "{err}");
+    assert!(err.contains("/elsewhere/.hive"), "{err}");
+    assert!(
+        err.contains(&tmp.path().to_string_lossy().into_owned()),
+        "{err}"
+    );
+    assert_eq!(spawns, 0);
+    assert_eq!(cleanups, 0);
+}
+
+#[test]
 fn test_handle_request_ping_returns_hived_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
     let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
@@ -2901,6 +3258,10 @@ fn test_handle_request_ping_returns_hived_identity() {
         ("apiVersion", Value::from(HIVED_API_VERSION)),
         ("buildHash", Value::from(hived_build_hash())),
         ("team", Value::from("team-a")),
+        (
+            "hiveHome",
+            Value::from(tmp.path().to_string_lossy().into_owned()),
+        ),
         ("tmuxWindow", Value::from("dev:3")),
         ("tmuxWindowId", Value::from("@99")),
         (
@@ -3064,6 +3425,222 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
 }
 
 #[test]
+fn test_handle_request_node_dispatch_carries_no_sender() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
+        panic!("a node dispatch is a tracked turn, never a plain send")
+    }));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text| {
+        handed_sink.lock().unwrap().push(text.to_string());
+        Ok(TurnHandle::Codex {
+            thread_id: "thr-b".to_string(),
+            turn_id: "turn-1".to_string(),
+        })
+    }));
+    let _guard = testhook::install(hook);
+
+    // No dispatch id is no dispatch.
+    let (response, keep_running) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("node-dispatch")),
+            ("targetAgent", Value::from("b")),
+            ("body", Value::from("task")),
+        ]),
+    );
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(false));
+    assert!(bus::read_all_events(&workspace).unwrap().is_empty());
+
+    // The wire shape: action `node-dispatch`, a `dispatchId`, no
+    // `senderAgent` key at all.
+    let (response, keep_running) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("node-dispatch")),
+            ("dispatchId", Value::from("nd-0123456789ab")),
+            ("targetAgent", Value::from("b")),
+            ("body", Value::from("task nd-0123456789ab\ndo it")),
+            (
+                "artifact",
+                Value::from("/ws/artifacts/tasks/b-nd-0123456789ab.md"),
+            ),
+        ]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["to"], Value::from("b"));
+    let seq = response["seq"].as_i64().unwrap();
+    let events = bus::read_all_events(&workspace).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].seq, seq);
+    assert_eq!(events[0].from, "");
+    assert_eq!(events[0].to, "b");
+    let handed = handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert!(
+        handed[0].starts_with("<HIVE to=b artifact="),
+        "{}",
+        handed[0]
+    );
+
+    // The turn is held under the dispatch id from here: `node-result`
+    // reads it running, then ended with the engine's word and text.
+    let ask = |dispatch_id: &str| {
+        handle_request(
+            &workspace.to_string_lossy(),
+            "team-a",
+            "dev:3",
+            "@99",
+            "2026-04-17T00:00:00Z",
+            &json_obj(&[
+                ("action", Value::from("node-result")),
+                ("dispatchId", Value::from(dispatch_id)),
+            ]),
+        )
+        .0
+    };
+    let running = Arc::new(Mutex::new(true));
+    let running_hook = Arc::clone(&running);
+    testhook::update(|h| {
+        h.cas_turn_result = Some(Arc::new(move |turn_id| {
+            assert_eq!(turn_id, "turn-1");
+            Some(TurnResult {
+                thread_id: "thr-b".to_string(),
+                status: (!*running_hook.lock().unwrap()).then(|| "completed".to_string()),
+                error: None,
+                messages: vec!["on it".to_string(), "done: see /tmp/out.md".to_string()],
+            })
+        }))
+    });
+    assert_eq!(ask("nd-0123456789ab")["state"], Value::from("running"));
+    *running.lock().unwrap() = false;
+    let ended = ask("nd-0123456789ab");
+    assert_eq!(ended["state"], Value::from("ended"));
+    assert_eq!(ended["status"], Value::from("completed"));
+    assert_eq!(ended["text"], Value::from("done: see /tmp/out.md"));
+    assert_eq!(ended["error"], Value::Null);
+    // A dispatch this hived never made is unknown, with the reason.
+    let unknown = ask("nd-ffffffffffff");
+    assert_eq!(unknown["state"], Value::from("unknown"));
+    assert!(unknown["reason"]
+        .as_str()
+        .unwrap()
+        .contains("holds no turn for dispatch nd-ffffffffffff"));
+    let (missing, _) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[("action", Value::from("node-result"))]),
+    );
+    assert_eq!(missing["ok"], Value::Bool(false));
+}
+
+#[test]
+fn test_node_result_payload_reads_each_engines_own_word() {
+    let _guard = testhook::install(Hook {
+        cas_turn_result: Some(Arc::new(|turn_id| match turn_id {
+            "t-run" => Some(TurnResult {
+                thread_id: "thr".to_string(),
+                status: None,
+                error: None,
+                messages: vec!["partial".to_string()],
+            }),
+            "t-failed" => Some(TurnResult {
+                thread_id: "thr".to_string(),
+                status: Some("failed".to_string()),
+                error: Some("{\"code\":1}".to_string()),
+                messages: vec![],
+            }),
+            "t-gone" => None,
+            _ => panic!("unexpected turn {turn_id}"),
+        })),
+        gl_prompt_result: Some(Arc::new(|key, rid| {
+            assert_eq!(key, "m-honey.g");
+            match rid.rid {
+                1 => Some(PromptResult::Running),
+                2 => Some(PromptResult::Ended {
+                    stop_reason: "end_turn".to_string(),
+                    text: "SAGE_FINAL".to_string(),
+                    error: None,
+                }),
+                3 => Some(PromptResult::Ended {
+                    stop_reason: "error".to_string(),
+                    text: String::new(),
+                    error: Some("closed".to_string()),
+                }),
+                _ => None,
+            }
+        })),
+        ..Default::default()
+    });
+    let hold = |id: &str, handle: TurnHandle| {
+        node_turns().lock().unwrap().insert(id.to_string(), handle);
+    };
+    let codex = |turn_id: &str| TurnHandle::Codex {
+        thread_id: "thr".to_string(),
+        turn_id: turn_id.to_string(),
+    };
+    let grok = |rid: u64| TurnHandle::Grok {
+        key: "m-honey.g".to_string(),
+        prompt_id: PromptId { generation: 1, rid },
+    };
+    hold("c-run", codex("t-run"));
+    hold("c-failed", codex("t-failed"));
+    hold("c-gone", codex("t-gone"));
+    hold("g-run", grok(1));
+    hold("g-done", grok(2));
+    hold("g-err", grok(3));
+    hold("g-gone", grok(4));
+    hold("untracked", TurnHandle::Untracked("no turn id".to_string()));
+
+    let state = |id: &str| node_result_payload(id)["state"].clone();
+    assert_eq!(state("c-run"), Value::from("running"));
+    let failed = node_result_payload("c-failed");
+    assert_eq!(failed["state"], Value::from("ended"));
+    assert_eq!(failed["status"], Value::from("failed"));
+    assert_eq!(failed["text"], Value::from(""));
+    assert_eq!(failed["error"], Value::from("{\"code\":1}"));
+    let gone = node_result_payload("c-gone");
+    assert_eq!(gone["state"], Value::from("unknown"));
+    assert!(gone["reason"].as_str().unwrap().contains("t-gone"));
+
+    assert_eq!(state("g-run"), Value::from("running"));
+    let done = node_result_payload("g-done");
+    assert_eq!(done["state"], Value::from("ended"));
+    assert_eq!(done["status"], Value::from("end_turn"));
+    assert_eq!(done["text"], Value::from("SAGE_FINAL"));
+    let err = node_result_payload("g-err");
+    assert_eq!(err["status"], Value::from("error"));
+    assert_eq!(err["error"], Value::from("closed"));
+    assert!(node_result_payload("g-gone")["reason"]
+        .as_str()
+        .unwrap()
+        .contains("prompt 4"));
+    let untracked = node_result_payload("untracked");
+    assert_eq!(untracked["state"], Value::from("unknown"));
+    assert!(untracked["reason"].as_str().unwrap().contains("no turn id"));
+    assert_eq!(node_result_payload("nope")["state"], Value::from("unknown"));
+}
+
+#[test]
 fn test_handle_request_doctor_embeds_hived_identity_and_defaults_the_team() {
     let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&asked);
@@ -3179,7 +3756,61 @@ fn test_start_hived_spawns_current_exe_with_hived_argv() {
 }
 
 #[test]
+fn test_registry_visible_requires_the_entry_under_this_hive_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let entry = crate::registry::entry_path("team-a").unwrap();
+
+    let refused = registry_visible("team-a").unwrap_err();
+    assert!(
+        refused.contains(&entry.to_string_lossy().into_owned()),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&tmp.path().to_string_lossy().into_owned()),
+        "{refused}"
+    );
+    assert!(registry_visible("../escape").is_err());
+
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(&entry, "{}").unwrap();
+    assert_eq!(registry_visible("team-a"), Ok(()));
+
+    // Another home does not see it.
+    let other = tempfile::tempdir().unwrap();
+    env.set("HIVE_HOME", other.path());
+    assert!(registry_visible("team-a").is_err());
+}
+
+#[test]
+fn test_run_spawned_hived_refuses_a_team_missing_from_its_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let _guard = testhook::install(Hook {
+        ignore_sigint: Some(Arc::new(|| panic!("must not reach the loop"))),
+        hived_loop: Some(Arc::new(|_, _, _, _| panic!("must not reach the loop"))),
+        ..Default::default()
+    });
+    let exit_code = run_spawned_hived(&[
+        "--hived".to_string(),
+        "/tmp/ws".to_string(),
+        "team-a".to_string(),
+        "dev:3".to_string(),
+        "@99".to_string(),
+    ]);
+    assert_eq!(exit_code, 2);
+}
+
+#[test]
 fn test_run_spawned_hived_ignores_sigint_and_runs_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let entry = crate::registry::entry_path("team-a").unwrap();
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(&entry, "{}").unwrap();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sigint_sink = Arc::clone(&calls);
     let loop_sink = Arc::clone(&calls);
@@ -3872,7 +4503,7 @@ fn send_payload_for_test(
     send_payload(
         &workspace.to_string_lossy(),
         "team-x",
-        sender,
+        SendOrigin::Member(sender),
         target,
         body,
         artifact,
@@ -3995,31 +4626,165 @@ fn test_three_message_busy_incident_regression() {
 }
 
 #[test]
-fn test_send_to_flow_mailbox_writes_bus_row_without_transport() {
-    // `flow.run` is a mailbox: the durable bus row IS the delivery. No
-    // member resolution, no gate, no transport — a member's
-    // `hive send flow.run` must succeed with no flow-runner pane
-    // anywhere.
+fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
+    // A `hive workflow run` dispatch rides the normal transport (member
+    // resolution, send gate, hand-off) but has no sender: the ledger row's
+    // from_agent is empty, the envelope carries no `from`, and the
+    // transport's origin label is the team itself.
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     bus::init_workspace(&workspace).unwrap();
-    let hook = Hook {
-        resolve_live_agent: Some(Arc::new(|_team, _agent| {
-            panic!("mailbox send must not resolve a live agent")
-        })),
-        ..Default::default()
-    };
+    let gated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let gated_sink = Arc::clone(&gated);
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.check_send_gate = Some(Arc::new(move |target| {
+        gated_sink.lock().unwrap().push(target.name.clone());
+        Ok(())
+    }));
+    hook.agent_dispatch_turn = Some(Arc::new(move |agent, text| {
+        handed_sink
+            .lock()
+            .unwrap()
+            .push((text.to_string(), agent.name.clone()));
+        Ok(TurnHandle::Grok {
+            key: "m-team-x.b".to_string(),
+            prompt_id: PromptId {
+                generation: 1,
+                rid: 7,
+            },
+        })
+    }));
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "impl", "flow.run", "done", "/tmp/a.md");
+    let payload = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node {
+            dispatch_id: "nd-0123456789ab",
+        },
+        "b",
+        "task nd-0123456789ab\nreview it",
+        "/ws/artifacts/tasks/b-nd-0123456789ab.md",
+    )
+    .unwrap();
 
     assert_eq!(payload["ok"], Value::Bool(true));
-    assert_eq!(payload["mailbox"], Value::Bool(true));
+    assert_eq!(payload["to"], Value::from("b"));
+    assert_eq!(*gated.lock().unwrap(), vec!["b".to_string()]);
     let events = bus::read_all_events(&workspace).unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].to, "flow.run");
-    assert_eq!(events[0].from, "impl");
-    assert_eq!(events[0].artifact, "/tmp/a.md");
+    assert_eq!(events[0].seq, payload["seq"].as_i64().unwrap());
+    assert_eq!(events[0].from, "");
+    assert_eq!(events[0].to, "b");
+    assert_eq!(events[0].body, "task nd-0123456789ab\nreview it");
+    assert_eq!(
+        events[0].artifact,
+        "/ws/artifacts/tasks/b-nd-0123456789ab.md"
+    );
+    let handed = handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(
+        handed[0].0,
+        "<HIVE to=b artifact=/ws/artifacts/tasks/b-nd-0123456789ab.md>\ntask nd-0123456789ab\nreview it\n</HIVE>"
+    );
+    assert_eq!(handed[0].1, "b");
+    assert!(payload.get("untracked").is_none());
+    // The engine's handle is held under the dispatch id.
+    assert_eq!(
+        node_turns().lock().unwrap().get("nd-0123456789ab"),
+        Some(&TurnHandle::Grok {
+            key: "m-team-x.b".to_string(),
+            prompt_id: PromptId {
+                generation: 1,
+                rid: 7
+            },
+        })
+    );
+
+    // A refused turn is a refused dispatch: the row is on the ledger (the
+    // dispatch was attempted), nothing is held for it.
+    testhook::update(|h| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+            Err(DeliveryError(
+                "codex pane %1 did not accept the turn".to_string(),
+            ))
+        }))
+    });
+    let refused = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node {
+            dispatch_id: "nd-refused000000",
+        },
+        "b",
+        "task nd-refused000000\nagain",
+        "",
+    )
+    .unwrap();
+    assert_eq!(refused["ok"], Value::Bool(false));
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("transport refused b: codex pane %1 did not accept the turn"));
+    assert!(!node_turns()
+        .lock()
+        .unwrap()
+        .contains_key("nd-refused000000"));
+
+    // A turn the engine took without a trackable id is dispatched, flagged,
+    // and held as untracked.
+    testhook::update(|h| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+            Ok(TurnHandle::Untracked("result without turn.id".to_string()))
+        }))
+    });
+    let untracked = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node {
+            dispatch_id: "nd-untracked0000",
+        },
+        "b",
+        "task nd-untracked0000\nagain",
+        "",
+    )
+    .unwrap();
+    assert_eq!(untracked["ok"], Value::Bool(true));
+    assert_eq!(
+        untracked["untracked"],
+        Value::from("result without turn.id")
+    );
+    assert_eq!(
+        node_turns().lock().unwrap().get("nd-untracked0000"),
+        Some(&TurnHandle::Untracked("result without turn.id".to_string()))
+    );
+}
+
+#[test]
+fn test_send_with_an_empty_sender_is_not_a_node_dispatch() {
+    // Only the explicit node mode drops `from`; a malformed member send
+    // with no sender still renders the normal envelope.
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.agent_send = Some(Arc::new(move |_agent, text, _sender| {
+        handed_sink.lock().unwrap().push(text.to_string());
+        Ok("accepted".to_string())
+    }));
+    let _guard = testhook::install(hook);
+
+    send_payload_for_test(&workspace, "", "b", "hi", "");
+    assert_eq!(
+        *handed.lock().unwrap(),
+        vec!["<HIVE from= to=b>\nhi\n</HIVE>".to_string()]
+    );
 }
 
 // ---- retained-shell liveness -------------------------------------------
@@ -4324,7 +5089,7 @@ fn test_headless_member_runtime_grok() {
     let hook = Hook {
         gl_runtime_for_key: Some(Arc::new(|key| {
             if key == "m-honey.rex" {
-                Some(session_runtime(true, "tool_open", "ready"))
+                Some(session_runtime(true, "ready"))
             } else {
                 None
             }
@@ -4787,8 +5552,65 @@ fn test_send_marks_the_target_pane_unread() {
     let refused = send_payload_for_test(&workspace, "a", "b", "hi", "");
     assert_eq!(refused["ok"], Value::Bool(false));
     assert_eq!(pending(), Vec::<String>::new());
+}
 
-    // The flow mailbox owns no pane: the bus row is the delivery.
-    send_payload_for_test(&workspace, "a", FLOW_MAILBOX_AGENT, "hi", "");
-    assert_eq!(pending(), Vec::<String>::new());
+// ---- codex record reaping is scoped to the hived's own tmux server -------
+
+fn reap_calls(state: SuperState) -> Vec<String> {
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    calls
+        .iter()
+        .filter(|call| call.starts_with("clear "))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn test_supervisor_reaps_only_records_of_its_own_server() {
+    let mut state = super_state();
+    state.own_socket = Some("/x/tmux-501/e2e".to_string());
+    state.recorded = vec!["%1".to_string(), "%dead".to_string(), "%3".to_string()];
+    state.record_sockets = HashMap::from([
+        ("%dead".to_string(), "/x/tmux-501/e2e".to_string()),
+        ("%3".to_string(), "/tmp/tmux-501/default".to_string()),
+    ]);
+    // %3 is absent from this (private) server but lives on the default one
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+}
+
+#[test]
+fn test_supervisor_on_private_server_leaves_legacy_records_alone() {
+    let mut state = super_state();
+    state.own_socket = Some("/x/tmux-501/e2e".to_string());
+    state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    // no tmuxSocket on %dead: written by the pre-field binary
+    assert_eq!(reap_calls(state), Vec::<String>::new());
+}
+
+#[test]
+fn test_supervisor_on_default_server_reaps_legacy_records() {
+    let mut state = super_state();
+    state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+}
+
+#[test]
+fn test_supervisor_reaps_nothing_when_its_own_server_is_unknown() {
+    let mut state = super_state();
+    state.own_socket = None;
+    state.recorded = vec!["%1".to_string(), "%dead".to_string(), "%3".to_string()];
+    state.record_sockets = HashMap::from([("%3".to_string(), "/tmp/tmux-501/default".to_string())]);
+    assert_eq!(reap_calls(state), Vec::<String>::new());
+}
+
+#[test]
+fn test_supervisor_reaps_own_record_spelled_through_private_tmp() {
+    let mut state = super_state();
+    state.own_socket = Some("/private/tmp/tmux-501/default".to_string());
+    state.recorded = vec!["%dead".to_string()];
+    state.record_sockets =
+        HashMap::from([("%dead".to_string(), "/tmp/tmux-501/default".to_string())]);
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
 }

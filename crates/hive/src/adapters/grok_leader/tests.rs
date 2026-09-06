@@ -492,6 +492,78 @@ fn test_notifications_before_load_response_are_discarded() {
     teardown(&client, &proc);
 }
 
+fn turn_completed_for(session_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session_notification",
+        "params": {
+            "sessionId": session_id,
+            "update": {"sessionUpdate": "turn_completed", "stop_reason": "end_turn"},
+        },
+    })
+}
+
+#[test]
+fn test_replayed_history_is_turn_evidence_but_not_display_state() {
+    // The load replay is the engine's own turn history: its last turn
+    // event says whether a turn is open at load time. The display fields
+    // still ignore it.
+    let _bed = setup();
+    let chunk = || {
+        update(
+            "agent_message_chunk",
+            json!({"content": {"type": "text", "text": "old turn"}}),
+        )
+    };
+
+    // A completed turn: idle at load time.
+    let (client, proc) = loaded(None, vec![turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // A turn that ran and completed.
+    let (client, proc) = loaded(None, vec![chunk(), turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // A turn still running when the load happened.
+    let (client, proc) = loaded(None, vec![chunk()]);
+    assert_eq!(client.turn_open(), Some(true));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // Nothing replayed, or another session's history: no evidence.
+    let (client, proc) = loaded(None, vec![]);
+    assert_eq!(client.turn_open(), None);
+    teardown(&client, &proc);
+    let (client, proc) = loaded(
+        None,
+        vec![
+            update_for("other-session", "agent_message_chunk", json!({})),
+            turn_completed_for("other-session"),
+        ],
+    );
+    assert_eq!(client.turn_open(), None);
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_live_turn_evidence_overrides_the_replayed_history() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    proc.feed(&update(
+        "agent_message_chunk",
+        json!({"content": {"type": "text", "text": "new turn"}}),
+    ));
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
+    assert_eq!(client.turn_open(), Some(true));
+    teardown(&client, &proc);
+}
+
 #[test]
 fn test_notification_right_behind_the_load_response_is_folded() {
     // A live turn queued behind the load response must not count as replay.
@@ -543,19 +615,18 @@ fn test_activity_working_marks_busy_and_idle_closes_turn() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&activity("working"));
-    assert_eq!(
-        settle(&client, |rt| rt.busy).session_id.as_deref(),
-        Some(SID)
-    );
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.session_id.as_deref(), Some(SID));
+    assert_eq!(runtime.turn_open, Some(true));
     proc.feed(&activity("idle"));
     let runtime = settle(&client, |rt| !rt.busy);
-    assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
+    assert_eq!(runtime.turn_open, Some(false));
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_message_chunks_mark_user_prompt_pending() {
+fn test_message_chunks_mark_busy() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&update(
@@ -563,39 +634,20 @@ fn test_message_chunks_mark_user_prompt_pending() {
         json!({"content": {"type": "text", "text": "The"}}),
     ));
     let runtime = settle(&client, |rt| rt.busy);
-    assert_eq!(runtime.turn_phase, "user_prompt_pending");
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_tool_call_phases_survive_streamed_chunks() {
+fn test_tool_call_marks_busy() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&update(
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    assert!(settle(&client, |rt| rt.turn_phase == "tool_open").busy);
-    proc.feed(&update(
-        "tool_call_update",
-        json!({"toolCallId": "c1", "status": "completed"}),
-    ));
-    settle(&client, |rt| rt.turn_phase == "tool_result_pending_reply");
-    proc.feed(&update(
-        "agent_message_chunk",
-        json!({"content": {"type": "text", "text": "done"}}),
-    ));
-    // The reader applies lines in order: once this permission request has
-    // landed (input_state moves off "ready"), the chunk before it has been
-    // applied too.
-    proc.feed(&json!({
-        "jsonrpc": "2.0",
-        "id": 79,
-        "method": "session/request_permission",
-        "params": {"sessionId": SID, "toolCall": {"toolCallId": "c2"}, "options": []},
-    }));
-    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
-    assert_eq!(runtime.turn_phase, "tool_result_pending_reply");
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -609,7 +661,8 @@ fn test_late_joined_tool_call_update_marks_busy() {
         "tool_call_update",
         json!({"toolCallId": "c1", "status": "in_progress"}),
     ));
-    settle(&client, |rt| rt.busy);
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -648,24 +701,8 @@ fn test_turn_completed_clears_busy() {
         },
     }));
     let runtime = settle(&client, |rt| !rt.busy);
-    assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_queued_entries_mark_input_backlog() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    proc.feed(&json!({
-        "jsonrpc": "2.0",
-        "method": "_x.ai/queue/changed",
-        "params": {
-            "sessionId": SID,
-            "entries": [{"id": "p1", "kind": "prompt", "text": "next", "position": 0}],
-        },
-    }));
-    settle(&client, |rt| rt.turn_phase == "input_backlog");
+    assert_eq!(runtime.turn_open, Some(false));
     teardown(&client, &proc);
 }
 
@@ -677,7 +714,7 @@ fn test_other_session_notifications_are_ignored() {
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    let baseline = settle(&client, |rt| rt.turn_phase == "tool_open");
+    let baseline = settle(&client, |rt| rt.busy);
     proc.feed(&activity_for("idle", "other-session"));
     proc.feed(&update_for(
         "other-session",
@@ -689,8 +726,7 @@ fn test_other_session_notifications_are_ignored() {
     proc.feed(&activity("working"));
     let runtime = settle(&client, |rt| rt.observed_at > baseline.observed_at);
     assert!(runtime.busy);
-    assert_eq!(runtime.turn_phase, "tool_open"); // the foreign idle never closed it
-    assert_eq!(runtime.input_state, "");
+    assert_eq!(runtime.input_state, ""); // the foreign idle never closed it
     teardown(&client, &proc);
 }
 
@@ -712,7 +748,77 @@ fn test_unknown_updates_are_ignored() {
     }));
     let runtime = settle(&client, |rt| rt.observed_at > first.observed_at);
     assert!(!runtime.busy);
-    assert_eq!(runtime.turn_phase, "unknown_evidence");
+    // seen, but neither is turn evidence: the runtime still has no answer
+    // about the turn, not a positive idle
+    assert_eq!(runtime.turn_open, None);
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_queue_backlog_opens_the_turn() {
+    // a queued entry runs FIFO behind whatever is running: not between turns
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {
+            "sessionId": SID,
+            "entries": [{"id": "p1", "kind": "prompt", "text": "someone else", "position": 0}],
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.turn_open.is_some());
+    assert_eq!(runtime.turn_open, Some(true));
+    assert!(!runtime.busy); // display busy is the activity authority's
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_queue_running_text_opens_the_turn() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {
+            "sessionId": SID,
+            "entries": [],
+            "runningText": "someone else",
+            "runningKind": "prompt",
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.turn_open.is_some());
+    assert_eq!(runtime.turn_open, Some(true));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_empty_queue_says_nothing_about_the_turn() {
+    // the queue draining is not the turn ending: the entry it handed over
+    // may still be running
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {"sessionId": SID, "entries": [], "runningText": null},
+    }));
+    let runtime = settle(&client, |_rt| true);
+    assert_eq!(runtime.turn_open, None);
+    proc.feed(&activity("working"));
+    let before = settle(&client, |rt| rt.turn_open == Some(true));
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {"sessionId": SID, "entries": []},
+    }));
+    // same-session marker after the empty snapshot proves it was folded
+    proc.feed(&update(
+        "available_commands_update",
+        json!({"availableCommands": []}),
+    ));
+    let runtime = settle(&client, |rt| rt.observed_at > before.observed_at);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -755,6 +861,8 @@ fn test_prompt_acks_on_queue_changed_echo() {
             "prompt": [{"type": "text", "text": "hello grok"}],
         })
     );
+    // the echo that accepted hive's own prompt is the turn evidence
+    assert_eq!(client.runtime().unwrap().turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -796,6 +904,7 @@ fn test_prompt_acks_on_user_message_chunk() {
     });
     let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(GrokStdioClient::prompt(&client, "hello grok"));
+    assert_eq!(client.runtime().unwrap().turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -845,6 +954,414 @@ fn test_prompt_echo_of_another_text_does_not_ack() {
 }
 
 // ----------------------------------------------------------------------
+// tracked prompts
+// ----------------------------------------------------------------------
+
+const P: &str = "prompt-ours";
+const P_OTHER: &str = "prompt-theirs";
+
+/// A `session/update` of the session, stamped `_meta.promptId` when given.
+fn tracked_update(prompt_id: Option<&str>, kind: &str, fields: Value) -> Value {
+    let mut msg = update(kind, fields);
+    if let Some(prompt_id) = prompt_id {
+        msg["params"]["_meta"] = json!({"promptId": prompt_id});
+    }
+    msg
+}
+
+fn agent_chunk(prompt_id: Option<&str>, text: &str) -> Value {
+    tracked_update(
+        prompt_id,
+        "agent_message_chunk",
+        json!({"content": {"type": "text", "text": text}}),
+    )
+}
+
+fn thought_chunk(prompt_id: &str, text: &str) -> Value {
+    tracked_update(
+        Some(prompt_id),
+        "agent_thought_chunk",
+        json!({"content": {"type": "text", "text": text}}),
+    )
+}
+
+fn tool_call(prompt_id: &str, id: &str) -> Value {
+    tracked_update(
+        Some(prompt_id),
+        "tool_call",
+        json!({"toolCallId": id, "title": "run_terminal_command", "status": "pending"}),
+    )
+}
+
+fn turn_completed(prompt_id: &str, stop_reason: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session_notification",
+        "params": {
+            "sessionId": SID,
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "prompt_id": prompt_id,
+                "stop_reason": stop_reason,
+            },
+        },
+    })
+}
+
+fn prompt_complete(prompt_id: &str, stop_reason: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session/prompt_complete",
+        "params": {"sessionId": SID, "promptId": prompt_id, "stopReason": stop_reason},
+    })
+}
+
+/// The `session/prompt` response: the turn's end, carrying the prompt id.
+fn prompt_response(rid: u64, prompt_id: &str, stop_reason: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": rid,
+        "result": {
+            "stopReason": stop_reason,
+            "_meta": {"sessionId": SID, "requestId": prompt_id, "promptId": prompt_id},
+        },
+    })
+}
+
+fn ended(stop_reason: &str, text: &str) -> PromptResult {
+    PromptResult::Ended {
+        stop_reason: stop_reason.to_string(),
+        text: text.to_string(),
+        error: None,
+    }
+}
+
+/// The frames of one prompt's turn, the echo through the completion — no
+/// response, so the test decides when the turn ends.
+fn tool_turn_frames(text: &str) -> Vec<Value> {
+    vec![
+        json!({
+            "jsonrpc": "2.0",
+            "method": "_x.ai/queue/changed",
+            "params": {"sessionId": SID, "entries": [{"id": "q1", "kind": "prompt", "text": text}]},
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "_x.ai/queue/changed",
+            "params": {"sessionId": SID, "entries": [], "runningText": text},
+        }),
+        tracked_update(
+            None,
+            "user_message_chunk",
+            json!({"content": {"type": "text", "text": text}}),
+        ),
+        thought_chunk(P, "The"),
+        thought_chunk(P, " task"),
+        agent_chunk(Some(P), "SAGE_"),
+        agent_chunk(Some(P), "PREAMBLE"),
+        tracked_update(
+            Some(P),
+            "available_commands_update",
+            json!({"availableCommands": []}),
+        ),
+        tool_call(P, "call-1"),
+        tracked_update(
+            None,
+            "tool_call_update",
+            json!({"toolCallId": "call-1", "status": "in_progress"}),
+        ),
+        tracked_update(
+            Some(P),
+            "tool_call_update",
+            json!({"toolCallId": "call-1", "status": "completed"}),
+        ),
+        thought_chunk(P, "Done"),
+        agent_chunk(Some(P), "SAGE_"),
+        agent_chunk(Some(P), "FINAL"),
+        turn_completed(P, "end_turn"),
+        prompt_complete(P, "end_turn"),
+    ]
+}
+
+fn feed_all(proc: &FakeProc, frames: Vec<Value>) {
+    for frame in frames {
+        proc.feed(&frame);
+    }
+}
+
+fn settle_result(
+    client: &GrokStdioClient,
+    rid: u64,
+    predicate: impl Fn(&Option<PromptResult>) -> bool,
+) -> Option<PromptResult> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let result = client.prompt_result(rid);
+        if predicate(&result) {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!(
+        "prompt result never matched: {:?}",
+        client.prompt_result(rid)
+    );
+}
+
+fn settle_ended(client: &GrokStdioClient, rid: u64) -> PromptResult {
+    settle_result(client, rid, |result| {
+        matches!(result, Some(PromptResult::Ended { .. }))
+    })
+    .unwrap()
+}
+
+#[test]
+fn test_prompt_tracked_writes_the_prompt_and_runs_until_the_response() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("do the task").unwrap();
+    let sent = settle_sent(&proc, |msg| msg["method"] == "session/prompt");
+    assert_eq!(sent["id"], json!(rid));
+    assert_eq!(
+        sent["params"],
+        json!({"sessionId": SID, "prompt": [{"type": "text", "text": "do the task"}]})
+    );
+    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
+
+    feed_all(&proc, tool_turn_frames("do the task"));
+    // turn_completed is folded (busy drops) yet the prompt still runs: the
+    // response, not the notification, is the end
+    let runtime = settle(&client, |rt| rt.turn_open == Some(false));
+    assert!(!runtime.busy);
+    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
+
+    proc.feed(&prompt_response(rid, P, "end_turn"));
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", "SAGE_FINAL"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_text_is_the_whole_message_without_a_tool_call() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("say hi").unwrap();
+    feed_all(
+        &proc,
+        vec![
+            thought_chunk(P, "Hmm"),
+            agent_chunk(Some(P), "Hello, "),
+            agent_chunk(Some(P), "world"),
+            agent_chunk(Some(P), "!"),
+            turn_completed(P, "end_turn"),
+            prompt_response(rid, P, "end_turn"),
+        ],
+    );
+    assert_eq!(
+        settle_ended(&client, rid),
+        ended("end_turn", "Hello, world!")
+    );
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_text_falls_back_to_the_preamble_when_nothing_follows_the_tool() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("run it").unwrap();
+    feed_all(
+        &proc,
+        vec![
+            agent_chunk(Some(P), "Running the "),
+            agent_chunk(Some(P), "script now."),
+            tool_call(P, "call-1"),
+            tracked_update(
+                Some(P),
+                "tool_call_update",
+                json!({"toolCallId": "call-1", "status": "completed"}),
+            ),
+            tool_call(P, "call-2"),
+            turn_completed(P, "end_turn"),
+            prompt_response(rid, P, "end_turn"),
+        ],
+    );
+    assert_eq!(
+        settle_ended(&client, rid),
+        ended("end_turn", "Running the script now.")
+    );
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_keeps_only_its_own_prompt_when_a_foreign_one_ran_first() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("ours").unwrap();
+    feed_all(
+        &proc,
+        vec![
+            // the human's prompt, queued before ours, runs to its own end
+            agent_chunk(Some(P_OTHER), "theirs "),
+            tool_call(P_OTHER, "call-0"),
+            agent_chunk(Some(P_OTHER), "and theirs again"),
+            turn_completed(P_OTHER, "end_turn"),
+            prompt_complete(P_OTHER, "end_turn"),
+            // now ours
+            agent_chunk(Some(P), "ours "),
+            agent_chunk(Some(P), "only"),
+            turn_completed(P, "end_turn"),
+            prompt_response(rid, P, "end_turn"),
+        ],
+    );
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", "ours only"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_ignores_chunks_without_a_prompt_id() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("echo").unwrap();
+    feed_all(
+        &proc,
+        vec![
+            agent_chunk(None, "not attributed"),
+            thought_chunk(P, "thinking"),
+            agent_chunk(Some(P), "attributed"),
+            prompt_response(rid, P, "end_turn"),
+        ],
+    );
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", "attributed"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_cancelled_response_keeps_the_collected_text() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("long task").unwrap();
+    feed_all(
+        &proc,
+        vec![
+            agent_chunk(Some(P), "partial"),
+            turn_completed(P, "cancelled"),
+            prompt_response(rid, P, "cancelled"),
+        ],
+    );
+    assert_eq!(settle_ended(&client, rid), ended("cancelled", "partial"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_error_response_ends_with_the_error() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("bad").unwrap();
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "id": rid,
+        "error": {"code": -32602, "message": "unknown session id"},
+    }));
+    match settle_ended(&client, rid) {
+        PromptResult::Ended {
+            stop_reason,
+            text,
+            error,
+        } => {
+            assert_eq!(stop_reason, "error");
+            assert_eq!(text, "");
+            assert!(error.unwrap().contains("unknown session id"));
+        }
+        other => panic!("{other:?}"),
+    }
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_leader_eof_ends_with_closed_and_stays_readable() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("task").unwrap();
+    proc.feed(&agent_chunk(Some(P), "half"));
+    settle(&client, |rt| rt.busy);
+    proc.eof();
+    assert_eq!(
+        settle_ended(&client, rid),
+        PromptResult::Ended {
+            stop_reason: "error".to_string(),
+            text: String::new(),
+            error: Some("closed".to_string()),
+        }
+    );
+    assert!(!client.is_alive());
+    teardown(&client, &proc);
+    assert!(matches!(
+        client.prompt_result(rid),
+        Some(PromptResult::Ended { .. })
+    ));
+}
+
+#[test]
+fn test_prompt_tracked_err_without_a_loaded_session() {
+    let _bed = setup();
+    let (client, proc) = make(Some(responder(None, vec![])), Some((SID, CWD)), "%19");
+    assert!(client.prompt_tracked("hello").is_err());
+    assert!(proc.sent().is_empty());
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_err_when_the_write_fails() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.set_write_fail();
+    assert!(client.prompt_tracked("hello").is_err());
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_result_none_for_a_rid_this_client_never_sent() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    assert_eq!(client.prompt_result(99), None);
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_result_keeps_the_last_sixty_four_ended_prompts() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rids: Vec<u64> = (0..65)
+        .map(|i| {
+            let rid = client.prompt_tracked(&format!("task {i}")).unwrap();
+            let prompt_id = format!("p{i}");
+            proc.feed(&agent_chunk(Some(&prompt_id), "ok"));
+            proc.feed(&prompt_response(rid, &prompt_id, "end_turn"));
+            rid
+        })
+        .collect();
+    assert_eq!(settle_ended(&client, rids[64]), ended("end_turn", "ok"));
+    assert_eq!(client.prompt_result(rids[0]), None);
+    assert_eq!(client.prompt_result(rids[1]), Some(ended("end_turn", "ok")));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_prompt_tracked_leaves_the_echo_ack_path_alone() {
+    // An ordinary prompt() racing a tracked one still acks on its own echo.
+    let _bed = setup();
+    let (client, proc) = loaded(
+        Some(responder(Some(on_prompt_queue_echo()), vec![])),
+        vec![],
+    );
+    let rid = client.prompt_tracked("tracked").unwrap();
+    assert!(GrokStdioClient::prompt(&client, "plain"));
+    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
+    proc.feed(&prompt_response(rid, P, "end_turn"));
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", ""));
+    teardown(&client, &proc);
+}
+
+// ----------------------------------------------------------------------
 // permission requests
 // ----------------------------------------------------------------------
 
@@ -869,7 +1386,9 @@ fn test_permission_request_is_cancelled_and_marks_waiting_user() {
         answer["result"],
         json!({"outcome": {"outcome": "cancelled"}})
     );
-    settle(&client, |rt| rt.input_state == "waiting_user");
+    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    // a prompt alone is not turn evidence
+    assert_eq!(runtime.turn_open, None);
     teardown(&client, &proc);
 }
 
@@ -1597,6 +2116,122 @@ fn test_pool_send_to_key_none_when_client_raises() {
     assert_eq!(grok_pool.send_to_key("p19", "hi"), None);
 }
 
+struct FakeTrackedClient {
+    sent: Arc<Mutex<Vec<String>>>,
+    asked: Arc<Mutex<Vec<u64>>>,
+}
+
+impl LeaderClient for FakeTrackedClient {
+    fn generation(&self) -> u64 {
+        1
+    }
+    fn prompt_tracked(&self, text: &str) -> Result<u64> {
+        self.sent.lock().unwrap().push(text.to_string());
+        Ok(7)
+    }
+
+    fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
+        self.asked.lock().unwrap().push(rid);
+        (rid == 7).then(|| ended("end_turn", "relayed"))
+    }
+}
+
+type TrackedPool = (
+    GrokClientPool,
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<u64>>>,
+);
+
+fn tracked_pool() -> TrackedPool {
+    let grok_pool = GrokClientPool::new();
+    let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let (sent_client, asked_client) = (sent.clone(), asked.clone());
+    *grok_pool.client_override.lock().unwrap() = Some(Box::new(move |_key| {
+        Some(Arc::new(FakeTrackedClient {
+            sent: sent_client.clone(),
+            asked: asked_client.clone(),
+        }))
+    }));
+    (grok_pool, sent, asked)
+}
+
+#[test]
+fn test_pool_dispatch_to_key_returns_the_rid() {
+    let (grok_pool, sent, _asked) = tracked_pool();
+    assert_eq!(
+        grok_pool.dispatch_to_key("p19", "task"),
+        Ok(PromptId {
+            generation: 1,
+            rid: 7
+        })
+    );
+    assert_eq!(*sent.lock().unwrap(), vec!["task"]);
+}
+
+#[test]
+fn test_pool_prompt_result_for_key_relays_the_client() {
+    let (grok_pool, _sent, asked) = tracked_pool();
+    assert_eq!(
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 7
+            }
+        ),
+        Some(ended("end_turn", "relayed"))
+    );
+    assert_eq!(
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 8
+            }
+        ),
+        None
+    );
+    assert_eq!(*asked.lock().unwrap(), vec![7, 8]);
+}
+
+#[test]
+fn test_pool_dispatch_to_key_err_without_client() {
+    let grok_pool = GrokClientPool::new();
+    *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
+    let err = grok_pool.dispatch_to_key("p19", "task").unwrap_err();
+    assert!(err.contains("p19"), "{err}");
+    assert_eq!(
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 7
+            }
+        ),
+        None
+    );
+}
+
+struct FakeRaisingTrackedClient;
+
+impl LeaderClient for FakeRaisingTrackedClient {
+    fn prompt_tracked(&self, _text: &str) -> Result<u64> {
+        Err(anyhow::anyhow!("broken pipe"))
+    }
+}
+
+#[test]
+fn test_pool_dispatch_to_key_err_when_client_raises() {
+    let grok_pool = GrokClientPool::new();
+    *grok_pool.client_override.lock().unwrap() =
+        Some(Box::new(|_key| Some(Arc::new(FakeRaisingTrackedClient))));
+    assert_eq!(
+        grok_pool.dispatch_to_key("p19", "task"),
+        Err("broken pipe".to_string())
+    );
+}
+
 struct FakeCancelClient {
     cancelled: Arc<Mutex<Vec<bool>>>,
     answer: Result<bool>,
@@ -2202,4 +2837,47 @@ fn test_kill_daemon_key_removes_socket_pid_and_session() {
     assert!(!sock.exists());
     assert!(!sock.with_extension("pid").exists());
     assert!(!sock.with_extension("session").exists());
+}
+
+#[test]
+fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
+    let _bed = setup();
+    let pool = GrokClientPool::new();
+    let (first, first_proc) = loaded(None, vec![]);
+    let handout = first.clone();
+    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
+    let old_id = pool.dispatch_to_key("p19", "old task").unwrap();
+    first_proc.feed(&agent_chunk(Some("old-prompt"), "OLD RESULT"));
+    first_proc.feed(&prompt_response(old_id.rid, "old-prompt", "end_turn"));
+    assert_eq!(
+        settle_ended(&first, old_id.rid),
+        ended("end_turn", "OLD RESULT")
+    );
+    assert_eq!(
+        pool.prompt_result_for_key("p19", old_id),
+        Some(ended("end_turn", "OLD RESULT"))
+    );
+    teardown(&first, &first_proc);
+
+    let (replacement, replacement_proc) = loaded(None, vec![]);
+    let handout = replacement.clone();
+    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
+    let new_id = pool.dispatch_to_key("p19", "new task").unwrap();
+    assert_eq!(
+        old_id.rid, new_id.rid,
+        "client counters restart at handshake"
+    );
+    assert_ne!(old_id.generation, new_id.generation);
+    replacement_proc.feed(&agent_chunk(Some("new-prompt"), "NEW RESULT"));
+    replacement_proc.feed(&prompt_response(new_id.rid, "new-prompt", "end_turn"));
+    assert_eq!(
+        settle_ended(&replacement, new_id.rid),
+        ended("end_turn", "NEW RESULT")
+    );
+    assert_eq!(pool.prompt_result_for_key("p19", old_id), None);
+    assert_eq!(
+        pool.prompt_result_for_key("p19", new_id),
+        Some(ended("end_turn", "NEW RESULT"))
+    );
+    teardown(&replacement, &replacement_proc);
 }

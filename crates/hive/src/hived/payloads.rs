@@ -7,8 +7,9 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
-use crate::agent::Agent;
-use crate::message::format_hive_envelope;
+use crate::adapters::grok_leader::PromptResult;
+use crate::agent::{Agent, DeliveryError, TurnHandle};
+use crate::message::{format_hive_envelope, format_node_envelope};
 use crate::team::Team;
 use crate::{bus, devlog};
 
@@ -45,55 +46,46 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
     bail!("target agent is waiting for a user answer; answer it in the target pane")
 }
 
+/// Who a send is from. A member (or guest) send carries its sender on the
+/// ledger row and in the envelope and goes out as a plain send; a `hive
+/// workflow run` dispatch has no sender at all — its row's `from_agent` is
+/// empty, its envelope has no `from` — and goes out as a tracked turn whose
+/// engine handle is kept under the dispatch id for `node-result`. The mode
+/// is explicit: an empty member name is never a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOrigin<'a> {
+    Member(&'a str),
+    Node { dispatch_id: &'a str },
+}
+
 pub(crate) fn send_payload(
     workspace: &str,
     team_name: &str,
-    sender_agent: &str,
+    origin: SendOrigin<'_>,
     target_agent: &str,
     body: &str,
     artifact: &str,
 ) -> Result<Map<String, Value>> {
-    if target_agent == FLOW_MAILBOX_AGENT {
-        // The node runner's mailbox (`hive node run`): it owns no pane and
-        // no transport — the durable bus row IS the delivery, and the runner
-        // polls for it. Members answer a node dispatch with an ordinary
-        // `hive send flow.run`, which lands here.
-        let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
-        let mut payload = Map::new();
-        payload.insert("ok".to_string(), Value::Bool(true));
-        payload.insert("to".to_string(), Value::from(target_agent));
-        payload.insert("seq".to_string(), Value::from(seq));
-        payload.insert("mailbox".to_string(), Value::Bool(true));
-        return Ok(payload);
-    }
-
     let (_team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
 
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
 
-    let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
-    let envelope = format_hive_envelope(sender_agent, target_agent, body, artifact);
+    let from_agent = match origin {
+        SendOrigin::Member(sender) => sender,
+        SendOrigin::Node { .. } => "",
+    };
+    let seq = bus::write_send_event(workspace, from_agent, target_agent, body, artifact)?;
+    let envelope = match origin {
+        SendOrigin::Member(sender) => format_hive_envelope(sender, target_agent, body, artifact),
+        SendOrigin::Node { .. } => format_node_envelope(target_agent, body, artifact),
+    };
 
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
     payload.insert("to".to_string(), Value::from(target_agent));
     payload.insert("seq".to_string(), Value::from(seq));
-    // Fire-and-forget past this point: the transport verdict is the only
-    // delivery state. The daemon/channel either accepted the message (its
-    // own contract queues and processes it) or refused it — there is no
-    // tracked in-between, no confirmation oracle, and nothing to poll. A
-    // claude member mid-turn queues the message itself (`priority: next`
-    // folds it in at the next tool boundary) — no hived hold on top.
-    // The transport's origin label is the message author, qualified so a
-    // Claude session outside the team can address it back verbatim. A guest
-    // or ccd sender already carries its prefix.
-    let sender_label = if sender_agent.contains('.') {
-        sender_agent.to_string()
-    } else {
-        format!("{team_name}.{sender_agent}")
-    };
-    if let Err(exc) = hooked_agent_send(&target, &envelope, &sender_label) {
+    let refused = |exc: DeliveryError| {
         let mut refused = Map::new();
         refused.insert("ok".to_string(), Value::Bool(false));
         refused.insert(
@@ -101,7 +93,47 @@ pub(crate) fn send_payload(
             Value::from(format!("transport refused {target_agent}: {exc}")),
         );
         refused.insert("seq".to_string(), Value::from(seq));
-        return Ok(refused);
+        refused
+    };
+    match origin {
+        SendOrigin::Member(sender) => {
+            // Fire-and-forget past this point: the transport verdict is the
+            // only delivery state. The daemon/channel either accepted the
+            // message (its own contract queues and processes it) or refused
+            // it — there is no tracked in-between, no confirmation oracle,
+            // and nothing to poll. A claude member mid-turn queues the
+            // message itself (`priority: next` folds it in at the next tool
+            // boundary) — no hived hold on top. The transport's origin label
+            // is the message author, qualified so a Claude session outside
+            // the team can address it back verbatim. A guest or ccd sender
+            // already carries its prefix.
+            let sender_label = if sender.contains('.') {
+                sender.to_string()
+            } else {
+                format!("{team_name}.{sender}")
+            };
+            if let Err(exc) = hooked_agent_send(&target, &envelope, &sender_label) {
+                return Ok(refused(exc));
+            }
+        }
+        SendOrigin::Node { dispatch_id } => {
+            // The turn is tracked from here: its handle is what
+            // `node-result` reads the engine's own end and text under.
+            let handle = match hooked_agent_dispatch_turn(&target, &envelope) {
+                Ok(handle) => handle,
+                Err(exc) => return Ok(refused(exc)),
+            };
+            if let TurnHandle::Unknown(reason) = &handle {
+                payload.insert("dispatchUnknown".to_string(), Value::from(reason.as_str()));
+            }
+            if let TurnHandle::Untracked(reason) = &handle {
+                payload.insert("untracked".to_string(), Value::from(reason.as_str()));
+            }
+            node_turns()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(dispatch_id.to_string(), handle);
+        }
     }
     // Accepted for a pane member: unread on the status bar until the
     // status tick next sees that pane busy.
@@ -116,6 +148,89 @@ pub(crate) fn send_payload(
         payload.insert("artifact".to_string(), Value::from(artifact));
     }
     Ok(payload)
+}
+
+/// The `node-result` answer for one dispatch: `state` is `running` while
+/// the engine has not ended the turn, `ended` with `status` (codex
+/// `turn/completed` status — `completed`, `interrupted`, `failed`; grok
+/// `stopReason` — `end_turn`, `cancelled`, `max_tokens`, `refusal`, or
+/// `error`), `text` (the last thing the member said in the turn) and
+/// `error` once it has, and `unknown` with a `reason` when this hived
+/// holds nothing for the dispatch: it was not dispatched through this
+/// hived (a restart since), the engine handed back no id, or the adapter
+/// client that started the turn has been replaced. Never a guess.
+pub(crate) fn node_result_payload(dispatch_id: &str) -> Map<String, Value> {
+    let handle = node_turns()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dispatch_id)
+        .cloned();
+    let mut payload = Map::new();
+    payload.insert("ok".to_string(), Value::Bool(true));
+    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
+    let unknown = |mut payload: Map<String, Value>, reason: String| {
+        payload.insert("state".to_string(), Value::from("unknown"));
+        payload.insert("reason".to_string(), Value::from(reason));
+        payload
+    };
+    let ended =
+        |mut payload: Map<String, Value>, status: String, text: String, error: Option<String>| {
+            payload.insert("state".to_string(), Value::from("ended"));
+            payload.insert("status".to_string(), Value::from(status));
+            payload.insert("text".to_string(), Value::from(text));
+            payload.insert(
+                "error".to_string(),
+                error.map(Value::from).unwrap_or(Value::Null),
+            );
+            payload
+        };
+    let running = |mut payload: Map<String, Value>| {
+        payload.insert("state".to_string(), Value::from("running"));
+        payload
+    };
+    match handle {
+        None => unknown(
+            payload,
+            format!("this hived holds no turn for dispatch {dispatch_id}"),
+        ),
+        Some(TurnHandle::Unknown(reason)) => unknown(
+            payload,
+            format!("the engine may have taken the task but its answer was lost ({reason})"),
+        ),
+        Some(TurnHandle::Untracked(reason)) => unknown(
+            payload,
+            format!("the engine took the task but handed back no turn id ({reason})"),
+        ),
+        Some(TurnHandle::Codex { thread_id, turn_id }) => match hooked_cas_turn_result(&turn_id) {
+            None => unknown(
+                payload,
+                format!("the codex client that started turn {turn_id} on {thread_id} is gone"),
+            ),
+            Some(result) => match result.status.clone() {
+                None => running(payload),
+                Some(status) => {
+                    let text = result.final_text();
+                    ended(payload, status, text, result.error)
+                }
+            },
+        },
+        Some(TurnHandle::Grok { key, prompt_id }) => match hooked_gl_prompt_result(&key, prompt_id)
+        {
+            None => unknown(
+                payload,
+                format!(
+                    "the grok client that sent prompt {} on {key} (generation {}) is gone",
+                    prompt_id.rid, prompt_id.generation
+                ),
+            ),
+            Some(PromptResult::Running) => running(payload),
+            Some(PromptResult::Ended {
+                stop_reason,
+                text,
+                error,
+            }) => ended(payload, stop_reason, text, error),
+        },
+    }
 }
 
 pub(crate) fn doctor_payload(
@@ -165,10 +280,6 @@ pub(crate) fn doctor_payload(
             "busy".to_string(),
             Value::Bool(busy.as_bool().unwrap_or(false)),
         );
-    }
-    let turn_phase = map_get_str(&runtime, "turnPhase");
-    if !turn_phase.is_empty() {
-        diag.insert("turnPhase".to_string(), Value::from(turn_phase));
     }
     if verbose {
         diag.insert("pane".to_string(), Value::from(target.pane_id.clone()));

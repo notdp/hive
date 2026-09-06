@@ -13,7 +13,7 @@ use crate::paths::{expanduser, getcwd};
 use crate::team::{
     add_runtime_location_fields, created_at_key, gc_dead_teams, member_registry_row,
     remember_context, resolve_scoped_team, resolve_workspace, session_member_row, start_team_hived,
-    team_status_payload, Team, LEAD_AGENT_NAME,
+    start_team_hived_or_warn, team_status_payload, Team, LEAD_AGENT_NAME,
 };
 use crate::tmux;
 
@@ -336,7 +336,7 @@ fn create_detached_team(
                 &ws_str,
                 "mirror",
             ));
-            let _ = start_team_hived(&mut t, &ws_str);
+            start_team_hived_or_warn(&mut t, &ws_str);
         }
         None => {
             // No orch: the first pane is the team's own shell pane, tagged
@@ -503,7 +503,7 @@ fn create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
         &[member],
         &t.tmux_window_id,
     );
-    let _ = start_team_hived(&mut t, &ws_str);
+    start_team_hived_or_warn(&mut t, &ws_str);
     tmux::select_window(&window);
 
     let mut result = Map::new();
@@ -957,7 +957,9 @@ fn doctor_report(t: &mut Team, ws: &str, target_name: &str) -> (Map<String, Valu
 }
 
 fn doctor_answer(t: &mut Team, ws: &str, target_name: &str) -> (Map<String, Value>, bool) {
-    let _ = start_team_hived(t, ws);
+    if let Err(err) = start_team_hived(t, ws) {
+        return (hived_down_report(ws, &err.to_string()), false);
+    }
     let answer = crate::hived::request_doctor(ws, &t.name, target_name, true);
     let mut payload = match answer {
         Some(payload) if !payload.is_empty() => payload,

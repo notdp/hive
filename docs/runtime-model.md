@@ -32,9 +32,17 @@ Consequences across modules:
   backfills fields of names already there. An observation racing a `hive kill`
   must not resurrect the killed member.
 - **The `display` window id.** It is a cache: authority checks do not read
-  it, and hived identity is `(workspace socket, team)`, so a dead window does
-  not retire a hived on its own; a missing registry entry with no window left
-  behind it does.
+  it, and hived identity is `(workspace socket, team, hive home)`, so a dead
+  window does not retire a hived on its own; a missing registry entry with
+  no window left behind it does.
+- **The hive home is part of the identity.** A hived answers `ping` with
+  the `HIVE_HOME` it resolved. A client of the same home that finds another
+  build, api version or team on the socket restarts the hived from its own
+  binary; a client of another home is refused (`ensure_hived` errors,
+  naming both homes) and starts nothing — a replacement would run with the
+  client's home, could not see the team's registry, and would reap the
+  members it does not own. A hived whose own home holds no registry entry
+  for its team exits at start instead of serving.
 - **One directory per team.** `$HIVE_HOME/teams/<team>/` holds everything
   hive owns for the team: `team.json` (the entry — present means the team
   exists), and, on the default workspace, `hive.db` (the bus), `run/`
@@ -55,7 +63,7 @@ Consequences across modules:
   missing), `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
-  these verbs do not require the caller to have one. `node run` rides the
+  these verbs do not require the caller to have one. `workflow run` rides the
   same doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
   the setup/launcher commands never needed a pane. The full list is
   `cli/mod.rs::TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
@@ -187,15 +195,146 @@ busy since; the ticker is the two newest bus sends as `from → to · age ·
 verbatim. They are display of the runtime fields below, never a source for
 them.
 
-### Mailbox addresses
+### Addresses beyond the roster
 
-Of the three send address kinds, only a member names an engine with a
-transport. `ccd.<name>` reaches a Claude session outside any team over that
-session's own inbox. `flow.run` is the mailbox a `hive node run` dispatch
-names as its reply address, where delivery is the durable bus row itself:
-`run_node` polls it, owns no transport, and sends no ack. Mailboxes are
-listed under `mailboxes`, not in `members`; the roster holds engines only,
-and `flow` is a reserved prefix like `ccd`.
+Of the send address kinds, only a member names an engine with a transport.
+`ccd.<name>` reaches a Claude session outside any team over that session's
+own inbox. A `hive workflow run` dispatch has no reply address at all: the
+member is never asked to send anything back, and the roster holds engines
+only.
+
+### Workflow node: the result is the turn's end, read off the engine
+
+`hive workflow run --team T --name N --cli codex|grok [--model M]` runs one
+task on a member the way a Claude Code Workflow runs a subagent: the
+member is told nothing about replying, does the task in one turn, and the
+result is the last thing it said in that turn. Nothing travels back over
+the bus, nothing is read from the engine's transcript, and the member runs
+nothing to return: the engine's own turn-end signal is the result's
+boundary. A node runs codex or grok — a claude bg job reports no turn end
+over any RPC, and Claude Code runs its own subagents natively — and the
+runner refuses a claude member before anything is spawned.
+
+- **The dispatch.** The runner mints a dispatch id `nd-<12 lowercase hex>`,
+  writes the task to `<workspace>/artifacts/tasks/<name>-<dispatch_id>.md`,
+  and hands the hived a `node-dispatch` carrying the id. The hived writes
+  the ledger row (`from_agent` empty — there is no sender — `to_agent` the
+  member, `artifact` the task path; the only bus write a node makes),
+  injects an envelope with no `from` —
+  `<HIVE to=<team>.<name> artifact=<that path>>`, body `task <dispatch_id>`
+  followed by the task's first line, `</HIVE>` — as **one tracked turn**
+  (`Agent::dispatch_turn`): codex `turn/start` on the member's thread,
+  whose response carries the turn id; grok `session/prompt` on the
+  member's session, whose request id and client generation are kept until
+  its response. A Grok result lookup requires the original generation;
+  a replacement client cannot supply a result for the old handle. The hived
+  holds that engine handle under the dispatch id (`hived/state.rs::node_turns`)
+  for as long as it runs. The run record (below) is written `pending`
+  before any of that, so a runner that dies between the delivery and its
+  own bookkeeping leaves a pending record behind, never a gap a same-name
+  run could walk through.
+- **The engine's end of the turn.** The hived's own adapter client is
+  the one the engine reports the turn's end to, and it collects the turn's
+  text meanwhile. codex: `turn/*` and `item/*` notifications reach only
+  the client that started the turn; the client keeps every `agentMessage`
+  item's text in item order (`item/completed`; `turn/completed`'s items
+  are authoritative when present) and the terminal status —
+  `completed`, `interrupted`, `failed` — plus `turn.error`
+  (`codex_app_server::TurnResult`). grok (ACP): the `session/prompt`
+  response arrives when the turn ends, with `stopReason` (`end_turn`,
+  `cancelled`, `max_tokens`, `max_turn_requests`, `refusal`) and
+  `_meta.promptId`; the text comes from the `session/update`
+  `agent_message_chunk`s whose `_meta.promptId` matches, split into
+  segments at each `tool_call`, the last non-empty segment being the
+  result — a turn that says something, runs a tool, then answers, returns
+  the answer (`grok_leader::PromptResult`). In both engines the result is
+  the member's last message of the turn; a member that stops to ask has
+  ended its turn with that question.
+- **The read-back.** The runner polls the hived's `node-result` for the
+  dispatch id at 1s: `running` while the turn is open; `ended` with
+  `status` (the engine's word), `text` and `error` once it is; `unknown`
+  with a `reason` when this hived holds nothing for the id — restarted
+  since the dispatch, the engine handed back no turn id (`untracked` in
+  the dispatch answer), or the adapter client that started the turn was
+  replaced. `unknown` is never a verdict on the turn: with the member's
+  turn open or unanswered the runner keeps waiting (the turn may still end
+  in front of a client that never saw it start), and only 5 consecutive
+  unknowns with the turn closed (`turn-open` `false`) end the run
+  `no_result`. No answer at all from the hived on 120 consecutive polls
+  returns `unknown`: the waiter exits, but the record retains ownership
+  because execution has not been resolved. A member the roster reports
+  dead is `member_gone`. The turn itself has no timeout (the caller
+  decides how long to wait).
+- **A refused dispatch and a lost answer are different failures.** The
+  hived's answer to the dispatch is what the runner keys on
+  (`send.rs::DispatchFailure`). `Refused` is a definite no — the hived
+  answered `ok:false` (transport refused, unknown member, send gate) or
+  the request never reached it (no socket, connect or write failed): the
+  task is not with the member, the dispatch is retried up to three times,
+  and a final refusal takes the pending record back, retires a member
+  this run spawned, and exits 1. `Unknown` is the request going out whole
+  and no usable answer coming back (read timeout, dropped connection,
+  empty or unparsable reply): the hived may have injected the task, so it
+  is never sent again. The run keeps its pending record (`seq` stays
+  null, since the seq rode the lost answer) and reads the turn back
+  exactly as a delivered dispatch — the hived holds the turn under the
+  dispatch id whether or not its answer arrived, so a lost answer costs
+  nothing but the seq when the hived still holds a usable turn handle.
+  The engine boundary follows the same rule: Codex requests not written
+  or explicitly rejected are retryable; write failures and lost responses
+  are `Unknown`. The hived retains an unknown handle and returns
+  `dispatchUnknown`, which the runner treats as a lost answer, not a
+  refusal. It cannot recover a turn id from that response, so result
+  queries remain unknown.
+- **Readiness.** The runner dispatches only between turns, and only on a
+  positive reading from the engine's own daemon that no turn is open. The
+  runner asks the hived's `turn-open` for the member and the hived queries
+  the engine directly, with no tick cache in between (codex: the
+  app-server's `thread/read`; grok: the leader pool's push-fed turn
+  evidence, the session load replay included). No answer says nothing
+  about the turn and never opens the dispatch; every null answer carries
+  a `reason` and is recorded as a `turn_open.null` notify event (cli,
+  agent, reason), so a run stalled on null leaves evidence in
+  `notify.jsonl`. A member still in a turn after 600 polls ends the run
+  `member_busy` without dispatching — a task dropped into a running turn
+  would be folded into it.
+- **The JSON line** (stdout, exit 0 whenever a verdict was reached):
+  `status`, `name`, `pane` (may be empty), `reused`, `dispatchId`, `body`
+  (the member's last message of the turn, possibly empty) whenever the
+  turn ended, `reason` for every status but `completed`. `status` is one
+  of `completed` (codex `completed`, grok `end_turn`) | `interrupted`
+  (codex `interrupted`, grok `cancelled`; `body` is what was said by
+  then) | `failed` (any other engine word — codex `failed`, grok an error
+  response, `max_tokens`, `refusal`…; `reason` carries the word and the
+  engine's error) | `no_result` | `unknown` (waiter lost contact; execution
+  unresolved) | `member_gone` | `member_busy` (a pending or unknown
+  node record for the member whose member is alive, the per-member lock
+  held by another runner, or the readiness cap above). No session, turn
+  or artifact field: the runner never learns the engine's session, and a
+  member that wants to hand over a file names its path in what it says.
+  stderr and exit 1 mean the task was not dispatched — bad team, a claude
+  member, spawn or ready failure, the dispatch refused — and the run can
+  be repeated (`member_busy` is the other not-dispatched verdict, reported
+  as a JSON line because it names a state the caller acts on); a
+  dispatched task always ends in a JSON line.
+- **The record.** `<workspace>/run/workflow/<name>.json` — `dispatchId`,
+  `cli`, `status` (`pending | unknown | <terminal status>`), `body`/`reason` from
+  the waiter's verdict, `seq` (ledger seq of the dispatch, filled in after the
+  delivery), `startedAt` (epoch seconds) — under the flock
+  `<workspace>/run/workflow/<name>.lock` held for the whole run; the lock
+  file itself is never deleted, the record is. A stale pending record whose
+  member is dead is replaced by the next run; `hive kill` of the member
+  removes its record. A same-name node reuses a live member, whatever
+  `--cli` says (its engine is the roster's). After acquiring the lock, a
+  new run checks a live member's pending record, including status
+  `unknown` from 120 unanswered polls, once by its old dispatch id.
+  `Ended` saves the old result before continuing; `Unknown` with an
+  explicitly closed turn settles the old record as `no_result` and
+  continues. `Running`, no result answer, or `Unknown` with an open or
+  unanswered turn returns `member_busy` with the old dispatch id.
+  The new task still passes the normal turn-closed gate before dispatch.
+  The per-member record is replaced when the new task starts; this is
+  reconciliation on reuse, not a result archive or a resume command.
 
 ## Runtime fields and their sources
 
@@ -227,12 +366,6 @@ gate consumes it and refuses a send to a waiting target. One waiver exists:
 claude parks its status on `waiting` while a `/status`-style dialog is open in
 an attached viewer, yet the inbox still queues normally, so that reason alone
 does not gate a send.
-
-**`turnPhase`** — the phase of the receiver's turn, per its daemon's events.
-Claude emits none: its registry status carries no turn structure and nothing
-synthesizes one from the transcript. Consumers must treat an absent
-`turnPhase` as "no turn structure available" and fall back to `busy` and the
-runtime source, not as an error.
 
 ## Claude: bg job and viewer
 
@@ -529,10 +662,14 @@ outside any team gets a pane-keyed leader with the pane's lifecycle.
   fork has no leader-side primitive, so the pane's TUI branches it under the
   id hive recorded.
 - **Session load replay.** Session load replays the session's past updates
-  before it answers, so everything received before the load response is
-  discarded; a replayed turn must not mark the pane busy. Spawn therefore asks
-  the hived to connect once the pane's grok is up on the session, rather than
-  lazily on the next tick.
+  before it answers. For the display that replay is discarded: a replayed
+  turn must not mark the pane busy, so spawn asks the hived to connect once
+  the pane's grok is up on the session, rather than lazily on the next tick.
+  For the dispatch gate it is evidence: the replay is the engine's own turn
+  history, and its last turn event (a message chunk or tool call opens,
+  `turn_completed` closes) is the session's state at load time — so a
+  hived restarted onto an idle member answers `turn-open` `false` at once
+  instead of `null` until the member's next turn.
 - **Permission requests.** Hive answers its own copy with `cancelled` and
   reports the member as waiting: the decision belongs to the human at the TUI,
   which gets its own copy.

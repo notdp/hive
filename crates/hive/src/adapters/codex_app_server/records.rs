@@ -43,23 +43,39 @@ pub fn pane_thread_path(pane: &str) -> PathBuf {
         .join(format!("hive-pane-{slug}.thread"))
 }
 
-pub fn write_pane_thread(pane: &str, thread_id: &str, cwd: &str) -> Result<()> {
+/// Write the pane's thread record.
+///
+/// *tmux_socket* is the socket of the tmux server the pane lives on
+/// (`crate::tmux::own_socket_path` in the writing process). Pane ids are
+/// only unique per server while CODEX_HOME is shared by every server of
+/// this user, so the record carries the server identity and the hived's
+/// reaper only clears records of its own server.
+pub fn write_pane_thread(
+    pane: &str,
+    thread_id: &str,
+    cwd: &str,
+    tmux_socket: Option<&str>,
+) -> Result<()> {
     let path = pane_thread_path(pane);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(
-        &path,
-        json!({"threadId": thread_id, "cwd": cwd}).to_string(),
-    )?;
+    let mut record = json!({"threadId": thread_id, "cwd": cwd});
+    if let Some(socket) = tmux_socket.filter(|s| !s.is_empty()) {
+        record["tmuxSocket"] = Value::String(socket.to_string());
+    }
+    fs::write(&path, record.to_string())?;
     Ok(())
 }
 
 /// The pane→thread binding hive wrote at spawn.
+///
+/// `tmux_socket` is None for a record written before the field existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneThread {
     pub thread_id: String,
     pub cwd: String,
+    pub tmux_socket: Option<String>,
 }
 
 pub fn read_pane_thread(pane: &str) -> Option<PaneThread> {
@@ -71,9 +87,15 @@ pub fn read_pane_thread(pane: &str) -> Option<PaneThread> {
         .and_then(Value::as_str)
         .filter(|tid| !tid.is_empty())?;
     let cwd = obj.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let tmux_socket = obj
+        .get("tmuxSocket")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Some(PaneThread {
         thread_id: thread_id.to_string(),
         cwd: cwd.to_string(),
+        tmux_socket,
     })
 }
 

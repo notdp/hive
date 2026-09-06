@@ -8,9 +8,10 @@ use crate::adapters::base::GateResult;
 use crate::adapters::claude_bg::{EngineSession, PaneJob};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::ThreadRuntime;
-use crate::adapters::grok_leader::{SessionRecord, SessionRuntime};
-use crate::agent::{Agent, DeliveryError};
+use crate::adapters::codex_app_server::{ThreadRuntime, TurnResult};
+use crate::adapters::grok_leader::PromptId;
+use crate::adapters::grok_leader::{PromptResult, SessionRecord, SessionRuntime};
+use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -53,6 +54,7 @@ pub struct Hook {
     pub set_window_option: Option<S3<()>>,
     pub send_keys: Option<S2<()>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
+    pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
@@ -78,11 +80,14 @@ pub struct Hook {
     // codex_app_server
     pub cas_runtime_for_pane: Option<S1<Option<ThreadRuntime>>>,
     pub cas_runtime_for_thread: Option<S1<Option<ThreadRuntime>>>,
+    pub cas_turn_open_for_thread: Option<S1<Option<bool>>>,
+    pub cas_turn_result: Option<S1<Option<TurnResult>>>,
     pub cas_session_id_for_pane: Option<S1<Option<String>>>,
     pub cas_shared_socket_path: Option<F0<PathBuf>>,
     pub cas_daemon_alive: Option<F0<bool>>,
     pub cas_thread_id_for_pane: Option<S1<Option<String>>>,
     pub cas_list_recorded_panes: Option<F0<Vec<String>>>,
+    pub cas_pane_thread_socket: Option<S1<Option<String>>>,
     pub cas_clear_pane_thread: Option<S1<()>>,
     pub cas_drop_client: Option<F0<()>>,
     pub cas_spawn_daemon: Option<F0<bool>>,
@@ -90,6 +95,9 @@ pub struct Hook {
     // grok_leader
     pub gl_runtime_for_pane: Option<S1<Option<SessionRuntime>>>,
     pub gl_runtime_for_key: Option<S1<Option<SessionRuntime>>>,
+    pub gl_turn_open_for_key: Option<S1<Option<Option<bool>>>>,
+    #[allow(clippy::type_complexity)]
+    pub gl_prompt_result: Option<Arc<dyn Fn(&str, PromptId) -> Option<PromptResult> + Send + Sync>>,
     pub gl_session_id_for_pane: Option<S1<Option<String>>>,
     pub gl_read_session_key: Option<S1<Option<SessionRecord>>>,
     pub gl_list_daemon_keys: Option<F0<Vec<String>>>,
@@ -110,6 +118,9 @@ pub struct Hook {
     #[allow(clippy::type_complexity)]
     pub agent_send:
         Option<Arc<dyn Fn(&Agent, &str, &str) -> Result<String, DeliveryError> + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
+    pub agent_dispatch_turn:
+        Option<Arc<dyn Fn(&Agent, &str) -> Result<TurnHandle, DeliveryError> + Send + Sync>>,
     // hived self-seams
     pub resolve_live_agent: Option<S2<anyhow::Result<(Team, Agent)>>>,
     pub check_send_gate: Option<A1<anyhow::Result<()>>>,

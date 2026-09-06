@@ -252,7 +252,12 @@ fn exec_codex_managed(args: &[String]) -> ! {
         let sid = codex_positional_after(args, sub_index.expect("sub implies index"));
         match sid {
             Some(sid) => {
-                let _ = codex_app_server::write_pane_thread(&pane, &sid, &cwd);
+                let _ = codex_app_server::write_pane_thread(
+                    &pane,
+                    &sid,
+                    &cwd,
+                    tmux::own_socket_path().as_deref(),
+                );
             }
             None => {
                 // Picker / --last: the chosen thread is unknowable up front. A
@@ -270,7 +275,12 @@ fn exec_codex_managed(args: &[String]) -> ! {
             codex_app_server::fork_member_thread(source, &codex_pane_thread_name(&pane))
         });
         if let (Some(source), Some(forked)) = (source, forked) {
-            let _ = codex_app_server::write_pane_thread(&pane, &forked, &cwd);
+            let _ = codex_app_server::write_pane_thread(
+                &pane,
+                &forked,
+                &cwd,
+                tmux::own_socket_path().as_deref(),
+            );
             let mut rewritten: Vec<String> = args.to_vec();
             rewritten[sub_index] = "resume".to_string();
             if let Some(offset) = rewritten
@@ -299,7 +309,12 @@ fn exec_codex_managed(args: &[String]) -> ! {
         &codex_opt_value(args, &["--model", "-m"]).unwrap_or_default(),
     );
     if let Some(minted) = minted {
-        let _ = codex_app_server::write_pane_thread(&pane, &minted, &cwd);
+        let _ = codex_app_server::write_pane_thread(
+            &pane,
+            &minted,
+            &cwd,
+            tmux::own_socket_path().as_deref(),
+        );
         argv.push("resume".to_string());
         argv.push(minted);
         argv.extend(args.iter().cloned());

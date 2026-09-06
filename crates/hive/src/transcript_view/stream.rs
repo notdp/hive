@@ -35,7 +35,7 @@ pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
             matches.push((mtime, candidate));
         }
     }
-    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
     matches.into_iter().next().map(|(_, p)| p)
 }
 

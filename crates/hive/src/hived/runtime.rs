@@ -13,12 +13,11 @@ use crate::runtime_snapshot::RuntimeSnapshot;
 
 use super::*;
 
-/// The busy/turn/input triple the codex app-server and grok leader runtimes
-/// report, as runtime fields. `waiting_reason` names why that source parks on
+/// The busy/input pair the codex app-server and grok leader runtimes report,
+/// as runtime fields. `waiting_reason` names why that source parks on
 /// `waiting_user`; `source` is its `_runtimeSource` label.
 fn daemon_runtime_fields(
     busy: bool,
-    turn_phase: &str,
     input_state: &str,
     waiting_reason: &str,
     source: &str,
@@ -30,7 +29,6 @@ fn daemon_runtime_fields(
     };
     let mut fields = Map::new();
     fields.insert("busy".to_string(), Value::Bool(busy));
-    fields.insert("turnPhase".to_string(), Value::from(turn_phase));
     fields.insert("inputState".to_string(), Value::from(input_state));
     fields.insert(
         "inputReason".to_string(),
@@ -49,7 +47,6 @@ fn codex_runtime_fields(
 ) -> Map<String, Value> {
     daemon_runtime_fields(
         rt.busy,
-        &rt.turn_phase,
         &rt.input_state,
         "app_server_active_flag",
         "codex_app_server",
@@ -59,7 +56,6 @@ fn codex_runtime_fields(
 fn grok_runtime_fields(rt: &crate::adapters::grok_leader::SessionRuntime) -> Map<String, Value> {
     daemon_runtime_fields(
         rt.busy,
-        &rt.turn_phase,
         &rt.input_state,
         "leader_permission_request",
         "grok-leader",
@@ -637,6 +633,86 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
         );
     }
     Ok(payload)
+}
+
+/// Whether the named member has a turn open, asked of its engine directly
+/// — no tick cache in between. codex: the shared app-server's
+/// `thread/read` on the roster thread id. grok: the member's ACP connection is held by the hived's leader
+/// pool (a second process must not `session/load` the same session), and
+/// the pool client's `turn_open` is push-fed by the turn's own
+/// notifications, the load replay included — not the display `busy` flag,
+/// which a client that has only seen a command table or an announcement
+/// reports as false. `open` is null whenever the engine cannot be asked
+/// (no daemon, no engine entry, no turn evidence yet) — never a guess —
+/// and then `reason` says why and a `turn_open.null` notify event records
+/// it, so a workflow run stalled on null answers leaves evidence; a member off
+/// the roster is an error.
+pub(crate) fn turn_open_payload(
+    workspace: &str,
+    team_name: &str,
+    agent_name: &str,
+) -> Result<Map<String, Value>> {
+    let team = match hooked_team_load(team_name) {
+        Ok(team) => team,
+        Err(err) => {
+            emit_turn_open_null(
+                workspace,
+                team_name,
+                "",
+                agent_name,
+                &format!("team load failed: {err}"),
+            );
+            return Err(err);
+        }
+    };
+    let agent = team
+        .agent_named(agent_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown member '{agent_name}'"))?;
+    let sid = agent.session_id.as_deref().filter(|s| !s.is_empty());
+    let open: Result<bool, String> = match agent.cli.as_str() {
+        "codex" => sid
+            .ok_or_else(|| "no session id on the roster row".to_string())
+            .and_then(|sid| {
+                hooked_cas_turn_open_for_thread(sid)
+                    .ok_or_else(|| format!("codex app-server unreachable or thread {sid} unknown"))
+            }),
+        "grok" => {
+            let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
+            match hooked_gl_turn_open_for_key(&key) {
+                None => Err(format!("no leader client for {key}")),
+                Some(None) => Err("no turn evidence yet".to_string()),
+                Some(Some(open)) => Ok(open),
+            }
+        }
+        other => Err(format!("cli '{other}' has no turn evidence")),
+    };
+    let mut payload = Map::new();
+    payload.insert("ok".to_string(), Value::Bool(true));
+    payload.insert("agent".to_string(), Value::from(agent_name));
+    match open {
+        Ok(open) => {
+            payload.insert("open".to_string(), Value::Bool(open));
+        }
+        Err(reason) => {
+            payload.insert("open".to_string(), Value::Null);
+            payload.insert("reason".to_string(), Value::from(reason.as_str()));
+            emit_turn_open_null(workspace, team_name, &agent.cli, agent_name, &reason);
+        }
+    }
+    Ok(payload)
+}
+
+fn emit_turn_open_null(workspace: &str, team: &str, cli: &str, agent: &str, reason: &str) {
+    hooked_notify_debug_emit(
+        workspace,
+        "turn_open.null",
+        &[
+            ("team", Value::from(team)),
+            ("cli", Value::from(cli)),
+            ("agent", Value::from(agent)),
+            ("reason", Value::from(reason)),
+        ],
+    );
 }
 
 pub(crate) fn runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
