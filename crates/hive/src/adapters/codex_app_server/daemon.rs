@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime};
+use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnResult, TurnStartFailure};
 use super::records::{codex_home, shared_pidfile_path, shared_socket_path, thread_id_for_pane};
 use super::transport::WsConn;
 use super::{
@@ -261,6 +261,30 @@ pub fn send_to_thread(thread_id: &str, text: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A workflow node's task as a tracked turn on the pane's recorded thread:
+/// the turn id comes back so `turn_result` can read the turn's outcome.
+/// `Refused` covers no recorded thread and no daemon as well.
+pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, String), TurnStartFailure> {
+    let tid = thread_id_for_pane(pane)
+        .ok_or_else(|| TurnStartFailure::Refused(format!("pane {pane} has no recorded codex thread")))?;
+    let turn_id = dispatch_to_thread(&tid, text)?;
+    Ok((tid, turn_id))
+}
+
+/// `dispatch_to_pane` keyed by the thread.
+pub fn dispatch_to_thread(thread_id: &str, text: &str) -> Result<String, TurnStartFailure> {
+    let client = shared_client()
+        .ok_or_else(|| TurnStartFailure::Refused("codex daemon unreachable".to_string()))?;
+    client.turn_start_tracked(thread_id, text)
+}
+
+/// The outcome of a turn `dispatch_to_thread` started, from the shared
+/// client that started it; None when no client, or one that never saw
+/// the turn (reconnected since).
+pub fn turn_result(turn_id: &str) -> Option<TurnResult> {
+    shared_client()?.turn_result(turn_id)
 }
 
 /// Abort the running turn on the pane's recorded thread.

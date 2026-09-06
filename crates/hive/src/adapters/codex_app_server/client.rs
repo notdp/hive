@@ -519,6 +519,12 @@ pub trait DaemonClient: Send + Sync {
     fn turn_start(&self, _thread_id: &str, _text: &str) -> Result<Value, String> {
         unimplemented!("turn_start")
     }
+    fn turn_start_tracked(&self, _thread_id: &str, _text: &str) -> Result<String, TurnStartFailure> {
+        unimplemented!("turn_start_tracked")
+    }
+    fn turn_result(&self, _turn_id: &str) -> Option<TurnResult> {
+        unimplemented!("turn_result")
+    }
     fn active_turn_id(&self, _thread_id: &str) -> Result<Option<String>, String> {
         unimplemented!("active_turn_id")
     }
@@ -542,6 +548,12 @@ pub trait DaemonClient: Send + Sync {
 impl DaemonClient for CodexDaemonClient {
     fn turn_start(&self, thread_id: &str, text: &str) -> Result<Value, String> {
         Ok(CodexDaemonClient::turn_start(self, thread_id, text))
+    }
+    fn turn_start_tracked(&self, thread_id: &str, text: &str) -> Result<String, TurnStartFailure> {
+        CodexDaemonClient::turn_start_tracked(self, thread_id, text)
+    }
+    fn turn_result(&self, turn_id: &str) -> Option<TurnResult> {
+        CodexDaemonClient::turn_result(self, turn_id)
     }
     fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
         CodexDaemonClient::active_turn_id(self, thread_id)
@@ -591,5 +603,62 @@ impl CodexDaemonClient {
 
     pub(super) fn threads_is_empty(&self) -> bool {
         self.inner.state.lock().unwrap().threads.is_empty()
+    }
+}
+
+// --------------------------------------------------------------------------
+// turn results: what a turn this client started came back with
+// --------------------------------------------------------------------------
+
+/// One turn's outcome as the daemon reported it to this client — the
+/// client that started it is the only one `turn/*` and `item/*`
+/// notifications reach. `status` is None while the turn is in progress
+/// and the `turn/completed` status word (`completed`, `interrupted`,
+/// `failed`) once it ended; `messages` are the turn's `agentMessage`
+/// texts in item order, whatever their `phase` (a model may omit
+/// `final_answer`), so the result of the turn is the last one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TurnResult {
+    pub thread_id: String,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub messages: Vec<String>,
+}
+
+impl TurnResult {
+    /// The last non-empty assistant message of the turn, or empty.
+    pub fn final_text(&self) -> String {
+        self.messages
+            .iter()
+            .rev()
+            .find(|text| !text.trim().is_empty())
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// Why a `turn/start` did not hand back a trackable turn: `Refused` is
+/// the daemon not taking it (no result, RPC error, closed connection) —
+/// the turn is not running; `Untracked` is a result with no turn id — the
+/// turn is running but nothing will be collected for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStartFailure {
+    Refused(String),
+    Untracked(String),
+}
+
+impl CodexDaemonClient {
+    /// `turn/start` whose turn id is kept: the turn's notifications are
+    /// collected under it until `turn_result` reads them back.
+    pub fn turn_start_tracked(&self, thread_id: &str, text: &str) -> Result<String, TurnStartFailure> {
+        let _ = (thread_id, text);
+        unimplemented!("turn_start_tracked")
+    }
+
+    /// What this client has seen of *turn_id*; None when it never saw the
+    /// turn (started by another client, or before this connection).
+    pub fn turn_result(&self, turn_id: &str) -> Option<TurnResult> {
+        let _ = turn_id;
+        unimplemented!("turn_result")
     }
 }

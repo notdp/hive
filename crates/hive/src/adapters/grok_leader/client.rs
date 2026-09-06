@@ -803,3 +803,47 @@ fn ack_timeout() -> f64 {
     }
     ACK_TIMEOUT
 }
+
+// --------------------------------------------------------------------------
+// prompt results: what a prompt this client sent came back with
+// --------------------------------------------------------------------------
+
+/// One `session/prompt`'s outcome, read by the client that sent it. The
+/// prompt request's own response is the turn's end (ACP: it returns when
+/// the turn ends, with `stopReason`); the text is not in that response but
+/// in the `session/update` `agent_message_chunk`s whose `_meta.promptId`
+/// matches the response's. A turn with tool calls says something before
+/// the tool and something after it: the chunks are split into segments at
+/// each `tool_call`, and the result is the last non-empty segment — the
+/// last thing the member said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptResult {
+    Running,
+    /// `stop_reason` is the response's `stopReason` (`end_turn`,
+    /// `cancelled`, `max_tokens`, `max_turn_requests`, `refusal`), or
+    /// `error` with `error` set when the response was a JSON-RPC error or
+    /// the leader went away first.
+    Ended {
+        stop_reason: String,
+        text: String,
+        error: Option<String>,
+    },
+}
+
+impl GrokStdioClient {
+    /// Send `session/prompt` and keep its request id registered until the
+    /// response lands, collecting the turn's text meanwhile; no echo wait —
+    /// the response is the accept and the end in one. `Err` is nothing
+    /// written (no loaded session, dead leader).
+    pub fn prompt_tracked(&self, text: &str) -> Result<u64, String> {
+        let _ = text;
+        unimplemented!("prompt_tracked")
+    }
+
+    /// What this client has seen of the prompt sent as *rid*; None when
+    /// it never sent it (a fresh client since).
+    pub fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
+        let _ = rid;
+        unimplemented!("prompt_result")
+    }
+}

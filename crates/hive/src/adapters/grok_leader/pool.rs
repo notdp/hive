@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::client::{GrokStdioClient, SessionRuntime};
+use super::client::{GrokStdioClient, PromptResult, SessionRuntime};
 use super::daemon::{kill_daemon_key, probe_socket, spawn_member_daemon};
 use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
@@ -24,6 +24,12 @@ pub trait LeaderClient: Send + Sync {
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
     }
+    fn prompt_tracked(&self, _text: &str) -> Result<u64> {
+        unreachable!("prompt_tracked not expected on this client")
+    }
+    fn prompt_result(&self, _rid: u64) -> Option<PromptResult> {
+        unreachable!("prompt_result not expected on this client")
+    }
     fn cancel(&self) -> Result<bool> {
         unreachable!("cancel not expected on this client")
     }
@@ -41,6 +47,14 @@ pub trait LeaderClient: Send + Sync {
 impl LeaderClient for GrokStdioClient {
     fn prompt(&self, text: &str) -> Result<bool> {
         Ok(GrokStdioClient::prompt(self, text))
+    }
+
+    fn prompt_tracked(&self, text: &str) -> Result<u64> {
+        GrokStdioClient::prompt_tracked(self, text).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
+        GrokStdioClient::prompt_result(self, rid)
     }
 
     fn cancel(&self) -> Result<bool> {
@@ -142,6 +156,22 @@ impl GrokClientPool {
             Ok(true) => Some(PROMPT_QUEUED),
             _ => None,
         }
+    }
+
+    /// A workflow node's task as a tracked prompt over the key's leader:
+    /// the request id comes back so `prompt_result_for_key` can read the
+    /// turn's outcome. `Err` covers no daemon and no session record too.
+    pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<u64, String> {
+        let client = self
+            .acting_client(key)
+            .ok_or_else(|| format!("no grok leader client on {key}"))?;
+        client.prompt_tracked(text).map_err(|e| e.to_string())
+    }
+
+    /// The outcome of a prompt `dispatch_to_key` sent; None with no client
+    /// on the key or one that never sent it (reconnected since).
+    pub fn prompt_result_for_key(&self, key: &str, rid: u64) -> Option<PromptResult> {
+        self.acting_client(key)?.prompt_result(rid)
     }
 
     /// Cancel the running turn over the key's leader.
@@ -305,6 +335,20 @@ pub fn send_to_pane(pane: &str, text: &str) -> Option<&'static str> {
 
 pub fn send_to_key(key: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(key, text)
+}
+
+pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, u64), String> {
+    let key = resolve_pane_key(pane);
+    let rid = pool().dispatch_to_key(&key, text)?;
+    Ok((key, rid))
+}
+
+pub fn dispatch_to_key(key: &str, text: &str) -> Result<u64, String> {
+    pool().dispatch_to_key(key, text)
+}
+
+pub fn prompt_result_for_key(key: &str, rid: u64) -> Option<PromptResult> {
+    pool().prompt_result_for_key(key, rid)
 }
 
 pub fn interrupt_pane(pane: &str) -> Option<&'static str> {
