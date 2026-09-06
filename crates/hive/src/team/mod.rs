@@ -1140,7 +1140,7 @@ pub(crate) use roster::{
 pub(crate) use scope::{
     add_runtime_location_fields, ensure_pane_in_scope, ensure_team_hived, load_team,
     remember_context, resolve_scoped_team, resolve_workspace, start_team_hived,
-    team_status_payload,
+    start_team_hived_or_warn, team_status_payload,
 };
 
 #[cfg(test)]

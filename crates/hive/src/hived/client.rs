@@ -4,6 +4,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -118,21 +119,49 @@ pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, V
     request_hived(workspace, &payload, 3.0)
 }
 
-pub(crate) fn hived_identity_matches(response: Option<&Map<String, Value>>, team: &str) -> bool {
-    // Hived identity is (workspace socket, team) — never the window.
+/// What a ping answer says about the hived on the workspace socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HivedIdentity {
+    /// This build, this api version, this team, this hive home.
+    Matches,
+    /// No hived, or one of this hive home that is another build, api
+    /// version or team: replace it from this binary.
+    Restart,
+    /// A hived serving the workspace from another `HIVE_HOME` (the path it
+    /// reported). Not this hive's to restart: a replacement started from
+    /// here would run with this home, could not see that team's registry,
+    /// and would reap the members it does not own.
+    ForeignHome(String),
+}
+
+pub(crate) fn hived_identity(response: Option<&Map<String, Value>>, team: &str) -> HivedIdentity {
+    // Hived identity is (workspace socket, team, hive home) — never the
+    // window.
     //
     // The window is display: it can die, move, or be recreated by attach
     // without the team changing, so a window mismatch must not bounce a
     // healthy hived (and with it every live delivery client it holds).
-    match response {
-        Some(map) => {
-            map.get("ok") == Some(&Value::Bool(true))
-                && map.get("apiVersion") == Some(&Value::from(HIVED_API_VERSION))
-                && map.get("buildHash").and_then(Value::as_str) == Some(hived_build_hash())
-                && map.get("team").and_then(Value::as_str) == Some(team)
+    let Some(map) = response else {
+        return HivedIdentity::Restart;
+    };
+    if let Some(home) = map.get("hiveHome").and_then(Value::as_str) {
+        if Path::new(home) != crate::paths::hive_home().as_path() {
+            return HivedIdentity::ForeignHome(home.to_string());
         }
-        None => false,
     }
+    let matches = map.get("ok") == Some(&Value::Bool(true))
+        && map.get("apiVersion") == Some(&Value::from(HIVED_API_VERSION))
+        && map.get("buildHash").and_then(Value::as_str) == Some(hived_build_hash())
+        && map.get("team").and_then(Value::as_str) == Some(team);
+    if matches {
+        HivedIdentity::Matches
+    } else {
+        HivedIdentity::Restart
+    }
+}
+
+pub(crate) fn hived_identity_matches(response: Option<&Map<String, Value>>, team: &str) -> bool {
+    hived_identity(response, team) == HivedIdentity::Matches
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -32,9 +32,16 @@ Consequences across modules:
   backfills fields of names already there. An observation racing a `hive kill`
   must not resurrect the killed member.
 - **The `display` window id.** It is a cache: authority checks do not read
-  it, and hived identity is `(workspace socket, team)`, so a dead window does
-  not retire a hived on its own; a missing registry entry with no window left
-  behind it does.
+  it, and hived identity is `(workspace socket, team, hive home)`, so a dead
+  window does not retire a hived on its own; a missing registry entry with
+  no window left behind it does.
+- **The hive home is part of the identity.** A hived answers `ping` with
+  the `HIVE_HOME` it resolved. A client of the same home that finds another
+  build, api version or team on the socket restarts the hived from its own
+  binary; a client of another home is refused (`ensure_hived` errors,
+  naming both homes) and starts nothing — a replacement would run with the
+  client's home, could not see the team's registry, and would reap the
+  members it does not own.
 - **One directory per team.** `$HIVE_HOME/teams/<team>/` holds everything
   hive owns for the team: `team.json` (the entry — present means the team
   exists), and, on the default workspace, `hive.db` (the bus), `run/`

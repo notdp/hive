@@ -14,7 +14,7 @@ use super::util::{
 use crate::identity;
 use crate::team::{
     live_member_pids, load_team, resolve_scoped_team, resolve_workspace, spawn_team_agent,
-    start_team_hived, Team,
+    start_team_hived_or_warn, Team,
 };
 
 /// Send a message to another agent — the only message verb.
@@ -427,7 +427,7 @@ pub(crate) fn spawn(
     };
 
     let workspace = task_workspace.expect("--task resolved its workspace before spawning");
-    let _ = start_team_hived(&mut t, &workspace);
+    start_team_hived_or_warn(&mut t, &workspace);
     if agent.cli != "claude" {
         // A claude member's inbox is a queue: the task can land while the
         // bootstrap turn is still running and waits its turn. Only CLIs

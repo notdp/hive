@@ -133,7 +133,8 @@ pub struct MemberInfo {
 pub trait NodeEnv: Send + Sync {
     fn context(&self) -> Result<Ctx, NodeError>;
     fn spawn(&self, name: &str, cli: Option<&str>, model: &str) -> Result<SpawnedAgent, String>;
-    fn ensure_hived(&self);
+    /// `Err` is a hived this hive must not touch (`hived::ensure_hived`).
+    fn ensure_hived(&self) -> Result<(), String>;
     /// Agents still not ready when the gate expires.
     fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String>;
     /// Dispatch the task with no sender; returns the ledger seq of the row.
@@ -513,7 +514,7 @@ fn spawn_member(
 }
 
 fn ready_gate(env: &dyn NodeEnv, name: &str, cli: &str) -> Result<(), NodeError> {
-    env.ensure_hived();
+    env.ensure_hived().map_err(NodeError)?;
     if cli != "claude" {
         // claude inboxes queue; only TUI-injected CLIs need the ready gate.
         let not_ready = env.wait_ready(&HashSet::from([name.to_string()]));
@@ -1314,10 +1315,13 @@ impl NodeEnv for RealEnv {
         .and_then(|inner| inner)
     }
 
-    fn ensure_hived(&self) {
-        let _ = self.with_ctx(|c| {
-            crate::team::ensure_team_hived(&c.team, Path::new(&c.workspace));
-        });
+    fn ensure_hived(&self) -> Result<(), String> {
+        self.with_ctx(|c| {
+            crate::team::ensure_team_hived(&c.team, Path::new(&c.workspace))
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.0)
+        .and_then(|inner| inner)
     }
 
     fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String> {
@@ -1641,7 +1645,9 @@ pub(crate) mod test_env {
             })
         }
 
-        fn ensure_hived(&self) {}
+        fn ensure_hived(&self) -> Result<(), String> {
+            Ok(())
+        }
 
         fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String> {
             if self.ready {

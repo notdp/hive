@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use anyhow::{bail, Result};
 use serde_json::Value;
 
 use crate::devlog;
@@ -23,26 +24,36 @@ pub(crate) fn is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
 }
 
 /// Ensure the team hived socket is alive.
+///
+/// A hived of this hive home that is another build, api version or team
+/// is replaced from this binary. One serving the workspace from another
+/// `HIVE_HOME` is refused, not restarted: nothing is spawned and the error
+/// names both homes.
 pub fn ensure_hived(
     workspace: &str,
     team: &str,
     tmux_window: &str,
     tmux_window_id: &str,
-) -> Option<i32> {
+) -> Result<Option<i32>> {
     let lock_path = lock_path(workspace);
     if let Some(parent) = lock_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let cpath = CString::new(lock_path.as_os_str().as_bytes()).ok()?;
+    let cpath = CString::new(lock_path.as_os_str().as_bytes())?;
     let lock_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644) };
     if lock_fd < 0 {
-        return None;
+        bail!("cannot open hived lock {}", lock_path.display());
     }
     unsafe { libc::flock(lock_fd, libc::LOCK_EX) };
     let result = (|| {
         let response = hooked_request_ping(workspace);
-        if hived_identity_matches(response.as_ref(), team) {
-            return None;
+        match hived_identity(response.as_ref(), team) {
+            HivedIdentity::Matches => return Ok(None),
+            HivedIdentity::ForeignHome(served) => bail!(
+                "hived for {workspace} serves HIVE_HOME {served}, this hive runs with {}",
+                crate::paths::hive_home().display()
+            ),
+            HivedIdentity::Restart => {}
         }
         if response.is_some() {
             stop_hived(workspace);
@@ -53,11 +64,11 @@ pub fn ensure_hived(
         while monotonic() < deadline {
             let response = hooked_request_ping(workspace);
             if hived_identity_matches(response.as_ref(), team) {
-                return pid;
+                return Ok(pid);
             }
             thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
         }
-        pid
+        Ok(pid)
     })();
     unsafe {
         libc::flock(lock_fd, libc::LOCK_UN);

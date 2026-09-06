@@ -31,7 +31,7 @@ pub(crate) fn request_send_payload(
     if warn_on_long_body {
         maybe_warn_long_body(body, command_name);
     }
-    ensure_team_hived(team, std::path::Path::new(workspace));
+    ensure_team_hived(team, std::path::Path::new(workspace))?;
     let payload = crate::hived::request_send(
         workspace,
         &team.name,
@@ -74,7 +74,8 @@ pub(crate) fn request_node_dispatch(
     body: &str,
     artifact: &str,
 ) -> Result<Map<String, Value>, DispatchFailure> {
-    ensure_team_hived(team, std::path::Path::new(workspace));
+    ensure_team_hived(team, std::path::Path::new(workspace))
+        .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
     let answer =
         crate::hived::request_node_dispatch(workspace, &team.name, target_agent, body, artifact);
     hived_answer(workspace, answer, "node dispatch")

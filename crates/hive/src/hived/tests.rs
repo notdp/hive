@@ -3078,7 +3078,161 @@ fn test_hived_identity_matches_team_and_ignores_window() {
 }
 
 #[test]
+fn test_hived_identity_refuses_another_hive_home_before_reading_the_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let home = tmp.path().to_string_lossy().into_owned();
+    let identity = |build: &str, home: &str| {
+        json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from(build)),
+            ("team", Value::from("team-a")),
+            ("hiveHome", Value::from(home)),
+        ])
+    };
+    assert_eq!(
+        hived_identity(Some(&identity(hived_build_hash(), &home)), "team-a"),
+        HivedIdentity::Matches
+    );
+    // A trailing slash is the same home.
+    assert_eq!(
+        hived_identity(
+            Some(&identity(hived_build_hash(), &format!("{home}/"))),
+            "team-a"
+        ),
+        HivedIdentity::Matches
+    );
+    assert_eq!(
+        hived_identity(Some(&identity("stale", &home)), "team-a"),
+        HivedIdentity::Restart
+    );
+    assert_eq!(hived_identity(None, "team-a"), HivedIdentity::Restart);
+    // Another home is refused whatever the build says — even this one.
+    assert_eq!(
+        hived_identity(
+            Some(&identity(hived_build_hash(), "/elsewhere/.hive")),
+            "team-a"
+        ),
+        HivedIdentity::ForeignHome("/elsewhere/.hive".to_string())
+    );
+    assert_eq!(
+        hived_identity(Some(&identity("stale", "/elsewhere/.hive")), "team-a"),
+        HivedIdentity::ForeignHome("/elsewhere/.hive".to_string())
+    );
+    // A hived that reports no home (an older build) is restarted as before.
+    let mut unhomed = identity("stale", &home);
+    unhomed.shift_remove("hiveHome");
+    assert_eq!(
+        hived_identity(Some(&unhomed), "team-a"),
+        HivedIdentity::Restart
+    );
+}
+
+/// `ensure_hived` against a hooked ping: `identity` is what the socket
+/// answers before a start, `after_start` once the popen hook has run.
+/// Returns the result and the popen / cleanup_socket call counts.
+fn ensure_hived_against(
+    identity: Map<String, Value>,
+    after_start: Map<String, Value>,
+) -> (Result<Option<i32>>, usize, usize) {
+    let run_tmp = tempfile::Builder::new()
+        .prefix("hens")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = run_tmp.path().to_path_buf();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ping_started = Arc::clone(&started);
+    let popen_started = Arc::clone(&started);
+    let popen_spawns = Arc::clone(&spawns);
+    let cleanup_count = Arc::clone(&cleanups);
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        request_ping: Some(Arc::new(move |_ws| {
+            if ping_started.load(Ordering::SeqCst) {
+                Some(after_start.clone())
+            } else {
+                Some(identity.clone())
+            }
+        })),
+        cleanup_socket: Some(Arc::new(move |_ws| {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        })),
+        popen: Some(Arc::new(move |_command, _stderr| {
+            popen_spawns.fetch_add(1, Ordering::SeqCst);
+            popen_started.store(true, Ordering::SeqCst);
+            4242
+        })),
+        ..Default::default()
+    });
+    let result = ensure_hived("/tmp/ws-ensure", "team-a", "dev:3", "@99");
+    (
+        result,
+        spawns.load(Ordering::SeqCst),
+        cleanups.load(Ordering::SeqCst),
+    )
+}
+
+#[test]
+fn test_ensure_hived_restarts_a_stale_hived_of_the_same_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let home = tmp.path().to_string_lossy().into_owned();
+    let identity = |build: &str| {
+        json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from(build)),
+            ("team", Value::from("team-a")),
+            ("hiveHome", Value::from(home.clone())),
+        ])
+    };
+    let (result, spawns, cleanups) =
+        ensure_hived_against(identity("stale"), identity(hived_build_hash()));
+    assert_eq!(result.unwrap(), Some(4242));
+    assert_eq!(spawns, 1);
+    assert_eq!(cleanups, 1);
+
+    // Already this build: nothing to do.
+    let (result, spawns, _) =
+        ensure_hived_against(identity(hived_build_hash()), identity(hived_build_hash()));
+    assert_eq!(result.unwrap(), None);
+    assert_eq!(spawns, 0);
+}
+
+#[test]
+fn test_ensure_hived_refuses_a_hived_of_another_home_and_starts_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let foreign = json_obj(&[
+        ("ok", Value::Bool(true)),
+        ("apiVersion", Value::from(HIVED_API_VERSION)),
+        ("buildHash", Value::from("stale")),
+        ("team", Value::from("team-a")),
+        ("hiveHome", Value::from("/elsewhere/.hive")),
+    ]);
+    let (result, spawns, cleanups) = ensure_hived_against(foreign.clone(), foreign);
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("/tmp/ws-ensure"), "{err}");
+    assert!(err.contains("/elsewhere/.hive"), "{err}");
+    assert!(
+        err.contains(&tmp.path().to_string_lossy().into_owned()),
+        "{err}"
+    );
+    assert_eq!(spawns, 0);
+    assert_eq!(cleanups, 0);
+}
+
+#[test]
 fn test_handle_request_ping_returns_hived_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
     let (response, keep_running) = handle_request(
         "/tmp/ws",
         "team-a",
@@ -3094,6 +3248,10 @@ fn test_handle_request_ping_returns_hived_identity() {
         ("apiVersion", Value::from(HIVED_API_VERSION)),
         ("buildHash", Value::from(hived_build_hash())),
         ("team", Value::from("team-a")),
+        (
+            "hiveHome",
+            Value::from(tmp.path().to_string_lossy().into_owned()),
+        ),
         ("tmuxWindow", Value::from("dev:3")),
         ("tmuxWindowId", Value::from("@99")),
         (

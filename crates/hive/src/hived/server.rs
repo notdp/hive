@@ -120,6 +120,10 @@ pub(crate) fn handle_request(
             response.insert("apiVersion".to_string(), Value::from(HIVED_API_VERSION));
             response.insert("buildHash".to_string(), Value::from(hived_build_hash()));
             response.insert("team".to_string(), Value::from(team));
+            response.insert(
+                "hiveHome".to_string(),
+                Value::from(crate::paths::hive_home().to_string_lossy().into_owned()),
+            );
             response.insert("tmuxWindow".to_string(), Value::from(tmux_window));
             response.insert("tmuxWindowId".to_string(), Value::from(tmux_window_id));
             response.insert("hived".to_string(), Value::Object(hived));
