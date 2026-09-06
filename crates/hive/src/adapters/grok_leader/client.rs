@@ -21,6 +21,17 @@ pub struct SessionRuntime {
     pub input_state: String,
     pub session_id: Option<String>,
     pub observed_at: f64,
+    /// Turn evidence for the node runner's dispatch gate, distinct from the
+    /// display `busy` flag: `busy` defaults to false and `observed_at` is
+    /// bumped by any in-session notification, so a client that has only
+    /// seen a command table, an announcement, or a permission prompt would
+    /// otherwise read as positively idle. `Some(true)` only on turn activity
+    /// (message chunks, tool calls, `activity: working`) or a queue with a
+    /// prompt queued or running — a backlog counts as open because the
+    /// leader runs it FIFO, so nothing dispatched now runs between turns;
+    /// `Some(false)` only on `turn_completed` / `activity: idle`; `None`
+    /// until one of those has been seen. Not a runtime field.
+    pub turn_open: Option<bool>,
 }
 
 impl Default for SessionRuntime {
@@ -30,6 +41,7 @@ impl Default for SessionRuntime {
             input_state: String::new(),
             session_id: None,
             observed_at: 0.0,
+            turn_open: None,
         }
     }
 }
@@ -300,10 +312,11 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
                 .and_then(Value::as_str);
             if kind == Some("turn_completed") {
                 state.runtime.busy = false;
+                state.runtime.turn_open = Some(false);
                 state.runtime.input_state = "ready".to_string();
             }
         }
-        "_x.ai/queue/changed" => apply_queue(&state, params),
+        "_x.ai/queue/changed" => apply_queue(&mut state, params),
         _ => {}
     }
 }
@@ -312,9 +325,13 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
 fn apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
     state.runtime.observed_at = now_epoch();
     match activity.and_then(Value::as_str) {
-        Some("working") => state.runtime.busy = true,
+        Some("working") => {
+            state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
+        }
         Some("idle") => {
             state.runtime.busy = false;
+            state.runtime.turn_open = Some(false);
             state.runtime.input_state = "ready".to_string();
         }
         _ => {}
@@ -327,15 +344,20 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("");
     match kind {
-        "tool_call" => state.runtime.busy = true,
+        "tool_call" => {
+            state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
+        }
         "tool_call_update" => {
             // An update on a tool call means the turn is running and any
             // permission it was blocked on has been decided.
             state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
             state.runtime.input_state = "ready".to_string();
         }
         kind if MESSAGE_CHUNKS.contains(&kind) => {
             state.runtime.busy = true;
+            state.runtime.turn_open = Some(true);
             if kind == "user_message_chunk" {
                 let text = update
                     .get("content")
@@ -347,11 +369,25 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
     }
 }
 
-fn apply_queue(state: &ClientShared, params: &Value) {
-    if let Some(entries) = params.get("entries").and_then(Value::as_array) {
-        for entry in entries.iter().filter(|entry| entry.is_object()) {
-            note_ack(state, entry.get("text"));
-        }
+/// Fold a queue snapshot: a queued entry or a running prompt is turn
+/// evidence (the backlog runs FIFO behind the current turn), an empty
+/// snapshot says nothing — the turn that drained it may still be running.
+/// The ack match is separate and never touches the turn evidence.
+fn apply_queue(state: &mut ClientShared, params: &Value) {
+    let entries: Vec<&Value> = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().filter(|entry| entry.is_object()).collect())
+        .unwrap_or_default();
+    let running = params
+        .get("runningText")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty());
+    if !entries.is_empty() || running {
+        state.runtime.turn_open = Some(true);
+    }
+    for entry in &entries {
+        note_ack(state, entry.get("text"));
     }
     note_ack(state, params.get("runningText"));
 }
@@ -569,6 +605,12 @@ impl GrokStdioClient {
     /// accept boundary is the echo — a queue entry carrying the text, or the
     /// turn's `user_message_chunk`. The response id stays registered just long
     /// enough to catch an immediate rpc error; its eventual result is dropped.
+    ///
+    /// The echo is also the turn evidence: both shapes open `turn_open` on
+    /// the reader thread, in order with everything after them. This method
+    /// writes none itself — by the time the ack wakes it the turn may already
+    /// have completed (a short turn's `turn_completed`, or the prompt
+    /// response landing first), and a late `Some(true)` would outlive it.
     pub fn prompt(&self, text: &str) -> bool {
         let done = Event::new();
         let session_id = {

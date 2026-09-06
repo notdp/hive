@@ -2889,7 +2889,7 @@ mod tests {
             gl_runtime_for_key: Some(Arc::new(move |key| {
                 (key == format!("m-{team}.g")).then(|| {
                     crate::adapters::grok_leader::SessionRuntime {
-                        busy: true,
+                        turn_open: Some(true),
                         ..Default::default()
                     }
                 })

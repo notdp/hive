@@ -653,10 +653,12 @@ pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Option<bool> {
 /// job-id shaped), whose `busy` flag is no answer once its status is
 /// stale. grok: the member's ACP connection is held by the hived's leader
 /// pool (a second process must not `session/load` the same session), and
-/// the pool client's runtime is push-fed by `session/update`
-/// notifications. `open` is null whenever the engine cannot be asked (no
-/// daemon, no engine entry, nothing reported yet) — never a guess; a
-/// member off the roster is an error.
+/// the pool client's `turn_open` is push-fed by the turn's own
+/// notifications — not the display `busy` flag, which a client that has
+/// only seen a command table or an announcement reports as false. `open`
+/// is null whenever the engine cannot be asked (no daemon, no engine
+/// entry, no turn evidence yet) — never a guess; a member off the roster
+/// is an error.
 pub(crate) fn turn_open_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
     let team = hooked_team_load(team_name)?;
     let agent = team
@@ -675,7 +677,7 @@ pub(crate) fn turn_open_payload(team_name: &str, agent_name: &str) -> Result<Map
             }),
         "grok" => {
             let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
-            hooked_gl_runtime_for_key(&key).map(|rt| rt.busy)
+            hooked_gl_runtime_for_key(&key).and_then(|rt| rt.turn_open)
         }
         _ => None,
     };

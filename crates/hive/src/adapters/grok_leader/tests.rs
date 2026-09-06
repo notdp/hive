@@ -543,13 +543,13 @@ fn test_activity_working_marks_busy_and_idle_closes_turn() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&activity("working"));
-    assert_eq!(
-        settle(&client, |rt| rt.busy).session_id.as_deref(),
-        Some(SID)
-    );
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.session_id.as_deref(), Some(SID));
+    assert_eq!(runtime.turn_open, Some(true));
     proc.feed(&activity("idle"));
     let runtime = settle(&client, |rt| !rt.busy);
     assert_eq!(runtime.input_state, "ready");
+    assert_eq!(runtime.turn_open, Some(false));
     teardown(&client, &proc);
 }
 
@@ -561,7 +561,8 @@ fn test_message_chunks_mark_busy() {
         "agent_thought_chunk",
         json!({"content": {"type": "text", "text": "The"}}),
     ));
-    settle(&client, |rt| rt.busy);
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -573,7 +574,8 @@ fn test_tool_call_marks_busy() {
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    settle(&client, |rt| rt.busy);
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -587,7 +589,8 @@ fn test_late_joined_tool_call_update_marks_busy() {
         "tool_call_update",
         json!({"toolCallId": "c1", "status": "in_progress"}),
     ));
-    settle(&client, |rt| rt.busy);
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -627,6 +630,7 @@ fn test_turn_completed_clears_busy() {
     }));
     let runtime = settle(&client, |rt| !rt.busy);
     assert_eq!(runtime.input_state, "ready");
+    assert_eq!(runtime.turn_open, Some(false));
     teardown(&client, &proc);
 }
 
@@ -672,6 +676,77 @@ fn test_unknown_updates_are_ignored() {
     }));
     let runtime = settle(&client, |rt| rt.observed_at > first.observed_at);
     assert!(!runtime.busy);
+    // seen, but neither is turn evidence: the runtime still has no answer
+    // about the turn, not a positive idle
+    assert_eq!(runtime.turn_open, None);
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_queue_backlog_opens_the_turn() {
+    // a queued entry runs FIFO behind whatever is running: not between turns
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {
+            "sessionId": SID,
+            "entries": [{"id": "p1", "kind": "prompt", "text": "someone else", "position": 0}],
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.turn_open.is_some());
+    assert_eq!(runtime.turn_open, Some(true));
+    assert!(!runtime.busy); // display busy is the activity authority's
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_queue_running_text_opens_the_turn() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {
+            "sessionId": SID,
+            "entries": [],
+            "runningText": "someone else",
+            "runningKind": "prompt",
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.turn_open.is_some());
+    assert_eq!(runtime.turn_open, Some(true));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_empty_queue_says_nothing_about_the_turn() {
+    // the queue draining is not the turn ending: the entry it handed over
+    // may still be running
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {"sessionId": SID, "entries": [], "runningText": null},
+    }));
+    let runtime = settle(&client, |_rt| true);
+    assert_eq!(runtime.turn_open, None);
+    proc.feed(&activity("working"));
+    let before = settle(&client, |rt| rt.turn_open == Some(true));
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/queue/changed",
+        "params": {"sessionId": SID, "entries": []},
+    }));
+    // same-session marker after the empty snapshot proves it was folded
+    proc.feed(&update(
+        "available_commands_update",
+        json!({"availableCommands": []}),
+    ));
+    let runtime = settle(&client, |rt| rt.observed_at > before.observed_at);
+    assert_eq!(runtime.turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -714,6 +789,8 @@ fn test_prompt_acks_on_queue_changed_echo() {
             "prompt": [{"type": "text", "text": "hello grok"}],
         })
     );
+    // the echo that accepted hive's own prompt is the turn evidence
+    assert_eq!(client.runtime().unwrap().turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -755,6 +832,7 @@ fn test_prompt_acks_on_user_message_chunk() {
     });
     let (client, proc) = loaded(Some(responder(Some(on_prompt), vec![])), vec![]);
     assert!(GrokStdioClient::prompt(&client, "hello grok"));
+    assert_eq!(client.runtime().unwrap().turn_open, Some(true));
     teardown(&client, &proc);
 }
 
@@ -828,7 +906,9 @@ fn test_permission_request_is_cancelled_and_marks_waiting_user() {
         answer["result"],
         json!({"outcome": {"outcome": "cancelled"}})
     );
-    settle(&client, |rt| rt.input_state == "waiting_user");
+    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    // a prompt alone is not turn evidence
+    assert_eq!(runtime.turn_open, None);
     teardown(&client, &proc);
 }
 
