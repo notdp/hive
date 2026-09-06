@@ -121,9 +121,9 @@ pub trait TurnReader: Send + Sync {
 /// transcript reader for.
 pub fn reader_for(cli: &str) -> Option<Box<dyn TurnReader>> {
     match cli {
-        "claude" => Some(Box::new(super::claude_turn::ClaudeTurnReader::default())),
-        "codex" => Some(Box::new(super::codex_turn::CodexTurnReader::default())),
-        "grok" => Some(Box::new(super::grok_turn::GrokTurnReader::default())),
+        "claude" => Some(Box::new(super::claude_turn::ClaudeTurnReader)),
+        "codex" => Some(Box::new(super::codex_turn::CodexTurnReader)),
+        "grok" => Some(Box::new(super::grok_turn::GrokTurnReader)),
         _ => None,
     }
 }
