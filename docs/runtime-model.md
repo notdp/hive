@@ -273,8 +273,10 @@ own transcript. Nothing travels back over the bus.
   the reader is re-invoked on every poll, and a half-written trailing line
   is "not yet"; the turn itself has no timeout (the caller decides).
   stderr and exit 1 mean the task was not dispatched — bad team, spawn or
-  ready failure, no reader for the cli, the readiness cap — and the run
-  can be repeated; a dispatched task always ends in a JSON line.
+  ready failure, no reader for the cli — and the run can be repeated
+  (`member_busy` is the other not-dispatched verdict, reported as a JSON
+  line because it names a state the caller acts on); a dispatched task
+  always ends in a JSON line.
 - **The record.** `<workspace>/run/nodes/<name>.json` — `dispatchId`,
   `cli`, `session`, `cursor`, `anchor` (session/turn/cursor once bound),
   `status` (`pending | input_bound | <terminal status>`), `body`/`reason`
