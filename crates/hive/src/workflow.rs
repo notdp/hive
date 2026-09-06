@@ -18,9 +18,9 @@
 //!
 //! One run is one record, `<workspace>/run/workflow/<name>.json`, written
 //! pending before the dispatch has any side effect and again at its end,
-//! held under the per-member flock `<name>.lock`; a pending record of a
-//! live member is another runner's, a pending record of a dead member is
-//! stale and replaced. Past the dispatch nothing is an `Err` any more:
+//! held under the per-member flock `<name>.lock`. Once the lock is free,
+//! a live member's unresolved record is checked against the hived before
+//! reuse; a dead member's record is stale and replaced. Past the dispatch nothing is an `Err` any more:
 //! exit 1 means "not dispatched", so a record write that fails later is
 //! logged and the run still ends in a verdict. A dispatch the hived
 //! refused is not dispatched; one whose answer was lost may be, is never
@@ -270,6 +270,13 @@ impl WorkflowRecord {
         matches!(self.status.as_str(), STATUS_PENDING | STATUS_UNKNOWN)
     }
 
+    fn apply_verdict(&mut self, verdict: &Verdict) {
+        self.status = verdict.status.to_string();
+        self.body = verdict.body.clone();
+        self.artifact = verdict.artifact.clone();
+        self.reason = verdict.reason.clone();
+    }
+
     fn to_json(&self) -> Value {
         let mut map = Map::new();
         map.insert("dispatchId".into(), Value::from(self.dispatch_id.as_str()));
@@ -349,8 +356,8 @@ fn write_atomic(workspace: &str, path: &Path, value: &Value) -> Result<(), Workf
     fs::rename(&tmp, path).map_err(|e| WorkflowError(e.to_string()))
 }
 
-/// The `Err` is for the pending write before the dispatch; every later
-/// write goes through `update_record`.
+/// Writes before this run dispatches (reconciliation and its pending
+/// record) may fail the run; after dispatch use `update_record`.
 fn write_record(workspace: &str, name: &str, record: &WorkflowRecord) -> Result<(), WorkflowError> {
     write_atomic(workspace, &record_path(workspace, name), &record.to_json())
 }
@@ -843,12 +850,35 @@ pub fn run_workflow(
             "the workflow lock for '{name}' is held by another runner"
         )));
     };
-    if let Some(record) = read_record(workspace, name) {
+    if let Some(mut record) = read_record(workspace, name) {
         if record.is_pending() && env.alive(name) {
-            return Ok(busy(format!(
-                "member '{name}' has an unresolved workflow dispatch {}",
-                record.dispatch_id
-            )));
+            // Holding the lock means the previous waiter is gone, not that
+            // its execution ended. Ask once before taking over its member.
+            let verdict = match env.node_result(&record.dispatch_id) {
+                Some(NodeResult::Ended {
+                    status,
+                    text,
+                    error,
+                }) => Some(Verdict::ended(&status, text, error)),
+                Some(NodeResult::Unknown(reason)) if env.turn_open(name) == Some(false) => {
+                    Some(Verdict::reason(
+                        STATUS_NO_RESULT,
+                        format!(
+                            "the previous turn is closed and nothing holds its result ({reason})"
+                        ),
+                    ))
+                }
+                _ => None,
+            };
+            let Some(verdict) = verdict else {
+                return Ok(busy(format!(
+                    "member '{name}' has an unresolved workflow dispatch {}",
+                    record.dispatch_id
+                )));
+            };
+            record.apply_verdict(&verdict);
+            // Preserve the recovered result before starting the new run.
+            write_record(workspace, name, &record)?;
         }
     }
 
@@ -962,10 +992,7 @@ pub fn run_workflow(
     }
 
     let verdict = await_result(env, name, &dispatch_id);
-    record.status = verdict.status.to_string();
-    record.body = verdict.body.clone();
-    record.artifact = verdict.artifact.clone();
-    record.reason = verdict.reason.clone();
+    record.apply_verdict(&verdict);
     update_record(workspace, name, &record);
     log(&format!("{name} {}", verdict.status));
     Ok(WorkflowResult {
@@ -2040,6 +2067,128 @@ mod tests {
         let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_ne!(r["dispatchId"], "nd-aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn test_run_workflow_reconciles_ended_records_before_dispatching_once() {
+        for status in [STATUS_PENDING, STATUS_UNKNOWN] {
+            let tmp = TempDir::new().unwrap();
+            let env = fake_env(tmp.path());
+            env.add_live("audit");
+            env.watch_record("audit");
+            let old = WorkflowRecord {
+                status: status.into(),
+                ..pending("nd-aaaaaaaaaaaa")
+            };
+            write_record(&env.workspace_str(), "audit", &old).unwrap();
+            *env.node_answers.lock().unwrap() = VecDeque::from([
+                Some(ended("completed", "old result")),
+                Some(ended("completed", "new result")),
+            ]);
+            // Observe the recovered record before the new pending write.
+            *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(false)]);
+            let result = run_workflow(&env, &codex("audit", "new task")).unwrap();
+            assert_eq!(result["body"], "new result");
+            assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+            assert_eq!(*env.statuses_seen.lock().unwrap(), vec!["completed"]);
+            assert_eq!(
+                *env.node_calls.lock().unwrap(),
+                vec![
+                    old.dispatch_id,
+                    result["dispatchId"].as_str().unwrap().to_string()
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_preserves_recovered_result_when_new_turn_gate_stays_closed() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        let old = WorkflowRecord {
+            status: STATUS_UNKNOWN.into(),
+            ..pending("nd-aaaaaaaaaaaa")
+        };
+        write_record(&env.workspace_str(), "audit", &old).unwrap();
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(ended("completed", "recovered result"))]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
+        let result = run_workflow(&env, &codex("audit", "new task")).unwrap();
+        assert_eq!(result["status"], "member_busy");
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        let saved = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(saved.dispatch_id, old.dispatch_id);
+        assert_eq!(saved.status, "completed");
+        assert_eq!(saved.body.as_deref(), Some("recovered result"));
+        assert_eq!(saved.seq, old.seq);
+    }
+
+    #[test]
+    fn test_run_workflow_keeps_unresolved_records_without_dispatching() {
+        for status in [STATUS_PENDING, STATUS_UNKNOWN] {
+            for (answer, turn) in [
+                (Some(NodeResult::Running), Some(false)),
+                (None, Some(false)),
+                (Some(NodeResult::Unknown("no handle".into())), Some(true)),
+                (Some(NodeResult::Unknown("no handle".into())), None),
+            ] {
+                let tmp = TempDir::new().unwrap();
+                let env = fake_env(tmp.path());
+                env.add_live("audit");
+                let old = WorkflowRecord {
+                    status: status.into(),
+                    ..pending("nd-aaaaaaaaaaaa")
+                };
+                write_record(&env.workspace_str(), "audit", &old).unwrap();
+                *env.node_answers.lock().unwrap() = VecDeque::from([answer]);
+                *env.turn_answers.lock().unwrap() = VecDeque::from([turn]);
+                let result = run_workflow(&env, &codex("audit", "new task")).unwrap();
+                assert_eq!(result["status"], "member_busy");
+                assert_eq!(result["dispatchId"], old.dispatch_id);
+                assert!(result["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&old.dispatch_id));
+                assert!(env.dispatches.lock().unwrap().is_empty());
+                assert_eq!(
+                    *env.node_calls.lock().unwrap(),
+                    vec![old.dispatch_id.clone()]
+                );
+                assert_eq!(read_record(&env.workspace_str(), "audit"), Some(old));
+            }
+        }
+    }
+
+    #[test]
+    fn test_run_workflow_replaces_unknown_closed_records_after_a_fresh_turn_gate() {
+        for status in [STATUS_PENDING, STATUS_UNKNOWN] {
+            let tmp = TempDir::new().unwrap();
+            let env = fake_env(tmp.path());
+            env.add_live("audit");
+            env.watch_record("audit");
+            let old = WorkflowRecord {
+                status: status.into(),
+                ..pending("nd-aaaaaaaaaaaa")
+            };
+            write_record(&env.workspace_str(), "audit", &old).unwrap();
+            *env.node_answers.lock().unwrap() = VecDeque::from([
+                Some(NodeResult::Unknown("client replaced".into())),
+                Some(ended("completed", "fresh result")),
+            ]);
+            // Closed for reconciliation, open at dispatch gate, then closed.
+            *env.turn_answers.lock().unwrap() =
+                VecDeque::from([Some(false), Some(true), Some(false)]);
+            let result = run_workflow(&env, &codex("audit", "new task")).unwrap();
+            assert_eq!(result["body"], "fresh result");
+            assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+            assert_eq!(env.turn_calls.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                *env.statuses_seen.lock().unwrap(),
+                vec![status, "no_result"]
+            );
+            assert_ne!(result["dispatchId"], old.dispatch_id);
+        }
     }
 
     #[test]

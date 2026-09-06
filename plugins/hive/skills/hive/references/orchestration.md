@@ -94,15 +94,15 @@ JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头);�
 - `interrupted`:这一轮被打断(codex `interrupted`,grok `cancelled`),body 是打断前说到的。
 - `failed`:引擎以错误收口(codex `failed`,grok 出错响应、`max_tokens`、`refusal`…),`reason` 带引擎原话。
 - `no_result`:连续确认这一轮没在跑,也没人拿着它的结果(例如 hived 在派发后重启过);任务可能做了也可能没做,重派前先核查副作用。
-- `unknown`:120 次结果轮询都没应答,等待者退出但执行状态未决;记录仍占用成员,同名重跑返回 `member_busy`。
+- `unknown`:120 次结果轮询都没应答,等待者退出但执行状态未决;记录仍占用成员,同名重跑先按旧 dispatchId 问 hived 裁决。
 - `member_gone`:等待期间成员死了。
-- `member_busy`:没派发——上一跑还 pending/unknown 且成员活着、名字被别的 runner 锁着、或成员 600 次轮询还在一轮里没空(runner 不往进行中的一轮里塞任务)。
+- `member_busy`:没派发——上一跑 pending/unknown 经查询仍未决且成员活着、名字被别的 runner 锁着、或成员 600 次轮询还在一轮里没空(runner 不往进行中的一轮里塞任务)。
 
 非 `completed` 一样是节点的返回值,由脚本决定重派、改任务还是升级 human,代理不重试、不解读。
 
 派发失败分两种,runner 按 hived 的应答区分:hived 明确拒了(`ok:false`:传输拒收、成员不存在、send gate)或请求根本没送到,是"确定没派出去"——重试 3 次,最终拒收就撤掉 pending 记录、回收本次 spawn 的成员、exit 1;请求发出去了但应答没回来(socket 读超时、连接断、空应答),是"不知道派没派出去"——任务可能已经注入,**绝不重发**,记录留在 pending(`seq` 为 null),照常去 hived 读这一轮的结果。只要 hived 仍持有可用的 turn 句柄,就能读回终态。Codex 引擎侧同样区分:写出前失败或明确 RPC 拒收可重试;写失败、超时或断连按 `Unknown` 保留,不自动重发。若丢失的是引擎返回 turn id 的应答,hived 无法跟踪该轮结果,查询返回 unknown。
 
-exit code 的语义只有一条:exit 1 = 任务没派发出去(team 不对、指定了 claude、spawn/ready 失败),可以直接重跑;`member_busy` 也是没派发,但以 exit 0 + JSON 报,由脚本决定等还是换人;派发出去的任务一定以 exit 0 + 一行 JSON 收场,turn 本身没有超时,由脚本决定等多久。每次跑在 `<workspace>/run/workflow/<member>.json` 留记录,派发前先写 pending。v1 尚无 resume:runner 被 Ctrl-C 杀掉或返回 `unknown` 时,记录仍占用活成员;直到 `hive kill` 清除记录,或后续 run 确认成员已死才替换。`no_result` 只在连续确认 turn 已关闭后释放名字;它不说明任务有没有产生副作用。
+exit code 的语义只有一条:exit 1 = 任务没派发出去(team 不对、指定了 claude、spawn/ready 失败),可以直接重跑;`member_busy` 也是没派发,但以 exit 0 + JSON 报,由脚本决定等还是换人;派发出去的任务一定以 exit 0 + 一行 JSON 收场,turn 本身没有超时,由脚本决定等多久。每次跑在 `<workspace>/run/workflow/<member>.json` 留记录,派发前先写 pending。runner 被 Ctrl-C 杀掉或因 120 次无应答返回 `unknown` 后,下一次同名 run 拿到锁会先查旧 dispatchId:Ended 先保存旧结果再继续;Unknown 且 turn 明确关闭则视为陈旧;Running、hived 不应答、turn 仍开或未获应答则返回 `member_busy`。新任务仍须通过关轮 gate,开始时会替换成员记录;这不是结果归档或 resume 命令。`no_result` 不说明任务有没有产生副作用。
 
 hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——把这条命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
 

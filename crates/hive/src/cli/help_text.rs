@@ -745,10 +745,13 @@ Commands:
   unanswered; the record still owns the member) | member_gone (the
   member died before its turn ended) | member_busy (a pending or unknown
   dispatch owns the member, another runner holds its lock, or its turn
-  stayed open for 600s). Every status exits 0; exit 1 with the error on stderr only when no dispatch
-  happened: bad team, a claude member, spawn or ready failure, the dispatch
-  refused three times. A spawn made here is retired when the run ends
-  before the dispatch.
+  stayed open for 600s). Every status exits 0; exit 1 with the error on
+  stderr only when no dispatch happened: bad team, a claude member, spawn
+  or ready failure, the dispatch refused three times. A spawn made here
+  is retired when the run ends before the dispatch.
+  A same-name retry checks the old dispatch once: ended results are saved;
+  unknown results with a closed turn permit reuse. While the result or
+  turn remains unresolved it returns member_busy with the old dispatchId.
 
   The run's record is `<workspace>/run/workflow/<NAME>.json` (dispatch id,
   status, body/reason); `hive kill` of the member removes it. The task

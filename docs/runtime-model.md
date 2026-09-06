@@ -325,12 +325,16 @@ runner refuses a claude member before anything is spawned.
   file itself is never deleted, the record is. A stale pending record whose
   member is dead is replaced by the next run; `hive kill` of the member
   removes its record. A same-name node reuses a live member, whatever
-  `--cli` says (its engine is the roster's). Pending and unknown records
-  both block a new same-name dispatch while the member is alive. The v1
-  recovery limit remains: after Ctrl-C or an unknown verdict there is no
-  resume command; the record remains until `hive kill` removes it or a
-  subsequent run finds the member dead. `no_result` releases ownership
-  only after the closed-turn observations described above.
+  `--cli` says (its engine is the roster's). After acquiring the lock, a
+  new run checks a live member's pending record, including status
+  `unknown` from 120 unanswered polls, once by its old dispatch id.
+  `Ended` saves the old result before continuing; `Unknown` with an
+  explicitly closed turn settles the old record as `no_result` and
+  continues. `Running`, no result answer, or `Unknown` with an open or
+  unanswered turn returns `member_busy` with the old dispatch id.
+  The new task still passes the normal turn-closed gate before dispatch.
+  The per-member record is replaced when the new task starts; this is
+  reconciliation on reuse, not a result archive or a resume command.
 
 ## Runtime fields and their sources
 
