@@ -287,13 +287,8 @@ fn shlex_split(s: &str) -> Option<Vec<String>> {
                     quote = Some(c);
                     in_word = true;
                 } else if c == '\\' {
-                    match chars.next() {
-                        Some(n) => {
-                            cur.push(n);
-                            in_word = true;
-                        }
-                        None => return None,
-                    }
+                    cur.push(chars.next()?);
+                    in_word = true;
                 } else {
                     cur.push(c);
                     in_word = true;

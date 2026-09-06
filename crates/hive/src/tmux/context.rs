@@ -122,7 +122,7 @@ fn list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
         let activity: i64 = raw.parse().unwrap_or(0);
         rows.push((activity, parts[3].to_string()));
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
     rows
 }
 

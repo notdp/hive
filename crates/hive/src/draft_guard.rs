@@ -318,14 +318,12 @@ fn apply_sgr(params: &[i64], mut dim: bool, mut reverse: bool) -> (bool, bool) {
             7 => reverse = true,
             22 => dim = false,
             27 => reverse = false,
-            38 | 48 => {
-                if i + 1 < params.len() {
-                    let mode = params[i + 1];
-                    if mode == 2 {
-                        i += 4;
-                    } else if mode == 5 {
-                        i += 2;
-                    }
+            38 | 48 if i + 1 < params.len() => {
+                let mode = params[i + 1];
+                if mode == 2 {
+                    i += 4;
+                } else if mode == 5 {
+                    i += 2;
                 }
             }
             _ => {}
