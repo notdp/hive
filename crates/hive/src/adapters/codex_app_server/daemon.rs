@@ -267,8 +267,9 @@ pub fn send_to_thread(thread_id: &str, text: &str) -> Option<&'static str> {
 /// the turn id comes back so `turn_result` can read the turn's outcome.
 /// `Refused` covers no recorded thread and no daemon as well.
 pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, String), TurnStartFailure> {
-    let tid = thread_id_for_pane(pane)
-        .ok_or_else(|| TurnStartFailure::Refused(format!("pane {pane} has no recorded codex thread")))?;
+    let tid = thread_id_for_pane(pane).ok_or_else(|| {
+        TurnStartFailure::Refused(format!("pane {pane} has no recorded codex thread"))
+    })?;
     let turn_id = dispatch_to_thread(&tid, text)?;
     Ok((tid, turn_id))
 }
