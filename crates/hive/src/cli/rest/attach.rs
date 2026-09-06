@@ -353,8 +353,8 @@ pub(crate) fn backfill_missing_member_panes(
 }
 
 /// Session geometry for a team session hive builds itself.
-const _TEAM_SESSION_COLS: u32 = 220;
-const _TEAM_SESSION_ROWS: u32 = 60;
+const TEAM_SESSION_COLS: u32 = 220;
+const TEAM_SESSION_ROWS: u32 = 60;
 
 /// Marks a window hive built itself (as opposed to one a human's session
 /// lent the team): `hive delete` closes only these.
@@ -376,7 +376,7 @@ pub(crate) fn new_team_session_window(team: &str) -> Result<(String, String, boo
         install_team_status(&pane);
         return Ok((window, pane, false));
     }
-    let pane = tmux::new_session(team, _TEAM_SESSION_COLS, _TEAM_SESSION_ROWS)?;
+    let pane = tmux::new_session(team, TEAM_SESSION_COLS, TEAM_SESSION_ROWS)?;
     // Never fall back to "<team>:" here — that is a session target, not a
     // window, and the first window's index follows the user's base-index.
     let window = tmux::get_pane_window_target(&pane)
@@ -410,7 +410,7 @@ fn team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "hive".to_string());
     if !tmux::has_session(&session_name) {
-        let _ = tmux::new_session(&session_name, _TEAM_SESSION_COLS, _TEAM_SESSION_ROWS);
+        let _ = tmux::new_session(&session_name, TEAM_SESSION_COLS, TEAM_SESSION_ROWS);
     }
     let (window, first_pane) =
         tmux::new_window(&session_name, team, Some(anchor_cwd), true).unwrap_or_default();

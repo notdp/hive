@@ -17,11 +17,11 @@ const MAGENTA: &str = "\x1b[35m";
 const YELLOW: &str = "\x1b[33m";
 const CLEAR_LINE: &str = "\x1b[2K\r";
 
-const _TAIL_EVENTS: usize = 40;
-const _POLL_SECONDS: f64 = 0.25;
-const _SPINNER: &str = "✻✼✢✽";
+const TAIL_EVENTS: usize = 40;
+const POLL_SECONDS: f64 = 0.25;
+const SPINNER: &str = "✻✼✢✽";
 /// Idle polls before the plain stream force-finalizes pending blocks.
-const _IDLE_FLUSH_TICKS: usize = 4;
+const IDLE_FLUSH_TICKS: usize = 4;
 
 pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
@@ -225,7 +225,7 @@ impl StreamPrinter {
 
     pub(super) fn status_line(&self, tick: usize, session_id: &str) -> String {
         let verb = if self.working {
-            let frames: Vec<char> = _SPINNER.chars().collect();
+            let frames: Vec<char> = SPINNER.chars().collect();
             let frame = frames[tick % frames.len()];
             let elapsed = self.state_since.elapsed().as_secs();
             format!("{YELLOW}{frame}{RESET} Working… {DIM}({elapsed}s){RESET}")
@@ -272,7 +272,7 @@ pub fn follow_plain(session_id: &str, path: &Path) -> i32 {
     }
     let mut lines = LineAccumulator::new();
     let whole = lines.split_backlog(&backlog);
-    for raw in &whole[whole.len().saturating_sub(_TAIL_EVENTS)..] {
+    for raw in &whole[whole.len().saturating_sub(TAIL_EVENTS)..] {
         if let Some(rendered) = printer.push_rendered(raw) {
             println!("{rendered}");
         }
@@ -295,7 +295,7 @@ pub fn follow_plain(session_id: &str, path: &Path) -> i32 {
             Ok(0) => {
                 tick += 1;
                 idle_ticks += 1;
-                if idle_ticks == _IDLE_FLUSH_TICKS {
+                if idle_ticks == IDLE_FLUSH_TICKS {
                     if let Some(rendered) = printer.flush_rendered() {
                         print!("{CLEAR_LINE}");
                         println!("{rendered}");
@@ -303,7 +303,7 @@ pub fn follow_plain(session_id: &str, path: &Path) -> i32 {
                 }
                 print!("{}{}", CLEAR_LINE, printer.status_line(tick, session_id));
                 let _ = std::io::stdout().flush();
-                std::thread::sleep(Duration::from_secs_f64(_POLL_SECONDS));
+                std::thread::sleep(Duration::from_secs_f64(POLL_SECONDS));
             }
             Ok(_) => {
                 let Some(line) = lines.push(&raw) else {

@@ -31,9 +31,9 @@ use serde_json::{json, Map, Value};
 // side. The codex marketplace is a directory source over the same payload;
 // its cache is keyed by the manifest version, which tracks the crate version.
 
-const _MP_CLAUDE: &str = include_str!("../assets/marketplace/claude-marketplace.json");
-const _MP_CODEX: &str = include_str!("../assets/marketplace/codex-marketplace.json");
-const _PAYLOAD: &[(&str, &str, bool)] = &[
+const MP_CLAUDE: &str = include_str!("../assets/marketplace/claude-marketplace.json");
+const MP_CODEX: &str = include_str!("../assets/marketplace/codex-marketplace.json");
+const PAYLOAD: &[(&str, &str, bool)] = &[
     (
         ".claude-plugin/plugin.json",
         include_str!("../../../plugins/hive/.claude-plugin/plugin.json"),
@@ -69,7 +69,7 @@ const _PAYLOAD: &[(&str, &str, bool)] = &[
 /// Relative payload location inside the marketplace tree: the codex
 /// marketplace's directory source points at it, and `hive plugin sync`
 /// prints it for Claude's command source.
-const _PAYLOAD_SUBDIR: &str = "codex/plugins/hive";
+const PAYLOAD_SUBDIR: &str = "codex/plugins/hive";
 
 /// Codex has no command-source plugins and its plugin hooks sit behind a
 /// hook-review dialog, so the codex plugin ships no hooks at all; lockstep
@@ -105,24 +105,24 @@ pub fn materialize_marketplace() -> Result<PathBuf> {
     let mut files: Vec<(String, &str, bool)> = vec![
         (
             "claude/.claude-plugin/marketplace.json".to_string(),
-            _MP_CLAUDE,
+            MP_CLAUDE,
             false,
         ),
         (
             "codex/.claude-plugin/marketplace.json".to_string(),
-            _MP_CODEX,
+            MP_CODEX,
             false,
         ),
     ];
-    for (rel, content, executable) in _PAYLOAD {
-        files.push((format!("{_PAYLOAD_SUBDIR}/{rel}"), content, *executable));
+    for (rel, content, executable) in PAYLOAD {
+        files.push((format!("{PAYLOAD_SUBDIR}/{rel}"), content, *executable));
     }
     let borrowed: Vec<(&str, &str, bool)> = files
         .iter()
         .map(|(rel, content, executable)| (rel.as_str(), *content, *executable))
         .collect();
     crate::assets::materialize_asset_tree(&root, &borrowed)?;
-    Ok(root.join(_PAYLOAD_SUBDIR))
+    Ok(root.join(PAYLOAD_SUBDIR))
 }
 
 #[derive(Debug, Clone)]

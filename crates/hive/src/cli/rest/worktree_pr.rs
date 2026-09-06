@@ -14,7 +14,7 @@ use crate::tmux;
 // escaped literal `#I`, not the index token — left alone (the pathological
 // `###I` triple is intentionally unsupported: a conservative no-replace beats
 // corrupting a user's format).
-pub(crate) const _PR_INDEX_TOKEN: &str = "#{?#{@hive-pr},PR#{@hive-pr},#I}";
+pub(crate) const PR_INDEX_TOKEN: &str = "#{?#{@hive-pr},PR#{@hive-pr},#I}";
 
 fn replace_index_tokens(format: &str) -> String {
     let bytes = format.as_bytes();
@@ -26,7 +26,7 @@ fn replace_index_tokens(format: &str) -> String {
             && bytes[i + 1] == b'I'
             && (i == 0 || bytes[i - 1] != b'#')
         {
-            out.extend_from_slice(_PR_INDEX_TOKEN.as_bytes());
+            out.extend_from_slice(PR_INDEX_TOKEN.as_bytes());
             i += 2;
         } else {
             out.push(bytes[i]);

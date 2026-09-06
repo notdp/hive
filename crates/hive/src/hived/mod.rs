@@ -48,7 +48,7 @@ pub const IDLE_NOTIFY_MISSING_PRUNE_TICKS: i64 = 5;
 pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
-const _HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
+const HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
 pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
 pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // The CLI's socket budget must be strictly longer than the work it asks the
@@ -62,19 +62,19 @@ pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;
 // A probed session id only speaks for the session it saw: nothing tells the
 // hived that the human typed `/new` in an unmanaged pane, so the snapshot
 // ages out and the adapter re-probes instead of pinning a dead id forever.
-const _SESSION_SNAPSHOT_FRESHNESS_S: f64 = 600.0;
-const _TRANSCRIPT_PATH_CACHE_TTL: f64 = 60.0;
-const _CLAUDE_JOBS_CACHE_TTL: f64 = 30.0;
-const _GROK_REAP_GRACE_SECONDS: f64 = 120.0;
+const SESSION_SNAPSHOT_FRESHNESS_S: f64 = 600.0;
+const TRANSCRIPT_PATH_CACHE_TTL: f64 = 60.0;
+const CLAUDE_JOBS_CACHE_TTL: f64 = 30.0;
+const GROK_REAP_GRACE_SECONDS: f64 = 120.0;
 // One send_keys attempt per pane per cooldown window, so a slow-starting
 // codex is not typed at twice while the process check cannot see it yet.
-const _CODEX_REATTACH_COOLDOWN_SECONDS: f64 = 60.0;
+const CODEX_REATTACH_COOLDOWN_SECONDS: f64 = 60.0;
 pub const FLOW_MAILBOX_AGENT: &str = "flow.run";
 
 // waitingFor values that do not gate a send: a /status-style dialog open in
 // an attached viewer parks the status on "waiting", but the inbox still
 // queues normally and the message shows the moment the dialog closes.
-const _SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
+const SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
 
 // Near-zero process clock (runtime_snapshot's timestamps share the shape).
 // A stamp that must read as "long ago" seeds NEG_INFINITY, not 0.0: zero is

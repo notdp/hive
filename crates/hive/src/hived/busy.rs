@@ -83,7 +83,7 @@ pub(crate) fn resolve_transcript_path_cached_impl(pane_id: &str, force: bool) ->
         .unwrap_or_else(|e| e.into_inner())
         .insert(
             pane_id.to_string(),
-            (path_str.clone(), now + _TRANSCRIPT_PATH_CACHE_TTL, sid),
+            (path_str.clone(), now + TRANSCRIPT_PATH_CACHE_TTL, sid),
         );
     if path_str.is_empty() {
         None

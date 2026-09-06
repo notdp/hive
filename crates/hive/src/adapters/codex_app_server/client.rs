@@ -16,7 +16,7 @@ use anyhow::Result;
 use serde_json::{json, Map, Value};
 
 use super::transport::{ws_send_frame, WsConn};
-use super::{_CALL_TIMEOUT, _HANDSHAKE_TIMEOUT, _RESUME_COOLDOWN};
+use super::{CALL_TIMEOUT, HANDSHAKE_TIMEOUT, RESUME_COOLDOWN};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadRuntime {
@@ -157,7 +157,7 @@ fn reader_loop(inner: Arc<Inner>, mut conn: WsConn) {
 
 impl CodexDaemonClient {
     pub fn new(socket_path: &Path) -> io::Result<CodexDaemonClient> {
-        let conn = WsConn::connect(socket_path, Duration::from_secs_f64(_HANDSHAKE_TIMEOUT))?;
+        let conn = WsConn::connect(socket_path, Duration::from_secs_f64(HANDSHAKE_TIMEOUT))?;
         let inner = Arc::new(Inner {
             state: Mutex::new(ClientState::default()),
             pending: Mutex::new(HashMap::new()),
@@ -207,7 +207,7 @@ impl CodexDaemonClient {
         let guard = slot.msg.lock().unwrap();
         let (mut guard, _timeout) = slot
             .cv
-            .wait_timeout_while(guard, Duration::from_secs_f64(_CALL_TIMEOUT), |msg| {
+            .wait_timeout_while(guard, Duration::from_secs_f64(CALL_TIMEOUT), |msg| {
                 msg.is_none()
             })
             .unwrap();
@@ -270,7 +270,7 @@ impl CodexDaemonClient {
             }
             state.resume_cooldown.insert(
                 thread_id.to_string(),
-                now + Duration::from_secs_f64(_RESUME_COOLDOWN),
+                now + Duration::from_secs_f64(RESUME_COOLDOWN),
             );
         }
         self.resume(thread_id);

@@ -114,7 +114,7 @@ pub fn team_status_format_1(p: &StatusPalette) -> String {
 /// tmux's stock root-table status click, verbatim (`list-keys -T root
 /// MouseDown1Status`, 3.4): the else branch of the hive click, so every
 /// other status line keeps the click it always had.
-pub const _STOCK_STATUS_CLICK: &str = "select-window -t =";
+pub const STOCK_STATUS_CLICK: &str = "select-window -t =";
 /// Window option tagging the hidden window that parks a closed mirror;
 /// value = team name.
 pub const HIDDEN_WINDOW_KEY: &str = "hive-hidden";
@@ -172,7 +172,7 @@ pub fn status_click_binding(hive: &str) -> Vec<String> {
         "#{==:#{mouse_status_range},hive-mirror}".to_string(),
         mirror_run_shell(hive),
         format!(
-            "if-shell -F \"#{{==:#{{mouse_status_range}},pane}}\" \"select-pane -t =\" \"{_STOCK_STATUS_CLICK}\""
+            "if-shell -F \"#{{==:#{{mouse_status_range}},pane}}\" \"select-pane -t =\" \"{STOCK_STATUS_CLICK}\""
         ),
     ]
 }

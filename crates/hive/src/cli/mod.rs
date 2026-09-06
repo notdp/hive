@@ -586,7 +586,7 @@ pub(crate) fn build_cli() -> Command {
 // main + dispatch
 // ---------------------------------------------------------------------------
 
-const _KNOWN_COMMANDS: &[&str] = &[
+const KNOWN_COMMANDS: &[&str] = &[
     "fork",
     "join",
     "create",
@@ -627,7 +627,7 @@ const _KNOWN_COMMANDS: &[&str] = &[
 /// Click groups, by command path, and their subcommands (help lookup +
 /// bare-group help). Every path here and every path + sub has a `help_text`
 /// entry; `test_every_help_path_has_help_text` holds that line.
-const _HELP_GROUPS: &[(&[&str], &[&str])] = &[
+const HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["ccd"], &["ls"]),
     (&["config"], &["get", "set", "unset"]),
     (&["flow"], &["board", "node", "rig", "run"]),
@@ -641,7 +641,7 @@ const _HELP_GROUPS: &[(&[&str], &[&str])] = &[
 ];
 
 fn group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
-    _HELP_GROUPS
+    HELP_GROUPS
         .iter()
         .find(|(group, _)| *group == path)
         .map(|(_, subs)| *subs)
@@ -658,7 +658,7 @@ fn group_subs(path: &[&str]) -> Option<&'static [&'static str]> {
 /// dash-first one (`hive --bogus -h`, `hive -- flow -h`) is left to clap,
 /// which rejects it with exit 2 like any other unexpected argument.
 fn help_path<'a>(invoked: &'a str, tail: &'a [String]) -> Option<Vec<&'a str>> {
-    if !_KNOWN_COMMANDS.contains(&invoked) {
+    if !KNOWN_COMMANDS.contains(&invoked) {
         return None;
     }
     if matches!(invoked, "claude" | "codex" | "grok") {
@@ -722,11 +722,11 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 /// in, and the tmux line would send it hunting for a terminal it is never
 /// going to have.
 fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
-    if _TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
+    if TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
         return None;
     }
     if invoked != "send" {
-        return Some(_TMUX_REQUIRED_MESSAGE);
+        return Some(TMUX_REQUIRED_MESSAGE);
     }
     if crate::adapters::claude_sessions::self_session().is_some()
         || !session_member_binding().is_empty()
@@ -734,9 +734,9 @@ fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
         return None;
     }
     if engine_marker_env() {
-        Some(_UNROSTERED_ENGINE_MESSAGE)
+        Some(UNROSTERED_ENGINE_MESSAGE)
     } else {
-        Some(_TMUX_REQUIRED_MESSAGE)
+        Some(TMUX_REQUIRED_MESSAGE)
     }
 }
 
@@ -797,7 +797,7 @@ fn main_with_argv(argv: Vec<String>) {
 
     // Click resolves the subcommand before the group callback runs, so an
     // unknown command errors before any tmux/codex gate fires.
-    if !_KNOWN_COMMANDS.contains(&invoked.as_str()) && !invoked.starts_with('-') {
+    if !KNOWN_COMMANDS.contains(&invoked.as_str()) && !invoked.starts_with('-') {
         eprint!(
             "Usage: hive [OPTIONS] COMMAND [ARGS]...\n\
              Try 'hive -h' for help.\n\n\
@@ -814,7 +814,7 @@ fn main_with_argv(argv: Vec<String>) {
     }
 
     let help_requested = args.iter().any(|a| a == "-h" || a == "--help");
-    if _KNOWN_COMMANDS.contains(&invoked.as_str()) && !help_requested {
+    if KNOWN_COMMANDS.contains(&invoked.as_str()) && !help_requested {
         run_root_gates(&invoked);
     }
 
@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn test_command_tree_declares_every_known_command() {
         let cli = build_cli();
-        for name in _KNOWN_COMMANDS {
+        for name in KNOWN_COMMANDS {
             assert!(
                 cli.find_subcommand(name).is_some(),
                 "missing command {name}"
@@ -1071,7 +1071,7 @@ mod tests {
     }
 
     /// Every path `help_path`/`bare_group_path` can produce — a
-    /// `_KNOWN_COMMANDS` entry, a `_HELP_GROUPS` group, or a group plus one
+    /// `KNOWN_COMMANDS` entry, a `HELP_GROUPS` group, or a group plus one
     /// of its subs — must resolve, or `-h` on it panics instead of
     /// printing. Tokens outside that table never become a path.
     #[test]
@@ -1082,13 +1082,13 @@ mod tests {
         assert_eq!(help_path("--", &tail(&["flow", "-h"])), None);
         assert_eq!(help_path("bogus", &tail(&["--help"])), None);
         assert_eq!(bare_group_path("--bogus", &tail(&[])), None);
-        for name in _KNOWN_COMMANDS {
+        for name in KNOWN_COMMANDS {
             if matches!(*name, "claude" | "codex" | "grok") {
                 continue; // launchers forward -h to the wrapped CLI
             }
             assert!(help_text::help_for(&[name]).is_some(), "no help for {name}");
         }
-        for (group, subs) in _HELP_GROUPS {
+        for (group, subs) in HELP_GROUPS {
             assert!(
                 help_text::help_for(group).is_some(),
                 "no help for {group:?}"
@@ -1160,27 +1160,27 @@ mod tests {
         crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
 
         // no identity at all: the generic tmux refusal
-        assert_eq!(no_tmux_refusal("send"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("send"), Some(TMUX_REQUIRED_MESSAGE));
 
         env.set("GROK_SESSION_ID", "s-bee");
         assert_eq!(no_tmux_refusal("send"), None);
 
         // the leader's env outlived the member it names
         env.set("GROK_SESSION_ID", "s-ant");
-        assert_eq!(no_tmux_refusal("send"), Some(_UNROSTERED_ENGINE_MESSAGE));
+        assert_eq!(no_tmux_refusal("send"), Some(UNROSTERED_ENGINE_MESSAGE));
 
         // the session lane is a send lane only; other verbs still need tmux
         env.set("GROK_SESSION_ID", "s-bee");
-        assert_eq!(no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("interrupt"), Some(TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(no_tmux_refusal("config"), None);
         // `mirror` moves panes on the server: tmux-only (a run-shell job
         // carries TMUX)
-        assert_eq!(no_tmux_refusal("mirror"), Some(_TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("mirror"), Some(TMUX_REQUIRED_MESSAGE));
     }
 
     /// Root help lists a command exactly when its clap node is not hidden:
-    /// every `_KNOWN_COMMANDS` entry has a `  <name>  <about>` line unless
+    /// every `KNOWN_COMMANDS` entry has a `  <name>  <about>` line unless
     /// `.hide(true)` marks it (resume-hint today; `plugin ls` is hidden too
     /// but is a subcommand, outside the root table), and no hidden one leaks.
     #[test]
@@ -1198,7 +1198,7 @@ mod tests {
             })
             .collect();
         let cli = build_cli();
-        for name in _KNOWN_COMMANDS {
+        for name in KNOWN_COMMANDS {
             let hidden = cli.find_subcommand(name).unwrap().is_hide_set();
             assert_eq!(
                 listed.contains(name),
@@ -1211,7 +1211,7 @@ mod tests {
 
     // --- exit-code lane: the binary's own argv path in a child process ---
 
-    const _CHILD_ENTRY: &str = "cli::tests::test_child_entry_runs_hive_argv_from_env";
+    const CHILD_ENTRY: &str = "cli::tests::test_child_entry_runs_hive_argv_from_env";
 
     /// Child half of `run_hive_child`: a no-op in the normal run. When the
     /// parent re-executes this test binary with `HIVE_TEST_CHILD_ARGV`
@@ -1250,7 +1250,7 @@ mod tests {
         let mut argv = vec!["hive".to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-        cmd.args([_CHILD_ENTRY, "--exact", "--nocapture", "--test-threads=1"])
+        cmd.args([CHILD_ENTRY, "--exact", "--nocapture", "--test-threads=1"])
             .env(
                 "HIVE_TEST_CHILD_ARGV",
                 serde_json::to_string(&argv).unwrap(),

@@ -77,7 +77,7 @@ type Argv = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
 
 /// A tmux double that answers everything the display verbs ask and records
 /// every argv. `windows` is the `list-windows -a` stdout; `panes` the pane
-/// rows the team window already has (`_PANE_BASE_FMT` order, tab-joined).
+/// rows the team window already has (`PANE_BASE_FMT` order, tab-joined).
 /// The caller's own session `dev` exists.
 ///
 /// Two seams, because `find_team_window` resolves tmux through `team.rs`'s
@@ -1094,7 +1094,7 @@ fn test_replaces_real_tokens_and_leaves_escaped_ones() {
     let derived = derive_pr_window_status(Some("#I #W ##I #I"));
     assert_eq!(
         derived,
-        Some(format!("{_PR_INDEX_TOKEN} #W ##I {_PR_INDEX_TOKEN}"))
+        Some(format!("{PR_INDEX_TOKEN} #W ##I {PR_INDEX_TOKEN}"))
     );
 }
 
@@ -1931,7 +1931,7 @@ fn test_attach_heal_joins_the_hidden_mirror_instead_of_splitting() {
     // The window records nothing; the orch's mirror is parked from an
     // earlier `hive mirror off` on a window since killed by hand.
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("%1", "hive-hidden", "honey"),
@@ -1978,7 +1978,7 @@ fn test_attach_heal_splits_a_fresh_viewer_when_the_parked_pane_is_another_member
     )
     .unwrap();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("%1", "hive-hidden", "honey"),
@@ -2045,7 +2045,7 @@ fn test_attach_heal_builds_the_mirror_when_not_suppressed() {
         "@7",
     )
     .unwrap();
-    let argv = fake_tmux(_MIRROR_WINDOW, &["%0\t\tzsh\tterminal\t\thoney\t\t"]);
+    let argv = fake_tmux(MIRROR_WINDOW, &["%0\t\tzsh\tterminal\t\thoney\t\t"]);
 
     attach_cmd("honey");
 
@@ -2092,7 +2092,7 @@ fn planned_layout(size: (i64, i64), panes: &[(&str, &str)]) -> crate::layout::Pl
 
 // --- hive mirror -------------------------------------------------------------
 
-const _MIRROR_WINDOW: &str = "dev:1\t@7\thoney\t\t\t\n";
+const MIRROR_WINDOW: &str = "dev:1\t@7\thoney\t\t\t\n";
 
 fn honey_with_a_session_orch() {
     crate::registry::record_team(
@@ -2105,7 +2105,7 @@ fn honey_with_a_session_orch() {
     .unwrap();
 }
 
-const _BREAK_PANE_TAIL: [&str; 5] = [
+const BREAK_PANE_TAIL: [&str; 5] = [
     "-n",
     "honey·mirror",
     "-P",
@@ -2118,7 +2118,7 @@ fn test_mirror_off_breaks_the_pane_into_the_team_session_records_off_and_retiles
     let _env = display_env();
     honey_with_a_session_orch();
     let argv = fake_tmux_sessions(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &[
             "%0\t\tzsh\tterminal\torch\thoney\t\t",
             "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
@@ -2135,7 +2135,7 @@ fn test_mirror_off_breaks_the_pane_into_the_team_session_records_off_and_retiles
         &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
     ));
     let mut row = vec!["break-pane", "-s", "%1", "-d", "-t", "=honey:"];
-    row.extend(&_BREAK_PANE_TAIL);
+    row.extend(&BREAK_PANE_TAIL);
     assert!(has_row(&argv, &row));
     assert!(has_row(
         &argv,
@@ -2163,7 +2163,7 @@ fn test_mirror_off_without_a_team_session_parks_the_pane_in_the_callers_session(
     let _env = display_env();
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &[
             "%0\t\tzsh\tterminal\torch\thoney\t\t",
             "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
@@ -2174,7 +2174,7 @@ fn test_mirror_off_without_a_team_session_parks_the_pane_in_the_callers_session(
     assert_eq!(mirror("off", ""), Ok("mirror off (honey)".to_string()));
 
     let mut row = vec!["break-pane", "-s", "%1", "-d"];
-    row.extend(&_BREAK_PANE_TAIL);
+    row.extend(&BREAK_PANE_TAIL);
     assert!(has_row(&argv, &row));
     assert!(has_row(
         &argv,
@@ -2187,7 +2187,7 @@ fn test_mirror_off_refuses_when_the_mirror_is_the_only_pane() {
     let _env = display_env();
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t"],
         &[("dev:1", "hive-team", "honey")],
     );
@@ -2205,7 +2205,7 @@ fn test_mirror_off_without_a_mirror_records_off_and_leaves_the_window_alone() {
     let _env = display_env();
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\torch\thoney\t\t"],
         &[("dev:1", "hive-team", "honey")],
     );
@@ -2229,7 +2229,7 @@ fn test_mirror_off_refuses_from_the_mirror_pane_but_not_with_window() {
     env.env.set("TMUX_PANE", "%1");
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &[
             "%0\t\tzsh\tterminal\t\thoney\t\t",
             "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
@@ -2252,7 +2252,7 @@ fn test_mirror_on_joins_the_hidden_pane_first_and_retiles() {
     let _env = display_env();
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("dev:1", "hive-team", "honey"),
@@ -2283,7 +2283,7 @@ fn test_mirror_on_with_the_mirror_shown_says_so_and_leaves_the_window_alone() {
     let _claude = claude_session_me(&mut env);
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &[
             "%0\t\tzsh\tterminal\t\thoney\t\t",
             "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",
@@ -2311,7 +2311,7 @@ fn test_mirror_on_rebuilds_the_mirror_when_no_hidden_pane_exists() {
     let _claude = claude_session_me(&mut env);
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("dev:1", "hive-team", "honey"),
@@ -2344,7 +2344,7 @@ fn test_mirror_on_with_nothing_to_show_says_so() {
     // whose rig mirror is gone for good.
     crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[("dev:1", "hive-team", "honey")],
     );
@@ -2365,7 +2365,7 @@ fn test_mirror_on_joins_a_parked_rig_mirror_that_names_no_member() {
     let _env = display_env();
     crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("dev:1", "hive-team", "honey"),
@@ -2396,7 +2396,7 @@ fn test_mirror_on_leaves_another_members_parked_pane_alone() {
     honey_with_a_session_orch();
     // scout's parked mirror is scout's: the orch gets a fresh viewer.
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
             ("dev:1", "hive-team", "honey"),
@@ -2423,7 +2423,7 @@ fn test_mirror_toggles_by_presence() {
     let _claude = claude_session_me(&mut env);
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[("dev:1", "hive-team", "honey")],
     );
@@ -2447,7 +2447,7 @@ fn test_mirror_window_flag_names_the_window() {
     env.env.set("TMUX", "/tmp/hive-test-tmux,1,0");
     honey_with_a_session_orch();
     let argv = fake_tmux_tagged(
-        _MIRROR_WINDOW,
+        MIRROR_WINDOW,
         &[
             "%0\t\tzsh\tterminal\t\thoney\t\t",
             "%1\t[orch]\thive\tmirror\torch\thoney\tclaude\t",

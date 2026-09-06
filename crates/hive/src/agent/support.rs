@@ -7,7 +7,7 @@ use super::seams::*;
 use super::testhook;
 
 pub const AGENT_STARTUP_TIMEOUT: f64 = 90.0;
-pub(super) const _TMUX_REQUIRED_MESSAGE: &str =
+pub(super) const TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
 /// Escape a string for safe shell use.

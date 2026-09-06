@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::keys::{
     daemon_env_for_pane, key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
 };
-use super::{grok_home, _DAEMON_START_TIMEOUT};
+use super::{grok_home, DAEMON_START_TIMEOUT};
 use crate::adapters::base::washed_spawner_env;
 
 // --------------------------------------------------------------------------
@@ -19,7 +19,7 @@ use crate::adapters::base::washed_spawner_env;
 
 /// Connect budget for a liveness probe: a unix connect to a listening
 /// socket completes in microseconds; anything longer is not a live leader.
-const _PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// True when a listener accepts a connection on the socket.
 ///
@@ -28,7 +28,7 @@ const _PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// not consulted, because a pid can be dead or reused by an unrelated
 /// process while the file still names it.
 pub fn probe_socket(socket_path: &Path) -> bool {
-    socket_path.exists() && connect_within(socket_path, _PROBE_TIMEOUT).is_ok()
+    socket_path.exists() && connect_within(socket_path, PROBE_TIMEOUT).is_ok()
 }
 
 /// Non-blocking unix connect that gives up after *timeout*.
@@ -186,7 +186,7 @@ pub fn spawn_daemon(pane: &str) -> bool {
         &resolve_pane_key(pane),
         daemon_env_for_pane(pane),
         "grok",
-        _DAEMON_START_TIMEOUT,
+        DAEMON_START_TIMEOUT,
     )
 }
 
@@ -203,12 +203,7 @@ pub fn spawn_daemon(pane: &str) -> bool {
 /// pane is display resolved on top of identity, never the other way round.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
-    spawn_daemon_key(
-        &member_key(team, member),
-        env,
-        "grok",
-        _DAEMON_START_TIMEOUT,
-    )
+    spawn_daemon_key(&member_key(team, member), env, "grok", DAEMON_START_TIMEOUT)
 }
 
 /// The pid's command line as `ps` reports it; None once the pid is gone.

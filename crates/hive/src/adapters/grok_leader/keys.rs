@@ -20,12 +20,12 @@ use crate::adapters::base::washed_spawner_env;
 // tags, so a tagged member pane and a headless caller reach the same files.
 // --------------------------------------------------------------------------
 
-const _KEY_TTL: f64 = 5.0;
+const KEY_TTL: f64 = 5.0;
 
-static _KEY_CACHE: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
+static KEY_CACHE: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
 
 pub(crate) fn key_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
-    _KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn member_key(team: &str, member: &str) -> String {
@@ -72,7 +72,7 @@ pub fn resolve_pane_key(pane: &str) -> String {
     {
         let cache = key_cache().lock().unwrap();
         if let Some((at, key)) = cache.get(pane) {
-            if now.duration_since(*at).as_secs_f64() < _KEY_TTL {
+            if now.duration_since(*at).as_secs_f64() < KEY_TTL {
                 return key.clone();
             }
         }

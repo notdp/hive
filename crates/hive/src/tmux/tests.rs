@@ -469,7 +469,7 @@ fn test_grok_member_without_a_pane_keeps_its_identity_but_no_display() {
 fn test_list_panes_full_parses_rows() {
     set_run_override(|args, _check, _timeout| {
         let fmt = args.last().map(String::as_str).unwrap_or("");
-        let stdout = if fmt == _PANE_BASE_FMT {
+        let stdout = if fmt == PANE_BASE_FMT {
             "%1\tmain\tcodex\tagent\tclaude\tteam-a\t\n%2\tshell\tzsh\tterminal\tterm-1\tteam-a\t\n"
         } else {
             ""
@@ -586,11 +586,11 @@ fn test_enable_pane_border_status_uses_hive_member_format() {
             "-t",
             "dev:1",
             "pane-border-format",
-            _HIVE_PANE_BORDER_FORMAT,
+            HIVE_PANE_BORDER_FORMAT,
         ])
     );
-    assert!(!_HIVE_PANE_BORDER_FORMAT.contains("#[fg=colour220,bold]"));
-    assert!(_HIVE_PANE_BORDER_FORMAT.contains("#[fg=colour220]#[bold][!]"));
+    assert!(!HIVE_PANE_BORDER_FORMAT.contains("#[fg=colour220,bold]"));
+    assert!(HIVE_PANE_BORDER_FORMAT.contains("#[fg=colour220]#[bold][!]"));
 }
 
 #[test]
@@ -615,7 +615,7 @@ fn test_configure_hive_window_disables_native_tmux_alerts_and_installs_layout_ho
             "-t",
             "dev:1",
             "pane-border-format",
-            _HIVE_PANE_BORDER_FORMAT,
+            HIVE_PANE_BORDER_FORMAT,
         ]),
         v(&[
             "set-window-option",
@@ -631,7 +631,7 @@ fn test_configure_hive_window_disables_native_tmux_alerts_and_installs_layout_ho
     assert_eq!(argvs.len(), 4 + crate::layout::LAYOUT_HOOKS.len());
 }
 
-const _MIRROR_RUN_SHELL: &str =
+const MIRROR_RUN_SHELL: &str =
     "run-shell -b \"/x/hive mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
 
 #[test]
@@ -684,7 +684,7 @@ fn test_team_status_palettes_differ_in_colours_only() {
 
 #[test]
 fn test_mirror_run_shell_escapes_a_dollar_in_the_binary_path_for_tmux() {
-    assert_eq!(mirror_run_shell("/x/hive"), _MIRROR_RUN_SHELL);
+    assert_eq!(mirror_run_shell("/x/hive"), MIRROR_RUN_SHELL);
     assert_eq!(
         mirror_run_shell("'/tmp/we ird$x/hive'"),
         "run-shell -b \"'/tmp/we ird\\$x/hive' mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\""
@@ -703,15 +703,15 @@ fn test_status_click_binding_ends_in_the_stock_status_click() {
         binding[4..7],
         v(&["if-shell", "-F", "#{==:#{mouse_status_range},hive-mirror}"])[..]
     );
-    assert_eq!(binding[7], _MIRROR_RUN_SHELL);
+    assert_eq!(binding[7], MIRROR_RUN_SHELL);
     assert_eq!(
         binding[8],
         "if-shell -F \"#{==:#{mouse_status_range},pane}\" \"select-pane -t =\" \"select-window -t =\""
     );
     assert!(binding[8]
         .trim_end_matches('"')
-        .ends_with(_STOCK_STATUS_CLICK));
-    assert_eq!(_STOCK_STATUS_CLICK, "select-window -t =");
+        .ends_with(STOCK_STATUS_CLICK));
+    assert_eq!(STOCK_STATUS_CLICK, "select-window -t =");
 }
 
 #[test]
@@ -724,7 +724,7 @@ fn test_mirror_key_binding_is_gated_on_a_team_window_and_falls_back_elsewhere() 
         "if-shell",
         "-F",
         "#{@hive-team}",
-        _MIRROR_RUN_SHELL,
+        MIRROR_RUN_SHELL,
     ];
     assert_eq!(mirror_key_binding("/x/hive", ""), v(&head));
     let mut with_fallback = v(&head);
@@ -882,9 +882,9 @@ fn test_team_status_format_reads_only_options() {
 /// Every team-window scan reads the tag through the hidden-window mask.
 #[test]
 fn test_team_window_scans_mask_the_hidden_window() {
-    assert!(_TEAM_WINDOW_FMT.contains(_WINDOW_TEAM_FMT));
-    assert!(!_TEAM_WINDOW_FMT
-        .replace(_WINDOW_TEAM_FMT, "")
+    assert!(TEAM_WINDOW_FMT.contains(WINDOW_TEAM_FMT));
+    assert!(!TEAM_WINDOW_FMT
+        .replace(WINDOW_TEAM_FMT, "")
         .contains("@hive-team"));
 }
 

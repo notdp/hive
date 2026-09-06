@@ -223,7 +223,7 @@ pub fn detect_profile_from_text(text: &str) -> Option<&'static CLIProfile> {
 // Script runtimes whose argv[1] is the launched CLI's entry script — the one
 // verified wrapper shape (codex runs as `node /.../codex ...`). Anything else
 // in argv is ordinary argument text and must never identify a CLI.
-const _SCRIPT_RUNTIMES: [&str; 1] = ["node"];
+const SCRIPT_RUNTIMES: [&str; 1] = ["node"];
 
 /// CLI identity from process fields, not argument text.
 ///
@@ -242,7 +242,7 @@ pub fn detect_profile_from_process(command: &str, argv: &str) -> Option<&'static
     if let Some(profile) = get_profile(&parts[0]) {
         return Some(profile);
     }
-    if parts.len() >= 2 && _SCRIPT_RUNTIMES.contains(&normalize_command(&parts[0]).as_str()) {
+    if parts.len() >= 2 && SCRIPT_RUNTIMES.contains(&normalize_command(&parts[0]).as_str()) {
         return get_profile(&parts[1]);
     }
     None

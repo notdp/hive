@@ -25,10 +25,10 @@ use serde_json::{Map, Value};
 use crate::adapters::base::read_json_object;
 use crate::adapters::claude_sessions::{config_dir, pid_alive};
 
-const _VIEWER_SUBCOMMANDS: [&str; 2] = ["attach", "agents"];
-const _PROC_START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
-const _PROC_START_TOLERANCE: f64 = 2.0; // seconds; the two clocks are the same clock
-const _LABEL_MAX: usize = 28; // a border suffix, not a log line
+const VIEWER_SUBCOMMANDS: [&str; 2] = ["attach", "agents"];
+const PROC_START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
+const PROC_START_TOLERANCE: f64 = 2.0; // seconds; the two clocks are the same clock
+const LABEL_MAX: usize = 28; // a border suffix, not a log line
 
 /// What *this* pane's viewer is showing.
 ///
@@ -138,7 +138,7 @@ pub fn journal_signature() -> Vec<String> {
 /// string must match, and the month/day names are the C locale's.
 fn strptime_lstart(text: &str) -> Option<libc::tm> {
     let c_text = CString::new(text).ok()?;
-    let c_fmt = CString::new(_PROC_START_FORMAT).ok()?;
+    let c_fmt = CString::new(PROC_START_FORMAT).ok()?;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let end = unsafe { libc::strptime(c_text.as_ptr(), c_fmt.as_ptr(), &mut tm) };
     if end.is_null() || unsafe { *end } != 0 {
@@ -193,7 +193,7 @@ fn start_matches(claimed: &str, pid: i32) -> bool {
     };
     [timegm_utc(parsed), mktime_local(parsed)]
         .iter()
-        .any(|candidate| (actual - candidate).abs() <= _PROC_START_TOLERANCE)
+        .any(|candidate| (actual - candidate).abs() <= PROC_START_TOLERANCE)
 }
 
 /// The live attach entry naming *pid* — i.e. that viewer has a session on
@@ -328,7 +328,7 @@ fn viewer_argv(argv: &str) -> Option<(String, String)> {
     if base != "claude" && !version_basename(&base) {
         return None;
     }
-    if !_VIEWER_SUBCOMMANDS.contains(&parts[1].as_str()) {
+    if !VIEWER_SUBCOMMANDS.contains(&parts[1].as_str()) {
         return None;
     }
     Some((parts[1].clone(), parts.get(2).cloned().unwrap_or_default()))
@@ -578,7 +578,7 @@ pub fn view_label(view: &PaneView, own_job_id: &str) -> String {
         .replace('#', "")
         .trim()
         .chars()
-        .take(_LABEL_MAX)
+        .take(LABEL_MAX)
         .collect()
 }
 
@@ -664,7 +664,7 @@ mod tests {
         let epoch = mktime_local(strptime_lstart(&text).unwrap()) as libc::time_t;
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::gmtime_r(&epoch, &mut tm) };
-        let fmt = CString::new(_PROC_START_FORMAT).unwrap();
+        let fmt = CString::new(PROC_START_FORMAT).unwrap();
         let mut buf = [0u8; 64];
         let n = unsafe {
             libc::strftime(

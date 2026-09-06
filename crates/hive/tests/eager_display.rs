@@ -632,7 +632,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     // installed binding ends in that same text as its else branch — a tmux
     // that changes its stock click fails here.
     assert!(
-        gone[0].ends_with(hive::tmux::_STOCK_STATUS_CLICK),
+        gone[0].ends_with(hive::tmux::STOCK_STATUS_CLICK),
         "{}",
         gone[0]
     );
@@ -640,7 +640,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert!(
         added[0]
             .trim_end_matches(['"', '\\'])
-            .ends_with(hive::tmux::_STOCK_STATUS_CLICK),
+            .ends_with(hive::tmux::STOCK_STATUS_CLICK),
         "{}",
         added[0]
     );

@@ -47,15 +47,15 @@ pub use lifecycle::*;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const _AGENTS_TIMEOUT: f64 = 10.0; // observed ~270ms; the cap only bounds a hung CLI
-const _SPAWN_TIMEOUT: f64 = 60.0;
-const _WAKE_TIMEOUT: f64 = 20.0; // observed ~2-6s including a fresh supervisor start
-const _WAKE_ENTRY_TIMEOUT: f64 = 5.0; // the wake is synchronous; the entry follows fast
-const _ENTRY_POLL_INTERVAL: f64 = 0.3;
+const AGENTS_TIMEOUT: f64 = 10.0; // observed ~270ms; the cap only bounds a hung CLI
+const SPAWN_TIMEOUT: f64 = 60.0;
+const WAKE_TIMEOUT: f64 = 20.0; // observed ~2-6s including a fresh supervisor start
+const WAKE_ENTRY_TIMEOUT: f64 = 5.0; // the wake is synchronous; the entry follows fast
+const ENTRY_POLL_INTERVAL: f64 = 0.3;
 /// Worst-case extra submission budget when delivery must wake a parked engine
 /// first: one ledger read, the tty-less attach that revives it, and the short
 /// entry re-read. The hived folds this into its request budgets.
-pub const WAKE_SUBMIT_BUDGET: f64 = _AGENTS_TIMEOUT + _WAKE_TIMEOUT + _WAKE_ENTRY_TIMEOUT;
+pub const WAKE_SUBMIT_BUDGET: f64 = AGENTS_TIMEOUT + WAKE_TIMEOUT + WAKE_ENTRY_TIMEOUT;
 
 /// An engine entry whose statusUpdatedAt stopped advancing this long ago is
 /// not trusted as busy/waiting truth (wedged engine, clock issues); liveness

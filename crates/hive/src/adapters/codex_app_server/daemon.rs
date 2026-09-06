@@ -18,8 +18,8 @@ use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime};
 use super::records::{codex_home, shared_pidfile_path, shared_socket_path, thread_id_for_pane};
 use super::transport::WsConn;
 use super::{
-    NO_RUNNING_TURN, TURN_INTERRUPT_ACCEPTED, TURN_START_ACCEPTED, _CONNECT_COOLDOWN,
-    _DAEMON_START_TIMEOUT,
+    CONNECT_COOLDOWN, DAEMON_START_TIMEOUT, NO_RUNNING_TURN, TURN_INTERRUPT_ACCEPTED,
+    TURN_START_ACCEPTED,
 };
 use crate::adapters::base::washed_spawner_env;
 
@@ -118,7 +118,7 @@ pub fn spawn_daemon() -> bool {
         Ok(child) => child,
         Err(_) => return false,
     };
-    let deadline = Instant::now() + Duration::from_secs_f64(_DAEMON_START_TIMEOUT);
+    let deadline = Instant::now() + Duration::from_secs_f64(DAEMON_START_TIMEOUT);
     while Instant::now() < deadline {
         if let Ok(Some(_status)) = child.try_wait() {
             return false; // died before binding
@@ -144,7 +144,7 @@ struct SharedSlot {
     cooldown_until: Option<Instant>,
 }
 
-static _CLIENT: Mutex<SharedSlot> = Mutex::new(SharedSlot {
+static CLIENT: Mutex<SharedSlot> = Mutex::new(SharedSlot {
     client: None,
     cooldown_until: None,
 });
@@ -164,7 +164,7 @@ fn shared_client() -> Option<Arc<dyn DaemonClient>> {
 
 fn shared_client_prod() -> Option<CodexDaemonClient> {
     {
-        let mut slot = _CLIENT.lock().unwrap();
+        let mut slot = CLIENT.lock().unwrap();
         if let Some(client) = slot.client.as_ref() {
             if client.is_alive() {
                 return Some(client.clone());
@@ -197,13 +197,13 @@ fn shared_client_prod() -> Option<CodexDaemonClient> {
         return None;
     }
     client.attach(); // busy late-join recovery
-    _CLIENT.lock().unwrap().client = Some(client.clone());
+    CLIENT.lock().unwrap().client = Some(client.clone());
     Some(client)
 }
 
 fn set_cooldown() {
-    _CLIENT.lock().unwrap().cooldown_until =
-        Some(Instant::now() + Duration::from_secs_f64(_CONNECT_COOLDOWN));
+    CLIENT.lock().unwrap().cooldown_until =
+        Some(Instant::now() + Duration::from_secs_f64(CONNECT_COOLDOWN));
 }
 
 /// Eagerly bring hive's client online (spawn time / hived request).
@@ -214,7 +214,7 @@ pub fn connect() -> bool {
 /// Close the process's client so the next use reconnects (daemon respawn).
 pub fn drop_client() {
     let client = {
-        let mut slot = _CLIENT.lock().unwrap();
+        let mut slot = CLIENT.lock().unwrap();
         slot.cooldown_until = None;
         slot.client.take()
     };

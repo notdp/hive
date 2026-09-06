@@ -83,9 +83,9 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
     CELL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) static _SHUTDOWN: AtomicBool = AtomicBool::new(false);
-pub(super) static _INFLIGHT_REQUESTS: AtomicI64 = AtomicI64::new(0);
+pub(super) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+pub(super) static INFLIGHT_REQUESTS: AtomicI64 = AtomicI64::new(0);
 
 pub(crate) fn requests_in_flight() -> bool {
-    _INFLIGHT_REQUESTS.load(Ordering::SeqCst) > 0
+    INFLIGHT_REQUESTS.load(Ordering::SeqCst) > 0
 }

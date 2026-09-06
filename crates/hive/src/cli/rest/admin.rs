@@ -283,7 +283,7 @@ pub fn plugin_disable(name: &str, plain: bool) {
 // shell-init
 // ---------------------------------------------------------------------------
 
-const _SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
+const SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
@@ -328,7 +328,7 @@ function hgrok {
 }
 "#;
 
-const _SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
+const SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
 # cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
@@ -398,11 +398,11 @@ pub(crate) fn shell_init_script(shell: &str) -> &'static str {
         shell.to_string()
     };
     if resolved.trim() == "fish" {
-        _SHELL_INIT_FISH
+        SHELL_INIT_FISH
     } else {
         // zsh and bash share this syntax. The ksh-style `function name {` form
         // bypasses alias expansion of the name in BOTH shells, so a stray
         // alias cannot break the parse.
-        _SHELL_INIT_POSIX
+        SHELL_INIT_POSIX
     }
 }

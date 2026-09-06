@@ -20,7 +20,7 @@ use crate::layout;
 use crate::tmux;
 
 pub const LEAD_AGENT_NAME: &str = "orch";
-const _TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
+const TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
 
 /// The registry's instance key for a team created at *created_at*
 /// (epoch seconds): an empty key for a team with no known creation time,
@@ -348,7 +348,7 @@ impl Team {
         // flow rig` binds a team to a session it just created, from outside
         // tmux); only the implicit "the window I am in" needs a client.
         if window_target.is_empty() && !tmux::is_inside_tmux() {
-            bail!("{}", _TMUX_REQUIRED_MESSAGE);
+            bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
         let error = validate_team_name(name);
         if !error.is_empty() {
@@ -412,7 +412,7 @@ impl Team {
     /// Create a new team in the currently-focused tmux window.
     pub fn create(name: &str, description: &str, workspace: &str) -> Result<Team> {
         if !tmux::is_inside_tmux() {
-            bail!("{}", _TMUX_REQUIRED_MESSAGE);
+            bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
         Team::create_for_window(
             name,
@@ -893,7 +893,7 @@ pub(crate) fn window_has_live_team_members(window_target: &str, team_name: &str)
 pub(crate) fn find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
     let fmt = format!(
         "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}\t#{{@hive-desc}}\t#{{@hive-created}}",
-        crate::tmux::_WINDOW_TEAM_FMT
+        crate::tmux::WINDOW_TEAM_FMT
     );
     let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
@@ -984,7 +984,7 @@ pub(crate) fn gc_stale_team_windows(name: &str, keep: &str, all_windows: &[Strin
 pub fn duplicate_team_bindings() -> Result<Vec<Map<String, Value>>> {
     let fmt = format!(
         "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}",
-        crate::tmux::_WINDOW_TEAM_FMT
+        crate::tmux::WINDOW_TEAM_FMT
     );
     let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
@@ -1066,7 +1066,7 @@ pub fn list_teams() -> Result<Vec<Map<String, Value>>> {
 
     let fmt = format!(
         "#{{session_name}}:#{{window_index}}\t{}\t#{{@hive-workspace}}",
-        crate::tmux::_WINDOW_TEAM_FMT
+        crate::tmux::WINDOW_TEAM_FMT
     );
     let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
     for line in r.stdout.trim().split('\n') {
@@ -1271,7 +1271,7 @@ mod tests {
                 "#{@hive-team}"
             };
             let mut line = fmt
-                .replace(crate::tmux::_WINDOW_TEAM_FMT, team_tag)
+                .replace(crate::tmux::WINDOW_TEAM_FMT, team_tag)
                 .replace("#{session_name}:#{window_index}", target)
                 .replace("#{window_id}", &window_id_for_target(target));
             while let Some(start) = line.find("#{@") {

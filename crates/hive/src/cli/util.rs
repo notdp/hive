@@ -8,20 +8,20 @@ use super::*;
 use crate::team::{Team, LEAD_AGENT_NAME};
 use crate::tmux;
 
-pub(crate) const _TMUX_REQUIRED_MESSAGE: &str =
+pub(crate) const TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
 /// Refusal for an engine whose own session id names no roster row. Told
-/// apart from `_TMUX_REQUIRED_MESSAGE` because the caller has no terminal to
+/// apart from `TMUX_REQUIRED_MESSAGE` because the caller has no terminal to
 /// go find: it is an engine subprocess, and its identity is the broken part.
-pub(crate) const _UNROSTERED_ENGINE_MESSAGE: &str =
+pub(crate) const UNROSTERED_ENGINE_MESSAGE: &str =
     "this engine's session names nobody on any team's roster \
      (the member was killed, or the team deleted)";
 
 /// Env an engine mints for its own subprocesses. A process carrying one of
 /// these is an engine context: it is some member, or it is nobody — it is
 /// never the human at the orch's keyboard.
-pub(crate) const _ENGINE_MARKER_ENV: [&str; 3] = [
+pub(crate) const ENGINE_MARKER_ENV: [&str; 3] = [
     "CODEX_THREAD_ID",
     "GROK_SESSION_ID",
     "CLAUDE_CODE_MESSAGING_SOCKET",
@@ -32,7 +32,7 @@ pub(crate) const _ENGINE_MARKER_ENV: [&str; 3] = [
 // caller outside tmux or in another session reaches it the same way. `flow`
 // rides the same doctrine, and `flow node --team` exists for callers without
 // a pane identity (a workflow proxy subagent, a desktop session).
-pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
+pub(crate) const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
     "shell-init",
@@ -54,7 +54,7 @@ pub(crate) const _TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "flow",
 ];
 
-pub(crate) const _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
+pub(crate) const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
     "claude",
     "codex",
     "config",
@@ -70,7 +70,7 @@ pub const TEAM_NAME_POOL: [&str; 10] = [
     "honey", "comb", "wasp", "bumble", "hornet", "nectar", "pollen", "amber", "clover", "sage",
 ];
 
-pub(crate) const _RANDOM_AGENT_NAMES: [&str; 10] = [
+pub(crate) const RANDOM_AGENT_NAMES: [&str; 10] = [
     "yoyo", "lulu", "nini", "bobo", "kiki", "dodo", "pipi", "toto", "momo", "coco",
 ];
 
@@ -356,7 +356,7 @@ fn unresolved_sender_fallback() -> Option<String> {
 
 /// True when this process carries an engine's own identity marker.
 pub(crate) fn engine_marker_env() -> bool {
-    _ENGINE_MARKER_ENV
+    ENGINE_MARKER_ENV
         .iter()
         .any(|key| !env_string(key).trim().is_empty())
 }
@@ -1055,7 +1055,7 @@ mod tests {
         env.set("TMUX", "/tmp/tmux-0/default,1,0");
         assert_eq!(unresolved_sender_fallback().as_deref(), Some("orch"));
         // an engine marker makes it a member context even inside tmux
-        for key in _ENGINE_MARKER_ENV {
+        for key in ENGINE_MARKER_ENV {
             env.set(key, "x");
             assert_eq!(unresolved_sender_fallback(), None, "{key}");
             env.remove(key);

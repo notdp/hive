@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use super::engine::{pane_for_job, EngineSession};
 use super::keyboard::{
-    _ATTACH_EXIT_TIMEOUT, _BUF_CAP, _CLEAR_LINE, _CLIENT_READY_TIMEOUT, _CONTROL_KEY_GAP,
-    _DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS, _ENGINE_READY_TIMEOUT, _RESTORE_KILL,
+    ATTACH_EXIT_TIMEOUT, BUF_CAP, CLEAR_LINE, CLIENT_READY_TIMEOUT, CONTROL_KEY_GAP,
+    DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, ENGINE_READY_TIMEOUT, RESTORE_KILL,
 };
 use super::lifecycle::{bg_env, wait_engine_entry_until};
 use super::sleep_s;
@@ -67,8 +67,8 @@ impl RealClient {
                 let mut b = drain_buf.lock().unwrap_or_else(|e| e.into_inner());
                 b.data.extend_from_slice(&chunk[..n]);
                 b.seen += n;
-                if b.data.len() > _BUF_CAP {
-                    let excess = b.data.len() - _BUF_CAP;
+                if b.data.len() > BUF_CAP {
+                    let excess = b.data.len() - BUF_CAP;
                     b.data.drain(..excess);
                 }
             }
@@ -254,7 +254,7 @@ pub(crate) fn engine_screen_size(job_id: &str) -> (u16, u16) {
             }
         }
     }
-    (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
+    (DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)
 }
 
 pub(crate) fn attach_pipe(job_id: &str, claude_bin: &str) -> Option<Client> {
@@ -343,7 +343,7 @@ fn engine_ready_timeout() -> f64 {
             return v;
         }
     }
-    _ENGINE_READY_TIMEOUT
+    ENGINE_READY_TIMEOUT
 }
 
 fn client_ready_timeout() -> f64 {
@@ -353,7 +353,7 @@ fn client_ready_timeout() -> f64 {
             return v;
         }
     }
-    _CLIENT_READY_TIMEOUT
+    CLIENT_READY_TIMEOUT
 }
 
 pub(super) fn hooked_wait_engine_behind(job_id: &str, proc: &mut Client) -> Option<EngineSession> {
@@ -398,10 +398,10 @@ pub(super) fn hooked_wait_client_ready(proc: &mut Client) -> bool {
 
 /// C-u, in a chunk of its own — see [`wait_client_ready`].
 pub(crate) fn clear_composer(proc: &mut Client) -> bool {
-    if !feed(proc, _CLEAR_LINE) {
+    if !feed(proc, CLEAR_LINE) {
         return false;
     }
-    sleep_s(_CONTROL_KEY_GAP);
+    sleep_s(CONTROL_KEY_GAP);
     true
 }
 
@@ -410,9 +410,9 @@ pub(crate) fn clear_composer(proc: &mut Client) -> bool {
 /// Best-effort — a failed restore leaves what today's behavior always left,
 /// the draft on claude's kill ring with the TUI's own Ctrl+Y hint on screen.
 pub(crate) fn restore_draft(proc: &mut Client) {
-    sleep_s(_CONTROL_KEY_GAP);
-    if feed(proc, _RESTORE_KILL) {
-        sleep_s(_CONTROL_KEY_GAP); // let the client forward it before EOF
+    sleep_s(CONTROL_KEY_GAP);
+    if feed(proc, RESTORE_KILL) {
+        sleep_s(CONTROL_KEY_GAP); // let the client forward it before EOF
     }
 }
 
@@ -424,9 +424,9 @@ pub(crate) fn restore_draft(proc: &mut Client) {
 pub(crate) fn close_pipe(mut proc: Client) {
     proc.close_stdin();
     thread::spawn(move || {
-        if proc.wait_timeout(_ATTACH_EXIT_TIMEOUT).is_none() {
+        if proc.wait_timeout(ATTACH_EXIT_TIMEOUT).is_none() {
             proc.kill();
-            let _ = proc.wait_timeout(_ATTACH_EXIT_TIMEOUT);
+            let _ = proc.wait_timeout(ATTACH_EXIT_TIMEOUT);
         }
     });
 }

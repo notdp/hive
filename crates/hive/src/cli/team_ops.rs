@@ -159,7 +159,7 @@ pub(crate) fn codex_relaunch_message() -> String {
 
 pub(crate) fn require_codex_native(invoked: Option<&str>) {
     if let Some(invoked) = invoked {
-        if _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS.contains(&invoked) {
+        if CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS.contains(&invoked) {
             return;
         }
     }
@@ -211,7 +211,7 @@ fn names_used_in_window(panes: &[PaneInfo]) -> HashSet<String> {
 
 /// Pick a short random peer name while avoiding collisions in this window.
 pub(crate) fn derive_agent_name(seen: &mut HashSet<String>) -> String {
-    let available: Vec<&str> = _RANDOM_AGENT_NAMES
+    let available: Vec<&str> = RANDOM_AGENT_NAMES
         .iter()
         .copied()
         .filter(|name| !seen.contains(*name))
@@ -864,12 +864,12 @@ mod tests {
     fn test_derive_agent_name_avoids_seen_and_falls_back() {
         let mut seen: HashSet<String> = ["yoyo", "lulu"].iter().map(|s| s.to_string()).collect();
         let name = derive_agent_name(&mut seen);
-        assert!(_RANDOM_AGENT_NAMES.contains(&name.as_str()));
+        assert!(RANDOM_AGENT_NAMES.contains(&name.as_str()));
         assert_ne!(name, "yoyo");
         assert_ne!(name, "lulu");
         assert!(seen.contains(&name));
 
-        let mut all: HashSet<String> = _RANDOM_AGENT_NAMES.iter().map(|s| s.to_string()).collect();
+        let mut all: HashSet<String> = RANDOM_AGENT_NAMES.iter().map(|s| s.to_string()).collect();
         assert_eq!(derive_agent_name(&mut all), "agent-1");
         assert_eq!(derive_agent_name(&mut all), "agent-2");
     }
@@ -912,7 +912,7 @@ mod tests {
     fn test_seen_names_include_registry_only_members() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _env = iso(tmp.path());
-        let pool: Vec<&str> = _RANDOM_AGENT_NAMES.to_vec();
+        let pool: Vec<&str> = RANDOM_AGENT_NAMES.to_vec();
         let t = registry_team("honey", 100.0, &pool);
 
         let mut seen = window_seen_names(&t, &[]);

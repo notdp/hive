@@ -100,7 +100,7 @@ impl Agent {
         // external orchestrator (`hive flow node --team`) spawns visible
         // members. Only an un-addressable spawn has to be inside tmux.
         if !hooked_is_inside_tmux() && target_pane.is_empty() {
-            bail!("{}", _TMUX_REQUIRED_MESSAGE);
+            bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
 
         let initial_prompt = compose_spawn_prompt(cli, &opts, team_name)?;

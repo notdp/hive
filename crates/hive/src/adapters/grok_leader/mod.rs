@@ -47,18 +47,18 @@ pub use daemon::*;
 pub use keys::*;
 pub use pool::*;
 
-const _INIT_TIMEOUT: f64 = 10.0; // initialize answers ~2 s after process start
-const _LOAD_TIMEOUT: f64 = 5.0; // session/load ~0.8 s plus the notification replay
-const _HANDSHAKE_TIMEOUT: f64 = _INIT_TIMEOUT + _LOAD_TIMEOUT;
-const _ACK_TIMEOUT: f64 = 10.0;
-const _CALL_TIMEOUT: f64 = 10.0;
-const _DAEMON_START_TIMEOUT: f64 = 8.0;
-const _CONNECT_COOLDOWN: f64 = 5.0;
+const INIT_TIMEOUT: f64 = 10.0; // initialize answers ~2 s after process start
+const LOAD_TIMEOUT: f64 = 5.0; // session/load ~0.8 s plus the notification replay
+const HANDSHAKE_TIMEOUT: f64 = INIT_TIMEOUT + LOAD_TIMEOUT;
+const ACK_TIMEOUT: f64 = 10.0;
+const CALL_TIMEOUT: f64 = 10.0;
+const DAEMON_START_TIMEOUT: f64 = 8.0;
+const CONNECT_COOLDOWN: f64 = 5.0;
 
 /// Worst-case local submission budget for one send_to_pane call: a cold client
 /// (initialize + session/load) plus the ack wait. The hived derives its request
 /// budgets from this so a valid slow acceptance can never outlive its caller.
-pub const SUBMIT_TIMEOUT: f64 = _HANDSHAKE_TIMEOUT + _ACK_TIMEOUT;
+pub const SUBMIT_TIMEOUT: f64 = HANDSHAKE_TIMEOUT + ACK_TIMEOUT;
 
 /// Accepted-transport classification for durable delivery observations: the
 /// leader took the prompt into the session queue. Not proof the turn ran.
@@ -68,8 +68,8 @@ pub const PROMPT_QUEUED: &str = "sessionPromptQueued";
 /// only accept class there is — see [`GrokStdioClient::cancel`].
 pub const CANCEL_SENT: &str = "sessionCancelSent";
 
-const _TOOL_PHASES: [&str; 2] = ["tool_open", "tool_result_pending_reply"];
-const _MESSAGE_CHUNKS: [&str; 3] = [
+const TOOL_PHASES: [&str; 2] = ["tool_open", "tool_result_pending_reply"];
+const MESSAGE_CHUNKS: [&str; 3] = [
     "agent_message_chunk",
     "agent_thought_chunk",
     "user_message_chunk",

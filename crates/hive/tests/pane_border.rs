@@ -47,7 +47,7 @@ impl BorderPane {
             "-p",
             "-t",
             &self.pane,
-            hive::tmux::_HIVE_PANE_BORDER_FORMAT,
+            hive::tmux::HIVE_PANE_BORDER_FORMAT,
         ])
     }
 }

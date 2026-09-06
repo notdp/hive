@@ -14,7 +14,7 @@ use super::attach::{
 };
 use super::engine::{hooked_engine_for_job, pane_for_job, EngineSession};
 use super::lifecycle::{bg_env, run_capture};
-use super::{sleep_s, _AGENTS_TIMEOUT};
+use super::{sleep_s, AGENTS_TIMEOUT};
 
 #[cfg(test)]
 use super::testhook;
@@ -27,42 +27,42 @@ use super::testhook;
 // pane, no viewer. A pane viewer stays attached and unflickered while this
 // second client types (real-machine verified, 2.1.240), and the attach itself
 // wakes a parked engine, so the keyboard path self-heals the ~1h park for free.
-pub(super) const _CLEAR_LINE: &str = "\u{15}"; // C-u: drop whatever is in the composer (claude keeps it
-                                               // on its own kill ring — Ctrl+Y pastes it back)
-pub(super) const _RESTORE_KILL: &str = "\u{19}"; // C-y: paste the kill ring back into the composer
-const _SUBMIT: &str = "\r";
-const _ESCAPE: &str = "\u{1b}"; // interrupts the running turn
+pub(super) const CLEAR_LINE: &str = "\u{15}"; // C-u: drop whatever is in the composer (claude keeps it
+                                              // on its own kill ring — Ctrl+Y pastes it back)
+pub(super) const RESTORE_KILL: &str = "\u{19}"; // C-y: paste the kill ring back into the composer
+const SUBMIT: &str = "\r";
+const ESCAPE: &str = "\u{1b}"; // interrupts the running turn
 
 // Only used when the job is on nobody's screen: claude's own pty host
 // starts at this size, so it is the least surprising thing to wear.
-pub(super) const _DEFAULT_PTY_COLS: u16 = 200;
-pub(super) const _DEFAULT_PTY_ROWS: u16 = 50;
+pub(super) const DEFAULT_PTY_COLS: u16 = 200;
+pub(super) const DEFAULT_PTY_ROWS: u16 = 50;
 
-pub(super) const _ENGINE_READY_TIMEOUT: f64 = 20.0; // our own attach is the wake; the entry follows it
-pub(super) const _CLIENT_READY_TIMEOUT: f64 = 15.0; // observed ~0.3s to the journal entry
-const _TYPE_READY_TIMEOUT: f64 = 25.0; // total budget for "the client is forwarding stdin"
-const _TYPE_RETRY_AFTER: f64 = 5.0; // re-type (C-u first, so it is idempotent) after this
-const _SUBMIT_CONFIRM_TIMEOUT: f64 = 20.0; // the user turn is written the moment it lands
+pub(super) const ENGINE_READY_TIMEOUT: f64 = 20.0; // our own attach is the wake; the entry follows it
+pub(super) const CLIENT_READY_TIMEOUT: f64 = 15.0; // observed ~0.3s to the journal entry
+const TYPE_READY_TIMEOUT: f64 = 25.0; // total budget for "the client is forwarding stdin"
+const TYPE_RETRY_AFTER: f64 = 5.0; // re-type (C-u first, so it is idempotent) after this
+const SUBMIT_CONFIRM_TIMEOUT: f64 = 20.0; // the user turn is written the moment it lands
 
 // A slash command's `<command-name>` record is written when the command
 // *finishes* (a /compact can take a minute), so waiting for it would block the
 // caller on work it does not need to see. This window only has to be long
 // enough for the failure shape — the command submitted as plain text, which
 // writes its turn immediately.
-const _SLASH_CONFIRM_TIMEOUT: f64 = 5.0;
-const _INTERRUPT_CONFIRM_TIMEOUT: f64 = 12.0;
-const _KEY_POLL_INTERVAL: f64 = 0.4;
-const _ECHO_POLL_INTERVAL: f64 = 0.05; // in-memory read of our own attach stream
-const _RENAME_CONFIRM_TIMEOUT: f64 = 5.0; // a control/rename lands in ~0.1s; this is slack
-const _RENAME_POLL_INTERVAL: f64 = 0.1; // registry file reads are cheap
-pub(super) const _CONTROL_KEY_GAP: f64 = 0.25; // a control byte must not ride in the text's chunk
-pub(super) const _ATTACH_EXIT_TIMEOUT: f64 = 10.0;
+const SLASH_CONFIRM_TIMEOUT: f64 = 5.0;
+const INTERRUPT_CONFIRM_TIMEOUT: f64 = 12.0;
+const KEY_POLL_INTERVAL: f64 = 0.4;
+const ECHO_POLL_INTERVAL: f64 = 0.05; // in-memory read of our own attach stream
+const RENAME_CONFIRM_TIMEOUT: f64 = 5.0; // a control/rename lands in ~0.1s; this is slack
+const RENAME_POLL_INTERVAL: f64 = 0.1; // registry file reads are cheap
+pub(super) const CONTROL_KEY_GAP: f64 = 0.25; // a control byte must not ride in the text's chunk
+pub(super) const ATTACH_EXIT_TIMEOUT: f64 = 10.0;
 
-const _ECHO_PREFIX_CHARS: usize = 40; // head/tail slice: unique enough, short enough to survive a wrap
-const _PASTE_PLACEHOLDER: &str = "[Pastedtext#"; // squashed `[Pasted text #N]`
-const _INTERRUPT_MARKER: &str = "[Request interrupted by user]";
+const ECHO_PREFIX_CHARS: usize = 40; // head/tail slice: unique enough, short enough to survive a wrap
+const PASTE_PLACEHOLDER: &str = "[Pastedtext#"; // squashed `[Pasted text #N]`
+const INTERRUPT_MARKER: &str = "[Request interrupted by user]";
 
-pub(super) const _BUF_CAP: usize = 262144;
+pub(super) const BUF_CAP: usize = 262144;
 
 macro_rules! tunable {
     ($fn_name:ident, $field:ident, $default:expr) => {
@@ -78,32 +78,32 @@ macro_rules! tunable {
     };
 }
 
-tunable!(type_retry_after, type_retry_after, _TYPE_RETRY_AFTER);
-tunable!(type_ready_timeout, type_ready_timeout, _TYPE_READY_TIMEOUT);
+tunable!(type_retry_after, type_retry_after, TYPE_RETRY_AFTER);
+tunable!(type_ready_timeout, type_ready_timeout, TYPE_READY_TIMEOUT);
 tunable!(
     slash_confirm_timeout,
     slash_confirm_timeout,
-    _SLASH_CONFIRM_TIMEOUT
+    SLASH_CONFIRM_TIMEOUT
 );
 tunable!(
     submit_confirm_timeout,
     submit_confirm_timeout,
-    _SUBMIT_CONFIRM_TIMEOUT
+    SUBMIT_CONFIRM_TIMEOUT
 );
 tunable!(
     interrupt_confirm_timeout,
     interrupt_confirm_timeout,
-    _INTERRUPT_CONFIRM_TIMEOUT
+    INTERRUPT_CONFIRM_TIMEOUT
 );
 tunable!(
     rename_confirm_timeout,
     rename_confirm_timeout,
-    _RENAME_CONFIRM_TIMEOUT
+    RENAME_CONFIRM_TIMEOUT
 );
 tunable!(
     rename_poll_interval,
     rename_poll_interval,
-    _RENAME_POLL_INTERVAL
+    RENAME_POLL_INTERVAL
 );
 
 /// Outcome of a keystroke pipe. `confirmed` names the evidence:
@@ -304,12 +304,12 @@ fn echo_needles(text: &str) -> Vec<String> {
         return Vec::new();
     }
     let chars: Vec<char> = squashed.chars().collect();
-    let head: String = chars.iter().take(_ECHO_PREFIX_CHARS).collect();
-    let tail: String = chars[chars.len().saturating_sub(_ECHO_PREFIX_CHARS)..]
+    let head: String = chars.iter().take(ECHO_PREFIX_CHARS).collect();
+    let tail: String = chars[chars.len().saturating_sub(ECHO_PREFIX_CHARS)..]
         .iter()
         .collect();
     let mut needles = Vec::new();
-    for needle in [head, tail, _PASTE_PLACEHOLDER.to_string()] {
+    for needle in [head, tail, PASTE_PLACEHOLDER.to_string()] {
         if !needles.contains(&needle) {
             needles.push(needle);
         }
@@ -513,7 +513,7 @@ fn type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
             echoed = true;
             break;
         }
-        sleep_s(_ECHO_POLL_INTERVAL);
+        sleep_s(ECHO_POLL_INTERVAL);
     }
     let restore = draft && clears == 1;
     if !echoed {
@@ -521,7 +521,7 @@ fn type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
             "job {job_id} never echoed the typed text back into its composer"
         ));
     }
-    if !feed(proc, _SUBMIT) {
+    if !feed(proc, SUBMIT) {
         return KeyResult::failure("the attach client closed its stdin before Enter");
     }
     if transcript.is_none() {
@@ -555,7 +555,7 @@ fn type_inner(proc: &mut Client, job_id: &str, text: &str) -> KeyResult {
             }
             SubmitVerdict::None => {}
         }
-        sleep_s(_KEY_POLL_INTERVAL);
+        sleep_s(KEY_POLL_INTERVAL);
     }
     if slash {
         // ponytail: a slash command's record comes late (or never — /cost and
@@ -659,20 +659,20 @@ fn interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
     if !hooked_wait_client_ready(proc) {
         return KeyResult::failure(format!("`attach {job_id}` never came up"));
     }
-    if !feed(proc, _ESCAPE) {
+    if !feed(proc, ESCAPE) {
         return KeyResult::failure("the attach client closed its stdin");
     }
     if !was_busy {
         // Nothing was running, so nothing can confirm: waiting out the
         // window could only relabel a success. cvim sends this before every
         // sendback, and the member is idle most of the time.
-        sleep_s(_CONTROL_KEY_GAP); // let the client forward it before EOF
+        sleep_s(CONTROL_KEY_GAP); // let the client forward it before EOF
         return KeyResult::success("written", "the engine was not busy");
     }
     let confirm = Duration::from_secs_f64(interrupt_confirm_timeout().max(0.0));
     let start = Instant::now();
     while start.elapsed() < confirm {
-        if transcript_since(transcript.as_deref(), offset).contains(_INTERRUPT_MARKER) {
+        if transcript_since(transcript.as_deref(), offset).contains(INTERRUPT_MARKER) {
             return KeyResult::success("transcript", "");
         }
         if let Some(current) = hooked_engine_for_job(job_id) {
@@ -680,7 +680,7 @@ fn interrupt_inner(proc: &mut Client, job_id: &str) -> KeyResult {
                 return KeyResult::success("status", "");
             }
         }
-        sleep_s(_KEY_POLL_INTERVAL);
+        sleep_s(KEY_POLL_INTERVAL);
     }
     KeyResult::failure(format!("job {job_id} is still busy after Escape"))
 }
@@ -696,5 +696,5 @@ pub fn stop_job(job_id: &str, claude_bin: &str) {
         "stop".to_string(),
         job_id.to_string(),
     ];
-    let _ = run_capture(&argv, _AGENTS_TIMEOUT, None, &bg_env(None));
+    let _ = run_capture(&argv, AGENTS_TIMEOUT, None, &bg_env(None));
 }
