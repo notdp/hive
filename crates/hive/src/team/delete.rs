@@ -63,17 +63,28 @@ pub(crate) fn delete_team(
     }
     let session = format!("={name}");
     let had_session = down && tmux::has_session(&session);
+    // The caller may be a member of this very team (an orch running the
+    // teardown). Its engine is this process's host: kill it here and the
+    // rest of the delete dies with it. It is held aside and stopped after
+    // everything else, the session included.
+    let me = crate::identity::default_agent();
+    let mut caller = None;
     if down {
         if crate::registry::load(name).is_none() && !had_session {
             bail!("no team named '{name}' (no registry entry, no tmux session)");
         }
         if let Ok(mut team) = Team::load(name, "") {
-            // The caller may be a member of this very team (an orch running
-            // the teardown): retire it last so the retirements before it,
-            // and the delete itself, are not cut off with its engine.
-            let me = crate::identity::default_agent();
-            let mut names: Vec<String> = team.agents.iter().map(|a| a.name.clone()).collect();
-            names.sort_by_key(|n| Some(n) == me.as_ref());
+            caller = team
+                .agents
+                .iter()
+                .find(|a| Some(&a.name) == me.as_ref())
+                .cloned();
+            let names: Vec<String> = team
+                .agents
+                .iter()
+                .filter(|a| Some(&a.name) != me.as_ref())
+                .map(|a| a.name.clone())
+                .collect();
             for member in names {
                 if team.retire(&member) {
                     println!("retired {member}");
@@ -88,7 +99,7 @@ pub(crate) fn delete_team(
         team_workspace = t.workspace.clone();
         team_window = t.tmux_window.clone();
         team_window_id = t.tmux_window_id.clone();
-        t.cleanup();
+        t.cleanup(me.as_deref());
     }
 
     // Read before the tags go: a window hive built itself (`@hive-built`,
@@ -163,6 +174,13 @@ pub(crate) fn delete_team(
     }
     if had_session {
         println!("session '{name}' killed");
+    }
+    // The caller last: its roster row went with the entry above, so only
+    // its engine is left to stop — and a pane inside the session is gone
+    // already.
+    if let Some(agent) = caller {
+        agent.kill();
+        println!("retired {}", agent.name);
     }
     Ok(())
 }
@@ -460,6 +478,61 @@ mod tests {
         assert!(err.contains("no team named 'abc'"), "{err}");
         assert_eq!(count(&argv, "kill-session"), 0);
         assert_eq!(count(&argv, "kill-window"), 0);
+    }
+
+    #[test]
+    fn test_delete_down_stops_the_calling_member_after_the_session() {
+        // The caller is orch, a codex member of the team being torn down:
+        // its tool thread id is the identity ladder's session rung.
+        let mut env = display_env_outside();
+        env.env.set("CODEX_THREAD_ID", "t-orch");
+        crate::registry::record_team(
+            "abc",
+            "",
+            "100.0",
+            &[
+                member_row("orch", "codex", "t-orch"),
+                member_row("bee", "claude", ""),
+            ],
+            "@7",
+        )
+        .unwrap();
+        let argv = fake_tmux_sessions(
+            "abc:1\t@7\tabc\t\t\t\n",
+            &[],
+            &[("abc:1", "hive-built", "1")],
+            &["abc"],
+        );
+        // The team window's panes, one per member, so each kill is a
+        // recorded `kill-pane`.
+        crate::team::set_fake_tmux_panes(|_| {
+            [("%5", "orch", "codex"), ("%6", "bee", "claude")]
+                .into_iter()
+                .map(|(pane, agent, cli)| crate::tmux::PaneInfo {
+                    pane_id: pane.to_string(),
+                    role: "agent".to_string(),
+                    agent: agent.to_string(),
+                    team: "abc".to_string(),
+                    cli: cli.to_string(),
+                    ..Default::default()
+                })
+                .collect()
+        });
+
+        delete_team("abc", "", false, true).unwrap();
+
+        assert!(crate::registry::load("abc").is_none());
+        let at = |row: &[&str]| {
+            argv.borrow()
+                .iter()
+                .position(|a| a.iter().map(String::as_str).eq(row.iter().copied()))
+                .unwrap_or_else(|| panic!("{row:?} never ran: {:?}", argv.borrow()))
+        };
+        let bee = at(&["kill-pane", "-t", "%6"]);
+        let session = at(&["kill-session", "-t", "=abc"]);
+        let orch = at(&["kill-pane", "-t", "%5"]);
+        assert!(bee < session, "the other member goes before the session");
+        assert!(session < orch, "the caller goes after the session");
     }
 
     #[test]

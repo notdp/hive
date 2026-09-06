@@ -860,9 +860,14 @@ impl Team {
     }
 
     /// Kill all agent panes (not the session itself if in-place).
-    pub fn cleanup(&self) {
+    /// Kill every engine on the roster but `keep` (the member running this
+    /// very delete, whose engine hosts the process), then clear the lead
+    /// pane's tags.
+    pub fn cleanup(&self, keep: Option<&str>) {
         for agent in &self.agents {
-            agent.kill();
+            if Some(agent.name.as_str()) != keep {
+                agent.kill();
+            }
         }
         if !self.lead_pane_id.is_empty() && tmux::is_pane_alive(&self.lead_pane_id) {
             tmux::clear_pane_tags(&self.lead_pane_id);
