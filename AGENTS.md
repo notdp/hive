@@ -70,12 +70,15 @@ behavior is documented in the modules themselves.
   `grok_turn`) are the only place a transcript's turn and terminal shapes
   are interpreted; `node.rs` sees `TurnOutcome` values and nothing else,
   and what it cannot attribute to the id it reports (`ambiguous`,
-  `session_changed`) rather than guesses. Each run is recorded at
-  `<workspace>/run/nodes/<name>.json` under the flock
-  `<workspace>/run/nodes/<name>.lock`; a pending record whose member is
-  alive is `member_busy`, one whose member is dead is replaced, and
-  `hive kill` removes it. A same-name node reuses a live member; the run's
-  team comes from `hive create <run>` and goes with
+  `session_changed`) rather than guesses; a turn the engine closed before
+  its final message reached disk is `TurnOutcome::Flushing`, which the core
+  polls under a bounded flush budget and never treats as a result. Each run
+  is recorded at `<workspace>/run/nodes/<name>.json` under the flock
+  `<workspace>/run/nodes/<name>.lock`, written `pending` before the bus
+  write so exit 1 always means "not dispatched"; a pending record whose
+  member is alive is `member_busy`, one whose member is dead is replaced,
+  and `hive kill` removes it. A same-name node reuses a live member; the
+  run's team comes from `hive create <run>` and goes with
   `hive delete <run> --down`.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that

@@ -210,84 +210,173 @@ own transcript. Nothing travels back over the bus.
   followed by the task's first line, `</HIVE>`. The id therefore appears
   verbatim in the text the member receives (header and body). The ledger row
   has `from_agent` empty (there is no sender), `to_agent` the member name and
-  `artifact` the task path; it is the only bus write a node makes.
+  `artifact` the task path; it is the only bus write a node makes. The run
+  record (below) is written `pending` — dispatch id, engine session, reader
+  cursor — before that write, so a runner that dies between the delivery
+  and its own bookkeeping leaves a pending record behind, never a gap a
+  same-name run could walk through.
+- **Readiness.** The runner dispatches only between turns, and only on a
+  positive reading from the engine's own daemon that no turn is open
+  (codex: the app-server's `thread/read`; claude: the bg job's engine
+  record, whose `busy` flag is no answer once its status is stale; grok:
+  the hived's ACP connection). No answer says nothing about the turn and
+  never opens the dispatch. A member still in a turn after 600s ends the
+  run `member_busy` without dispatching — a task dropped into a running
+  turn would be folded into it, and the fold detection below is a net,
+  not a plan.
 - **Anchoring is input identity, never time.** Before dispatching, the
   runner takes the reader's cursor (where the transcript ends now). After
   dispatching it asks the reader for the input record carrying the id past
   that cursor, binds the turn that input started, and waits for that turn's
   terminal record. A turn the reader cannot attribute to the id is reported,
-  not guessed at: a message folded into a running turn, a human typing into
-  the pane before or during the turn, a compaction that breaks the chain,
-  a second input merged in — all `ambiguous`; `/clear`, a resume into another
-  id or a fork — `session_changed`. The readers (`adapters/turn.rs`, one
-  per CLI) are the only place transcript turn and terminal shapes are
-  interpreted; `node.rs` sees `TurnOutcome` values and nothing else.
+  not guessed at: an id that landed inside a running turn instead of
+  opening one, a second input folded into the bound turn after it opened
+  (a human typing into the pane, a teammate's message absorbed mid-turn —
+  the two fold paths are detected separately), a compaction that rewrote
+  the branch — all `ambiguous`. A member whose engine session is no longer
+  the one the dispatch landed in (`/clear`, a resume into another id, a
+  fork) is `session_changed`: the old transcript by itself cannot show that
+  a new file was opened, so the core re-reads the member's engine session
+  while it waits and voids the anchor when it moved, after one last read of
+  the old transcript for a terminal record already there. The readers
+  (`adapters/turn.rs`, one per CLI) are the only place transcript turn and
+  terminal shapes are interpreted; `node.rs` sees `TurnOutcome` values and
+  nothing else.
+- **A closed turn whose text is not on disk yet.** Engines close a turn
+  before its final message is fully written: grok writes `turn_ended`
+  before the history line, claude writes a message one content block per
+  record. A reader in that state returns `TurnOutcome::Flushing`, which is
+  not a result: the core keeps polling under a 30s flush budget from the
+  first `Flushing` reading and ends `ambiguous` when the text never lands.
+  Earlier text of the same turn (a tool-calling step's narration, a block
+  of an earlier message) never stands in for the final message.
 - **The result.** `body` is every text block of the bound turn's final
   assistant message, original order, thinking and tool blocks excluded, not
   truncated to a sentence or a line; it is empty when the turn closed
   without a text block. A completed turn says the engine closed it, not that
   the task succeeded: a refusal or a request for help is a normal final
   message.
-- **The JSON line** (stdout, exit 0 whenever a verdict was reached; stderr
-  and exit 1 only when no dispatch happened — bad team, spawn or ready
-  failure, no reader for the cli): `status`, `name`, `pane` (may be empty),
-  `reused`, `dispatchId`, `session` (engine session id, may be empty),
-  `turn` (engine turn key, or null), `body` when `status` is `completed`,
-  `reason` (the engine's own label or an explanation) otherwise. `status`
-  is one of `completed | interrupted | failed | ambiguous | session_changed
-  | transcript_unavailable | member_gone | member_busy`: the first five are
+- **The JSON line** (stdout, exit 0 whenever a verdict was reached): `status`,
+  `name`, `pane` (may be empty), `reused`, `dispatchId`, `session` (the
+  engine's own session id — for claude the session uuid the bg job runs,
+  never the job id the roster row holds), `turn` (engine turn key, or
+  null), `body` when `status` is `completed`, `reason` (the engine's own
+  label or an explanation) otherwise. `status` is one of `completed |
+  interrupted | failed | ambiguous | session_changed |
+  transcript_unavailable | member_gone | member_busy`: the first five are
   the same-named `TurnOutcome`; `transcript_unavailable` is a reader that
   kept failing to read for 60s after the dispatch, or a roster row that
   never got a session id; `member_gone` is a member the roster reports dead
   with no outcome readable on one final read; `member_busy` is a pending
-  node record for the member whose member is alive, or the per-member lock
-  held by another runner. Polling is 1s, the reader is re-invoked on every
-  poll, and a half-written trailing line is "not yet"; there is no timeout
-  (the caller decides), and Ctrl-C leaves the record pending.
+  node record for the member whose member is alive, the per-member lock
+  held by another runner, or the 600s readiness cap above. Polling is 1s,
+  the reader is re-invoked on every poll, and a half-written trailing line
+  is "not yet"; the turn itself has no timeout (the caller decides).
+  stderr and exit 1 mean the task was not dispatched — bad team, spawn or
+  ready failure, no reader for the cli — and the run can be repeated
+  (`member_busy` is the other not-dispatched verdict, reported as a JSON
+  line because it names a state the caller acts on); a dispatched task
+  always ends in a JSON line.
 - **The record.** `<workspace>/run/nodes/<name>.json` — `dispatchId`,
   `cli`, `session`, `cursor`, `anchor` (session/turn/cursor once bound),
   `status` (`pending | input_bound | <terminal status>`), `body`/`reason`
-  when terminal, `seq` (ledger seq of the dispatch), `startedAt` (epoch
-  seconds) — under the flock `<workspace>/run/nodes/<name>.lock` held for
-  the whole run. A stale pending record whose member is dead is replaced by
-  the next run; `hive kill` of the member removes its record. A same-name
-  node reuses a live member.
+  when terminal, `seq` (ledger seq of the dispatch, filled in after the
+  delivery), `startedAt` (epoch seconds) — under the flock
+  `<workspace>/run/nodes/<name>.lock` held for the whole run; the lock
+  file itself is never deleted, the record is. A stale pending record whose
+  member is dead is replaced by the next run; `hive kill` of the member
+  removes its record. A same-name node reuses a live member. Two v1
+  limitations: Ctrl-C on the runner leaves the record pending until
+  `hive kill` of the member, and a terminal verdict frees the name even
+  though the member may still be working (an `ambiguous` or
+  `transcript_unavailable` run releases the lock while the engine can be
+  mid-task, so the next same-name run dispatches into whatever the member
+  is doing and its fold detection is the net).
 
 #### Node turn anchors, per CLI
 
-What each reader binds and waits for, in the engine's own records:
+What each reader binds and waits for, in the engine's own records. Every
+reader re-opens the transcript on every call, holds no state between calls,
+and treats a trailing line without its newline as not written yet.
 
 - **claude** — transcript `~/.claude/projects/<cwd slug>/<sessionId>.jsonl`
   (the slug is the cwd with every non-alphanumeric character replaced by
-  `-`). The input is the `user` record whose content carries the dispatch id
-  (a human-origin row with the bare envelope, as the daemon lane writes it
-  between turns); a `tool_result` row or a meta row is never an input. The
-  turn key is that record's `uuid`, and the turn is followed along the
-  `parentUuid` chain from it: the assistant record with
-  `message.stop_reason == "end_turn"` on that chain is the terminal record,
-  and the final message is the text blocks of the records sharing its
-  `message.id`. Mid-turn the id lands only in a `queued_command` attachment
-  and its queue rows (see "What a delivery leaves in the receiver's
-  transcript"), never in a `user` row: that is `ambiguous`, not a turn.
+  `-`; the session id is the engine's uuid, resolved from the roster's job
+  id through the job's engine record). The input is the `user` record whose
+  `message.content` (a string or text blocks) carries the dispatch id;
+  a `tool_result` row and a row flagged `isMeta` or `turnCompanion` (a
+  harness companion) are never inputs. Between turns the daemon lane writes
+  it as `promptSource: queued` after a `queue-operation enqueue`/`dequeue`.
+  The turn key is that record's `uuid`; the turn is the records whose
+  `parentUuid` chains back to it, and because claude repairs its own chain
+  through records it never wrote (a refusal fallback, an interrupt), a
+  chained record after the anchor whose parent nobody since the anchor
+  wrote is adopted as the running turn's. The terminal record is an
+  assistant record on the turn with `message.stop_reason == "end_turn"`.
+  Claude writes one API message as one record per content block, every
+  block carrying the message's `stop_reason` and `message.id`, and the
+  thinking block with `end_turn` lands before the text block that follows
+  it — so the final message is the text blocks of the records sharing that
+  `message.id`, complete only once a barrier has landed after them: a
+  record with a `uuid` that is not one of its blocks, or one of the
+  uuid-less rows claude writes only after a turn closes (`last-prompt`, the
+  `dequeue` that opens the next queued turn). Until then the reader is
+  `Flushing`. A `user` record `[Request interrupted by user…]` (Escape, or
+  a rejected tool call) is `interrupted`; an `isApiErrorMessage` assistant
+  record, `stop_reason` `max_tokens` or `refusal`, and a `system
+  model_refusal_no_fallback` are `failed`. `ambiguous`: at dispatch, the id
+  landing only in a `queued_command` attachment and a terminal
+  `queue-operation remove` (folded into a turn already running — see "What
+  a delivery leaves in the receiver's transcript"); after binding, a
+  `queued_command` attachment or an absorbed `remove` inside the turn (a
+  second input folded in, whose text may have redirected the member), a
+  fresh `user` input chained into or started outside the turn, a
+  `compact_boundary` or an `isCompactSummary` row. A replaced or truncated
+  file, or a record from another `sessionId`, is `session_changed`.
 - **codex** — rollout `~/.codex/sessions/**/rollout-*-<threadId>.jsonl`.
-  The input is the `response_item` user message whose `input_text` carries
-  the id; its metadata `turn_id` is the turn key, the same id the
-  `task_started` event_msg carries. The terminal record is the `event_msg`
-  `task_complete` with that `turn_id`; its `last_agent_message` is the
-  final message, the same text as the turn's `final_answer` assistant
-  message. A turn that ends with another event for the same `turn_id`
-  keeps that event's own label as the reason.
+  Every turn is bracketed by `event_msg` records: `task_started
+  {turn_id}`, the turn's `response_item`s, one terminal event for the same
+  `turn_id`. The input is the `response_item` user message whose
+  `input_text` carries the id; the turn key is the `turn_id` of the
+  `task_started` open at that point, not the message's own metadata. An id
+  that lands with no `task_started` since the cursor, or into an open turn
+  that has already written engine output (an assistant message, a tool
+  call or its output), was steered into a running turn: `ambiguous`.
+  Codex's own user-role injections before the id inside the same turn
+  (`<environment_context>`, a skill expansion) do not disqualify it. The
+  terminal record is `task_complete` with the bound `turn_id`: the final
+  message is its `last_agent_message`, else the turn's last `final_answer`
+  assistant message, else empty (commentary never stands in). `turn_aborted`
+  (`reason: interrupted`; older builds omit the `turn_id`) is
+  `interrupted`; `error {message, codex_error_info}`, which carries no
+  `turn_id` and in every sample precedes a null `task_complete`, is
+  `failed`. A `task_complete` or `task_started` for another `turn_id`
+  before the bound turn closed, a `thread_rolled_back`, or another user
+  message inside the turn is `ambiguous`; a replaced or shortened rollout,
+  or a `session_meta` naming another id, is `session_changed`.
 - **grok** — two files under
   `~/.grok/sessions/<urlencode(cwd, safe='')>/<sessionId>/`.
-  `chat_history.jsonl` holds the input: the `user` record whose
-  `<user_query>` carries the id (system-reminder user records are not
-  queries). `events.jsonl` holds `turn_started` (`session_id`,
-  `turn_number`) and `turn_ended` (`outcome`) records, paired in order; the
-  n-th query is the n-th pair, and the turn key is
-  `<session_id>/<turn_number>`. The final message is the last `assistant`
-  record of `chat_history.jsonl` between the bound query and the next one;
-  a `turn_ended` whose `outcome` is not `completed` ends the turn under
-  grok's own outcome label.
+  `chat_history.jsonl`: the input is the `user` record whose text carries
+  the id and that has a `prompt_index` — the same coordinate as the turn
+  number; a mid-turn user record (a `<system-reminder>`, an interjection
+  folded into the running turn) carries `synthetic_reason` and no
+  `prompt_index`, and an id in one of those is `ambiguous`. `events.jsonl`:
+  `turn_started` carries `session_id` and `turn_number`, `turn_ended`
+  carries `outcome` (and `cancellation_category` for a cancel) but no turn
+  number, so the reader binds the `turn_started` whose `turn_number` is the
+  prompt's `prompt_index` (its `session_id` must be the member's) and walks
+  the events after it in order: the first `turn_ended` closes the turn,
+  another `turn_started` first or an `interjected` event is `ambiguous`.
+  `conversation_message_count` is never used. The turn key is
+  `<session_id>/<turn_number>`. On `outcome: completed` the final message is
+  the last `assistant` record of the turn's history span (up to the next
+  prompt) that carries no `tool_calls` — a tool-calling record is a step and
+  its narration is not the answer. `turn_ended` lands before that record is
+  flushed, so a completed turn with no such record yet is `Flushing` under
+  the flush budget, and empty once a later prompt or `turn_started` shows
+  nothing is coming. `cancelled` is `interrupted` with the category,
+  `error` is `failed`, any other outcome is `ambiguous`; a session
+  directory gone or events from another `session_id` is `session_changed`.
 
 ## Runtime fields and their sources
 
@@ -319,12 +408,6 @@ gate consumes it and refuses a send to a waiting target. One waiver exists:
 claude parks its status on `waiting` while a `/status`-style dialog is open in
 an attached viewer, yet the inbox still queues normally, so that reason alone
 does not gate a send.
-
-**`turnPhase`** — the phase of the receiver's turn, per its daemon's events.
-Claude emits none: its registry status carries no turn structure and nothing
-synthesizes one from the transcript. Consumers must treat an absent
-`turnPhase` as "no turn structure available" and fall back to `busy` and the
-runtime source, not as an error.
 
 ## Claude: bg job and viewer
 

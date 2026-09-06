@@ -5,7 +5,9 @@ HIVE_ACCEPTANCE: nothing here spawns anything or reads a real home.
 Each fixture plants the traps the live oracle exists for: the dispatch id
 and nonce in the input record (a reader that returns the input would "find"
 the nonce), a tool_result row quoting the task path, a later turn whose
-assistant text carries a decoy, and a half-written trailing line.
+assistant text carries a decoy, a half-written trailing line, and — for
+claude — a registry row holding the bg job id rather than the session uuid
+the transcript is named after.
 """
 
 from __future__ import annotations
@@ -17,8 +19,10 @@ import pytest
 
 from member_transcripts import (
     DISPATCH_ID_RE,
+    JOB_ID_RE,
     claude_turn,
     codex_turn,
+    engine_session,
     grok_turn,
     normalize,
     read_jsonl,
@@ -136,24 +140,37 @@ def test_codex_reader_does_not_take_another_turns_completion():
 
 
 def grok_files(outcome: str = "completed") -> tuple[list[dict], list[dict]]:
+    def prompt(index: int, text: str) -> dict:
+        return {"type": "user", "content": [{"type": "text", "text": f"<user_query>\n{text}\n</user_query>"}],
+                "prompt_index": index}
+
+    def reminder(text: str) -> dict:
+        return {"type": "user", "content": [{"type": "text", "text": f"<system-reminder>\n{text}\n</system-reminder>"}],
+                "synthetic_reason": "system_reminder"}
+
     history = [
         {"type": "system", "content": "You are Grok."},
-        {"type": "user", "content": [{"type": "text", "text": "<system-reminder>\nskills…\n</system-reminder>"}]},
-        {"type": "user", "content": [{"type": "text", "text": "<user_query>\n/hive acc\n</user_query>"}]},
-        {"type": "assistant", "content": "在队里了。"},
-        {"type": "user", "content": [{"type": "text", "text": f"<system-reminder>\nmcp {DID} mentions do not count\n</system-reminder>"}]},
-        {"type": "user", "content": [{"type": "text", "text": f"<user_query>\n{ENVELOPE}\n</user_query>"}]},
+        reminder("skills…"),
+        prompt(0, "/hive acc"),
+        {"type": "assistant", "content": "在队里了。", "model_id": "grok-4.6"},
+        reminder(f"mcp {DID} mentions do not count"),
+        prompt(1, ENVELOPE),
         {"type": "reasoning", "content": None},
-        {"type": "assistant", "content": [{"type": "tool_use", "name": "read_file"}]},
-        {"type": "tool_result", "content": f"task {DID} {NONCE}"},
-        {"type": "assistant", "content": [{"type": "text", "text": FINAL_A}, {"type": "text", "text": FINAL_B}]},
-        {"type": "user", "content": [{"type": "text", "text": "<user_query>\n再说一遍干扰词\n</user_query>"}]},
-        {"type": "assistant", "content": BAIT},
+        # a tool-calling step narrates: its text is not the answer
+        {"type": "assistant", "content": "先读任务文件。", "model_id": "grok-4.6",
+         "tool_calls": [{"id": "call-1", "name": "read_file", "arguments": "{}"}]},
+        {"type": "tool_result", "content": f"task {DID} {NONCE}", "tool_call_id": "call-1"},
+        {"type": "assistant", "content": [{"type": "text", "text": FINAL_A}, {"type": "text", "text": FINAL_B}],
+         "model_id": "grok-4.6"},
+        prompt(2, "再说一遍干扰词"),
+        {"type": "assistant", "content": BAIT, "model_id": "grok-4.6"},
     ]
     events = [
         {"type": "turn_started", "session_id": "sid-g", "turn_number": 0},
+        {"type": "phase_changed", "phase": "waiting_for_model"},
         {"type": "turn_ended", "outcome": "completed"},
         {"type": "turn_started", "session_id": "sid-g", "turn_number": 1},
+        {"type": "tool_started", "name": "read_file"},
         {"type": "turn_ended", "outcome": outcome},
         {"type": "turn_started", "session_id": "sid-g", "turn_number": 2},
         {"type": "turn_ended", "outcome": "completed"},
@@ -161,18 +178,38 @@ def grok_files(outcome: str = "completed") -> tuple[list[dict], list[dict]]:
     return history, events
 
 
-def test_grok_reader_pairs_the_query_with_its_turn_events():
+def test_grok_reader_binds_the_prompt_index_to_its_turn_events():
     turn = grok_turn(*grok_files(), DID)
-    assert turn.input_count == 1  # the system-reminder user record is not a query
+    assert turn.input_count == 1  # the system-reminder user record carrying the id is not a prompt
     assert turn.turn == "sid-g/1"
     assert turn.terminal and turn.outcome == "completed"
-    assert normalize(turn.text) == normalize(FINAL_A + FINAL_B)
+    assert normalize(turn.text) == normalize(FINAL_A + FINAL_B)  # not the tool step's narration
     assert BAIT not in turn.text
 
 
 def test_grok_reader_keeps_a_non_completed_outcome_label():
     turn = grok_turn(*grok_files(outcome="cancelled"), DID)
     assert turn.terminal and turn.outcome == "cancelled"
+
+
+def test_grok_reader_pairs_events_in_order_not_by_ordinal():
+    # turn 1 never got its own turn_ended; turn 2 started and completed.
+    # Splitting the stream into a starts array and an ends array and
+    # indexing both by the prompt's ordinal would give turn 1 turn 2's end.
+    history, events = grok_files()
+    del events[5]  # turn 1's turn_ended
+    turn = grok_turn(history, events, DID)
+    assert turn.turn == "sid-g/1"
+    assert not turn.terminal and turn.outcome == "" and turn.blocks == []
+
+
+def test_grok_reader_final_message_waits_for_the_non_tool_record():
+    # turn_ended lands before the answer's history line: with only the
+    # tool-calling record on disk the turn is terminal but has no text yet
+    history, events = grok_files()
+    del history[9]  # the final assistant record
+    turn = grok_turn(history, events, DID)
+    assert turn.terminal and turn.outcome == "completed" and turn.blocks == []
 
 
 def test_read_member_turn_resolves_each_engines_layout(tmp_path, monkeypatch):
@@ -199,6 +236,39 @@ def test_read_member_turn_resolves_each_engines_layout(tmp_path, monkeypatch):
     assert read_member_turn("claude", "missing", cwd, DID, home=home).input_count == 0
     with pytest.raises(ValueError):
         read_member_turn("stub", "sid", cwd, DID, home=home)
+
+
+def test_claude_job_id_roster_row_resolves_through_the_jobs_state_file(tmp_path, monkeypatch):
+    # The registry row of a claude bg member holds the job id (8 hex, the
+    # session uuid's leading block); the transcript is named after the
+    # uuid. The oracle resolves job -> session from the job's own state
+    # file and never from the node's answer.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    home = tmp_path
+    job_id = "b50e8587"
+    session = "b50e8587-aec4-4b85-8bdd-db6d040d75eb"
+    cwd = "/Users/x/Developer/hive"
+    assert JOB_ID_RE.match(job_id) and not JOB_ID_RE.match(session)
+    job = home / ".claude" / "jobs" / job_id
+    job.mkdir(parents=True)
+    (job / "state.json").write_text(json.dumps({
+        "name": "acc.probe-claude", "state": "running", "cwd": cwd,
+        "sessionId": session, "resumeSessionId": None, "backend": "local",
+    }))
+    projects = home / ".claude" / "projects" / "-Users-x-Developer-hive"
+    projects.mkdir(parents=True)
+    (projects / f"{session}.jsonl").write_text(jsonl(claude_records(sid=session)))
+
+    assert engine_session("claude", job_id, home=home) == session
+    assert engine_session("claude", session, home=home) == session  # a uuid row passes through
+    assert engine_session("claude", "deadbeef", home=home) == ""  # a job without state resolves to nothing
+    assert engine_session("codex", "abcdef12", home=home) == "abcdef12"  # only claude rows are job ids
+    assert engine_session("grok", "abcdef12", home=home) == "abcdef12"
+
+    turn = read_member_turn("claude", engine_session("claude", job_id, home=home), cwd, DID, home=home)
+    assert turn.turn == "u1" and turn.terminal and NONCE in turn.text and BAIT not in turn.text
+    # the job id names no transcript: reading by it finds nothing
+    assert read_member_turn("claude", job_id, cwd, DID, home=home).input_count == 0
 
 
 def test_dispatch_id_shape():

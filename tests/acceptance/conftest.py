@@ -17,12 +17,15 @@ task wording is deliberately NOT "mechanical, do not improvise" — drift
 member has room to move.
 
 The oracle does not take the node's word for it: after the nodes return,
-the rig reads each member's own transcript (`member_transcripts.py`, from
-the registry row's cli/sessionId/cwd) and the tests compare the node JSON
-against what the engine wrote. The task carries two decoys for that
-oracle: the nonce itself appears in the task text (a reader that grabbed
-the input record instead of the final message would still "find" it) and a
-bait string the member is told never to repeat.
+the rig resolves each member's engine session from its registry row
+(`member_transcripts.engine_session` — a claude row holds the bg job id,
+and the engine session behind it comes from the job's own state file, not
+from the node's answer), reads the member's own transcript by that id, and
+the tests compare the node JSON against what the engine wrote. The task
+carries two decoys for that oracle: the nonce itself appears in the task
+text (a reader that grabbed the input record instead of the final message
+would still "find" it) and a bait string the member is told never to
+repeat.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from member_transcripts import BoundTurn, read_member_turn
+from member_transcripts import BoundTurn, engine_session, read_member_turn
 
 pytestmark = pytest.mark.acceptance
 
@@ -75,6 +78,7 @@ class Rig:
     bus_rows: list[tuple] = field(default_factory=list)  # (seq, from, to, body, artifact)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
     roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
+    engine_sessions: dict[str, str] = field(default_factory=dict)  # member -> engine session behind the row
     turns: dict[str, BoundTurn] = field(default_factory=dict)  # member -> what its transcript says
 
     def member(self, cli: str) -> str:
@@ -199,16 +203,18 @@ def rig():
                 "select seq, from_agent, to_agent, body, artifact from messages"
             ).fetchall()
         # The registry row is where the runner learned the member's engine
-        # session; the oracle resolves the transcript from the same row and
-        # reads it before teardown retires the members.
+        # session; the oracle starts from the same row, resolves the engine
+        # session on its own (a claude row is a job id — its engine session
+        # comes from the job's state file, never from the node's answer),
+        # and reads the transcript before teardown retires the members.
         r.roster = _registry_members(r.team)
         for member in procs:
             row = r.roster.get(member, {})
             did = r.dispatch_id(member)
-            if row and did:
-                r.turns[member] = read_member_turn(
-                    str(row.get("cli", "")), str(row.get("sessionId", "")), str(row.get("cwd", "")), did
-                )
+            engine = engine_session(str(row.get("cli", "")), str(row.get("sessionId", "")))
+            r.engine_sessions[member] = engine
+            if row and did and engine:
+                r.turns[member] = read_member_turn(str(row.get("cli", "")), engine, str(row.get("cwd", "")), did)
             else:
                 r.turns[member] = BoundTurn()
         for line in _tmux("list-panes", "-t", r.session, "-F",
