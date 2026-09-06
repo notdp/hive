@@ -13,8 +13,16 @@ scratch team, one naturally-worded nonce task per CLI, each driven the way
 a Claude Code Workflow drives a node — one concurrent `hive node run`
 subprocess per member, task on stdin, one JSON line back on stdout. The
 task wording is deliberately NOT "mechanical, do not improvise" — drift
-(acks, misaddressed replies, self-invented scope) only shows itself when
-the member has room to move.
+(acks, stray replies, self-invented scope) only shows itself when the
+member has room to move.
+
+The oracle does not take the node's word for it: after the nodes return,
+the rig reads each member's own transcript (`member_transcripts.py`, from
+the registry row's cli/sessionId/cwd) and the tests compare the node JSON
+against what the engine wrote. The task carries two decoys for that
+oracle: the nonce itself appears in the task text (a reader that grabbed
+the input record instead of the final message would still "find" it) and a
+bait string the member is told never to repeat.
 """
 
 from __future__ import annotations
@@ -30,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+
+from member_transcripts import BoundTurn, read_member_turn
 
 pytestmark = pytest.mark.acceptance
 
@@ -62,8 +72,10 @@ class Rig:
     flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
     node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
     node_results: dict[str, dict] = field(default_factory=dict)  # member -> node run JSON
-    bus_rows: list[tuple] = field(default_factory=list)
+    bus_rows: list[tuple] = field(default_factory=list)  # (seq, from, to, body, artifact)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
+    roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
+    turns: dict[str, BoundTurn] = field(default_factory=dict)  # member -> what its transcript says
 
     def member(self, cli: str) -> str:
         return f"probe-{cli}"
@@ -71,27 +83,23 @@ class Rig:
     def want(self, cli: str) -> str:
         return f"{self.nonce}-{cli}"
 
-    def dispatches_for(self, member: str) -> list[tuple]:
-        # A refused delivery leaves its bus row behind (the bus is a ledger,
-        # not a queue) and the node retries with a fresh row — several
-        # same-body dispatch rows are legal. The one that reached the member
-        # is the last one before its reply.
-        return [r for r in self.bus_rows if r[1] == "flow.run" and r[2] == member]
+    def bait(self, cli: str) -> str:
+        return f"bait-{self.nonce[4:]}-{cli}"
 
-    def replies_for(self, member: str) -> list[tuple]:
-        # The bus keeps order, not links: a reply is what reached the
-        # mailbox after the member's dispatch. Other members' own replies
-        # are excluded by name so an identity hijack (a reply signed by
-        # someone who is not a member) still shows up here.
-        dispatches = self.dispatches_for(member)
-        if not dispatches:
-            return []
-        since = min(d[0] for d in dispatches)
-        others = {self.member(c) for c in self.clis} - {member}
+    def dispatch_id(self, member: str) -> str:
+        return str(self.node_results.get(member, {}).get("dispatchId", ""))
+
+    def dispatch_rows(self, member: str) -> list[tuple]:
+        # The node's one ledger write: no sender, the member as recipient,
+        # the task artifact named after the dispatch id.
+        did = self.dispatch_id(member)
         return [
             r for r in self.bus_rows
-            if r[2] == "flow.run" and r[0] > since and r[1] not in others
+            if r[1] == "" and r[2] == member and did and did in str(r[4])
         ]
+
+    def rows_from(self, member: str) -> list[tuple]:
+        return [r for r in self.bus_rows if r[1] == member]
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
@@ -141,7 +149,10 @@ def rig():
                 raise RuntimeError("hive create never finished in the rig pane")
             time.sleep(1)
 
-        task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
+        task = (
+            "请把这段口令写进 {path}：{nonce}。写完后，在你这一轮的最后一条消息里原样写出口令 {nonce}，"
+            "顺便说一句你对这个任务的看法。另外有一个干扰词 {bait}——它不是口令，任何地方都不要复述它。"
+        )
         # Reproduce the honest parentage: a Workflow's node runner lives
         # inside an engine's tool subprocess — no $TMUX. Only the pinned pane
         # identity rides in, exactly what a spawned daemon's tools get.
@@ -166,7 +177,7 @@ def rig():
         waits = {
             r.member(c): _NodeWait(
                 procs[r.member(c)],
-                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)),
+                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c), bait=r.bait(c)),
                 deadline,
             )
             for c in r.clis
@@ -185,8 +196,21 @@ def rig():
         db = r.workspace / "hive.db"
         if db.exists():
             r.bus_rows = sqlite3.connect(db).execute(
-                "select seq, from_agent, to_agent, body from messages"
+                "select seq, from_agent, to_agent, body, artifact from messages"
             ).fetchall()
+        # The registry row is where the runner learned the member's engine
+        # session; the oracle resolves the transcript from the same row and
+        # reads it before teardown retires the members.
+        r.roster = _registry_members(r.team)
+        for member in procs:
+            row = r.roster.get(member, {})
+            did = r.dispatch_id(member)
+            if row and did:
+                r.turns[member] = read_member_turn(
+                    str(row.get("cli", "")), str(row.get("sessionId", "")), str(row.get("cwd", "")), did
+                )
+            else:
+                r.turns[member] = BoundTurn()
         for line in _tmux("list-panes", "-t", r.session, "-F",
                           "#{pane_id} #{@hive-agent}", check=False).splitlines():
             pid, _, name = line.strip().partition(" ")
@@ -234,6 +258,20 @@ class _NodeWait:
     def result(self) -> tuple[str, str, int]:
         self.thread.join()
         return self.out, self.err, self.proc.returncode
+
+
+def _registry_members(team: str) -> dict[str, dict]:
+    """`$HIVE_HOME/teams/<team>/team.json` members by name (cli, sessionId, cwd)."""
+    hive_home = Path(os.environ.get("HIVE_HOME") or Path.home() / ".hive")
+    try:
+        entry = json.loads((hive_home / "teams" / team / "team.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {
+        str(m.get("name")): m
+        for m in entry.get("members", [])
+        if isinstance(m, dict) and m.get("name")
+    }
 
 
 def _last_json_object(stdout: str) -> dict:

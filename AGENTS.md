@@ -57,13 +57,25 @@ behavior is documented in the modules themselves.
   the viewer must stay usable against a transcript file alone.
 - Orchestration is not hive's: `hive node run` is one node as one blocking
   command (`--team`, `--name`, `--cli`, `--model`; the task on stdin, the
-  member's reply as one JSON line on stdout), and a Claude Code Workflow
-  drives those nodes through the plugin's `hive-node` agent, which is only
-  a relay for the command. The node's reply address is the `flow.run`
-  mailbox (`FLOW_SENDER`): the member's `hive send` to it is a durable bus
-  row the hived's mailbox branch stores without a transport or an ack, and
-  `run_node` polls the bus for it. A same-name node reuses a live member;
-  the run's team comes from `hive create <run>` and goes with
+  member's final message for it as one JSON line on stdout), and a Claude
+  Code Workflow drives those nodes through the plugin's `hive-node` agent,
+  which is only a relay for the command. A node has no reply address: the
+  dispatch envelope carries no `from` (its ledger row has an empty
+  `from_agent`), the member is never asked to send anything back, and
+  `run_node` (`node.rs`) reads the result from the engine's own transcript
+  through the `adapters/turn.rs` readers — cursor before the dispatch, the
+  input record carrying the dispatch id (`nd-<12 hex>`, in the task
+  artifact path and the first body line) binds the turn, that turn's
+  terminal record ends the wait. The readers (`claude_turn`, `codex_turn`,
+  `grok_turn`) are the only place a transcript's turn and terminal shapes
+  are interpreted; `node.rs` sees `TurnOutcome` values and nothing else,
+  and what it cannot attribute to the id it reports (`ambiguous`,
+  `session_changed`) rather than guesses. Each run is recorded at
+  `<workspace>/run/nodes/<name>.json` under the flock
+  `<workspace>/run/nodes/<name>.lock`; a pending record whose member is
+  alive is `member_busy`, one whose member is dead is replaced, and
+  `hive kill` removes it. A same-name node reuses a live member; the run's
+  team comes from `hive create <run>` and goes with
   `hive delete <run> --down`.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
@@ -98,8 +110,9 @@ Design truth lives in these docs, one question each:
 
 - `docs/runtime-model.md` — what hive knows about an engine: team identity
   (registry vs tmux display), the runtime fields and their per-CLI native
-  sources, send addressing, active-turn fork routing. Runtime-field semantics
-  belong there; keep them in sync with the code that computes them.
+  sources, send addressing, the node dispatch and its per-CLI turn anchors,
+  active-turn fork routing. Runtime-field semantics belong there; keep them
+  in sync with the code that computes them.
 - `docs/transcript-view.md` — what a reader sees on screen: the JSONL →
   `DisplayBlock` parse model, the TUI's chrome and interaction layer, theme
   and appearance resolution. The boundary against `runtime-model.md` follows
@@ -127,9 +140,10 @@ Design truth lives in these docs, one question each:
   `target/debug/hive` (`cargo build` first, or point `HIVE_E2E_BIN` elsewhere).
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok python -m pytest tests/acceptance -q`
   — post-install live acceptance: one real agent per CLI, spawned through the
-  installed `hive`. It asserts what unit suites structurally cannot see (reply
-  identity, absence of acks, pane color as tmux actually renders it, picker
-  residue, nonce causality) plus a headless-claude semantic coroner. Run it
+  installed `hive`. It asserts what unit suites structurally cannot see (the
+  node's body against the member's own transcript, absence of acks and
+  replies, pane color as tmux actually renders it, picker residue, nonce
+  causality) plus a headless-claude semantic coroner. Run it
   after every live install; it is skipped everywhere else.
 - Plugin/skill materialization and hived behavior that must exercise new
   source code need an isolated dev lane: disposable `HIVE_HOME`,
