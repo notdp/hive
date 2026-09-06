@@ -412,18 +412,26 @@ impl CodexDaemonClient {
         )
     }
 
-    /// Id of the thread's in-progress turn, read from the daemon.
+    /// Id of the thread's in-progress turn, read from the daemon: `Ok(None)`
+    /// is the daemon answering that no turn is open, `Err` is no answer
+    /// (RPC error, closed connection).
     ///
     /// `turn/interrupt` requires the turnId and `ThreadStatus::Active`
     /// carries none, so the id has to be read back — hive never owns the turn
     /// (the pane's TUI started it) and only the starting client gets `turn/*`
     /// notifications. `thread/read` with `includeTurns` is the one route.
-    pub fn active_turn_id(&self, thread_id: &str) -> Option<String> {
+    pub fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
         let res = self.call(
             "thread/read",
             json!({"threadId": thread_id, "includeTurns": true}),
         );
-        let result = res.get("result").and_then(Value::as_object)?;
+        let Some(result) = res.get("result").and_then(Value::as_object) else {
+            return Err(res
+                .get("__error__")
+                .or_else(|| res.get("error"))
+                .map(Value::to_string)
+                .unwrap_or_else(|| "thread/read answered without a result".to_string()));
+        };
         let turns = result
             .get("thread")
             .and_then(|thread| thread.get("turns"))
@@ -431,14 +439,14 @@ impl CodexDaemonClient {
         for turn in turns.map(Vec::as_slice).unwrap_or(&[]).iter().rev() {
             if turn.get("status").and_then(Value::as_str) == Some("inProgress") {
                 let id = turn.get("id").and_then(Value::as_str).unwrap_or("");
-                return if id.is_empty() {
+                return Ok(if id.is_empty() {
                     None
                 } else {
                     Some(id.to_string())
-                };
+                });
             }
         }
-        None
+        Ok(None)
     }
 
     /// Abort *turn_id* on *thread_id*.
@@ -533,7 +541,7 @@ impl DaemonClient for CodexDaemonClient {
         Ok(CodexDaemonClient::turn_start(self, thread_id, text))
     }
     fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
-        Ok(CodexDaemonClient::active_turn_id(self, thread_id))
+        CodexDaemonClient::active_turn_id(self, thread_id)
     }
     fn turn_interrupt(&self, thread_id: &str, turn_id: &str) -> Result<Value, String> {
         Ok(CodexDaemonClient::turn_interrupt(self, thread_id, turn_id))

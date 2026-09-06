@@ -275,6 +275,17 @@ pub fn interrupt_pane(pane: &str) -> Option<&'static str> {
     interrupt_thread(&tid)
 }
 
+/// Whether a turn is open on *thread_id*, asked of the shared daemon:
+/// `Some(false)` is the daemon answering that no turn is in progress,
+/// `None` is no answer (no daemon, RPC error) — never a guess.
+pub fn turn_open_for_thread(thread_id: &str) -> Option<bool> {
+    let client = shared_client()?;
+    client
+        .active_turn_id(thread_id)
+        .ok()
+        .map(|turn| turn.is_some())
+}
+
 /// Abort the running turn on *thread_id* — the engine-keyed core.
 pub fn interrupt_thread(thread_id: &str) -> Option<&'static str> {
     let client = shared_client()?;

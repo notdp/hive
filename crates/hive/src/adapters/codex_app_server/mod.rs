@@ -40,7 +40,7 @@ mod client;
 mod daemon;
 mod records;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod transport;
 
 pub use client::*;

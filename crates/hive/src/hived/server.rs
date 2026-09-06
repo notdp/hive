@@ -172,6 +172,11 @@ pub(crate) fn handle_request(
             let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
             (response, true)
         }
+        "turn-open" => {
+            let response = turn_open_payload(&team_in_request(), &map_get_str(request, "agent"))
+                .unwrap_or_else(err_response);
+            (response, true)
+        }
         "connect-codex" => {
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));

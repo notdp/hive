@@ -165,6 +165,16 @@ pub fn request_team_runtime(workspace: &str, team: &str) -> Option<Map<String, V
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
+/// Ask the hived whether a member has a turn open (`turn-open`): the
+/// answer's `open` is a bool, or null when the hived holds no such state
+/// for the member.
+pub fn request_turn_open(workspace: &str, team: &str, agent: &str) -> Option<Map<String, Value>> {
+    let mut payload = action_payload("turn-open");
+    payload.insert("team".to_string(), Value::from(team));
+    payload.insert("agent".to_string(), Value::from(agent));
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+}
+
 pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("runtime-snapshot");
     payload.insert("pane".to_string(), Value::from(pane_id));

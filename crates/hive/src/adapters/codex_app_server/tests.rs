@@ -23,11 +23,13 @@ pub(super) fn shared_client_override() -> Option<Option<Arc<dyn DaemonClient>>> 
     SHARED_CLIENT_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|factory| factory()))
 }
 
-fn set_shared_client_override(factory: impl Fn() -> Option<Arc<dyn DaemonClient>> + 'static) {
+pub(crate) fn set_shared_client_override(
+    factory: impl Fn() -> Option<Arc<dyn DaemonClient>> + 'static,
+) {
     SHARED_CLIENT_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(Box::new(factory)));
 }
 
-fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
+pub(crate) fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
     set_shared_client_override(move || {
         let client: Arc<dyn DaemonClient> = fake.clone();
         Some(client)
@@ -791,7 +793,10 @@ fn test_active_turn_id_reads_the_in_progress_turn() {
         {"id": "old", "status": "completed"},
         {"id": "live", "status": "inProgress"},
     ]));
-    assert_eq!(client.active_turn_id("t1").as_deref(), Some("live"));
+    assert_eq!(
+        client.active_turn_id("t1").unwrap().as_deref(),
+        Some("live")
+    );
     assert_eq!(
         *calls.lock().unwrap(),
         vec![(
@@ -804,14 +809,45 @@ fn test_active_turn_id_reads_the_in_progress_turn() {
 #[test]
 fn test_active_turn_id_none_when_every_turn_is_finished() {
     let (client, _calls) = client_reading(json!([{"id": "old", "status": "completed"}]));
-    assert_eq!(client.active_turn_id("t1"), None);
+    assert_eq!(client.active_turn_id("t1"), Ok(None));
 }
 
 #[test]
-fn test_active_turn_id_none_on_rpc_error() {
+fn test_active_turn_id_errs_on_rpc_error() {
+    // No result is no answer, distinct from "no turn is open".
     let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "boom"}));
-    assert_eq!(client.active_turn_id("t1"), None);
+    assert!(client.active_turn_id("t1").unwrap_err().contains("boom"));
+}
+
+#[test]
+fn test_turn_open_for_thread_reads_the_daemons_answer() {
+    struct FakeClient {
+        answer: Result<Option<String>, String>,
+    }
+    impl DaemonClient for FakeClient {
+        fn active_turn_id(&self, tid: &str) -> Result<Option<String>, String> {
+            assert_eq!(tid, "t1");
+            self.answer.clone()
+        }
+    }
+    override_client(Arc::new(FakeClient {
+        answer: Ok(Some("live".to_string())),
+    }));
+    assert_eq!(turn_open_for_thread("t1"), Some(true));
+    override_client(Arc::new(FakeClient { answer: Ok(None) }));
+    assert_eq!(turn_open_for_thread("t1"), Some(false));
+    // An RPC error is no answer, never "idle".
+    override_client(Arc::new(FakeClient {
+        answer: Err("boom".to_string()),
+    }));
+    assert_eq!(turn_open_for_thread("t1"), None);
+}
+
+#[test]
+fn test_turn_open_for_thread_none_without_daemon() {
+    set_shared_client_override(|| None);
+    assert_eq!(turn_open_for_thread("t1"), None);
 }
 
 #[test]

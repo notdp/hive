@@ -639,6 +639,34 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
     Ok(payload)
 }
 
+/// Whether the named member has a turn open, for the one engine whose turn
+/// state only the hived can read: a grok member's ACP connection is held by
+/// the hived's leader pool (a second process must not `session/load` the
+/// same session), and the pool client's runtime is push-fed by
+/// `session/update` notifications. `open` is null when the member is not
+/// a grok member of the team or its leader has reported nothing yet; a
+/// member off the roster is an error.
+pub(crate) fn turn_open_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
+    let team = hooked_team_load(team_name)?;
+    let agent = team
+        .agent_named(agent_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown member '{agent_name}'"))?;
+    let open = if agent.cli == "grok" {
+        let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
+        hooked_gl_runtime_for_key(&key).map(|rt| rt.busy)
+    } else {
+        None
+    };
+    let mut payload = Map::new();
+    payload.insert("ok".to_string(), Value::Bool(true));
+    payload.insert("agent".to_string(), Value::from(agent_name));
+    payload.insert(
+        "open".to_string(),
+        open.map(Value::Bool).unwrap_or(Value::Null),
+    );
+    Ok(payload)
+}
+
 pub(crate) fn runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
     if pane_id.is_empty() {
         return err_response("pane required");

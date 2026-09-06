@@ -479,6 +479,88 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
 }
 
 #[test]
+fn test_turn_open_payload_reads_the_grok_pools_busy_flag() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| {
+            Ok(fake_team(
+                name,
+                vec![
+                    fake_agent("g", "%3", "grok"),
+                    fake_agent("quiet", "", "grok"),
+                    fake_agent("c", "%4", "codex"),
+                ],
+            ))
+        })),
+        gl_runtime_for_key: Some(Arc::new(|key| match key {
+            "m-honey.g" => Some(session_runtime(true, "tool_open", "ready")),
+            _ => None,
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    let payload = turn_open_payload("honey", "g").unwrap();
+    assert_eq!(payload["ok"], Value::Bool(true));
+    assert_eq!(payload["agent"], Value::from("g"));
+    assert_eq!(payload["open"], Value::Bool(true));
+    // A grok leader that has reported nothing yet is no answer.
+    assert_eq!(
+        turn_open_payload("honey", "quiet").unwrap()["open"],
+        Value::Null
+    );
+    // Other engines are asked directly by the caller, never through here.
+    assert_eq!(
+        turn_open_payload("honey", "c").unwrap()["open"],
+        Value::Null
+    );
+    assert!(turn_open_payload("honey", "nobody").is_err());
+}
+
+#[test]
+fn test_handle_request_turn_open_answers_for_the_team() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| {
+            Ok(fake_team(name, vec![fake_agent("g", "%3", "grok")]))
+        })),
+        gl_runtime_for_key: Some(Arc::new(|key| {
+            assert_eq!(key, "m-honey.g");
+            Some(session_runtime(false, "turn_closed", "ready"))
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let request = json_obj(&[
+        ("action", Value::from("turn-open")),
+        ("team", Value::from("honey")),
+        ("agent", Value::from("g")),
+    ]);
+    let (response, keep_serving) = handle_request(
+        "/ws",
+        "honey",
+        "dev:1",
+        "@7",
+        "2026-01-01T00:00:00Z",
+        &request,
+    );
+    assert!(keep_serving);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["open"], Value::Bool(false));
+    let missing = json_obj(&[
+        ("action", Value::from("turn-open")),
+        ("agent", Value::from("nobody")),
+    ]);
+    let (response, _) = handle_request(
+        "/ws",
+        "honey",
+        "dev:1",
+        "@7",
+        "2026-01-01T00:00:00Z",
+        &missing,
+    );
+    assert_eq!(response["ok"], Value::Bool(false));
+}
+
+#[test]
 fn test_runtime_snapshot_payload_returns_none_when_snapshot_missing() {
     let _guard = testhook::install(Hook::default());
 

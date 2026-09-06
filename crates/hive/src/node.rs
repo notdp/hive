@@ -46,9 +46,10 @@ const READ_ERROR_BUDGET_SECONDS: f64 = 60.0;
 /// How long a ready member's roster row may lack a session id: the id is
 /// backfilled by the hived, not written by the spawn.
 const SESSION_ID_WAIT_SECONDS: f64 = 30.0;
-/// How long a member spawned by this run may go unseen busy: its bootstrap
-/// turn is what the idle wait has to outlast, and the hived's polling can
-/// miss a fast one, so a spawn never seen busy is taken as past it.
+/// How long a member spawned by this run may go unseen with a turn open:
+/// its bootstrap turn is what the idle wait has to outlast, and a fast one
+/// can close between two polls, so a spawn never seen in a turn is taken as
+/// past it.
 const BUSY_SIGHTING_SECONDS: f64 = 60.0;
 /// How long a dispatch waits for the member to be between turns; past it
 /// the dispatch goes ahead and the reader's fold detection is the net.
@@ -99,53 +100,16 @@ pub struct SpawnedAgent {
 }
 
 /// A roster row as the node needs it: where the member sits, which engine
-/// it runs, and the engine's own session id and cwd the reader resolves
-/// the transcript through.
+/// it runs, the engine's own session id and cwd the reader resolves the
+/// transcript through, and for a claude bg member the job id its engine
+/// record is found by.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberInfo {
     pub pane_id: String,
     pub cli: String,
     pub session_id: Option<String>,
     pub cwd: String,
-}
-
-/// The hived's runtime view of a member (`team-runtime`, `members[name]`):
-/// the busy flag, the daemon runtimes' turn phase, and the engine's own
-/// session id. Every field is None when the answer does not carry it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemberRuntime {
-    pub busy: Option<bool>,
-    pub turn_phase: Option<String>,
-    pub session_id: Option<String>,
-}
-
-impl MemberRuntime {
-    fn from_fields(fields: &Map<String, Value>) -> MemberRuntime {
-        let text = |key: &str| {
-            fields
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        MemberRuntime {
-            busy: fields.get("busy").and_then(Value::as_bool),
-            turn_phase: text("turnPhase"),
-            session_id: text("sessionId"),
-        }
-    }
-
-    /// Whether the member is between turns, or None when the runtime has
-    /// no evidence either way. The turn phase is the finer fact (grok's
-    /// `input_backlog` keeps a turn open without touching `busy`), so it
-    /// decides when present; `unknown_evidence` is the daemon runtimes'
-    /// blank and defers to the busy flag.
-    fn idle(&self) -> Option<bool> {
-        match self.turn_phase.as_deref() {
-            None | Some("") | Some("unknown_evidence") => self.busy.map(|busy| !busy),
-            Some(phase) => Some(phase == "turn_closed"),
-        }
-    }
+    pub job_id: Option<String>,
 }
 
 /// The seams a node reaches through. `Err(String)` from `spawn`/`dispatch`
@@ -164,9 +128,10 @@ pub trait NodeEnv: Send + Sync {
     /// A fresh read of the member's roster row; None when it is not on
     /// the roster.
     fn member(&self, name: &str) -> Option<MemberInfo>;
-    /// The hived's runtime view of the member; None when the hived has no
-    /// answer (no socket, no such member).
-    fn runtime(&self, name: &str) -> Option<MemberRuntime>;
+    /// Whether a turn is open on the member right now, asked of its
+    /// engine's own daemon; None when the daemon could not be asked. Never
+    /// a guess: an unreachable daemon is not an idle member.
+    fn turn_open(&self, name: &str) -> Option<bool>;
     /// `Team::retire`: no-op when the member is not on the roster.
     fn retire(&self, name: &str);
     /// The transcript reader for a roster `cli` value; None when hive has
@@ -710,13 +675,14 @@ fn wait_for_session(env: &dyn NodeEnv, name: &str) -> Result<MemberInfo, Verdict
 /// Hold the dispatch until the member is between turns, so the task starts
 /// a turn of its own instead of folding into one already running (a fresh
 /// member's bootstrap turn, a reused member's current work). A member
-/// spawned by this run is first watched until it has been seen busy once —
-/// the hived can miss a fast bootstrap, so that sighting is capped and a
-/// spawn never seen busy is taken as past it — then, like a reused member,
-/// until idle. The idle wait is capped too: past it the dispatch goes ahead
-/// and the reader's fold detection stays the safety net. A runtime the
-/// hived cannot give counts as idle. `Err` is the member dying meanwhile.
-fn wait_idle(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict> {
+/// spawned by this run is first watched until it has been seen with a turn
+/// open once — a fast bootstrap can close between polls, so that sighting
+/// is capped and a spawn never seen in a turn is taken as past it — then,
+/// like a reused member, until the daemon says the turn is closed. The
+/// wait is capped too: past it the dispatch goes ahead and the reader's
+/// fold detection stays the safety net. `Err` is the member dying
+/// meanwhile.
+fn wait_turn_closed(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict> {
     let died = || gone(name, "before the task was dispatched");
     if spawned {
         let polls = (BUSY_SIGHTING_SECONDS / POLL_SECONDS) as u32;
@@ -724,7 +690,7 @@ fn wait_idle(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict
             if !env.alive(name) {
                 return Err(died());
             }
-            if env.runtime(name).and_then(|rt| rt.idle()) == Some(false) {
+            if env.turn_open(name) == Some(true) {
                 break;
             }
             env.sleep(POLL_SECONDS);
@@ -736,11 +702,10 @@ fn wait_idle(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict
         if !env.alive(name) {
             return Err(died());
         }
-        // Only a positive idle reading opens the dispatch: a missing or
-        // unknown runtime (the hived answer can drop out for a poll) says
-        // nothing about the turn, and dispatching on it lands the task
-        // mid-turn.
-        if env.runtime(name).and_then(|rt| rt.idle()) == Some(true) {
+        // Only the daemon's own "no turn open" opens the dispatch: no answer
+        // (daemon unreachable for a poll) says nothing about the turn, and
+        // dispatching on it lands the task mid-turn.
+        if env.turn_open(name) == Some(false) {
             return Ok(());
         }
         if !logged {
@@ -945,7 +910,7 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
             "no transcript reader for cli '{cli}'; a node reads its member's turn and cannot run on it"
         )));
     };
-    if let Err(verdict) = wait_idle(env, name, !reused) {
+    if let Err(verdict) = wait_turn_closed(env, name, !reused) {
         return Ok(pre_dispatch(verdict, String::new()));
     }
     let member = match wait_for_session(env, name) {
@@ -1018,25 +983,48 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
 // ---------------------------------------------------------------------------
 
 /// The engine's own session id for a roster row — the id a transcript
-/// reader opens. The hived's runtime `sessionId` wins when it has one
-/// (`unresolved` is its blank), else the row's. A claude row stores the bg
-/// job id (`team/mod.rs` records `job_id_for_pane`), and the hived echoes
-/// it back while the engine entry lacks a session, so for claude a job-id
-/// shaped value is mapped through the job's engine entry and never handed
-/// on as is.
+/// reader opens. A claude row stores the bg job id (`team/mod.rs` records
+/// `job_id_for_pane`), so for claude a job-id shaped value is mapped
+/// through the job's engine entry and never handed on as is.
 fn engine_session_id(
     cli: &str,
     row_session: Option<&str>,
-    runtime_session: Option<&str>,
     job_lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let candidate = runtime_session
-        .filter(|s| !s.is_empty() && *s != "unresolved")
-        .or(row_session.filter(|s| !s.is_empty()))?;
+    let candidate = row_session.filter(|s| !s.is_empty())?;
     if cli == "claude" && crate::adapters::claude_bg::looks_like_job_id(candidate) {
         return job_lookup(candidate);
     }
     Some(candidate.to_string())
+}
+
+/// The claude bg job id a roster row carries, if that is what its session
+/// field holds.
+fn claude_job_id(cli: &str, row_session: Option<&str>) -> Option<String> {
+    row_session
+        .filter(|s| cli == "claude" && crate::adapters::claude_bg::looks_like_job_id(s))
+        .map(str::to_string)
+}
+
+/// Whether a claude bg engine has a turn open, read off the runtime fields
+/// `claude_bg::runtime_from_engine` folds its registry status into: the
+/// `busy` flag, unless the status is stale (`inputReason: stale_status`),
+/// which is a wedged engine's last word and no answer.
+fn claude_turn_open(fields: &Map<String, Value>) -> Option<bool> {
+    if fields.get("inputReason").and_then(Value::as_str) == Some("stale_status") {
+        return None;
+    }
+    fields.get("busy").and_then(Value::as_bool)
+}
+
+/// The `open` field of the hived's `turn-open` answer; None for no answer,
+/// an error envelope, or a null `open`.
+fn hived_turn_open(answer: Option<Map<String, Value>>) -> Option<bool> {
+    let answer = answer?;
+    if answer.get("ok") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    answer.get("open").and_then(Value::as_bool)
 }
 
 struct RealCtx {
@@ -1164,37 +1152,50 @@ impl NodeEnv for RealEnv {
     fn member(&self, name: &str) -> Option<MemberInfo> {
         let team = self.fresh_team()?;
         let agent = team.agent_named(name)?;
-        let runtime_session = self.runtime(name).and_then(|rt| rt.session_id);
-        let session_id = engine_session_id(
-            &agent.cli,
-            agent.session_id.as_deref(),
-            runtime_session.as_deref(),
-            |job_id| {
-                crate::adapters::claude_bg::engine_session_for_job(job_id)
-                    .map(|engine| engine.session_id)
-                    .filter(|sid| !sid.is_empty())
-            },
-        );
+        let session_id = engine_session_id(&agent.cli, agent.session_id.as_deref(), |job_id| {
+            crate::adapters::claude_bg::engine_session_for_job(job_id)
+                .map(|engine| engine.session_id)
+                .filter(|sid| !sid.is_empty())
+        });
         Some(MemberInfo {
             pane_id: agent.pane_id.clone(),
             cli: agent.cli.clone(),
             session_id,
             cwd: agent.cwd.clone(),
+            job_id: claude_job_id(&agent.cli, agent.session_id.as_deref()),
         })
     }
 
-    fn runtime(&self, name: &str) -> Option<MemberRuntime> {
-        let ctx = self.context().ok()?;
-        let runtime = crate::team::usable_runtime(crate::hived::request_team_runtime(
-            &ctx.workspace,
-            &ctx.team_name,
-        ))?;
-        let fields = runtime
-            .get("members")
-            .and_then(Value::as_object)?
-            .get(name)
-            .and_then(Value::as_object)?;
-        Some(MemberRuntime::from_fields(fields))
+    /// Each engine's own daemon is asked directly. codex: the shared
+    /// app-server over its socket (`thread/read` on the roster thread id).
+    /// claude: the bg job's engine record, which is the claude daemon's own
+    /// published state. grok: through the hived — the ACP connection to the
+    /// member's leader is held by the hived's pool and a second process must
+    /// not `session/load` the same session, so the hived answers from the
+    /// push-fed state that connection carries.
+    fn turn_open(&self, name: &str) -> Option<bool> {
+        let member = self.member(name)?;
+        match member.cli.as_str() {
+            "codex" => crate::adapters::codex_app_server::turn_open_for_thread(
+                member.session_id.as_deref()?,
+            ),
+            "claude" => {
+                let engine =
+                    crate::adapters::claude_bg::engine_session_for_job(member.job_id.as_deref()?)?;
+                claude_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
+                    &engine, None,
+                ))
+            }
+            "grok" => {
+                let ctx = self.context().ok()?;
+                hived_turn_open(crate::hived::request_turn_open(
+                    &ctx.workspace,
+                    &ctx.team_name,
+                    name,
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn retire(&self, name: &str) {
@@ -1237,22 +1238,6 @@ pub(crate) mod test_env {
         pub artifact: String,
         /// The env's sleep count when the dispatch was made.
         pub sleeps: u32,
-    }
-
-    pub(crate) fn busy_runtime() -> Option<MemberRuntime> {
-        Some(MemberRuntime {
-            busy: Some(true),
-            turn_phase: Some("tool_open".to_string()),
-            session_id: None,
-        })
-    }
-
-    pub(crate) fn idle_runtime() -> Option<MemberRuntime> {
-        Some(MemberRuntime {
-            busy: Some(false),
-            turn_phase: Some("turn_closed".to_string()),
-            session_id: None,
-        })
     }
 
     /// One `find_input` call as the reader saw it.
@@ -1344,9 +1329,10 @@ pub(crate) mod test_env {
     /// Failure knobs replace flaky seams; `sleep` is a no-op that counts,
     /// and `die_after_sleeps` drops the member off the roster at that
     /// count. `agents` is the roster; a member is alive iff it is there.
-    /// `runtimes` is the hived's answer queue (sticky last value, empty
-    /// means no answer); a fresh env scripts one bootstrap turn — busy
-    /// once, then idle — and `add_live` an idle member.
+    /// `turn_answers` is the daemons' `turn_open` answer queue (sticky
+    /// last value, empty means no answer); a fresh env scripts one
+    /// bootstrap turn — open once, then closed — and `add_live` an idle
+    /// member.
     pub(crate) struct FakeEnv {
         pub workspace: PathBuf,
         pub ready: bool,
@@ -1360,8 +1346,8 @@ pub(crate) mod test_env {
         /// Backfill every roster member's session id at that sleep count.
         pub session_after_sleeps: Option<u32>,
         pub reader: Arc<FakeReader>,
-        pub runtimes: Mutex<VecDeque<Option<MemberRuntime>>>,
-        pub runtime_calls: AtomicU32,
+        pub turn_answers: Mutex<VecDeque<Option<bool>>>,
+        pub turn_calls: AtomicU32,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub dispatches: Mutex<Vec<DispatchCall>>,
         pub msg_seq: AtomicU32,
@@ -1388,8 +1374,8 @@ pub(crate) mod test_env {
             die_after_sleeps: None,
             session_after_sleeps: None,
             reader: Arc::new(FakeReader::default()),
-            runtimes: Mutex::new(VecDeque::from([busy_runtime(), idle_runtime()])),
-            runtime_calls: AtomicU32::new(0),
+            turn_answers: Mutex::new(VecDeque::from([Some(true), Some(false)])),
+            turn_calls: AtomicU32::new(0),
             spawns: Mutex::new(Vec::new()),
             dispatches: Mutex::new(Vec::new()),
             msg_seq: AtomicU32::new(0),
@@ -1410,7 +1396,7 @@ pub(crate) mod test_env {
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), Some(format!("sess-{name}")));
-            *self.runtimes.lock().unwrap() = VecDeque::from([idle_runtime()]);
+            *self.turn_answers.lock().unwrap() = VecDeque::from([Some(false)]);
         }
 
         pub(crate) fn workspace_str(&self) -> String {
@@ -1494,15 +1480,16 @@ pub(crate) mod test_env {
                 cli: "claude".to_string(),
                 session_id: self.sessions.lock().unwrap().get(name).cloned().flatten(),
                 cwd: "/repo".to_string(),
+                job_id: None,
             })
         }
 
-        fn runtime(&self, name: &str) -> Option<MemberRuntime> {
+        fn turn_open(&self, name: &str) -> Option<bool> {
             if !self.alive(name) {
                 return None;
             }
-            self.runtime_calls.fetch_add(1, Ordering::SeqCst);
-            next(&self.runtimes, None)
+            self.turn_calls.fetch_add(1, Ordering::SeqCst);
+            next(&self.turn_answers, None)
         }
 
         fn retire(&self, name: &str) {
@@ -2226,24 +2213,45 @@ mod tests {
     }
 
     #[test]
-    fn test_member_runtime_idle_reads_the_phase_before_the_busy_flag() {
-        let rt = |busy: Option<bool>, phase: Option<&str>| MemberRuntime {
-            busy,
-            turn_phase: phase.map(str::to_string),
-            session_id: None,
+    fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
+        use crate::adapters::claude_bg::{runtime_from_engine, STATUS_STALE_AFTER_SECONDS};
+        let engine = |status: &str, updated_at: f64| crate::adapters::claude_bg::EngineSession {
+            status: status.to_string(),
+            status_updated_at: updated_at,
+            ..crate::agent::testhook::fake_engine(4242, "b9beb2b8", "sess-1")
         };
-        assert_eq!(rt(Some(true), None).idle(), Some(false));
-        assert_eq!(rt(Some(false), None).idle(), Some(true));
-        assert_eq!(rt(None, None).idle(), None);
-        // A phase decides over the flag: grok's queue keeps a turn open
-        // with busy already false.
-        assert_eq!(rt(Some(false), Some("input_backlog")).idle(), Some(false));
-        assert_eq!(rt(Some(true), Some("tool_open")).idle(), Some(false));
-        assert_eq!(rt(Some(true), Some("turn_closed")).idle(), Some(true));
-        // The daemon runtimes' blank phase defers to the flag.
-        assert_eq!(rt(Some(false), Some("unknown_evidence")).idle(), Some(true));
-        assert_eq!(rt(None, Some("unknown_evidence")).idle(), None);
-        assert_eq!(rt(None, Some("")).idle(), None);
+        let now = 1_000_000.0;
+        let open = |status: &str, updated_at: f64| {
+            claude_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
+        };
+        assert_eq!(open("busy", now - 1.0), Some(true));
+        assert_eq!(open("idle", now - 1.0), Some(false));
+        assert_eq!(open("waiting", now - 1.0), Some(false));
+        // An engine with no status record answers "not busy" — its
+        // runtime folds an unknown status to busy=false, which is still
+        // the daemon's own word.
+        assert_eq!(open("", 0.0), Some(false));
+        // A status that stopped advancing is a wedged engine, no answer.
+        assert_eq!(open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0), None);
+        assert_eq!(claude_turn_open(&Map::new()), None);
+    }
+
+    #[test]
+    fn test_hived_turn_open_reads_only_a_bool_from_an_ok_answer() {
+        let answer = |ok: bool, open: Value| {
+            Some(Map::from_iter([
+                ("ok".to_string(), Value::Bool(ok)),
+                ("open".to_string(), open),
+            ]))
+        };
+        assert_eq!(hived_turn_open(answer(true, Value::Bool(true))), Some(true));
+        assert_eq!(
+            hived_turn_open(answer(true, Value::Bool(false))),
+            Some(false)
+        );
+        assert_eq!(hived_turn_open(answer(true, Value::Null)), None);
+        assert_eq!(hived_turn_open(answer(false, Value::Bool(false))), None);
+        assert_eq!(hived_turn_open(None), None);
     }
 
     #[test]
@@ -2253,60 +2261,51 @@ mod tests {
         let none = |_: &str| None;
         // The registry row of a claude bg member is the job id.
         assert_eq!(
-            engine_session_id("claude", Some("b9beb2b8"), None, lookup).as_deref(),
+            engine_session_id("claude", Some("b9beb2b8"), lookup).as_deref(),
             Some(uuid)
         );
-        // The hived echoes the job id back while the engine entry has no
-        // session yet; it is mapped just the same.
         assert_eq!(
-            engine_session_id("claude", Some("b9beb2b8"), Some("b9beb2b8"), lookup).as_deref(),
-            Some(uuid)
+            claude_job_id("claude", Some("b9beb2b8")).as_deref(),
+            Some("b9beb2b8")
         );
-        // A runtime session id wins over the row.
-        assert_eq!(
-            engine_session_id("claude", Some("b9beb2b8"), Some("other-uuid-1234"), none).as_deref(),
-            Some("other-uuid-1234")
-        );
-        // `unresolved` is the hived's blank; with no engine entry there is
-        // no session, never the job id.
-        assert_eq!(
-            engine_session_id("claude", Some("b9beb2b8"), Some("unresolved"), none),
-            None
-        );
+        // With no engine entry there is no session, never the job id.
+        assert_eq!(engine_session_id("claude", Some("b9beb2b8"), none), None);
         // A joined claude member's row already names the engine session.
         assert_eq!(
-            engine_session_id("claude", Some(uuid), None, none).as_deref(),
+            engine_session_id("claude", Some(uuid), none).as_deref(),
             Some(uuid)
         );
+        assert_eq!(claude_job_id("claude", Some(uuid)), None);
         // Other engines' rows pass through, whatever their shape.
         assert_eq!(
-            engine_session_id("codex", Some("thr-1"), None, none).as_deref(),
+            engine_session_id("codex", Some("thr-1"), none).as_deref(),
             Some("thr-1")
         );
         assert_eq!(
-            engine_session_id("codex", Some("abcdef12"), None, none).as_deref(),
+            engine_session_id("codex", Some("abcdef12"), none).as_deref(),
             Some("abcdef12")
         );
-        assert_eq!(engine_session_id("codex", None, None, none), None);
-        assert_eq!(engine_session_id("codex", Some(""), Some(""), none), None);
+        assert_eq!(claude_job_id("codex", Some("abcdef12")), None);
+        assert_eq!(engine_session_id("codex", None, none), None);
+        assert_eq!(engine_session_id("codex", Some(""), none), None);
     }
 
     #[test]
     fn test_run_node_waits_for_a_fresh_spawns_bootstrap_turn_to_close() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        // Not yet reported, then busy (the bootstrap turn), then idle.
-        *env.runtimes.lock().unwrap() =
-            VecDeque::from([None, busy_runtime(), busy_runtime(), idle_runtime()]);
+        // No answer yet, then a turn open (the bootstrap turn), then closed.
+        *env.turn_answers.lock().unwrap() =
+            VecDeque::from([None, Some(true), Some(true), Some(false)]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", Some("codex"), "t")).unwrap();
         assert_eq!(r["status"], "completed");
-        // One poll to see it busy, one more while it stays so; the
-        // dispatch went out only on the idle answer.
+        // One poll to see the turn open, one more while it stays so; the
+        // dispatch went out only on the closed answer.
         let d = env.dispatches.lock().unwrap();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].sleeps, 2);
-        assert_eq!(env.runtime_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(env.turn_calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -2314,15 +2313,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         env.add_live("audit");
-        *env.runtimes.lock().unwrap() =
-            VecDeque::from([busy_runtime(), busy_runtime(), idle_runtime()]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(true), Some(false)]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["reused"], true);
         let d = env.dispatches.lock().unwrap();
         assert_eq!(d[0].sleeps, 2);
-        assert_eq!(env.runtime_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(env.turn_calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -2330,7 +2328,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         env.add_live("audit");
-        *env.runtimes.lock().unwrap() = VecDeque::from([busy_runtime()]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
         script_turn(
             &env,
             TurnOutcome::Completed {
@@ -2351,7 +2349,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.die_after_sleeps = Some(3);
-        *env.runtimes.lock().unwrap() = VecDeque::from([busy_runtime()]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "member_gone");
         assert_eq!(r["reused"], false);
@@ -2369,7 +2367,7 @@ mod tests {
         let mut env = fake_env(tmp.path());
         env.add_live("audit");
         env.die_after_sleeps = Some(1);
-        *env.runtimes.lock().unwrap() = VecDeque::from([busy_runtime()]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "member_gone");
         assert_eq!(r["reused"], true);
@@ -2378,10 +2376,10 @@ mod tests {
     }
 
     #[test]
-    fn test_run_node_keeps_waiting_on_an_unknown_runtime_until_the_idle_cap() {
+    fn test_run_node_keeps_waiting_on_an_unanswered_daemon_until_the_idle_cap() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        *env.runtimes.lock().unwrap() = VecDeque::from([None]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([None]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "completed");
@@ -2393,21 +2391,13 @@ mod tests {
     }
 
     #[test]
-    fn test_run_node_does_not_dispatch_on_a_runtime_dropout_mid_turn() {
+    fn test_run_node_does_not_dispatch_on_a_daemon_dropout_mid_turn() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        let busy = MemberRuntime {
-            busy: Some(true),
-            turn_phase: Some("tool_open".into()),
-            session_id: None,
-        };
-        let idle = MemberRuntime {
-            busy: Some(false),
-            turn_phase: Some("turn_closed".into()),
-            session_id: None,
-        };
-        *env.runtimes.lock().unwrap() =
-            VecDeque::from([Some(busy.clone()), None, Some(busy), None, Some(idle)]);
+        // The daemon answers, drops out for a poll, answers again: only its
+        // own "closed" opens the dispatch.
+        *env.turn_answers.lock().unwrap() =
+            VecDeque::from([Some(true), None, Some(true), None, Some(false)]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "completed");
@@ -2453,9 +2443,21 @@ mod tests {
             ("sessionId".to_string(), Value::from("thr-1")),
             ("cwd".to_string(), Value::from("/repo")),
         ]);
+        let grok_member = Map::from_iter([
+            ("name".to_string(), Value::from("g")),
+            ("cli".to_string(), Value::from("grok")),
+            ("sessionId".to_string(), Value::from("grk-1")),
+            ("cwd".to_string(), Value::from("/repo")),
+        ]);
         assert_eq!(
-            crate::registry::record_team(team, &workspace, "1700000000", &[member], "dev:1")
-                .unwrap(),
+            crate::registry::record_team(
+                team,
+                &workspace,
+                "1700000000",
+                &[member, grok_member],
+                "dev:1"
+            )
+            .unwrap(),
             "written"
         );
         let window_row = format!("dev:1\t@7\t{team}\t{workspace}\t\t1700000000\n");
@@ -2507,6 +2509,16 @@ mod tests {
             // The hived's team-runtime answer for the headless codex row
             // must not look for a daemon on this machine.
             cas_runtime_for_thread: Some(Arc::new(|_thread| None)),
+            // The grok leader pool's push-fed state, as the hived's
+            // `turn-open` reads it for the grok row.
+            gl_runtime_for_key: Some(Arc::new(move |key| {
+                (key == format!("m-{team}.g")).then(|| {
+                    crate::adapters::grok_leader::SessionRuntime {
+                        busy: true,
+                        ..Default::default()
+                    }
+                })
+            })),
             agent_send: Some(Arc::new(move |_agent, text, sender| {
                 handed_sink
                     .lock()
@@ -2546,20 +2558,25 @@ mod tests {
                 cli: "codex".to_string(),
                 session_id: Some("thr-1".to_string()),
                 cwd: "/repo".to_string(),
+                job_id: None,
             })
         );
         assert_eq!(env.member("nobody"), None);
-        // The hived's runtime view: the headless row is not busy, carries
-        // no turn phase, and names its thread.
-        assert_eq!(
-            env.runtime("b"),
-            Some(MemberRuntime {
-                busy: Some(false),
-                turn_phase: None,
-                session_id: Some("thr-1".to_string()),
-            })
-        );
-        assert_eq!(env.runtime("nobody"), None);
+        // The codex row's turn is asked of the shared app-server daemon on
+        // its thread id: this test's daemon is a fake on the process seam,
+        // answering "no turn open".
+        struct IdleDaemon;
+        impl crate::adapters::codex_app_server::DaemonClient for IdleDaemon {
+            fn active_turn_id(&self, thread_id: &str) -> Result<Option<String>, String> {
+                assert_eq!(thread_id, "thr-1");
+                Ok(None)
+            }
+        }
+        crate::adapters::codex_app_server::tests::override_client(Arc::new(IdleDaemon));
+        assert_eq!(env.turn_open("b"), Some(false));
+        // The grok row's turn goes through the hived, over the socket.
+        assert_eq!(env.turn_open("g"), Some(true));
+        assert_eq!(env.turn_open("nobody"), None);
         assert!(env.reader("codex").is_some());
         assert!(env.reader("bash").is_none());
 
