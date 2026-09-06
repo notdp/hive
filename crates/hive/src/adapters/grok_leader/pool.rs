@@ -10,7 +10,7 @@ use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
     socket_path_for_key, write_session_key,
 };
-use super::{CANCEL_SENT, PROMPT_QUEUED, _CONNECT_COOLDOWN};
+use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 
 // --------------------------------------------------------------------------
 // per-key client pool (hived-side)
@@ -214,7 +214,7 @@ impl GrokClientPool {
     fn set_cooldown(&self, key: &str) {
         self.state.lock().unwrap().cooldown.insert(
             key.to_string(),
-            Instant::now() + Duration::from_secs_f64(_CONNECT_COOLDOWN),
+            Instant::now() + Duration::from_secs_f64(CONNECT_COOLDOWN),
         );
     }
 
@@ -263,10 +263,10 @@ impl Default for GrokClientPool {
     }
 }
 
-static _POOL: OnceLock<GrokClientPool> = OnceLock::new();
+static POOL: OnceLock<GrokClientPool> = OnceLock::new();
 
 pub fn pool() -> &'static GrokClientPool {
-    _POOL.get_or_init(GrokClientPool::new)
+    POOL.get_or_init(GrokClientPool::new)
 }
 
 pub fn runtime_for_pane(pane: &str) -> Option<SessionRuntime> {

@@ -445,8 +445,8 @@ fn seed_aged_snapshot(pane_id: &str, session_id: &str) -> RuntimeSnapshot {
         pane_id,
         session_id,
         "pidfile",
-        Some(monotonic() - _SESSION_SNAPSHOT_FRESHNESS_S - 1.0),
-        Some(_SESSION_SNAPSHOT_FRESHNESS_S),
+        Some(monotonic() - SESSION_SNAPSHOT_FRESHNESS_S - 1.0),
+        Some(SESSION_SNAPSHOT_FRESHNESS_S),
     )
 }
 
@@ -671,7 +671,7 @@ fn test_agent_runtime_payload_stamps_a_freshness_window_on_a_probed_session() {
 
     let store = runtime_snapshots().lock().unwrap();
     let field = &store.get("%1").unwrap().sessionId;
-    assert_eq!(field.freshness_s, Some(_SESSION_SNAPSHOT_FRESHNESS_S));
+    assert_eq!(field.freshness_s, Some(SESSION_SNAPSHOT_FRESHNESS_S));
     assert!(field.is_fresh(Some(field.observed_at + 1.0)));
     assert!(!field.is_fresh(Some(field.observed_at + field.freshness_s.unwrap() + 1.0)));
 }
@@ -2810,7 +2810,7 @@ fn test_serve_requests_still_retires_the_loop_on_shutdown() {
     assert_eq!(response, Some(json_obj(&[("ok", Value::Bool(true))])));
     assert!(!keep_running);
 
-    _SHUTDOWN.store(false, Ordering::SeqCst);
+    SHUTDOWN.store(false, Ordering::SeqCst);
     server.close();
     cleanup_socket_impl(&workspace);
 }
@@ -3288,7 +3288,7 @@ fn test_try_acquire_reexec_lock_returns_none_when_lock_is_busy() {
 
 #[test]
 fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
-    let _env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
+    let _env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let lock_sink = Arc::clone(&calls);
     let release_sink = Arc::clone(&calls);
@@ -3313,7 +3313,7 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
             execv_sink.lock().unwrap().push(format!(
                 "execv {} env={}",
                 argv.join(" "),
-                std::env::var(_HIVED_REEXEC_LOCK_ENV).unwrap_or_default()
+                std::env::var(HIVED_REEXEC_LOCK_ENV).unwrap_or_default()
             ));
             ExecOutcome::Replaced
         })),
@@ -3349,7 +3349,7 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
             "release Some(42)".to_string(),
         ]
     );
-    assert!(std::env::var(_HIVED_REEXEC_LOCK_ENV).is_err());
+    assert!(std::env::var(HIVED_REEXEC_LOCK_ENV).is_err());
 }
 
 #[test]
@@ -3390,7 +3390,7 @@ fn test_reexec_hived_skips_when_reexec_lock_is_busy() {
 fn test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails() {
     // execv failing after the teardown used to punch through the loop
     // and leave the window with no hived *and* no socket.
-    let _env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
+    let _env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let release_sink = Arc::clone(&calls);
     let cleanup_sink = Arc::clone(&calls);
@@ -3445,7 +3445,7 @@ fn test_reexec_hived_rebinds_and_keeps_serving_when_execv_fails() {
     }
     let installed = get_output_busy_monitor().expect("monitor restored");
     assert!(Arc::ptr_eq(&installed, &monitor));
-    assert!(std::env::var(_HIVED_REEXEC_LOCK_ENV).is_err());
+    assert!(std::env::var(HIVED_REEXEC_LOCK_ENV).is_err());
     set_output_busy_monitor(None);
 }
 
@@ -3476,7 +3476,7 @@ fn test_cleanup_socket_if_owner_skips_foreign_owner() {
 
 #[test]
 fn test_hived_loop_retires_orphan_before_idle_tick() {
-    let mut env = EnvGuard::cleared(&[_HIVED_REEXEC_LOCK_ENV]);
+    let mut env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     let workspace = tmp.path().to_string_lossy().to_string();
@@ -3612,7 +3612,7 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
     let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
-    env.set(_HIVED_REEXEC_LOCK_ENV, "78");
+    env.set(HIVED_REEXEC_LOCK_ENV, "78");
     let workspace = tmp.path().to_string_lossy().to_string();
     let events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
@@ -3667,7 +3667,7 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
     let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
-    env.set(_HIVED_REEXEC_LOCK_ENV, "77");
+    env.set(HIVED_REEXEC_LOCK_ENV, "77");
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let open_sink = Arc::clone(&calls);
@@ -3708,7 +3708,7 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
             format!("cleanup {workspace}"),
         ]
     );
-    assert!(std::env::var(_HIVED_REEXEC_LOCK_ENV).is_err());
+    assert!(std::env::var(HIVED_REEXEC_LOCK_ENV).is_err());
 }
 
 #[test]
@@ -3800,7 +3800,7 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
         Value::from("2026-04-17T00:00:00Z")
     );
     assert!(
-        !_SHUTDOWN.load(Ordering::SeqCst),
+        !SHUTDOWN.load(Ordering::SeqCst),
         "ping must keep the loop running"
     );
 
@@ -3817,7 +3817,7 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
         serde_json::from_str::<Value>(&reply).unwrap(),
         serde_json::json!({"ok": false, "error": "unknown action"})
     );
-    assert!(!_SHUTDOWN.load(Ordering::SeqCst));
+    assert!(!SHUTDOWN.load(Ordering::SeqCst));
 
     let again = request_hived(&workspace, &action_payload("ping"), SOCKET_READY_TIMEOUT)
         .expect("the loop must survive a malformed frame");

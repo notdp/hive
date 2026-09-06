@@ -185,7 +185,7 @@ fn claude_jobs_cached() -> Option<HashMap<String, Map<String, Value>>> {
     });
     *claude_jobs_cache()
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some((now + _CLAUDE_JOBS_CACHE_TTL, indexed.clone()));
+        .unwrap_or_else(|e| e.into_inner()) = Some((now + CLAUDE_JOBS_CACHE_TTL, indexed.clone()));
     indexed
 }
 
@@ -380,7 +380,7 @@ fn resolve_session_fields(
                 &session_id,
                 source,
                 None,
-                Some(_SESSION_SNAPSHOT_FRESHNESS_S),
+                Some(SESSION_SNAPSHOT_FRESHNESS_S),
             );
         for (key, value) in snapshot.to_runtime_fields(None) {
             runtime.insert(key, value);

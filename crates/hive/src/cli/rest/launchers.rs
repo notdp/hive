@@ -11,7 +11,7 @@ use crate::tmux;
 
 // codex subcommands that are not an interactive TUI launch: hive leaves these
 // completely untouched (raw codex). Kept in sync with `codex --help`.
-const _CODEX_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
+const CODEX_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "exec",
     "e",
     "review",
@@ -37,12 +37,12 @@ const _CODEX_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
 ];
 
 // Non-interactive surfaces: --help/--version never start a session.
-const _CODEX_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
+const CODEX_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
 
 // Global codex options that consume the following token as their value, so the
 // subcommand scan does not mistake that value for the subcommand. `--opt=value`
 // and `-Cvalue` are self-contained and handled separately.
-const _CODEX_VALUE_OPTS: &[&str] = &[
+const CODEX_VALUE_OPTS: &[&str] = &[
     "-c",
     "--config",
     "-m",
@@ -74,7 +74,7 @@ pub(crate) fn codex_subcommand_index(args: &[String]) -> Option<usize> {
             };
         }
         if a.starts_with('-') {
-            i += if _CODEX_VALUE_OPTS.contains(&a.as_str()) && !a.contains('=') {
+            i += if CODEX_VALUE_OPTS.contains(&a.as_str()) && !a.contains('=') {
                 2
             } else {
                 1
@@ -95,7 +95,7 @@ pub(crate) fn codex_positional_after(args: &[String], sub_index: usize) -> Optio
             return args.get(i + 1).cloned();
         }
         if a.starts_with('-') {
-            i += if _CODEX_VALUE_OPTS.contains(&a.as_str()) && !a.contains('=') {
+            i += if CODEX_VALUE_OPTS.contains(&a.as_str()) && !a.contains('=') {
                 2
             } else {
                 1
@@ -203,13 +203,13 @@ fn exec_codex_managed(args: &[String]) -> ! {
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
     if let Some(sub) = sub {
-        if _CODEX_PASSTHROUGH_SUBCOMMANDS.contains(&sub) {
+        if CODEX_PASSTHROUGH_SUBCOMMANDS.contains(&sub) {
             codex_raw(args); // a management subcommand, not an interactive TUI launch
         }
     }
     if args
         .iter()
-        .any(|a| _CODEX_PASSTHROUGH_FLAGS.contains(&a.as_str()))
+        .any(|a| CODEX_PASSTHROUGH_FLAGS.contains(&a.as_str()))
     {
         codex_raw(args); // --help/--version never start a session
     }
@@ -316,7 +316,7 @@ pub fn codex_cmd(args: &[String]) {
 // claude subcommands that are not an interactive TUI launch: raw passthrough.
 // Hidden subcommands are only recognized at argv[1], so args[0] is the one
 // place a subcommand can sit.
-const _CLAUDE_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
+const CLAUDE_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "agents",
     "attach",
     "logs",
@@ -339,12 +339,12 @@ const _CLAUDE_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
 ];
 
 // Non-interactive surfaces: --help/--version never start a session.
-const _CLAUDE_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-v", "--version"];
+const CLAUDE_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-v", "--version"];
 
 // Launch shapes the bg mapping cannot represent: headless print mode
 // (rejected by --bg upstream), an explicit --bg the caller manages itself,
 // and -c/--continue (which session it continues is unknowable up front).
-const _CLAUDE_RAW_MODE_FLAGS: &[&str] = &["-p", "--print", "--bg", "-c", "--continue"];
+const CLAUDE_RAW_MODE_FLAGS: &[&str] = &["-p", "--print", "--bg", "-c", "--continue"];
 
 /// (resume flag present, its value). `-r`/`--resume` take an optional value;
 /// a bare flag opens claude's picker.
@@ -421,19 +421,19 @@ fn exec_claude_managed(args: &[String]) -> ! {
         claude_raw(args); // hive needs a real tmux pane to bind a job to
     }
     if let Some(first) = args.first() {
-        if _CLAUDE_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
+        if CLAUDE_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
             claude_raw(args); // a management subcommand, not an interactive TUI launch
         }
     }
     if args
         .iter()
-        .any(|a| _CLAUDE_PASSTHROUGH_FLAGS.contains(&a.as_str()))
+        .any(|a| CLAUDE_PASSTHROUGH_FLAGS.contains(&a.as_str()))
     {
         claude_raw(args);
     }
     if args
         .iter()
-        .any(|a| _CLAUDE_RAW_MODE_FLAGS.contains(&a.as_str()))
+        .any(|a| CLAUDE_RAW_MODE_FLAGS.contains(&a.as_str()))
     {
         claude_raw(args);
     }
@@ -497,7 +497,7 @@ pub fn claude_cmd(args: &[String]) {
 // grok subcommands that are not an interactive TUI launch: hive leaves these
 // completely untouched (raw grok). A subcommand is always the first token; a
 // prompt is the only other thing that can sit there.
-const _GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
+const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "agent",
     "completions",
     "dashboard",
@@ -523,7 +523,7 @@ const _GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
 ];
 
 // Non-interactive surfaces: --help/--version never start a session.
-const _GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
+const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
 
 /// Value of the first `--opt value` / `--opt=value` occurrence in `args`.
 ///
@@ -594,13 +594,13 @@ fn exec_grok_managed(args: &[String]) -> ! {
         grok_raw(args); // hive needs a tmux pane to bind a daemon to
     }
     if let Some(first) = args.first() {
-        if _GROK_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
+        if GROK_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
             grok_raw(args); // a management subcommand, not an interactive TUI launch
         }
     }
     if args
         .iter()
-        .any(|a| _GROK_PASSTHROUGH_FLAGS.contains(&a.as_str()))
+        .any(|a| GROK_PASSTHROUGH_FLAGS.contains(&a.as_str()))
     {
         grok_raw(args); // --help/--version never start a session
     }

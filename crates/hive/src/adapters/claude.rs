@@ -110,7 +110,7 @@ impl SessionAdapter for ClaudeAdapter {
         let mut cwd: Option<String> = None;
         let mut model: Option<String> = None;
         let mut line = String::new();
-        for _ in 0.._META_SCAN_LIMIT {
+        for _ in 0..META_SCAN_LIMIT {
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => break,
@@ -168,7 +168,7 @@ impl SessionAdapter for ClaudeAdapter {
     }
 }
 
-const _META_SCAN_LIMIT: usize = 20;
+const META_SCAN_LIMIT: usize = 20;
 
 fn claude_message_from_payload(payload: &Map<String, Value>) -> Option<Message> {
     let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
@@ -272,7 +272,7 @@ fn iter_claude_parts(content: Option<&Value>) -> Vec<MessagePart> {
     parts
 }
 
-const _CLAUDE_TOKENS: [&str; 2] = ["claude", "claude.exe"];
+const CLAUDE_TOKENS: [&str; 2] = ["claude", "claude.exe"];
 
 /// Match the executable itself (ps comm / argv[0]), or the script-runtime
 /// shape `node <.../claude> …`.
@@ -280,19 +280,19 @@ const _CLAUDE_TOKENS: [&str; 2] = ["claude", "claude.exe"];
 /// Later argv tokens are the process's own arguments — `rg claude src` is
 /// a search, not a claude — so they are never scanned.
 fn is_claude_process(command: &str, argv: &str) -> bool {
-    if _CLAUDE_TOKENS.contains(&normalize_command_token(command).as_str()) {
+    if CLAUDE_TOKENS.contains(&normalize_command_token(command).as_str()) {
         return true;
     }
     let parts: Vec<&str> = argv.split_whitespace().collect();
     if parts.is_empty() {
         return false;
     }
-    if _CLAUDE_TOKENS.contains(&normalize_command_token(parts[0]).as_str()) {
+    if CLAUDE_TOKENS.contains(&normalize_command_token(parts[0]).as_str()) {
         return true;
     }
     parts.len() >= 2
         && normalize_command_token(parts[0]) == "node"
-        && _CLAUDE_TOKENS.contains(&normalize_command_token(parts[1]).as_str())
+        && CLAUDE_TOKENS.contains(&normalize_command_token(parts[1]).as_str())
 }
 
 /// Claude's project-dir slug for a cwd. Observed rule (from real

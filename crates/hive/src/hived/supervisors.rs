@@ -87,7 +87,7 @@ pub(crate) fn cleanup_dead_daemons(workspace: &str, team: &str) {
                     .duration_since(mtime)
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
-                if age < _GROK_REAP_GRACE_SECONDS {
+                if age < GROK_REAP_GRACE_SECONDS {
                     continue;
                 }
             }
@@ -164,7 +164,7 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
             .get(&agent.pane_id)
             .copied()
             .unwrap_or(f64::NEG_INFINITY);
-        if now - last < _CODEX_REATTACH_COOLDOWN_SECONDS {
+        if now - last < CODEX_REATTACH_COOLDOWN_SECONDS {
             continue;
         }
         let command =

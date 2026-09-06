@@ -9,7 +9,7 @@ use super::support::DeliveryError;
 /// How long a kill waits for a pane's process to be gone before moving on
 /// to the engine behind it. A tmux pane teardown is milliseconds; this is
 /// the ceiling, not the expected cost.
-const _PANE_EXIT_TIMEOUT: f64 = 2.0;
+const PANE_EXIT_TIMEOUT: f64 = 2.0;
 
 impl Agent {
     // --- Control ---
@@ -448,7 +448,7 @@ impl Agent {
             // race is against.
             let pane_pid = hooked_pane_pid(&self.pane_id);
             hooked_kill_pane(&self.pane_id);
-            hooked_wait_pane_exit(&self.pane_id, pane_pid, _PANE_EXIT_TIMEOUT);
+            hooked_wait_pane_exit(&self.pane_id, pane_pid, PANE_EXIT_TIMEOUT);
         }
         hooked_grok_pool_drop_key(&key);
         hooked_grok_kill_daemon_key(&key);

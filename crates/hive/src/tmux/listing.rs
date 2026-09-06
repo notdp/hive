@@ -22,23 +22,23 @@ impl PaneInfo {
 
 // Adding a column means touching three places: the format string, its field
 // count const, and the positional `p[n]` reads in the parser below.
-pub const _PANE_BASE_FMT: &str = concat!(
+pub const PANE_BASE_FMT: &str = concat!(
     "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{@hive-role}\t",
     "#{@hive-agent}\t#{@hive-team}\t#{@hive-cli}\t#{@hive-group}"
 );
-const _PANE_FIELD_COUNT: usize = 8;
+const PANE_FIELD_COUNT: usize = 8;
 
 /// `#{@hive-team}` read as a window tag. A window format reads pane options
 /// through (the active pane's `@hive-team` answers for a window that has
 /// none), so the hidden window parking a mirror pane would scan as a second
 /// team window; `@hive-hidden` masks it.
-pub const _WINDOW_TEAM_FMT: &str = "#{?@hive-hidden,,#{@hive-team}}";
+pub const WINDOW_TEAM_FMT: &str = "#{?@hive-hidden,,#{@hive-team}}";
 
-pub const _TEAM_WINDOW_FMT: &str = concat!(
+pub const TEAM_WINDOW_FMT: &str = concat!(
     "#{session_name}:#{window_index}\t#{window_name}\t#{window_id}\t",
     "#{?@hive-hidden,,#{@hive-team}}\t#{@hive-workspace}\t#{@hive-created}\t#{@hive-pr}"
 );
-const _TEAM_WINDOW_FIELD_COUNT: usize = 7;
+const TEAM_WINDOW_FIELD_COUNT: usize = 7;
 
 /// Entry of `list_team_windows_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -72,12 +72,7 @@ pub fn list_panes_full(target: &str) -> Vec<PaneInfo> {
 /// caller cannot tell missing panes from a transient tmux failure and must
 /// not take irreversible action on it (same contract as `is_pane_alive`).
 pub fn list_panes_full_or_none(target: &str) -> Option<Vec<PaneInfo>> {
-    let r = run(
-        &["list-panes", "-t", target, "-F", _PANE_BASE_FMT],
-        false,
-        5,
-    )
-    .ok()?;
+    let r = run(&["list-panes", "-t", target, "-F", PANE_BASE_FMT], false, 5).ok()?;
     if r.returncode != 0 {
         return None;
     }
@@ -109,7 +104,7 @@ fn stderr_means_no_server(stderr: &str) -> bool {
 /// live), `(None, "unknown")` on any other failure — callers must not
 /// read unknown as "dead" (same contract as `is_pane_alive`).
 pub fn list_panes_all_status() -> (Option<Vec<PaneInfo>>, &'static str) {
-    let r = match run(&["list-panes", "-a", "-F", _PANE_BASE_FMT], false, 5) {
+    let r = match run(&["list-panes", "-a", "-F", PANE_BASE_FMT], false, 5) {
         Ok(r) => r,
         Err(_) => return (None, "unknown"),
     };
@@ -129,7 +124,7 @@ pub fn list_panes_all_status() -> (Option<Vec<PaneInfo>>, &'static str) {
 /// options — everything `hive ls` needs to match a live
 /// team instance against a snapshot.
 pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
-    let r = match run(&["list-windows", "-a", "-F", _TEAM_WINDOW_FMT], false, 5) {
+    let r = match run(&["list-windows", "-a", "-F", TEAM_WINDOW_FMT], false, 5) {
         Ok(r) => r,
         Err(_) => return (None, "unknown"),
     };
@@ -144,7 +139,7 @@ pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
         if line.is_empty() {
             continue;
         }
-        let p = split_fields(line, _TEAM_WINDOW_FIELD_COUNT);
+        let p = split_fields(line, TEAM_WINDOW_FIELD_COUNT);
         if p[3].is_empty() {
             continue;
         }
@@ -177,7 +172,7 @@ fn parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
         if line.is_empty() {
             continue;
         }
-        let p = split_fields(line, _PANE_FIELD_COUNT);
+        let p = split_fields(line, PANE_FIELD_COUNT);
         result.push(PaneInfo {
             pane_id: p[0].clone(),
             title: p[1].clone(),
@@ -222,7 +217,7 @@ pub fn clear_pane_option(pane_id: &str, key: &str) {
 // view probe and the status tick write them), not identity — but release
 // must clear them with the rest, or a reused pane keeps rendering a border
 // suffix or a status chip nobody owns any more.
-const _PANE_TAG_KEYS: [&str; 9] = [
+const PANE_TAG_KEYS: [&str; 9] = [
     "hive-role",
     "hive-agent",
     "hive-team",
@@ -255,7 +250,7 @@ pub fn tag_pane(pane_id: &str, role: &str, agent: &str, team: &str, cli: &str, g
 
 /// Remove all hive identity options from a pane.
 pub fn clear_pane_tags(pane_id: &str) {
-    for key in _PANE_TAG_KEYS {
+    for key in PANE_TAG_KEYS {
         clear_pane_option(pane_id, key);
     }
 }

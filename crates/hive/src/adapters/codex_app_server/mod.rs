@@ -16,16 +16,16 @@
 //! Transport is WebSocket framing over the unix socket — RFC6455 masked text
 //! frames, one background reader thread per connection.
 
-const _HANDSHAKE_TIMEOUT: f64 = 5.0;
-const _CALL_TIMEOUT: f64 = 10.0;
+const HANDSHAKE_TIMEOUT: f64 = 5.0;
+const CALL_TIMEOUT: f64 = 10.0;
 
 /// Worst-case local submission budget for one send_to_pane call (fresh daemon
 /// handshake plus the turn/start RPC). The hived derives its request budgets
 /// from this so a valid slow acceptance can never outlive the caller's timeout.
-pub const SUBMIT_TIMEOUT: f64 = _HANDSHAKE_TIMEOUT + _CALL_TIMEOUT;
-const _DAEMON_START_TIMEOUT: f64 = 8.0;
-const _CONNECT_COOLDOWN: f64 = 5.0;
-const _RESUME_COOLDOWN: f64 = 5.0;
+pub const SUBMIT_TIMEOUT: f64 = HANDSHAKE_TIMEOUT + CALL_TIMEOUT;
+const DAEMON_START_TIMEOUT: f64 = 8.0;
+const CONNECT_COOLDOWN: f64 = 5.0;
+const RESUME_COOLDOWN: f64 = 5.0;
 
 /// Accepted-transport classification for durable delivery observations: the
 /// shared daemon took the turn. Not proof the turn produced output.

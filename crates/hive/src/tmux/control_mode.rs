@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const _CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
+const CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
 
 /// Decode tmux control-mode escape: control bytes and '\' are encoded as \NNN (3 octal digits).
 fn decode_output_payload(raw: &str) -> String {
@@ -303,7 +303,7 @@ fn monitor_run_loop(inner: Arc<MonitorInner>, session_target: String) {
         if inner.stop.load(Ordering::SeqCst) {
             break;
         }
-        thread::sleep(Duration::from_secs_f64(_CONTROL_MODE_RESTART_DELAY));
+        thread::sleep(Duration::from_secs_f64(CONTROL_MODE_RESTART_DELAY));
     }
 }
 

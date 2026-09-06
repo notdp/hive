@@ -144,7 +144,7 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
         return Ok(());
     }
     let reason = map_get_str(&runtime, "inputReason");
-    if _SEND_GATE_WAIVED_REASONS.contains(&reason.as_str()) {
+    if SEND_GATE_WAIVED_REASONS.contains(&reason.as_str()) {
         return Ok(());
     }
     bail!("target agent is waiting for a user answer; answer it in the target pane")

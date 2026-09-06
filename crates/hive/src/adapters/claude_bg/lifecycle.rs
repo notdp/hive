@@ -12,8 +12,8 @@ use crate::adapters::claude_sessions::{config_dir, truthy_str};
 use super::engine::{hooked_engine_for_job, EngineSession};
 use super::keyboard::strip_ansi;
 use super::{
-    looks_like_job_id, sleep_s, _AGENTS_TIMEOUT, _ENTRY_POLL_INTERVAL, _SPAWN_TIMEOUT,
-    _WAKE_ENTRY_TIMEOUT, _WAKE_TIMEOUT,
+    looks_like_job_id, sleep_s, AGENTS_TIMEOUT, ENTRY_POLL_INTERVAL, SPAWN_TIMEOUT,
+    WAKE_ENTRY_TIMEOUT, WAKE_TIMEOUT,
 };
 
 #[cfg(test)]
@@ -123,7 +123,7 @@ pub fn list_jobs(claude_bin: &str) -> Option<Vec<Map<String, Value>>> {
         "--json".to_string(),
         "--all".to_string(),
     ];
-    let (code, stdout, _stderr) = run_capture(&argv, _AGENTS_TIMEOUT, None, &bg_env(None))?;
+    let (code, stdout, _stderr) = run_capture(&argv, AGENTS_TIMEOUT, None, &bg_env(None))?;
     if code != 0 {
         return None;
     }
@@ -219,7 +219,7 @@ pub fn spawn_job(
         argv.push(prompt.to_string());
     }
     let cwd = if cwd.is_empty() { None } else { Some(cwd) };
-    let (code, stdout, _stderr) = run_capture(&argv, _SPAWN_TIMEOUT, cwd, &bg_env(extra_env))?;
+    let (code, stdout, _stderr) = run_capture(&argv, SPAWN_TIMEOUT, cwd, &bg_env(extra_env))?;
     if code != 0 {
         return None;
     }
@@ -249,7 +249,7 @@ pub fn wake_job(job_id: &str, claude_bin: &str) -> bool {
         "attach".to_string(),
         job_id.to_string(),
     ];
-    match run_capture(&argv, _WAKE_TIMEOUT, None, &bg_env(None)) {
+    match run_capture(&argv, WAKE_TIMEOUT, None, &bg_env(None)) {
         Some((code, _out, _err)) => code == 0,
         None => false,
     }
@@ -290,7 +290,7 @@ pub(super) fn wait_engine_entry_until(
         if give_up() || Instant::now() >= deadline {
             return None;
         }
-        sleep_s(_ENTRY_POLL_INTERVAL);
+        sleep_s(ENTRY_POLL_INTERVAL);
     }
 }
 
@@ -310,5 +310,5 @@ pub fn ensure_engine(
     if !hooked_wake_job(job_id, claude_bin) {
         return None;
     }
-    wait_engine_entry(job_id, timeout.unwrap_or(_WAKE_ENTRY_TIMEOUT))
+    wait_engine_entry(job_id, timeout.unwrap_or(WAKE_ENTRY_TIMEOUT))
 }

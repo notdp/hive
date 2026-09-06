@@ -3,7 +3,7 @@
 //! clap parses, so clap's own help never reaches a user; keep each clap
 //! command's `about` equal to its first line here. Adding a command or group
 //! means adding its arm here and, for a group, listing it in
-//! `cli/mod.rs::_HELP_GROUPS`.
+//! `cli/mod.rs::HELP_GROUPS`.
 
 /// Exact click `--help` output for a command path (`[]` = root).
 pub(crate) fn help_for(path: &[&str]) -> Option<&'static str> {

@@ -13,8 +13,8 @@ use crate::tmux;
 // fork
 // ---------------------------------------------------------------------------
 
-const _FORK_MIN_COLS: i64 = 80;
-const _FORK_MIN_ROWS: i64 = 20;
+const FORK_MIN_COLS: i64 = 80;
+const FORK_MIN_ROWS: i64 = 20;
 
 /// True for horizontal (left/right) split, false for vertical (top/bottom).
 ///
@@ -22,8 +22,8 @@ const _FORK_MIN_ROWS: i64 = 20;
 pub(crate) fn choose_fork_split(width: i64, height: i64) -> bool {
     let h_half = (width - 1) / 2;
     let v_half = (height - 1) / 2;
-    let can_h = h_half >= _FORK_MIN_COLS;
-    let can_v = v_half >= _FORK_MIN_ROWS;
+    let can_h = h_half >= FORK_MIN_COLS;
+    let can_v = v_half >= FORK_MIN_ROWS;
     if can_h && can_v {
         return width as f64 >= height as f64 * 2.5;
     }
@@ -34,12 +34,12 @@ pub(crate) fn choose_fork_split(width: i64, height: i64) -> bool {
         return false;
     }
     let h_score = f64::min(
-        h_half as f64 / _FORK_MIN_COLS as f64,
-        height as f64 / _FORK_MIN_ROWS as f64,
+        h_half as f64 / FORK_MIN_COLS as f64,
+        height as f64 / FORK_MIN_ROWS as f64,
     );
     let v_score = f64::min(
-        width as f64 / _FORK_MIN_COLS as f64,
-        v_half as f64 / _FORK_MIN_ROWS as f64,
+        width as f64 / FORK_MIN_COLS as f64,
+        v_half as f64 / FORK_MIN_ROWS as f64,
     );
     h_score >= v_score
 }
@@ -169,8 +169,8 @@ fn fork_source_details(
     (current_pane, profile, session_id, horizontal, source_cwd)
 }
 
-pub(crate) const _FORK_NEW_TASK_MARKER: &str = "NEW TASK FOR THIS FORK:";
-pub(crate) const _FORK_BOUNDARY_TEXT: &str =
+pub(crate) const FORK_NEW_TASK_MARKER: &str = "NEW TASK FOR THIS FORK:";
+pub(crate) const FORK_BOUNDARY_TEXT: &str =
     "FORK BOUNDARY: you are a freshly forked agent. Run `hive team` to find your \
 own identity (the `self` field).\n\n\
 Everything before this boundary is read-only inherited context for the \
@@ -186,7 +186,7 @@ is present, stop after identifying yourself and wait for new input.";
 // told to run `hive team` to find an identity. The anti-re-execution core is
 // preserved verbatim — that is what stops the clone from re-running the
 // parent's in-flight work regardless of team membership.
-pub(crate) const _FORK_ORPHAN_BOUNDARY_TEXT: &str =
+pub(crate) const FORK_ORPHAN_BOUNDARY_TEXT: &str =
     "FORK BOUNDARY: you are a freshly forked, independent clone. You are NOT \
 bound to any Hive team — running `hive team` only confirms you have no team \
 binding, and there is no `self` identity to look up.\n\n\
@@ -203,9 +203,9 @@ present, stop and wait for new human input.";
 /// The boundary message every fork receives as its first user input.
 fn fork_boundary_prompt(team_bound: bool) -> &'static str {
     if team_bound {
-        _FORK_BOUNDARY_TEXT
+        FORK_BOUNDARY_TEXT
     } else {
-        _FORK_ORPHAN_BOUNDARY_TEXT
+        FORK_ORPHAN_BOUNDARY_TEXT
     }
 }
 
@@ -265,7 +265,7 @@ fn fork_registered_agent(
         let composed = format!(
             "{}\n\n{}\n{}",
             fork_boundary_prompt(true),
-            _FORK_NEW_TASK_MARKER,
+            FORK_NEW_TASK_MARKER,
             prompt
         );
         format!("{cmd_base} {}", shlex_quote(&composed))
@@ -320,7 +320,7 @@ fn fork_orphan_clone(pane_id: &str, split: &str, prompt: &str) -> String {
         let composed = format!(
             "{}\n\n{}\n{}",
             fork_boundary_prompt(false),
-            _FORK_NEW_TASK_MARKER,
+            FORK_NEW_TASK_MARKER,
             prompt
         );
         format!("{cmd_base} {}", shlex_quote(&composed))

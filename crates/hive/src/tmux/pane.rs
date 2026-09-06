@@ -188,7 +188,7 @@ pub fn set_pane_title(pane_id: &str, title: &str) {
 // Both halves carry the team: with several teams on screen, a bare member
 // name says nothing about which team a pane belongs to, and
 // the view suffix already names its member as `<team>.<member>`.
-pub const _HIVE_PANE_BORDER_FORMAT: &str = concat!(
+pub const HIVE_PANE_BORDER_FORMAT: &str = concat!(
     " #{?@hive-notify-active,#[fg=colour220]#[bold][!] #[default],}",
     "#{?@hive-agent,#{?@hive-team,#{@hive-team}.,}#{@hive-agent}",
     "#{?@hive-view,#[fg=colour220] -> #{@hive-view}#[default],}",
@@ -217,7 +217,7 @@ pub fn enable_pane_border_status(target: &str) {
             "-t",
             target,
             "pane-border-format",
-            _HIVE_PANE_BORDER_FORMAT,
+            HIVE_PANE_BORDER_FORMAT,
         ],
         false,
         5,

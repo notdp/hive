@@ -58,7 +58,7 @@ Consequences across modules:
   these verbs do not require the caller to have one. `flow` rides the same
   doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
   the setup/launcher commands never needed a pane. The full list is
-  `cli/util.rs::_TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
+  `cli/util.rs::TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
   fork, inject, cvim, …) acts on the current pane and refuses to run outside
   tmux, except `send`, which is admitted when the caller's own session names
   a roster row or a Claude messaging socket (the ladder in the next

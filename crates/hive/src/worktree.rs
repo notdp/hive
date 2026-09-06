@@ -30,9 +30,9 @@ pub const META_KEYS: [&str; 5] = [
 ];
 pub const GH_MERGE_BASE_KEY: &str = "gh-merge-base";
 
-const _PR_BASE_PREFIXES: [&str; 3] = ["refs/remotes/origin/", "origin/", "refs/heads/"];
+const PR_BASE_PREFIXES: [&str; 3] = ["refs/remotes/origin/", "origin/", "refs/heads/"];
 
-const _IN_PROGRESS_MARKERS: [(&str, &str); 6] = [
+const IN_PROGRESS_MARKERS: [(&str, &str); 6] = [
     ("rebase-merge", "rebase"),
     ("rebase-apply", "rebase"),
     ("MERGE_HEAD", "merge"),
@@ -330,7 +330,7 @@ pub fn worktree_dirty(wt_path: &str) -> Result<bool> {
 /// Names of git operations mid-flight in *wt_path* (rebase, merge, ...).
 pub fn in_progress_ops(wt_path: &str) -> Result<Vec<String>> {
     let mut args: Vec<&str> = vec!["rev-parse"];
-    for (marker, _) in _IN_PROGRESS_MARKERS.iter() {
+    for (marker, _) in IN_PROGRESS_MARKERS.iter() {
         args.push("--git-path");
         args.push(marker);
     }
@@ -338,7 +338,7 @@ pub fn in_progress_ops(wt_path: &str) -> Result<Vec<String>> {
     let paths: Vec<&str> = out.lines().collect();
     let mut ops: Vec<String> = Vec::new();
     let base = Path::new(wt_path);
-    for ((_, op), p) in _IN_PROGRESS_MARKERS.iter().zip(paths.iter()) {
+    for ((_, op), p) in IN_PROGRESS_MARKERS.iter().zip(paths.iter()) {
         let candidate = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
@@ -493,7 +493,7 @@ pub fn resolve_base(
 }
 
 pub fn pr_merge_base_from_ref(base_ref: &str) -> String {
-    for prefix in _PR_BASE_PREFIXES {
+    for prefix in PR_BASE_PREFIXES {
         if let Some(rest) = base_ref.strip_prefix(prefix) {
             return rest.to_string();
         }

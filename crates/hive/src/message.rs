@@ -3,9 +3,9 @@
 
 use serde_json::{Map, Value};
 
-const _BODY_WARNING_CHAR_LIMIT: usize = 500;
-const _BODY_WARNING_LINE_LIMIT: usize = 3;
-const _BODY_WARNING_MARKERS: [&str; 3] = ["# ", "- ", "* "];
+const BODY_WARNING_CHAR_LIMIT: usize = 500;
+const BODY_WARNING_LINE_LIMIT: usize = 3;
+const BODY_WARNING_MARKERS: [&str; 3] = ["# ", "- ", "* "];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyWarningHint {
@@ -54,10 +54,10 @@ pub fn body_warning_hint(body: &str) -> Option<BodyWarningHint> {
     }
     let lines = splitlines(text);
     let mut reasons: Vec<&'static str> = Vec::new();
-    if text.chars().count() > _BODY_WARNING_CHAR_LIMIT {
+    if text.chars().count() > BODY_WARNING_CHAR_LIMIT {
         reasons.push("chars");
     }
-    if lines.len() >= _BODY_WARNING_LINE_LIMIT {
+    if lines.len() >= BODY_WARNING_LINE_LIMIT {
         reasons.push("lines");
     }
     if text.contains("```") {
@@ -68,7 +68,7 @@ pub fn body_warning_hint(body: &str) -> Option<BodyWarningHint> {
         .filter(|line| !line.trim().is_empty())
         .any(|line| {
             let stripped = line.trim_start();
-            _BODY_WARNING_MARKERS
+            BODY_WARNING_MARKERS
                 .iter()
                 .any(|marker| stripped.starts_with(marker))
         })

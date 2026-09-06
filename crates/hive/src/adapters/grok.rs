@@ -21,8 +21,8 @@ use super::base::{
     SessionMeta,
 };
 
-const _HISTORY_NAME: &str = "chat_history.jsonl";
-const _META_SCAN_LIMIT: usize = 20;
+const HISTORY_NAME: &str = "chat_history.jsonl";
+const META_SCAN_LIMIT: usize = 20;
 
 fn role_by_type(record_type: &str) -> Option<&'static str> {
     match record_type {
@@ -63,7 +63,7 @@ impl SessionAdapter for GrokAdapter {
             return None;
         }
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-            let direct = root.join(quote(cwd)).join(session_id).join(_HISTORY_NAME);
+            let direct = root.join(quote(cwd)).join(session_id).join(HISTORY_NAME);
             if direct.exists() {
                 return Some(direct);
             }
@@ -71,7 +71,7 @@ impl SessionAdapter for GrokAdapter {
         let mut matches: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = fs::read_dir(&root) {
             for entry in entries.flatten() {
-                let candidate = entry.path().join(session_id).join(_HISTORY_NAME);
+                let candidate = entry.path().join(session_id).join(HISTORY_NAME);
                 if candidate.exists() {
                     matches.push(candidate);
                 }
@@ -84,7 +84,7 @@ impl SessionAdapter for GrokAdapter {
     // --- reading ---
 
     fn read_meta(&self, path: &Path) -> Option<SessionMeta> {
-        if path.file_name().and_then(|n| n.to_str()) != Some(_HISTORY_NAME) {
+        if path.file_name().and_then(|n| n.to_str()) != Some(HISTORY_NAME) {
             return None;
         }
         let parent = path.parent()?;
@@ -256,7 +256,7 @@ fn first_assistant_model(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
-    for _ in 0.._META_SCAN_LIMIT {
+    for _ in 0..META_SCAN_LIMIT {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
@@ -328,7 +328,7 @@ mod tests {
     fn write_session(home: &Path, session_id: &str, cwd: &str, records: &[Value]) -> PathBuf {
         let session_dir = home.join("sessions").join(quote(cwd)).join(session_id);
         fs::create_dir_all(&session_dir).unwrap();
-        let history = session_dir.join(_HISTORY_NAME);
+        let history = session_dir.join(HISTORY_NAME);
         let text: String = records.iter().map(|r| r.to_string() + "\n").collect();
         fs::write(&history, text).unwrap();
         history

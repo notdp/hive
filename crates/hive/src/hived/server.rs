@@ -197,7 +197,7 @@ fn serve_connection(
     hived_started_at: &str,
     read_timeout: f64,
 ) {
-    _INFLIGHT_REQUESTS.fetch_add(1, Ordering::SeqCst);
+    INFLIGHT_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
     let mut raw: Vec<u8> = Vec::new();
     let mut buf = [0u8; 65536];
@@ -229,9 +229,9 @@ fn serve_connection(
     // Answer first, then retire: the reply must be on the wire before the
     // loop tears the socket down.
     if !keep_running {
-        _SHUTDOWN.store(true, Ordering::SeqCst);
+        SHUTDOWN.store(true, Ordering::SeqCst);
     }
-    _INFLIGHT_REQUESTS.fetch_sub(1, Ordering::SeqCst);
+    INFLIGHT_REQUESTS.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Accept for up to ``timeout`` seconds, handling each request off-loop.
@@ -252,7 +252,7 @@ pub(crate) fn serve_requests(
     timeout: f64,
 ) -> bool {
     let end = monotonic() + timeout;
-    while !_SHUTDOWN.load(Ordering::SeqCst) {
+    while !SHUTDOWN.load(Ordering::SeqCst) {
         let remaining = end - monotonic();
         if remaining <= 0.0 {
             break;
@@ -279,5 +279,5 @@ pub(crate) fn serve_requests(
                 );
             });
     }
-    !_SHUTDOWN.load(Ordering::SeqCst)
+    !SHUTDOWN.load(Ordering::SeqCst)
 }

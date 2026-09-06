@@ -157,7 +157,7 @@ fn hooked_make_busy_monitor(session_target: &str) -> Option<Arc<dyn OutputMonito
 }
 
 pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
-    _SHUTDOWN.store(false, Ordering::SeqCst);
+    SHUTDOWN.store(false, Ordering::SeqCst);
     let hived_started_at = now_iso();
     let mut idle_notify: HashMap<String, IdleRecord> = HashMap::new();
     let mut notify_debug_state = NotifyDebugState::default();

@@ -9,9 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
-use super::{
-    _ACK_TIMEOUT, _CALL_TIMEOUT, _INIT_TIMEOUT, _LOAD_TIMEOUT, _MESSAGE_CHUNKS, _TOOL_PHASES,
-};
+use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, TOOL_PHASES};
 
 // --------------------------------------------------------------------------
 // per-session runtime state, kept current by the reader thread
@@ -346,9 +344,9 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
                 state.runtime.turn_phase = "tool_result_pending_reply".to_string();
             }
         }
-        kind if _MESSAGE_CHUNKS.contains(&kind) => {
+        kind if MESSAGE_CHUNKS.contains(&kind) => {
             state.runtime.busy = true;
-            if !_TOOL_PHASES.contains(&state.runtime.turn_phase.as_str()) {
+            if !TOOL_PHASES.contains(&state.runtime.turn_phase.as_str()) {
                 state.runtime.turn_phase = "user_prompt_pending".to_string();
             }
             if kind == "user_message_chunk" {
@@ -533,7 +531,7 @@ impl GrokStdioClient {
                 "clientInfo": {"name": "hive", "version": "1"},
                 "clientCapabilities": {},
             }),
-            _INIT_TIMEOUT,
+            INIT_TIMEOUT,
             None,
         );
         if initialized.get("result").is_none() {
@@ -546,7 +544,7 @@ impl GrokStdioClient {
                 "cwd": cwd,
                 "mcpServers": [],
             }),
-            _LOAD_TIMEOUT,
+            LOAD_TIMEOUT,
             Some(&session_id),
         );
         loaded.get("result").is_some()
@@ -567,7 +565,7 @@ impl GrokStdioClient {
                 "clientInfo": {"name": "hive", "version": "1"},
                 "clientCapabilities": {},
             }),
-            _INIT_TIMEOUT,
+            INIT_TIMEOUT,
             None,
         );
         if initialized.get("result").is_none() {
@@ -580,7 +578,7 @@ impl GrokStdioClient {
                 "mcpServers": [],
                 "_meta": {"sessionId": session_id},
             }),
-            _LOAD_TIMEOUT,
+            LOAD_TIMEOUT,
             Some(session_id),
         );
         created
@@ -671,7 +669,7 @@ impl GrokStdioClient {
         let result = self.call(
             "x.ai/compact_conversation",
             json!({"sessionId": session_id}),
-            _CALL_TIMEOUT,
+            CALL_TIMEOUT,
             None,
         );
         if result.get("result").is_some() {
@@ -733,5 +731,5 @@ fn ack_timeout() -> f64 {
             return timeout;
         }
     }
-    _ACK_TIMEOUT
+    ACK_TIMEOUT
 }

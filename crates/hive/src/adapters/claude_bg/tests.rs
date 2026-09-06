@@ -621,12 +621,12 @@ fn test_engine_screen_size_is_the_bound_panes_size() {
     // an unparsable answer falls back to claude's own pty-host size
     assert_eq!(
         engine_screen_size("cafe1234"),
-        (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
+        (DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)
     );
     // a job on nobody's pane never asks tmux
     assert_eq!(
         engine_screen_size("beef5678"),
-        (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
+        (DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)
     );
     assert_eq!(argv.borrow().len(), 2);
 }

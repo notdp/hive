@@ -29,32 +29,32 @@ pub const WRITE_TIMED_OUT: &str = "udsWriteTimedOut";
 // The status vocabulary a session reports in its registry entry (observed on
 // 2.1.240, not a documented enum).
 pub const STATUS_VALUES: [&str; 4] = ["busy", "shell", "idle", "waiting"];
-const _CONNECT_TIMEOUT: f64 = 2.0;
-const _WRITE_TIMEOUT: f64 = 10.0;
+const CONNECT_TIMEOUT: f64 = 2.0;
+const WRITE_TIMEOUT: f64 = 10.0;
 // Daemon control-socket lane (op "reply"): retry codes are the daemon's own
 // readiness vocabulary (observed on 2.1.240) — the worker exists but cannot
 // take input this instant. The bound keeps a hived RPC from hanging on a
 // worker that never comes up; past it the caller falls back to the inbox lane.
-const _DAEMON_PROTO: u64 = 1;
-const _DAEMON_RETRY_CODES: [&str; 3] = ["ESTARTING", "ENOREPLY", "ERESPAWNING"];
-const _DAEMON_RETRY_LIMIT: u32 = 24;
-const _DAEMON_RETRY_DELAY: f64 = 0.2;
+const DAEMON_PROTO: u64 = 1;
+const DAEMON_RETRY_CODES: [&str; 3] = ["ESTARTING", "ENOREPLY", "ERESPAWNING"];
+const DAEMON_RETRY_LIMIT: u32 = 24;
+const DAEMON_RETRY_DELAY: f64 = 0.2;
 // The hived submit budget must cover a daemon_reply retry run plus a full
 // fallback send() worst case. The retry run is costed as prompt answers
 // (a retry code comes back immediately); a daemon that stalls mid-roundtrip
 // is bounded by that attempt's own read timeout, not by this budget.
 pub const SUBMIT_TIMEOUT: f64 =
-    _CONNECT_TIMEOUT + _WRITE_TIMEOUT + _DAEMON_RETRY_LIMIT as f64 * _DAEMON_RETRY_DELAY + 2.0;
+    CONNECT_TIMEOUT + WRITE_TIMEOUT + DAEMON_RETRY_LIMIT as f64 * DAEMON_RETRY_DELAY + 2.0;
 
 // Transcript bytes scanned for the desktop title: the `custom-title` record is
 // written when the title is set and re-emitted near the tail as the session
 // runs, so the tail window finds the current title; the head window catches a
 // title set once at the start of a short session.
-const _TITLE_TAIL_BYTES: u64 = 512 * 1024;
-const _TITLE_HEAD_BYTES: u64 = 64 * 1024;
+const TITLE_TAIL_BYTES: u64 = 512 * 1024;
+const TITLE_HEAD_BYTES: u64 = 64 * 1024;
 
 fn write_timeout() -> Duration {
-    Duration::from_secs_f64(_WRITE_TIMEOUT)
+    Duration::from_secs_f64(WRITE_TIMEOUT)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,14 +157,14 @@ pub fn session_title(session_id: &str) -> String {
 fn read_title(path: &Path) -> std::io::Result<String> {
     let size = fs::metadata(path)?.len();
     let mut fh = fs::File::open(path)?;
-    fh.seek(SeekFrom::Start(size.saturating_sub(_TITLE_TAIL_BYTES)))?;
+    fh.seek(SeekFrom::Start(size.saturating_sub(TITLE_TAIL_BYTES)))?;
     let mut tail = Vec::new();
     fh.read_to_end(&mut tail)?;
     let mut title = title_in(&tail);
-    if title.is_empty() && size > _TITLE_TAIL_BYTES {
+    if title.is_empty() && size > TITLE_TAIL_BYTES {
         fh.seek(SeekFrom::Start(0))?;
         let mut head = Vec::new();
-        (&mut fh).take(_TITLE_HEAD_BYTES).read_to_end(&mut head)?;
+        (&mut fh).take(TITLE_HEAD_BYTES).read_to_end(&mut head)?;
         title = title_in(&head);
     }
     Ok(title)
@@ -335,7 +335,7 @@ pub fn rename(sock_path: &str, name: &str, session_id: &str) -> bool {
         payload["session_id"] = json!(session_id);
     }
     // ponytail: std has no AF_UNIX connect timeout; connect is
-    // instant-or-refused, so _CONNECT_TIMEOUT only shapes SUBMIT_TIMEOUT.
+    // instant-or-refused, so CONNECT_TIMEOUT only shapes SUBMIT_TIMEOUT.
     let Ok(mut conn) = UnixStream::connect(sock_path) else {
         return false;
     };
@@ -458,7 +458,7 @@ pub fn daemon_reply(session_id: &str, text: &str) -> Option<&'static str> {
         session_id,
         text,
         &daemon_control_sock(),
-        Duration::from_secs_f64(_DAEMON_RETRY_DELAY),
+        Duration::from_secs_f64(DAEMON_RETRY_DELAY),
     )
 }
 
@@ -477,14 +477,14 @@ fn daemon_reply_via(
         return None;
     }
     let mut frame = json!({
-        "proto": _DAEMON_PROTO,
+        "proto": DAEMON_PROTO,
         "op": "reply",
         "short": short,
         "auth": auth,
         "text": text,
     });
     let mut reauthed = false;
-    for _ in 0.._DAEMON_RETRY_LIMIT {
+    for _ in 0..DAEMON_RETRY_LIMIT {
         let resp = daemon_roundtrip(sock_path, &frame)?;
         if resp.get("ok") == Some(&Value::Bool(true)) {
             return Some(ACCEPTED_DAEMON_REPLY);
@@ -500,7 +500,7 @@ fn daemon_reply_via(
             frame["auth"] = json!(auth);
             continue;
         }
-        if _DAEMON_RETRY_CODES.contains(&code) {
+        if DAEMON_RETRY_CODES.contains(&code) {
             std::thread::sleep(retry_delay);
             continue;
         }

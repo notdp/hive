@@ -270,9 +270,9 @@ pub fn str_or_none(value: Option<&Value>) -> Option<String> {
 // Detect whether the target agent is waiting for a user answer
 // (AskUserQuestion) before allowing message injection.
 
-const _ASK_TOOL_NAMES: [&str; 2] = ["AskUserQuestion", "request_user_input"];
+const ASK_TOOL_NAMES: [&str; 2] = ["AskUserQuestion", "request_user_input"];
 
-const _MAX_TAIL_BYTES: u64 = 128 * 1024; // 128KB upper bound for tail reads
+const MAX_TAIL_BYTES: u64 = 128 * 1024; // 128KB upper bound for tail reads
 
 /// status: "waiting" | "clear" | "unknown"
 #[derive(Debug, Clone, PartialEq)]
@@ -293,7 +293,7 @@ fn extract_content_blocks(payload: &Map<String, Value>) -> &[Value] {
 }
 
 fn is_ask_tool(name: Option<&Value>) -> bool {
-    matches!(name, Some(Value::String(s)) if _ASK_TOOL_NAMES.contains(&s.as_str()))
+    matches!(name, Some(Value::String(s)) if ASK_TOOL_NAMES.contains(&s.as_str()))
 }
 
 /// Check whether a raw JSONL record is an assistant turn with AskUserQuestion.
@@ -380,7 +380,7 @@ pub fn check_input_gate(path: &Path) -> GateResult {
     }
 
     let mut chunk: u64 = 8192;
-    while chunk <= _MAX_TAIL_BYTES {
+    while chunk <= MAX_TAIL_BYTES {
         let offset = file_size.saturating_sub(chunk);
         let mut raw = Vec::new();
         let read = File::open(path).and_then(|mut f| {

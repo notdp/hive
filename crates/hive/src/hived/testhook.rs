@@ -161,7 +161,7 @@ pub struct Guard;
 impl Drop for Guard {
     fn drop(&mut self) {
         *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        super::_SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+        super::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
         super::transcript_path_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner())

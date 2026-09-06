@@ -136,8 +136,8 @@ pub(crate) fn try_acquire_reexec_lock_impl(workspace: &str) -> Option<i32> {
 }
 
 pub(crate) fn take_reexec_lock_fd_from_env() -> Option<i32> {
-    let raw_fd = std::env::var(_HIVED_REEXEC_LOCK_ENV).unwrap_or_default();
-    std::env::remove_var(_HIVED_REEXEC_LOCK_ENV);
+    let raw_fd = std::env::var(HIVED_REEXEC_LOCK_ENV).unwrap_or_default();
+    std::env::remove_var(HIVED_REEXEC_LOCK_ENV);
     if raw_fd.is_empty() {
         return None;
     }
@@ -187,8 +187,8 @@ pub(crate) fn reexec_hived(
 ) -> Option<Box<dyn HivedServerApi>> {
     let lock_fd = hooked_try_acquire_reexec_lock(workspace)?;
 
-    let previous_lock_env = std::env::var(_HIVED_REEXEC_LOCK_ENV).ok();
-    std::env::set_var(_HIVED_REEXEC_LOCK_ENV, lock_fd.to_string());
+    let previous_lock_env = std::env::var(HIVED_REEXEC_LOCK_ENV).ok();
+    std::env::set_var(HIVED_REEXEC_LOCK_ENV, lock_fd.to_string());
     if let Some(monitor) = busy_monitor {
         monitor.stop();
     }
@@ -203,8 +203,8 @@ pub(crate) fn reexec_hived(
     // Only reached when execv came back (live: it failed; under test: the
     // hook reports Replaced) — undo the env and drop the lock either way.
     match previous_lock_env {
-        None => std::env::remove_var(_HIVED_REEXEC_LOCK_ENV),
-        Some(previous) => std::env::set_var(_HIVED_REEXEC_LOCK_ENV, previous),
+        None => std::env::remove_var(HIVED_REEXEC_LOCK_ENV),
+        Some(previous) => std::env::set_var(HIVED_REEXEC_LOCK_ENV, previous),
     }
     hooked_release_reexec_lock_fd(Some(lock_fd));
     match outcome {
@@ -223,7 +223,7 @@ pub(crate) fn reexec_hived(
     let replacement = match hooked_open_server_socket(workspace) {
         Ok(replacement) => replacement,
         Err(_) => {
-            _SHUTDOWN.store(true, Ordering::SeqCst);
+            SHUTDOWN.store(true, Ordering::SeqCst);
             return None;
         }
     };
