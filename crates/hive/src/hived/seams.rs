@@ -147,6 +147,14 @@ pub(super) fn hooked_list_panes_all() -> Vec<crate::tmux::PaneInfo> {
     crate::tmux::list_panes_all()
 }
 
+pub(super) fn hooked_tmux_socket_path() -> Option<String> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.tmux_socket_path.clone()).flatten() {
+        return f();
+    }
+    crate::tmux::own_socket_path()
+}
+
 pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {
@@ -395,6 +403,16 @@ pub(super) fn hooked_cas_list_recorded_panes() -> Vec<String> {
         return f();
     }
     crate::adapters::codex_app_server::list_recorded_panes()
+}
+
+/// The tmux socket a pane's thread record was written on; None for a
+/// record without the field (or no record).
+pub(super) fn hooked_cas_pane_thread_socket(pane: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_pane_thread_socket.clone()).flatten() {
+        return f(pane);
+    }
+    crate::adapters::codex_app_server::read_pane_thread(pane).and_then(|record| record.tmux_socket)
 }
 
 pub(super) fn hooked_cas_clear_pane_thread(pane: &str) {

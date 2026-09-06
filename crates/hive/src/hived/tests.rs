@@ -2004,6 +2004,8 @@ fn test_cleanup_member_daemon_missing_registry_reaps_after_grace() {
 struct SuperState {
     panes: Vec<(String, String, String)>, // pane_id, agent, cli
     recorded: Vec<String>,
+    record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = legacy record
+    own_socket: Option<String>,
     threads: HashMap<String, String>,
     daemon_alive: bool,
     spawn_ok: bool,
@@ -2016,6 +2018,12 @@ fn super_state() -> SuperState {
     SuperState {
         panes: vec![("%1".to_string(), "val".to_string(), "codex".to_string())],
         recorded: vec!["%1".to_string()],
+        record_sockets: HashMap::new(),
+        own_socket: Some(
+            crate::tmux::default_socket_path()
+                .to_string_lossy()
+                .into_owned(),
+        ),
         threads: HashMap::from([("%1".to_string(), "tid-1".to_string())]),
         daemon_alive: true,
         spawn_ok: true,
@@ -2053,6 +2061,8 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let send_sink = Arc::clone(&calls);
     let emit_sink = Arc::clone(&calls);
     let s_recorded = Arc::clone(&state);
+    let s_sockets = Arc::clone(&state);
+    let s_own = Arc::clone(&state);
     let s_threads = Arc::clone(&state);
     let s_alive = Arc::clone(&state);
     let s_spawn = Arc::clone(&state);
@@ -2061,6 +2071,10 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let hook = Hook {
         list_panes_all: Some(Arc::new(list_panes)),
         cas_list_recorded_panes: Some(Arc::new(move || s_recorded.recorded.clone())),
+        cas_pane_thread_socket: Some(Arc::new(move |pane| {
+            s_sockets.record_sockets.get(pane).cloned()
+        })),
+        tmux_socket_path: Some(Arc::new(move || s_own.own_socket.clone())),
         cas_clear_pane_thread: Some(Arc::new(move |pane| {
             clear_sink.lock().unwrap().push(format!("clear {pane}"))
         })),
@@ -5053,4 +5067,65 @@ fn test_send_marks_the_target_pane_unread() {
     let refused = send_payload_for_test(&workspace, "a", "b", "hi", "");
     assert_eq!(refused["ok"], Value::Bool(false));
     assert_eq!(pending(), Vec::<String>::new());
+}
+
+// ---- codex record reaping is scoped to the hived's own tmux server -------
+
+fn reap_calls(state: SuperState) -> Vec<String> {
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    calls
+        .iter()
+        .filter(|call| call.starts_with("clear "))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn test_supervisor_reaps_only_records_of_its_own_server() {
+    let mut state = super_state();
+    state.own_socket = Some("/x/tmux-501/e2e".to_string());
+    state.recorded = vec!["%1".to_string(), "%dead".to_string(), "%3".to_string()];
+    state.record_sockets = HashMap::from([
+        ("%dead".to_string(), "/x/tmux-501/e2e".to_string()),
+        ("%3".to_string(), "/tmp/tmux-501/default".to_string()),
+    ]);
+    // %3 is absent from this (private) server but lives on the default one
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+}
+
+#[test]
+fn test_supervisor_on_private_server_leaves_legacy_records_alone() {
+    let mut state = super_state();
+    state.own_socket = Some("/x/tmux-501/e2e".to_string());
+    state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    // no tmuxSocket on %dead: written by the pre-field binary
+    assert_eq!(reap_calls(state), Vec::<String>::new());
+}
+
+#[test]
+fn test_supervisor_on_default_server_reaps_legacy_records() {
+    let mut state = super_state();
+    state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+}
+
+#[test]
+fn test_supervisor_reaps_nothing_when_its_own_server_is_unknown() {
+    let mut state = super_state();
+    state.own_socket = None;
+    state.recorded = vec!["%1".to_string(), "%dead".to_string(), "%3".to_string()];
+    state.record_sockets = HashMap::from([("%3".to_string(), "/tmp/tmux-501/default".to_string())]);
+    assert_eq!(reap_calls(state), Vec::<String>::new());
+}
+
+#[test]
+fn test_supervisor_reaps_own_record_spelled_through_private_tmp() {
+    let mut state = super_state();
+    state.own_socket = Some("/private/tmp/tmux-501/default".to_string());
+    state.recorded = vec!["%dead".to_string()];
+    state.record_sockets =
+        HashMap::from([("%dead".to_string(), "/tmp/tmux-501/default".to_string())]);
+    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
 }

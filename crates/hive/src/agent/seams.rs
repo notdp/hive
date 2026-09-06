@@ -589,7 +589,12 @@ pub(super) fn hooked_write_pane_thread(
     {
         return Ok(());
     }
-    crate::adapters::codex_app_server::write_pane_thread(pane_id, thread_id, cwd)
+    crate::adapters::codex_app_server::write_pane_thread(
+        pane_id,
+        thread_id,
+        cwd,
+        crate::tmux::own_socket_path().as_deref(),
+    )
 }
 
 pub(super) fn hooked_codex_send_to_pane(pane_id: &str, text: &str) -> Option<&'static str> {

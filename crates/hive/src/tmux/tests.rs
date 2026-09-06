@@ -1115,3 +1115,42 @@ fn test_pane_colour_report_lines_follow_the_theme_and_the_tmux_version() {
         Some(true)
     );
 }
+
+#[test]
+fn test_own_socket_path_prefers_tmux_env_over_the_server() {
+    let mut env = EnvGuard::new();
+    env.set("TMUX", "/private/tmp/tmux-501/default,4242,0");
+    set_run_override(|_args, _check, _timeout| panic!("must not ask the server"));
+    assert_eq!(
+        own_socket_path().as_deref(),
+        Some("/private/tmp/tmux-501/default")
+    );
+}
+
+#[test]
+fn test_own_socket_path_asks_the_server_outside_tmux() {
+    let _env = EnvGuard::cleared(&["TMUX"]);
+    set_run_override(|args, _check, _timeout| {
+        assert_eq!(args, v(&["display-message", "-p", "#{socket_path}"]));
+        Ok(ok_run(0, "/x/tmux-501/e2e\n", ""))
+    });
+    assert_eq!(own_socket_path().as_deref(), Some("/x/tmux-501/e2e"));
+    set_run_override(|_args, _check, _timeout| {
+        Ok(ok_run(1, "", "no server running on /tmp/tmux-501/default"))
+    });
+    assert_eq!(own_socket_path(), None);
+}
+
+#[test]
+fn test_same_socket_normalizes_private_tmp() {
+    assert!(same_socket(
+        "/private/tmp/tmux-501/default",
+        "/tmp/tmux-501/default"
+    ));
+    assert!(same_socket("/x/tmux-501/e2e", "/x/tmux-501/e2e"));
+    assert!(!same_socket("/x/tmux-501/e2e", "/tmp/tmux-501/default"));
+    assert!(!same_socket("", ""));
+    let default = default_socket_path();
+    assert_eq!(default.file_name().unwrap(), "default");
+    assert!(default.starts_with("/tmp"));
+}
