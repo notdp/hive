@@ -412,7 +412,7 @@ fn test_mirror_off_breaks_the_pane_into_the_team_session_records_off_and_retiles
     assert_eq!(count(&argv, "kill-pane"), 0);
     // The two survivors are planned side by side (200x50 is landscape).
     let planned = planned_layout((200, 50), &[("%0", ""), ("%2", "agent")]);
-    assert_eq!(planned.key, "landscape/m2/no-mirror/no-dock/2x1");
+    assert_eq!(planned.key, "landscape/m2/no-mirror/2x1");
     assert!(has_row(
         &argv,
         &["select-layout", "-t", "dev:1", &planned.layout]
@@ -602,8 +602,7 @@ fn test_mirror_on_rebuilds_the_mirror_when_no_hidden_pane_exists() {
 #[test]
 fn test_mirror_on_with_nothing_to_show_says_so() {
     let _env = display_env();
-    // The flow-rig shape: a team whose roster has no session member and
-    // whose rig mirror is gone for good.
+    // A team whose roster has no session member: nothing to mirror.
     crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
     let argv = fake_tmux_tagged(
         MIRROR_WINDOW,
@@ -620,35 +619,6 @@ fn test_mirror_on_with_nothing_to_show_says_so() {
     assert_eq!(count(&argv, "split-window"), 0);
     // Nothing shown, nothing recorded: no orch chip that toggles nothing.
     assert_eq!(count(&argv, "set-window-option"), 0);
-}
-
-#[test]
-fn test_mirror_on_joins_a_parked_rig_mirror_that_names_no_member() {
-    let _env = display_env();
-    crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
-    let argv = fake_tmux_tagged(
-        MIRROR_WINDOW,
-        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
-        &[
-            ("dev:1", "hive-team", "honey"),
-            ("dev:1", "hive-mirror", "off"),
-            ("%1", "hive-hidden", "honey"),
-            ("%1", "hive-role", "mirror"),
-        ],
-    );
-
-    assert_eq!(mirror("on", ""), Ok("mirror on (honey)".to_string()));
-
-    assert!(has_row(
-        &argv,
-        &["join-pane", "-h", "-b", "-d", "-s", "%1", "-t", "%0"]
-    ));
-    assert!(has_row(
-        &argv,
-        &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
-    ));
-    assert_eq!(count(&argv, "split-window"), 0);
-    assert_eq!(count(&argv, "select-layout"), 1);
 }
 
 #[test]

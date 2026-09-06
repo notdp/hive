@@ -81,7 +81,7 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
             "#{{?@hive-notify-active,#[fg={alert}#,bold] ✱ ,",
             "#{{?@hive-unread,#[fg={alert}] ✱ ,",
             "#{{?@hive-busy,#[fg={busy}] ● ,#[fg={muted}] ○ }}}}}}#{{@hive-agent}} ,",
-            "#{{?#{{==:#{{@hive-role}},dock}},#[fg={muted}] ⬡ board ,#[fg={muted}] #{{pane_current_command}} }}}}",
+            "#[fg={muted}] #{{pane_current_command}} }}",
             "#[norange]#[default] }}}}",
             "#[align=right]#[fg={muted}]#{{?@hive-pr,PR#{{@hive-pr}} · ,}}#{{session_name}} · %H:%M "
         ),

@@ -4625,12 +4625,9 @@ fn test_status_tick_clears_unread_when_the_member_goes_busy() {
 }
 
 #[test]
-fn test_status_tick_skips_mirror_terminal_and_dock_panes() {
-    let (mut env, _guard) = status_env(
-        &[("%1", "mirror"), ("%2", "terminal"), ("%3", "dock")],
-        Some(true),
-    );
-    let members = status_members(&[("orch", "%1"), ("shell", "%2"), ("board", "%3")]);
+fn test_status_tick_skips_mirror_and_terminal_panes() {
+    let (mut env, _guard) = status_env(&[("%1", "mirror"), ("%2", "terminal")], Some(true));
+    let members = status_members(&[("orch", "%1"), ("shell", "%2")]);
     unread_pending().lock().unwrap().insert("%1".to_string());
 
     tick_status(&mut env, &members, 1_000);

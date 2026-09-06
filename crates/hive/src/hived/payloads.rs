@@ -54,10 +54,10 @@ pub(crate) fn send_payload(
     artifact: &str,
 ) -> Result<Map<String, Value>> {
     if target_agent == FLOW_MAILBOX_AGENT {
-        // The flow runner's mailbox: it owns no pane and no transport —
-        // the durable bus row IS the delivery, and the runner polls for
-        // it. Members answer a flow dispatch with an ordinary
-        // `hive send flow`, which lands here.
+        // The node runner's mailbox (`hive node run`): it owns no pane and
+        // no transport — the durable bus row IS the delivery, and the runner
+        // polls for it. Members answer a node dispatch with an ordinary
+        // `hive send flow.run`, which lands here.
         let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
         let mut payload = Map::new();
         payload.insert("ok".to_string(), Value::Bool(true));

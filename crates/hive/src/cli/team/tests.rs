@@ -240,9 +240,9 @@ fn test_create_outside_tmux_builds_the_team_session_and_records_the_display() {
     );
     assert!(ws.join("team.json").is_file());
     assert_eq!(entry["members"], Value::Array(Vec::new()));
-    // The first pane is the team's dock, tagged as a shell-pane create
-    // tags its pane, so a verb run from it finds the team through its own
-    // tags (the window's `@hive-team` is display, not binding).
+    // The first pane is the team's own shell pane, tagged as a shell-pane
+    // create tags its pane, so a verb run from it finds the team through
+    // its own tags (the window's `@hive-team` is display, not binding).
     assert!(has_row(
         &argv,
         &["set-option", "-p", "-t", "%1", "@hive-team", "honey"]

@@ -18,8 +18,13 @@ SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 pytestmark = pytest.mark.acceptance
 
 
-def test_flow_completed(rig):
-    assert rig.flow_rc == 0, f"flow run failed:\n{rig.flow_stdout[-1500:]}"
+def test_every_node_replied(rig):
+    assert rig.flow_rc == 0, f"a node run failed:\n{rig.flow_stdout[-1500:]}"
+    for cli in rig.clis:
+        member = rig.member(cli)
+        result = rig.node_results.get(member, {})
+        assert result.get("status") == "replied", f"{member}: node result {result!r}"
+        assert result.get("name") == member, f"{member}: node result names {result.get('name')!r}"
 
 
 def test_nonce_reaches_the_file(rig):
@@ -41,7 +46,7 @@ def test_reply_identity_is_the_member_itself(rig):
 
 
 def test_exactly_one_reply_per_dispatch(rig):
-    # bought by: "收到" acks consuming the flow's await
+    # bought by: "收到" acks consuming the node's await
     for cli in rig.clis:
         member = rig.member(cli)
         replies = rig.replies_for(member)
@@ -55,8 +60,8 @@ def test_nonce_reaches_the_reply_body(rig):
     for cli in rig.clis:
         (reply,) = rig.replies_for(rig.member(cli))[:1] or [None]
         assert reply is not None
-        assert rig.want(cli) in str(reply[4]), (
-            f"{rig.member(cli)}: reply body lacks the nonce: {str(reply[4])[:80]!r}"
+        assert rig.want(cli) in str(reply[3]), (
+            f"{rig.member(cli)}: reply body lacks the nonce: {str(reply[3])[:80]!r}"
         )
 
 
@@ -86,11 +91,11 @@ def test_semantic_coroner(rig):
             {"seq": r[0], "from": r[1], "to": r[2], "body": str(r[3])[:200]}
             for r in rig.bus_rows
         ],
-        "flow_log": rig.flow_stdout[-2000:],
+        "node_log": rig.flow_stdout[-2000:],
         "panes": {m: rig.capture_visible(m)[-2000:] for m in rig.member_panes},
     }
     rubric = (
-        "你是 hive 多 agent runtime 的验收验尸官。下面是一次验收跑的材料(bus 消息行/flow 日志/成员 pane 屏幕)。"
+        "你是 hive 多 agent runtime 的验收验尸官。下面是一次验收跑的材料(bus 消息行/node 日志/成员 pane 屏幕)。"
         "按以下 rubric 找违规,只报有证据的:\n"
         "1) ack 回执:成员对派发消息先回'收到/开始做了'类空回执\n"
         "2) 寻址错误:成员把回报发给了派发人以外的地址,或用错 send/reply\n"

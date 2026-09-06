@@ -9,10 +9,12 @@ never run from a plain `pytest tests/`. Run after every install:
         python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
-scratch team, one naturally-worded nonce task per CLI dispatched through a
-real `hive flow run`. The task wording is deliberately NOT "mechanical, do
-not improvise" — drift (acks, misaddressed replies, self-invented scope)
-only shows itself when the member has room to move.
+scratch team, one naturally-worded nonce task per CLI, each driven the way
+a Claude Code Workflow drives a node — one concurrent `hive node run`
+subprocess per member, task on stdin, one JSON line back on stdout. The
+task wording is deliberately NOT "mechanical, do not improvise" — drift
+(acks, misaddressed replies, self-invented scope) only shows itself when
+the member has room to move.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -55,8 +58,10 @@ class Rig:
     session: str
     team: str
     workspace: Path
-    flow_stdout: str = ""
-    flow_rc: int = 0
+    flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
+    flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
+    node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
+    node_results: dict[str, dict] = field(default_factory=dict)  # member -> node run JSON
     bus_rows: list[tuple] = field(default_factory=list)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
 
@@ -68,7 +73,7 @@ class Rig:
 
     def dispatches_for(self, member: str) -> list[tuple]:
         # A refused delivery leaves its bus row behind (the bus is a ledger,
-        # not a queue) and the flow retries with a fresh row — several
+        # not a queue) and the node retries with a fresh row — several
         # same-body dispatch rows are legal. The one that reached the member
         # is the last one before its reply.
         return [r for r in self.bus_rows if r[1] == "flow.run" and r[2] == member]
@@ -136,44 +141,46 @@ def rig():
                 raise RuntimeError("hive create never finished in the rig pane")
             time.sleep(1)
 
-        wf = r.root / "workflow.js"
         task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
-        # agent() resolves to the reply ({body, artifact}); the
-        # member's name is the script's own knowledge.
-        thunk_lines = "".join(
-            "  () => agent("
-            + json.dumps(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)), ensure_ascii=False)
-            + ", { name: " + json.dumps(r.member(c))
-            + ", cli: " + json.dumps(c) + " })"
-            + ".then((reply) => ({ name: " + json.dumps(r.member(c)) + ", summary: reply.body })),\n"
-            for c in r.clis
-        )
-        wf.write_text(
-            "export const meta = { name: 'acceptance', description: 'one member per CLI, nonce causality' }\n"
-            "const members = await parallel([\n" + thunk_lines + "])\n"
-            # parallel() drops a failed branch to null instead of rejecting;
-            # the rc-0 oracle needs the failure back.
-            "if (members.some((m) => !m)) throw new Error('a member failed: ' + JSON.stringify(members))\n"
-            "for (const m of members) log(`RESULT ${m.name} ${(m.summary || '').slice(0, 100)}`)\n"
-            "return members.map((m) => ({ name: m.name, summary: m.summary }))\n"
-        )
-        # Reproduce the honest parentage: an orch's flow runner lives inside
-        # an engine's tool subprocess — no $TMUX. Only the pinned pane identity rides
-        # in, exactly what a spawned daemon's tools get.
+        # Reproduce the honest parentage: a Workflow's node runner lives
+        # inside an engine's tool subprocess — no $TMUX. Only the pinned pane
+        # identity rides in, exactly what a spawned daemon's tools get.
         env = dict(os.environ)
         env.pop("TMUX", None)
         env["TMUX_PANE"] = pane
         env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
         env.pop("CODEX_THREAD_ID", None)
-        proc = subprocess.run(
-            ["hive", "flow", "run", str(wf)],
-            capture_output=True, text=True,
-            timeout=int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420")),
-            env=env,
-        )
-        # progress ([flow] lines, RESULT logs) rides stderr; stdout is the
-        # script's return value
-        r.flow_stdout, r.flow_rc = proc.stdout + proc.stderr[-3000:], proc.returncode
+        # One node per CLI, all started before any is awaited. The task is
+        # handed over by communicate(input=…) on a thread per node: writing
+        # then closing stdin by hand and calling communicate() afterwards
+        # raises "I/O operation on closed file" on Python 3.12.
+        procs = {
+            r.member(c): subprocess.Popen(
+                ["hive", "node", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env,
+            )
+            for c in r.clis
+        }
+        deadline = time.time() + int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420"))
+        waits = {
+            r.member(c): _NodeWait(
+                procs[r.member(c)],
+                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)),
+                deadline,
+            )
+            for c in r.clis
+        }
+        for member, wait in waits.items():
+            out, err, rc = wait.result()
+            # progress rides stderr; stdout is the one JSON result line
+            result = _last_json_object(out)
+            r.node_results[member] = result
+            r.node_rcs[member] = rc
+            r.flow_stdout += f"--- {member} (rc {rc}) ---\n{err[-3000:]}\n"
+            r.flow_stdout += f"RESULT {member} {str(result.get('body', ''))[:100]}\n"
+        # A signal kill is a negative code; max() with 0 would hide it.
+        r.flow_rc = next((rc for rc in r.node_rcs.values() if rc != 0), 0)
 
         db = r.workspace / "hive.db"
         if db.exists():
@@ -199,13 +206,49 @@ def rig():
                 subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
                 subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
         # The registry keeps the team alive (hived won't exit, member
-        # daemons won't reap) — release the name explicitly.
-        for cli in r.clis:
-            subprocess.run(["hive", "kill", f"{r.team}.{r.member(cli)}"],
-                           capture_output=True, timeout=30)
-        subprocess.run(["hive", "delete", r.team], capture_output=True, timeout=30)
+        # daemons won't reap) — retire the run the way a Workflow does.
+        subprocess.run(["hive", "delete", r.team, "--down"], capture_output=True, timeout=60)
         _tmux("kill-session", "-t", r.session, check=False)
         subprocess.run(["rm", "-rf", str(r.root)], timeout=15)
+
+
+class _NodeWait:
+    """Feed one node its task and drain it on a thread, so every node is
+    fed and running concurrently; a node still running at the deadline is
+    killed and reported with what it wrote so far."""
+
+    def __init__(self, proc: subprocess.Popen, task: str, deadline: float):
+        self.proc = proc
+        self.out = self.err = ""
+        self.thread = threading.Thread(target=self._run, args=(task, deadline), daemon=True)
+        self.thread.start()
+
+    def _run(self, task: str, deadline: float) -> None:
+        try:
+            self.out, self.err = self.proc.communicate(task, timeout=max(1.0, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.out, self.err = self.proc.communicate()
+            self.err += f"\n[rig] node run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
+
+    def result(self) -> tuple[str, str, int]:
+        self.thread.join()
+        return self.out, self.err, self.proc.returncode
+
+
+def _last_json_object(stdout: str) -> dict:
+    """The node's result is its last stdout line; anything else is {}."""
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 def _drop_dim_cells(line: str) -> str:

@@ -7,7 +7,6 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
-use super::flow::task_dispatch_workspace;
 use super::util::{
     fail, json_pretty, ok_or_fail, parse_entries, resolve_artifact_path, resolve_sender,
     value_as_env_string,
@@ -355,6 +354,18 @@ fn capture_text(t: &Team, member_name: &str, lines: i64) -> Result<String> {
         .get(member_name)
         .map_err(|_| anyhow!("member '{member_name}' not found in team '{}'", t.name))?;
     agent.capture(lines.max(0) as u32)
+}
+
+/// Workspace the `--task` dispatch will ride, or None without `--task`.
+///
+/// Split out so the requirement is checked before the spawn: the dispatch
+/// needs a workspace, and discovering that after the member is registered
+/// and its engine minted leaves a half-born member on the roster.
+fn task_dispatch_workspace(t: &Team, task_artifact: Option<&str>) -> Result<Option<String>> {
+    match task_artifact {
+        Some(_) => resolve_workspace(Some(t), true).map(Some),
+        None => Ok(None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -796,5 +807,33 @@ mod tests {
             "{err}"
         );
         assert_eq!(argv.borrow().len(), 1);
+    }
+
+    #[test]
+    fn test_task_dispatch_workspace_fails_before_the_spawn_when_none_resolves() {
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        let tmp = tempfile::TempDir::new().unwrap();
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
+        let workspaceless = Team {
+            name: "hornet".to_string(),
+            ..Default::default()
+        };
+
+        // no --task: nothing is required, nothing is resolved
+        assert_eq!(task_dispatch_workspace(&workspaceless, None).unwrap(), None);
+
+        let err = task_dispatch_workspace(&workspaceless, Some("/tmp/task.md"))
+            .expect_err("a task dispatch with no workspace must refuse");
+        assert!(err.to_string().contains("workspace not found"), "{err}");
+
+        let with_workspace = Team {
+            name: "hornet".to_string(),
+            workspace: "/tmp/ws-hn".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
+            Some("/tmp/ws-hn".to_string())
+        );
     }
 }

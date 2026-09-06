@@ -39,12 +39,12 @@ Consequences across modules:
   hive owns for the team: `team.json` (the entry — present means the team
   exists), and, on the default workspace, `hive.db` (the bus), `run/`
   (`hived.sock`, `notify.jsonl`, `hived.stderr`, `cvim/`) and `artifacts/`.
-  `--workspace <DIR>` on `create` or `flow rig` puts the workspace elsewhere
-  and the entry's `workspace` field records it; `team.json` stays in the team
+  `--workspace <DIR>` on `create` puts the workspace elsewhere and the
+  entry's `workspace` field records it; `team.json` stays in the team
   directory. `create` always resets the default workspace (a pool name
-  recycled after `hive delete` must not inherit the old bus or event log);
-  `flow rig` only initializes it, so a run's op journal survives a `--down`
-  and re-rig. `hive delete` removes `team.json` and leaves the rest;
+  recycled after `hive delete` must not inherit the old bus or event log).
+  `hive delete` removes `team.json` and leaves the rest; `--down` first
+  retires every member and kills the team's tmux session;
   `--delete-workspace` removes the whole directory (or the external
   workspace); an external workspace is never removed without the flag. A
   long `HIVE_HOME` relocates the hived socket under `/tmp/hive-<uid>/` as
@@ -55,8 +55,8 @@ Consequences across modules:
   missing), `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
-  these verbs do not require the caller to have one. `flow` rides the same
-  doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
+  these verbs do not require the caller to have one. `node run` rides the
+  same doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
   the setup/launcher commands never needed a pane. The full list is
   `cli/mod.rs::TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
   fork, inject, cvim, …) acts on the current pane and refuses to run outside
@@ -110,20 +110,18 @@ creating or joined desktop/ccd session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
 steals the member's deliveries. That mirror is an ordinary pane
 tagged `@hive-role mirror` beside its member tags: the first pane of a team
-window, a pane above the dock strip in a flow rig. The mirror is display
-state only.
+window. The mirror is display state only.
 
 hive owns the team window's layout, and that too is display state. The
 planner (`layout/plan.rs`) reads the window's size and its panes' roles
-and emits one tmux layout string: a flow dock (`@hive-role dock`) is a
-full-width strip at the bottom; the mirror is a left column in a landscape
-window (`w >= 2h`) and a top row in a portrait one, half the body unless
-the members score better beside an 80-column / 24-row mirror; the members
-take the grid whose equal cells come closest to 80x24. `select-layout`
-hands cells to panes in window order, so the apply swaps the mirror first
-and the dock last before it lands. The key of the plan last applied —
-orientation, member count, mirror and dock presence, grid, mirror share,
-never absolute sizes — sits on the window as `@hive-layout`. Two window
+and emits one tmux layout string: the mirror is a left column in a
+landscape window (`w >= 2h`) and a top row in a portrait one, half the
+window unless the members score better beside an 80-column / 24-row
+mirror; the members take the grid whose equal cells come closest to
+80x24. `select-layout` hands cells to panes in window order, so the apply
+swaps the mirror first before it lands. The key of the plan last applied —
+orientation, member count, mirror presence, grid, mirror share, never
+absolute sizes — sits on the window as `@hive-layout`. Two window
 hooks (`window-resized`, `window-layout-changed`, installed wherever a
 window is marked as hive's) run `hive layout auto --on-change --window`,
 which re-plans and applies only when the key differs (the apply's flock is
@@ -133,7 +131,7 @@ the hook form and the explicit call sites yield to an apply in flight,
 leaving a rerun marker the holder consumes with one more plan, so a drag
 that fires the hook per step never queues processes; a window down to
 one pane drops its key, so the next member is planned): a client attaching
-at another size, a spawn, a kill, a mirror or dock coming and going all
+at another size, a spawn, a kill, a mirror coming and going all
 re-plan without a hived, while a human's border drag — same key — holds,
 through proportional resizes, until the plan changes. `hive layout auto`
 from a human forces the apply; an explicit preset applies as given and
@@ -158,7 +156,7 @@ status bar's orch chip and `prefix+m` run the same verb with `--window`: a
 `run-shell` job carries no `TMUX_PANE`.
 
 The team session hive builds — `hive create` outside tmux, `hive attach`
-rebuilding a lost window, `hive flow rig` — carries hive's own two-line
+rebuilding a lost window — carries hive's own two-line
 status bar, installed by session id at build (`tmux/status.rs`; `status*`
 are session options, so a window a human's session lent the team gets none
 and the human's global status is untouched). Its colours follow the
@@ -193,10 +191,11 @@ them.
 
 Of the three send address kinds, only a member names an engine with a
 transport. `ccd.<name>` reaches a Claude session outside any team over that
-session's own inbox. `flow.run` is the flow runner's mailbox, where delivery
-is the durable bus row itself: the runner polls it, owns no transport, and
-sends no ack. Mailboxes are listed under `mailboxes`, not in `members`; the
-roster holds engines only, and `flow` is a reserved prefix like `ccd`.
+session's own inbox. `flow.run` is the mailbox a `hive node run` dispatch
+names as its reply address, where delivery is the durable bus row itself:
+`run_node` polls it, owns no transport, and sends no ack. Mailboxes are
+listed under `mailboxes`, not in `members`; the roster holds engines only,
+and `flow` is a reserved prefix like `ccd`.
 
 ## Runtime fields and their sources
 

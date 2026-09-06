@@ -336,9 +336,9 @@ fn create_detached_team(
             let _ = start_team_hived(&mut t, &ws_str);
         }
         None => {
-            // No orch: the first pane is the team's dock, tagged the way a
-            // shell-pane create tags its pane (`Team::create`), so a verb
-            // run from it finds the team through its own tags — the
+            // No orch: the first pane is the team's own shell pane, tagged
+            // the way a shell-pane create tags its pane (`Team::create`), so
+            // a verb run from it finds the team through its own tags — the
             // window's `@hive-team` is display, not binding.
             tmux::tag_pane(
                 &first_pane,
@@ -998,9 +998,15 @@ fn hived_down_report(ws: &str, error: &str) -> Map<String, Value> {
     payload
 }
 
-/// Delete a team and clean up.
-pub(crate) fn delete(name: &str, workspace: &str, delete_workspace: bool) {
-    ok_or_fail(crate::team::delete_team(name, workspace, delete_workspace));
+/// Delete a team and clean up; `--down` retires every member first and
+/// kills the team's tmux session after.
+pub(crate) fn delete(name: &str, workspace: &str, delete_workspace: bool, down: bool) {
+    ok_or_fail(crate::team::delete_team(
+        name,
+        workspace,
+        delete_workspace,
+        down,
+    ));
 }
 
 mod ls;

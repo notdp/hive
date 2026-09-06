@@ -108,9 +108,10 @@ pub trait SessionAdapter {
 
 /// The spawner's env with every inherited identity marker washed, for a
 /// daemon that serves tool shells of its own: the spawner may itself run
-/// inside another member's engine (an orch's flow runner), and an inherited
-/// CLAUDE_CODE_MESSAGING_SOCKET — or any other CLAUDE*/ANTHROPIC* marker —
-/// would make every hive call from those shells resolve to the *spawner*.
+/// inside another member's engine (an orch's `hive node run`), and an
+/// inherited CLAUDE_CODE_MESSAGING_SOCKET — or any other CLAUDE*/ANTHROPIC*
+/// marker — would make every hive call from those shells resolve to the
+/// *spawner*.
 /// *drop* names the caller's further markers to wash by exact key.
 pub(crate) fn washed_spawner_env(drop: &[&str]) -> HashMap<String, String> {
     std::env::vars_os()

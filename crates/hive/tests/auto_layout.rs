@@ -307,7 +307,7 @@ fn test_layout_hooks_replan_on_flip_keep_a_drag_through_a_proportional_resize_an
         payload["orientation"],
         Value::String("landscape".to_string())
     );
-    assert_eq!(landscape.key, "landscape/m2/mirror-half/no-dock/1x2");
+    assert_eq!(landscape.key, "landscape/m2/mirror-half/1x2");
     assert_eq!(rig.layout(&window), landscape.layout);
     assert_eq!(rig.key(&window), landscape.key);
     let panes = rig.panes(&window);
@@ -321,7 +321,7 @@ fn test_layout_hooks_replan_on_flip_keep_a_drag_through_a_proportional_resize_an
     // re-plans without a hive call from here, and every pane sits at x=0.
     rig.tmux_ok(&["resize-window", "-t", &window, "-x", "100", "-y", "90"]);
     let portrait = rig.plan(&window, (100, 90));
-    assert_eq!(portrait.key, "portrait/m2/mirror-min/no-dock/1x2");
+    assert_eq!(portrait.key, "portrait/m2/mirror-min/1x2");
     rig.wait_for_plan(&window, &portrait)
         .unwrap_or_else(|seen| panic!("portrait plan never applied; saw {seen:?}"));
     assert_eq!(rig.key(&window), portrait.key);
@@ -363,7 +363,7 @@ fn test_layout_hooks_replan_on_flip_keep_a_drag_through_a_proportional_resize_an
     // re-planned by the hook alone.
     rig.tmux_ok(&["kill-pane", "-t", &member_b]);
     let one = rig.plan(&window, (200, 55));
-    assert_eq!(one.key, "landscape/m1/mirror-half/no-dock/1x1");
+    assert_eq!(one.key, "landscape/m1/mirror-half/1x1");
     rig.wait_for_plan(&window, &one)
         .unwrap_or_else(|seen| panic!("re-plan after kill never applied; saw {seen:?}"));
     assert_eq!(rig.key(&window), one.key);
