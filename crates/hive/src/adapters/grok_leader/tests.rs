@@ -549,53 +549,31 @@ fn test_activity_working_marks_busy_and_idle_closes_turn() {
     );
     proc.feed(&activity("idle"));
     let runtime = settle(&client, |rt| !rt.busy);
-    assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_message_chunks_mark_user_prompt_pending() {
+fn test_message_chunks_mark_busy() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&update(
         "agent_thought_chunk",
         json!({"content": {"type": "text", "text": "The"}}),
     ));
-    let runtime = settle(&client, |rt| rt.busy);
-    assert_eq!(runtime.turn_phase, "user_prompt_pending");
+    settle(&client, |rt| rt.busy);
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_tool_call_phases_survive_streamed_chunks() {
+fn test_tool_call_marks_busy() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&update(
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    assert!(settle(&client, |rt| rt.turn_phase == "tool_open").busy);
-    proc.feed(&update(
-        "tool_call_update",
-        json!({"toolCallId": "c1", "status": "completed"}),
-    ));
-    settle(&client, |rt| rt.turn_phase == "tool_result_pending_reply");
-    proc.feed(&update(
-        "agent_message_chunk",
-        json!({"content": {"type": "text", "text": "done"}}),
-    ));
-    // The reader applies lines in order: once this permission request has
-    // landed (input_state moves off "ready"), the chunk before it has been
-    // applied too.
-    proc.feed(&json!({
-        "jsonrpc": "2.0",
-        "id": 79,
-        "method": "session/request_permission",
-        "params": {"sessionId": SID, "toolCall": {"toolCallId": "c2"}, "options": []},
-    }));
-    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
-    assert_eq!(runtime.turn_phase, "tool_result_pending_reply");
+    settle(&client, |rt| rt.busy);
     teardown(&client, &proc);
 }
 
@@ -648,24 +626,7 @@ fn test_turn_completed_clears_busy() {
         },
     }));
     let runtime = settle(&client, |rt| !rt.busy);
-    assert_eq!(runtime.turn_phase, "turn_closed");
     assert_eq!(runtime.input_state, "ready");
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_queued_entries_mark_input_backlog() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    proc.feed(&json!({
-        "jsonrpc": "2.0",
-        "method": "_x.ai/queue/changed",
-        "params": {
-            "sessionId": SID,
-            "entries": [{"id": "p1", "kind": "prompt", "text": "next", "position": 0}],
-        },
-    }));
-    settle(&client, |rt| rt.turn_phase == "input_backlog");
     teardown(&client, &proc);
 }
 
@@ -677,7 +638,7 @@ fn test_other_session_notifications_are_ignored() {
         "tool_call",
         json!({"toolCallId": "c1", "status": "pending"}),
     ));
-    let baseline = settle(&client, |rt| rt.turn_phase == "tool_open");
+    let baseline = settle(&client, |rt| rt.busy);
     proc.feed(&activity_for("idle", "other-session"));
     proc.feed(&update_for(
         "other-session",
@@ -689,8 +650,7 @@ fn test_other_session_notifications_are_ignored() {
     proc.feed(&activity("working"));
     let runtime = settle(&client, |rt| rt.observed_at > baseline.observed_at);
     assert!(runtime.busy);
-    assert_eq!(runtime.turn_phase, "tool_open"); // the foreign idle never closed it
-    assert_eq!(runtime.input_state, "");
+    assert_eq!(runtime.input_state, ""); // the foreign idle never closed it
     teardown(&client, &proc);
 }
 
@@ -712,7 +672,6 @@ fn test_unknown_updates_are_ignored() {
     }));
     let runtime = settle(&client, |rt| rt.observed_at > first.observed_at);
     assert!(!runtime.busy);
-    assert_eq!(runtime.turn_phase, "unknown_evidence");
     teardown(&client, &proc);
 }
 

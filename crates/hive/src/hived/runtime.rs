@@ -13,12 +13,11 @@ use crate::runtime_snapshot::RuntimeSnapshot;
 
 use super::*;
 
-/// The busy/turn/input triple the codex app-server and grok leader runtimes
-/// report, as runtime fields. `waiting_reason` names why that source parks on
+/// The busy/input pair the codex app-server and grok leader runtimes report,
+/// as runtime fields. `waiting_reason` names why that source parks on
 /// `waiting_user`; `source` is its `_runtimeSource` label.
 fn daemon_runtime_fields(
     busy: bool,
-    turn_phase: &str,
     input_state: &str,
     waiting_reason: &str,
     source: &str,
@@ -30,7 +29,6 @@ fn daemon_runtime_fields(
     };
     let mut fields = Map::new();
     fields.insert("busy".to_string(), Value::Bool(busy));
-    fields.insert("turnPhase".to_string(), Value::from(turn_phase));
     fields.insert("inputState".to_string(), Value::from(input_state));
     fields.insert(
         "inputReason".to_string(),
@@ -49,7 +47,6 @@ fn codex_runtime_fields(
 ) -> Map<String, Value> {
     daemon_runtime_fields(
         rt.busy,
-        &rt.turn_phase,
         &rt.input_state,
         "app_server_active_flag",
         "codex_app_server",
@@ -59,7 +56,6 @@ fn codex_runtime_fields(
 fn grok_runtime_fields(rt: &crate::adapters::grok_leader::SessionRuntime) -> Map<String, Value> {
     daemon_runtime_fields(
         rt.busy,
-        &rt.turn_phase,
         &rt.input_state,
         "leader_permission_request",
         "grok-leader",

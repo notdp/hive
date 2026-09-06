@@ -98,7 +98,7 @@ Examples:
   # Team lifecycle
   hive create                                  # make this pane the orch of a new team
   hive spawn explore --task /tmp/task.md       # spawn a member and dispatch its task atomically
-  hive team                                    # members + runtime state (busy / inputState / turnPhase)
+  hive team                                    # members + runtime state (busy / inputState)
 
   # Messaging (root thread: body is a short summary, details go in --artifact)
   hive send dodo "review this diff" --artifact /tmp/diff.md
@@ -708,9 +708,9 @@ Options:
   Returns a JSON payload with `members[]`, `self` (your own name), the bound
   `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.
 
-  Each member row carries the runtime fields `busy`, `inputState`, and
-  `turnPhase` — see docs/runtime-model.md for semantics. `self` is a string
-  pointer: look yourself up in `members[]` for your own state.
+  Each member row carries the runtime fields `busy` and `inputState` — see
+  docs/runtime-model.md for semantics. `self` is a string pointer: look
+  yourself up in `members[]` for your own state.
 
   If the current tmux window has no team bound, returns a bootstrap payload
   instead: `team=null`, a pane list, and a `hint` telling you to run `hive

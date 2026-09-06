@@ -171,10 +171,6 @@ pub(crate) fn doctor_payload(
             Value::Bool(busy.as_bool().unwrap_or(false)),
         );
     }
-    let turn_phase = map_get_str(&runtime, "turnPhase");
-    if !turn_phase.is_empty() {
-        diag.insert("turnPhase".to_string(), Value::from(turn_phase));
-    }
     if verbose {
         diag.insert("pane".to_string(), Value::from(target.pane_id.clone()));
         diag.insert("teamMembers".to_string(), Value::from(team.agents.len()));

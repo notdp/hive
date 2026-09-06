@@ -492,7 +492,7 @@ fn test_turn_open_payload_reads_the_grok_pools_busy_flag() {
             ))
         })),
         gl_runtime_for_key: Some(Arc::new(|key| match key {
-            "m-honey.g" => Some(session_runtime(true, "tool_open", "ready")),
+            "m-honey.g" => Some(session_runtime(true, "ready")),
             _ => None,
         })),
         ..Default::default()
@@ -524,7 +524,7 @@ fn test_handle_request_turn_open_answers_for_the_team() {
         })),
         gl_runtime_for_key: Some(Arc::new(|key| {
             assert_eq!(key, "m-honey.g");
-            Some(session_runtime(false, "turn_closed", "ready"))
+            Some(session_runtime(false, "ready"))
         })),
         ..Default::default()
     };
@@ -1159,10 +1159,9 @@ fn test_claude_supervisor_tick_treats_empty_listing_as_tmux_failure() {
 
 // ---- codex runtime -----------------------------------------------------
 
-fn thread_runtime(busy: bool, turn_phase: &str, input_state: &str) -> ThreadRuntime {
+fn thread_runtime(busy: bool, input_state: &str) -> ThreadRuntime {
     ThreadRuntime {
         busy,
-        turn_phase: turn_phase.to_string(),
         input_state: input_state.to_string(),
         ..Default::default()
     }
@@ -1170,7 +1169,7 @@ fn thread_runtime(busy: bool, turn_phase: &str, input_state: &str) -> ThreadRunt
 
 #[test]
 fn test_codex_app_server_runtime_maps_fields() {
-    let rt = thread_runtime(true, "tool_open", "ready");
+    let rt = thread_runtime(true, "ready");
     let hook = Hook {
         cas_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1178,7 +1177,6 @@ fn test_codex_app_server_runtime_maps_fields() {
     let _guard = testhook::install(hook);
     let out = codex_app_server_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
-    assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
     assert_eq!(out["_runtimeSource"], Value::from("codex_app_server"));
 }
@@ -1195,7 +1193,7 @@ fn test_codex_app_server_runtime_none_without_daemon() {
 
 #[test]
 fn test_codex_app_server_runtime_waiting_user() {
-    let rt = thread_runtime(true, "tool_open", "waiting_user");
+    let rt = thread_runtime(true, "waiting_user");
     let hook = Hook {
         cas_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1250,10 +1248,9 @@ fn test_doctor_verbose_reports_codex_daemon() {
 
 // ---- grok runtime ------------------------------------------------------
 
-fn session_runtime(busy: bool, turn_phase: &str, input_state: &str) -> SessionRuntime {
+fn session_runtime(busy: bool, input_state: &str) -> SessionRuntime {
     SessionRuntime {
         busy,
-        turn_phase: turn_phase.to_string(),
         input_state: input_state.to_string(),
         ..Default::default()
     }
@@ -1261,7 +1258,7 @@ fn session_runtime(busy: bool, turn_phase: &str, input_state: &str) -> SessionRu
 
 #[test]
 fn test_grok_leader_runtime_maps_fields() {
-    let rt = session_runtime(true, "tool_open", "ready");
+    let rt = session_runtime(true, "ready");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1269,7 +1266,6 @@ fn test_grok_leader_runtime_maps_fields() {
     let _guard = testhook::install(hook);
     let out = grok_leader_runtime("%5").unwrap();
     assert_eq!(out["busy"], Value::Bool(true));
-    assert_eq!(out["turnPhase"], Value::from("tool_open"));
     assert_eq!(out["inputState"], Value::from("ready"));
     assert_eq!(out["inputReason"], Value::from(""));
     assert_eq!(out["_runtimeSource"], Value::from("grok-leader"));
@@ -1287,7 +1283,7 @@ fn test_grok_leader_runtime_none_without_daemon() {
 
 #[test]
 fn test_grok_leader_runtime_defaults_empty_input_state_to_ready() {
-    let rt = session_runtime(true, "user_prompt_pending", "");
+    let rt = session_runtime(true, "");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1301,7 +1297,7 @@ fn test_grok_leader_runtime_defaults_empty_input_state_to_ready() {
 
 #[test]
 fn test_grok_leader_runtime_waiting_user() {
-    let rt = session_runtime(true, "tool_open", "waiting_user");
+    let rt = session_runtime(true, "waiting_user");
     let hook = Hook {
         gl_runtime_for_pane: Some(Arc::new(move |_p| Some(rt.clone()))),
         ..Default::default()
@@ -1327,21 +1323,20 @@ fn live_grok_pane(runtime: Option<SessionRuntime>, session_id: Option<String>) -
 #[test]
 fn test_agent_payload_grok_branch_reports_minted_session() {
     let hook = live_grok_pane(
-        Some(session_runtime(true, "tool_open", "ready")),
+        Some(session_runtime(true, "ready")),
         Some("sid-grok-1".to_string()),
     );
     let _guard = testhook::install(hook);
     let rt = agent_runtime_payload("%5", None);
     assert_eq!(rt["cliAlive"], Value::Bool(true));
     assert_eq!(rt["busy"], Value::Bool(true));
-    assert_eq!(rt["turnPhase"], Value::from("tool_open"));
     assert_eq!(rt["_runtimeSource"], Value::from("grok-leader"));
     assert_eq!(rt["sessionId"], Value::from("sid-grok-1"));
 }
 
 #[test]
 fn test_agent_payload_grok_session_unresolved_without_record() {
-    let hook = live_grok_pane(Some(session_runtime(false, "turn_closed", "ready")), None);
+    let hook = live_grok_pane(Some(session_runtime(false, "ready")), None);
     let _guard = testhook::install(hook);
     assert_eq!(
         agent_runtime_payload("%5", None)["sessionId"],
@@ -4517,7 +4512,7 @@ fn test_headless_member_runtime_grok() {
     let hook = Hook {
         gl_runtime_for_key: Some(Arc::new(|key| {
             if key == "m-honey.rex" {
-                Some(session_runtime(true, "tool_open", "ready"))
+                Some(session_runtime(true, "ready"))
             } else {
                 None
             }
