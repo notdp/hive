@@ -26,8 +26,6 @@ pub(crate) fn clip(text: &str, limit: usize) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HiveMessage {
     pub from: Option<String>,
-    pub msg_id: Option<String>,
-    pub reply_to: Option<String>,
     pub artifact: Option<String>,
     pub body: String,
     /// The envelope arrived inside claude's peer-message wrapper rather than
@@ -109,8 +107,6 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
     }
     let mut msg = HiveMessage {
         from: None,
-        msg_id: None,
-        reply_to: None,
         artifact: None,
         body: core[gt + 1..body_end].trim().to_string(),
         injected,
@@ -124,10 +120,10 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
         if value.is_empty() {
             continue;
         }
+        // Unknown attrs (the retired `msgId`/`reply-to` in old transcripts
+        // among them) are skipped, not errors.
         let slot = match key {
             "from" => &mut msg.from,
-            "msgId" => &mut msg.msg_id,
-            "reply-to" => &mut msg.reply_to,
             "artifact" => &mut msg.artifact,
             _ => continue,
         };

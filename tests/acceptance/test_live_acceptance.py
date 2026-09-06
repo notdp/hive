@@ -47,7 +47,7 @@ def test_exactly_one_reply_per_dispatch(rig):
         replies = rig.replies_for(member)
         assert len(replies) == 1, (
             f"{member}: {len(replies)} replies on one dispatch "
-            f"(first bodies: {[str(r[4])[:40] for r in replies[:3]]})"
+            f"(first bodies: {[str(r[3])[:40] for r in replies[:3]]})"
         )
 
 
@@ -83,7 +83,7 @@ def test_semantic_coroner(rig):
     """Headless claude reads what the human reads, against the rubric."""
     material = {
         "bus": [
-            {"msgId": r[0], "from": r[1], "to": r[2], "inReplyTo": r[3], "body": str(r[4])[:200]}
+            {"seq": r[0], "from": r[1], "to": r[2], "body": str(r[3])[:200]}
             for r in rig.bus_rows
         ],
         "flow_log": rig.flow_stdout[-2000:],

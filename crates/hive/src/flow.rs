@@ -79,9 +79,10 @@ pub trait FlowEnv: Send + Sync {
     fn ensure_hived(&self);
     /// Agents still not ready when the gate expires.
     fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String>;
-    /// Send as `flow.run`; returns the msgId.
-    fn send(&self, target: &str, body: &str, artifact: &str) -> Result<String, String>;
-    fn find_reply(&self, msg_id: &str, from: &str) -> Result<Option<Event>, FlowError>;
+    /// Send as `flow.run`; returns the bus seq of the dispatch row.
+    fn send(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String>;
+    /// The first `from` → `flow.run` row after `seq`: the reply, by order.
+    fn find_reply(&self, seq: i64, from: &str) -> Result<Option<Event>, FlowError>;
     /// Runtime liveness (`Team::member_alive`): can this member still take a
     /// dispatch and answer.
     fn alive(&self, name: &str) -> bool;
@@ -137,7 +138,7 @@ pub enum FlowOp {
     },
     WaitReply {
         name: String,
-        msg_id: String,
+        seq: i64,
     },
     Kill {
         name: String,
@@ -188,16 +189,11 @@ fn task_artifact(env: &dyn FlowEnv, name: &str, text: &str) -> Result<String, Fl
 /// Send with bounded retries: a cloud-backed transport can refuse
 /// transiently under provider throttling, and a single blip must not kill
 /// a whole orchestration. Still loud on exhaustion.
-fn dispatch(
-    env: &dyn FlowEnv,
-    name: &str,
-    body: &str,
-    artifact: &str,
-) -> Result<String, FlowError> {
+fn dispatch(env: &dyn FlowEnv, name: &str, body: &str, artifact: &str) -> Result<i64, FlowError> {
     let mut last = String::new();
     for attempt in 0..ATTEMPTS {
         match env.send(name, body, artifact) {
-            Ok(msg_id) => return Ok(msg_id),
+            Ok(seq) => return Ok(seq),
             Err(exc) => {
                 last = exc;
                 if attempt + 1 < ATTEMPTS {
@@ -215,15 +211,16 @@ fn dispatch(
     )))
 }
 
-/// Block until `name`'s reply anchored to `msg_id` lands on the bus, or the
-/// member dies first — a dead member's reply never comes, so that is a
+/// Block until `name`'s reply — its first send to the mailbox after the
+/// dispatch at `seq`; the runner is serial per member, so order is the
+/// link — lands on the bus, or the member dies first — a dead member's reply never comes, so that is a
 /// terminal error, not a longer wait. No other timeout by design: the
 /// members are visible panes and the human is the supervisor.
-fn await_reply(env: &dyn FlowEnv, name: &str, msg_id: &str) -> Result<Event, FlowError> {
+fn await_reply(env: &dyn FlowEnv, name: &str, seq: i64) -> Result<Event, FlowError> {
     loop {
         // Reply first: a member that replied and then retired still
         // delivered.
-        if let Some(row) = env.find_reply(msg_id, name)? {
+        if let Some(row) = env.find_reply(seq, name)? {
             return Ok(row);
         }
         if !env.alive(name) {
@@ -290,7 +287,6 @@ fn reply_map(row: Event) -> Map<String, Value> {
     let mut result = Map::new();
     result.insert("body".to_string(), Value::String(row.body));
     result.insert("artifact".to_string(), Value::String(row.artifact));
-    result.insert("msgId".to_string(), Value::String(row.msg_id));
     result
 }
 
@@ -315,7 +311,7 @@ pub fn run_op(env: &dyn FlowEnv, op: &FlowOp) -> Result<Map<String, Value>, Flow
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let msg_id = dispatch(
+            let seq = dispatch(
                 env,
                 name,
                 &format!(
@@ -323,7 +319,7 @@ pub fn run_op(env: &dyn FlowEnv, op: &FlowOp) -> Result<Map<String, Value>, Flow
                 ),
                 &artifact,
             )?;
-            result.insert("msgId".to_string(), Value::String(msg_id));
+            result.insert("seq".to_string(), Value::from(seq));
             result.insert("artifact".to_string(), Value::String(artifact));
         }
         FlowOp::DispatchAsk { name, prompt } => {
@@ -340,11 +336,11 @@ pub fn run_op(env: &dyn FlowEnv, op: &FlowOp) -> Result<Map<String, Value>, Flow
             } else {
                 (prompt.clone(), String::new())
             };
-            let msg_id = dispatch(env, name, &body, &artifact)?;
-            result.insert("msgId".to_string(), Value::String(msg_id));
+            let seq = dispatch(env, name, &body, &artifact)?;
+            result.insert("seq".to_string(), Value::from(seq));
         }
-        FlowOp::WaitReply { name, msg_id } => {
-            result = reply_map(await_reply(env, name, msg_id)?);
+        FlowOp::WaitReply { name, seq } => {
+            result = reply_map(await_reply(env, name, *seq)?);
         }
         FlowOp::Kill { name } => env.retire(name),
     }
@@ -425,16 +421,9 @@ pub fn run_node(env: &dyn FlowEnv, spec: &NodeSpec) -> Result<Map<String, Value>
             return Err(err);
         }
     };
-    let msg_id = dispatched
-        .get("msgId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    log(&format!(
-        "{} dispatched ({msg_id}); waiting for reply",
-        spec.name
-    ));
-    let mut result = reply_map(await_reply(env, &spec.name, &msg_id)?);
+    let seq = dispatched.get("seq").and_then(Value::as_i64).unwrap_or(0);
+    log(&format!("{} dispatched; waiting for reply", spec.name));
+    let mut result = reply_map(await_reply(env, &spec.name, seq)?);
     result.insert("status".to_string(), Value::String("replied".into()));
     result.insert("name".to_string(), Value::String(spec.name.clone()));
     result.insert("pane".to_string(), Value::String(pane));
@@ -563,7 +552,7 @@ impl FlowEnv for RealEnv {
         }
     }
 
-    fn send(&self, target: &str, body: &str, artifact: &str) -> Result<String, String> {
+    fn send(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
         self.with_ctx(|c| {
             crate::send::request_send_payload(
                 &c.workspace,
@@ -572,23 +561,19 @@ impl FlowEnv for RealEnv {
                 target,
                 body,
                 artifact,
-                "",
                 "flow-dispatch",
                 false,
             )
-            .map(|payload| match payload.get("msgId") {
-                Some(Value::String(s)) => s.clone(),
-                _ => String::new(),
-            })
+            .map(|payload| payload.get("seq").and_then(Value::as_i64).unwrap_or(0))
             .map_err(|e| e.to_string())
         })
         .map_err(|e| e.0)
         .and_then(|inner| inner)
     }
 
-    fn find_reply(&self, msg_id: &str, from: &str) -> Result<Option<Event>, FlowError> {
+    fn find_reply(&self, seq: i64, from: &str) -> Result<Option<Event>, FlowError> {
         let ctx = self.context()?;
-        crate::bus::find_reply_to(&ctx.workspace, msg_id, from)
+        crate::bus::first_send_after(&ctx.workspace, seq, from, FLOW_SENDER)
             .map_err(|e| FlowError(e.to_string()))
     }
 
@@ -652,8 +637,8 @@ pub(crate) mod test_env {
         pub dispatch_err: String,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub dispatches: Mutex<Vec<DispatchCall>>,
-        pub awaits: Mutex<Vec<(String, String)>>,
-        pub replies: Mutex<HashMap<String, Event>>,
+        pub awaits: Mutex<Vec<(String, i64)>>,
+        pub replies: Mutex<HashMap<i64, Event>>,
         pub msg_seq: AtomicU32,
         pub spawn_calls: AtomicU32,
         pub send_calls: AtomicU32,
@@ -684,15 +669,12 @@ pub(crate) mod test_env {
         }
     }
 
-    pub(crate) fn reply_row(body: &str, artifact: &str, msg_id: &str) -> Event {
+    pub(crate) fn reply_row(body: &str, artifact: &str, seq: i64) -> Event {
         Event {
+            seq,
             from: String::new(),
             to: String::new(),
-            intent: "send".to_string(),
-            metadata: Map::new(),
             created_at: String::new(),
-            msg_id: msg_id.to_string(),
-            in_reply_to: String::new(),
             body: body.to_string(),
             artifact: artifact.to_string(),
         }
@@ -740,33 +722,26 @@ pub(crate) mod test_env {
             }
         }
 
-        fn send(&self, target: &str, body: &str, artifact: &str) -> Result<String, String> {
+        fn send(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
             let n = self.send_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if n <= self.dispatch_fail_first {
                 return Err(self.dispatch_err.clone());
             }
-            let msg_id = format!("m{}", self.msg_seq.fetch_add(1, Ordering::SeqCst) + 1);
+            let seq = i64::from(self.msg_seq.fetch_add(1, Ordering::SeqCst) + 1);
             self.dispatches.lock().unwrap().push(DispatchCall {
                 target: target.to_string(),
                 body: body.to_string(),
                 artifact: artifact.to_string(),
             });
-            Ok(msg_id)
+            Ok(seq)
         }
 
-        fn find_reply(&self, msg_id: &str, from: &str) -> Result<Option<Event>, FlowError> {
-            self.awaits
-                .lock()
-                .unwrap()
-                .push((from.to_string(), msg_id.to_string()));
+        fn find_reply(&self, seq: i64, from: &str) -> Result<Option<Event>, FlowError> {
+            self.awaits.lock().unwrap().push((from.to_string(), seq));
             if self.reply_any {
-                return Ok(Some(reply_row(
-                    &format!("done-{msg_id}"),
-                    "",
-                    &format!("r-{msg_id}"),
-                )));
+                return Ok(Some(reply_row(&format!("done-{seq}"), "", seq + 100)));
             }
-            Ok(self.replies.lock().unwrap().get(msg_id).cloned())
+            Ok(self.replies.lock().unwrap().get(&seq).cloned())
         }
 
         fn alive(&self, name: &str) -> bool {
@@ -823,7 +798,7 @@ mod tests {
         assert_eq!(
             FlowOp::WaitReply {
                 name: "w".into(),
-                msg_id: "m".into()
+                seq: 1
             }
             .member(),
             "w"
@@ -855,7 +830,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(r["msgId"], "m1");
+        assert_eq!(r["seq"], 1);
         let artifact = r["artifact"].as_str().unwrap();
         assert_eq!(
             fs::read_to_string(artifact).unwrap(),
@@ -871,23 +846,20 @@ mod tests {
         env.replies
             .lock()
             .unwrap()
-            .insert("m1".into(), reply_row("done", "/tmp/f.md", "r1"));
+            .insert(1, reply_row("done", "/tmp/f.md", 2));
         let r = run_op(
             &env,
             &FlowOp::WaitReply {
                 name: "impl".into(),
-                msg_id: "m1".into(),
+                seq: 1,
             },
         )
         .unwrap();
         assert_eq!(r["body"], "done");
         assert_eq!(r["artifact"], "/tmp/f.md");
-        assert_eq!(r["msgId"], "r1");
+        assert!(r.get("msgId").is_none());
         // the wait is scoped to the member
-        assert_eq!(
-            *env.awaits.lock().unwrap(),
-            vec![("impl".to_string(), "m1".to_string())]
-        );
+        assert_eq!(*env.awaits.lock().unwrap(), vec![("impl".to_string(), 1)]);
 
         run_op(
             &env,
@@ -950,7 +922,7 @@ mod tests {
             &env,
             &FlowOp::WaitReply {
                 name: "impl".into(),
-                msg_id: "m9".into(),
+                seq: 9,
             },
         )
         .unwrap_err();
@@ -959,12 +931,12 @@ mod tests {
         env.replies
             .lock()
             .unwrap()
-            .insert("m9".into(), reply_row("late", "", "r9"));
+            .insert(9, reply_row("late", "", 10));
         let r = run_op(
             &env,
             &FlowOp::WaitReply {
                 name: "impl".into(),
-                msg_id: "m9".into(),
+                seq: 9,
             },
         )
         .unwrap();
@@ -1151,7 +1123,7 @@ mod tests {
     // the fake `team/mod.rs` uses in test builds.
 
     #[test]
-    fn test_real_env_send_and_find_reply_are_anchored_by_msg_id() {
+    fn test_real_env_send_and_find_reply_follow_bus_order() {
         use crate::hived::testhook::Hook as HivedHook;
         use crate::hived::HivedServerApi;
         use std::sync::{Arc, Mutex};
@@ -1260,29 +1232,32 @@ mod tests {
 
         let first = env.send("b", "first task", "/art/1").unwrap();
         let second = env.send("b", "second task", "/art/2").unwrap();
-        assert!(!first.is_empty());
+        assert!(first > 0);
         assert_ne!(first, second);
         let events = crate::bus::read_all_events(&workspace).unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].msg_id, first);
+        assert_eq!(events[0].seq, first);
         assert_eq!(events[0].from, FLOW_SENDER);
         assert_eq!(events[0].to, "b");
         assert_eq!(events[0].body, "first task");
         assert_eq!(events[0].artifact, "/art/1");
-        assert_eq!(events[0].in_reply_to, "");
-        assert_eq!(events[1].msg_id, second);
+        assert_eq!(events[1].seq, second);
         {
             let handed = handed.lock().unwrap();
             assert_eq!(handed.len(), 2);
-            assert!(handed[0].0.contains(&first), "{}", handed[0].0);
+            // The envelope carries sender, body and artifact — and no id.
+            assert!(handed[0].0.contains("first task"), "{}", handed[0].0);
+            assert!(!handed[0].0.contains("msgId"), "{}", handed[0].0);
             assert_eq!(handed[0].1, FLOW_SENDER);
         }
 
         // No reply yet: neither dispatch resolves.
-        assert!(env.find_reply(&first, "b").unwrap().is_none());
-        assert!(env.find_reply(&second, "b").unwrap().is_none());
+        assert!(env.find_reply(first, "b").unwrap().is_none());
+        assert!(env.find_reply(second, "b").unwrap().is_none());
 
-        // A reply anchored to the second dispatch resolves only that one.
+        // The reply is the member's first send to the mailbox after the
+        // dispatch — order, not a link — so a row written now answers both
+        // (the runner never has two dispatches open on one member).
         let nonce = format!("nonce-{}-{}", std::process::id(), second);
         let reply = crate::bus::write_send_event(
             &workspace,
@@ -1290,21 +1265,21 @@ mod tests {
             FLOW_SENDER,
             &format!("done {nonce}"),
             "",
-            None,
-            &second,
         )
         .unwrap();
-        assert!(env.find_reply(&first, "b").unwrap().is_none());
         let found = env
-            .find_reply(&second, "b")
+            .find_reply(second, "b")
             .unwrap()
             .expect("reply to second");
-        assert_eq!(found.msg_id, reply.msg_id);
-        assert_eq!(found.in_reply_to, second);
+        assert_eq!(found.seq, reply);
         assert_eq!(found.from, "b");
         assert_eq!(found.body, format!("done {nonce}"));
+        assert_eq!(env.find_reply(first, "b").unwrap().unwrap().seq, reply);
+        // A dispatch after the reply is open again.
+        let third = env.send("b", "third task", "").unwrap();
+        assert!(env.find_reply(third, "b").unwrap().is_none());
         // `from` scopes the match: another member's name finds nothing.
-        assert!(env.find_reply(&second, "c").unwrap().is_none());
+        assert!(env.find_reply(second, "c").unwrap().is_none());
 
         assert!(
             real_tmux_argv.borrow().is_empty(),

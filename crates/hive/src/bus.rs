@@ -5,22 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 pub const WORKSPACE_DIRS: [&str; 3] = ["artifacts", "state", "run"];
 pub const DB_FILENAME: &str = "hive.db";
-
-const MSG_ID_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const MSG_ID_WIDTH: usize = 4;
-// Keep short IDs non-obvious without introducing collisions inside the 4-char space.
-const MSG_ID_MULTIPLIER: i64 = 131071;
-const MSG_ID_OFFSET: i64 = 8191;
-
-fn msg_id_space() -> i64 {
-    (MSG_ID_ALPHABET.len() as i64).pow(MSG_ID_WIDTH as u32)
-}
 
 pub(crate) fn now_iso() -> String {
     format!("{}Z", crate::clock::utc_now_iso_seconds())
@@ -40,39 +30,6 @@ fn db_path(workspace: &Path) -> PathBuf {
     expanduser(workspace).join(DB_FILENAME)
 }
 
-fn encode_base62(value: i64) -> String {
-    debug_assert!(value >= 0, "value must be non-negative");
-    if value == 0 {
-        return (MSG_ID_ALPHABET[0] as char).to_string();
-    }
-    let base = MSG_ID_ALPHABET.len() as i64;
-    let mut encoded: Vec<u8> = Vec::new();
-    let mut current = value;
-    while current > 0 {
-        let digit = (current % base) as usize;
-        current /= base;
-        encoded.push(MSG_ID_ALPHABET[digit]);
-    }
-    encoded.reverse();
-    String::from_utf8(encoded).unwrap()
-}
-
-/// Derive a short deterministic msgId from the durable row sequence.
-pub fn format_msg_id(event_seq: i64) -> Result<String> {
-    if event_seq <= 0 {
-        bail!("event_seq must be positive");
-    }
-    if event_seq < msg_id_space() {
-        let mixed = (event_seq * MSG_ID_MULTIPLIER + MSG_ID_OFFSET) % msg_id_space();
-        return Ok(format!(
-            "{:0>width$}",
-            encode_base62(mixed),
-            width = MSG_ID_WIDTH
-        ));
-    }
-    Ok(encode_base62(event_seq))
-}
-
 /// Open a sqlite connection (schema initialized, WAL, 30s busy timeout).
 fn connect(workspace: &Path) -> Result<Connection> {
     let ws = expanduser(workspace);
@@ -86,26 +43,18 @@ fn connect(workspace: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventWriteResult {
-    pub seq: i64,
-    pub msg_id: String,
-}
-
 /// A bus event as read back from a row. Field order is the JSON output
-/// order; empty optional fields are omitted from JSON.
+/// order; empty optional fields are omitted from JSON. The ledger knows
+/// three things about a message — its `seq`, who sent it, who it went to —
+/// and nothing about what it answers; a "reply" is whatever the reader
+/// derives from that order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
+    pub seq: i64,
     pub from: String,
     pub to: String,
-    pub intent: String,
-    pub metadata: Map<String, Value>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
-    #[serde(rename = "msgId", skip_serializing_if = "String::is_empty")]
-    pub msg_id: String,
-    #[serde(rename = "inReplyTo", skip_serializing_if = "String::is_empty")]
-    pub in_reply_to: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub body: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -116,37 +65,25 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS messages (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            msg_id TEXT NOT NULL DEFAULT '',
             from_agent TEXT NOT NULL,
             to_agent TEXT NOT NULL,
-            intent TEXT NOT NULL,
             body TEXT NOT NULL DEFAULT '',
             artifact TEXT NOT NULL DEFAULT '',
-            in_reply_to TEXT NOT NULL DEFAULT '',
-            metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq
-            ON messages(msg_id, intent, seq);",
+        CREATE INDEX IF NOT EXISTS idx_messages_route
+            ON messages(from_agent, to_agent, seq);",
     )?;
     Ok(())
 }
 
 fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
-    let metadata_raw: String = row.get("metadata_json")?;
-    let metadata = match serde_json::from_str::<Value>(&metadata_raw) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
-    };
     Ok(Event {
+        seq: row.get("seq")?,
         from: row.get("from_agent")?,
         to: row.get("to_agent")?,
-        intent: row.get("intent")?,
-        metadata,
         created_at: row.get("created_at")?,
-        msg_id: row.get("msg_id")?,
-        in_reply_to: row.get("in_reply_to")?,
         body: row.get("body")?,
         artifact: row.get("artifact")?,
     })
@@ -206,103 +143,28 @@ pub fn parse_key_value(entries: &[String]) -> Result<Map<String, Value>> {
     Ok(data)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn write_event(
-    workspace: impl AsRef<Path>,
-    from_agent: &str,
-    to_agent: &str,
-    intent: &str,
-    body: &str,
-    artifact: &str,
-    metadata: Option<&Map<String, Value>>,
-    message_id: &str,
-    reply_to: &str,
-) -> Result<i64> {
-    let normalized_body = body.trim();
-    let empty = Map::new();
-    let metadata_json = serde_json::to_string(metadata.unwrap_or(&empty))?;
-    let created_at = now_iso();
-    let conn = connect(workspace.as_ref())?;
-    conn.execute(
-        "INSERT INTO messages (
-            msg_id, from_agent, to_agent, intent, body, artifact,
-            in_reply_to, metadata_json, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            message_id,
-            from_agent,
-            to_agent,
-            intent,
-            normalized_body,
-            artifact,
-            reply_to,
-            metadata_json,
-            created_at,
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-/// Write a send event with its deterministic msgId in one transaction.
+/// Append a send; returns its seq.
 pub fn write_send_event(
     workspace: impl AsRef<Path>,
     from_agent: &str,
     to_agent: &str,
     body: &str,
     artifact: &str,
-    metadata: Option<&Map<String, Value>>,
-    reply_to: &str,
-) -> Result<EventWriteResult> {
-    let normalized_body = body.trim();
-    let empty = Map::new();
-    let metadata_json = serde_json::to_string(metadata.unwrap_or(&empty))?;
+) -> Result<i64> {
     let created_at = now_iso();
-    let mut conn = connect(workspace.as_ref())?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let event_seq: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM messages",
-        [],
-        |row| row.get(0),
+    let conn = connect(workspace.as_ref())?;
+    conn.execute(
+        "INSERT INTO messages (from_agent, to_agent, body, artifact, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![from_agent, to_agent, body.trim(), artifact, created_at],
     )?;
-    let msg_id = format_msg_id(event_seq)?;
-    tx.execute(
-        "INSERT INTO messages (
-            seq, msg_id, from_agent, to_agent, intent, body, artifact,
-            in_reply_to, metadata_json, created_at
-        ) VALUES (?1, ?2, ?3, ?4, 'send', ?5, ?6, ?7, ?8, ?9)",
-        params![
-            event_seq,
-            msg_id,
-            from_agent,
-            to_agent,
-            normalized_body,
-            artifact,
-            reply_to,
-            metadata_json,
-            created_at,
-        ],
-    )?;
-    tx.commit()?;
-    Ok(EventWriteResult {
-        seq: event_seq,
-        msg_id,
-    })
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn read_all_events(workspace: impl AsRef<Path>) -> Result<Vec<Event>> {
     let conn = connect(workspace.as_ref())?;
     let mut stmt = conn.prepare("SELECT * FROM messages ORDER BY seq ASC")?;
     let rows = stmt.query_map([], row_to_event)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Return sorted list of (monotonic sequence, event_data) tuples.
-pub fn read_events_with_seq(workspace: impl AsRef<Path>) -> Result<Vec<(i64, Event)>> {
-    let conn = connect(workspace.as_ref())?;
-    let mut stmt = conn.prepare("SELECT * FROM messages ORDER BY seq ASC")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>("seq")?, row_to_event(row)?))
-    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -314,97 +176,45 @@ pub fn count_events(workspace: impl AsRef<Path>) -> Result<i64> {
     Ok(count)
 }
 
-/// Return the latest send event from `target` to `sender` with a msgId.
-pub fn latest_inbound_send_event(
+/// The newest `limit` events, newest first (the status bar's ticker).
+pub fn latest_send_events(workspace: impl AsRef<Path>, limit: usize) -> Result<Vec<Event>> {
+    let conn = connect(workspace.as_ref())?;
+    let mut stmt = conn.prepare("SELECT * FROM messages ORDER BY seq DESC LIMIT ?1")?;
+    let rows = stmt.query_map(params![limit as i64], row_to_event)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The first `from_agent` → `to_agent` row written after `seq`, or None.
+///
+/// This is what "the reply to `seq`" means on the bus: order, not a link.
+/// Nothing else is filtered — a clarifying question sent after the
+/// dispatch is "the reply" as far as this query knows.
+pub fn first_send_after(
     workspace: impl AsRef<Path>,
-    sender: &str,
-    target: &str,
+    seq: i64,
+    from_agent: &str,
+    to_agent: &str,
 ) -> Result<Option<Event>> {
     let conn = connect(workspace.as_ref())?;
     let event = conn
         .query_row(
             "SELECT * FROM messages
-            WHERE intent = 'send'
-              AND from_agent = ?1
+            WHERE from_agent = ?1
               AND to_agent = ?2
-              AND msg_id != ''
-            ORDER BY seq DESC
+              AND seq > ?3
+            ORDER BY seq ASC
             LIMIT 1",
-            params![target, sender],
+            params![from_agent, to_agent, seq],
             row_to_event,
         )
         .optional()?;
     Ok(event)
 }
 
-/// The newest `limit` send events, newest first (the status bar's ticker).
-pub fn latest_send_events(workspace: impl AsRef<Path>, limit: usize) -> Result<Vec<Event>> {
-    let conn = connect(workspace.as_ref())?;
-    let mut stmt =
-        conn.prepare("SELECT * FROM messages WHERE intent = 'send' ORDER BY seq DESC LIMIT ?1")?;
-    let rows = stmt.query_map(params![limit as i64], row_to_event)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Return the first send event anchored to `msg_id`, or None.
-///
-/// A non-empty `from_agent` scopes the match to one sender; empty means any
-/// agent's send anchored to `msg_id` wins. Nothing else is filtered — not the
-/// recipient, not what the body means. A clarifying question anchored to the
-/// dispatch is "the reply" as far as this query knows.
-pub fn find_reply_to(
-    workspace: impl AsRef<Path>,
-    msg_id: &str,
-    from_agent: &str,
-) -> Result<Option<Event>> {
-    if msg_id.is_empty() {
-        return Ok(None);
-    }
-    let mut sql = String::from("SELECT * FROM messages WHERE intent = 'send' AND in_reply_to = ?");
-    let mut sql_params: Vec<&dyn rusqlite::ToSql> = vec![&msg_id];
-    if !from_agent.is_empty() {
-        sql.push_str(" AND from_agent = ?");
-        sql_params.push(&from_agent);
-    }
-    sql.push_str(" ORDER BY seq ASC LIMIT 1");
-    let conn = connect(workspace.as_ref())?;
-    let event = conn
-        .query_row(&sql, sql_params.as_slice(), row_to_event)
-        .optional()?;
-    Ok(event)
-}
-
-/// True if `sender` already wrote a send event to `target` with in_reply_to=msg_id.
-pub fn has_send_reply_to(
-    workspace: impl AsRef<Path>,
-    msg_id: &str,
-    sender: &str,
-    target: &str,
-) -> Result<bool> {
-    if msg_id.is_empty() {
-        return Ok(false);
-    }
-    let conn = connect(workspace.as_ref())?;
-    let row = conn
-        .query_row(
-            "SELECT 1 FROM messages
-            WHERE intent = 'send'
-              AND from_agent = ?1
-              AND to_agent = ?2
-              AND in_reply_to = ?3
-            LIMIT 1",
-            params![sender, target, msg_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(row.is_some())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::HashSet;
     use tempfile::TempDir;
 
     fn assert_created_at_shape(created_at: &str) {
@@ -460,10 +270,7 @@ mod tests {
     fn test_reset_workspace_recreates_managed_dirs_and_clears_contents() {
         let tmp = TempDir::new().unwrap();
         let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-        write_event(
-            &workspace, "orch", "claude", "send", "old", "", None, "old1", "",
-        )
-        .unwrap();
+        write_send_event(&workspace, "orch", "claude", "old", "").unwrap();
         fs::write(workspace.join("artifacts").join("note.txt"), "artifact").unwrap();
         fs::write(workspace.join("state").join("mode"), "busy").unwrap();
         fs::write(workspace.join("keep.txt"), "keep").unwrap();
@@ -530,22 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn test_write_event_round_trip() {
+    fn test_write_send_event_round_trip() {
         let tmp = TempDir::new().unwrap();
         let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-        let mut metadata = Map::new();
-        metadata.insert("verdict".to_string(), Value::String("issues".to_string()));
 
-        let seq = write_event(
+        let seq = write_send_event(
             &workspace,
             "claude",
             "orch",
-            "send",
-            "review complete",
+            " review complete ",
             "/tmp/review.md",
-            Some(&metadata),
-            "ab12",
-            "",
         )
         .unwrap();
 
@@ -559,151 +360,39 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&events).unwrap(),
             json!([{
-                "msgId": "ab12",
+                "seq": 1,
                 "from": "claude",
                 "to": "orch",
-                "intent": "send",
+                "createdAt": created_at,
                 "body": "review complete",
                 "artifact": "/tmp/review.md",
-                "metadata": {"verdict": "issues"},
-                "createdAt": created_at,
             }])
         );
     }
 
     #[test]
-    fn test_write_event_multiple_events() {
+    fn test_write_send_event_seq_is_monotonic() {
         let tmp = TempDir::new().unwrap();
         let workspace = init_workspace(tmp.path().join("ws")).unwrap();
 
-        write_event(
-            &workspace,
-            "orch",
-            "claude",
-            "send",
-            "review this diff",
-            "",
-            None,
-            "aa01",
-            "",
-        )
-        .unwrap();
-        write_event(
-            &workspace,
-            "orch",
-            "gpt",
-            "send",
-            "pick a strategy",
-            "",
-            None,
-            "bb02",
-            "",
-        )
-        .unwrap();
+        let first = write_send_event(&workspace, "orch", "claude", "review this", "").unwrap();
+        let second = write_send_event(&workspace, "claude", "orch", "done", "").unwrap();
+        assert_eq!((first, second), (1, 2));
 
         let events = read_all_events(&workspace).unwrap();
-        let msg_ids: Vec<&str> = events.iter().map(|event| event.msg_id.as_str()).collect();
-        assert_eq!(msg_ids, ["aa01", "bb02"]);
-        assert_eq!(events[0].body, "review this diff");
-        assert_eq!(events[1].body, "pick a strategy");
+        let seqs: Vec<i64> = events.iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, [1, 2]);
+        assert_eq!(events[1].body, "done");
     }
 
     #[test]
-    fn test_format_msg_id_is_short_and_unique_for_small_range() {
-        let values: Vec<String> = (1..2000).map(|i| format_msg_id(i).unwrap()).collect();
-
-        assert!(values.iter().all(|value| value.len() == 4));
-        let unique: HashSet<&String> = values.iter().collect();
-        assert_eq!(unique.len(), values.len());
-    }
-
-    #[test]
-    fn test_write_send_event_assigns_msg_id_without_followup_patch() {
+    fn test_latest_send_events_returns_newest_first() {
         let tmp = TempDir::new().unwrap();
         let workspace = init_workspace(tmp.path().join("ws")).unwrap();
 
-        let result = write_send_event(
-            &workspace,
-            "claude",
-            "orch",
-            "review complete",
-            "/tmp/review.md",
-            None,
-            "r1",
-        )
-        .unwrap();
-
-        assert_eq!(result.seq, 1);
-        assert_eq!(result.msg_id, format_msg_id(1).unwrap());
-        let events = read_all_events(&workspace).unwrap();
-        assert_eq!(events.len(), 1);
-        let created_at = events[0].created_at.clone();
-        assert_created_at_shape(&created_at);
-        assert_eq!(
-            serde_json::to_value(&events).unwrap(),
-            json!([{
-                "msgId": result.msg_id,
-                "from": "claude",
-                "to": "orch",
-                "intent": "send",
-                "body": "review complete",
-                "artifact": "/tmp/review.md",
-                "inReplyTo": "r1",
-                "metadata": {},
-                "createdAt": created_at,
-            }])
-        );
-    }
-
-    #[test]
-    fn test_latest_inbound_send_event_returns_none_when_no_match() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-
-        write_send_event(&workspace, "orch", "claude", "hi", "", None, "").unwrap();
-
-        assert!(latest_inbound_send_event(&workspace, "orch", "claude")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn test_latest_inbound_send_event_picks_most_recent_matching() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-
-        write_send_event(&workspace, "dodo", "orch", "first", "", None, "").unwrap();
-        write_send_event(&workspace, "claude", "orch", "other", "", None, "").unwrap();
-        let second = write_send_event(&workspace, "dodo", "orch", "second", "", None, "").unwrap();
-
-        let event = latest_inbound_send_event(&workspace, "orch", "dodo")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(event.msg_id, second.msg_id);
-        assert_eq!(event.body, "second");
-    }
-
-    #[test]
-    fn test_latest_send_events_returns_newest_first_and_only_sends() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-
-        write_send_event(&workspace, "a", "b", "first", "", None, "").unwrap();
-        write_event(
-            &workspace,
-            "_system",
-            "",
-            "observation",
-            "",
-            "",
-            None,
-            "",
-            "",
-        )
-        .unwrap();
-        write_send_event(&workspace, "b", "a", "second", "", None, "").unwrap();
-        write_send_event(&workspace, "a", "b", "third", "", None, "").unwrap();
+        write_send_event(&workspace, "a", "b", "first", "").unwrap();
+        write_send_event(&workspace, "b", "a", "second", "").unwrap();
+        write_send_event(&workspace, "a", "b", "third", "").unwrap();
 
         let bodies: Vec<String> = latest_send_events(&workspace, 2)
             .unwrap()
@@ -712,66 +401,36 @@ mod tests {
             .collect();
 
         assert_eq!(bodies, vec!["third".to_string(), "second".to_string()]);
-        assert!(latest_send_events(&workspace, 10)
-            .unwrap()
-            .iter()
-            .all(|e| e.intent == "send"));
     }
 
     #[test]
-    fn test_has_send_reply_to_detects_prior_reply() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-
-        let inbound =
-            write_send_event(&workspace, "dodo", "orch", "review?", "", None, "").unwrap();
-        write_send_event(&workspace, "orch", "dodo", "fresh take", "", None, "").unwrap();
-        assert!(!has_send_reply_to(&workspace, &inbound.msg_id, "orch", "dodo").unwrap());
-
-        write_send_event(&workspace, "orch", "dodo", "ack", "", None, &inbound.msg_id).unwrap();
-
-        assert!(has_send_reply_to(&workspace, &inbound.msg_id, "orch", "dodo").unwrap());
-        // Reply in the opposite direction must not count.
-        assert!(!has_send_reply_to(&workspace, &inbound.msg_id, "dodo", "orch").unwrap());
-    }
-
-    #[test]
-    fn test_has_send_reply_to_returns_false_for_empty_msg_id() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
-        assert!(!has_send_reply_to(&workspace, "", "orch", "dodo").unwrap());
-    }
-
-    #[test]
-    fn test_find_reply_to_returns_first_anchored_send() {
+    fn test_first_send_after_is_the_reply_by_order() {
         let tmp = TempDir::new().unwrap();
         let ws = tmp.path().join("ws");
         init_workspace(&ws).unwrap();
-        let root = write_send_event(&ws, "flow", "impl", "task", "", None, "").unwrap();
-        assert!(find_reply_to(&ws, &root.msg_id, "").unwrap().is_none());
-        write_send_event(&ws, "impl", "flow", "done", "/tmp/a.md", None, &root.msg_id).unwrap();
-        let row = find_reply_to(&ws, &root.msg_id, "").unwrap().unwrap();
+        let root = write_send_event(&ws, "flow", "impl", "task", "").unwrap();
+        assert!(first_send_after(&ws, root, "impl", "flow")
+            .unwrap()
+            .is_none());
+        // Traffic on other routes, or older than the dispatch, is not it.
+        write_send_event(&ws, "bystander", "flow", "not mine", "").unwrap();
+        write_send_event(&ws, "impl", "orch", "aside", "").unwrap();
+        assert!(first_send_after(&ws, root, "impl", "flow")
+            .unwrap()
+            .is_none());
+
+        write_send_event(&ws, "impl", "flow", "done", "/tmp/a.md").unwrap();
+        write_send_event(&ws, "impl", "flow", "ps", "").unwrap();
+        let row = first_send_after(&ws, root, "impl", "flow")
+            .unwrap()
+            .unwrap();
         assert_eq!(row.body, "done");
         assert_eq!(row.artifact, "/tmp/a.md");
-        assert!(find_reply_to(&ws, "", "").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_find_reply_to_scopes_to_from_agent() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("ws");
-        init_workspace(&ws).unwrap();
-        let root = write_send_event(&ws, "flow", "impl", "task", "", None, "").unwrap();
-        write_send_event(&ws, "bystander", "flow", "not mine", "", None, &root.msg_id).unwrap();
-        assert_eq!(
-            find_reply_to(&ws, &root.msg_id, "").unwrap().unwrap().body,
-            "not mine"
-        );
-        assert!(find_reply_to(&ws, &root.msg_id, "impl").unwrap().is_none());
-
-        write_send_event(&ws, "impl", "flow", "done", "", None, &root.msg_id).unwrap();
-        let row = find_reply_to(&ws, &root.msg_id, "impl").unwrap().unwrap();
-        assert_eq!(row.body, "done");
         assert_eq!(row.from, "impl");
+        // A later dispatch only sees what comes after it.
+        let next = write_send_event(&ws, "flow", "impl", "again", "").unwrap();
+        assert!(first_send_after(&ws, next, "impl", "flow")
+            .unwrap()
+            .is_none());
     }
 }

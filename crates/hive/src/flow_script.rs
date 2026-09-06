@@ -338,12 +338,12 @@ const __schemaClause = (schema) =>
 
 const SCHEMA_REASKS = 2;
 
-// Wait for `name`'s reply to msgId. Without a schema the reply is
-// {body, artifact, msgId}; with one, the validated object (re-asked twice
+// Wait for `name`'s reply to the dispatch at bus seq. Without a schema the
+// reply is {body, artifact}; with one, the validated object (re-asked twice
 // on mismatch, then thrown). Fresh values every time — nothing to mutate.
-const __collect = async (name, msgId, schema) => {
-  let reply = await __op({ op: 'wait-reply', name, msg_id: msgId });
-  if (!schema) return { body: reply.body ?? '', artifact: reply.artifact ?? '', msgId: reply.msgId ?? '' };
+const __collect = async (name, seq, schema) => {
+  let reply = await __op({ op: 'wait-reply', name, seq });
+  if (!schema) return { body: reply.body ?? '', artifact: reply.artifact ?? '' };
   for (let attempt = 0; ; attempt++) {
     let errs;
     try {
@@ -358,7 +358,7 @@ const __collect = async (name, msgId, schema) => {
     }
     log(`${name} 回信不符合 schema(${errs.join('; ')}); 重新要求 (${attempt + 1}/${SCHEMA_REASKS})`);
     const d = await __op({ op: 'dispatch-ask', name, prompt: `回信不符合要求: ${errs.join('; ')}。重发一条消息,body 为纯 JSON(不带 code fence),符合以下 JSON Schema。${__schemaClause(schema)}` });
-    reply = await __op({ op: 'wait-reply', name, msg_id: d.msgId });
+    reply = await __op({ op: 'wait-reply', name, seq: d.seq });
   }
 };
 
@@ -373,8 +373,8 @@ globalThis.agent = async (prompt, opts = {}) => {
   await __op({ op: 'ready', name, cli: spawned.cli });
   const fullPrompt = opts.schema ? prompt + __schemaClause(opts.schema) : prompt;
   const d = await __op({ op: 'dispatch-task', name, prompt: fullPrompt });
-  log(`${name} dispatched (${d.msgId}); waiting for reply…`);
-  const out = await __collect(name, d.msgId, opts.schema);
+  log(`${name} dispatched; waiting for reply…`);
+  const out = await __collect(name, d.seq, opts.schema);
   log(`${name} replied`);
   return out;
 };
@@ -384,8 +384,8 @@ globalThis.agent = async (prompt, opts = {}) => {
 globalThis.ask = async (name, prompt, opts = {}) => {
   const fp = opts.schema ? prompt + __schemaClause(opts.schema) : prompt;
   const d = await __op({ op: 'dispatch-ask', name, prompt: fp });
-  log(`${name} asked (${d.msgId}); waiting…`);
-  const out = await __collect(name, d.msgId, opts.schema);
+  log(`${name} asked; waiting…`);
+  const out = await __collect(name, d.seq, opts.schema);
   log(`${name} answered`);
   return out;
 };
@@ -714,16 +714,16 @@ return checks"#;
         let fake = fake_env(tmp.path());
         {
             let mut replies = fake.replies.lock().unwrap();
-            replies.insert("m1".into(), reply_row("not json at all", "", "r1"));
+            replies.insert(1, reply_row("not json at all", "", 101));
             replies.insert(
-                "m2".into(),
+                2,
                 reply_row(
                     "```json\n{\"verdict\": \"pass\", \"score\": 3}\n```",
                     "",
-                    "r2",
+                    102,
                 ),
             );
-            replies.insert("m3".into(), reply_row("plain follow-up", "", "r3"));
+            replies.insert(3, reply_row("plain follow-up", "", 103));
         }
         let env = Arc::new(fake);
         let src = r#"export const meta = { name: 's', description: 'schema' }
@@ -759,9 +759,9 @@ return { verdict, note }"#;
         let fake = fake_env(tmp.path());
         {
             let mut replies = fake.replies.lock().unwrap();
-            replies.insert("m1".into(), reply_row("junk", "", "r1"));
-            replies.insert("m2".into(), reply_row("more junk", "", "r2"));
-            replies.insert("m3".into(), reply_row("{\"wrong\": true}", "", "r3"));
+            replies.insert(1, reply_row("junk", "", 101));
+            replies.insert(2, reply_row("more junk", "", 102));
+            replies.insert(3, reply_row("{\"wrong\": true}", "", 103));
         }
         let env = Arc::new(fake);
         let src = r#"export const meta = { name: 's', description: 'schema exhaustion' }

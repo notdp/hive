@@ -110,7 +110,7 @@ return { verdict: v.verdict }
 - 脚本必须以纯字面量 `export const meta = { name, description }` 开头;脚本体跑在 async 上下文里,顶层 `await` 和 `return` 都可用,`return` 的值就是 run 的最终输出(stdout 最后一行;进度行走 stderr)。
 - 跑法:后台 shell 跑 `hive flow run workflow.js`,结束当前 turn 等完成通知,完成后读输出;期间来消息照常处理。
 - API 全貌(不需要读源码):
-  - `agent(prompt, { name, cli, model, schema })`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套;`name` 必填,成员之后一律按名字引用。不带 `schema` 返回 `{ body, artifact, msgId }`;带 `schema` 时回信 body 必须是符合它的纯 JSON,返回校验过的对象(不合格自动打回重问两次,仍不合格才 throw)。
+  - `agent(prompt, { name, cli, model, schema })`——spawn+原子投递+阻塞等回报。prompt 就是 task artifact,写全四件套;`name` 必填,成员之后一律按名字引用。不带 `schema` 返回 `{ body, artifact }`;带 `schema` 时回信 body 必须是符合它的纯 JSON,返回校验过的对象(不合格自动打回重问两次,仍不合格才 throw)。
   - `ask(name, prompt, { schema? })`——对活成员追问/打回,阻塞等回答,返回同上。
   - `kill(name)`——验收后退场。
   - `parallel(thunks) -> list`——并发跑,按调用顺序返回;失败的分支落为 `null`(不中断其他分支),用 `.filter(Boolean)` 收敛。

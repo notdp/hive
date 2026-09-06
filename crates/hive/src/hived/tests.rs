@@ -3047,12 +3047,12 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
     assert!(keep_running);
     assert_eq!(response["ok"], Value::Bool(true));
     assert_eq!(response["to"], Value::from("b"));
-    let msg_id = response["msgId"].as_str().unwrap().to_string();
-    assert!(!msg_id.is_empty());
+    let seq = response["seq"].as_i64().unwrap();
+    assert!(seq > 0);
     assert_eq!(*resolved.lock().unwrap(), vec!["team-a".to_string()]);
     let events = bus::read_all_events(&workspace).unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].msg_id, msg_id);
+    assert_eq!(events[0].seq, seq);
     assert_eq!(events[0].from, "a");
     assert_eq!(events[0].to, "b");
     assert_eq!(events[0].body, "ship it");
@@ -3060,10 +3060,7 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
     assert_eq!(handed.len(), 1);
     let (envelope, sender_label) = &handed[0];
     assert_eq!(sender_label, "team-a.a");
-    assert!(
-        envelope.contains(&msg_id),
-        "envelope must carry the bus msgId"
-    );
+    assert_eq!(envelope, "<HIVE from=a to=b>\nship it\n</HIVE>");
 }
 
 #[test]
@@ -3753,11 +3750,11 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
         // ping timeout would have hung up by the time this is written.
         let drained = std::time::Instant::now();
         thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL * 3.0));
-        let _ = (&conn).write_all(b"{\"ok\": true, \"msgId\": \"x1\", \"delivery\": \"queued\"}\n");
+        let _ = (&conn).write_all(b"{\"ok\": true, \"seq\": 1, \"delivery\": \"queued\"}\n");
         let _ = held_tx.send(drained.elapsed().as_secs_f64());
     });
 
-    let response = request_send("/tmp/ws-x", "t", "a", "b", "hello", "", "");
+    let response = request_send("/tmp/ws-x", "t", "a", "b", "hello", "");
 
     // The server held the reply past the ping budget (SOCKET_RETRY_INTERVAL)
     // but inside the send budget; the oracle is the reply arriving at all.
@@ -3848,77 +3845,6 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
     cleanup_socket_impl(&workspace);
 }
 
-// ---- thread view -------------------------------------------------------
-
-#[test]
-fn test_thread_payload_projects_pure_send_chain() {
-    let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("ws");
-    bus::init_workspace(&workspace).unwrap();
-
-    bus::write_event(
-        &workspace, "momo", "orch", "send", "root", "", None, "a001", "",
-    )
-    .unwrap();
-    bus::write_event(
-        &workspace, "orch", "momo", "send", "reply", "", None, "a002", "a001",
-    )
-    .unwrap();
-    bus::write_event(
-        &workspace,
-        "momo",
-        "orch",
-        "send",
-        "follow-up",
-        "",
-        None,
-        "a003",
-        "a002",
-    )
-    .unwrap();
-    let mut metadata = Map::new();
-    metadata.insert("msgId".to_string(), Value::from("a002"));
-    metadata.insert("result".to_string(), Value::from("success"));
-    metadata.insert(
-        "observedAt".to_string(),
-        Value::from("2026-04-15T00:00:00Z"),
-    );
-    bus::write_event(
-        &workspace,
-        "_system",
-        "",
-        "observation",
-        "",
-        "",
-        Some(&metadata),
-        "a002",
-        "",
-    )
-    .unwrap();
-
-    let payload = thread_payload(&workspace.to_string_lossy(), "a003").unwrap();
-
-    assert_eq!(payload["ok"], Value::Bool(true));
-    assert_eq!(payload["rootMsgId"], Value::from("a001"));
-    assert_eq!(payload["focusMsgId"], Value::from("a003"));
-    let messages = payload["messages"].as_array().unwrap();
-    let ids: Vec<&str> = messages
-        .iter()
-        .map(|m| m["msgId"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, vec!["a001", "a002", "a003"]);
-    let depths: Vec<i64> = messages
-        .iter()
-        .map(|m| m["depth"].as_i64().unwrap())
-        .collect();
-    assert_eq!(depths, vec![0, 1, 2]);
-    assert_eq!(messages[2]["focus"], Value::Bool(true));
-    // threads are pure message chains: no delivery decoration exists
-    assert!(messages
-        .iter()
-        .all(|m| m.as_object().unwrap().get("delivery").is_none()));
-}
-
 // ---- send payload ------------------------------------------------------
 
 fn wire_send(hook: &mut Hook, workspace: &Path) {
@@ -3942,7 +3868,6 @@ fn send_payload_for_test(
     target: &str,
     body: &str,
     artifact: &str,
-    reply_to: &str,
 ) -> Map<String, Value> {
     send_payload(
         &workspace.to_string_lossy(),
@@ -3951,7 +3876,6 @@ fn send_payload_for_test(
         target,
         body,
         artifact,
-        reply_to,
     )
     .unwrap()
 }
@@ -3968,19 +3892,14 @@ fn test_accepted_send_returns_identity_only() {
     }));
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    let payload = send_payload_for_test(&workspace, "a", "b", "hi", "");
 
     assert_eq!(payload["ok"], Value::Bool(true));
-    assert!(!payload["msgId"].as_str().unwrap().is_empty());
+    assert!(payload["seq"].as_i64().unwrap() > 0);
     assert!(!payload.contains_key("delivery"));
     // exactly one durable event: the send itself — no observations, no
     // tracking
-    let intents: Vec<String> = bus::read_all_events(&workspace)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.intent)
-        .collect();
-    assert_eq!(intents, vec!["send".to_string()]);
+    assert_eq!(bus::read_all_events(&workspace).unwrap().len(), 1);
 }
 
 #[test]
@@ -3998,9 +3917,9 @@ fn test_send_hands_the_transport_the_qualified_author() {
     }));
     let _guard = testhook::install(hook);
 
-    send_payload_for_test(&workspace, "yoyo", "orch", "hi", "", "");
-    send_payload_for_test(&workspace, "other.guest", "orch", "hi", "", "");
-    send_payload_for_test(&workspace, "ccd.desk", "orch", "hi", "", "");
+    send_payload_for_test(&workspace, "yoyo", "orch", "hi", "");
+    send_payload_for_test(&workspace, "other.guest", "orch", "hi", "");
+    send_payload_for_test(&workspace, "ccd.desk", "orch", "hi", "");
 
     // bare member names get the team prefix; guests and ccd senders are
     // already qualified and travel as-is
@@ -4026,7 +3945,7 @@ fn test_refused_send_fails_synchronously() {
     }));
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    let payload = send_payload_for_test(&workspace, "a", "b", "hi", "");
 
     assert_eq!(payload["ok"], Value::Bool(false));
     assert!(payload["error"]
@@ -4060,7 +3979,6 @@ fn test_three_message_busy_incident_regression() {
             "worker",
             body,
             "",
-            "",
         ));
     }
 
@@ -4072,10 +3990,7 @@ fn test_three_message_busy_incident_regression() {
         .collect();
     assert_eq!(bodies, vec!["first", "second", "third"]);
     assert_eq!(delivered.len(), 3); // no duplicate submissions, ever
-    let ids: HashSet<&str> = results
-        .iter()
-        .map(|r| r["msgId"].as_str().unwrap())
-        .collect();
+    let ids: HashSet<i64> = results.iter().map(|r| r["seq"].as_i64().unwrap()).collect();
     assert_eq!(ids.len(), 3);
 }
 
@@ -4096,7 +4011,7 @@ fn test_send_to_flow_mailbox_writes_bus_row_without_transport() {
     };
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "impl", "flow.run", "done", "/tmp/a.md", "m1");
+    let payload = send_payload_for_test(&workspace, "impl", "flow.run", "done", "/tmp/a.md");
 
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["mailbox"], Value::Bool(true));
@@ -4104,7 +4019,7 @@ fn test_send_to_flow_mailbox_writes_bus_row_without_transport() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].to, "flow.run");
     assert_eq!(events[0].from, "impl");
-    assert_eq!(events[0].in_reply_to, "m1");
+    assert_eq!(events[0].artifact, "/tmp/a.md");
 }
 
 // ---- retained-shell liveness -------------------------------------------
@@ -4211,20 +4126,15 @@ fn test_send_to_retained_shell_fails_closed_with_durable_bus_event() {
     }));
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "w", "v", "hi", "", "");
+    let payload = send_payload_for_test(&workspace, "w", "v", "hi", "");
 
     assert_eq!(payload["ok"], Value::Bool(false));
     let error = payload["error"].as_str().unwrap();
     assert!(error.contains("transport refused"));
     assert!(error.contains("cli_exited"));
-    // the send event is durable: recoverable from the bus by msgId
-    let intents: Vec<String> = bus::read_all_events(&workspace)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.intent)
-        .collect();
-    assert_eq!(intents, vec!["send".to_string()]);
-    assert!(!payload["msgId"].as_str().unwrap().is_empty());
+    // the send event is durable: recoverable from the bus by seq
+    assert_eq!(bus::read_all_events(&workspace).unwrap().len(), 1);
+    assert!(payload["seq"].as_i64().unwrap() > 0);
 }
 
 #[test]
@@ -4260,7 +4170,7 @@ fn test_send_with_live_cli_still_uses_native_transport() {
         };
         let _guard = testhook::install(hook);
 
-        let payload = send_payload_for_test(&workspace, "w", "v", "hi", "", "");
+        let payload = send_payload_for_test(&workspace, "w", "v", "hi", "");
         assert_eq!(payload["ok"], Value::Bool(true), "cli={cli_name}");
 
         match cli_name {
@@ -4740,7 +4650,7 @@ fn test_status_tick_anchors_the_ticker_on_an_engine_pane_not_the_parked_mirror()
         Some(false),
         &[("%1", "honey:9"), ("%2", "dev:1")],
     );
-    bus::write_send_event(&env.workspace, "orch", "sage", "hi", "", None, "").unwrap();
+    bus::write_send_event(&env.workspace, "orch", "sage", "hi", "").unwrap();
     // The mirror is bound first; the ticker still lands on the engine
     // pane's window.
     let members = status_members(&[("orch", "%1"), ("sage", "%2")]);
@@ -4773,8 +4683,8 @@ fn test_status_tick_writes_nothing_on_an_empty_listing() {
 fn test_status_tick_writes_the_ticker_once_per_text() {
     let (mut env, _guard) = status_env(&[("%1", "agent")], Some(false));
     let members = status_members(&[("sage", "%1")]);
-    bus::write_send_event(&env.workspace, "orch", "sage", "first #1", "", None, "").unwrap();
-    bus::write_send_event(&env.workspace, "sage", "orch", "second", "", None, "").unwrap();
+    bus::write_send_event(&env.workspace, "orch", "sage", "first #1", "").unwrap();
+    bus::write_send_event(&env.workspace, "sage", "orch", "second", "").unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -4822,13 +4732,10 @@ fn test_ticker_text_escapes_hashes_clips_the_body_and_orders_newest_first() {
         .to_string()
     };
     let event = |from: &str, to: &str, body: &str, created_at: String| bus::Event {
+        seq: 0,
         from: from.to_string(),
         to: to.to_string(),
-        intent: "send".to_string(),
-        metadata: Map::new(),
         created_at,
-        msg_id: String::new(),
-        in_reply_to: String::new(),
         body: body.to_string(),
         artifact: String::new(),
     };
@@ -4871,7 +4778,7 @@ fn test_send_marks_the_target_pane_unread() {
     let _guard = testhook::install(hook);
     let pending = || -> Vec<String> { unread_pending().lock().unwrap().iter().cloned().collect() };
 
-    send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    send_payload_for_test(&workspace, "a", "b", "hi", "");
     assert_eq!(pending(), vec!["%4".to_string()]);
 
     unread_pending().lock().unwrap().clear();
@@ -4880,11 +4787,11 @@ fn test_send_marks_the_target_pane_unread() {
             Err(DeliveryError("no channel".to_string()))
         }));
     });
-    let refused = send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    let refused = send_payload_for_test(&workspace, "a", "b", "hi", "");
     assert_eq!(refused["ok"], Value::Bool(false));
     assert_eq!(pending(), Vec::<String>::new());
 
     // The flow mailbox owns no pane: the bus row is the delivery.
-    send_payload_for_test(&workspace, "a", FLOW_MAILBOX_AGENT, "hi", "", "");
+    send_payload_for_test(&workspace, "a", FLOW_MAILBOX_AGENT, "hi", "");
     assert_eq!(pending(), Vec::<String>::new());
 }

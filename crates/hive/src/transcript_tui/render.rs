@@ -335,7 +335,7 @@ fn hive_line(
     Line::from(all)
 }
 
-/// A HIVE envelope. The tag becomes a header — the sender, ids and clock
+/// A HIVE envelope. The tag becomes a header — the sender and clock
 /// on the right — the body reads as plain text, and `artifact=` gets its own
 /// line. Whatever wrapper carried it (claude's peer-message injection, the
 /// retired `<channel>` block) never reaches the screen. The whole block sits
@@ -361,19 +361,11 @@ fn render_hive(
         msg.from.clone().unwrap_or_else(|| "peer".to_string()),
         fg(rail_fg).bg(bg).add_modifier(Modifier::BOLD),
     ));
-    let mut tail = String::new();
-    if let Some(r) = msg.reply_to.as_deref() {
-        tail.push_str(&format!("↩{r} "));
-    }
-    if let Some(id) = msg.msg_id.as_deref() {
-        tail.push_str(id);
-    }
-    if let Some(ts) = u.timestamp.as_ref() {
-        if !tail.is_empty() {
-            tail.push_str("  ");
-        }
-        tail.push_str(&ts.clock);
-    }
+    let tail = u
+        .timestamp
+        .as_ref()
+        .map(|ts| ts.clock.clone())
+        .unwrap_or_default();
     let head_w: usize = head
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))

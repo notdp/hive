@@ -73,7 +73,6 @@ Debug:
   inject     Debug: inject raw input into an agent pane.
   interrupt  Interrupt an agent's running turn.
   kill       Kill an agent pane and remove it from the team.
-  thread     Show a reply thread rooted at a msgId.
 
 Extensions:
   Manage first-party Hive plugins (Claude Code, Codex).
@@ -310,7 +309,7 @@ Commands:
   (spawned / working / done / gone) with elapsed times. Phases come from the
   members' pane groups — the --phase of `hive flow node run`, the enclosing
   `phase()` of a flow script — so serial/parallel structure needs nothing
-  extra written. A dispatch and the reply anchored to it (in_reply_to) give
+  extra written. A dispatch and the member's first send back after it give
   each node its state; liveness comes from the hived.
 
   The pane tags itself @hive-role dock: the adaptive layout keeps it as a
@@ -337,8 +336,8 @@ Commands:
 
   Spawns the member (or reuses one of that name that is still alive),
   dispatches the task atomically, waits without timeout, and prints one JSON
-  object on stdout: {"status":"replied","body":…,"artifact":…,"msgId":…,
-  "name":…,"pane":…,"reused":…}. Progress goes to stderr. A member that
+  object on stdout: {"status":"replied","body":…,"artifact":…,"name":…,
+  "pane":…,"reused":…}. Progress goes to stderr. A member that
   dies before replying ends the call with an error and exit 1; a spawn or
   dispatch that fails retires the member it created.
 
@@ -634,9 +633,9 @@ Options:
 
   Send a message to another agent — the only message verb.
 
-  Threading is automatic: when the latest inbound message from the recipient
-  is still unanswered, this send is recorded as its reply; otherwise it opens
-  a new thread. Senders never handle msgIds.
+  There is no threading to manage: the bus keeps every send in order, and a
+  reply is simply the next message back. Senders and readers never see a
+  message id.
 
   The recipient is an address, and every `from=` value on a received envelope
   is one — answer by copying it verbatim. A teammate is a bare name. A member
@@ -755,21 +754,6 @@ Options:
 Options:
   -t, --team TEXT  Explicit team (default: the pane's binding)
   -h, --help       Show this message and exit.
-"#
-        }
-        ["thread"] => {
-            r#"Usage: hive thread [OPTIONS] MESSAGE_ID
-
-  Show a reply thread rooted at a msgId.
-
-  Returns the chain of send/reply events linked to this msgId. Useful to audit
-  conversation flow or resolve "who replied to what".
-
-  Example:
-    hive thread aBc1
-
-Options:
-  -h, --help  Show this message and exit.
 "#
         }
         ["vfork"] => {
@@ -905,7 +889,7 @@ Options:
     await kill('verify')
     return { verdict: v.verdict }
 
-  Surface: agent(prompt, {name, cli, model, schema}) -> {body, artifact, msgId}
+  Surface: agent(prompt, {name, cli, model, schema}) -> {body, artifact}
   (or the schema-validated object); ask(name, prompt, {schema}); kill(name);
   parallel(thunks); pipeline(items, ...stages); phase(title); log(msg).
   Date.now() / Math.random() / new Date() throw — runs must replay.

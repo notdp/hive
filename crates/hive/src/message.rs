@@ -1,7 +1,5 @@
 //! Send-message helpers shared by the hived and the CLI: body-length
-//! hints, the `<HIVE>` envelope, and the thread-event projection.
-
-use serde_json::{Map, Value};
+//! hints and the `<HIVE>` envelope.
 
 const BODY_WARNING_CHAR_LIMIT: usize = 500;
 const BODY_WARNING_LINE_LIMIT: usize = 3;
@@ -103,46 +101,16 @@ pub fn format_body_warning(command: &str, hint: &BodyWarningHint) -> String {
     )
 }
 
-/// Project durable send events into the smaller thread-facing shape.
-pub fn project_thread_event(event: &Map<String, Value>) -> Map<String, Value> {
-    let mut projected = Map::new();
-    for key in [
-        "from",
-        "to",
-        "intent",
-        "metadata",
-        "createdAt",
-        "msgId",
-        "inReplyTo",
-        "body",
-        "artifact",
-    ] {
-        match event.get(key) {
-            None | Some(Value::Null) => continue,
-            Some(Value::String(s)) if s.is_empty() => continue,
-            Some(value) => {
-                projected.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    projected
-}
-
+/// The `<HIVE>` envelope a member reads: `from` and `to` always, `artifact`
+/// when one rides along. No id: the bus keeps order, not links, and a reader
+/// answers by addressing the sender.
 pub fn format_hive_envelope(
     from_agent: &str,
     to_agent: &str,
     body: &str,
     artifact: &str,
-    message_id: &str,
-    reply_to: &str,
 ) -> String {
     let mut attrs: Vec<(&str, &str)> = vec![("from", from_agent), ("to", to_agent)];
-    if !message_id.is_empty() {
-        attrs.push(("msgId", message_id));
-    }
-    if !reply_to.is_empty() {
-        attrs.push(("reply-to", reply_to));
-    }
     if !artifact.is_empty() {
         attrs.push(("artifact", artifact));
     }
@@ -166,7 +134,6 @@ pub fn format_hive_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_body_warning_hint_flags_structured_body() {
@@ -186,29 +153,12 @@ mod tests {
     #[test]
     fn test_format_hive_envelope_orders_attrs_and_defaults_body() {
         assert_eq!(
-            format_hive_envelope("a.b", "c.d", "  hi  ", "art.md", "m1", "m0"),
-            "<HIVE from=a.b to=c.d msgId=m1 reply-to=m0 artifact=art.md>\nhi\n</HIVE>"
+            format_hive_envelope("a.b", "c.d", "  hi  ", "art.md"),
+            "<HIVE from=a.b to=c.d artifact=art.md>\nhi\n</HIVE>"
         );
         assert_eq!(
-            format_hive_envelope("a.b", "c.d", "", "", "", ""),
+            format_hive_envelope("a.b", "c.d", "", ""),
             "<HIVE from=a.b to=c.d>\n(no message)\n</HIVE>"
-        );
-    }
-
-    #[test]
-    fn test_project_thread_event_drops_empty_values() {
-        let event = json!({
-            "from": "a.b",
-            "to": "",
-            "intent": null,
-            "msgId": "m1",
-            "extra": "dropped",
-            "metadata": {"k": "v"}
-        });
-        let projected = project_thread_event(event.as_object().unwrap());
-        assert_eq!(
-            Value::Object(projected),
-            json!({"from": "a.b", "msgId": "m1", "metadata": {"k": "v"}})
         );
     }
 }

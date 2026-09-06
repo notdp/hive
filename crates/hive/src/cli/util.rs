@@ -105,12 +105,6 @@ pub(crate) fn resolve_sender(agent_name: Option<&str>) -> String {
 // `fail` wrappers over the domain modules' `Result`/`Option` seams
 // ---------------------------------------------------------------------------
 
-pub(crate) fn validate_root_send_protocol(body: &str) {
-    if let Some(err) = crate::send::root_send_protocol_error(body) {
-        fail(&err);
-    }
-}
-
 pub(crate) fn parse_entries(entries: &[String]) -> Map<String, Value> {
     match crate::bus::parse_key_value(entries) {
         Ok(map) => map,

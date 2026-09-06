@@ -250,7 +250,7 @@ fn test_worked_for_line_and_hive_header() {
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row("go"));
     app.push_raw(&assistant_text_row("done"));
-    let envelope = "<HIVE from=comb.dodo to=comb.rex msgId=a1>review the spec</HIVE>";
+    let envelope = "<HIVE from=comb.dodo to=comb.rex>review the spec</HIVE>";
     app.push_raw(&user_row(envelope));
     let buf = draw_to_buffer(&mut app, W, H);
     let text = buffer_text(&buf);
@@ -260,7 +260,6 @@ fn test_worked_for_line_and_hive_header() {
     assert!(!text.contains("comb.rex"), "{text}");
     assert!(!text.contains("<HIVE"), "{text}");
     assert!(text.contains("review the spec"), "{text}");
-    assert!(text.contains("a1"), "{text}");
 }
 
 #[test]
@@ -268,7 +267,7 @@ fn test_hive_injection_wrapper_never_reaches_the_screen() {
     let mut app = App::new(&GROKNIGHT);
     app.push_raw(&user_row(
         "Another Claude session sent a message while you were working:\n\
-         <HIVE from=sage to=orch msgId=7boK reply-to=65cE artifact=/tmp/spec.md>\n\
+         <HIVE from=sage to=orch artifact=/tmp/spec.md>\n\
          done: Exclusive<T> landed\n\
          </HIVE>\n\n\
          This came from another Claude session — not typed by your user, but very \
@@ -280,7 +279,6 @@ fn test_hive_injection_wrapper_never_reaches_the_screen() {
     assert!(text.contains("sage"), "{text}");
     assert!(!text.contains("orch"), "{text}");
     assert!(text.contains("done: Exclusive<T> landed"), "{text}");
-    assert!(text.contains("↩65cE"), "{text}");
     assert!(text.contains("↳ /tmp/spec.md"), "{text}");
     assert!(!text.contains("Another Claude session"), "{text}");
     assert!(!text.contains("permission laundering"), "{text}");

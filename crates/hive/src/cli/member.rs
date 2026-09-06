@@ -10,10 +10,10 @@ use serde_json::{json, Map, Value};
 use super::flow::task_dispatch_workspace;
 use super::util::{
     fail, json_pretty, ok_or_fail, parse_entries, resolve_artifact_path, resolve_sender,
-    validate_root_send_protocol, value_as_env_string,
+    value_as_env_string,
 };
 use crate::identity;
-use crate::json_fields::{is_set, map_str};
+use crate::json_fields::is_set;
 use crate::team::{
     live_member_pids, load_team, resolve_scoped_team, resolve_workspace, spawn_team_agent,
     start_team_hived, Team,
@@ -71,25 +71,8 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
         (t, resolve_sender(None))
     };
     let ws = ok_or_fail(resolve_workspace(Some(&t), true));
-    // Auto-anchor: the latest unanswered inbound from the recipient makes
-    // this send its reply; senders never handle msgIds. Anything else is a
-    // new thread and rides the root protocol. An unreadable bus (guest
-    // sender, fresh workspace) just means no anchor — delivery still goes,
-    // and a truly broken bus fails loudly in the send itself.
-    let mut reply_to = String::new();
-    let latest = crate::bus::latest_inbound_send_event(&ws, &sender, &to_agent)
-        .ok()
-        .flatten();
-    if let Some(latest) = latest {
-        let candidate = latest.msg_id;
-        if !candidate.is_empty()
-            && !crate::bus::has_send_reply_to(&ws, &candidate, &sender, &to_agent).unwrap_or(false)
-        {
-            reply_to = candidate;
-        }
-    }
-    if reply_to.is_empty() {
-        validate_root_send_protocol(body);
+    if body.trim().is_empty() {
+        fail("message body required");
     }
     let resolved_artifact = resolve_artifact_path(artifact, &ws);
     let payload = match crate::send::request_send_payload(
@@ -99,7 +82,6 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
         &to_agent,
         body,
         &resolved_artifact,
-        &reply_to,
         "send",
         true,
     ) {
@@ -109,13 +91,9 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
     if is_set(payload.get("mailbox")) {
         // A mailbox has no peer runtime to go silent about: say so once,
         // in the sender's own tool result, so nobody invents a follow-up.
-        println!(
-            "delivered to flow mailbox msgId={} (not a member; no ack will arrive)",
-            map_str(&payload, "msgId")
-        );
+        println!("delivered to flow mailbox (not a member; no ack will arrive)");
     }
-    // Peer sends stay silent (rule of silence). The bus row carries the
-    // identity; `hive thread` reads it back.
+    // Peer sends stay silent (rule of silence).
 }
 
 /// `hive send ccd.<session>`: a member pushes into an outside Claude
@@ -176,15 +154,9 @@ fn send_to_ccd_session(label: &str, message: &str, artifact: &str) {
     // The frame's `from` reaches only the human's message card; the receiving
     // model sees just the text. Wrap the body in the ordinary <HIVE> envelope
     // so the sender travels in band and the receiver answers by copying it
-    // verbatim: `hive send <team>.<agent>`. No msgId: this is not a bus thread.
-    let envelope = crate::message::format_hive_envelope(
-        &sender,
-        &format!("ccd.{}", target.name),
-        message,
-        "",
-        "",
-        "",
-    );
+    // verbatim: `hive send <team>.<agent>`. Not a bus thread.
+    let envelope =
+        crate::message::format_hive_envelope(&sender, &format!("ccd.{}", target.name), message, "");
     let outcome = crate::adapters::claude_sessions::send(
         &target.socket_path,
         &envelope,
@@ -370,30 +342,6 @@ pub(crate) fn compact_cmd(pane_id: &str) {
     println!("{}", json_pretty(&Value::Object(result)));
 }
 
-pub(crate) fn thread(message_id: &str) {
-    let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
-    let mut t = t.expect("required resolve returned no team");
-    let ws = ok_or_fail(resolve_workspace(Some(&t), true));
-    let _ = start_team_hived(&mut t, &ws);
-    let payload = crate::hived::request_thread(&ws, message_id);
-    let mut payload = match payload {
-        Some(payload) if !payload.is_empty() => payload,
-        _ => fail(&crate::devlog::hived_unavailable_message(
-            std::path::Path::new(&ws),
-        )),
-    };
-    if payload.get("ok") == Some(&Value::Bool(false)) {
-        let error = match payload.get("error") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => "thread lookup failed".to_string(),
-        };
-        fail(&error);
-    }
-    payload.shift_remove("ok");
-    println!("{}", json_pretty(&Value::Object(payload)));
-}
-
 pub(crate) fn capture(member_name: &str, lines: i64) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let t = t.expect("required resolve returned no team");
@@ -512,7 +460,6 @@ pub(crate) fn spawn(
         agent_name,
         &format!("task dispatch: {task_name}"),
         &task_path,
-        "",
         "spawn-dispatch",
         false,
     );
@@ -572,7 +519,7 @@ mod tests {
     }
 
     /// A hived stand-in on the workspace socket: records every request it is
-    /// sent and answers each with `{ok: true, msgId: "m-<n>"}`.
+    /// sent and answers each with `{ok: true, seq: <n>}`.
     struct FakeHived {
         path: std::path::PathBuf,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -606,7 +553,7 @@ mod tests {
                     let request: Map<String, Value> = serde_json::from_slice(&body).unwrap();
                     let mut log = log.lock().unwrap();
                     log.push(request);
-                    let reply = json!({"ok": true, "msgId": format!("m-{}", log.len())});
+                    let reply = json!({"ok": true, "seq": log.len()});
                     let _ = stream.write_all(reply.to_string().as_bytes());
                 }
             });
@@ -716,7 +663,7 @@ mod tests {
         assert_eq!(sent["targetAgent"], Value::from("bee"));
         assert_eq!(sent["body"], Value::from("task dispatch: task.md"));
         assert_eq!(sent["artifact"], Value::from(task_path.as_str()));
-        assert_eq!(sent["replyTo"], Value::from(""));
+        assert!(sent.get("replyTo").is_none());
         // The window was there: no heal. The member's pane came from the agent
         // seam's split echo (it never reaches the tmux facade), tagged for the
         // team.

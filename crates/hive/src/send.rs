@@ -1,8 +1,8 @@
 //! Send addressing and the hived send seam: which team owns the target of
 //! a `hive send` (a qualified `<group>.<name>` across windows, a bare name
-//! in the caller's team, a Claude-session guest's target), the root-thread
-//! body protocol, and the request every dispatch — `hive send`, a spawn's
-//! `--task`, a flow node — hands the hived.
+//! in the caller's team, a Claude-session guest's target), the long-body
+//! hint, and the request every dispatch — `hive send`, a spawn's `--task`,
+//! a flow node — hands the hived.
 
 use std::collections::HashSet;
 
@@ -23,7 +23,6 @@ pub(crate) fn request_send_payload(
     target_agent: &str,
     body: &str,
     artifact: &str,
-    reply_to: &str,
     command_name: &str,
     warn_on_long_body: bool,
 ) -> Result<Map<String, Value>> {
@@ -38,7 +37,6 @@ pub(crate) fn request_send_payload(
         target_agent,
         body,
         artifact,
-        reply_to,
     );
     let payload = match payload {
         Some(p) if !p.is_empty() => p,
@@ -278,26 +276,6 @@ fn maybe_warn_long_body(body: &str, command: &str) {
     }
 }
 
-/// Some(error) when the body violates the root-thread protocol (the cli's
-/// `validate_root_send_protocol` fails on it).
-pub(crate) fn root_send_protocol_error(body: &str) -> Option<String> {
-    let summary = body.trim();
-    if summary.is_empty() {
-        return Some("new root send requires a short body summary".to_string());
-    }
-    // artifact is not mandatory — short confirmations like "ack" legitimately
-    // don't need one. The length/structure gate below already forces bulky or
-    // structured content into --artifact.
-    if crate::message::body_warning_hint(summary).is_some() {
-        return Some(
-            "new root send body must stay short and unstructured; move details into --artifact \
-             (prefer `--artifact -` unless you already have a file)"
-                .to_string(),
-        );
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,16 +408,5 @@ mod tests {
         );
         assert_eq!(split_team_address(".x"), ("".to_string(), ".x".to_string()));
         assert_eq!(split_team_address("x."), ("".to_string(), "x.".to_string()));
-    }
-
-    #[test]
-    fn test_root_send_protocol_rejects_empty_and_structured_bodies() {
-        assert_eq!(
-            root_send_protocol_error("  "),
-            Some("new root send requires a short body summary".to_string())
-        );
-        assert!(root_send_protocol_error("ack").is_none());
-        let long_body = "x".repeat(501);
-        assert!(root_send_protocol_error(&long_body).is_some());
     }
 }

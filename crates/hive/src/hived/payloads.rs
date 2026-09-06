@@ -1,123 +1,18 @@
 // --------------------------------------------------------------------------
-// thread / send / doctor payloads
+// send / doctor payloads
 // --------------------------------------------------------------------------
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
 use crate::agent::Agent;
-use crate::message::{format_hive_envelope, project_thread_event};
+use crate::message::format_hive_envelope;
 use crate::team::Team;
 use crate::{bus, devlog};
 
 use super::*;
-
-pub(crate) fn thread_payload(workspace: &str, message_id: &str) -> Result<Map<String, Value>> {
-    let events = bus::read_events_with_seq(workspace)?;
-    let mut send_events: HashMap<String, (i64, Map<String, Value>)> = HashMap::new();
-    let mut children: HashMap<String, Vec<String>> = HashMap::new();
-
-    for (seq, event) in events {
-        let event_map = match serde_json::to_value(&event) {
-            Ok(Value::Object(map)) => map,
-            _ => continue,
-        };
-        let event_msg_id = event.msg_id.clone();
-        if event_msg_id.is_empty() {
-            continue;
-        }
-        if event.intent == "send" {
-            let parent = event.in_reply_to.clone();
-            send_events.insert(event_msg_id.clone(), (seq, event_map));
-            if !parent.is_empty() {
-                children.entry(parent).or_default().push(event_msg_id);
-            }
-        }
-    }
-
-    if !send_events.contains_key(message_id) {
-        return Ok(err_response(format!(
-            "no send event found with msgId '{message_id}'"
-        )));
-    }
-
-    let mut root_id = message_id.to_string();
-    let mut seen: HashSet<String> = HashSet::new();
-    loop {
-        let (_, event) = &send_events[&root_id];
-        let parent = map_get_str(event, "inReplyTo");
-        if parent.is_empty() || !send_events.contains_key(&parent) || seen.contains(&parent) {
-            break;
-        }
-        seen.insert(root_id.clone());
-        root_id = parent;
-    }
-
-    let mut depth_map: HashMap<String, i64> = HashMap::new();
-    let mut thread_ids: HashSet<String> = HashSet::new();
-
-    fn walk(
-        current_id: &str,
-        depth: i64,
-        thread_ids: &mut HashSet<String>,
-        depth_map: &mut HashMap<String, i64>,
-        children: &HashMap<String, Vec<String>>,
-        send_events: &HashMap<String, (i64, Map<String, Value>)>,
-    ) {
-        if thread_ids.contains(current_id) {
-            return;
-        }
-        thread_ids.insert(current_id.to_string());
-        depth_map.insert(current_id.to_string(), depth);
-        let mut child_ids = children.get(current_id).cloned().unwrap_or_default();
-        child_ids.sort_by_key(|item| send_events[item].0);
-        for child_id in child_ids {
-            walk(
-                &child_id,
-                depth + 1,
-                thread_ids,
-                depth_map,
-                children,
-                send_events,
-            );
-        }
-    }
-
-    walk(
-        &root_id,
-        0,
-        &mut thread_ids,
-        &mut depth_map,
-        &children,
-        &send_events,
-    );
-
-    let mut sorted_ids: Vec<String> = thread_ids.into_iter().collect();
-    sorted_ids.sort_by_key(|item| send_events[item].0);
-    let mut items: Vec<Value> = Vec::new();
-    for thread_msg_id in sorted_ids {
-        let (_, event) = &send_events[&thread_msg_id];
-        let mut item = project_thread_event(event);
-        item.insert(
-            "depth".to_string(),
-            Value::from(depth_map.get(&thread_msg_id).copied().unwrap_or(0)),
-        );
-        if thread_msg_id == message_id {
-            item.insert("focus".to_string(), Value::Bool(true));
-        }
-        items.push(Value::Object(item));
-    }
-
-    let mut payload = Map::new();
-    payload.insert("ok".to_string(), Value::Bool(true));
-    payload.insert("rootMsgId".to_string(), Value::from(root_id));
-    payload.insert("focusMsgId".to_string(), Value::from(message_id));
-    payload.insert("messages".to_string(), Value::Array(items));
-    Ok(payload)
-}
 
 pub(crate) fn resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
     let team = hooked_team_load(team_name)?;
@@ -150,7 +45,6 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
     bail!("target agent is waiting for a user answer; answer it in the target pane")
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn send_payload(
     workspace: &str,
     team_name: &str,
@@ -158,59 +52,33 @@ pub(crate) fn send_payload(
     target_agent: &str,
     body: &str,
     artifact: &str,
-    reply_to: &str,
 ) -> Result<Map<String, Value>> {
     if target_agent == FLOW_MAILBOX_AGENT {
         // The flow runner's mailbox: it owns no pane and no transport —
         // the durable bus row IS the delivery, and the runner polls for
         // it. Members answer a flow dispatch with an ordinary
         // `hive send flow`, which lands here.
-        let event = bus::write_send_event(
-            workspace,
-            sender_agent,
-            target_agent,
-            body.trim(),
-            artifact,
-            None,
-            reply_to,
-        )?;
+        let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
         let mut payload = Map::new();
         payload.insert("ok".to_string(), Value::Bool(true));
         payload.insert("to".to_string(), Value::from(target_agent));
-        payload.insert("msgId".to_string(), Value::from(event.msg_id));
+        payload.insert("seq".to_string(), Value::from(seq));
         payload.insert("mailbox".to_string(), Value::Bool(true));
         return Ok(payload);
     }
 
     let (_team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
-    let normalized_body = body.trim();
 
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
 
-    let event = bus::write_send_event(
-        workspace,
-        sender_agent,
-        target_agent,
-        normalized_body,
-        artifact,
-        None,
-        reply_to,
-    )?;
-    let message_id = event.msg_id;
-    let envelope = format_hive_envelope(
-        sender_agent,
-        target_agent,
-        body,
-        artifact,
-        &message_id,
-        reply_to,
-    );
+    let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
+    let envelope = format_hive_envelope(sender_agent, target_agent, body, artifact);
 
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
     payload.insert("to".to_string(), Value::from(target_agent));
-    payload.insert("msgId".to_string(), Value::from(message_id.clone()));
+    payload.insert("seq".to_string(), Value::from(seq));
     // Fire-and-forget past this point: the transport verdict is the only
     // delivery state. The daemon/channel either accepted the message (its
     // own contract queues and processes it) or refused it — there is no
@@ -232,7 +100,7 @@ pub(crate) fn send_payload(
             "error".to_string(),
             Value::from(format!("transport refused {target_agent}: {exc}")),
         );
-        refused.insert("msgId".to_string(), Value::from(message_id));
+        refused.insert("seq".to_string(), Value::from(seq));
         return Ok(refused);
     }
     // Accepted for a pane member: unread on the status bar until the

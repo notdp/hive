@@ -68,14 +68,25 @@ class Rig:
 
     def dispatches_for(self, member: str) -> list[tuple]:
         # A refused delivery leaves its bus row behind (the bus is a ledger,
-        # not a queue) and the flow retries with a fresh msgId — several
+        # not a queue) and the flow retries with a fresh row — several
         # same-body dispatch rows are legal. The one that reached the member
-        # is whichever its reply anchors.
+        # is the last one before its reply.
         return [r for r in self.bus_rows if r[1] == "flow.run" and r[2] == member]
 
     def replies_for(self, member: str) -> list[tuple]:
-        ids = {d[0] for d in self.dispatches_for(member)}
-        return [r for r in self.bus_rows if r[3] in ids]
+        # The bus keeps order, not links: a reply is what reached the
+        # mailbox after the member's dispatch. Other members' own replies
+        # are excluded by name so an identity hijack (a reply signed by
+        # someone who is not a member) still shows up here.
+        dispatches = self.dispatches_for(member)
+        if not dispatches:
+            return []
+        since = min(d[0] for d in dispatches)
+        others = {self.member(c) for c in self.clis} - {member}
+        return [
+            r for r in self.bus_rows
+            if r[2] == "flow.run" and r[0] > since and r[1] not in others
+        ]
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
@@ -127,7 +138,7 @@ def rig():
 
         wf = r.root / "workflow.js"
         task = "请把这段口令写进 {path}：{nonce}。写完后把口令原样回报给派发人，顺便说一句你对这个任务的看法。"
-        # agent() resolves to the reply ({body, artifact, msgId}); the
+        # agent() resolves to the reply ({body, artifact}); the
         # member's name is the script's own knowledge.
         thunk_lines = "".join(
             "  () => agent("
@@ -167,7 +178,7 @@ def rig():
         db = r.workspace / "hive.db"
         if db.exists():
             r.bus_rows = sqlite3.connect(db).execute(
-                "select msg_id, from_agent, to_agent, in_reply_to, body from messages"
+                "select seq, from_agent, to_agent, body from messages"
             ).fetchall()
         for line in _tmux("list-panes", "-t", r.session, "-F",
                           "#{pane_id} #{@hive-agent}", check=False).splitlines():
