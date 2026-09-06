@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from member_transcripts import DISPATCH_ID_RE, normalize
+from member_transcripts import DISPATCH_ID_RE, JOB_ID_RE, normalize
 
 SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -45,22 +45,42 @@ def test_nonce_reaches_the_file(rig):
         assert rig.want(cli) in f.read_text(), f"{rig.member(cli)}: wrong file content"
 
 
+def test_node_session_is_the_engines_own(rig):
+    # bought by: a claude roster row holding the bg job id (8 hex), which
+    # names no transcript — the node must report the engine session the
+    # job runs, and the oracle resolves that session from the job's own
+    # state file rather than from the node's answer
+    for cli in rig.clis:
+        member = rig.member(cli)
+        row = rig.roster.get(member, {})
+        assert row.get("sessionId"), f"{member}: registry row has no sessionId: {row!r}"
+        engine = rig.engine_sessions.get(member, "")
+        assert engine, (
+            f"{member}: roster sessionId {row.get('sessionId')!r} resolves to no engine session "
+            f"(claude: <claude-config>/jobs/<job_id>/state.json has no sessionId)"
+        )
+        result = rig.node_results[member]
+        assert result.get("session") == engine, (
+            f"{member}: node session {result.get('session')!r} != engine session {engine!r} "
+            f"(roster sessionId {row.get('sessionId')!r})"
+        )
+        if cli == "claude":
+            assert not JOB_ID_RE.match(str(result.get("session", ""))), (
+                f"{member}: node reported the bg job id {result.get('session')!r} as its session"
+            )
+
+
 def test_dispatch_lands_once_in_the_member_transcript(rig):
     # bought by: anchoring a turn by time instead of by the input that
     # started it (a fold-in or a human's keystroke steals the wrong turn)
     for cli in rig.clis:
         member = rig.member(cli)
-        row = rig.roster.get(member, {})
-        assert row.get("sessionId"), f"{member}: registry row has no sessionId: {row!r}"
         turn = rig.turns[member]
         assert turn.input_count == 1, (
             f"{member}: dispatch id {rig.dispatch_id(member)} found in "
             f"{turn.input_count} input records of the member's transcript"
         )
         result = rig.node_results[member]
-        assert result.get("session") == row.get("sessionId"), (
-            f"{member}: node session {result.get('session')!r} != roster {row.get('sessionId')!r}"
-        )
         assert turn.turn and result.get("turn") == turn.turn, (
             f"{member}: node turn {result.get('turn')!r} != transcript turn {turn.turn!r}"
         )

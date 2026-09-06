@@ -1,12 +1,20 @@
 """The acceptance oracle's own transcript readers.
 
 A node's JSON line says what the runner believed; these readers say what the
-member's engine wrote. They resolve a member's transcript from its registry
-row (cli, sessionId, cwd) the way the engines lay files out, find the one
-input record carrying the dispatch id, and read the turn that input started
-to its terminal record and final assistant text — independently of the
-runner's own readers in `crates/hive/src/adapters/*_turn.rs`, so the two
-can disagree.
+member's engine wrote. They resolve a member's engine session from its
+registry row (cli, sessionId, cwd), locate the transcript the way the
+engines lay files out, find the one input record carrying the dispatch id,
+and read the turn that input started to its terminal record and final
+assistant text — independently of the runner's own readers in
+`crates/hive/src/adapters/*_turn.rs`, so the two can disagree. Nothing here
+takes the node's own answer (its `session`, `turn` or `body`) as a key to
+find anything.
+
+Identity: a codex or grok registry row holds the engine's own session id.
+A claude row holds the bg job id (8 hex, the leading block of the session
+uuid), and the engine session behind it is read from the job's own state
+file `<claude-config>/jobs/<job_id>/state.json` (`sessionId`), which is not
+the sessions-registry entry the runner resolves it through.
 
 Record shapes (verified on live transcripts, 2026-09-06):
 
@@ -22,10 +30,13 @@ Record shapes (verified on live transcripts, 2026-09-06):
   .turn_id` names the turn; `event_msg` `task_complete` with the same
   `turn_id` closes it and carries `last_agent_message`.
 - grok `~/.grok/sessions/<urlencode(cwd, safe='')>/<sid>/`:
-  `chat_history.jsonl` records of `type: user` whose text holds
-  `<user_query>` are turn inputs (system-reminder user records are not);
-  `events.jsonl` `turn_started` (`session_id`, `turn_number`) and
-  `turn_ended` (`outcome`) pair up in order, one pair per query.
+  `chat_history.jsonl` records of `type: user` with a `prompt_index` are
+  the prompts (a mid-turn user record carries `synthetic_reason` and no
+  `prompt_index`); an assistant record with `tool_calls` is a step, the
+  answer is an assistant record without. `events.jsonl` `turn_started`
+  carries `session_id` and `turn_number` — the same coordinate as the
+  prompt's `prompt_index` — and `turn_ended` (`outcome`) carries no turn
+  number: start and end pair by walking the stream in order.
 """
 
 from __future__ import annotations
@@ -38,6 +49,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 DISPATCH_ID_RE = re.compile(r"^nd-[0-9a-f]{12}$")
+# A claude bg job id: the session uuid's leading 8 hex, with the same band
+# the runner accepts (`claude_bg::looks_like_job_id`).
+JOB_ID_RE = re.compile(r"^[0-9a-f]{6,12}$")
 
 
 @dataclass
@@ -81,11 +95,39 @@ def read_jsonl(path: Path) -> list[dict]:
     return out
 
 
+# --- the engine session behind a registry row ---
+
+
+def claude_config_dir(home: Path | None = None) -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (home or Path.home()) / ".claude")
+
+
+def claude_job_session(job_id: str, home: Path | None = None) -> str:
+    """The engine session a claude bg job runs, from the job's own state
+    file `<claude-config>/jobs/<job_id>/state.json` (`sessionId`). Empty
+    when the job has no readable state."""
+    try:
+        data = json.loads((claude_config_dir(home) / "jobs" / job_id / "state.json").read_text())
+    except (OSError, ValueError):
+        return ""
+    sid = data.get("sessionId") if isinstance(data, dict) else None
+    return sid if isinstance(sid, str) else ""
+
+
+def engine_session(cli: str, roster_session: str, home: Path | None = None) -> str:
+    """The engine session id a registry row's `sessionId` stands for: a
+    claude row holds the bg job id and resolves through the job's state
+    file; any other value is the engine id itself."""
+    if cli == "claude" and JOB_ID_RE.match(roster_session):
+        return claude_job_session(roster_session, home)
+    return roster_session
+
+
 # --- locating a member's transcript ---
 
 
 def claude_transcript(session_id: str, cwd: str, home: Path | None = None) -> Path | None:
-    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (home or Path.home()) / ".claude") / "projects"
+    root = claude_config_dir(home) / "projects"
     slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     direct = root / slug / f"{session_id}.jsonl"
     if direct.exists():
@@ -107,8 +149,9 @@ def grok_session_dir(session_id: str, cwd: str, home: Path | None = None) -> Pat
 
 
 def read_member_turn(cli: str, session_id: str, cwd: str, marker: str, home: Path | None = None) -> BoundTurn:
-    """Locate the member's transcript and read the turn `marker` started.
-    A missing transcript reads as an empty BoundTurn (no input found)."""
+    """Locate the member's transcript by its engine session id (see
+    `engine_session`) and read the turn `marker` started. A missing
+    transcript reads as an empty BoundTurn (no input found)."""
     if cli == "claude":
         path = claude_transcript(session_id, cwd, home)
         return claude_turn(read_jsonl(path), marker) if path else BoundTurn()
@@ -254,33 +297,53 @@ def _grok_text(rec: dict) -> str:
     return ""
 
 
-def _grok_is_query(rec: dict) -> bool:
-    return rec.get("type") == "user" and "<user_query>" in _grok_text(rec)
+def _grok_prompt_index(rec: dict) -> int | None:
+    """The turn number of a prompt record; None for a mid-turn user record
+    (`synthetic_reason`, no `prompt_index`) and for anything else."""
+    if rec.get("type") != "user":
+        return None
+    index = rec.get("prompt_index")
+    return index if isinstance(index, int) and not isinstance(index, bool) else None
 
 
 def grok_turn(history: list[dict], events: list[dict], marker: str) -> BoundTurn:
     bound = BoundTurn()
-    queries = [i for i, r in enumerate(history) if _grok_is_query(r)]
-    hits = [i for i in queries if marker in _grok_text(history[i])]
+    hits = [i for i, r in enumerate(history) if _grok_prompt_index(r) is not None and marker in _grok_text(r)]
     bound.input_count = len(hits)
     if not hits:
         return bound
     start = hits[0]
-    ordinal = queries.index(start)
-    starts = [e for e in events if e.get("type") == "turn_started"]
-    ends = [e for e in events if e.get("type") == "turn_ended"]
-    if ordinal < len(starts):
-        s = starts[ordinal]
-        bound.turn = f"{s.get('session_id', '')}/{s.get('turn_number', '')}"
-    if ordinal < len(ends):
-        bound.terminal = True
-        bound.outcome = str(ends[ordinal].get("outcome", ""))
-    stop = queries[ordinal + 1] if ordinal + 1 < len(queries) else len(history)
-    last_assistant = None
-    for rec in history[start + 1:stop]:
-        if rec.get("type") == "assistant":
-            last_assistant = rec
-    if last_assistant is not None and bound.terminal:
-        text = _grok_text(last_assistant)
+    number = _grok_prompt_index(history[start])
+    # The prompt's `prompt_index` is the turn number. `turn_ended` carries
+    # none, so the pairing walks the event stream in order from the
+    # `turn_started` with that number: the first `turn_ended` after it closes
+    # the turn; another `turn_started` first means the turn never got its own
+    # end record. Splitting the stream into two arrays and indexing by
+    # ordinal would hand a turn without an end the next turn's outcome.
+    opened = False
+    for event in events:
+        kind = event.get("type")
+        if not opened:
+            if kind == "turn_started" and event.get("turn_number") == number:
+                opened = True
+                bound.turn = f"{event.get('session_id', '')}/{number}"
+            continue
+        if kind == "turn_started":
+            break
+        if kind == "turn_ended":
+            bound.terminal = True
+            bound.outcome = str(event.get("outcome", ""))
+            break
+    # The final message is the last assistant record of the turn's history
+    # span (up to the next prompt) that carries no `tool_calls`: a
+    # tool-calling record is a step, and its narration is not the answer.
+    final = None
+    for rec in history[start + 1:]:
+        if _grok_prompt_index(rec) is not None:
+            break
+        if rec.get("type") == "assistant" and not rec.get("tool_calls"):
+            final = rec
+    if final is not None and bound.terminal:
+        text = _grok_text(final)
         bound.blocks = [text] if text else []
     return bound
