@@ -117,6 +117,22 @@ pub(crate) fn self_exe() -> String {
         .unwrap_or_else(|| "hive".to_string())
 }
 
+/// Python `shlex.quote`: alphanumerics and `_@%+=:,./-` pass through bare,
+/// anything else is wrapped in single quotes.
+pub(crate) fn shlex_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let safe = value.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '_' | '-')
+    });
+    if safe {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub(crate) fn env_string(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }

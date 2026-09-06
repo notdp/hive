@@ -28,9 +28,15 @@ pub const _PANE_BASE_FMT: &str = concat!(
 );
 const _PANE_FIELD_COUNT: usize = 8;
 
+/// `#{@hive-team}` read as a window tag. A window format reads pane options
+/// through (the active pane's `@hive-team` answers for a window that has
+/// none), so the hidden window parking a mirror pane would scan as a second
+/// team window; `@hive-hidden` masks it.
+pub const _WINDOW_TEAM_FMT: &str = "#{?@hive-hidden,,#{@hive-team}}";
+
 pub const _TEAM_WINDOW_FMT: &str = concat!(
     "#{session_name}:#{window_index}\t#{window_name}\t#{window_id}\t",
-    "#{@hive-team}\t#{@hive-workspace}\t#{@hive-created}\t#{@hive-pr}"
+    "#{?@hive-hidden,,#{@hive-team}}\t#{@hive-workspace}\t#{@hive-created}\t#{@hive-pr}"
 );
 const _TEAM_WINDOW_FIELD_COUNT: usize = 7;
 
@@ -156,6 +162,16 @@ pub fn list_team_windows_status() -> (Option<Vec<TeamWindow>>, &'static str) {
     (Some(out), "ok")
 }
 
+/// The window tagged `@hive-team` *team* (hidden windows masked), as a
+/// `session:index` target.
+pub fn team_window_target(team: &str) -> Option<String> {
+    list_team_windows_status()
+        .0?
+        .into_iter()
+        .find(|w| w.team == team)
+        .map(|w| w.window)
+}
+
 fn _parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
     let mut result: Vec<PaneInfo> = Vec::new();
     for line in stdout.trim().split('\n') {
@@ -203,10 +219,11 @@ pub fn clear_pane_option(pane_id: &str, key: &str) {
     let _ = _run(&["set-option", "-p", "-t", pane_id, "-u", &opt], false, 5);
 }
 
-// `hive-view` is derived state (the claude view probe writes it), not
-// identity — but release must clear it with the rest, or a reused pane keeps
-// rendering a border suffix nobody owns any more.
-const _PANE_TAG_KEYS: [&str; 7] = [
+// `hive-view`, `hive-busy` and `hive-unread` are derived state (the claude
+// view probe and the status tick write them), not identity — but release
+// must clear them with the rest, or a reused pane keeps rendering a border
+// suffix or a status chip nobody owns any more.
+const _PANE_TAG_KEYS: [&str; 9] = [
     "hive-role",
     "hive-agent",
     "hive-team",
@@ -214,6 +231,8 @@ const _PANE_TAG_KEYS: [&str; 7] = [
     "hive-group",
     "hive-owner",
     "hive-view",
+    "hive-busy",
+    "hive-unread",
 ];
 
 /// Set all hive identity options on a pane.
@@ -240,4 +259,48 @@ pub fn clear_pane_tags(pane_id: &str) {
     for key in _PANE_TAG_KEYS {
         clear_pane_option(pane_id, key);
     }
+}
+
+/// Window ids of the hidden windows parking *team*'s closed mirror pane
+/// (`@hive-hidden <team>`, written by `hive mirror off`).
+pub fn hidden_mirror_windows(team: &str) -> Vec<String> {
+    let fmt = format!("#{{window_id}}\t#{{@{}}}", super::HIDDEN_WINDOW_KEY);
+    let r = match _run(&["list-windows", "-a", "-F", &fmt], false, 5) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    r.stdout
+        .lines()
+        .filter_map(|line| {
+            let (window, hidden) = line.split_once('\t')?;
+            (hidden == team && !window.is_empty()).then(|| window.to_string())
+        })
+        .collect()
+}
+
+/// The parked mirror pane of *team*: the first `mirror` pane in one of its
+/// hidden windows. A second one is a leftover for `hive delete`.
+pub fn hidden_mirror_pane(team: &str) -> Option<String> {
+    let windows = hidden_mirror_windows(team);
+    if windows.is_empty() {
+        return None;
+    }
+    let r = _run(
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{window_id}\t#{@hive-role}",
+        ],
+        false,
+        5,
+    )
+    .ok()?;
+    r.stdout.lines().find_map(|line| {
+        let mut parts = line.split('\t');
+        let pane = parts.next()?;
+        let window = parts.next()?;
+        let role = parts.next().unwrap_or_default();
+        (role == "mirror" && windows.iter().any(|w| w == window)).then(|| pane.to_string())
+    })
 }

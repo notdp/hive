@@ -121,6 +121,15 @@ pub(super) fn hooked_set_pane_option(pane_id: &str, key: &str, value: &str) {
     crate::tmux::set_pane_option(pane_id, key, value)
 }
 
+pub(super) fn hooked_set_window_option(target: &str, option: &str, value: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.set_window_option.clone()).flatten() {
+        f(target, option, value);
+        return;
+    }
+    crate::tmux::set_window_option(target, option, value)
+}
+
 pub(super) fn hooked_send_keys(pane_id: &str, text: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.send_keys.clone()).flatten() {
@@ -520,35 +529,19 @@ pub(super) fn hooked_notify_ui_notify(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn hooked_clear_stale_notify(
     window_target: &str,
     panes: &[String],
     token: &str,
-    remove_attention: bool,
     source: &str,
     workspace: &str,
 ) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.clear_stale_notify.clone()).flatten() {
-        f(
-            window_target,
-            panes,
-            token,
-            remove_attention,
-            source,
-            workspace,
-        );
+        f(window_target, panes, token, source, workspace);
         return;
     }
-    crate::notify_ui::clear_stale_notify(
-        window_target,
-        panes,
-        token,
-        remove_attention,
-        source,
-        workspace,
-    )
+    crate::notify_ui::clear_stale_notify(window_target, panes, token, source, workspace)
 }
 
 pub(super) fn hooked_is_plugin_enabled(name: &str) -> bool {

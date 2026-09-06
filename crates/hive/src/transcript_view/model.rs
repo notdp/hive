@@ -26,7 +26,6 @@ pub(super) fn _clip(text: &str, limit: usize) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HiveMessage {
     pub from: Option<String>,
-    pub to: Option<String>,
     pub msg_id: Option<String>,
     pub reply_to: Option<String>,
     pub artifact: Option<String>,
@@ -110,7 +109,6 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
     }
     let mut msg = HiveMessage {
         from: None,
-        to: None,
         msg_id: None,
         reply_to: None,
         artifact: None,
@@ -128,7 +126,6 @@ pub(crate) fn parse_hive_message(text: &str) -> Option<HiveMessage> {
         }
         let slot = match key {
             "from" => &mut msg.from,
-            "to" => &mut msg.to,
             "msgId" => &mut msg.msg_id,
             "reply-to" => &mut msg.reply_to,
             "artifact" => &mut msg.artifact,

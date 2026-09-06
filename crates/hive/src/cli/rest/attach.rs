@@ -187,9 +187,9 @@ pub(crate) fn _mirrors_a_session(member: &Map<String, Value>) -> bool {
         && crate::adapters::claude_bg::job_row(&map_str(member, "sessionId"), "claude").is_none()
 }
 
-/// The window's recorded rail choice: `@hive-mirror` `on` / `off` (written
-/// by `hive mirror`, or `off` by the self heuristic), None when nobody has
-/// decided yet — the only state the heuristic is consulted in.
+/// The window's recorded mirror choice: `@hive-mirror` `on` / `off`
+/// (`hive mirror`, or `on` written when a session mirror is built), None
+/// when nothing is recorded yet — which reads as open.
 fn _mirror_preference(window: &str) -> Option<bool> {
     match tmux::get_window_option(window, "hive-mirror").as_deref() {
         Some("on") => Some(true),
@@ -198,94 +198,53 @@ fn _mirror_preference(window: &str) -> Option<bool> {
     }
 }
 
-/// Heuristic, not authority: the human is already looking at this session.
-/// A shell inside a Claude desktop terminal panel (`TERM_PROGRAM`
-/// claude-desktop) with a human at it (stdin is a tty — a Claude Code tool
-/// subprocess has none) and the session's own cwd is that conversation on
-/// screen; a mirror of it beside it is dead weight.
-pub(crate) fn _self_session_on_screen(
-    term_program: &str,
-    stdin_tty: bool,
-    cwd: &str,
-    member_cwd: &str,
-) -> bool {
-    term_program == "claude-desktop" && stdin_tty && !member_cwd.is_empty() && cwd == member_cwd
-}
-
-/// The heuristic against this process's own env and tty, for one member.
-fn _self_on_screen(member: &Map<String, Value>) -> bool {
-    _self_session_on_screen(
-        &env_string("TERM_PROGRAM"),
-        stdin_isatty(),
-        &getcwd(),
-        &map_str(member, "cwd"),
-    )
-}
-
-/// The `@hive-role` of the pane *member* gets in *window* now — `agent`
-/// riding its engine, `mirror` for a session mirror — or None when no pane
-/// is drawn: a session mirror is withheld while the window records `off`,
-/// or, with nothing recorded, when the self heuristic fires — which records
-/// `off` so heal and backfill respect it. A recorded `on` is never second-
-/// guessed. Decided once per member: the job-ledger probe behind
-/// `_mirrors_a_session` is a CLI call.
-pub(crate) fn _pane_role(window: &str, member: &Map<String, Value>) -> Option<&'static str> {
-    _pane_role_with(window, member, || _self_on_screen(member))
-}
-
-/// `_pane_role` with the heuristic's verdict supplied; only reached when
-/// the window has no recorded choice.
-pub(crate) fn _pane_role_with(
-    window: &str,
+/// The `@hive-role` of the pane *member* gets — `agent` riding its engine,
+/// `mirror` for a session mirror — or None when no pane is drawn: a session
+/// mirror is withheld while *mirror_pref* (the window's `_mirror_preference`,
+/// or the `on` a `hive mirror on` is enforcing) is `off`. Decided once per
+/// member: the job-ledger probe behind `_mirrors_a_session` is a CLI call.
+pub(crate) fn _pane_role(
+    mirror_pref: Option<bool>,
     member: &Map<String, Value>,
-    on_screen: impl FnOnce() -> bool,
 ) -> Option<&'static str> {
     if !_mirrors_a_session(member) {
         return Some("agent");
     }
-    match _mirror_preference(window) {
-        Some(false) => None,
-        Some(true) => Some("mirror"),
-        None if on_screen() => {
-            tmux::set_window_option(window, "@hive-mirror", "off");
-            None
-        }
-        None => Some("mirror"),
+    if mirror_pref == Some(false) {
+        return None;
+    }
+    Some("mirror")
+}
+
+/// A session mirror on screen makes the orch chip appear: the window
+/// records `on` unless a choice is already recorded.
+fn _record_mirror_shown(window: &str) {
+    if !window.is_empty() && _mirror_preference(window).is_none() {
+        tmux::set_window_option(window, "@hive-mirror", "on");
     }
 }
 
-/// The heuristic on a window that already shows a rail: an attach from the
-/// panel of the very session a rail mirrors takes that rail down, once,
-/// recording `off` — a window with a recorded choice is left as it is.
-/// Returns the panes killed. `kill-pane` unzooms, so the re-tile lands.
-pub(crate) fn _withdraw_self_mirrors_with(
-    window: &str,
-    entry: &Map<String, Value>,
-    on_screen: impl Fn(&Map<String, Value>) -> bool,
-) -> Vec<String> {
-    if _mirror_preference(window).is_some() {
-        return Vec::new();
+/// *member*'s parked mirror pane (`hive mirror off` broke it into a hidden
+/// window) joined back as *window*'s first pane, tags and viewer intact —
+/// so a rebuilt or healed window never starts a second viewer of one
+/// session. None when nothing of *member*'s is parked.
+fn _join_hidden_mirror(window: &str, team: &str, member: &str) -> Option<String> {
+    let hidden = tmux::hidden_mirror_pane(team)?;
+    if tmux::get_pane_option(&hidden, "hive-agent").as_deref() != Some(member) {
+        return None;
     }
-    let members = _entry_members(entry);
-    let rails: Vec<String> = tmux::list_panes_full(window)
-        .into_iter()
-        .filter(|p| p.role == "mirror")
-        .filter(|p| {
-            members
-                .iter()
-                .any(|m| map_str(m, "name") == p.agent && on_screen(m))
-        })
-        .map(|p| p.pane_id)
-        .collect();
-    if rails.is_empty() {
-        return rails;
-    }
-    tmux::set_window_option(window, "@hive-mirror", "off");
-    for pane in &rails {
-        tmux::kill_pane(pane);
-    }
-    let _ = crate::layout::apply_adaptive(window);
-    rails
+    let first = tmux::list_panes(window).into_iter().next()?;
+    _join_parked_pane(&hidden, &first);
+    _record_mirror_shown(window);
+    Some(hidden)
+}
+
+/// The parked pane *hidden* joined back before *first*. A notify mark it
+/// carries is stale: the select hook reconciles only the panes of the
+/// window it fires on, and the parked pane sat outside it.
+pub(crate) fn _join_parked_pane(hidden: &str, first: &str) {
+    tmux::join_pane_before(hidden, first);
+    tmux::clear_pane_option(hidden, crate::notify_ui::PANE_NOTIFY_ACTIVE_KEY);
 }
 
 /// Title + tags + context + viewer launcher for one member's display pane,
@@ -301,6 +260,9 @@ pub(crate) fn _bind_member_viewer(
     let cli_name = map_str(member, "cli");
     tmux::set_pane_title(pane, &format!("[{name}]"));
     tmux::tag_pane(pane, role, &name, team, &cli_name, "");
+    if role == "mirror" {
+        _record_mirror_shown(&tmux::get_pane_window_target(pane).unwrap_or_default());
+    }
     if !ws.is_empty() {
         let _ = crate::context::save_context_for_pane(pane, team, ws, &name);
     }
@@ -343,10 +305,12 @@ pub(super) fn _members_to_backfill(
 
 /// Split panes into an existing team window for roster members it does not
 /// render yet (a member spawned after the window was built, a session
-/// mirror `hive mirror on` asks back). Re-tiles when it added any.
+/// mirror `hive mirror on` asks back — *mirror_pref* is what decides a
+/// session member's pane, see `_pane_role`). Re-tiles when it added any.
 pub(super) fn _backfill_missing_member_panes(
     window: &str,
     entry: &Map<String, Value>,
+    mirror_pref: Option<bool>,
 ) -> Vec<String> {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
@@ -364,10 +328,14 @@ pub(super) fn _backfill_missing_member_panes(
     }
     let mut added = Vec::new();
     for member in _members_to_backfill(&rendered, _entry_members(entry)) {
-        let Some(role) = _pane_role(window, &member) else {
+        let Some(role) = _pane_role(mirror_pref, &member) else {
             continue;
         };
         let name = map_str(&member, "name");
+        if role == "mirror" && _join_hidden_mirror(window, &team, &name).is_some() {
+            added.push(name);
+            continue;
+        }
         let cwd = map_str(&member, "cwd");
         let count = tmux::list_panes(window).len();
         let split = tmux::split_window(
@@ -412,6 +380,7 @@ pub fn _new_team_session_window(team: &str) -> Result<(String, String, bool)> {
         // new_window forces "<team>:" so a numeric name is a session, not an index
         let (window, pane) = tmux::new_window(&exact, team, None, true)?;
         _mark_hive_built(&window);
+        _install_team_status(&pane);
         return Ok((window, pane, false));
     }
     let pane = tmux::new_session(team, _TEAM_SESSION_COLS, _TEAM_SESSION_ROWS)?;
@@ -422,7 +391,18 @@ pub fn _new_team_session_window(team: &str) -> Result<(String, String, bool)> {
         .ok_or_else(|| anyhow!("tmux did not report the window of pane {pane}"))?;
     tmux::rename_window(&window, team);
     _mark_hive_built(&window);
+    _install_team_status(&pane);
     Ok((window, pane, true))
+}
+
+/// hive's status bar on the session *pane* belongs to — the team session
+/// only; a window built inside the caller's own session leaves their
+/// status line alone.
+fn _install_team_status(pane: &str) {
+    let sid = tmux::display_value(pane, "#{session_id}").unwrap_or_default();
+    if !sid.is_empty() {
+        tmux::install_team_status(&sid);
+    }
 }
 
 /// Where a team window goes for the caller: inside tmux the caller's own
@@ -487,12 +467,17 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
     // The first member to take a pane gets the window's own; a withheld
     // mirror leaves it a shell, as a window with nobody attachable is.
     let mut first_free = true;
+    let mirror_pref = _mirror_preference(&window);
     for index in &attachable_idx {
         let member = &members[*index];
-        let Some(role) = _pane_role(&window, member) else {
+        let Some(role) = _pane_role(mirror_pref, member) else {
             continue;
         };
         let name = map_str(member, "name");
+        if role == "mirror" && _join_hidden_mirror(&window, &team, &name).is_some() {
+            attached.push(name);
+            continue;
+        }
         let cwd = map_str(member, "cwd");
         let pane = if first_free {
             first_free = false;
@@ -546,7 +531,7 @@ pub(crate) fn _ensure_team_display(entry: &Map<String, Value>) -> (String, bool)
         }
         return (window, true);
     }
-    for name in _backfill_missing_member_panes(&window, entry) {
+    for name in _backfill_missing_member_panes(&window, entry, _mirror_preference(&window)) {
         eprintln!("+ {name}: pane added to the existing window");
     }
     (window, false)
@@ -574,13 +559,6 @@ pub fn attach_cmd(team_name: &str) {
         Err(message) => fail(&message),
     };
     let (window, built) = _ensure_team_display(&entry);
-    if !built {
-        for pane in _withdraw_self_mirrors_with(&window, &entry, _self_on_screen) {
-            eprintln!(
-                "- {pane}: this session's own mirror withdrawn (`hive mirror on` restores it)"
-            );
-        }
-    }
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {
         if let Ok(mut t) = Team::load(team_name, "") {

@@ -323,20 +323,20 @@ pub(crate) fn _create_detached_team(
             fail(&e.to_string());
         }
     };
-    let orch_pane = orch_member
-        .as_ref()
-        .and_then(|orch| crate::cli::rest::_pane_role(&window, orch).map(|role| (orch, role)));
-    match orch_pane {
-        Some((orch, role)) => {
-            // The ccd creator's read-only mirror is the window's rail.
-            crate::cli::rest::_bind_member_viewer(&first_pane, orch, name, &ws_str, role);
+    match orch_member.as_ref() {
+        Some(orch) => {
+            // The ccd creator's read-only mirror is the first pane (a fresh
+            // window records no `off`, so `_pane_role` is `mirror`); an
+            // orch that will send needs the hived up, as in
+            // `_create_orch_team`.
+            crate::cli::rest::_bind_member_viewer(&first_pane, orch, name, &ws_str, "mirror");
+            let _ = _ensure_team_hived(&mut t, &ws_str);
         }
         None => {
-            // No orch, or a mirror withheld: the first pane is the team's
-            // dock, tagged the way a shell-pane create tags its pane
-            // (`Team::create`), so a verb run from it finds the team
-            // through its own tags — the window's `@hive-team` is display,
-            // not binding.
+            // No orch: the first pane is the team's dock, tagged the way a
+            // shell-pane create tags its pane (`Team::create`), so a verb
+            // run from it finds the team through its own tags — the
+            // window's `@hive-team` is display, not binding.
             tmux::tag_pane(
                 &first_pane,
                 crate::agent_cli::member_role_for_pane(&first_pane),
@@ -346,11 +346,6 @@ pub(crate) fn _create_detached_team(
                 "",
             );
         }
-    }
-    if orch_member.is_some() {
-        // An orch that will send needs the hived up, as in
-        // `_create_orch_team`.
-        let _ = _ensure_team_hived(&mut t, &ws_str);
     }
     _remember_context(name, &ws_str, LEAD_AGENT_NAME);
     println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
@@ -437,7 +432,7 @@ fn _create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     let mut orch_pane = current_pane.to_string();
     if panes.len() >= 2 {
         // Crowded window — isolate the orch so the team owns its window.
-        let (new_window, new_pane) = match tmux::break_pane(current_pane, "", true) {
+        let (new_window, new_pane) = match tmux::break_pane(current_pane, "", true, None) {
             Ok(pair) => pair,
             Err(e) => fail(&e.to_string()),
         };
@@ -1714,6 +1709,12 @@ pub(crate) fn _delete_team(name: &str, workspace: &str, delete_workspace: bool) 
         !team_window.is_empty() && tmux::get_window_option(&team_window, "hive-built").is_some();
     if !team_window.is_empty() {
         crate::team::clear_window_tags(&team_window);
+    }
+    // A parked mirror pane (`hive mirror off`) sits in a hidden window hive
+    // made; it goes first, or it would keep the team session alive after
+    // the team window closes.
+    for hidden in tmux::hidden_mirror_windows(name) {
+        tmux::kill_window(&hidden);
     }
     let caller_window = tmux::get_current_window_id().unwrap_or_default();
     if hive_built && !team_window_id.is_empty() && caller_window != team_window_id {

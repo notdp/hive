@@ -224,66 +224,8 @@ pub fn enable_pane_border_status(target: &str) {
     );
 }
 
-/// A click on a rail toggles it between `RAIL_COLS` and `RAIL_OPEN_WIDTH`;
-/// the width itself is the state, so a relayout that folded the rail needs
-/// no bookkeeping. `target` is `=` (the mouse pane) in the binding and a
-/// pane id when a test drives the same command by hand.
-pub fn rail_toggle_argv(target: &str) -> Vec<String> {
-    let rail = crate::layout::RAIL_COLS;
-    vec![
-        "if-shell".into(),
-        "-F".into(),
-        "-t".into(),
-        target.into(),
-        format!("#{{e|>:#{{pane_width}},{rail}}}"),
-        format!("resize-pane -t {target} -x {rail}"),
-        format!(
-            "resize-pane -t {target} -x {}",
-            crate::layout::RAIL_OPEN_WIDTH
-        ),
-    ]
-}
-
-/// tmux's stock root-table click, verbatim (`tmux list-keys -T root
-/// MouseDown1Pane` on 3.4): the else branch of the rail binding, so every
-/// pane that is not a rail keeps the click it always had.
-pub const _STOCK_CLICK: &str = "select-pane -t = ; send-keys -M";
-
-/// `bind-key` argv for the rail click. Pure tmux — no hive path in it — so
-/// it never goes stale and reinstalling is idempotent. A zoomed window is
-/// left to zoom: the click falls through to the stock branch. The rail
-/// branch drops `send-keys -M` on purpose: the viewer must not receive the
-/// click that resized it.
-pub fn mirror_click_binding() -> Vec<String> {
-    let toggle = rail_toggle_argv("=")
-        .iter()
-        .map(|t| format!("'{t}'"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    vec![
-        "bind-key".into(),
-        "-T".into(),
-        "root".into(),
-        "MouseDown1Pane".into(),
-        "if-shell".into(),
-        "-F".into(),
-        "-t".into(),
-        "=".into(),
-        "#{&&:#{==:#{@hive-role},mirror},#{==:#{window_zoomed_flag},0}}".into(),
-        format!("select-pane -t = ; {toggle}"),
-        _STOCK_CLICK.into(),
-    ]
-}
-
-pub fn ensure_mirror_click_binding() {
-    let binding = mirror_click_binding();
-    let args: Vec<&str> = binding.iter().map(String::as_str).collect();
-    let _ = _run(&args, false, 5);
-}
-
 /// Apply tmux window options expected for Hive-managed panes.
 pub fn configure_hive_window(target: &str) {
-    ensure_mirror_click_binding();
     enable_pane_border_status(target);
     set_window_option(target, "monitor-activity", "off");
     set_window_option(target, "monitor-bell", "off");

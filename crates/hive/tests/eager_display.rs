@@ -103,13 +103,14 @@ impl Rig {
 
     /// `(session_name, window_id)` of every window tagged for the team;
     /// none when the private server itself is gone (its last session
-    /// closed).
+    /// closed). The parked mirror's hidden window answers the tag through
+    /// its pane and is masked, as hive's own scans mask it.
     fn team_windows(&self) -> Vec<(String, String)> {
         let out = self.tmux(&[
             "list-windows",
             "-a",
             "-F",
-            "#{session_name}\t#{window_id}\t#{@hive-team}",
+            "#{session_name}\t#{window_id}\t#{?@hive-hidden,,#{@hive-team}}",
         ]);
         if !out.status.success() {
             return Vec::new();
@@ -127,9 +128,8 @@ impl Rig {
 
     /// The built hive binary, homed under the rig, on the private server.
     /// `inside` = (socket path, pane id) puts the call inside that pane the
-    /// way a tmux client's shell would see it. `TERM_PROGRAM` is stripped:
-    /// the self-mirror heuristic must never fire from the developer's
-    /// shell.
+    /// way a tmux client's shell would see it; an empty pane id is a
+    /// `run-shell` job's view (TMUX set, no TMUX_PANE).
     fn hive_cmd(&self, args: &[&str], inside: Option<(&str, &str)>) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hive"));
         cmd.args(args)
@@ -141,14 +141,15 @@ impl Rig {
             .env("CODEX_HOME", self.tmp.path().join("codex"))
             .env("GROK_HOME", self.tmp.path().join("grok"))
             .env("XDG_CACHE_HOME", self.tmp.path().join("cache"))
-            .env("TMUX_TMPDIR", self.tmp.path())
-            .env_remove("TERM_PROGRAM");
+            .env("TMUX_TMPDIR", self.tmp.path());
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
         }
         if let Some((socket, pane)) = inside {
-            cmd.env("TMUX", format!("{socket},{},0", std::process::id()))
-                .env("TMUX_PANE", pane);
+            cmd.env("TMUX", format!("{socket},{},0", std::process::id()));
+            if !pane.is_empty() {
+                cmd.env("TMUX_PANE", pane);
+            }
         }
         cmd
     }
@@ -239,6 +240,59 @@ impl Rig {
             window_id,
             &format!("#{{@{key}}}"),
         ])
+    }
+
+    fn session_id(&self, session: &str) -> String {
+        self.tmux_ok(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={session}:"),
+            "#{session_id}",
+        ])
+    }
+
+    /// Status line *n* of the window, rendered by tmux itself.
+    fn status_line(&self, window_id: &str, n: usize) -> String {
+        self.tmux_ok(&[
+            "display-message",
+            "-p",
+            "-t",
+            window_id,
+            &format!("#{{T:status-format[{n}]}}"),
+        ])
+    }
+
+    fn pane_pid(&self, pane_id: &str) -> String {
+        self.tmux_ok(&["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+    }
+
+    /// `(window_id, pane_id, @hive-role)` of every pane in a window parked
+    /// for the team (`@hive-hidden`).
+    fn hidden_panes(&self, team: &str) -> Vec<(String, String, String)> {
+        let windows: Vec<String> = self
+            .tmux_ok(&["list-windows", "-a", "-F", "#{window_id}\t#{@hive-hidden}"])
+            .lines()
+            .filter_map(|line| {
+                let (window, hidden) = line.split_once('\t')?;
+                (hidden == team).then(|| window.to_string())
+            })
+            .collect();
+        self.tmux_ok(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{window_id}\t#{pane_id}\t#{@hive-role}",
+        ])
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let window = parts.next()?.to_string();
+            let pane = parts.next()?.to_string();
+            let role = parts.next().unwrap_or_default().to_string();
+            windows.contains(&window).then_some((window, pane, role))
+        })
+        .collect()
     }
 
     fn zoomed(&self, window_id: &str) -> bool {
@@ -495,12 +549,17 @@ fn test_attach_names_a_missing_team_without_touching_tmux() {
 }
 
 #[test]
-fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_trips() {
-    let rig = Rig::new("rail");
-    // The server's stock key table, read before hive ever touches it.
+fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_trips() {
+    let rig = Rig::new("mirror");
+    // The server's stock key tables, read before hive ever touches them.
     let probe = format!("probe-{}", std::process::id());
     rig.tmux_ok(&["new-session", "-d", "-s", &probe]);
     let keys_before = rig.root_keys();
+    let prefix_before = rig.tmux_ok(&["list-keys", "-T", "prefix", "m"]);
+    assert!(
+        !prefix_before.contains("mirror --window"),
+        "{prefix_before}"
+    );
 
     let ws = rig.ws();
     rig.hive_as_claude_ok(
@@ -531,9 +590,29 @@ fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_tri
         (panes[0].1.as_str(), panes[0].2.as_str()),
         ("mirror", "orch")
     );
+    let mirror = panes[0].0.clone();
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
 
-    // The window build changed exactly one root binding: the click, whose
-    // rail branch resizes and whose else branch is the stock click.
+    // The bar is the team session's own: two lines there, the probe
+    // session and the global default untouched.
+    let sid = rig.session_id(&rig.team);
+    assert_eq!(
+        rig.tmux_ok(&["show-options", "-t", &sid, "-v", "status"]),
+        "2"
+    );
+    let probe_sid = rig.session_id(&probe);
+    assert_eq!(
+        rig.tmux_ok(&["show-options", "-t", &probe_sid, "-v", "status"]),
+        ""
+    );
+    assert_eq!(rig.tmux_ok(&["show-options", "-g", "-v", "status"]), "on");
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(&format!(" {} ", rig.team)), "{line}");
+    assert!(line.contains(" ◂ orch "), "{line}");
+    assert!(!line.contains(" ▸ orch "), "{line}");
+
+    // The window build changed exactly one root binding: the status click,
+    // whose else branch is the stock click, plus prefix+m.
     let keys_after = rig.root_keys();
     let gone: Vec<&String> = keys_before
         .iter()
@@ -545,32 +624,51 @@ fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_tri
         .collect();
     assert_eq!(gone.len(), 1, "removed: {gone:?}");
     assert_eq!(added.len(), 1, "added: {added:?}");
-    assert!(gone[0].contains("MouseDown1Pane"), "{}", gone[0]);
-    assert!(added[0].contains("MouseDown1Pane"), "{}", added[0]);
-    assert!(added[0].contains("@hive-role"), "{}", added[0]);
-    assert!(added[0].contains("resize-pane"), "{}", added[0]);
-    // The stock click hive hard-codes is the one tmux shipped (`list-keys`
-    // escapes its `;`), and the installed binding ends in that same text as
-    // its else branch — a tmux that changes its stock click fails here.
+    assert!(gone[0].contains("MouseDown1Status"), "{}", gone[0]);
+    assert!(added[0].contains("MouseDown1Status"), "{}", added[0]);
+    assert!(added[0].contains("hive-mirror"), "{}", added[0]);
+    assert!(added[0].contains("mirror --window"), "{}", added[0]);
+    // The stock click hive hard-codes is the one tmux shipped, and the
+    // installed binding ends in that same text as its else branch — a tmux
+    // that changes its stock click fails here.
     assert!(
-        gone[0]
-            .replace(r"\;", ";")
-            .ends_with(hive::tmux::_STOCK_CLICK),
+        gone[0].ends_with(hive::tmux::_STOCK_STATUS_CLICK),
         "{}",
         gone[0]
     );
+    // `list-keys` prints the nested command with its quotes escaped.
     assert!(
         added[0]
-            .trim_end_matches('"')
-            .ends_with(hive::tmux::_STOCK_CLICK),
+            .trim_end_matches(['"', '\\'])
+            .ends_with(hive::tmux::_STOCK_STATUS_CLICK),
         "{}",
         added[0]
     );
-    for key in ["MouseDown1Status", "MouseDrag1Border"] {
+    for key in ["MouseDown1Pane", "MouseDrag1Border"] {
         let before: Vec<&String> = keys_before.iter().filter(|k| k.contains(key)).collect();
         let after: Vec<&String> = keys_after.iter().filter(|k| k.contains(key)).collect();
         assert_eq!(before, after, "{key}");
     }
+    // prefix+m is gated on a team window; elsewhere it still runs what
+    // the key ran before (this server loads the developer's tmux.conf, so
+    // that is whatever they bound, else tmux's stock mark-pane), which the
+    // build also remembered in the server option.
+    let previous = hive::tmux::_bound_command(&prefix_before).expect("prefix+m was bound");
+    let prefix_after = rig.tmux_ok(&["list-keys", "-T", "prefix", "m"]);
+    assert!(prefix_after.contains("mirror --window"), "{prefix_after}");
+    // `list-keys` prints the else branch double-quoted, inner quotes escaped.
+    let printed = format!(
+        "\"{}\"",
+        previous.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    assert!(
+        prefix_after.ends_with(&printed),
+        "{prefix_after} vs {printed}"
+    );
+    assert_eq!(
+        rig.tmux_ok(&["show-options", "-s", "-v", "@hive-prefix-m"]),
+        previous
+    );
 
     // A plain pane stands in for a member: roles are what the layout
     // tiles by, and `hive mirror` runs from it.
@@ -585,64 +683,81 @@ fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_tri
     ]);
     let socket = rig.socket_path();
     let inside = Some((socket.as_str(), plain.as_str()));
+    let pid0 = rig.pane_pid(&mirror);
 
+    // `off` parks the pane — same id, same process — in a hidden window of
+    // the team session, and the chip reads closed.
     let stdout = rig.hive_ok(&["mirror", "off"], inside);
     assert_eq!(stdout, format!("mirror off ({})\n", rig.team));
-    assert!(
-        rig.panes(&window_id).iter().all(|p| p.1 != "mirror"),
-        "{:?}",
-        rig.panes(&window_id)
+    let panes = rig.panes(&window_id);
+    assert!(panes.iter().all(|p| p.1 != "mirror"), "{panes:?}");
+    assert_eq!(panes.len(), 1, "{panes:?}");
+    assert_eq!(panes[0].3, 220, "{panes:?}");
+    let hidden = rig.hidden_panes(&rig.team);
+    assert_eq!(hidden.len(), 1, "{hidden:?}");
+    assert_eq!(
+        (hidden[0].1.as_str(), hidden[0].2.as_str()),
+        (mirror.as_str(), "mirror")
     );
+    assert_eq!(rig.pane_pid(&mirror), pid0);
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "off");
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(" ▸ orch "), "{line}");
+
+    // The heal respects the recorded absence — and finds the team window,
+    // not the hidden one (whose pane answers `@hive-team` for it).
+    let target = rig.tmux_ok(&[
+        "display-message",
+        "-p",
+        "-t",
+        &window_id,
+        "#{session_name}:#{window_index}",
+    ]);
+    let stdout = rig.hive_ok(&["attach", &rig.team], inside);
+    assert_eq!(stdout.trim_end(), format!("found {target}"));
+    assert_eq!(rig.team_windows().len(), 1);
+    assert!(rig.panes(&window_id).iter().all(|p| p.1 != "mirror"));
+    assert_eq!(rig.hidden_panes(&rig.team).len(), 1);
     assert_eq!(rig.window_option(&window_id, "hive-mirror"), "off");
 
-    // The heal respects the recorded absence.
-    let stdout = rig.hive_ok(&["attach", &rig.team], inside);
-    assert!(stdout.starts_with("found "), "{stdout}");
-    assert!(rig.panes(&window_id).iter().all(|p| p.1 != "mirror"));
-
-    // `off` with no rail records the choice and touches nothing else.
+    // `off` with no mirror records the choice and touches nothing else.
     let stdout = rig.hive_ok(&["mirror", "off"], inside);
-    assert_eq!(stdout, format!("mirror off ({}): no rail\n", rig.team));
+    assert_eq!(stdout, format!("mirror off ({}): no mirror\n", rig.team));
     assert_eq!(rig.panes(&window_id).len(), 1);
 
+    // `on` joins the parked pane back as the main pane — no new viewer.
     let stdout = rig.hive_ok(&["mirror", "on"], inside);
     assert_eq!(stdout, format!("mirror on ({})\n", rig.team));
     let panes = rig.panes(&window_id);
     assert_eq!(panes.len(), 2, "{panes:?}");
     assert_eq!(
-        (panes[0].1.as_str(), panes[0].2.as_str(), panes[0].3),
-        ("mirror", "orch", 14),
+        (
+            panes[0].0.as_str(),
+            panes[0].1.as_str(),
+            panes[0].2.as_str()
+        ),
+        (mirror.as_str(), "mirror", "orch"),
         "{panes:?}"
     );
+    // main-vertical: the mirror is the main pane, half the 220 columns
+    // less tmux's separator rounding.
+    assert!((109..=110).contains(&panes[0].3), "{panes:?}");
     assert_eq!(panes[1].0, plain);
-    assert_eq!(panes[1].3, 220 - 15, "{panes:?}");
+    assert!(rig.hidden_panes(&rig.team).is_empty());
+    assert_eq!(rig.pane_pid(&mirror), pid0);
     assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(" ◂ orch "), "{line}");
 
-    // `on` with the rail already up says so and keeps the human's zoom.
+    // `on` with the mirror already up says so and keeps the human's zoom.
     rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
     assert!(rig.zoomed(&window_id));
     let stdout = rig.hive_ok(&["mirror", "on"], inside);
-    assert_eq!(
-        stdout,
-        format!("mirror on ({}): no session mirror to show\n", rig.team)
-    );
+    assert_eq!(stdout, format!("mirror on ({}): already shown\n", rig.team));
     assert!(rig.zoomed(&window_id));
-    rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
-    assert!(!rig.zoomed(&window_id));
 
-    // The click binding's rail branch, run by tmux's own parser exactly as
-    // the binding carries it (the mouse pane `=` being the rail): opens to
-    // 45% of the 220 columns, then folds back to the rail.
-    let rail = panes[0].0.clone();
-    let then = hive::tmux::mirror_click_binding()[9].replace('=', &rail);
-    rig.tmux_ok(&["if-shell", "-F", "-t", &rail, "1", &then]);
-    assert_eq!(rig.panes(&window_id)[0].3, 99);
-    rig.tmux_ok(&["if-shell", "-F", "-t", &rail, "1", &then]);
-    assert_eq!(rig.panes(&window_id)[0].3, 14);
-
-    // No argument toggles by presence; the kill unzooms, so the survivor
+    // No argument toggles by presence; break-pane unzooms, so the survivor
     // is re-tiled to the whole window.
-    rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
     let stdout = rig.hive_ok(&["mirror"], inside);
     assert_eq!(stdout, format!("mirror off ({})\n", rig.team));
     let panes = rig.panes(&window_id);
@@ -650,11 +765,25 @@ fn test_create_with_a_claude_creator_builds_the_rail_and_mirror_off_on_round_tri
     assert!(!rig.zoomed(&window_id));
     assert_eq!(panes[0].3, 220, "{panes:?}");
 
+    // The bindings' shape: a run-shell job — no caller pane — naming the
+    // window.
+    let stdout = rig.hive_ok(
+        &["mirror", "--window", &target, "on"],
+        Some((socket.as_str(), "")),
+    );
+    assert_eq!(stdout, format!("mirror on ({})\n", rig.team));
+    assert_eq!(rig.panes(&window_id)[0].0, mirror);
+
+    rig.hive_ok(&["mirror", "off"], inside);
+    assert_eq!(rig.hidden_panes(&rig.team).len(), 1);
     rig.delete();
+    // The hidden window went with the team: nothing keeps the session up.
+    assert!(rig.hidden_panes(&rig.team).is_empty());
+    assert!(!session_alive(&rig, &rig.team));
 }
 
 #[test]
-fn test_flow_rig_mirror_pane_is_the_rail() {
+fn test_flow_rig_mirror_pane_is_an_ordinary_pane_and_records_mirror_on() {
     let rig = Rig::new("flowrig");
     // The mirror pane is `hive view s-rig` with nothing else keeping the
     // pane open, and the viewer looks under `$HOME/.claude/projects` — so
@@ -678,14 +807,81 @@ fn test_flow_rig_mirror_pane_is_the_rail() {
     assert_eq!(panes.len(), 2, "{panes:?}");
     assert_eq!(
         (panes[0].1.as_str(), panes[0].3),
-        ("mirror", 14),
+        ("mirror", 220),
         "{panes:?}"
     );
     assert_eq!(
         (panes[1].1.as_str(), panes[1].3),
-        ("dock", 205),
+        ("dock", 220),
         "{panes:?}"
     );
+    let dock_height = rig.tmux_ok(&["display-message", "-p", "-t", &panes[1].0, "#{pane_height}"]);
+    assert_eq!(dock_height, hive::layout::DOCK_ROWS.to_string());
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(" ◂ orch "), "{line}");
+    assert!(line.contains(" ⬡ board "), "{line}");
     rig.hive_ok(&["flow", "rig", &rig.team, "--down"], None);
     assert!(rig.registry_entry().is_none());
+    assert!(!session_alive(&rig, &rig.team));
+}
+
+/// What the bar draws is tmux's rendering of options alone: set them the
+/// way the hived and notify do, read the lines back.
+#[test]
+fn test_status_bar_reflects_pane_options_tmux_renders() {
+    let rig = Rig::new("bar");
+    let window_id = rig.create_outside_tmux();
+    let split = |rig: &Rig| -> String {
+        rig.tmux_ok(&["split-window", "-t", &window_id, "-P", "-F", "#{pane_id}"])
+    };
+    let set = |pane: &str, key: &str, value: &str| {
+        rig.tmux_ok(&["set-option", "-p", "-t", pane, key, value]);
+    };
+    let busy = split(&rig);
+    set(&busy, "@hive-role", "agent");
+    set(&busy, "@hive-agent", "sage");
+    set(&busy, "@hive-busy", "1");
+    let unread = split(&rig);
+    set(&unread, "@hive-role", "agent");
+    set(&unread, "@hive-agent", "scout");
+    set(&unread, "@hive-unread", "1");
+    let attention = split(&rig);
+    set(&attention, "@hive-role", "agent");
+    set(&attention, "@hive-agent", "bee");
+    set(&attention, "@hive-notify-active", "tok");
+    rig.tmux_ok(&[
+        "set-option",
+        "-w",
+        "-t",
+        &window_id,
+        "@hive-ticker",
+        "x ##[y]",
+    ]);
+    rig.tmux_ok(&[
+        "set-option",
+        "-w",
+        "-t",
+        &window_id,
+        "@hive-notify-text",
+        "sage: hi",
+    ]);
+
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(" ● sage "), "{line}");
+    assert!(line.contains(" ✱ scout "), "{line}");
+    assert!(line.contains(" ✱ bee "), "{line}");
+    assert_eq!(line.matches(" ✱ ").count(), 2, "{line}");
+    // No mirror choice recorded: no orch chip (the shell pane tagged as
+    // the orch seat is an ordinary chip).
+    assert!(
+        !line.contains("◂ orch") && !line.contains("▸ orch"),
+        "{line}"
+    );
+    let line = rig.status_line(&window_id, 1);
+    assert!(line.contains("✱ sage: hi"), "{line}");
+    // The option value is inserted verbatim, never re-expanded.
+    assert!(line.ends_with("x ##[y]"), "{line}");
+
+    rig.delete();
 }

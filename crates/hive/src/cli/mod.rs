@@ -287,11 +287,17 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("mirror")
-                .about("Show or hide the read-only mirror rail on the current team window.")
+                .about("Show or hide the team's read-only orch mirror pane.")
                 .arg(
                     Arg::new("mode")
                         .num_args(0..=1)
                         .value_parser(["on", "off"]),
+                )
+                .arg(
+                    Arg::new("window")
+                        .long("window")
+                        .value_name("TARGET")
+                        .help("The team window (default: the caller's)"),
                 ),
         )
         .subcommand(
@@ -771,10 +777,8 @@ fn main_with_argv(argv: Vec<String>) {
         "cvim-seed" => std::process::exit(crate::cvim::seed_main(&tail)),
         "cvim-session" => std::process::exit(crate::cvim::session_main(&tail)),
         "cvim-profile" => std::process::exit(crate::cvim::profile_main(&tail)),
-        // notify's tmux hook / flash-script callbacks (Python's
-        // `-m hive.notify_ui` and the pane-attention middle layer).
+        // the after-select-window hook's callback
         "notify-hook" => std::process::exit(crate::notify_ui::main(&tail)),
-        "notify-attention" => std::process::exit(crate::notify_ui::attention_main()),
         _ => {}
     }
 
@@ -912,7 +916,7 @@ fn dispatch(matches: &ArgMatches) {
         Some(("compact", m)) => rest::compact_cmd(arg_str(m, "pane_id")),
         Some(("team", m)) => core_cmds::team_cmd(arg_str(m, "team_arg")),
         Some(("layout", m)) => rest::layout_cmd(&arg_str(m, "preset").to_lowercase()),
-        Some(("mirror", m)) => rest::mirror_cmd(arg_str(m, "mode")),
+        Some(("mirror", m)) => rest::mirror_cmd(arg_str(m, "mode"), arg_str(m, "window")),
         Some(("flow", m)) => match m.subcommand() {
             Some(("run", m)) => {
                 let script = arg_str(m, "script");
@@ -1153,7 +1157,8 @@ mod tests {
         assert_eq!(_no_tmux_refusal("interrupt"), Some(_TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(_no_tmux_refusal("config"), None);
-        // `mirror` reads the caller's window: tmux-only
+        // `mirror` moves panes on the server: tmux-only (a run-shell job
+        // carries TMUX)
         assert_eq!(_no_tmux_refusal("mirror"), Some(_TMUX_REQUIRED_MESSAGE));
     }
 

@@ -3,10 +3,10 @@
 //! A run gets a tmux session, a team and a board, all named after it
 //! (session = team = run). The session's first pane becomes the dock
 //! (`hive flow board`), an optional second pane mirrors the orchestrating
-//! Claude session read-only (`hive view`) as the window's rail, and members
-//! spawn above the dock as nodes run — the first spawn anchors on the dock
-//! pane, and the rail- and dock-aware layout tiles from there. `--down`
-//! retires every member, deletes the team and kills the session.
+//! Claude session read-only (`hive view`), and members spawn above the dock
+//! as nodes run — the first spawn anchors on the dock pane, and the
+//! dock-aware layout tiles from there. `--down` retires every member,
+//! deletes the team and kills the session.
 
 use std::path::Path;
 
@@ -104,6 +104,8 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
         tmux::set_pane_title(&mirror, "⬡ orch 「mirror」");
         tmux::respawn_pane(&mirror, &format!("{hive} view {}", shell_quote(session_id)))
             .context("starting the orch mirror")?;
+        // What makes the status bar's orch chip appear.
+        tmux::set_window_option(&window, "@hive-mirror", "on");
         let _ = crate::layout::apply_adaptive(&window);
     }
 

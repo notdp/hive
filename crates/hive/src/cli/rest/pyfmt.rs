@@ -137,21 +137,6 @@ fn write_py_value(
     }
 }
 
-/// Python `shlex.quote`.
-pub(crate) fn shlex_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    let safe = value.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '_' | '-')
-    });
-    if safe {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
 /// `str(uuid.uuid4())`.
 pub(super) fn uuid4() -> String {
     let b = os_random_bytes(16);

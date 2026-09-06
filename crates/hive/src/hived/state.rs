@@ -2,7 +2,7 @@
 // module state (process globals; nextest gives one process per test)
 // --------------------------------------------------------------------------
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -69,6 +69,13 @@ pub(super) fn claude_jobs_cache(
     static CELL: OnceLock<Mutex<Option<(f64, Option<HashMap<String, Map<String, Value>>>)>>> =
         OnceLock::new();
     CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Panes the hived handed a message to and has not seen busy since: the
+/// status tick's `@hive-unread`. The turn that reads the message clears it.
+pub(super) fn unread_pending() -> &'static Mutex<HashSet<String>> {
+    static CELL: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {

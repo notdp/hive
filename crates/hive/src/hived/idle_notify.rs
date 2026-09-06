@@ -294,7 +294,6 @@ fn clear_active_window_token(ctx: &TickCtx, windows: &BTreeMap<String, Vec<Strin
         &ctx.active_window,
         &sorted_panes,
         &token,
-        false,
         "hived.active_window",
         ctx.workspace,
     );

@@ -40,6 +40,7 @@ pub struct Hook {
     pub get_pane_window_target: Option<S1<Option<String>>>,
     pub get_window_option: Option<S2<Option<String>>>,
     pub set_pane_option: Option<Arc<dyn Fn(&str, &str, &str) + Send + Sync>>,
+    pub set_window_option: Option<Arc<dyn Fn(&str, &str, &str) + Send + Sync>>,
     pub send_keys: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
@@ -94,8 +95,7 @@ pub struct Hook {
     pub notify_ui_notify:
         Option<Arc<dyn Fn(&str, &str, &str) -> (bool, Option<String>) + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    pub clear_stale_notify:
-        Option<Arc<dyn Fn(&str, &[String], &str, bool, &str, &str) + Send + Sync>>,
+    pub clear_stale_notify: Option<Arc<dyn Fn(&str, &[String], &str, &str, &str) + Send + Sync>>,
     pub is_plugin_enabled: Option<S1<bool>>,
     // team / agent
     pub team_load: Option<Arc<dyn Fn(&str) -> anyhow::Result<Team> + Send + Sync>>,
@@ -169,6 +169,10 @@ impl Drop for Guard {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         super::codex_reattach_at()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        super::unread_pending()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();

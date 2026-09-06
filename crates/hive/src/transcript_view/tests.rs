@@ -228,16 +228,6 @@ fn test_parse_hive_message_reads_every_arrival_shape() {
 }
 
 #[test]
-fn test_parse_hive_message_reads_the_to_address() {
-    let addressed = parse_hive_message("<HIVE from=comb.dodo to=comb.rex>hi</HIVE>").unwrap();
-    assert_eq!(addressed.to.as_deref(), Some("comb.rex"));
-    let unaddressed = parse_hive_message("<HIVE from=comb.dodo>hi</HIVE>").unwrap();
-    assert_eq!(unaddressed.to, None);
-    let empty = parse_hive_message("<HIVE from=comb.dodo to=>hi</HIVE>").unwrap();
-    assert_eq!(empty.to, None);
-}
-
-#[test]
 fn test_every_hive_sender_draws_a_different_agent_icon() {
     let mut p = TranscriptParser::new();
     let mut icons = Vec::new();

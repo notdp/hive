@@ -89,6 +89,13 @@ def test_e2e_create_outside_tmux_builds_a_session_window_and_delete_closes_it():
             for line in run_tmux(["-u", "list-windows", "-t", f"={team}", "-F", "#{window_id}\t#{@hive-team}"], env=env).stdout.splitlines()
         ]
         assert [row[1] for row in rows] == [team], rows
+        # The team session carries hive's own two-line status bar and the
+        # server its status click; a session hive did not build is left
+        # alone by both (the bar is a session option).
+        assert run_tmux(["show-options", "-t", team, "-v", "status"], env=env).stdout.strip() == "2"
+        root_keys = run_tmux(["list-keys", "-T", "root"], env=env).stdout
+        assert "mouse_status_range},hive-mirror" in root_keys and "mirror --window" in root_keys, root_keys
+        assert "mirror --window" in run_tmux(["list-keys", "-T", "prefix", "m"], env=env).stdout
         entry = json.loads(registry_entry.read_text())
         assert entry["display"] == rows[0][0]
         assert entry["workspace"] == str(workspace)

@@ -163,6 +163,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
     let mut notify_debug_state = NotifyDebugState::default();
     let mut code_reexec_state = ReexecState::default();
     let mut claude_view_state = ClaudeTickState::default();
+    let mut status_state = StatusTickState::default();
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -314,6 +315,13 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         // down (the tick fns swallow their own failures).
         _claude_name_tick(&tick_members, team, &mut claude_view_state);
         _claude_view_tick(workspace, team, &tick_members, &mut claude_view_state);
+        _status_tick(
+            workspace,
+            &tick_members,
+            busy_monitor.as_deref(),
+            &mut status_state,
+            now_epoch_seconds(),
+        );
 
         if !hooked_serve_requests(
             server.as_ref(),
@@ -345,6 +353,13 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
     _set_output_busy_monitor(None);
     server.close();
     _cleanup_socket_if_owner(workspace, &owner_token);
+}
+
+fn now_epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 pub fn stop_hived(workspace: &str) {
