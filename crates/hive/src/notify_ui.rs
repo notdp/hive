@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 
 #[cfg(test)]
 use self::tests::fake_tmux as tmux;
-use crate::shell::shlex_quote;
 use crate::notify_debug;
+use crate::shell::shlex_quote;
 #[cfg(not(test))]
 use crate::tmux;
 
