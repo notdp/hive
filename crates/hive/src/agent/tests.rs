@@ -2278,3 +2278,11 @@ fn test_interrupt_of_an_unsupported_cli_is_refused() {
     assert!(err.contains("no native interrupt"), "{err}");
     assert!(calls().is_empty());
 }
+
+#[test]
+fn test_uuid4_shape() {
+    let sid = uuid4();
+    assert_eq!(sid.len(), 36);
+    assert_eq!(sid.as_bytes()[14], b'4');
+    assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+}

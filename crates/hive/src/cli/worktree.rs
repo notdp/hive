@@ -1,8 +1,14 @@
+//! Git integration verbs: `pr set|clear` (the window's PR label) and the
+//! `worktree *` pool.
+
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use super::*;
+use super::util::{fail, json_pretty};
+use crate::identity;
+use crate::json_fields::{is_set, map_str};
+use crate::paths::getcwd;
 use crate::tmux;
 
 // ---------------------------------------------------------------------------
@@ -14,7 +20,7 @@ use crate::tmux;
 // escaped literal `#I`, not the index token — left alone (the pathological
 // `###I` triple is intentionally unsupported: a conservative no-replace beats
 // corrupting a user's format).
-pub(crate) const PR_INDEX_TOKEN: &str = "#{?#{@hive-pr},PR#{@hive-pr},#I}";
+const PR_INDEX_TOKEN: &str = "#{?#{@hive-pr},PR#{@hive-pr},#I}";
 
 fn replace_index_tokens(format: &str) -> String {
     let bytes = format.as_bytes();
@@ -37,7 +43,7 @@ fn replace_index_tokens(format: &str) -> String {
 }
 
 /// Per-window status format derived from the *global* value; None = skip.
-pub(crate) fn derive_pr_window_status(global_format: Option<&str>) -> Option<String> {
+fn derive_pr_window_status(global_format: Option<&str>) -> Option<String> {
     let global_format = global_format?;
     if global_format.is_empty() {
         return None;
@@ -52,7 +58,7 @@ pub(crate) fn derive_pr_window_status(global_format: Option<&str>) -> Option<Str
     Some(derived)
 }
 
-pub fn pr_set_cmd(number: i64, plain: bool) {
+pub(crate) fn pr_set_cmd(number: i64, plain: bool) {
     if !identity::is_inside_tmux() {
         fail("must run inside tmux");
     }
@@ -118,7 +124,7 @@ pub fn pr_set_cmd(number: i64, plain: bool) {
     }
 }
 
-pub fn pr_clear_cmd(plain: bool) {
+pub(crate) fn pr_clear_cmd(plain: bool) {
     if !identity::is_inside_tmux() {
         fail("must run inside tmux");
     }
@@ -195,7 +201,7 @@ fn worktree_context() -> (String, String, Option<String>) {
     (owner, team, integration)
 }
 
-pub fn worktree_set_base_cmd(refname: &str, plain: bool) {
+pub(crate) fn worktree_set_base_cmd(refname: &str, plain: bool) {
     let window = identity::current_window_target().unwrap_or_default();
     let team = if window.is_empty() {
         String::new()
@@ -227,7 +233,7 @@ pub fn worktree_set_base_cmd(refname: &str, plain: bool) {
     }
 }
 
-pub fn worktree_start_cmd(feature: &str, base_ref: Option<&str>, plain: bool) {
+pub(crate) fn worktree_start_cmd(feature: &str, base_ref: Option<&str>, plain: bool) {
     let cwd = getcwd();
     let anchor = wt_ok(crate::worktree::repo_anchor(Some(Path::new(&cwd))));
     let (owner, team, integration) = worktree_context();
@@ -265,7 +271,7 @@ pub fn worktree_start_cmd(feature: &str, base_ref: Option<&str>, plain: bool) {
     }
 }
 
-pub fn worktree_done_cmd(feature: &str, force: bool, plain: bool) {
+pub(crate) fn worktree_done_cmd(feature: &str, force: bool, plain: bool) {
     let cwd = getcwd();
     let anchor = wt_ok(crate::worktree::repo_anchor(Some(Path::new(&cwd))));
     let result = wt_ok(crate::worktree::done(&anchor, feature, force, &cwd));
@@ -283,7 +289,7 @@ pub fn worktree_done_cmd(feature: &str, force: bool, plain: bool) {
     );
 }
 
-pub fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
+pub(crate) fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
     let cwd = getcwd();
     let anchor = wt_ok(crate::worktree::repo_anchor(Some(Path::new(&cwd))));
     let payload: Value = match feature.filter(|f| !f.is_empty()) {
@@ -349,5 +355,76 @@ pub fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
             map_str(&row, "worktreePath")
         );
         println!("{}", line.trim_end());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derives_plain_padded_format() {
+        assert_eq!(
+            derive_pr_window_status(Some("  #I #W  ")),
+            Some("  #{?#{@hive-pr},PR#{@hive-pr},#I} #W  ".to_string())
+        );
+    }
+
+    #[test]
+    fn test_preserves_style_wrappers_and_padding() {
+        let derived =
+            derive_pr_window_status(Some("#[bg=yellow,fg=black,bold]  #I #W  #[default]"));
+        assert_eq!(
+            derived,
+            Some(
+                "#[bg=yellow,fg=black,bold]  #{?#{@hive-pr},PR#{@hive-pr},#I} #W  #[default]"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_derives_tmux_default_format() {
+        let derived = derive_pr_window_status(Some("#I:#W#{?window_flags,#{window_flags}, }"));
+        assert_eq!(
+            derived,
+            Some(
+                "#{?#{@hive-pr},PR#{@hive-pr},#I}:#W#{?window_flags,#{window_flags}, }".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_skips_when_global_already_references_hive_pr() {
+        assert_eq!(
+            derive_pr_window_status(Some("#{?#{@hive-pr},PR#{@hive-pr},#I}:#W")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_skips_when_no_index_token() {
+        assert_eq!(derive_pr_window_status(Some("#W only")), None);
+    }
+
+    #[test]
+    fn test_skips_empty_or_missing_global() {
+        assert_eq!(derive_pr_window_status(None), None);
+        assert_eq!(derive_pr_window_status(Some("")), None);
+    }
+
+    #[test]
+    fn test_escaped_literal_hash_i_is_not_rewritten() {
+        // `##I` renders a literal `#I` — not a replaceable index token, so skip.
+        assert_eq!(derive_pr_window_status(Some("##I #W")), None);
+    }
+
+    #[test]
+    fn test_replaces_real_tokens_and_leaves_escaped_ones() {
+        let derived = derive_pr_window_status(Some("#I #W ##I #I"));
+        assert_eq!(
+            derived,
+            Some(format!("{PR_INDEX_TOKEN} #W ##I {PR_INDEX_TOKEN}"))
+        );
     }
 }

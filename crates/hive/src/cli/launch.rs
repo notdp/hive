@@ -1,8 +1,19 @@
+//! The managed launchers — `hive claude` / `hive codex` / `hive grok` —
+//! that replace this process with the engine bound to the pane (a bg job,
+//! the shared app-server daemon, the pane leader), plus `ccd ls` and the
+//! `resume-hint` the shell wrappers print after a launch ends.
+
 use std::os::unix::process::CommandExt;
 
 use serde_json::{json, Map, Value};
 
-use super::*;
+use super::util::{execvp, is_printable, json_pretty, stdout_isatty};
+use crate::agent::uuid4;
+use crate::identity;
+use crate::identity::env_string;
+use crate::paths::getcwd;
+use crate::shell::shlex_quote;
+use crate::team::live_member_pids;
 use crate::tmux;
 
 // ---------------------------------------------------------------------------
@@ -62,7 +73,7 @@ const CODEX_VALUE_OPTS: &[&str] = &[
 ];
 
 /// Index of the first non-option token in `args` — the subcommand, if any.
-pub(crate) fn codex_subcommand_index(args: &[String]) -> Option<usize> {
+fn codex_subcommand_index(args: &[String]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -87,7 +98,7 @@ pub(crate) fn codex_subcommand_index(args: &[String]) -> Option<usize> {
 }
 
 /// First positional token after the subcommand (e.g. resume's SESSION_ID).
-pub(crate) fn codex_positional_after(args: &[String], sub_index: usize) -> Option<String> {
+fn codex_positional_after(args: &[String], sub_index: usize) -> Option<String> {
     let mut i = sub_index + 1;
     while i < args.len() {
         let a = &args[i];
@@ -111,7 +122,7 @@ pub(crate) fn codex_positional_after(args: &[String], sub_index: usize) -> Optio
 ///
 /// A following token starting with `-` is the next flag, not this option's
 /// value: the option is read as bare (None) rather than swallowing it.
-pub(crate) fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
+fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
     for (i, a) in args.iter().enumerate() {
         if names.contains(&a.as_str()) {
             let next = args.get(i + 1).map(String::as_str).unwrap_or("");
@@ -136,10 +147,7 @@ pub(crate) fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String>
 }
 
 /// `<team>.<member>` when the pane carries hive member tags, else None.
-pub(crate) fn pane_member_label_via(
-    get: impl Fn(&str, &str) -> Option<String>,
-    pane: &str,
-) -> Option<String> {
+fn pane_member_label_via(get: impl Fn(&str, &str) -> Option<String>, pane: &str) -> Option<String> {
     let team = get(pane, "hive-team").unwrap_or_default();
     let agent = get(pane, "hive-agent").unwrap_or_default();
     if !team.is_empty() && !agent.is_empty() {
@@ -154,7 +162,7 @@ fn pane_member_label(pane: &str) -> Option<String> {
 }
 
 /// Launcher-minted job/thread name: member identity, or a pane placeholder.
-pub(crate) fn mint_name(label: Option<String>, pane: &str) -> String {
+fn mint_name(label: Option<String>, pane: &str) -> String {
     label.unwrap_or_else(|| {
         let stripped = pane.replace('%', "");
         format!(
@@ -304,7 +312,7 @@ fn exec_codex_managed(args: &[String]) -> ! {
     execvp("codex", &argv);
 }
 
-pub fn codex_cmd(args: &[String]) {
+pub(crate) fn codex_cmd(args: &[String]) {
     crate::plugin_manager::ensure_codex_plugin_current();
     exec_codex_managed(args);
 }
@@ -348,7 +356,7 @@ const CLAUDE_RAW_MODE_FLAGS: &[&str] = &["-p", "--print", "--bg", "-c", "--conti
 
 /// (resume flag present, its value). `-r`/`--resume` take an optional value;
 /// a bare flag opens claude's picker.
-pub(crate) fn claude_resume_arg(args: &[String]) -> (bool, Option<String>) {
+fn claude_resume_arg(args: &[String]) -> (bool, Option<String>) {
     for (i, a) in args.iter().enumerate() {
         if a == "-r" || a == "--resume" {
             if let Some(next) = args.get(i + 1) {
@@ -486,7 +494,7 @@ fn exec_claude_managed(args: &[String]) -> ! {
     claude_attach_loop(&job_id);
 }
 
-pub fn claude_cmd(args: &[String]) {
+pub(crate) fn claude_cmd(args: &[String]) {
     exec_claude_managed(args);
 }
 
@@ -530,7 +538,7 @@ const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
 /// A following token starting with `-` is the next flag, not this option's
 /// value: `--resume -m grok-4` resumes grok's own picker instead of recording
 /// `-m` as the pane's session id.
-pub(crate) fn grok_opt_value(args: &[String], names: &[&str]) -> Option<String> {
+fn grok_opt_value(args: &[String], names: &[&str]) -> Option<String> {
     for (i, a) in args.iter().enumerate() {
         if names.contains(&a.as_str()) {
             let next = args.get(i + 1).map(String::as_str).unwrap_or("");
@@ -550,7 +558,7 @@ pub(crate) fn grok_opt_value(args: &[String], names: &[&str]) -> Option<String> 
 }
 
 /// (session id this launch will run, whether hive must pass --session-id).
-pub(crate) fn grok_launch_session(args: &[String]) -> (Option<String>, bool) {
+fn grok_launch_session(args: &[String]) -> (Option<String>, bool) {
     let explicit = grok_opt_value(args, &["--session-id", "-s"]);
     if explicit.as_deref().is_some_and(|value| !value.is_empty()) {
         return (explicit, false);
@@ -630,7 +638,7 @@ fn exec_grok_managed(args: &[String]) -> ! {
     execvp("grok", &argv);
 }
 
-pub fn grok_cmd(args: &[String]) {
+pub(crate) fn grok_cmd(args: &[String]) {
     exec_grok_managed(args);
 }
 
@@ -638,7 +646,7 @@ pub fn grok_cmd(args: &[String]) {
 // ccd
 // ---------------------------------------------------------------------------
 
-pub fn ccd_ls_cmd() {
+pub(crate) fn ccd_ls_cmd() {
     let members = live_member_pids();
     let mut rows: Vec<Value> = Vec::new();
     for s in crate::adapters::claude_sessions::list_sessions() {
@@ -663,7 +671,7 @@ pub fn ccd_ls_cmd() {
 // resume-hint
 // ---------------------------------------------------------------------------
 
-pub fn resume_hint_cmd(cli_name: &str) {
+pub(crate) fn resume_hint_cmd(cli_name: &str) {
     // Prints nothing and exits 0 on any failure: a hint must never break the
     // wrapper.
     if let Some(hint) = resume_hint(cli_name, &getcwd()) {
@@ -671,7 +679,7 @@ pub fn resume_hint_cmd(cli_name: &str) {
     }
 }
 
-pub(crate) fn resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
+fn resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
     let (pane, _team, _agent) = pane_team_identity()?;
     let (session_id, resume_cmd) = match cli_name {
         "codex" => (
@@ -722,4 +730,192 @@ fn pane_team_identity() -> Option<(String, String, String)> {
         return None;
     }
     Some((pane, team, agent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::{args, display_env, fake_tmux_tagged};
+
+    #[test]
+    fn test_a_following_flag_is_not_the_value() {
+        let a = args(&["--resume", "-m", "grok-4"]);
+        assert_eq!(grok_opt_value(&a, &["--resume"]), None);
+        assert_eq!(codex_opt_value(&a, &["--resume"]), None);
+    }
+
+    #[test]
+    fn test_a_trailing_bare_option_has_no_value() {
+        let a = args(&["--resume"]);
+        assert_eq!(grok_opt_value(&a, &["--resume"]), None);
+        assert_eq!(codex_opt_value(&a, &["--resume"]), None);
+    }
+
+    #[test]
+    fn test_a_real_value_still_reads() {
+        let a = args(&["--resume", "old-sid", "-m", "grok-4"]);
+        assert_eq!(
+            grok_opt_value(&a, &["--resume"]),
+            Some("old-sid".to_string())
+        );
+        assert_eq!(
+            codex_opt_value(&a, &["--resume"]),
+            Some("old-sid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_the_equals_form_still_reads() {
+        let a = args(&["--resume=old-sid"]);
+        assert_eq!(
+            grok_opt_value(&a, &["--resume"]),
+            Some("old-sid".to_string())
+        );
+        assert_eq!(
+            codex_opt_value(&a, &["--resume"]),
+            Some("old-sid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_codex_cwd_does_not_swallow_the_next_flag() {
+        assert_eq!(
+            codex_opt_value(&args(&["--cd", "--model", "x"]), &["--cd", "-C"]),
+            None
+        );
+        assert_eq!(
+            codex_opt_value(&args(&["--cd", "/tmp/w", "--model", "x"]), &["--cd", "-C"]),
+            Some("/tmp/w".to_string())
+        );
+    }
+
+    #[test]
+    fn test_grok_resume_before_a_flag_leaves_the_pane_unrecorded() {
+        // a bare --resume opens grok's picker: hive cannot know the session id,
+        // so it records nothing rather than recording the next flag
+        assert_eq!(
+            grok_launch_session(&args(&["--resume", "-m", "grok-4"])),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn test_grok_resume_with_an_id_records_that_session() {
+        assert_eq!(
+            grok_launch_session(&args(&["--resume", "old-sid"])),
+            (Some("old-sid".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn test_grok_bare_launch_mints_a_session_and_passes_the_flag() {
+        let (sid, pass_flag) = grok_launch_session(&args(&["-m", "grok-4"]));
+        assert!(pass_flag);
+        assert_eq!(sid.expect("minted session id").len(), 36);
+    }
+
+    fn tags_lookup<'a>(
+        mapping: &'a [((&'a str, &'a str), &'a str)],
+    ) -> impl Fn(&str, &str) -> Option<String> + 'a {
+        move |target: &str, key: &str| {
+            mapping
+                .iter()
+                .find(|((t, k), _)| *t == target && *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn test_a_member_pane_mints_the_member_name_for_claude() {
+        let mapping = [
+            (("%179", "hive-team"), "honey"),
+            (("%179", "hive-agent"), "worker"),
+        ];
+        let label = pane_member_label_via(tags_lookup(&mapping), "%179");
+        assert_eq!(mint_name(label, "%179"), "honey.worker");
+    }
+
+    #[test]
+    fn test_a_member_pane_mints_the_member_name_for_codex() {
+        let mapping = [
+            (("%9", "hive-team"), "comb"),
+            (("%9", "hive-agent"), "validator"),
+        ];
+        let label = pane_member_label_via(tags_lookup(&mapping), "%9");
+        assert_eq!(mint_name(label, "%9"), "comb.validator");
+    }
+
+    #[test]
+    fn test_an_untagged_pane_falls_back_to_the_pane_placeholder() {
+        let mapping: [((&str, &str), &str); 0] = [];
+        let label = pane_member_label_via(tags_lookup(&mapping), "%42");
+        assert_eq!(mint_name(label, "%42"), "hive-42");
+    }
+
+    #[test]
+    fn test_a_half_tagged_pane_is_not_a_member() {
+        let mapping = [(("%7", "hive-team"), "honey")];
+        let label = pane_member_label_via(tags_lookup(&mapping), "%7");
+        assert_eq!(mint_name(label, "%7"), "hive-7");
+    }
+
+    #[test]
+    fn test_codex_subcommand_index_skips_global_options() {
+        assert_eq!(
+            codex_subcommand_index(&args(&["-c", "k=v", "exec"])),
+            Some(2)
+        );
+        assert_eq!(codex_subcommand_index(&args(&["resume", "sid"])), Some(0));
+        assert_eq!(codex_subcommand_index(&args(&["-m", "gpt"])), None);
+    }
+
+    #[test]
+    fn test_codex_positional_after_skips_flags() {
+        let a = args(&["resume", "--model", "x", "sid-1"]);
+        assert_eq!(codex_positional_after(&a, 0), Some("sid-1".to_string()));
+        assert_eq!(codex_positional_after(&args(&["resume"]), 0), None);
+    }
+
+    #[test]
+    fn test_claude_resume_arg_shapes() {
+        assert_eq!(claude_resume_arg(&args(&[])), (false, None));
+        assert_eq!(claude_resume_arg(&args(&["--resume"])), (true, None));
+        assert_eq!(
+            claude_resume_arg(&args(&["-r", "abc"])),
+            (true, Some("abc".to_string()))
+        );
+        assert_eq!(
+            claude_resume_arg(&args(&["--resume=abc"])),
+            (true, Some("abc".to_string()))
+        );
+        assert_eq!(claude_resume_arg(&args(&["--resume", "-m"])), (true, None));
+        assert_eq!(claude_resume_arg(&args(&["--resume="])), (true, None));
+    }
+
+    #[test]
+    fn test_resume_hint_needs_a_tagged_member_pane_and_its_job_record() {
+        let mut env = display_env();
+        env.env.set("TMUX_PANE", "%5");
+        let _argv = fake_tmux_tagged(
+            "",
+            &[],
+            &[("%5", "hive-team", "honey"), ("%5", "hive-agent", "bee")],
+        );
+
+        // A member pane with no job record: nothing to resume, no hint.
+        assert_eq!(resume_hint("claude", "/tmp/w"), None);
+
+        crate::adapters::claude_bg::write_pane_job("%5", "job-77", "sess-77", "/tmp/w").unwrap();
+        let hint = resume_hint("claude", "/tmp/w").expect("a recorded job is resumable");
+        assert!(hint.starts_with("Resume from anywhere:\n  "), "{hint}");
+        assert!(
+            hint.contains("cd /tmp/w && hive claude --resume job-77"),
+            "{hint}"
+        );
+
+        // The record alone is not enough: an untagged pane is nobody's member.
+        env.env.set("TMUX_PANE", "%6");
+        crate::adapters::claude_bg::write_pane_job("%6", "job-78", "sess-78", "/tmp/w").unwrap();
+        assert_eq!(resume_hint("claude", "/tmp/w"), None);
+    }
 }

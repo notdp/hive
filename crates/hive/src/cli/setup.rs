@@ -1,14 +1,18 @@
+//! Setup verbs: `config`, `notify`, `plugin *`, `shell-init`.
+
 use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use super::*;
+use super::util::{fail, json_pretty, ok_or_fail, resolve_target_pane};
+use crate::identity::env_string;
+use crate::json_fields::{is_set, map_str};
 
 // ---------------------------------------------------------------------------
 // config
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_config_value(raw: &str) -> Value {
+fn parse_config_value(raw: &str) -> Value {
     let lowered = raw.trim().to_lowercase();
     if lowered == "true" {
         return Value::Bool(true);
@@ -27,7 +31,7 @@ pub(crate) fn parse_config_value(raw: &str) -> Value {
     Value::String(raw.to_string())
 }
 
-pub fn config_get(key: &str) {
+pub(crate) fn config_get(key: &str) {
     let value = match crate::settings::get_setting(key) {
         Some(value) => value,
         None => std::process::exit(1),
@@ -40,13 +44,13 @@ pub fn config_get(key: &str) {
     }
 }
 
-pub fn config_set(key: &str, value: &str) {
+pub(crate) fn config_set(key: &str, value: &str) {
     let parsed = parse_config_value(value);
     ok_or_fail(crate::settings::set_setting(key, parsed.clone()));
     println!("{}", parsed);
 }
 
-pub fn config_unset(key: &str) {
+pub(crate) fn config_unset(key: &str) {
     if !ok_or_fail(crate::settings::unset_setting(key)) {
         std::process::exit(1);
     }
@@ -56,7 +60,7 @@ pub fn config_unset(key: &str) {
 // notify
 // ---------------------------------------------------------------------------
 
-pub fn notify_cmd(message: &str) {
+pub(crate) fn notify_cmd(message: &str) {
     let target_pane = resolve_target_pane();
     let payload = ok_or_fail(crate::notify_ui::notify(message, &target_pane, ""));
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
@@ -115,7 +119,7 @@ fn render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) -> 
     lines.join("\n")
 }
 
-pub fn plugin_list(plain: bool) {
+pub(crate) fn plugin_list(plain: bool) {
     let rows = ok_or_fail(crate::plugin_manager::list_plugins());
     if !plain {
         println!("{}", Value::Array(rows));
@@ -147,11 +151,11 @@ pub fn plugin_list(plain: bool) {
     }
 }
 
-pub fn plugin_ls(plain: bool) {
+pub(crate) fn plugin_ls(plain: bool) {
     plugin_list(plain);
 }
 
-pub fn plugin_enable(name: &str, plain: bool) {
+pub(crate) fn plugin_enable(name: &str, plain: bool) {
     match crate::plugin_manager::enable_plugin(name) {
         Ok(payload) => {
             if !plain {
@@ -166,7 +170,7 @@ pub fn plugin_enable(name: &str, plain: bool) {
     }
 }
 
-pub fn plugin_sync() {
+pub(crate) fn plugin_sync() {
     match crate::plugin_manager::materialize_marketplace() {
         Ok(payload) => println!("{}", payload.display()),
         Err(e) => fail(&e.to_string()),
@@ -205,7 +209,7 @@ fn setup_step(label: &str, argv: &[&str]) {
     }
 }
 
-pub fn plugin_setup() {
+pub(crate) fn plugin_setup() {
     let root = ok_or_fail(crate::plugin_manager::materialize_marketplace());
     let marketplace = root
         .ancestors()
@@ -264,7 +268,7 @@ fn which_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn plugin_disable(name: &str, plain: bool) {
+pub(crate) fn plugin_disable(name: &str, plain: bool) {
     match crate::plugin_manager::disable_plugin(name, false) {
         Ok(payload) => {
             if !plain {
@@ -376,14 +380,14 @@ function hgrok
 end
 "#;
 
-pub fn shell_init_cmd(shell: &str) {
+pub(crate) fn shell_init_cmd(shell: &str) {
     print!("{}", shell_init_script(shell));
 }
 
 /// The launcher script for *shell* (`$SHELL`'s basename when empty, zsh
 /// when that is unset too): fish gets its own dialect, everything else the
 /// zsh/bash one.
-pub(crate) fn shell_init_script(shell: &str) -> &'static str {
+fn shell_init_script(shell: &str) -> &'static str {
     let resolved = if shell.is_empty() {
         let env_shell = env_string("SHELL");
         if env_shell.is_empty() {
@@ -404,5 +408,136 @@ pub(crate) fn shell_init_script(shell: &str) -> &'static str {
         // bypasses alias expansion of the name in BOTH shells, so a stray
         // alias cannot break the parse.
         SHELL_INIT_POSIX
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::shell::shlex_quote;
+    use crate::testenv::EnvGuard;
+
+    #[test]
+    fn test_parse_config_value_shapes() {
+        assert_eq!(parse_config_value("true"), Value::Bool(true));
+        assert_eq!(parse_config_value(" FALSE "), Value::Bool(false));
+        assert_eq!(parse_config_value("42"), json!(42));
+        assert_eq!(parse_config_value("1.5"), json!(1.5));
+        assert_eq!(
+            parse_config_value("hello"),
+            Value::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_plugin_setup_drives_both_clis_in_order() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = tmp.path().join("calls.log");
+        for cli in ["claude", "codex"] {
+            let path = bin.join(cli);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho \"{cli} $*\" >> {}\n", log.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+
+        plugin_setup();
+
+        let mp = tmp.path().join(".hive/core_assets/marketplace");
+        let calls: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                format!(
+                    "claude plugin marketplace add {}",
+                    mp.join("claude").display()
+                ),
+                "claude plugin install hive@hive --yes".to_string(),
+                "claude plugin update hive@hive --yes".to_string(),
+                format!(
+                    "codex plugin marketplace add {}",
+                    mp.join("codex").display()
+                ),
+                "codex plugin add hive@hive".to_string(),
+            ]
+        );
+    }
+
+    /// The launcher script must be sourceable by both shells it claims and leave
+    /// the three launchers defined as functions.
+    #[test]
+    fn test_shell_init_script_parses_in_zsh_and_bash_and_defines_the_launchers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hive-init.sh");
+        std::fs::write(&path, shell_init_script("zsh")).unwrap();
+        let quoted = shlex_quote(&path.to_string_lossy());
+        let run = |shell: &str, argv: &[&str]| {
+            let out = std::process::Command::new(shell)
+                .args(argv)
+                .output()
+                .unwrap_or_else(|e| panic!("{shell} must be runnable for this test: {e}"));
+            assert!(
+                out.status.success(),
+                "{shell} {argv:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // Syntax only, no rc files.
+        run("zsh", &["-f", "-n", &path.to_string_lossy()]);
+        run(
+            "bash",
+            &["--noprofile", "--norc", "-n", &path.to_string_lossy()],
+        );
+        // Sourced: each launcher is a function in both dialects.
+        assert_eq!(
+            run(
+                "zsh",
+                &[
+                    "-f",
+                    "-c",
+                    &format!("source {quoted}; whence -w hclaude hcodex hgrok")
+                ]
+            ),
+            "hclaude: function\nhcodex: function\nhgrok: function\n"
+        );
+        assert_eq!(
+            run(
+                "bash",
+                &[
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    &format!("source {quoted}; declare -F hclaude hcodex hgrok"),
+                ]
+            ),
+            "hclaude\nhcodex\nhgrok\n"
+        );
+    }
+
+    #[test]
+    fn test_shell_init_resolves_the_dialect_from_shell_env() {
+        let mut env = EnvGuard::new();
+        assert_ne!(shell_init_script("fish"), shell_init_script("zsh"));
+        env.set("SHELL", "/opt/homebrew/bin/fish");
+        assert_eq!(shell_init_script(""), shell_init_script("fish"));
+        env.set("SHELL", "/bin/bash");
+        assert_eq!(shell_init_script(""), shell_init_script("zsh"));
+        env.remove("SHELL");
+        assert_eq!(shell_init_script(""), shell_init_script("zsh"));
     }
 }

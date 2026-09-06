@@ -40,4 +40,12 @@ mod tests {
         );
         assert_eq!(tmux_dquote_escape("a\\b\"c"), "a\\\\b\\\"c");
     }
+
+    #[test]
+    fn test_shlex_quote_matches_python() {
+        assert_eq!(shlex_quote(""), "''");
+        assert_eq!(shlex_quote("abc./_-"), "abc./_-");
+        assert_eq!(shlex_quote("a b"), "'a b'");
+        assert_eq!(shlex_quote("it's"), r#"'it'"'"'s'"#);
+    }
 }

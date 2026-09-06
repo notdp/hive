@@ -1,13 +1,109 @@
-//! `hive mirror [on|off] [--window TARGET]`: show or hide the team's
-//! read-only orch mirror pane. Display state only — `off` parks the pane
-//! with break-pane in a hidden window of the team session (the viewer keeps
-//! running), `on` joins it back; the choice lands on the window as
-//! `@hive-mirror` so heal and backfill keep it.
+//! Display verbs: `attach` (heal the team's window, then jump to it),
+//! `mirror` (show or park the session mirror pane), `layout`.
 
-use super::*;
+use serde_json::json;
+
+use super::util::{fail, ok_or_fail};
+use crate::identity;
+use crate::json_fields::map_str;
+use crate::team::{resolve_scoped_team, start_team_hived, Team};
+use crate::team_display::{
+    backfill_missing_member_panes, ensure_team_display, join_parked_pane, team_entry,
+};
 use crate::tmux;
 
-pub fn mirror_cmd(mode: &str, window: &str) {
+/// `hive layout <preset|auto> [--on-change] [--window TARGET]`. `auto`
+/// from a human forces the plan (the "布局拖乱了" repair); `--on-change`
+/// is the window hooks' form, which applies only when the plan's key
+/// differs from `@hive-layout` and prints nothing (a run-shell job's
+/// output would land in a tmux view). `--window` names the window when
+/// there is no caller pane (a run-shell job has no TMUX_PANE).
+pub(crate) fn layout_cmd(preset: &str, on_change: bool, window: &str) {
+    let window_target = if !window.is_empty() {
+        window.to_string()
+    } else {
+        let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
+        let t = t.expect("required resolve returned no team");
+        if !t.tmux_window.is_empty() {
+            t.tmux_window.clone()
+        } else {
+            identity::current_window_target().unwrap_or_default()
+        }
+    };
+    if window_target.is_empty() {
+        fail("Cannot determine tmux window target");
+    }
+    if preset == "auto" {
+        if on_change {
+            crate::layout::ensure_hook(&window_target);
+            return;
+        }
+        let outcome = crate::layout::ensure(&window_target, true);
+        let plan = outcome.plan();
+        println!(
+            "{}",
+            json!({
+                "layout": plan.map(|p| p.key.as_str()).unwrap_or_default(),
+                "orientation": plan.map(|p| p.orientation).unwrap_or_default(),
+                "window": window_target,
+                "applied": outcome.applied(),
+                "reason": outcome.reason(),
+            })
+        );
+        return;
+    }
+    if preset == "main-vertical" || preset == "main-horizontal" {
+        let dim = if preset == "main-vertical" {
+            "main-pane-width"
+        } else {
+            "main-pane-height"
+        };
+        tmux::set_window_option(&window_target, dim, "50%");
+    }
+    tmux::select_layout(&window_target, preset);
+    println!("{}", json!({"layout": preset, "window": window_target}));
+}
+
+// ---------------------------------------------------------------------------
+// attach
+// ---------------------------------------------------------------------------
+/// The jump attach ends on. Inside tmux, `switch-client` moves *this*
+/// client — `select-window` would only retarget the window's own session and
+/// leave a client attached elsewhere untouched.
+fn jump_to_window(window: &str, verdict: &str) {
+    if identity::is_inside_tmux() {
+        tmux::switch_client(window);
+        println!("{verdict} {window}");
+        return;
+    }
+    let session = match window.split_once(':') {
+        Some((session, _)) => session.to_string(),
+        None => window.to_string(),
+    };
+    ok_or_fail(tmux::exec_attach(&session, window));
+}
+
+pub(crate) fn attach_cmd(team_name: &str) {
+    let entry = match team_entry(team_name) {
+        Ok(entry) => entry,
+        Err(message) => fail(&message),
+    };
+    let (window, built) = ok_or_fail(ensure_team_display(&entry));
+    let ws = map_str(&entry, "workspace");
+    if !ws.is_empty() {
+        if let Ok(mut t) = Team::load(team_name, "") {
+            let _ = start_team_hived(&mut t, &ws);
+        }
+    }
+    jump_to_window(&window, if built { "built" } else { "found" });
+}
+
+/// `hive mirror [on|off] [--window TARGET]`: show or hide the team's
+/// read-only orch mirror pane. Display state only — `off` parks the pane
+/// with break-pane in a hidden window of the team session (the viewer keeps
+/// running), `on` joins it back; the choice lands on the window as
+/// `@hive-mirror` so heal and backfill keep it.
+pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     match mirror(mode, window) {
         Ok(line) => println!("{line}"),
         Err(message) => fail(&message),
@@ -47,7 +143,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
         // A roster member's parked pane joins back, a missing one is
         // rebuilt the way an attach heal would; the rig mirror is no
         // roster member.
-        backfill_missing_member_panes(&window, &entry, Some(true));
+        backfill_missing_member_panes(&window, &entry, Some(true)).map_err(|e| e.to_string())?;
         join_rig_mirror(&window, &team);
         if shown_mirrors(&window).is_empty() {
             return Ok(format!("mirror on ({team}): no session mirror to show"));
@@ -113,3 +209,6 @@ fn join_rig_mirror(window: &str, team: &str) {
     join_parked_pane(&hidden, &first);
     let _ = crate::layout::ensure(window, false);
 }
+
+#[cfg(test)]
+mod tests;

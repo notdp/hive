@@ -307,14 +307,14 @@ fn roster_rows(team: &crate::team::Team, runtime_alive: Option<HashSet<String>>)
 /// `hive flow board` body: resolve the team, dock this pane, paint until
 /// interrupted. Returns the process exit code.
 pub fn board_cmd(team: Option<&str>) -> i32 {
-    let (team_name, team) = match crate::cli::resolve_scoped_team(team, true) {
+    let (team_name, team) = match crate::team::resolve_scoped_team(team, true) {
         Ok((Some(name), Some(team))) => (name, team),
         Ok(_) | Err(_) => {
             eprintln!("Error: no Hive team in scope — pass --team <team> (see `hive ls`)");
             return 1;
         }
     };
-    let workspace = crate::cli::resolve_workspace(Some(&team), true).unwrap_or_default();
+    let workspace = crate::team::resolve_workspace(Some(&team), true).unwrap_or_default();
     if workspace.is_empty() {
         eprintln!("Error: team '{team_name}' has no workspace");
         return 1;

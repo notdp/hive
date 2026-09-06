@@ -1,25 +1,74 @@
-//! CLI entry point for hive.
-//!
-//! This module owns the clap command tree for the ENTIRE surface, `pub fn
-//! main()`, and the shared helpers both command halves use. Core registry
-//! verbs live in `core_cmds`; everything else routes to the `rest`
-//! directory.
+//! CLI entry point for hive: the clap command tree for the whole surface,
+//! `pub fn main()`, the root gates every subcommand passes (tmux, codex
+//! native), the help interception, and the dispatch into one module per
+//! domain — `team`, `member`, `attach`, `fork`, `flow`, `launch`, `setup`,
+//! `worktree`. The handlers print and exit; the logic they call lives in
+//! the crate (`team`, `naming`, `send`, `identity`, `team_display`).
 
-pub mod core_cmds;
+mod attach;
+mod flow;
+mod fork;
 pub mod help_text;
-pub mod rest;
-mod team_ops;
-pub(crate) mod util;
+mod launch;
+mod member;
+mod setup;
+mod team;
+mod util;
+mod worktree;
 
 use std::path::Path;
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use crate::identity;
+use util::fail;
 
-pub(crate) use crate::agent::uuid4;
-pub use team_ops::*;
-pub use util::*;
+const TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
+
+/// Refusal for an engine whose own session id names no roster row. Told
+/// apart from `TMUX_REQUIRED_MESSAGE` because the caller has no terminal to
+/// go find: it is an engine subprocess, and its identity is the broken part.
+const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on any team's roster \
+     (the member was killed, or the team deleted)";
+
+// Verbs that never need a tmux context — plus the team verbs, which read the
+// registry (the truth layer) and address the team's window by id, so a
+// caller outside tmux or in another session reaches it the same way. `flow`
+// rides the same doctrine, and `flow node --team` exists for callers without
+// a pane identity (a workflow proxy subagent, a desktop session).
+const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
+    "plugin",
+    "config",
+    "shell-init",
+    "codex",
+    "claude",
+    "grok",
+    "resume-hint",
+    "worktree",
+    "ls",
+    "ccd",
+    "create",
+    "join",
+    "spawn",
+    "team",
+    "kill",
+    "delete",
+    "attach",
+    "view",
+    "flow",
+];
+
+const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
+    "claude",
+    "codex",
+    "config",
+    "doctor",
+    "grok",
+    "inject",
+    "plugin",
+    "resume-hint",
+    "shell-init",
+];
 
 // ---------------------------------------------------------------------------
 // Command tree
@@ -46,7 +95,7 @@ fn json_default_options(cmd: Command) -> Command {
 pub(crate) fn build_cli() -> Command {
     Command::new("hive")
         .about("Hive - tmux-first multi-agent collaboration runtime.")
-        .version(hive_version())
+        .version(env!("CARGO_PKG_VERSION"))
         .disable_version_flag(true)
         .disable_help_subcommand(true)
         .subcommand(
@@ -740,6 +789,31 @@ fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Codex-native gate
+// ---------------------------------------------------------------------------
+
+fn codex_relaunch_message() -> String {
+    "this codex isn't hive-managed — hive runtime is degraded.\n\
+     for future launches use hcodex (one-time setup, any shell):\n  \
+     grep -q 'hive shell-init' ~/.zshrc || \
+     echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n\
+     then exit this codex (Ctrl-C twice) and run: hive codex resume"
+        .to_string()
+}
+
+fn require_codex_native(invoked: Option<&str>) {
+    if let Some(invoked) = invoked {
+        if CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS.contains(&invoked) {
+            return;
+        }
+    }
+    if !identity::is_codex_tool_env() || identity::current_codex_thread_is_hive_managed() {
+        return;
+    }
+    fail(&codex_relaunch_message());
+}
+
 /// Root-group gates, run before any subcommand.
 fn run_root_gates(invoked: &str) {
     require_codex_native(Some(invoked));
@@ -770,7 +844,7 @@ fn main_with_argv(argv: Vec<String>) {
             std::process::exit(0);
         }
         "--version" => {
-            println!("hive, version {}", hive_version());
+            println!("hive, version {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         }
         _ => {}
@@ -828,31 +902,31 @@ fn main_with_argv(argv: Vec<String>) {
     // forwarded verbatim (Click's ignore_unknown_options + UNPROCESSED args).
     match invoked.as_str() {
         "codex" => {
-            rest::codex_cmd(&tail);
+            launch::codex_cmd(&tail);
             return;
         }
         "claude" => {
-            rest::claude_cmd(&tail);
+            launch::claude_cmd(&tail);
             return;
         }
         "grok" => {
-            rest::grok_cmd(&tail);
+            launch::grok_cmd(&tail);
             return;
         }
         "cvim" => {
-            rest::cvim_cmd(&tail);
+            fork::cvim_cmd(&tail);
             return;
         }
         "vim" => {
-            rest::vim_cmd(&tail);
+            fork::vim_cmd(&tail);
             return;
         }
         "vfork" => {
-            rest::vfork_cmd(&tail);
+            fork::vfork_cmd(&tail);
             return;
         }
         "hfork" => {
-            rest::hfork_cmd(&tail);
+            fork::hfork_cmd(&tail);
             return;
         }
         _ => {}
@@ -867,27 +941,27 @@ fn main_with_argv(argv: Vec<String>) {
 
 fn dispatch(matches: &ArgMatches) {
     match matches.subcommand() {
-        Some(("fork", m)) => rest::fork_cmd(
+        Some(("fork", m)) => fork::fork_cmd(
             arg_str(m, "pane_id"),
             arg_str(m, "split"),
             arg_str(m, "join_as"),
             arg_str(m, "prompt"),
         ),
-        Some(("join", m)) => core_cmds::join_cmd(
+        Some(("join", m)) => team::join_cmd(
             arg_str(m, "team_arg"),
             arg_str(m, "name_override"),
             arg_str(m, "pane_override"),
             !m.get_flag("no_notify"),
             arg_str(m, "group_name"),
         ),
-        Some(("create", m)) => core_cmds::create(
+        Some(("create", m)) => team::create(
             arg_str(m, "name"),
             arg_str(m, "desc"),
             arg_str(m, "workspace"),
             m.get_flag("reset_workspace"),
             &arg_vec(m, "state_entries"),
         ),
-        Some(("delete", m)) => core_cmds::delete(
+        Some(("delete", m)) => team::delete(
             arg_str(m, "name"),
             arg_str(m, "workspace"),
             m.get_flag("delete_workspace"),
@@ -907,7 +981,7 @@ fn dispatch(matches: &ArgMatches) {
                     std::process::exit(2);
                 }
             }
-            rest::spawn(
+            member::spawn(
                 arg_str(m, "agent_name"),
                 arg_str(m, "model"),
                 arg_str(m, "prompt"),
@@ -920,20 +994,20 @@ fn dispatch(matches: &ArgMatches) {
             )
         }
         Some(("config", m)) => match m.subcommand() {
-            Some(("get", m)) => rest::config_get(arg_str(m, "key")),
-            Some(("set", m)) => rest::config_set(arg_str(m, "key"), arg_str(m, "value")),
-            Some(("unset", m)) => rest::config_unset(arg_str(m, "key")),
+            Some(("get", m)) => setup::config_get(arg_str(m, "key")),
+            Some(("set", m)) => setup::config_set(arg_str(m, "key"), arg_str(m, "value")),
+            Some(("unset", m)) => setup::config_unset(arg_str(m, "key")),
             _ => unreachable!("subcommand required"),
         },
-        Some(("inject", m)) => rest::inject_cmd(arg_str(m, "agent_name"), arg_str(m, "text")),
-        Some(("compact", m)) => rest::compact_cmd(arg_str(m, "pane_id")),
-        Some(("team", m)) => core_cmds::team_cmd(arg_str(m, "team_arg")),
-        Some(("layout", m)) => rest::layout_cmd(
+        Some(("inject", m)) => member::inject_cmd(arg_str(m, "agent_name"), arg_str(m, "text")),
+        Some(("compact", m)) => member::compact_cmd(arg_str(m, "pane_id")),
+        Some(("team", m)) => team::team_cmd(arg_str(m, "team_arg")),
+        Some(("layout", m)) => attach::layout_cmd(
             &arg_str(m, "preset").to_lowercase(),
             m.get_flag("on_change"),
             arg_str(m, "window"),
         ),
-        Some(("mirror", m)) => rest::mirror_cmd(arg_str(m, "mode"), arg_str(m, "window")),
+        Some(("mirror", m)) => attach::mirror_cmd(arg_str(m, "mode"), arg_str(m, "window")),
         Some(("flow", m)) => match m.subcommand() {
             Some(("run", m)) => {
                 let script = arg_str(m, "script");
@@ -941,13 +1015,13 @@ fn dispatch(matches: &ArgMatches) {
                     eprintln!("Error: Invalid value for 'SCRIPT': Path '{script}' does not exist.");
                     std::process::exit(2);
                 }
-                rest::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
+                flow::flow_run_cmd(script, m.get_one::<String>("resume").map(String::as_str))
             }
             Some(("board", m)) => std::process::exit(crate::flow_board::board_cmd(
                 m.get_one::<String>("team").map(String::as_str),
             )),
             Some(("node", m)) => match m.subcommand() {
-                Some(("run", m)) => rest::flow_node_run_cmd(
+                Some(("run", m)) => flow::flow_node_run_cmd(
                     arg_str(m, "name"),
                     m.get_one::<String>("cli").map(String::as_str),
                     m.get_one::<String>("model")
@@ -969,60 +1043,60 @@ fn dispatch(matches: &ArgMatches) {
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {
-            Some(("set", m)) => rest::pr_set_cmd(
+            Some(("set", m)) => worktree::pr_set_cmd(
                 *m.get_one::<i64>("number").expect("required"),
                 m.get_flag("plain"),
             ),
-            Some(("clear", m)) => rest::pr_clear_cmd(m.get_flag("plain")),
+            Some(("clear", m)) => worktree::pr_clear_cmd(m.get_flag("plain")),
             _ => unreachable!("subcommand required"),
         },
-        Some(("view", m)) => core_cmds::view_cmd(arg_str(m, "session_id")),
-        Some(("attach", m)) => rest::attach_cmd(arg_str(m, "team_name")),
-        Some(("ls", m)) => core_cmds::ls_cmd(m.get_flag("plain")),
-        Some(("send", m)) => core_cmds::send(
+        Some(("view", m)) => member::view_cmd(arg_str(m, "session_id")),
+        Some(("attach", m)) => attach::attach_cmd(arg_str(m, "team_name")),
+        Some(("ls", m)) => team::ls_cmd(m.get_flag("plain")),
+        Some(("send", m)) => member::send(
             arg_str(m, "to_agent"),
             arg_str(m, "body"),
             arg_str(m, "artifact"),
         ),
-        Some(("thread", m)) => rest::thread(arg_str(m, "message_id")),
-        Some(("doctor", m)) => core_cmds::doctor(arg_str(m, "agent_name")),
-        Some(("capture", m)) => rest::capture(
+        Some(("thread", m)) => member::thread(arg_str(m, "message_id")),
+        Some(("doctor", m)) => team::doctor(arg_str(m, "agent_name")),
+        Some(("capture", m)) => member::capture(
             arg_str(m, "member_name"),
             *m.get_one::<i64>("lines").unwrap_or(&30),
         ),
-        Some(("interrupt", m)) => core_cmds::interrupt(arg_str(m, "agent_name")),
-        Some(("kill", m)) => core_cmds::kill(arg_str(m, "agent_name"), arg_str(m, "team_arg")),
-        Some(("notify", m)) => rest::notify_cmd(arg_str(m, "message")),
+        Some(("interrupt", m)) => member::interrupt(arg_str(m, "agent_name")),
+        Some(("kill", m)) => member::kill(arg_str(m, "agent_name"), arg_str(m, "team_arg")),
+        Some(("notify", m)) => setup::notify_cmd(arg_str(m, "message")),
         Some(("plugin", m)) => match m.subcommand() {
-            Some(("list", m)) => rest::plugin_list(m.get_flag("plain")),
-            Some(("ls", m)) => rest::plugin_ls(m.get_flag("plain")),
-            Some(("enable", m)) => rest::plugin_enable(arg_str(m, "name"), m.get_flag("plain")),
-            Some(("disable", m)) => rest::plugin_disable(arg_str(m, "name"), m.get_flag("plain")),
-            Some(("sync", _)) => rest::plugin_sync(),
-            Some(("setup", _)) => rest::plugin_setup(),
+            Some(("list", m)) => setup::plugin_list(m.get_flag("plain")),
+            Some(("ls", m)) => setup::plugin_ls(m.get_flag("plain")),
+            Some(("enable", m)) => setup::plugin_enable(arg_str(m, "name"), m.get_flag("plain")),
+            Some(("disable", m)) => setup::plugin_disable(arg_str(m, "name"), m.get_flag("plain")),
+            Some(("sync", _)) => setup::plugin_sync(),
+            Some(("setup", _)) => setup::plugin_setup(),
             _ => unreachable!("subcommand required"),
         },
         Some(("ccd", m)) => match m.subcommand() {
-            Some(("ls", _)) => rest::ccd_ls_cmd(),
+            Some(("ls", _)) => launch::ccd_ls_cmd(),
             _ => unreachable!("subcommand required"),
         },
-        Some(("resume-hint", m)) => rest::resume_hint_cmd(arg_str(m, "cli_name")),
-        Some(("shell-init", m)) => rest::shell_init_cmd(arg_str(m, "shell")),
+        Some(("resume-hint", m)) => launch::resume_hint_cmd(arg_str(m, "cli_name")),
+        Some(("shell-init", m)) => setup::shell_init_cmd(arg_str(m, "shell")),
         Some(("worktree", m)) => match m.subcommand() {
             Some(("set-base", m)) => {
-                rest::worktree_set_base_cmd(arg_str(m, "ref"), m.get_flag("plain"))
+                worktree::worktree_set_base_cmd(arg_str(m, "ref"), m.get_flag("plain"))
             }
-            Some(("start", m)) => rest::worktree_start_cmd(
+            Some(("start", m)) => worktree::worktree_start_cmd(
                 arg_str(m, "feature"),
                 m.get_one::<String>("base_ref").map(String::as_str),
                 m.get_flag("plain"),
             ),
-            Some(("done", m)) => rest::worktree_done_cmd(
+            Some(("done", m)) => worktree::worktree_done_cmd(
                 arg_str(m, "feature"),
                 m.get_flag("force"),
                 m.get_flag("plain"),
             ),
-            Some(("status", m)) => rest::worktree_status_cmd(
+            Some(("status", m)) => worktree::worktree_status_cmd(
                 m.get_one::<String>("feature").map(String::as_str),
                 m.get_flag("plain"),
             ),

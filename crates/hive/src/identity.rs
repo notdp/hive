@@ -204,6 +204,11 @@ pub(crate) fn codex_thread_is_hive_managed(thread_id: &str) -> bool {
     codex_thread_member(thread_id).is_some()
 }
 
+/// `codex_thread_is_hive_managed` for this process's own tool thread.
+pub(crate) fn current_codex_thread_is_hive_managed() -> bool {
+    codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID"))
+}
+
 /// (team, member) of the codex roster row whose sessionId is *thread_id*.
 ///
 /// The self-identity rung for a codex tool: the row match *is* the identity
