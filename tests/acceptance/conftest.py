@@ -10,22 +10,22 @@ never run from a plain `pytest tests/`. Run after every install:
 
 The rig runs once per session (module fixture): scratch tmux session,
 scratch team, one naturally-worded nonce task per CLI, each driven the way
-a Claude Code Workflow drives a node — one concurrent `hive node run`
+a Claude Code Workflow drives a node — one concurrent `hive workflow run`
 subprocess per member, task on stdin, one JSON line back on stdout. The
 task wording is deliberately NOT "mechanical, do not improvise" — drift
 (acks, stray replies, self-invented scope) only shows itself when the
 member has room to move.
 
-The oracle does not take the node's word for it: after the nodes return,
-the rig resolves each member's engine session from its registry row
-(`member_transcripts.engine_session` — a claude row holds the bg job id,
-and the engine session behind it comes from the job's own state file, not
-from the node's answer), reads the member's own transcript by that id, and
-the tests compare the node JSON against what the engine wrote. The task
-carries two decoys for that oracle: the nonce itself appears in the task
-text (a reader that grabbed the input record instead of the final message
-would still "find" it) and a bait string the member is told never to
-repeat.
+The node's result is the member's own return (`hive workflow done`), and
+the oracle does not take the node's word for that either: after the nodes
+return, the rig reads the ledger, the node record and done file under the
+workspace's `run/workflow/`, and — the one transcript read left — counts
+how often the dispatch id landed in the member's own conversation, by the
+engine session resolved from its registry row (`member_transcripts` — a
+claude row holds the bg job id, and the engine session behind it comes
+from the job's own state file, never from the node's answer). The task
+carries a bait string the member is told never to repeat, so the body is
+shown to be the member's words and not the task's.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from member_transcripts import BoundTurn, engine_session, read_member_turn
+from member_transcripts import count_dispatch_inputs, engine_session
 
 pytestmark = pytest.mark.acceptance
 
@@ -74,12 +74,13 @@ class Rig:
     flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
     flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
     node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
-    node_results: dict[str, dict] = field(default_factory=dict)  # member -> node run JSON
+    node_results: dict[str, dict] = field(default_factory=dict)  # member -> workflow run JSON
     bus_rows: list[tuple] = field(default_factory=list)  # (seq, from, to, body, artifact)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
     roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
-    engine_sessions: dict[str, str] = field(default_factory=dict)  # member -> engine session behind the row
-    turns: dict[str, BoundTurn] = field(default_factory=dict)  # member -> what its transcript says
+    dispatch_inputs: dict[str, int] = field(default_factory=dict)  # member -> transcript input records carrying the id
+    records: dict[str, dict] = field(default_factory=dict)  # member -> run/workflow/<member>.json after the run
+    done_files: dict[str, bool] = field(default_factory=dict)  # member -> run/workflow/<member>.done.json still exists
 
     def member(self, cli: str) -> str:
         return f"probe-{cli}"
@@ -104,6 +105,12 @@ class Rig:
 
     def rows_from(self, member: str) -> list[tuple]:
         return [r for r in self.bus_rows if r[1] == member]
+
+    def record_path(self, member: str) -> Path:
+        return self.workspace / "run" / "workflow" / f"{member}.json"
+
+    def done_path(self, member: str) -> Path:
+        return self.workspace / "run" / "workflow" / f"{member}.done.json"
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
@@ -154,7 +161,7 @@ def rig():
             time.sleep(1)
 
         task = (
-            "请把这段口令写进 {path}：{nonce}。写完后，在你这一轮的最后一条消息里原样写出口令 {nonce}，"
+            "请把这段口令写进 {path}：{nonce}。写完后用 `hive workflow done` 返回，返回的摘要里原样写出口令 {nonce}，"
             "顺便说一句你对这个任务的看法。另外有一个干扰词 {bait}——它不是口令，任何地方都不要复述它。"
         )
         # Reproduce the honest parentage: a Workflow's node runner lives
@@ -171,7 +178,7 @@ def rig():
         # raises "I/O operation on closed file" on Python 3.12.
         procs = {
             r.member(c): subprocess.Popen(
-                ["hive", "node", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
+                ["hive", "workflow", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=env,
             )
@@ -202,21 +209,26 @@ def rig():
             r.bus_rows = sqlite3.connect(db).execute(
                 "select seq, from_agent, to_agent, body, artifact from messages"
             ).fetchall()
-        # The registry row is where the runner learned the member's engine
-        # session; the oracle starts from the same row, resolves the engine
-        # session on its own (a claude row is a job id — its engine session
-        # comes from the job's state file, never from the node's answer),
-        # and reads the transcript before teardown retires the members.
+        # The record and done file are read the moment the nodes return,
+        # before teardown retires the members and removes the records.
+        for member in procs:
+            r.records[member] = _read_json(r.record_path(member))
+            r.done_files[member] = r.done_path(member).exists()
+        # The registry row names the member's engine session (a claude row
+        # is a job id — its engine session comes from the job's state file,
+        # never from the node's answer); the transcript read counts how
+        # often the dispatch id landed there.
         r.roster = _registry_members(r.team)
         for member in procs:
             row = r.roster.get(member, {})
             did = r.dispatch_id(member)
             engine = engine_session(str(row.get("cli", "")), str(row.get("sessionId", "")))
-            r.engine_sessions[member] = engine
             if row and did and engine:
-                r.turns[member] = read_member_turn(str(row.get("cli", "")), engine, str(row.get("cwd", "")), did)
+                r.dispatch_inputs[member] = count_dispatch_inputs(
+                    str(row.get("cli", "")), engine, str(row.get("cwd", "")), did
+                )
             else:
-                r.turns[member] = BoundTurn()
+                r.dispatch_inputs[member] = 0
         for line in _tmux("list-panes", "-t", r.session, "-F",
                           "#{pane_id} #{@hive-agent}", check=False).splitlines():
             pid, _, name = line.strip().partition(" ")
@@ -259,7 +271,7 @@ class _NodeWait:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.out, self.err = self.proc.communicate()
-            self.err += f"\n[rig] node run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
+            self.err += f"\n[rig] workflow run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
 
     def result(self) -> tuple[str, str, int]:
         self.thread.join()
@@ -278,6 +290,15 @@ def _registry_members(team: str) -> dict[str, dict]:
         for m in entry.get("members", [])
         if isinstance(m, dict) and m.get("name")
     }
+
+
+def _read_json(path: Path) -> dict:
+    """The file's JSON object; {} when it is missing or not an object."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _last_json_object(stdout: str) -> dict:
