@@ -2355,6 +2355,11 @@ fn idle_setup(
             })
         })),
         is_plugin_enabled: Some(Arc::new(move |_name| plugin_enabled)),
+        // Both busy oracles answered here: an unhooked native_daemon_busy
+        // resolves "%1" through the real codex pane record and asks the
+        // live daemon, so the verdict would follow whatever member sits on
+        // that pane of the developer's tmux.
+        native_daemon_busy: Some(Arc::new(|_pane| None)),
         transcript_progressed_recently: Some(Arc::new(|_pane, _threshold| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
         ..Default::default()
