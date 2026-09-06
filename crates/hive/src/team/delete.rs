@@ -66,8 +66,12 @@ pub(crate) fn delete_team(
     // The caller may be a member of this very team (an orch running the
     // teardown). Its engine is this process's host: kill it here and the
     // rest of the delete dies with it. It is held aside and stopped after
-    // everything else, the session included.
-    let me = crate::identity::default_agent();
+    // everything else, the session included. A member of another team
+    // deleting this one is nobody here — a same-named member of this team
+    // is an ordinary engine to stop.
+    let me = crate::identity::default_team()
+        .filter(|team| team == name)
+        .and_then(|_| crate::identity::default_agent());
     let mut caller = None;
     if down {
         if crate::registry::load(name).is_none() && !had_session {
@@ -99,6 +103,13 @@ pub(crate) fn delete_team(
         team_workspace = t.workspace.clone();
         team_window = t.tmux_window.clone();
         team_window_id = t.tmux_window_id.clone();
+        if caller.is_none() {
+            caller = t
+                .agents
+                .iter()
+                .find(|a| Some(&a.name) == me.as_ref())
+                .cloned();
+        }
         t.cleanup(me.as_deref());
     }
 
@@ -478,6 +489,64 @@ mod tests {
         assert!(err.contains("no team named 'abc'"), "{err}");
         assert_eq!(count(&argv, "kill-session"), 0);
         assert_eq!(count(&argv, "kill-window"), 0);
+    }
+
+    #[test]
+    fn test_delete_by_another_teams_member_kills_a_same_named_member_here() {
+        // The caller is xyz.orch (codex rung); abc has its own orch. Deleting
+        // abc from xyz must stop abc's orch like any other engine — the
+        // bare name is not an identity across teams.
+        let mut env = display_env_outside();
+        env.env.set("CODEX_THREAD_ID", "t-xyz-orch");
+        crate::registry::record_team(
+            "xyz",
+            "",
+            "100.0",
+            &[member_row("orch", "codex", "t-xyz-orch")],
+            "@8",
+        )
+        .unwrap();
+        crate::registry::record_team(
+            "abc",
+            "",
+            "100.0",
+            &[member_row("orch", "claude", "")],
+            "@7",
+        )
+        .unwrap();
+        let argv = fake_tmux_sessions(
+            "abc:1\t@7\tabc\t\t\t\nxyz:1\t@8\txyz\t\t\t\n",
+            &[],
+            &[("abc:1", "hive-built", "1")],
+            &["abc", "xyz"],
+        );
+        crate::team::set_fake_tmux_panes(|window| {
+            let (pane, team) = if window.starts_with("xyz") {
+                ("%9", "xyz")
+            } else {
+                ("%5", "abc")
+            };
+            vec![crate::tmux::PaneInfo {
+                pane_id: pane.to_string(),
+                role: "agent".to_string(),
+                agent: "orch".to_string(),
+                team: team.to_string(),
+                cli: "claude".to_string(),
+                ..Default::default()
+            }]
+        });
+
+        delete_team("abc", "", false, false).unwrap();
+
+        assert!(crate::registry::load("abc").is_none());
+        assert!(crate::registry::load("xyz").is_some());
+        assert!(
+            has_row(&argv, &["kill-pane", "-t", "%5"]),
+            "{:?}",
+            argv.borrow()
+        );
+        assert!(!has_row(&argv, &["kill-pane", "-t", "%9"]));
+        assert_eq!(count(&argv, "kill-session"), 0);
     }
 
     #[test]
