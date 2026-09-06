@@ -110,10 +110,11 @@ pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
         fail("Cannot determine tmux window target");
     }
     if preset == "auto" {
-        let outcome = crate::layout::ensure(&window_target, !on_change);
         if on_change {
+            crate::layout::ensure_hook(&window_target);
             return;
         }
+        let outcome = crate::layout::ensure(&window_target, true);
         let plan = outcome.plan();
         println!(
             "{}",

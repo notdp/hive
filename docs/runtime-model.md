@@ -128,8 +128,11 @@ hooks (`window-resized`, `window-layout-changed`, installed wherever a
 window is marked as hive's) run `hive layout auto --on-change --window`,
 which re-plans and applies only when the key differs (the apply's flock is
 keyed on the window id, so the hook's `@N` and a verb's `session:index`
-serialize on one file; a window down to one pane drops its key, so the
-next member is planned): a client attaching
+serialize on one file, and only a human's `hive layout auto` waits for it —
+the hook form and the explicit call sites yield to an apply in flight,
+leaving a rerun marker the holder consumes with one more plan, so a drag
+that fires the hook per step never queues processes; a window down to
+one pane drops its key, so the next member is planned): a client attaching
 at another size, a spawn, a kill, a mirror or dock coming and going all
 re-plan without a hived, while a human's border drag — same key — holds,
 through proportional resizes, until the plan changes. `hive layout auto`

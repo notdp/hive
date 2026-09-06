@@ -149,6 +149,8 @@ impl Rig {
             .map(|dir| {
                 dir.filter_map(|e| e.ok())
                     .map(|e| e.file_name().to_string_lossy().into_owned())
+                    // a rerun marker a yielding hook left behind is not a lock
+                    .filter(|name| name.ends_with(".lock"))
                     .collect()
             })
             .unwrap_or_default();
