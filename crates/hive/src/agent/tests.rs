@@ -2291,9 +2291,11 @@ fn test_uuid4_shape() {
 fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
     use crate::adapters::codex_app_server::TurnStartFailure;
     for pane in ["%1", ""] {
-        let mut hook = Hook::default();
-        hook.cli_probe = Some("codex".to_string());
-        hook.codex_dispatch = Some(Err(TurnStartFailure::Unknown("answer lost".to_string())));
+        let hook = Hook {
+            cli_probe: Some("codex".to_string()),
+            codex_dispatch: Some(Err(TurnStartFailure::Unknown("answer lost".to_string()))),
+            ..Hook::default()
+        };
         let _guard = testhook::install(hook);
         let mut agent = testhook::fake_agent("node", "team", pane, "codex");
         agent.session_id = Some("thread".to_string());
