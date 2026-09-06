@@ -44,7 +44,7 @@ pub fn create(
             fail(&reason);
         }
     }
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         let team_name = if name.is_empty() {
             pick_team_name("", "", "0")
         } else {
@@ -53,7 +53,7 @@ pub fn create(
         create_detached_team(&team_name, desc, workspace, reset_workspace, state_entries);
         return;
     }
-    let current_pane = tmux::get_current_pane_id().unwrap_or_default();
+    let current_pane = identity::current_pane_id().unwrap_or_default();
     if !current_pane.is_empty()
         && crate::agent_cli::detect_profile_for_pane(&current_pane).is_some()
     {
@@ -68,7 +68,7 @@ pub fn create(
     }
     let mut name = name.to_string();
     if name.is_empty() {
-        let window = tmux::get_current_window_target().unwrap_or_default();
+        let window = identity::current_window_target().unwrap_or_default();
         let window_id = if window.is_empty() {
             String::new()
         } else {
@@ -80,7 +80,7 @@ pub fn create(
             "0".to_string()
         };
         name = pick_team_name(
-            &tmux::get_current_session_name().unwrap_or_default(),
+            &identity::current_session_name().unwrap_or_default(),
             &window_id,
             &index,
         );
@@ -245,7 +245,7 @@ pub(crate) fn create_detached_team(
     let orch_member: Option<Map<String, Value>> = match creator.as_ref() {
         Some(creator)
             if !creator.session_id.is_empty()
-                && registry_member_for_session(&creator.session_id).is_none() =>
+                && crate::registry::member_for_session(&creator.session_id, None).is_none() =>
         {
             Some(session_member_row(
                 LEAD_AGENT_NAME,
@@ -348,7 +348,9 @@ pub(crate) fn create_detached_team(
         println!("You are {name}.{LEAD_AGENT_NAME}.");
         println!("{}", title_badge_hint(&format!("[{name}] ")));
     } else if let Some(creator) = creator.as_ref().filter(|c| !c.session_id.is_empty()) {
-        if let Some((e_team, e_name)) = registry_member_for_session(&creator.session_id) {
+        if let Some((e_team, e_name)) =
+            crate::registry::member_for_session(&creator.session_id, None)
+        {
             println!("You are already {e_team}.{e_name} — orchestrating '{name}' as a guest.");
         }
     }
@@ -390,14 +392,14 @@ fn reuse_existing_binding(existing: &Map<String, Value>, name: &str) -> Result<b
 fn create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     gc_dead_teams();
 
-    let existing = discover_tmux_binding();
+    let existing = identity::discover_tmux_binding();
     match reuse_existing_binding(&existing, name) {
         Ok(true) => return existing,
         Ok(false) => {}
         Err(message) => fail(&message),
     }
 
-    let session_name = tmux::get_current_session_name().unwrap_or_else(|| "hive".to_string());
+    let session_name = identity::current_session_name().unwrap_or_else(|| "hive".to_string());
     let session_name = if session_name.is_empty() {
         "hive".to_string()
     } else {
@@ -573,13 +575,12 @@ fn hive_skill_entry(cli: &str) -> String {
 /// daemon, a bare interactive claude, a grok without a leader) as the orch
 /// of a new team; each refusal says how to relaunch.
 fn require_daemon_backed(pane: &str) {
-    if is_codex_tool_env() {
+    if identity::is_codex_tool_env() {
         // Running from inside the codex TUI's own tool: pane record or
         // codex roster membership is the identity, and the shared daemon
         // must answer.
-        if crate::cli::team_ops::codex_thread_is_hive_managed(&crate::cli::util::env_string(
-            "CODEX_THREAD_ID",
-        )) && crate::adapters::codex_app_server::daemon_alive()
+        if identity::codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID"))
+            && crate::adapters::codex_app_server::daemon_alive()
         {
             return;
         }
@@ -685,7 +686,7 @@ pub fn join_cmd(
     notify: bool,
     group_name: &str,
 ) {
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         if !pane_override.is_empty() {
             fail("--pane needs tmux; outside tmux `hive join <team>` joins this session");
         }
@@ -693,7 +694,7 @@ pub fn join_cmd(
         return;
     }
 
-    let binding = discover_tmux_binding();
+    let binding = identity::discover_tmux_binding();
     let team_name = if team_arg.is_empty() {
         map_str(&binding, "team")
     } else {
@@ -703,7 +704,7 @@ pub fn join_cmd(
         fail("no team in scope — pass a team (see `hive ls`) or run from a bound window");
     }
     let pane_id = if pane_override.is_empty() {
-        tmux::get_current_pane_id().unwrap_or_default()
+        identity::current_pane_id().unwrap_or_default()
     } else {
         pane_override.to_string()
     };
@@ -711,14 +712,14 @@ pub fn join_cmd(
         fail("cannot determine current pane");
     }
 
-    let mut t = match Team::load(&team_name, &tmux::get_current_pane_id().unwrap_or_default()) {
+    let mut t = match Team::load(&team_name, &identity::current_pane_id().unwrap_or_default()) {
         Ok(t) => t,
         Err(e) => fail(&e.to_string()),
     };
     let window_target = if !t.tmux_window.is_empty() {
         t.tmux_window.clone()
     } else {
-        tmux::get_current_window_target().unwrap_or_default()
+        identity::current_window_target().unwrap_or_default()
     };
     let panes = if window_target.is_empty() {
         Vec::new()
@@ -801,7 +802,7 @@ pub(crate) fn join_as_ccd(team_name: &str, name_override: &str) {
              codex/grok TUIs have none — join from a team pane instead",
         ),
     };
-    if let Some((e_team, e_name)) = registry_member_for_session(&guest.session_id) {
+    if let Some((e_team, e_name)) = crate::registry::member_for_session(&guest.session_id, None) {
         if e_team == team_name {
             println!("already a member: {e_team}.{e_name}");
             return;
@@ -851,14 +852,14 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
     // identity), or a codex/grok member's tool whose own session id keys
     // its roster row. The latter take the member lane, where the identity
     // ladder's session rung resolves them.
-    let guest = if tmux::is_inside_tmux() {
+    let guest = if identity::is_inside_tmux() {
         None
     } else {
         crate::adapters::claude_sessions::self_session()
     };
     let (t, sender) = if let Some(guest) = guest {
         let (_team_name, t) = resolve_guest_send_target(&to_agent, &explicit_team);
-        let sender = match registry_member_for_session(&guest.session_id) {
+        let sender = match crate::registry::member_for_session(&guest.session_id, None) {
             // A joined session is a full member: its roster name is the
             // reply address, not the ccd guest label.
             Some((m_team, m_name)) => format!("{m_team}.{m_name}"),
@@ -870,7 +871,9 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
         };
         (t, sender)
     } else {
-        if !explicit_team.is_empty() && explicit_team != default_team().unwrap_or_default() {
+        if !explicit_team.is_empty()
+            && explicit_team != identity::default_team().unwrap_or_default()
+        {
             // Copying a teammate's `from=<team>.<member>` verbatim must just
             // work, so an own-team prefix reads as the bare name; only a
             // foreign-team prefix is refused.
@@ -933,8 +936,8 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
 /// `hive send ccd.<session>`: a member pushes into an outside Claude
 /// session's cross-session inbox.
 fn send_to_ccd_session(label: &str, message: &str, artifact: &str) {
-    let team = default_team();
-    let agent = default_agent();
+    let team = identity::default_team();
+    let agent = identity::default_agent();
     let (team, agent) = match (team, agent) {
         (Some(team), Some(agent)) => (team, agent),
         _ => fail(
@@ -1032,7 +1035,7 @@ fn send_to_ccd_session(label: &str, message: &str, artifact: &str) {
 pub fn team_cmd(team_arg: &str) {
     gc_dead_teams();
     let scoped = if team_arg.is_empty() {
-        default_team().unwrap_or_default()
+        identity::default_team().unwrap_or_default()
     } else {
         team_arg.to_string()
     };
@@ -1046,14 +1049,14 @@ pub fn team_cmd(team_arg: &str) {
             return;
         }
     }
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         fail("no team in scope — pass -t <team> (see `hive ls`)");
     }
     let mut result = Map::new();
     result.insert("team".to_string(), Value::Null);
-    let session_name = tmux::get_current_session_name();
-    let window_target = tmux::get_current_window_target();
-    let current_pane = tmux::get_current_pane_id();
+    let session_name = identity::current_session_name();
+    let window_target = identity::current_window_target();
+    let current_pane = identity::current_pane_id();
     let panes = match window_target.as_deref() {
         Some(window) if !window.is_empty() => tmux::list_panes_full(window),
         _ => Vec::new(),
@@ -1723,7 +1726,7 @@ pub(crate) fn delete_team(name: &str, workspace: &str, delete_workspace: bool) -
     for hidden in tmux::hidden_mirror_windows(name) {
         tmux::kill_window(&hidden);
     }
-    let caller_window = tmux::get_current_window_id().unwrap_or_default();
+    let caller_window = identity::current_window_id().unwrap_or_default();
     if hive_built && !team_window_id.is_empty() && caller_window != team_window_id {
         tmux::kill_window(&team_window_id);
     }

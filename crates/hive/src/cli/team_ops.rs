@@ -100,54 +100,6 @@ pub fn wait_for_peer_ready(
 // Codex-native gate
 // ---------------------------------------------------------------------------
 
-pub(crate) fn is_codex_tool_env() -> bool {
-    !env_string("CODEX_THREAD_ID").trim().is_empty()
-}
-
-/// Hive-managed identity for a codex tool thread: a pane record (display
-/// bound), or a codex roster row whose sessionId is this thread — the
-/// registry, not the pane record, is the truth layer.
-pub(crate) fn codex_thread_is_hive_managed(thread_id: &str) -> bool {
-    let thread_id = thread_id.trim();
-    if thread_id.is_empty() {
-        return false;
-    }
-    if crate::adapters::codex_app_server::pane_for_thread(thread_id)
-        .filter(|p| !p.is_empty())
-        .is_some()
-    {
-        return true;
-    }
-    codex_thread_member(thread_id).is_some()
-}
-
-/// (team, member) of the codex roster row whose sessionId is *thread_id*.
-///
-/// The self-identity rung for a codex tool: the row match *is* the identity
-/// — a claude row carrying the same id is a stranger. The registry records
-/// no liveness for a thread, and no cheaper authority exists (the pane
-/// record is display binding, not a heartbeat), so liveness is enforced at
-/// delivery, where the daemon answers or does not.
-fn codex_thread_member(thread_id: &str) -> Option<(String, String)> {
-    crate::registry::member_for_session(thread_id.trim(), Some("codex"))
-}
-
-/// The codex member this process's own tool thread belongs to, or None.
-pub(crate) fn codex_thread_member_env() -> Option<(String, String)> {
-    codex_thread_member(&env_string("CODEX_THREAD_ID"))
-}
-
-/// The grok member this process's own leader session belongs to, or None.
-///
-/// A grok leader exports `GROK_SESSION_ID` into every tool subprocess it
-/// runs, and that id is the one hive minted for the member and recorded in
-/// its roster row — the same shape as the codex rung, and narrowed to grok
-/// rows for the same reason: another cli's row carrying the same id is a
-/// stranger.
-pub(crate) fn grok_session_member_env() -> Option<(String, String)> {
-    crate::registry::member_for_session(env_string("GROK_SESSION_ID").trim(), Some("grok"))
-}
-
 pub(crate) fn codex_relaunch_message() -> String {
     "this codex isn't hive-managed — hive runtime is degraded.\n\
      for future launches use hcodex (one-time setup, any shell):\n  \
@@ -163,7 +115,9 @@ pub(crate) fn require_codex_native(invoked: Option<&str>) {
             return;
         }
     }
-    if !is_codex_tool_env() || codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID")) {
+    if !identity::is_codex_tool_env()
+        || identity::codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID"))
+    {
         return;
     }
     fail(&codex_relaunch_message());
@@ -614,18 +568,13 @@ pub(crate) fn resolve_send_target_team(to_agent: &str) -> (String, Team) {
     )
 }
 
-/// (team, member) whose recorded engine identity is *session_id*, any cli.
-pub(crate) fn registry_member_for_session(session_id: &str) -> Option<(String, String)> {
-    crate::registry::member_for_session(session_id, None)
-}
-
 /// Target resolution for a Claude-session guest (outside tmux).
 pub(crate) fn resolve_guest_send_target(to_agent: &str, team: &str) -> (String, Team) {
     if to_agent == "flow.run" {
         let me = crate::adapters::claude_sessions::self_session();
         let membership = me
             .as_ref()
-            .and_then(|s| registry_member_for_session(&s.session_id));
+            .and_then(|s| crate::registry::member_for_session(&s.session_id, None));
         let membership = match membership {
             Some(m) => m,
             None => fail("the flow mailbox is a team-internal address; only members deliver to it"),
@@ -726,7 +675,7 @@ pub(crate) fn sorted_member_rows(rows: Vec<Map<String, Value>>) -> Vec<Map<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
+    use crate::testenv::iso;
 
     fn pane(agent: &str, team: &str, group: &str, pane_id: &str) -> PaneInfo {
         PaneInfo {
@@ -979,75 +928,5 @@ mod tests {
         let sorted = sorted_member_rows(vec![row("zed"), row("orch"), row("abe")]);
         let names: Vec<String> = sorted.iter().map(|m| map_str(m, "name")).collect();
         assert_eq!(names, vec!["orch", "abe", "zed"]);
-    }
-
-    // --- codex-native gate: pane-less members are hive-managed via the registry ---
-
-    /// Isolated HIVE_HOME and CODEX_HOME under *tmp*, for the test's lifetime.
-    fn iso(tmp: &std::path::Path) -> EnvGuard {
-        let mut env = EnvGuard::new();
-        env.set("HIVE_HOME", tmp.join("hive"));
-        env.set("CODEX_HOME", tmp.join("codex"));
-        env
-    }
-
-    #[test]
-    fn test_codex_thread_unknown_everywhere_is_unmanaged() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = iso(tmp.path());
-        assert!(!codex_thread_is_hive_managed("01aa-unknown"));
-        assert!(!codex_thread_is_hive_managed(""));
-    }
-
-    #[test]
-    fn test_codex_thread_with_pane_record_is_managed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = iso(tmp.path());
-        crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp").unwrap();
-        assert!(codex_thread_is_hive_managed("01aa-pane"));
-    }
-
-    #[test]
-    fn test_codex_thread_matching_registry_member_is_managed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = iso(tmp.path());
-        let member: Map<String, Value> = [
-            ("name", "review"),
-            ("cli", "codex"),
-            ("sessionId", "01aa-headless"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-        .collect();
-        crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
-        // no pane record: a pane-less member's identity is the registry row
-        assert!(codex_thread_is_hive_managed(" 01aa-headless "));
-        assert!(!codex_thread_is_hive_managed("01aa-other"));
-        assert_eq!(
-            codex_thread_member(" 01aa-headless "),
-            Some(("rr".to_string(), "review".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_codex_thread_matching_claude_row_is_not_managed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut env = iso(tmp.path());
-        let member: Map<String, Value> = [
-            ("name", "orch"),
-            ("cli", "claude"),
-            ("sessionId", "01aa-claude"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-        .collect();
-        crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
-        // A claude session id colliding with the thread id is a stranger to
-        // the codex gate; the generic session lookup still sees the row.
-        assert_eq!(codex_thread_member("01aa-claude"), None);
-        assert!(!codex_thread_is_hive_managed("01aa-claude"));
-        assert!(registry_member_for_session("01aa-claude").is_some());
-        env.set("CODEX_THREAD_ID", "01aa-claude");
-        assert_eq!(codex_thread_member_env(), None);
     }
 }

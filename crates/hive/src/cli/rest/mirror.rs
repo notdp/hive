@@ -19,7 +19,7 @@ pub fn mirror_cmd(mode: &str, window: &str) {
 /// prefix+m run from a run-shell job, which has no TMUX_PANE).
 pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     let window = if window_arg.is_empty() {
-        tmux::get_current_window_target()
+        identity::current_window_target()
             .filter(|w| !w.is_empty())
             .ok_or_else(|| "hive mirror runs from a pane in a team window".to_string())?
     } else {
@@ -56,7 +56,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
         return Ok(format!("mirror on ({team})"));
     }
     if window_arg.is_empty() {
-        let me = tmux::get_current_pane_id().unwrap_or_default();
+        let me = identity::current_pane_id().unwrap_or_default();
         if shown.contains(&me) {
             return Err(
                 "this pane is the mirror; run `hive mirror off` from another pane".to_string(),

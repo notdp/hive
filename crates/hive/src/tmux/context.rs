@@ -1,157 +1,5 @@
 use super::run::{exec_capture, run};
 
-// --- Context detection ---
-
-fn env_string(key: &str) -> String {
-    std::env::var(key).unwrap_or_default()
-}
-
-/// True inside a tmux client — or inside a member engine's tool subprocess.
-///
-/// A claude bg engine runs on the supervisor's pty, not in any tmux client,
-/// so its tools see no reliable $TMUX; but the member's pane identity is
-/// resolvable from the engine's own env markers, and the tmux server on the
-/// default socket answers targeted commands without $TMUX. Gating on $TMUX
-/// alone would lock every member out of hive.
-pub fn is_inside_tmux() -> bool {
-    if !env_string("TMUX").is_empty() {
-        return true;
-    }
-    member_env_pane().is_some()
-}
-
-/// Pane resolved from a member engine's per-tool env markers, or None.
-///
-/// - codex injects the thread's `CODEX_THREAD_ID` into tool subprocesses;
-///   hive records which pane each thread is bound to.
-/// - a claude bg engine's tools carry `CLAUDE_CODE_MESSAGING_SOCKET`
-///   (`/tmp/cc-socks/<enginePid>.sock`); the engine's registry entry names
-///   its jobId, and hive records which pane each job is bound to. An
-///   interactive claude session's tools carry the socket too, but have no
-///   bg registry entry (and no job record), so they fall through.
-/// - a grok member's leader exports `GROK_SESSION_ID` into its tools; that
-///   id keys the member's grok roster row, and the member's pane is the one
-///   tagged with that team and name on the default server. The leader
-///   carries no `TMUX_PANE` (it is minted by identity before any pane
-///   exists), so display is resolved from identity here, as for the other
-///   two.
-///
-/// A member whose pane is gone (window closed, server restarted) resolves
-/// nothing here; its identity is the registry row keyed by its sessionId —
-/// the ladder's session rung (`cli::util::session_member_binding`).
-fn member_env_pane() -> Option<String> {
-    let thread_id = env_string("CODEX_THREAD_ID").trim().to_string();
-    if !thread_id.is_empty() {
-        if let Some(pane) = crate::adapters::codex_app_server::pane_for_thread(&thread_id) {
-            if !pane.is_empty() {
-                return Some(pane);
-            }
-        }
-    }
-    let sock = env_string("CLAUDE_CODE_MESSAGING_SOCKET")
-        .trim()
-        .to_string();
-    if !sock.is_empty() {
-        let base = sock.rsplit('/').next().unwrap_or("");
-        let stem = match base.rfind('.') {
-            Some(i) => &base[..i],
-            None => base,
-        };
-        if !stem.is_empty() && stem.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(pid) = stem.parse::<u32>() {
-                if let Some(engine) = crate::adapters::claude_bg::engine_session_for_pid(pid) {
-                    if let Some(pane) = crate::adapters::claude_bg::pane_for_job(&engine.job_id) {
-                        if !pane.is_empty() {
-                            return Some(pane);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let grok_session = env_string("GROK_SESSION_ID").trim().to_string();
-    if !grok_session.is_empty() {
-        if let Some((team, member)) =
-            crate::registry::member_for_session(&grok_session, Some("grok"))
-        {
-            if let Some(pane) = super::listing::list_panes_all()
-                .into_iter()
-                .find(|p| p.team == team && p.agent == member)
-            {
-                return Some(pane.pane_id);
-            }
-        }
-    }
-    // A pane-keyed grok leader (a raw `hive grok` outside any team) pins
-    // its pane's TMUX_PANE into the env it spawns tools with, but carries
-    // no $TMUX; a member's identity-keyed leader pins nothing (the rung
-    // above is its display). Trust a pinned pane only when it is real on
-    // the default server.
-    let pinned = env_string("TMUX_PANE").trim().to_string();
-    if !pinned.is_empty() && env_string("TMUX").is_empty() {
-        if let Ok(r) = run(
-            &["display-message", "-t", &pinned, "-p", "#{pane_id}"],
-            false,
-            5,
-        ) {
-            if r.stdout.trim() == pinned {
-                return Some(pinned);
-            }
-        }
-    }
-    None
-}
-
-/// Get the pane id of the calling process.
-///
-/// Inside a member engine's tool subprocess the env's TMUX_PANE is
-/// unreliable — the codex shared daemon's env is frozen at spawn time (and
-/// hive strips TMUX_PANE from it), and a claude bg engine has none at all —
-/// so the per-CLI identity markers win over the env var (see
-/// `member_env_pane`); everywhere else the per-pane TMUX_PANE env var
-/// is the answer.
-pub fn get_current_pane_id() -> Option<String> {
-    if let Some(pane) = member_env_pane() {
-        if !pane.is_empty() {
-            return Some(pane);
-        }
-    }
-    std::env::var("TMUX_PANE").ok()
-}
-
-fn current_pane_display(fmt: &str) -> Option<String> {
-    let pane_id = get_current_pane_id()?;
-    if pane_id.is_empty() {
-        return None;
-    }
-    let r = run(&["display-message", "-t", &pane_id, "-p", fmt], false, 5).ok()?;
-    let out = r.stdout.trim().to_string();
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-/// Get the window target that contains the calling pane.
-pub fn get_current_window_target() -> Option<String> {
-    current_pane_display("#{session_name}:#{window_index}")
-}
-
-/// Get the tmux session name for the calling pane.
-pub fn get_current_session_name() -> Option<String> {
-    current_pane_display("#{session_name}")
-}
-
-/// Get the stable tmux window id for the calling pane.
-pub fn get_current_window_id() -> Option<String> {
-    let pane_id = get_current_pane_id()?;
-    if pane_id.is_empty() {
-        return None;
-    }
-    display_value(&pane_id, "#{window_id}")
-}
-
 pub fn display_value(target: &str, fmt: &str) -> Option<String> {
     let r = run(&["display-message", "-t", target, "-p", fmt], false, 5).ok()?;
     let val = r.stdout.trim().to_string();
@@ -256,15 +104,11 @@ pub fn get_most_recent_client_window(session_name: Option<&str>) -> Option<Strin
     get_client_window_target(&client_tty)
 }
 
-pub fn get_client_mode(target: Option<&str>) -> String {
-    let resolved_target = match target {
-        Some(t) if !t.is_empty() => t.to_string(),
-        _ => match get_current_pane_id() {
-            Some(p) if !p.is_empty() => p,
-            _ => return "unknown".to_string(),
-        },
-    };
-    match display_value(&resolved_target, "#{client_control_mode}").as_deref() {
+pub fn get_client_mode(target: &str) -> String {
+    if target.is_empty() {
+        return "unknown".to_string();
+    }
+    match display_value(target, "#{client_control_mode}").as_deref() {
         Some("1") => "control".to_string(),
         Some("0") => "terminal".to_string(),
         _ => "unknown".to_string(),

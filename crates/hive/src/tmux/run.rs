@@ -49,6 +49,22 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// A successful-exec `Run` for test overrides to hand back.
+#[cfg(test)]
+pub(crate) fn ok_run(returncode: i32, stdout: &str, stderr: &str) -> Run {
+    Run {
+        returncode,
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
+    }
+}
+
+/// An owned argv from string literals, for asserting on recorded calls.
+#[cfg(test)]
+pub(crate) fn v(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| s.to_string()).collect()
+}
+
 /// Test seam: route every `run` through *f*, which sees `(argv, check,
 /// timeout)`. Crate-visible because the command-layer tests drive whole
 /// handlers and assert on the tmux argv those handlers issue.

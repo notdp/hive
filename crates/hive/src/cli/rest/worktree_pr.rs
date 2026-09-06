@@ -53,7 +53,7 @@ pub(crate) fn derive_pr_window_status(global_format: Option<&str>) -> Option<Str
 }
 
 pub fn pr_set_cmd(number: i64, plain: bool) {
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         fail("must run inside tmux");
     }
     if number <= 0 {
@@ -61,7 +61,7 @@ pub fn pr_set_cmd(number: i64, plain: bool) {
             "PR number must be a positive integer, got {number}"
         ));
     }
-    let window = tmux::get_current_window_target().unwrap_or_default();
+    let window = identity::current_window_target().unwrap_or_default();
     if window.is_empty() {
         fail("cannot determine current window");
     }
@@ -119,10 +119,10 @@ pub fn pr_set_cmd(number: i64, plain: bool) {
 }
 
 pub fn pr_clear_cmd(plain: bool) {
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         fail("must run inside tmux");
     }
-    let window = tmux::get_current_window_target().unwrap_or_default();
+    let window = identity::current_window_target().unwrap_or_default();
     if window.is_empty() {
         fail("cannot determine current window");
     }
@@ -170,13 +170,13 @@ fn wt_ok<T>(result: crate::worktree::Result<T>) -> T {
 /// Owner / integration context for worktree commands (pane-anchored, cwd-free).
 /// Returns (owner, team, integration).
 fn worktree_context() -> (String, String, Option<String>) {
-    let binding = discover_tmux_binding();
+    let binding = identity::discover_tmux_binding();
     let window = {
         let bound = map_str(&binding, "tmuxWindow");
         if !bound.is_empty() {
             bound
-        } else if tmux::is_inside_tmux() {
-            tmux::get_current_window_target().unwrap_or_default()
+        } else if identity::is_inside_tmux() {
+            identity::current_window_target().unwrap_or_default()
         } else {
             String::new()
         }
@@ -196,7 +196,7 @@ fn worktree_context() -> (String, String, Option<String>) {
 }
 
 pub fn worktree_set_base_cmd(refname: &str, plain: bool) {
-    let window = tmux::get_current_window_target().unwrap_or_default();
+    let window = identity::current_window_target().unwrap_or_default();
     let team = if window.is_empty() {
         String::new()
     } else {

@@ -12,18 +12,6 @@ fn set_exec_override(
     EXEC_OVERRIDE.with(|o| *o.borrow_mut() = Some(Box::new(f)));
 }
 
-fn ok_run(returncode: i32, stdout: &str, stderr: &str) -> Run {
-    Run {
-        returncode,
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
-    }
-}
-
-fn v(args: &[&str]) -> Vec<String> {
-    args.iter().map(|s| s.to_string()).collect()
-}
-
 fn timeout_run() {
     set_exec_override(|_argv, _timeout, _input| Err(TmuxError::Timeout));
 }
@@ -213,19 +201,9 @@ fn test_is_pane_alive_treats_tmux_failure_as_alive() {
 }
 
 #[test]
-fn test_context_helpers_use_environment_and_display_message() {
-    let mut env = EnvGuard::new();
-    env.set("TMUX", "/tmp/tmux-1");
-    env.set("TMUX_PANE", "%7");
-    env.remove("CODEX_THREAD_ID");
-    env.remove("GROK_SESSION_ID");
-    env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
+fn test_get_window_id_reads_display_message() {
     set_run_override(|args, _check, _timeout| {
-        let stdout = if args.iter().any(|a| a == "#{session_name}:#{window_index}") {
-            "dev:2\n"
-        } else if args.iter().any(|a| a == "#{session_name}") {
-            "dev\n"
-        } else if args.iter().any(|a| a == "#{window_id}") {
+        let stdout = if args.iter().any(|a| a == "#{window_id}") {
             "@42\n"
         } else {
             "2\n"
@@ -233,11 +211,6 @@ fn test_context_helpers_use_environment_and_display_message() {
         Ok(ok_run(0, stdout, ""))
     });
 
-    assert!(is_inside_tmux());
-    assert_eq!(get_current_pane_id().as_deref(), Some("%7"));
-    assert_eq!(get_current_window_target().as_deref(), Some("dev:2"));
-    assert_eq!(get_current_session_name().as_deref(), Some("dev"));
-    assert_eq!(get_current_window_id().as_deref(), Some("@42"));
     assert_eq!(get_window_id("dev:2").as_deref(), Some("@42"));
 }
 
@@ -252,16 +225,16 @@ fn test_client_mode_and_popup_support_helpers() {
         Ok(ok_run(0, stdout, ""))
     });
 
-    assert_eq!(get_client_mode(Some("%7")), "control");
+    assert_eq!(get_client_mode("%7"), "control");
 }
 
 #[test]
 fn test_client_mode_returns_terminal_or_unknown() {
     set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
-    assert_eq!(get_client_mode(Some("%8")), "terminal");
+    assert_eq!(get_client_mode("%8"), "terminal");
 
     set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
-    assert_eq!(get_client_mode(Some("%8")), "unknown");
+    assert_eq!(get_client_mode("%8"), "unknown");
 }
 
 #[test]
@@ -345,124 +318,6 @@ fn test_list_tty_processes_strips_dev_prefix_and_parses_output() {
     );
     let expected = v(&["ps", "-t", "ttys012", "-o", "pid=,comm=,command="]);
     assert_eq!(*calls.borrow(), vec![expected]);
-}
-
-#[test]
-fn test_current_window_helpers_return_none_without_tmux_pane() {
-    let mut env = EnvGuard::new();
-    env.remove("TMUX_PANE");
-    env.remove("TMUX");
-    env.remove("CODEX_THREAD_ID");
-    env.remove("GROK_SESSION_ID");
-    env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
-
-    assert_eq!(get_current_window_target(), None);
-    assert_eq!(get_current_session_name(), None);
-    assert_eq!(get_current_window_id(), None);
-}
-
-#[test]
-fn test_grok_session_resolves_the_members_tagged_pane() {
-    // A grok member's tools carry GROK_SESSION_ID and nothing else — no
-    // $TMUX, no TMUX_PANE (the leader is minted by identity before any
-    // pane exists). The id keys the member's roster row, and the pane
-    // tagged with that team and name is its display.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
-    env.set("HIVE_HOME", tmp.path().join(".hive"));
-    let mut member = serde_json::Map::new();
-    member.insert(
-        "name".to_string(),
-        serde_json::Value::String("rex".to_string()),
-    );
-    member.insert(
-        "cli".to_string(),
-        serde_json::Value::String("grok".to_string()),
-    );
-    member.insert(
-        "sessionId".to_string(),
-        serde_json::Value::String("s-rex".to_string()),
-    );
-    assert_eq!(
-        crate::registry::record_team("honey", "/tmp/ws-h", "1.0", &[member], "").unwrap(),
-        "written"
-    );
-    env.set("GROK_SESSION_ID", "s-rex");
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let recorded = Rc::clone(&calls);
-    set_run_override(move |args, _check, _timeout| {
-        recorded.borrow_mut().push(args.to_vec());
-        let stdout = if args.first().map(String::as_str) == Some("list-panes") {
-            concat!(
-                "%3\t[orch]\tclaude\tagent\torch\thoney\tclaude\t\n",
-                "%5\t[rex]\tgrok\tagent\trex\thoney\tgrok\t\n",
-                "%8\t[rex]\tgrok\tagent\trex\twasp\tgrok\t\n"
-            )
-        } else if args.iter().any(|a| a == "#{window_id}") {
-            "@4\n"
-        } else {
-            ""
-        };
-        Ok(ok_run(0, stdout, ""))
-    });
-
-    assert!(is_inside_tmux());
-    assert_eq!(get_current_pane_id().as_deref(), Some("%5"));
-    assert_eq!(get_current_window_id().as_deref(), Some("@4"));
-    assert!(calls
-        .borrow()
-        .iter()
-        .all(|args| args[0] == "list-panes" || args[..3] == v(&["display-message", "-t", "%5"])));
-
-    // the same id on a claude row is a stranger, and no pane is anyone's
-    let mut stranger = serde_json::Map::new();
-    stranger.insert(
-        "name".to_string(),
-        serde_json::Value::String("rex".to_string()),
-    );
-    stranger.insert(
-        "cli".to_string(),
-        serde_json::Value::String("claude".to_string()),
-    );
-    stranger.insert(
-        "sessionId".to_string(),
-        serde_json::Value::String("s-rex".to_string()),
-    );
-    crate::registry::record_team("honey", "/tmp/ws-h", "1.0", &[stranger], "").unwrap();
-    assert!(!is_inside_tmux());
-    assert_eq!(get_current_pane_id(), None);
-}
-
-#[test]
-fn test_grok_member_without_a_pane_keeps_its_identity_but_no_display() {
-    // The member's window is gone: the roster still names it (the session
-    // rung answers hive send), but there is no pane to act on.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
-    env.set("HIVE_HOME", tmp.path().join(".hive"));
-    let mut member = serde_json::Map::new();
-    member.insert(
-        "name".to_string(),
-        serde_json::Value::String("rex".to_string()),
-    );
-    member.insert(
-        "cli".to_string(),
-        serde_json::Value::String("grok".to_string()),
-    );
-    member.insert(
-        "sessionId".to_string(),
-        serde_json::Value::String("s-rex".to_string()),
-    );
-    crate::registry::record_team("honey", "/tmp/ws-h", "1.0", &[member], "").unwrap();
-    env.set("GROK_SESSION_ID", "s-rex");
-    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
-
-    assert!(!is_inside_tmux());
-    assert_eq!(get_current_pane_id(), None);
-    assert_eq!(
-        crate::registry::member_for_session("s-rex", Some("grok")),
-        Some(("honey".to_string(), "rex".to_string()))
-    );
 }
 
 #[test]

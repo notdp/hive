@@ -22,7 +22,7 @@ pub(super) fn hooked_is_inside_tmux() -> bool {
     if let Some(v) = testhook::with(|h| h.is_inside_tmux) {
         return v;
     }
-    crate::tmux::is_inside_tmux()
+    crate::identity::is_inside_tmux()
 }
 
 pub(super) fn hooked_split_window(
