@@ -21,6 +21,27 @@
 //! number. Cursors are byte offsets past the last complete line of each
 //! file, so a half-written trailing line is invisible until its newline
 //! lands.
+//!
+//! Inside a turn, an assistant record that calls tools carries
+//! `tool_calls`, with whatever the model said alongside the call as its
+//! `content`; the shape on disk (`~/.grok/sessions`, grok-4.6-build) is
+//! `{"type":"assistant","content":"I will inspect the files",
+//! "tool_calls":[{"id":"call-<uuid>-0","name":"run_terminal_command",
+//! "arguments":"{…}"}],"model_id":…,"model_fingerprint":…,
+//! "reasoning_effort":…}`, `content` a string on every one of the 1498
+//! such records surveyed (571 with text), answered by a
+//! `tool_result {tool_call_id, content}` each. That text is narration,
+//! not the reply. The final message is an assistant record without the
+//! `tool_calls` key (390 of 390 surveyed) that no record of the model's
+//! follows. `turn_ended` is written before the history flushes, so a
+//! closed turn whose span still ends in a tool-calling assistant, a tool
+//! result, a reasoning record, or nothing at all is `Flushing`, never
+//! `Completed` with narration; a synthetic `system_reminder` user record
+//! after the final message is ignored (in the same survey it trails a
+//! final message 46 times, always as the next prompt's companion or the
+//! file's tail, never before more output of the turn). Once the next turn
+//! has started, or the next prompt record is on disk, a span without a
+//! final message is `Ambiguous`.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -362,30 +383,68 @@ impl TurnReader for GrokTurnReader {
             }
         }
 
-        let mut text = None;
+        // turn_ended lands before the history is flushed, and the flush is
+        // record by record: the span's tail says whether the model's output
+        // is complete. Only a plain assistant record (no tool_calls) with no
+        // model record after it is the final message.
         let mut closed = events[index + 1..]
             .iter()
             .any(|line| record_type(&line.record) == "turn_started");
+        let mut tail = Tail::Nothing;
         for line in span {
             match record_type(&line.record) {
                 "user" if prompt_index(&line.record).is_some() => {
                     closed = true;
                     break;
                 }
-                "assistant" => text = Some(content_text(&line.record)),
-                _ => {}
+                // A synthetic user record (`system_reminder`) is the
+                // engine's housekeeping, not the model's output: it rides
+                // with the next prompt and never precedes more output of
+                // this turn.
+                "user" => {}
+                "assistant" if has_tool_calls(&line.record) => tail = Tail::ToolCall,
+                "assistant" => tail = Tail::Final(content_text(&line.record)),
+                other => tail = Tail::Model(other.to_string()),
             }
         }
-        match text {
-            Some(text) => Ok(Some(TurnOutcome::Completed { text })),
-            // turn_ended lands before the assistant record is flushed: wait
-            // for it unless something after the turn shows nothing is coming.
-            None if closed => Ok(Some(TurnOutcome::Completed {
-                text: String::new(),
-            })),
-            None => Ok(None),
+        match tail {
+            Tail::Final(text) => Ok(Some(TurnOutcome::Completed { text })),
+            _ if closed => ambiguous(format!("turn {number} ended without a final message")),
+            Tail::Nothing => flushing(format!(
+                "turn {number} ended with no assistant record on disk yet"
+            )),
+            Tail::ToolCall => flushing(format!(
+                "turn {number} ended on a tool-calling assistant record, not a final message"
+            )),
+            Tail::Model(kind) => flushing(format!(
+                "turn {number} ended on a `{kind}` record, not a final message"
+            )),
         }
     }
+}
+
+/// The last model record of a closed turn's span.
+enum Tail {
+    /// No assistant record after the prompt yet.
+    Nothing,
+    /// A plain assistant record, and nothing of the model's after it.
+    Final(String),
+    /// An assistant record carrying `tool_calls`: narration.
+    ToolCall,
+    /// Any other model record (`tool_result`, `reasoning`, …): more is
+    /// coming.
+    Model(String),
+}
+
+fn has_tool_calls(record: &Map<String, Value>) -> bool {
+    record
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+}
+
+fn flushing(reason: String) -> Result<Option<TurnOutcome>, ReadError> {
+    Ok(Some(TurnOutcome::Flushing { reason }))
 }
 
 #[cfg(test)]
@@ -477,6 +536,27 @@ mod tests {
         json!({"type": "assistant", "content": content, "model_id": "grok-4.6-build"})
     }
 
+    /// A tool-calling assistant record as grok-4.6-build writes it: the
+    /// narration as a string `content`, the calls under `tool_calls`.
+    fn assistant_calling(narration: &str, call_id: &str) -> Value {
+        json!({"type": "assistant", "content": narration, "tool_calls": [{"id": call_id, "name": "run_terminal_command", "arguments": "{\"command\":\"ls\"}"}], "model_id": "grok-4.6-build", "model_fingerprint": "fp_08d0bc26c22b024e", "reasoning_effort": "xhigh"})
+    }
+
+    fn tool_result(call_id: &str, content: &str) -> Value {
+        json!({"type": "tool_result", "tool_call_id": call_id, "content": content})
+    }
+
+    fn reasoning() -> Value {
+        json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "hm"}], "encrypted_content": "x", "status": "completed"})
+    }
+
+    fn flushing_reason(outcome: Option<TurnOutcome>) -> String {
+        match outcome {
+            Some(TurnOutcome::Flushing { reason }) => reason,
+            other => panic!("expected flushing, got {other:?}"),
+        }
+    }
+
     fn turn_started(number: u64) -> Value {
         turn_started_in(SESSION, number)
     }
@@ -521,9 +601,9 @@ mod tests {
                 1,
                 &format!("<HIVE to=hornet.wren>\ntask {MARKER}\nsay it\n</HIVE>"),
             ),
-            json!({"type": "reasoning", "content": null}),
-            assistant(json!([{"type": "text", "text": "先看一眼。"}])),
-            json!({"type": "tool_result", "tool_call_id": "c1", "content": "exit: 0"}),
+            reasoning(),
+            assistant_calling("先看一眼。", "c1"),
+            tool_result("c1", "exit: 0"),
             reminder("MCP servers connected"),
         ]);
 
@@ -629,18 +709,16 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_ended_before_assistant_flush_is_still_running() {
+    fn test_turn_ended_before_assistant_flush_is_flushing() {
         let fx = idle_after_turn_zero();
         let cursor = fx.cursor();
         fx.events(&[turn_started(1)]);
-        fx.history(&[
-            prompt(1, MARKER),
-            json!({"type": "reasoning", "content": null}),
-        ]);
+        fx.history(&[prompt(1, MARKER), reasoning()]);
         let anchor = fx.bind(&cursor);
 
         fx.events(&[turn_ended("completed")]);
-        assert_eq!(fx.outcome(&anchor), None);
+        let reason = flushing_reason(fx.outcome(&anchor));
+        assert!(reason.contains("`reasoning`"), "{reason}");
 
         fx.history(&[assistant(json!("late"))]);
         assert_eq!(
@@ -652,7 +730,100 @@ mod tests {
     }
 
     #[test]
-    fn test_next_turn_without_an_assistant_record_closes_empty() {
+    fn test_turn_ended_with_no_assistant_record_is_flushing() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[prompt(1, MARKER)]);
+        let anchor = fx.bind(&cursor);
+
+        fx.events(&[turn_ended("completed")]);
+        let reason = flushing_reason(fx.outcome(&anchor));
+        assert!(reason.contains("no assistant record"), "{reason}");
+    }
+
+    /// The reviewer's sequence: narration with tool calls, its result,
+    /// then turn_ended before the final line lands.
+    #[test]
+    fn test_narration_before_the_final_flush_is_flushing_not_completed() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[
+            prompt(1, MARKER),
+            reasoning(),
+            assistant_calling("I will inspect the files", "c1"),
+        ]);
+        let anchor = fx.bind(&cursor);
+        assert_eq!(fx.outcome(&anchor), None, "turn still running");
+
+        fx.events(&[turn_ended("completed")]);
+        let reason = flushing_reason(fx.outcome(&anchor));
+        assert!(reason.contains("tool-calling"), "{reason}");
+
+        fx.history(&[tool_result("c1", "exit: 0")]);
+        let reason = flushing_reason(fx.outcome(&anchor));
+        assert!(reason.contains("`tool_result`"), "{reason}");
+
+        fx.history(&[reasoning(), assistant(json!("Actual final answer"))]);
+        assert_eq!(
+            fx.outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "Actual final answer".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_tool_result_after_a_plain_assistant_record_is_flushing() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[
+            prompt(1, MARKER),
+            assistant(json!("done, I think")),
+            tool_result("bg-1", "background task output"),
+        ]);
+        let anchor = fx.bind(&cursor);
+        fx.events(&[turn_ended("completed")]);
+        assert!(matches!(
+            fx.outcome(&anchor),
+            Some(TurnOutcome::Flushing { .. })
+        ));
+
+        fx.history(&[assistant(json!("done for real"))]);
+        assert_eq!(
+            fx.outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "done for real".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_system_reminder_after_the_final_message_does_not_hold_it() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[
+            prompt(1, MARKER),
+            assistant_calling("", "c1"),
+            tool_result("c1", "exit: 0"),
+            assistant(json!("final")),
+            reminder("MCP servers connected"),
+        ]);
+        let anchor = fx.bind(&cursor);
+        fx.events(&[turn_ended("completed")]);
+        assert_eq!(
+            fx.outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "final".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_next_turn_without_a_final_message_is_ambiguous() {
         let fx = idle_after_turn_zero();
         let cursor = fx.cursor();
         fx.events(&[turn_started(1)]);
@@ -660,11 +831,54 @@ mod tests {
         let anchor = fx.bind(&cursor);
 
         fx.events(&[turn_ended("completed"), turn_started(2)]);
+        assert_eq!(
+            fx.outcome(&anchor),
+            Some(TurnOutcome::Ambiguous {
+                reason: "turn 1 ended without a final message".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_next_prompt_after_narration_only_is_ambiguous() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[
+            prompt(1, MARKER),
+            assistant_calling("I will inspect the files", "c1"),
+            tool_result("c1", "exit: 0"),
+        ]);
+        let anchor = fx.bind(&cursor);
+
+        fx.events(&[turn_ended("completed")]);
         fx.history(&[prompt(2, "next"), assistant(json!("not yours"))]);
         assert_eq!(
             fx.outcome(&anchor),
+            Some(TurnOutcome::Ambiguous {
+                reason: "turn 1 ended without a final message".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_final_message_stands_once_the_next_turn_starts() {
+        let fx = idle_after_turn_zero();
+        let cursor = fx.cursor();
+        fx.events(&[turn_started(1)]);
+        fx.history(&[prompt(1, MARKER), assistant(json!("mine"))]);
+        let anchor = fx.bind(&cursor);
+
+        fx.events(&[turn_ended("completed"), turn_started(2)]);
+        fx.history(&[
+            reminder("skills"),
+            prompt(2, "next"),
+            assistant(json!("not yours")),
+        ]);
+        assert_eq!(
+            fx.outcome(&anchor),
             Some(TurnOutcome::Completed {
-                text: String::new()
+                text: "mine".into()
             })
         );
     }
