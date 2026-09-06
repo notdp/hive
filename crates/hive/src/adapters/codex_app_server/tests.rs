@@ -810,6 +810,29 @@ fn test_active_turn_id_none_when_every_turn_is_finished() {
 }
 
 #[test]
+fn test_active_turn_id_errs_without_turns() {
+    // `includeTurns` makes thread.turns part of the answer; a result without
+    // it is a schema error, not a thread with nothing in progress.
+    let client = bare_client();
+    client.set_call_override(|_method, _params| json!({"result": {"thread": {"id": "t1"}}}));
+    assert!(client
+        .active_turn_id("t1")
+        .unwrap_err()
+        .contains("thread.turns"));
+}
+
+#[test]
+fn test_active_turn_id_errs_when_the_in_progress_turn_has_no_id() {
+    let (client, _calls) = client_reading(json!([{"status": "inProgress"}]));
+    assert!(client
+        .active_turn_id("t1")
+        .unwrap_err()
+        .contains("without an id"));
+    let (client, _calls) = client_reading(json!([{"id": "", "status": "inProgress"}]));
+    assert!(client.active_turn_id("t1").is_err());
+}
+
+#[test]
 fn test_active_turn_id_errs_on_rpc_error() {
     // No result is no answer, distinct from "no turn is open".
     let client = bare_client();

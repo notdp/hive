@@ -522,6 +522,8 @@ fn turn_open_team(name: &str) -> Team {
                 "0f4e2a9c-6b1d-4e0a-9c3b-1d2e3f4a5b6c",
             ),
             fake_agent("g", "%3", "grok"),
+            fake_agent("g-idle", "%12", "grok"),
+            fake_agent("g-seen", "%13", "grok"),
             fake_agent("quiet", "", "grok"),
             fake_agent("sh", "%11", "bash"),
         ],
@@ -557,9 +559,19 @@ fn test_turn_open_payload_asks_each_engine_directly() {
                 _ => panic!("unexpected job {job}"),
             }
         })),
-        // grok: the leader pool's push-fed state.
+        // grok: the leader pool's push-fed turn evidence.
         gl_runtime_for_key: Some(Arc::new(|key| match key {
-            "m-honey.g" => Some(session_runtime(true, "ready")),
+            "m-honey.g" => Some(SessionRuntime {
+                turn_open: Some(true),
+                ..session_runtime(true, "ready")
+            }),
+            "m-honey.g-idle" => Some(SessionRuntime {
+                turn_open: Some(false),
+                ..session_runtime(false, "ready")
+            }),
+            // loaded and reporting (a command table, an announcement), but
+            // nothing the turn itself said: busy defaults to false
+            "m-honey.g-seen" => Some(session_runtime(false, "")),
             _ => None,
         })),
         ..Default::default()
@@ -585,7 +597,11 @@ fn test_turn_open_payload_asks_each_engine_directly() {
     assert_eq!(open("k-joined"), Value::Null);
 
     assert_eq!(open("g"), Value::Bool(true));
-    // A grok leader that has reported nothing yet is no answer.
+    assert_eq!(open("g-idle"), Value::Bool(false));
+    // A leader that has only sent notifications the turn did not — the
+    // default busy=false — is no answer, and so is one that reported
+    // nothing yet.
+    assert_eq!(open("g-seen"), Value::Null);
     assert_eq!(open("quiet"), Value::Null);
 
     // An engine hive cannot ask has no answer; a member off the roster is
@@ -602,7 +618,10 @@ fn test_handle_request_turn_open_answers_for_the_team() {
         })),
         gl_runtime_for_key: Some(Arc::new(|key| {
             assert_eq!(key, "m-honey.g");
-            Some(session_runtime(false, "ready"))
+            Some(SessionRuntime {
+                turn_open: Some(false),
+                ..session_runtime(false, "ready")
+            })
         })),
         ..Default::default()
     };
