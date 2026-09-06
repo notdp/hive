@@ -3,8 +3,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::{bail, Result};
+
 use crate::adapters::base::SessionAdapter;
-use crate::tmux::TTYProcessInfo;
+use crate::identity;
+use crate::tmux;
+use crate::tmux::{PaneInfo, TTYProcessInfo};
 
 pub const AGENT_CLI_NAMES: [&str; 3] = ["claude", "codex", "grok"];
 
@@ -614,6 +618,102 @@ fn get_close_match(word: &str, possibilities: &[String]) -> Option<String> {
         }
     }
     best.map(|(_, x)| x.clone())
+}
+
+/// Identity of an agent pane resolved straight from its tmux options.
+///
+/// Deliberately team-agnostic: `team_name` is empty for panes not bound to
+/// any Hive team, and `member_label` falls back to the literal pane id.
+#[derive(Debug, Clone)]
+pub(crate) struct PaneTarget {
+    pub pane_id: String,
+    pub team_name: String,
+    pub is_team_bound: bool,
+    pub cli: String,
+    pub member_label: String,
+}
+
+/// Resolve a pane's identity from tmux pane options *only* (never re-resolve
+/// an agent by name through Team state — the cross-window same-name bug PR #8
+/// fixed for `compact --pane`).
+pub(crate) fn resolve_pane_target(pane_id: &str) -> Result<PaneTarget> {
+    let pane = if !pane_id.is_empty() {
+        pane_id.to_string()
+    } else {
+        identity::current_pane_id().unwrap_or_default()
+    };
+    if pane.is_empty() {
+        bail!("cannot determine current pane (pass --pane explicitly)");
+    }
+    let team_name = tmux::get_pane_option(&pane, "hive-team").unwrap_or_default();
+    let option_cli =
+        normalize_command(&tmux::get_pane_option(&pane, "hive-cli").unwrap_or_default());
+    let cli_name = if AGENT_CLI_NAMES.contains(&option_cli.as_str()) {
+        option_cli
+    } else {
+        detect_profile_for_pane(&pane)
+            .map(|profile| profile.name.to_string())
+            .unwrap_or_default()
+    };
+    if cli_name.is_empty() {
+        bail!("unsupported agent pane '{pane}'");
+    }
+    let member_label = match tmux::get_pane_option(&pane, "hive-agent") {
+        Some(agent) if !agent.is_empty() => agent,
+        _ => pane.clone(),
+    };
+    Ok(PaneTarget {
+        pane_id: pane,
+        is_team_bound: !team_name.is_empty(),
+        team_name,
+        cli: cli_name,
+        member_label,
+    })
+}
+
+pub(crate) fn resolve_spawn_cli_name(cli_name: Option<&str>) -> String {
+    if let Some(cli) = cli_name {
+        if AGENT_CLI_NAMES.contains(&cli) {
+            return cli.to_string();
+        }
+    }
+    let current_pane = identity::current_pane_id().unwrap_or_default();
+    if !current_pane.is_empty() {
+        let option_cli = normalize_command(
+            &tmux::get_pane_option(&current_pane, "hive-cli").unwrap_or_default(),
+        );
+        if AGENT_CLI_NAMES.contains(&option_cli.as_str()) {
+            return option_cli;
+        }
+        if let Some(profile) = detect_profile_for_pane(&current_pane) {
+            return profile.name.to_string();
+        }
+    }
+    "claude".to_string()
+}
+
+fn resolve_pane_cli(pane: &PaneInfo) -> String {
+    let source = if !pane.cli.is_empty() {
+        pane.cli.clone()
+    } else {
+        pane.command.clone()
+    };
+    let mut pane_cli = normalize_command(&source);
+    if !AGENT_CLI_NAMES.contains(&pane_cli.as_str()) {
+        if let Some(profile) = detect_profile_for_pane(&pane.pane_id) {
+            pane_cli = profile.name.to_string();
+        }
+    }
+    pane_cli
+}
+
+pub(crate) fn classify_pane(pane: &PaneInfo) -> (&'static str, String) {
+    let pane_cli = resolve_pane_cli(pane);
+    if AGENT_CLI_NAMES.contains(&pane_cli.as_str()) {
+        ("agent", pane_cli)
+    } else {
+        ("terminal", pane_cli)
+    }
 }
 
 #[cfg(test)]

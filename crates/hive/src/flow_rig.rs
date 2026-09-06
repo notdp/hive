@@ -49,14 +49,14 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
     // only initializes it (never resets), so a run's op journal under
     // `artifacts/flow/` survives a `--down` and re-rig for `--resume`.
     let workspace = match workspace {
-        Some(dir) if !dir.is_empty() => crate::cli::expanduser(dir),
+        Some(dir) if !dir.is_empty() => crate::paths::expanduser(dir),
         _ => crate::registry::team_dir(run)
             .expect("validated above")
             .to_string_lossy()
             .into_owned(),
     };
 
-    let (window, dock, _) = crate::cli::rest::new_team_session_window(run)
+    let (window, dock, _) = crate::team_display::new_team_session_window(run)
         .with_context(|| format!("creating tmux session '{run}'"))?;
 
     let team = match Team::create_for_window(
@@ -132,7 +132,7 @@ pub(crate) fn rig_down(run: &str) -> Result<()> {
         }
     }
     if crate::registry::load(run).is_some() {
-        crate::cli::core_cmds::delete(run, "", false);
+        crate::team::delete_team(run, "", false)?;
     }
     if tmux::has_session(&session) {
         tmux::kill_session(&session);
@@ -145,11 +145,81 @@ pub(crate) fn rig_down(run: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
+    use crate::testkit::{count, display_env_outside, fake_tmux_sessions, has_row, team_dir};
 
     #[test]
     fn test_shell_quote_wraps_and_escapes_single_quotes() {
         assert_eq!(shell_quote("review-149"), "'review-149'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn test_rig_down_without_a_rig_never_kills_a_prefix_matched_session() {
+        let _env = display_env_outside();
+        let argv = fake_tmux_sessions("", &[], &[], &["abc-keep"]);
+
+        let err = crate::flow_rig::rig_down("abc").unwrap_err().to_string();
+
+        assert!(err.contains("no rig named 'abc'"), "{err}");
+        assert_eq!(count(&argv, "kill-session"), 0);
+        assert_eq!(count(&argv, "kill-window"), 0);
+    }
+
+    #[test]
+    fn test_rig_down_kills_the_team_window_and_the_exact_session() {
+        let _env = display_env_outside();
+        crate::registry::record_team("abc", "", "100.0", &[], "@7").unwrap();
+        let argv = fake_tmux_sessions(
+            "abc:1	@7	abc			
+    ",
+            &[],
+            &[("abc:1", "hive-built", "1")],
+            &["abc", "abc-keep"],
+        );
+
+        crate::flow_rig::rig_down("abc").unwrap();
+
+        assert!(crate::registry::load("abc").is_none());
+        assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
+        // Every session target is exact: `abc-keep` is never in reach.
+        let session_targets: Vec<String> = argv
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a[0].as_str(), "has-session" | "kill-session"))
+            .map(|a| a[2].clone())
+            .collect();
+        assert!(!session_targets.is_empty());
+        assert!(
+            session_targets.iter().all(|t| t == "=abc"),
+            "{session_targets:?}"
+        );
+    }
+
+    #[test]
+    fn test_rig_up_defaults_the_workspace_to_the_team_dir_and_keeps_its_journal() {
+        let env = display_env_outside();
+        let ws = team_dir(&env, "abc");
+        // a previous rig's journal, kept by `--down` for `--resume`
+        std::fs::create_dir_all(ws.join("artifacts").join("flow")).unwrap();
+        std::fs::write(ws.join("artifacts").join("flow").join("ops.jsonl"), "{}").unwrap();
+        let _argv = fake_tmux_sessions("", &[], &[], &[]);
+
+        assert_eq!(crate::flow_rig::rig_cmd("abc", None, None, false), 0);
+
+        let entry = crate::registry::load("abc").expect("team recorded");
+        assert_eq!(
+            entry["workspace"],
+            Value::from(ws.to_string_lossy().as_ref())
+        );
+        assert!(ws.join("team.json").is_file());
+        assert!(ws.join("hive.db").is_file());
+        assert!(ws
+            .join("artifacts")
+            .join("flow")
+            .join("ops.jsonl")
+            .is_file());
     }
 }

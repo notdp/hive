@@ -41,6 +41,16 @@ behavior is documented in the modules themselves.
   only module that reads an engine marker (`CODEX_THREAD_ID`,
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
   takes explicit targets, and reads neither markers nor the registry.
+- `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
+  `fork`, `flow`, `launch`, `setup`, `worktree`) that parse, print and
+  exit; the logic they call lives in the crate and is what the flow engine
+  and the rig reach for too: `team/` (`scope` for which team a verb acts
+  on, `roster` for membership writes, `delete`), `naming.rs` (the name
+  pools and the uniqueness claim), `send.rs` (send addressing and the
+  hived send seam), `team_display.rs` (the eager window on top of the
+  registry), `identity.rs`. Nothing outside `cli/` imports from it, and
+  the cli's own `util` module holds only plumbing (`fail`, tty and JSON
+  helpers).
 - The `hive view` transcript viewer is a read-only mirror by construction: in
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;

@@ -18,17 +18,22 @@ pub mod identity;
 pub mod json_fields;
 pub mod layout;
 pub mod message;
+pub mod naming;
 pub mod notify_debug;
 pub mod notify_ui;
 pub mod paths;
 pub mod plugin_manager;
 pub mod registry;
 pub mod runtime_snapshot;
+pub mod send;
 pub mod settings;
 pub mod shell;
 pub mod team;
+pub mod team_display;
 #[cfg(test)]
 pub(crate) mod testenv;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod tmux;
 pub mod transcript_tui;
 pub mod transcript_view;

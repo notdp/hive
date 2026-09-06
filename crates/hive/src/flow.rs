@@ -453,7 +453,7 @@ struct RealCtx {
 }
 
 /// Production `FlowEnv`: resolves the scoped team once and forwards every
-/// seam to the cli/bus/team modules.
+/// seam to the team/send/bus modules.
 pub struct RealEnv {
     team_arg: Option<String>,
     ctx: Mutex<Option<RealCtx>>,
@@ -482,10 +482,11 @@ impl RealEnv {
     fn with_ctx<R>(&self, f: impl FnOnce(&mut RealCtx) -> R) -> Result<R, FlowError> {
         let mut guard = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
         if guard.is_none() {
-            let (team_name, team) = crate::cli::resolve_scoped_team(self.team_arg.as_deref(), true)
-                .map_err(|e| FlowError(e.to_string()))?;
+            let (team_name, team) =
+                crate::team::resolve_scoped_team(self.team_arg.as_deref(), true)
+                    .map_err(|e| FlowError(e.to_string()))?;
             let team = team.ok_or_else(|| FlowError("no team resolved".to_string()))?;
-            let workspace = crate::cli::resolve_workspace(Some(&team), true)
+            let workspace = crate::team::resolve_workspace(Some(&team), true)
                 .map_err(|e| FlowError(e.to_string()))?;
             *guard = Some(RealCtx {
                 team_name: team_name.unwrap_or_default(),
@@ -521,7 +522,7 @@ impl FlowEnv for RealEnv {
     ) -> Result<SpawnedAgent, String> {
         self.with_ctx(|c| {
             let team_name = c.team_name.clone();
-            crate::cli::spawn_team_agent(
+            crate::team::spawn_team_agent(
                 &mut c.team,
                 &team_name,
                 name,
@@ -549,14 +550,14 @@ impl FlowEnv for RealEnv {
 
     fn ensure_hived(&self) {
         let _ = self.with_ctx(|c| {
-            crate::cli::ensure_team_hived(&c.team, Path::new(&c.workspace));
+            crate::team::ensure_team_hived(&c.team, Path::new(&c.workspace));
         });
     }
 
     fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String> {
         match self.context() {
             Ok(ctx) => {
-                crate::cli::wait_for_peer_ready(&ctx.workspace, &ctx.team_name, agents, 30.0, 0.5)
+                crate::send::wait_for_peer_ready(&ctx.workspace, &ctx.team_name, agents, 30.0, 0.5)
             }
             Err(_) => agents.clone(),
         }
@@ -564,7 +565,7 @@ impl FlowEnv for RealEnv {
 
     fn send(&self, target: &str, body: &str, artifact: &str) -> Result<String, String> {
         self.with_ctx(|c| {
-            crate::cli::request_send_payload(
+            crate::send::request_send_payload(
                 &c.workspace,
                 &c.team,
                 FLOW_SENDER,
@@ -1147,7 +1148,7 @@ mod tests {
     // real except what needs a live member: the hived's member lookup
     // (`resolve_live_agent`), send gate (`check_send_gate`) and transport
     // hand-off (`agent_send`) answer through the hived test hook, and tmux is
-    // the fake `team.rs` uses in test builds.
+    // the fake `team/mod.rs` uses in test builds.
 
     #[test]
     fn test_real_env_send_and_find_reply_are_anchored_by_msg_id() {

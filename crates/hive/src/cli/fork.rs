@@ -1,12 +1,21 @@
+//! Fork verbs: `fork` (clone an agent pane into a split, registering the
+//! clone when the source is a team pane) and the human helpers `cvim`,
+//! `vim`, `vfork`, `hfork` that call back into it.
+
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 
 use serde_json::{Map, Value};
 
-use super::*;
+use super::util::{execvp, fail, json_pretty, ok_or_fail};
 use crate::agent::Agent;
-use crate::team::Team;
+use crate::identity;
+use crate::identity::env_string;
+use crate::json_fields::{is_set, map_str};
+use crate::paths::getcwd;
+use crate::shell::shlex_quote;
+use crate::team::{ensure_pane_in_scope, load_team, resolve_scoped_team, Team};
 use crate::tmux;
 
 // ---------------------------------------------------------------------------
@@ -19,7 +28,7 @@ const FORK_MIN_ROWS: i64 = 20;
 /// True for horizontal (left/right) split, false for vertical (top/bottom).
 ///
 /// Accounts for the 1-cell tmux separator consumed by the split.
-pub(crate) fn choose_fork_split(width: i64, height: i64) -> bool {
+fn choose_fork_split(width: i64, height: i64) -> bool {
     let h_half = (width - 1) / 2;
     let v_half = (height - 1) / 2;
     let can_h = h_half >= FORK_MIN_COLS;
@@ -44,8 +53,8 @@ pub(crate) fn choose_fork_split(width: i64, height: i64) -> bool {
     h_score >= v_score
 }
 
-pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
-    let target = resolve_pane_target(pane_id);
+pub(crate) fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
+    let target = ok_or_fail(crate::agent_cli::resolve_pane_target(pane_id));
     if !target.is_team_bound {
         // Non-team pane: clone it bare — no member registration, no @hive-* tags.
         // The clone is an independent agent that belongs to no Hive team.
@@ -81,8 +90,8 @@ pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
         } else {
             tmux::list_panes_full(&window_target)
         };
-        let mut seen_names = window_seen_names(&target_team, &panes);
-        derive_agent_name(&mut seen_names)
+        let mut seen_names = crate::naming::window_seen_names(&target_team, &panes);
+        crate::naming::derive_agent_name(&mut seen_names)
     } else {
         join_as.to_string()
     };
@@ -169,8 +178,8 @@ fn fork_source_details(
     (current_pane, profile, session_id, horizontal, source_cwd)
 }
 
-pub(crate) const FORK_NEW_TASK_MARKER: &str = "NEW TASK FOR THIS FORK:";
-pub(crate) const FORK_BOUNDARY_TEXT: &str =
+const FORK_NEW_TASK_MARKER: &str = "NEW TASK FOR THIS FORK:";
+const FORK_BOUNDARY_TEXT: &str =
     "FORK BOUNDARY: you are a freshly forked agent. Run `hive team` to find your \
 own identity (the `self` field).\n\n\
 Everything before this boundary is read-only inherited context for the \
@@ -186,7 +195,7 @@ is present, stop after identifying yourself and wait for new input.";
 // told to run `hive team` to find an identity. The anti-re-execution core is
 // preserved verbatim — that is what stops the clone from re-running the
 // parent's in-flight work regardless of team membership.
-pub(crate) const FORK_ORPHAN_BOUNDARY_TEXT: &str =
+const FORK_ORPHAN_BOUNDARY_TEXT: &str =
     "FORK BOUNDARY: you are a freshly forked, independent clone. You are NOT \
 bound to any Hive team — running `hive team` only confirms you have no team \
 binding, and there is no `self` identity to look up.\n\n\
@@ -238,7 +247,7 @@ fn fork_registered_agent(
     join_as: &str,
     prompt: &str,
 ) -> (Agent, String) {
-    ensure_pane_in_scope(t, pane_id);
+    ok_or_fail(ensure_pane_in_scope(t, pane_id));
     let window_target = if !t.tmux_window.is_empty() {
         t.tmux_window.clone()
     } else {
@@ -249,8 +258,10 @@ fn fork_registered_agent(
     } else {
         tmux::list_panes_full(&window_target)
     };
-    let mut seen_names = window_seen_names(t, &panes);
-    claim_member_name(join_as, &mut seen_names);
+    let mut seen_names = crate::naming::window_seen_names(t, &panes);
+    if let Err(error) = crate::naming::claim_member_name(join_as, &mut seen_names) {
+        fail(&error);
+    }
 
     let workspace = t.workspace.clone();
     let (current_pane, profile, session_id, horizontal, source_cwd) =
@@ -298,7 +309,7 @@ fn fork_registered_agent(
     } else {
         source_cwd.clone()
     };
-    let registered_agent = register_agent_member(
+    let registered_agent = ok_or_fail(crate::team::register_agent_member(
         t,
         &new_pane,
         &team_name,
@@ -307,7 +318,7 @@ fn fork_registered_agent(
         &cwd,
         false,
         &group,
-    );
+    ));
     (registered_agent, new_pane)
 }
 
@@ -383,11 +394,11 @@ fn exec_cvim(mode: &str, args: &[String]) -> ! {
     execvp("bash", &argv);
 }
 
-pub fn cvim_cmd(args: &[String]) {
+pub(crate) fn cvim_cmd(args: &[String]) {
     exec_cvim("cvim", args);
 }
 
-pub fn vim_cmd(args: &[String]) {
+pub(crate) fn vim_cmd(args: &[String]) {
     exec_cvim("vim", args);
 }
 
@@ -418,10 +429,29 @@ fn exec_fork_split(split: &str, args: &[String]) {
     }
 }
 
-pub fn vfork_cmd(args: &[String]) {
+pub(crate) fn vfork_cmd(args: &[String]) {
     exec_fork_split("v", args);
 }
 
-pub fn hfork_cmd(args: &[String]) {
+pub(crate) fn hfork_cmd(args: &[String]) {
     exec_fork_split("h", args);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_choose_fork_split_prefers_fitting_direction() {
+        // Both fit: wide window goes horizontal only at >= 2.5x aspect.
+        assert!(choose_fork_split(300, 60));
+        assert!(!choose_fork_split(200, 100));
+        // Only horizontal fits.
+        assert!(choose_fork_split(200, 30));
+        // Only vertical fits.
+        assert!(!choose_fork_split(100, 60));
+        // Neither fits: highest score wins (h_score 0.9875 vs v_score 0.45).
+        assert!(choose_fork_split(159, 20));
+        assert!(!choose_fork_split(80, 41));
+    }
 }

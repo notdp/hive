@@ -67,3 +67,10 @@ pub fn mkstemp_in(dir: &Path, prefix: &str, suffix: &str) -> Result<(std::fs::Fi
     }
     bail!("could not create temp file in {}", dir.display());
 }
+
+/// The current directory as a string, empty when it cannot be read.
+pub(crate) fn getcwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
