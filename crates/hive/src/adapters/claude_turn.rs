@@ -30,9 +30,10 @@
 //!   records are flushed late: a `dequeue` with a later timestamp has been
 //!   seen on disk before the blocks of the message it followed.
 //! - After the final message a bg member session writes `system
-//!   turn_duration`, `cost-state`, then `last-prompt` (51 of 51 idle turn
-//!   ends sampled); a desktop session writes `system stop_hook_summary`
-//!   or the next turn's queue rows first.
+//!   turn_duration` and then nothing until its next input (`cost-state`
+//!   and `last-prompt` come with that input, not with the turn end); a
+//!   desktop session writes `system stop_hook_summary` or the next turn's
+//!   queue rows first.
 //! - A human interrupt is a `user` record whose text is
 //!   `[Request interrupted by user]` (Escape) or
 //!   `[Request interrupted by user for tool use]` (a rejected tool call,
@@ -379,10 +380,15 @@ struct FinalMessage {
 /// full: the next message (a different `message.id`), a `user` record (an
 /// `end_turn` message has no `tool_use` block, so no tool result of its own
 /// is pending; an input opens the next turn), `last-prompt`, and the
-/// dequeue that opens the next queued turn. Nothing else is: `system` rows
-/// (`turn_duration`, `stop_hook_summary`) and attachments chain but are
-/// harness writes with their own timing, an `enqueue` is a human typing,
-/// and the `file-history-*`, `cost-state` and title rows are bookkeeping.
+/// dequeue that opens the next queued turn, and the turn-close `system`
+/// rows (`turn_duration`, `stop_hook_summary`): the harness writes them
+/// once the turn is over, and a bg member that goes idle writes nothing
+/// else for minutes (its `last-prompt` row lands with the next input, not
+/// with the turn end — 9 live bg transcripts on this machine end on
+/// `turn_duration`). Nothing else is: other `system` rows and attachments
+/// chain but are harness writes with their own timing, an `enqueue` is a
+/// human typing, and the `file-history-*`, `cost-state` and title rows
+/// are bookkeeping.
 /// On 300 transcripts (2.1.215 – 2.1.260, duplicate rewrites removed) no
 /// record of any kind was seen between two blocks of an `end_turn`
 /// message; the narrower set is what the reader relies on.
@@ -397,6 +403,10 @@ fn completes_message(record: &Record) -> bool {
     match record_type(record) {
         "assistant" | "user" | "last-prompt" => true,
         "queue-operation" => record.get("operation").and_then(Value::as_str) == Some("dequeue"),
+        "system" => matches!(
+            record.get("subtype").and_then(Value::as_str),
+            Some("turn_duration") | Some("stop_hook_summary")
+        ),
         _ => false,
     }
 }
@@ -1116,16 +1126,9 @@ mod tests {
             ],
         );
         flushing(outcome(&anchor));
-        // turn_duration chains and has a uuid, and is still not proof.
-        append(
-            &fx.path,
-            &[
-                turn_duration("s1", "a6"),
-                json!({"type": "cost-state", "sessionId": SESSION, "totalCostUSD": 0.1}),
-            ],
-        );
-        flushing(outcome(&anchor));
-        append(&fx.path, &[last_prompt()]);
+        // turn_duration is the turn-close row: a bg member writes nothing
+        // else until its next input, so it completes the message.
+        append(&fx.path, &[turn_duration("s1", "a6")]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
@@ -1173,10 +1176,10 @@ mod tests {
         );
     }
 
-    /// The desktop shape after a turn: stop_hook_summary chains to the
-    /// final block and is not proof either; the next turn's dequeue is.
+    /// The desktop shape after a turn: stop_hook_summary is the turn-close
+    /// row there, and completes the message on its own.
     #[test]
-    fn test_outcome_hook_summary_is_not_a_barrier_but_dequeue_is() {
+    fn test_outcome_hook_summary_completes_the_final_message() {
         let fx = fixture();
         prior_turn(&fx.path);
         let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
@@ -1188,14 +1191,10 @@ mod tests {
         hook["preventedContinuation"] = json!(false);
         append(
             &fx.path,
-            &[
-                assistant("a1", "u1", "msg_1", "end_turn", text("done")),
-                hook,
-                queue_op("enqueue", Some("next question"), None),
-            ],
+            &[assistant("a1", "u1", "msg_1", "end_turn", text("done"))],
         );
         flushing(outcome(&anchor));
-        append(&fx.path, &[queue_op("dequeue", None, None)]);
+        append(&fx.path, &[hook]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
@@ -1213,13 +1212,10 @@ mod tests {
         let anchor = bind(&cursor);
         append(
             &fx.path,
-            &[
-                assistant("a1", "u1", "msg_1", "end_turn", text("done")),
-                turn_duration("s1", "a1"),
-            ],
+            &[assistant("a1", "u1", "msg_1", "end_turn", text("done"))],
         );
         flushing(outcome(&anchor));
-        append(&fx.path, &[input("u2", Some("s1"), "next question")]);
+        append(&fx.path, &[input("u2", Some("a1"), "next question")]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
@@ -1287,14 +1283,11 @@ mod tests {
         let anchor = bind(&cursor);
         append(
             &fx.path,
-            &[
-                assistant("a1", "u1", "msg_1", "end_turn", thinking()),
-                turn_duration("s1", "a1"),
-            ],
+            &[assistant("a1", "u1", "msg_1", "end_turn", thinking())],
         );
         // Never an empty Completed on its own: the text block may be next.
         flushing(outcome(&anchor));
-        append(&fx.path, &[last_prompt()]);
+        append(&fx.path, &[turn_duration("s1", "a1")]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
