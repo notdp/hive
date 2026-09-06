@@ -404,7 +404,7 @@ pub(crate) fn write_registry_backfill(workspace: &str, team: &str) {
     let _ = crate::registry::backfill(
         &t.name,
         &observed,
-        &py_float_str(t.created_at),
+        &created_at_key(t.created_at),
         &t.tmux_window_id,
         workspace,
     );

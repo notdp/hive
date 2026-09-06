@@ -78,7 +78,7 @@ pub(crate) const _RANDOM_AGENT_NAMES: [&str; 10] = [
 // Small shared utilities
 // ---------------------------------------------------------------------------
 
-/// Python `_fail`: print `Error: msg` to stderr, exit 1.
+/// Print `Error: msg` to stderr, exit 1.
 pub(crate) fn fail(msg: &str) -> ! {
     eprintln!("Error: {msg}");
     std::process::exit(1);
@@ -99,8 +99,39 @@ pub(crate) fn getcwd() -> String {
         .unwrap_or_default()
 }
 
-/// Python `str(float)` for epoch timestamps: integral floats keep `.0`.
-pub(crate) use crate::pyval::{py_float_str, truthy};
+pub(crate) use crate::json_fields::is_set;
+pub(crate) use crate::team::created_at_key;
+
+/// Replace this process with *program*; print the error and exit 1 when
+/// the exec fails.
+pub(crate) fn execvp(program: &str, args: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(program).args(args).exec();
+    eprintln!("Error: {err}");
+    std::process::exit(1);
+}
+
+/// No control characters or line separators: safe to echo into a terminal.
+// ponytail: the control-char gate covers the documented threats (ESC/OSC/BEL/
+// newline); the full Unicode C*/Z* table is overkill.
+pub(crate) fn is_printable(s: &str) -> bool {
+    s.chars()
+        .all(|c| !c.is_control() && c != '\u{2028}' && c != '\u{2029}')
+}
+
+pub(crate) fn stdout_isatty() -> bool {
+    unsafe { libc::isatty(1) == 1 }
+}
+
+/// A settings value as an environment-variable string: strings bare, null
+/// empty, anything else its JSON text.
+pub(crate) fn value_as_env_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
 
 /// The hive binary that tmux hooks, the flow dock and the cvim asset call
 /// back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
@@ -117,7 +148,7 @@ pub(crate) fn self_exe() -> String {
         .unwrap_or_else(|| "hive".to_string())
 }
 
-/// Python `shlex.quote`: alphanumerics and `_@%+=:,./-` pass through bare,
+/// POSIX shell quoting: alphanumerics and `_@%+=:,./-` pass through bare,
 /// anything else is wrapped in single quotes.
 pub(crate) fn shlex_quote(value: &str) -> String {
     if value.is_empty() {
@@ -163,7 +194,7 @@ pub(crate) fn json_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-/// Python `Path(...).expanduser()` (bare `~` and `~/...` forms).
+/// Expand a leading `~` (bare `~` and `~/...` forms).
 pub(crate) fn expanduser(path: &str) -> String {
     if path == "~" {
         return env_string("HOME");
@@ -672,7 +703,7 @@ fn team_window_identity(t: &mut Team) -> (String, String) {
     (window_target, window_id)
 }
 
-/// CLI-side `start_team_hived` (mutates the team like the Python original).
+/// Start (or find) the team's hived, filling the team's window identity.
 pub(crate) fn start_team_hived(t: &mut Team, workspace: &str) -> Option<i32> {
     let (window_target, window_id) = team_window_identity(t);
     crate::hived::ensure_hived(workspace, &t.name, &window_target, &window_id)

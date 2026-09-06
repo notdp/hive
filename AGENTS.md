@@ -131,10 +131,42 @@ functions, minimal comments, plain snake_case names. Visibility is the
 keyword, never the name: no leading underscore on a function (the port-era
 `_name` prefixes are gone, and a `_` prefix also silences the dead-code
 lint, which hid unused code). A helper only tests call is `#[cfg(test)]`,
-not `pub`. `crates/hive/PORTING.md` records the port-era JSON-compat rules.
+not `pub`.
 Test names stay explicit, e.g. `test_wait_status_times_out_without_match`. Do
 not leave dead code: if a function becomes a no-op or unused, delete it along
 with all call sites instead of leaving an empty body.
+
+## Data and output contracts
+
+- Documents hive does not own end to end (registry entries, claude/codex
+  session records, plugin state, settings) are read and written as
+  `serde_json::Value`, never a derived struct, so keys hive does not know
+  survive a read-modify-write; `Serialize`/`Deserialize` are derived only
+  on wire types hive owns (`flow.rs::FlowOp`, whose serialization is the
+  op-journal key). `serde_json` carries the `preserve_order` feature so
+  insertion order survives a round trip; dropping it reorders files that
+  existing readers diff. A field's presence is read through
+  `json_fields::is_set`, and a team instance is named by
+  `team::created_at_key` (epoch seconds, compared numerically).
+- stdout is a contract wherever a peer or a test reads it: the e2e suite
+  parses the `hive team` payload, and the `<HIVE …>` header built in
+  `message.rs` is re-parsed by the transcript viewer and by member skills.
+  None of those readers compile with the crate.
+- `cli/help_text.rs` is hand-maintained help text: the captured output is
+  the source. `cli/mod.rs` checks that every known command is a clap
+  subcommand, every `-h` path has an arm, and the root help lists a command
+  exactly when its clap node is not hidden; nothing catches flags that
+  drift from what the help text claims.
+- Every hive root resolves through `std::env::var("HOME")`, never
+  `home_dir()`, which falls back to the passwd database and walks out of a
+  redirected test root.
+- A `ponytail:` comment marks a deliberate narrowing: what the code does
+  not cover and what would justify widening it. Grep for it before treating
+  a gap as an oversight.
+- `crates/hive/assets/` ships as data, embedded at compile time, never
+  transliterated into Rust: the cvim toolkit and the notify plugin manifest
+  are run by something that is not this binary, and the grok `.tmTheme`
+  palettes are parsed by the linked-in markdown engine byte-verbatim.
 
 ## Testing guidelines
 

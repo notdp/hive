@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
 use crate::agent::Agent;
-use crate::pyval::{py_float_str, truthy};
+use crate::json_fields::is_set;
 use crate::tmux::PaneInfo;
 
 #[cfg(test)]
@@ -23,12 +23,23 @@ use crate::tmux;
 pub const LEAD_AGENT_NAME: &str = "orch";
 const _TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
 
-/// Python module constant `team.HIVE_HOME`; a per-call env read here so tests
-/// can redirect it (nextest runs one process per test).
+/// `$HIVE_HOME`, read per call so tests can redirect it (nextest runs one
+/// process per test).
 pub fn hive_home() -> PathBuf {
     let home = std::env::var("HIVE_HOME")
         .unwrap_or_else(|_| format!("{}/.hive", std::env::var("HOME").unwrap_or_default()));
     PathBuf::from(home)
+}
+
+/// The registry's instance key for a team created at *created_at*
+/// (epoch seconds): an empty key for a team with no known creation time,
+/// which every registry write treats as "no instance check".
+pub fn created_at_key(created_at: f64) -> String {
+    if created_at == 0.0 {
+        String::new()
+    } else {
+        format!("{created_at}")
+    }
 }
 
 fn now_epoch() -> f64 {
@@ -73,7 +84,7 @@ fn new_agent(
     }
 }
 
-/// Drop every `@hive-*` window tag `write_window_options` (or a Python-era
+/// Drop every `@hive-*` window tag `write_window_options` (or an older
 /// hive, which also wrote `@hive-peers`) left on *window*, with the display
 /// carriers the hived and notify wrote on it, and the layout hooks with
 /// their `@hive-layout` key: a window that stops being hive's keeps its
@@ -124,8 +135,8 @@ pub fn validate_team_name(name: &str) -> String {
     String::new()
 }
 
-/// What Team.load reads back from `find_team_window` (the Python window-data
-/// dict: window_id / workspace / desc / created).
+/// What Team.load reads back from `find_team_window` (window_id /
+/// workspace / desc / created).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TeamWindowData {
     pub window_id: String,
@@ -200,7 +211,7 @@ fn detect_profile_name_for_pane(pane_id: &str) -> Option<String> {
     crate::agent_cli::detect_profile_for_pane(pane_id).map(|profile| profile.name.to_string())
 }
 
-/// Python Team.load's cli resolution for a member pane: the pane tag, the
+/// Team.load's cli resolution for a member pane: the pane tag, the
 /// pane command, then live profile detection, then the "claude" default.
 fn resolve_member_cli(pane: &PaneInfo) -> String {
     let resolved = if !pane.cli.is_empty() {
@@ -260,7 +271,7 @@ pub struct Team {
     pub description: String,
     pub workspace: String,
     pub lead_name: String,
-    /// Insertion-ordered roster (the Python `dict[str, Agent]`); spawn splits
+    /// Insertion-ordered roster; spawn splits
     /// from the *last inserted* member, so order is behavior, not cosmetics.
     pub agents: Vec<Agent>,
     pub created_at: f64,
@@ -297,7 +308,7 @@ impl Team {
     }
 
     /// `self.agents[name] = agent`: replace in place (keeps the original
-    /// insertion position, like a Python dict assignment) or append.
+    /// insertion position) or append.
     pub fn upsert_agent(&mut self, agent: Agent) {
         match self.agents.iter_mut().find(|a| a.name == agent.name) {
             Some(slot) => *slot = agent,
@@ -318,7 +329,7 @@ impl Team {
         if !self.description.is_empty() {
             tmux::set_window_option(target, "@hive-desc", &self.description);
         }
-        tmux::set_window_option(target, "@hive-created", &py_float_str(self.created_at));
+        tmux::set_window_option(target, "@hive-created", &created_at_key(self.created_at));
     }
 
     // --- Lifecycle ---
@@ -450,7 +461,7 @@ impl Team {
             .map(|s| row_str(s, "workspace"))
             .unwrap_or_default();
         let snap_created = match snap.as_ref() {
-            Some(s) if truthy(s.get("createdAt")) => match s.get("createdAt") {
+            Some(s) if is_set(s.get("createdAt")) => match s.get("createdAt") {
                 Some(Value::String(text)) => text.clone(),
                 Some(other) => other.to_string(),
                 None => String::new(),
@@ -761,11 +772,7 @@ impl Team {
     }
 
     pub fn created_at_key(&self) -> String {
-        if self.created_at == 0.0 {
-            String::new()
-        } else {
-            py_float_str(self.created_at)
-        }
+        created_at_key(self.created_at)
     }
 
     /// Reserve `name` in the registry roster (paneless placeholder). Ok(true)
@@ -990,8 +997,7 @@ pub fn duplicate_team_bindings() -> Result<Vec<Map<String, Value>>> {
     );
     let r = tmux::run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
-    // serde_json's preserve_order Map keeps team insertion order like the
-    // Python dict.
+    // serde_json's preserve_order Map keeps team insertion order.
     let mut by_team: Map<String, Value> = Map::new();
     for line in r.stdout.trim().split('\n') {
         if line.is_empty() {
@@ -1053,7 +1059,7 @@ pub fn list_teams() -> Result<Vec<Map<String, Value>>> {
     let mut by_name: Map<String, Value> = Map::new();
     for entry in crate::registry::list_entries() {
         let team = row_str(&entry, "team");
-        if truthy(entry.get("corrupt")) || team.is_empty() {
+        if is_set(entry.get("corrupt")) || team.is_empty() {
             continue;
         }
         by_name.insert(

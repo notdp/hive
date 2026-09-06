@@ -442,7 +442,7 @@ fn title_names(title: &str, name: &str) -> bool {
     false
 }
 
-/// Python `repr()` for the printable strings that reach a `why` line: quote
+/// A quoted repr for the printable strings that reach a `why` line: quote
 /// choice, backslash/quote escapes; exotic controls are left as-is.
 fn py_repr(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {

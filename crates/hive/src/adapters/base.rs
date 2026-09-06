@@ -255,8 +255,8 @@ pub fn str_or_none(value: Option<&Value>) -> Option<String> {
         Value::String(s) => s.clone(),
         Value::Bool(b) => (if *b { "True" } else { "False" }).to_string(),
         Value::Number(n) => n.to_string(),
-        // ponytail: JSON repr instead of Python repr for containers; real
-        // payloads only put scalars in these fields.
+        // ponytail: containers render as JSON; real payloads only put
+        // scalars in these fields.
         other => other.to_string(),
     };
     if text.is_empty() {

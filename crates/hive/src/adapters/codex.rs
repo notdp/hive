@@ -213,7 +213,7 @@ fn codex_message_from_body(
         "function_call_output" | "custom_tool_call_output" => {
             let output_text = match body.get("output") {
                 Some(Value::Object(output)) => {
-                    str_or_none(first_truthy(output.get("content"), output.get("text")))
+                    str_or_none(first_set(output.get("content"), output.get("text")))
                 }
                 other => str_or_none(other),
             };
@@ -286,7 +286,7 @@ fn iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
                     }),
                     "tool_result" => parts.push(MessagePart {
                         kind: "tool_result".to_string(),
-                        tool_output: str_or_none(first_truthy(map.get("content"), map.get("text"))),
+                        tool_output: str_or_none(first_set(map.get("content"), map.get("text"))),
                         raw: Some(block.clone()),
                         ..Default::default()
                     }),
@@ -327,9 +327,9 @@ fn extract_reasoning_text(body: &Map<String, Value>) -> Option<String> {
 /// `a` when it is present and truthy (non-null, not `false`, `0`, or empty),
 /// else `b`. Callers read a tool result's `content` and fall back to its
 /// `text` when `content` is absent or empty.
-fn first_truthy<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
+fn first_set<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
     match a {
-        Some(value) if crate::pyval::truthy(Some(value)) => a,
+        Some(value) if crate::json_fields::is_set(Some(value)) => a,
         _ => b,
     }
 }

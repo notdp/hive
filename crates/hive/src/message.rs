@@ -14,7 +14,7 @@ pub struct BodyWarningHint {
     pub reasons: Vec<&'static str>,
 }
 
-/// Python str.splitlines over \n, \r\n, and \r.
+/// Split lines over \n, \r\n, and \r.
 // ponytail: skips exotic unicode line breaks (\v, \f, \x85, U+2028...);
 // extend if a real body ever carries them.
 fn splitlines(text: &str) -> Vec<&str> {

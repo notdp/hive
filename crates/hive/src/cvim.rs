@@ -792,7 +792,7 @@ pub fn list_main(args: &[String]) -> i32 {
         );
         menu.push(Value::Object(row));
     }
-    let rendered = crate::cli::rest::py_dumps(&Value::Array(menu), false, None, false);
+    let rendered = Value::Array(menu).to_string();
     if fs::write(menu_json, rendered).is_err() {
         eprintln!("cvim-list: cannot write {}", menu_json.display());
         return 1;

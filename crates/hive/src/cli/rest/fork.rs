@@ -145,7 +145,7 @@ fn fork_source_details(
         if let Some(snapshot) = payload.get("snapshot").and_then(Value::as_object) {
             let fresh = match snapshot.get("_sessionIdFresh") {
                 None => true,
-                some => truthy(some),
+                some => is_set(some),
             };
             if fresh {
                 let sid = map_str(snapshot, "sessionId");
@@ -370,9 +370,8 @@ fn exec_cvim(mode: &str, args: &[String]) -> ! {
     if let Some(pane) = tmux::get_current_pane_id().filter(|pane| !pane.is_empty()) {
         std::env::set_var("TMUX_PANE", pane);
     }
-    // The script's helper callbacks are hidden subcommands of this binary
-    // (the Python original exported HIVE_PYTHON for the same reason); a bare
-    // `hive` on the pane's PATH is only the script's fallback.
+    // The script's helper callbacks are hidden subcommands of this binary;
+    // a bare `hive` on the pane's PATH is only the script's fallback.
     if let Ok(exe) = std::env::current_exe() {
         std::env::set_var("HIVE_BIN", exe);
     }

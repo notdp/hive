@@ -40,8 +40,7 @@ pub const _TEAM_WINDOW_FMT: &str = concat!(
 );
 const _TEAM_WINDOW_FIELD_COUNT: usize = 7;
 
-/// Entry of `list_team_windows_status` (the Python dict keys were
-/// window/windowName/windowId/team/workspace/created/pr).
+/// Entry of `list_team_windows_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TeamWindow {
     pub window: String,

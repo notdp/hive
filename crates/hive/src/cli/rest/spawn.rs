@@ -102,17 +102,12 @@ pub fn spawn(
         if !not_ready.is_empty() {
             println!(
                 "{}",
-                py_dumps(
-                    &json!({
-                        "status": "spawn_ready_timeout",
-                        "agent": agent_name,
-                        "pane": agent.pane_id,
-                        "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
-                    }),
-                    true,
-                    Some(2),
-                    false
-                )
+                json_pretty(&json!({
+                    "status": "spawn_ready_timeout",
+                    "agent": agent_name,
+                    "pane": agent.pane_id,
+                    "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
+                }))
             );
             std::process::exit(1);
         }
@@ -140,34 +135,24 @@ pub fn spawn(
     if let Err(exc) = dispatch {
         println!(
             "{}",
-            py_dumps(
-                &json!({
-                    "status": "dispatch_failed",
-                    "agent": agent_name,
-                    "pane": agent.pane_id,
-                    "error": exc.to_string(),
-                    "hint": format!("member is ready but dispatch failed; retry: hive send {agent_name} ... --artifact {task_path}"),
-                }),
-                true,
-                Some(2),
-                false
-            )
+            json_pretty(&json!({
+                "status": "dispatch_failed",
+                "agent": agent_name,
+                "pane": agent.pane_id,
+                "error": exc.to_string(),
+                "hint": format!("member is ready but dispatch failed; retry: hive send {agent_name} ... --artifact {task_path}"),
+            }))
         );
         std::process::exit(1);
     }
     println!(
         "{}",
-        py_dumps(
-            &json!({
-                "agent": agent_name,
-                "pane": agent.pane_id,
-                "task": task_path,
-                "dispatched": true,
-            }),
-            true,
-            Some(2),
-            false
-        )
+        json_pretty(&json!({
+            "agent": agent_name,
+            "pane": agent.pane_id,
+            "task": task_path,
+            "dispatched": true,
+        }))
     );
 }
 

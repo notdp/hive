@@ -1,5 +1,5 @@
 //! Registry-truth core verbs: create, join, send, team, ls, view, doctor,
-//! interrupt, kill, delete — ported from `src/hive/cli.py`.
+//! interrupt, kill, delete.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -116,7 +116,7 @@ pub fn create(
     let _ = crate::registry::record_team(
         &t.name,
         &ws_str,
-        &py_float_str(t.created_at),
+        &created_at_key(t.created_at),
         &members,
         &t.tmux_window_id,
     );
@@ -305,7 +305,7 @@ pub(crate) fn create_detached_team(
         crate::registry::record_team(
             &t.name,
             &ws_str,
-            &py_float_str(t.created_at),
+            &created_at_key(t.created_at),
             &members,
             &window_id,
         )?;
@@ -484,7 +484,7 @@ fn create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     let _ = crate::registry::record_team(
         &t.name,
         &ws_str,
-        &py_float_str(t.created_at),
+        &created_at_key(t.created_at),
         &[member],
         &t.tmux_window_id,
     );
@@ -919,7 +919,7 @@ pub fn send(to_agent: &str, body: &str, artifact: &str) {
         Ok(payload) => payload,
         Err(e) => fail(&e.to_string()),
     };
-    if truthy(payload.get("mailbox")) {
+    if is_set(payload.get("mailbox")) {
         // A mailbox has no peer runtime to go silent about: say so once,
         // in the sender's own tool result, so nobody invents a follow-up.
         println!(
@@ -1117,7 +1117,7 @@ fn build_ls_payload() -> Map<String, Value> {
         "no-server"
     };
 
-    // team -> agent -> pane (insertion ordered like the Python dicts).
+    // team -> agent -> pane, insertion ordered.
     let mut live_members: Vec<(String, Vec<(String, tmux::PaneInfo)>)> = Vec::new();
     let mut win_by_team: HashMap<String, tmux::TeamWindow> = HashMap::new();
     if tmux_status == "ok" {
@@ -1154,7 +1154,7 @@ fn build_ls_payload() -> Map<String, Value> {
     for entry in crate::registry::list_entries() {
         let team_name = map_str(&entry, "team");
         seen.insert(team_name.clone());
-        if truthy(entry.get("corrupt")) {
+        if is_set(entry.get("corrupt")) {
             let mut row = Map::new();
             row.insert("team".to_string(), Value::String(team_name));
             row.insert("state".to_string(), Value::String("corrupt".to_string()));
@@ -1190,7 +1190,7 @@ fn build_ls_payload() -> Map<String, Value> {
                         );
                         row.insert(
                             "session".to_string(),
-                            Value::Bool(truthy(m.get("sessionId"))),
+                            Value::Bool(is_set(m.get("sessionId"))),
                         );
                         row
                     })
@@ -1421,7 +1421,7 @@ fn format_ls_human(payload: &Map<String, Value>) -> Vec<String> {
                         members
                             .iter()
                             .filter_map(Value::as_object)
-                            .filter(|m| !truthy(m.get("live")))
+                            .filter(|m| !is_set(m.get("live")))
                             .map(|m| map_str(m, "name"))
                             .collect()
                     })

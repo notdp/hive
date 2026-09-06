@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _, Result};
 use serde_json::{Map, Value};
 
-use crate::pyval::truthy;
+use crate::json_fields::is_set;
 
 pub const MEMBER_FIELDS: [&str; 5] = ["name", "cli", "model", "sessionId", "cwd"];
 
@@ -70,14 +70,18 @@ pub fn entry_path(team: &str) -> Option<PathBuf> {
     team_dir(team).map(|dir| dir.join(ENTRY_FILE))
 }
 
-/// Python `str(...)` of an optional JSON value, for `createdAt` comparisons.
-fn py_str(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => "None".to_string(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Bool(true)) => "True".to_string(),
-        Some(Value::Bool(false)) => "False".to_string(),
-        Some(other) => other.to_string(),
+/// Whether the stored `createdAt` names the instance *key* (a
+/// `team::created_at_key`) does. Both sides are epoch seconds; the stored
+/// value may be a string or a number.
+fn created_at_matches(stored: Option<&Value>, key: &str) -> bool {
+    let stored = match stored {
+        Some(Value::String(s)) => s.parse::<f64>().ok(),
+        Some(Value::Number(n)) => n.as_f64(),
+        _ => None,
+    };
+    match (stored, key.parse::<f64>().ok()) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -86,7 +90,7 @@ fn valid(entry: &Value) -> bool {
         Some(o) => o,
         None => return false,
     };
-    if !truthy(obj.get("team")) {
+    if !is_set(obj.get("team")) {
         return false;
     }
     let members = match obj.get("members").and_then(Value::as_array) {
@@ -95,7 +99,7 @@ fn valid(entry: &Value) -> bool {
     };
     members
         .iter()
-        .all(|m| m.as_object().is_some_and(|mo| truthy(mo.get("name"))))
+        .all(|m| m.as_object().is_some_and(|mo| is_set(mo.get("name"))))
 }
 
 /// The valid registry entry for *team*, or None (missing/corrupt/unsafe).
@@ -223,9 +227,9 @@ pub fn locked() -> Result<StoreLock> {
     Ok(StoreLock { file })
 }
 
-/// `str(member.get(field, "") or "")`.
+/// The member's *field* as a string, "" when missing.
 // ponytail: string fields only — real member rows are all-string payloads;
-// a non-string value normalizes to "" instead of Python's str() repr.
+// a non-string value normalizes to "".
 fn field_str(member: &Map<String, Value>, field: &str) -> String {
     member
         .get(field)
@@ -268,7 +272,7 @@ pub fn record_team(
     entry.insert("display".to_string(), Value::String(display.to_string()));
     let rows: Vec<Value> = members
         .iter()
-        .filter(|m| truthy(m.get("name")))
+        .filter(|m| is_set(m.get("name")))
         .map(|m| Value::Object(member_row(m)))
         .collect();
     entry.insert("members".to_string(), Value::Array(rows));
@@ -304,7 +308,7 @@ fn open_instance(team: &str, created_at: &str) -> Result<Open> {
         Some(e) => e,
         None => return Ok(Open::Refused("missing")),
     };
-    if !created_at.is_empty() && py_str(entry.get("createdAt")) != created_at {
+    if !created_at.is_empty() && !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok(Open::Refused("stale"));
     }
     Ok(Open::Ready(Opened { path, entry, _lock }))
@@ -454,7 +458,7 @@ pub fn backfill_members(
     // ponytail: linear scans — rosters are a handful of rows
     let mut rows: Vec<(String, Map<String, Value>)> = Vec::new();
     for m in existing {
-        if !truthy(m.get("name")) {
+        if !is_set(m.get("name")) {
             continue;
         }
         let name = field_str(m, "name");
@@ -502,7 +506,7 @@ pub fn backfill(
         Some(e) => e,
         None => return Ok("missing"),
     };
-    if py_str(entry.get("createdAt")) != created_at {
+    if !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok("missing");
     }
     let existing: Vec<Map<String, Value>> = entry

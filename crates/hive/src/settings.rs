@@ -29,8 +29,7 @@ pub fn load_user_settings() -> Map<String, Value> {
     }
 }
 
-/// The value at *key*, or None when any path segment is missing
-/// (Python's `default` argument maps to `Option` here).
+/// The value at *key*, or None when any path segment is missing.
 pub fn get_setting(key: &str) -> Option<Value> {
     let parts = key_parts(key);
     if parts.is_empty() {
@@ -95,9 +94,7 @@ fn write_atomic(data: &Map<String, Value>) -> Result<()> {
     let parent = path.parent().context("settings path has no parent")?;
     fs::create_dir_all(parent)?;
     let (mut file, tmp) = crate::registry::mkstemp_in(parent, ".settings.", ".json.tmp")?;
-    // json.dump(..., indent=2, sort_keys=True). (Python escapes non-ASCII
-    // here; serde writes UTF-8 — readers all parse JSON, so the documents
-    // are equivalent.)
+    // Pretty-printed with sorted keys so the file diffs cleanly.
     let result = (|| -> Result<()> {
         let sorted = crate::registry::sort_keys(&Value::Object(data.clone()));
         let mut text = serde_json::to_string_pretty(&sorted)?;

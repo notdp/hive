@@ -702,7 +702,7 @@ pub(crate) fn resume_hint(cli_name: &str, cwd: &str) -> Option<String> {
     // control/non-printable bytes (ESC/OSC/BEL/newline) silence the hint. So
     // does a leading "-", which would parse as a CLI option instead of a
     // session id when pasted.
-    if !py_isprintable(cwd) || !py_isprintable(&session_id) || session_id.starts_with('-') {
+    if !is_printable(cwd) || !is_printable(&session_id) || session_id.starts_with('-') {
         return None;
     }
     let command = format!(

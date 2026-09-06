@@ -138,7 +138,7 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// Python's non-strict `Path.resolve()`: canonicalize the deepest existing
+/// Non-strict resolve: canonicalize the deepest existing
 /// ancestor and append the remaining segments verbatim.
 fn resolve_path(p: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(p) {
@@ -169,8 +169,8 @@ fn resolve_path(p: &Path) -> PathBuf {
     out
 }
 
-// ponytail: naive Python-repr (plain single quotes, no escaping) — branch
-// names with quotes/control chars would render differently than CPython.
+// ponytail: naive single-quoted repr (no escaping) — branch names with
+// quotes/control chars would render oddly; none do.
 fn py_repr(s: &str) -> String {
     format!("'{s}'")
 }
@@ -503,9 +503,8 @@ pub fn pr_merge_base_from_ref(base_ref: &str) -> String {
 
 // --- start ----------------------------------------------------------------------
 
-/// Serialize field order matches Python `StartResult.to_json()`; serde_json's
-/// `preserve_order` feature (enabled in Cargo.toml) keeps that order through a
-/// `Value` round-trip too.
+/// Field order is the JSON output order; serde_json's `preserve_order`
+/// feature (enabled in Cargo.toml) keeps it through a `Value` round-trip.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartResult {
@@ -603,7 +602,7 @@ pub fn start(
         });
         meta.insert(
             "hive-created".to_string(),
-            crate::pyval::py_float_str(created),
+            crate::team::created_at_key(created),
         );
         let gmb = match gh_merge_base.filter(|s| !s.is_empty()) {
             Some(g) => g.to_string(),
@@ -742,8 +741,8 @@ pub fn start(
 
 // --- done -----------------------------------------------------------------------
 
-/// Serialize field order matches Python `DoneResult.to_json()`; serde_json's
-/// `preserve_order` feature keeps that order through a `Value` round-trip.
+/// Field order is the JSON output order; serde_json's `preserve_order`
+/// feature keeps it through a `Value` round-trip.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoneResult {
@@ -843,8 +842,8 @@ pub fn done(anchor: &Path, feature: &str, force: bool, caller_cwd: &str) -> Resu
 
 // --- status ----------------------------------------------------------------------
 
-/// Serialize field order matches the Python `feature_status()` dict;
-/// serde_json's `preserve_order` feature keeps that order through a `Value`.
+/// Field order is the JSON output order; serde_json's `preserve_order`
+/// feature keeps it through a `Value` round-trip.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeatureStatus {

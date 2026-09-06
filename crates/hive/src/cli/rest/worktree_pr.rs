@@ -114,7 +114,7 @@ pub fn pr_set_cmd(number: i64, plain: bool) {
         println!("window {window} labeled @hive-pr={number} ({summary})");
     } else {
         let result = json!({"window": window, "pr": number, "display": display});
-        println!("{}", py_dumps(&result, true, Some(2), false));
+        println!("{}", json_pretty(&result));
     }
 }
 
@@ -144,12 +144,7 @@ pub fn pr_clear_cmd(plain: bool) {
         };
         println!(
             "{}",
-            py_dumps(
-                &json!({"window": window, "previous": previous_value}),
-                true,
-                Some(2),
-                false
-            )
+            json_pretty(&json!({"window": window, "previous": previous_value}))
         );
     } else if previous.as_deref().is_some_and(|p| !p.is_empty()) {
         println!(
@@ -222,17 +217,12 @@ pub fn worktree_set_base_cmd(refname: &str, plain: bool) {
     } else {
         println!(
             "{}",
-            py_dumps(
-                &json!({
-                    "team": team,
-                    "integrationBranch": refname,
-                    "oid": oid,
-                    "window": window,
-                }),
-                true,
-                Some(2),
-                false
-            )
+            json_pretty(&json!({
+                "team": team,
+                "integrationBranch": refname,
+                "oid": oid,
+                "window": window,
+            }))
         );
     }
 }
@@ -268,7 +258,7 @@ pub fn worktree_start_cmd(feature: &str, base_ref: Option<&str>, plain: bool) {
             eprintln!("warning: {warning}");
         }
     } else {
-        println!("{}", py_dumps(&result.to_json(), true, Some(2), false));
+        println!("{}", json_pretty(&result.to_json()));
     }
     if !result.ready() {
         std::process::exit(1);
@@ -280,7 +270,7 @@ pub fn worktree_done_cmd(feature: &str, force: bool, plain: bool) {
     let anchor = wt_ok(crate::worktree::repo_anchor(Some(Path::new(&cwd))));
     let result = wt_ok(crate::worktree::done(&anchor, feature, force, &cwd));
     if !plain {
-        println!("{}", py_dumps(&result.to_json(), true, Some(2), false));
+        println!("{}", json_pretty(&result.to_json()));
         return;
     }
     if !result.status_summary.is_empty() {
@@ -305,7 +295,7 @@ pub fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
             .unwrap_or(Value::Null),
     };
     if !plain {
-        println!("{}", py_dumps(&payload, true, Some(2), false));
+        println!("{}", json_pretty(&payload));
         return;
     }
     let rows: Vec<Value> = match payload {
@@ -322,7 +312,7 @@ pub fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
             None => continue,
         };
         let mut flags: Vec<String> = Vec::new();
-        if truthy(row.get("dirty")) {
+        if is_set(row.get("dirty")) {
             flags.push("dirty".to_string());
         }
         let in_progress: Vec<String> = row
@@ -338,7 +328,7 @@ pub fn worktree_status_cmd(feature: Option<&str>, plain: bool) {
         if !in_progress.is_empty() {
             flags.push(format!("in-progress:{}", in_progress.join(",")));
         }
-        if truthy(row.get("stale")) {
+        if is_set(row.get("stale")) {
             flags.push("stale".to_string());
         }
         let suffix = if flags.is_empty() {

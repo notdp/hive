@@ -117,18 +117,13 @@ pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
         let plan = outcome.plan();
         println!(
             "{}",
-            py_dumps(
-                &json!({
-                    "layout": plan.map(|p| p.key.as_str()).unwrap_or_default(),
-                    "orientation": plan.map(|p| p.orientation).unwrap_or_default(),
-                    "window": window_target,
-                    "applied": outcome.applied(),
-                    "reason": outcome.reason(),
-                }),
-                true,
-                None,
-                false
-            )
+            json!({
+                "layout": plan.map(|p| p.key.as_str()).unwrap_or_default(),
+                "orientation": plan.map(|p| p.orientation).unwrap_or_default(),
+                "window": window_target,
+                "applied": outcome.applied(),
+                "reason": outcome.reason(),
+            })
         );
         return;
     }
@@ -141,15 +136,7 @@ pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
         tmux::set_window_option(&window_target, dim, "50%");
     }
     tmux::select_layout(&window_target, preset);
-    println!(
-        "{}",
-        py_dumps(
-            &json!({"layout": preset, "window": window_target}),
-            true,
-            None,
-            false
-        )
-    );
+    println!("{}", json!({"layout": preset, "window": window_target}));
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +269,7 @@ pub(crate) fn bind_member_viewer(
 /// A member a pane can ride: engine identity recorded, on a CLI
 /// `attach_launcher` has a resume form for.
 fn attachable(member: &Map<String, Value>) -> bool {
-    truthy(member.get("sessionId")) && attach_launcher(&map_str(member, "cli"), "").is_some()
+    is_set(member.get("sessionId")) && attach_launcher(&map_str(member, "cli"), "").is_some()
 }
 
 fn entry_members(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {

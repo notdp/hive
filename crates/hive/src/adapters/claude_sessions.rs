@@ -98,9 +98,9 @@ pub(crate) fn registry_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
-/// Python's `str(value or "")` for the scalar fields the claude registry,
-/// job ledger and pane records carry (containers never appear on them):
-/// a string as-is, a non-zero number rendered, `true` as "True", else "".
+/// The scalar fields the claude registry, job ledger and pane records
+/// carry, as a string (containers never appear on them): a string as-is,
+/// a non-zero number rendered, `true` as "True", else "".
 pub(crate) fn truthy_str(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
@@ -210,7 +210,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
         let (Some(pid), false, false) = (pid, name.is_empty(), sock.is_empty()) else {
             continue;
         };
-        if crate::pyval::truthy(obj.get("spare")) {
+        if crate::json_fields::is_set(obj.get("spare")) {
             continue; // a warm spare claude pre-started; nobody is behind it yet
         }
         if !pid_alive(pid) {
