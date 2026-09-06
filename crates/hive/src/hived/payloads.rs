@@ -46,7 +46,7 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
 }
 
 /// Who a send is from. A member (or guest) send carries its sender on the
-/// ledger row and in the envelope; a `hive node run` dispatch has no sender
+/// ledger row and in the envelope; a `hive workflow run` dispatch has no sender
 /// at all — the runner reads the member's turn instead of waiting for a
 /// message back — so its row's `from_agent` is empty and its envelope has
 /// no `from`. The mode is explicit: an empty member name is never a node.

@@ -2,7 +2,7 @@
 //! a `hive send` (a qualified `<group>.<name>` across windows, a bare name
 //! in the caller's team, a Claude-session guest's target), the long-body
 //! hint, and the request every dispatch — `hive send`, a spawn's `--task`,
-//! a `hive node run` task — hands the hived.
+//! a `hive workflow run` task — hands the hived.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -65,7 +65,7 @@ impl fmt::Display for DispatchFailure {
     }
 }
 
-/// The dispatch of a `hive node run` task: the hived's node mode, which
+/// The dispatch of a `hive workflow run` task: the hived's node-dispatch action, which
 /// writes a senderless ledger row and injects a from-less envelope.
 pub(crate) fn request_node_dispatch(
     workspace: &str,

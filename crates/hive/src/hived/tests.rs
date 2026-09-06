@@ -479,7 +479,7 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
 }
 
 #[test]
-fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
+fn test_claude_bg_turn_open_reads_busy_unless_the_status_is_stale() {
     use crate::adapters::claude_bg::{runtime_from_engine, STATUS_STALE_AFTER_SECONDS};
     let engine = |status: &str, updated_at: f64| EngineSession {
         status: status.to_string(),
@@ -488,7 +488,7 @@ fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
     };
     let now = 1_000_000.0;
     let open = |status: &str, updated_at: f64| {
-        claude_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
+        claude_bg_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
     };
     assert_eq!(open("busy", now - 1.0), Ok(true));
     assert_eq!(open("idle", now - 1.0), Ok(false));
@@ -500,7 +500,7 @@ fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
     // A status that stopped advancing is a wedged engine, no answer.
     let stale = open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0).unwrap_err();
     assert!(stale.contains("stale status"), "{stale}");
-    let blank = claude_turn_open(&Map::new()).unwrap_err();
+    let blank = claude_bg_turn_open(&Map::new()).unwrap_err();
     assert!(blank.contains("no busy flag"), "{blank}");
 }
 
@@ -4521,7 +4521,7 @@ fn test_three_message_busy_incident_regression() {
 
 #[test]
 fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
-    // A `hive node run` dispatch rides the normal transport (member
+    // A `hive workflow run` dispatch rides the normal transport (member
     // resolution, send gate, hand-off) but has no sender: the ledger row's
     // from_agent is empty, the envelope carries no `from`, and the
     // transport's origin label is the team itself.

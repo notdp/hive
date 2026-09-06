@@ -640,7 +640,7 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
 /// `busy` flag, unless the status is stale (`inputReason: stale_status`),
 /// which is a wedged engine's last word and no answer. `Err` is why there
 /// is no answer.
-pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Result<bool, String> {
+pub(super) fn claude_bg_turn_open(fields: &Map<String, Value>) -> Result<bool, String> {
     if fields.get("inputReason").and_then(Value::as_str) == Some("stale_status") {
         return Err("stale status: the engine's status stopped advancing".to_string());
     }
@@ -663,7 +663,7 @@ pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Result<bool, Stri
 /// reports as false. `open` is null whenever the engine cannot be asked
 /// (no daemon, no engine entry, no turn evidence yet) — never a guess —
 /// and then `reason` says why and a `turn_open.null` notify event records
-/// it, so a node run stalled on null answers leaves evidence; a member off
+/// it, so a workflow run stalled on null answers leaves evidence; a member off
 /// the roster is an error.
 pub(crate) fn turn_open_payload(
     workspace: &str,
@@ -702,7 +702,7 @@ pub(crate) fn turn_open_payload(
                 }
                 let engine = hooked_cb_engine_session_for_job(sid)
                     .ok_or_else(|| format!("no engine entry for job {sid}"))?;
-                claude_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
+                claude_bg_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
                     &engine, None,
                 ))
             }),

@@ -21,7 +21,7 @@ pub struct SessionRuntime {
     pub input_state: String,
     pub session_id: Option<String>,
     pub observed_at: f64,
-    /// Turn evidence for the node runner's dispatch gate, distinct from the
+    /// Turn evidence for the workflow runner's dispatch gate, distinct from the
     /// display `busy` flag: `busy` defaults to false and `observed_at` is
     /// bumped by any in-session notification, so a client that has only
     /// seen a command table, an announcement, or a permission prompt would

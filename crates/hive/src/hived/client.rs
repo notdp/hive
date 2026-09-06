@@ -184,7 +184,7 @@ pub fn request_send(
     request_hived(workspace, &payload, timeout)
 }
 
-/// A `hive node run` dispatch: the same transport as a send, no sender.
+/// A `hive workflow run` dispatch: the same transport as a send, no sender.
 /// The failure kind is kept: a dispatch whose answer was lost may have
 /// been injected, and the node must not repeat it.
 pub(crate) fn request_node_dispatch(

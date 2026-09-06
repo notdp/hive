@@ -113,7 +113,7 @@ pub fn format_hive_envelope(
     render_envelope(&[("from", from_agent), ("to", to_agent)], body, artifact)
 }
 
-/// The envelope of a `hive node run` dispatch: `to` and the task artifact,
+/// The envelope of a `hive workflow run` dispatch: `to` and the task artifact,
 /// and no `from` — nobody is waiting for a message back, the runner reads
 /// the member's turn. Only the node dispatch path renders this; a normal
 /// send always carries its sender.

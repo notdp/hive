@@ -629,7 +629,7 @@ impl Team {
         }
         // Cross-process name claim under the registry lock: the in-memory
         // check above cannot see a concurrent spawner (a workflow fanning out
-        // one `hive node run` process per node). The claim is a paneless
+        // one `hive workflow run` process per node). The claim is a paneless
         // placeholder row — replaced by the real row after the spawn, removed
         // if the spawn fails.
         let claimed = self.claim_name(name, cli, model)?;
@@ -738,7 +738,7 @@ impl Team {
 
     /// Retire a member: kill its engine/pane, drop the roster row here and
     /// in the registry, re-tile the display. The one retirement path —
-    /// `hive kill`, `hive delete --down`, and a failed node start all come here.
+    /// `hive kill`, `hive delete --down`, and a failed workflow start all come here.
     /// Returns whether the member was on the roster.
     pub fn retire(&mut self, name: &str) -> bool {
         let Some(pos) = self.agents.iter().position(|a| a.name == name) else {
@@ -750,7 +750,7 @@ impl Team {
             let _ = crate::registry::remove_member(&self.name, name, &self.created_at_key());
         }
         if !self.workspace.is_empty() {
-            crate::node::remove_record(&self.workspace, name);
+            crate::workflow::remove_record(&self.workspace, name);
         }
         let window = self.display_window();
         if !window.is_empty() {

@@ -40,9 +40,9 @@ Workflow:
   attach    Jump to a team's tmux window, rebuilding it first when it is
             gone.
   ls        List hive teams from the registry, with their display state.
-  node      One task on one live member, as a single blocking call.
   pr        Pin a PR number on the team window's status bar.
   view      Read-only viewer for a Claude session transcript (follows live).
+  workflow  One task on one live member, returned explicitly.
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
             state.
 
@@ -254,7 +254,7 @@ Options:
   removes the whole team directory — or the external workspace the entry
   records, which is never removed without the flag.
 
-  --down is the teardown of a workflow run (`hive create RUN`, `hive node
+  --down is the teardown of a workflow run (`hive create RUN`, `hive workflow
   run` nodes, `hive delete RUN --down`): every member is retired first, and
   the team's own tmux session — the one `hive create` built outside tmux,
   named after the team — is killed after, by its exact name, never a prefix
@@ -282,67 +282,6 @@ Options:
 
 Options:
   -h, --help  Show this message and exit.
-"#
-        }
-        ["node"] => {
-            r#"Usage: hive node [OPTIONS] COMMAND [ARGS]...
-
-  One task on one live member, as a single blocking call.
-
-  The seam an external orchestrator — Claude Code's Workflow tool through
-  the `hive-node` agent the hive plugin ships — runs in the background: a
-  workflow run is `hive create RUN`, one `hive node run` per node, `hive
-  delete RUN --down`. Every node is a visible pane on the team window.
-
-Options:
-  -h, --help  Show this message and exit.
-
-Commands:
-  run  Place the task on stdin onto member NAME and block for the final
-       message of the turn it starts.
-"#
-        }
-        ["node", "run"] => {
-            r#"Usage: hive node run [OPTIONS] --name <NAME> < task.md
-
-  Place the task on stdin onto member NAME and block for the final message
-  of the turn it starts.
-
-  Spawns the member (or reuses one of that name that is still alive),
-  dispatches the task as a `<HIVE>` envelope with no sender, and reads the
-  member's own turn from its engine's transcript: the member is not asked
-  to send anything back, and the result is every text block of the final
-  assistant message of the turn that took the task, in full. The wait has
-  no timeout. Progress goes to stderr; stdout is one JSON object:
-  {"status":…,"name":…,"pane":…,"reused":…,"dispatchId":"nd-…",
-  "session":…,"turn":…} plus "body" when completed, else "reason".
-
-  status: completed (body may be empty) | interrupted | failed | ambiguous
-  (the task's input could not be tied to one turn of its own, or the turn's
-  end could not be attributed) | session_changed (the member's session was
-  cleared, forked or resumed elsewhere) | transcript_unavailable (the
-  transcript stayed unreadable for 60s, or the roster never got a session
-  id) | member_gone (the member died with no end readable) | member_busy
-  (another runner owns a pending run on that member). Every status exits 0;
-  exit 1 with the error on stderr only when no dispatch happened: bad team,
-  spawn or ready failure, no transcript reader for the CLI. A spawn made
-  here is retired when the run ends before the dispatch.
-
-  The run's record is `<workspace>/run/nodes/<NAME>.json` (dispatch id,
-  session, cursor, bound turn, status, body/reason); `hive kill` of the
-  member removes it. The task text lands in
-  `<workspace>/artifacts/tasks/<NAME>-<dispatchId>.md`, the artifact of
-  the envelope.
-
-  This is the seam the `hive-node` agent (shipped by the hive plugin) runs in
-  the background from a Claude Code Workflow script.
-
-Options:
-  --name <NAME>    Member name (stable; a live member of that name is reused)
-  --cli <CLI>      claude | codex | grok (default: claude)
-  --model <MODEL>  Model for the member's CLI
-  --team <TEAM>    Team (default: the team in scope)
-  -h, --help       Show this message and exit.
 "#
         }
         ["fork"] => {
@@ -613,8 +552,8 @@ Options:
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
   outside any team is `ccd.<name or title or pid>` (how a member reaches out).
-  An envelope with no `from=` is a `hive node run` task: nobody is waiting
-  for a message back — do the task and end the turn.
+  An envelope with no `from=` is a `hive workflow run` task: it is answered
+  with `hive workflow done`, never with a send.
 
   New-thread sends must keep `body` to a short summary and put details in
   `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,
@@ -757,6 +696,91 @@ Options:
 
 Options:
   --help  Show this message and exit.
+"#
+        }
+        ["workflow"] => {
+            r#"Usage: hive workflow [OPTIONS] COMMAND [ARGS]...
+
+  One task on one live member, returned explicitly.
+
+  The two ends of one workflow node. `run` is the seam an external
+  orchestrator — Claude Code's Workflow tool through the `hive-node` agent
+  the hive plugin ships — runs in the background: a workflow run is `hive
+  create RUN`, one `hive workflow run` per node, `hive delete RUN --down`.
+  Every node is a visible pane on the team window. `done` is what the
+  member on the node ends its task with: its return statement.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  done  Return SUMMARY as the result of the workflow task you are on.
+  run   Place the task on stdin onto member NAME and block for its return.
+"#
+        }
+        ["workflow", "run"] => {
+            r#"Usage: hive workflow run [OPTIONS] --name <NAME> < task.md
+
+  Place the task on stdin onto member NAME and block for its return.
+
+  Spawns the member (or reuses one of that name that is still alive), waits
+  until it is between turns, dispatches the task as a `<HIVE>` envelope with
+  no sender, and waits for the member's own `hive workflow done`. Nothing is
+  read from the member's transcript: the result is what the member
+  returned, and a member that ends its turn without returning is reported
+  as such. The wait has no timeout. Progress goes to stderr; stdout is one
+  JSON object: {"status":…,"name":…,"pane":…,"reused":…,
+  "dispatchId":"nd-…"} plus "body" and "artifact" when completed, else
+  "reason".
+
+  status: completed (the member's summary and artifact path, which may be
+  empty) | no_result (the member ended its turn without `hive workflow
+  done`) | member_gone (the member died before it returned) | member_busy
+  (another runner owns a pending run on that member, or its turn stayed
+  open for 600s) | ambiguous (the hived's answer to the dispatch was lost
+  and the member neither returned nor closed its turn within 120s; the
+  record stays pending and the name owned until `hive kill`). Every status
+  exits 0; exit 1 with the error on stderr only when no dispatch happened:
+  bad team, spawn or ready failure, the dispatch refused three times. A
+  spawn made here is retired when the run ends before the dispatch.
+
+  The run's record is `<workspace>/run/workflow/<NAME>.json` (dispatch id,
+  status, body/artifact/reason); `hive kill` of the member removes it. The
+  task text lands in `<workspace>/artifacts/tasks/<NAME>-<dispatchId>.md`,
+  the artifact of the envelope.
+
+Options:
+  --name <NAME>    Member name (stable; a live member of that name is reused)
+  --cli <CLI>      claude | codex | grok (default: claude)
+  --model <MODEL>  Model for the member's CLI
+  --team <TEAM>    Team (default: the team in scope)
+  -h, --help       Show this message and exit.
+"#
+        }
+        ["workflow", "done"] => {
+            r#"Usage: hive workflow done [OPTIONS] SUMMARY
+
+  Return SUMMARY as the result of the workflow task you are on.
+
+  The return statement of a workflow node: the task arrived as a `<HIVE>`
+  envelope with no `from=`, and this is how it is answered — not with a
+  send. You are resolved the way `hive send` signs you (your pane, or your
+  engine's own session); the one task waiting on you is the dispatch your
+  run record names. SUMMARY is a return value, as long as the task needs;
+  put a full report in `--artifact` (a file path, or `-` to read it from
+  stdin). Prints nothing on success. Errors when no workflow task is waiting
+  for you, or when you already returned for this one.
+
+  Examples:
+    hive workflow done "reviewed: 2 findings, see artifact" --artifact /tmp/review.md
+    hive workflow done "done" --artifact - <<'EOF'
+    # Findings
+    - item
+    EOF
+
+Options:
+  --artifact TEXT  Artifact path for the full result (- reads stdin)
+  -h, --help       Show this message and exit.
 "#
         }
         ["worktree"] => {
