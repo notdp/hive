@@ -56,7 +56,7 @@ tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 se
 
 ### 没活就停
 
-Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 turn 没有待办就结束 turn 等唤醒。不 `sleep`、不 while loop、不反复 `hive team`,也不翻 repo、artifact 或任务表猜活——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。一次性任务(无 `from` 的信封,见「收活」)结束 turn 就是回报——之后不去 `hive team` 找派发人、不另发「验证送达」;下一条 `<HIVE>` 只会是打回或新任务。
+Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 turn 没有待办就结束 turn 等唤醒。不 `sleep`、不 while loop、不反复 `hive team`,也不翻 repo、artifact 或任务表猜活——猜来的活没人验收,轮询白烧 context。刚出生没任务、回报完等验收,都一样。workflow 任务(无 `from` 的信封,见「收活」)以 `hive workflow done` 回报,回报完就结束 turn——之后不去 `hive team` 找派发人、不另发「验证送达」;下一条 `<HIVE>` 只会是打回或新任务。
 
 ### 收活:任务以派发 artifact 为准
 
@@ -69,13 +69,13 @@ review the spec
 ```
 
 - 有 `from`:队友消息。回信照抄 `from`,终态 `hive send` 回去(见「回报」)。
-- 没有 `from`(`<HIVE to=comb.rex artifact=…>`,正文首行是任务号 `task nd-…`):一次性任务。打开 artifact 干活,干完就结束 turn——你这一轮的最后一条消息就是结果,runtime 会从你的对话记录里读走它。对这个任务本身不 `hive send` 任何东西、不去找是谁派的、不回执、不问收没收到;结论、交付物路径、遗留问题全部写进最后一条消息里,写全,别只写一句。
-- 一次性任务干到一半,来了带 `from` 的队友消息:那是普通队友通信,和任务无关,照常处理、照抄 `from` 用 `hive send` 回——「不 send」只管任务本身,不管队友。
+- 没有 `from`(`<HIVE to=comb.rex artifact=…>`,正文首行是任务号 `task nd-…`):workflow 任务。打开 artifact 干活,干完用 `hive workflow done` 返回(见「回报」)——这条命令就是你的 return 语句,runtime 只认它。对这个任务本身不 `hive send` 任何东西、不去找是谁派的、不回执、不问收没收到;结论、交付物路径、遗留问题全部交给 `hive workflow done`,写全,别只写一句。
+- workflow 任务干到一半,来了带 `from` 的队友消息:那是普通队友通信,和任务无关,照常处理、照抄 `from` 用 `hive send` 回——「不 send」只管任务本身,不管队友。
 - 收活以 `<HIVE>` block 为准——它就是完整投递,没有别处要查。
 - 正文只是短摘要,`artifact=<path>` 指的文件才是全文——要细节就打开它,按摘要开工会做偏。
 - 任务 = 派发消息 + 它的 artifact:scope、交付物形态与路径、验收标准、上游材料位置,全以该 artifact 为准。
 - artifact 引用的文件(上游产出、材料)直接打开读——凭摘要猜会漏关键细节。
-- 材料不够、目标含糊,`hive send` 问派发人一句——自己翻库扩出来的 scope 没人验收。一次性任务没有派发人可问:缺什么、按什么假设做的,写进最后一条消息。
+- 材料不够、目标含糊,`hive send` 问派发人一句——自己翻库扩出来的 scope 没人验收。workflow 任务没有派发人可问:缺什么、按什么假设做的,写进 `hive workflow done` 的返回里。
 
 `<HIVE>` 的到达形态分两轴,任何组合都是正常队内投递:
 
@@ -117,7 +117,16 @@ shell 纪律:多行、反引号、`$(...)` 的内容先落地成文件,不在双
 回报纪律:
 
 - 带 `from` 的任务:成果、blocked、失败,一切终态 `hive send` 回派发人。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
-- 无 `from` 的一次性任务:不 send,终态写进本轮最后一条消息就是回报。任务期间到达的带 `from` 消息不受此限,照常 send 回。
+- 无 `from` 的 workflow 任务:不 send,终态用 `hive workflow done` 返回,然后结束 turn。第一个参数是短摘要,详情走 `--artifact <file>` 或 `--artifact -` 的 heredoc,shell 纪律同 `hive send`;这是返回值,不受 500 字符 / 3 行的短消息提醒限制。同一个任务只能返回一次,第二次会被拒(already returned)。任务期间到达的带 `from` 消息不受此限,照常 send 回。
+
+```bash
+hive workflow done "done: commit abc123, see artifact" --artifact /tmp/result.md
+hive workflow done "review verdict: pass" --artifact - <<'EOF'
+# Findings
+- item
+EOF
+```
+
 - **收到任务不回执。**回派发线程的第一条就该是终态(或阻断求助)——派发人把它当回报读。禁令双向:也不期待对方回「收到了」。
 - 交付走派发人,不越过他向 human 宣布完成;human 问起时给状态。
 
@@ -149,4 +158,4 @@ kill 是派发人的动词:验收通过后派发人会 `hive kill` 你。在那�
 
 ## 你要当派发人时
 
-你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥(⑥ 是 Claude Code Workflow 驱动 `hive node run` 节点)、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。
+你要发起协作,你就是这个 team 的 **orch**,成员章是你的底座。拆任务、四件套、spawn/派发、fix 循环、pattern ①-⑥(⑥ 是 Claude Code Workflow 驱动 `hive workflow run` 节点)、git 集成、终验与对 human 汇报全在 references/orchestration.md——动手编排前先读它。

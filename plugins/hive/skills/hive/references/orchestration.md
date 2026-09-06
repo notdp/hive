@@ -86,20 +86,28 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 开工:在编排的 Claude session 里 `hive create <run>`——建团者即 orch,你以 `<run>.orch` 入册,团窗口首格是你的只读镜像;human `hive attach <run>` 看全场。session=team=run 名。
 
-节点就是一条阻塞命令:`hive node run --team <run> --name <member> [--cli] [--model]`,task 从 stdin 进,结果以一行 JSON 从 stdout 出。节点像 Workflow 自己的子代理一样工作:成员不被要求回信。它收到的是一封没有 `from` 的信封——`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,正文首行是任务号 `task nd-…`——干完结束 turn,runner 从引擎自己的对话记录里读走那一轮的最后一条 assistant 消息(全部文本段,原顺序,不截断)作为结果。所以 task 里要写明成员该把什么写进最后一条消息(commit sha、报告路径、verdict),而不是「完成后回报」。
+节点就是一条阻塞命令:`hive workflow run --team <run> --name <member> [--cli] [--model]`,task 从 stdin 进,结果以一行 JSON 从 stdout 出。节点像 Workflow 自己的子代理一样工作:成员不被要求回信。它收到的是一封没有 `from` 的信封——`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,正文首行是任务号 `task nd-…`——干完用 `hive workflow done "<短摘要>" [--artifact <file>|-]` 显式返回,runner 拿到的就是这条命令交出的 body 和 artifact。成员的 skill 已教它这条 return 语句;task 里仍要写明返回值里该有什么(commit sha、报告路径、verdict),而不是「完成后回报」。
 
-JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头)、`session`(引擎自己的 session id;claude 是 job 跑的 session uuid,不是名册里的 job id)、`turn`;`status=completed` 时有 `body`(最后一条消息全文,可能为空串),否则有 `reason`(引擎自己的标签)。`status` 取值:`completed | interrupted | failed | ambiguous | session_changed | transcript_unavailable | member_gone | member_busy`。runner 只报它能归因的:human 在 pane 里打断是 `interrupted`;任务折进成员正在跑的一轮、任务开始后又有别的输入(human 插话、队友消息)折进这一轮、compaction 改写了这一轮、引擎收口了但最后一条消息在 30 次轮询(每秒一次,按轮询计数不按墙钟)内没落盘、派发请求发出去了但 hived 的应答丢了且 120 次轮询内没在 transcript 里看到任务(见下)——都是 `ambiguous`;成员 `/clear`、resume 到别的 id、fork 换了 session 是 `session_changed`。runner 不猜哪一轮是任务那轮;非 `completed` 一样是节点的返回值,由脚本决定重派、改任务还是升级 human,代理不重试、不解读。
+JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头);`status=completed` 时有 `body`(done 的摘要)和 `artifact`(done 带的文件路径,可能为空串),否则有 `reason`。`status` 取值:
 
-派发失败分两种,runner 按 hived 的应答区分:hived 明确拒了(`ok:false`:传输拒收、成员不存在、send gate)或请求根本没送到,是"确定没派出去"——重试 3 次,最终拒收就撤掉 pending 记录、回收本次 spawn 的成员、exit 1;请求发出去了但应答没回来(socket 读超时、连接断、空应答),是"不知道派没派出去"——任务可能已经注入,**绝不重发**,记录留在 pending(`seq` 为 null),照常等 transcript:任务号在 transcript 里绑上了就当正常派发继续跑;成员活着但 120 次轮询内没看到任务,以 `ambiguous` 收场、exit 0,记录仍是 pending(不是终态),名字不释放——同名再跑得到 `member_busy`,直到 `hive kill` 该成员;本次 spawn 的成员也不回收,它可能正在干活。应答丢失永远不会释放名字。
+- `completed`:成员调用了 `hive workflow done`,body/artifact 就是它交出的。
+- `no_result`:成员结束了 turn(runner 连续 5 次轮询看到它没有开着的 turn)但没有调用 `hive workflow done`——任务可能做了也可能没做,由脚本决定重派还是看 pane。
+- `member_gone`:等待期间成员死了。
+- `member_busy`:没派发——上一跑还 pending 且成员活着、名字被别的 runner 锁着、或成员 600 次轮询还在一轮里没空(runner 不往进行中的一轮里塞任务)。
+- `ambiguous`:派发请求发出去了但 hived 的应答丢了,之后 120 次轮询内既没有 done 文件也没看到 turn 收口(见下);这是唯一的 ambiguous。
 
-exit code 的语义只有一条:exit 1 = 任务没派发出去(team 不对、spawn/ready 失败),可以直接重跑;`member_busy` 也是没派发(上一跑还 pending 且成员活着、名字被别的 runner 锁着、或成员 600s 还在一轮里没空——runner 不往进行中的一轮里塞任务),但以 exit 0 + JSON 报,由脚本决定等还是换人;派发出去的任务一定以 exit 0 + 一行 JSON 收场,turn 本身没有超时,由脚本决定等多久。每次跑在 `<workspace>/run/nodes/<member>.json` 留记录,派发前先写 pending;上一跑还 pending 且成员活着时,同名节点得到 `member_busy`。两条 v1 限制:runner 被 Ctrl-C 杀掉时记录留在 pending,直到 `hive kill` 该成员才清;拿到终态 verdict 就释放名字,但成员可能还在干——`ambiguous` / `transcript_unavailable` 之后别立刻同名重派,先看 pane 或 kill 掉重 spawn。
+非 `completed` 一样是节点的返回值,由脚本决定重派、改任务还是升级 human,代理不重试、不解读。
+
+派发失败分两种,runner 按 hived 的应答区分:hived 明确拒了(`ok:false`:传输拒收、成员不存在、send gate)或请求根本没送到,是"确定没派出去"——重试 3 次,最终拒收就撤掉 pending 记录、回收本次 spawn 的成员、exit 1;请求发出去了但应答没回来(socket 读超时、连接断、空应答),是"不知道派没派出去"——任务可能已经注入,**绝不重发**,记录留在 pending(`seq` 为 null),照常等 done 文件或 turn 收口:done 了就是 `completed`,turn 收口没 done 就是 `no_result`;120 次轮询内两者都没有,以 `ambiguous` 收场、exit 0,记录仍是 pending(不是终态),名字不释放——同名再跑得到 `member_busy`,直到 `hive kill` 该成员;本次 spawn 的成员也不回收,它可能正在干活。应答丢失永远不会释放名字。
+
+exit code 的语义只有一条:exit 1 = 任务没派发出去(team 不对、spawn/ready 失败),可以直接重跑;`member_busy` 也是没派发,但以 exit 0 + JSON 报,由脚本决定等还是换人;派发出去的任务一定以 exit 0 + 一行 JSON 收场,turn 本身没有超时,由脚本决定等多久。每次跑在 `<workspace>/run/workflow/<member>.json` 留记录,派发前先写 pending;成员的 `hive workflow done` 写 `<workspace>/run/workflow/<member>.done.json`,runner 读走即删。两条 v1 限制:runner 被 Ctrl-C 杀掉时记录留在 pending,直到 `hive kill` 该成员才清;拿到终态 verdict 就释放名字,但成员可能还在干——`no_result` 之后别立刻同名重派,先看 pane 或 kill 掉重 spawn。
 
 hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——把这条命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
 
 ```js
-const result = await agent(`hive node run --team ${run} --name impl-auth --cli codex
+const result = await agent(`hive workflow run --team ${run} --name impl-auth --cli codex
 
-实现 auth 模块;交付 commit;最后一条消息写 commit sha 和改动摘要。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
+实现 auth 模块;交付 commit;hive workflow done 的摘要写 commit sha,artifact 放改动说明。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
 ```
 
 代理定义里已固定 `model: haiku`,不用在调用处写。Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> 「<cli>」`,显式指定了成员模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`。
