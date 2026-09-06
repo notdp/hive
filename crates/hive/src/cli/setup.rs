@@ -217,6 +217,9 @@ pub(crate) fn plugin_setup() {
         .expect("payload sits three levels under the marketplace root")
         .to_path_buf();
     println!("setup: marketplace synced at {}", marketplace.display());
+    if let Some(warning) = crate::tmux::stale_version_warning() {
+        eprintln!("setup: {warning}");
+    }
 
     if which_on_path("claude") {
         let dir = marketplace.join("claude");

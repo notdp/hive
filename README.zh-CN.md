@@ -40,7 +40,7 @@ hive plugin setup
 
 依赖：
 
-- `tmux` 3.2+ —— `hive cvim` / `hive vim` 的弹窗要 3.2+；`hive view` 选主题时发的裸 OSC 11 背景色查询，也要 3.2 起才会在 pane 里被应答
+- `tmux` 3.5+ —— hive 在每个团 session 上挂着一个 control-mode 客户端（hived 的 pane 监视器），而 tmux 会用这个从未拿到真实颜色的客户端去回答 pane 的 OSC 10/11 颜色查询：tmux 3.4 上团 pane 里的 codex 和 `hive view` 被告知背景是黑的，在浅色终端里画成深色。3.5 起 hive 自己替 pane 上报颜色（`refresh-client -r`，依次看 `view.theme`、`HIVE_APPEARANCE` / `COLORFGBG`，缺省浅色）。`hive create`、`hive doctor`、`hive plugin setup` 在旧 tmux 上会警告。`hive cvim` / `hive vim` 的弹窗要 3.2+
 - Rust 工具链 —— 仅源码编译这条路需要；installer 装的是预编译二进制
 - 至少一种 agent CLI：`claude`、`codex` 或 `grok`
 
@@ -81,7 +81,7 @@ bind -n M-f run-shell -b 'hive fork --pane "#{pane_id}"'
 
 镜像就是一个普通 pane，排在团窗口第一格，默认就在：没有任何规则会主动不画它，除非你自己收起。收起靠 `hive mirror off`（`on` 展开，不带参数则切换）、状态栏上的 orch 芯片，或 `prefix+m`。三者做的是同一件事：用 `break-pane` / `join-pane` 把这个 pane 在团窗口和团 session 的一个隐藏窗口之间搬来搬去，viewer 进程从不重启；选择记在窗口的 `@hive-mirror` 上，`hive attach` 修复显示时照它办。
 
-hive 自己建的团 session——tmux 外 `hive create`、`hive attach` 重建丢失的窗口——带一根自己的两行状态栏，只动 session 级选项，你全局的 tmux 状态栏原样不动。第一行：团名芯片；orch 芯片，镜像 pane 在窗口里时是 ` ◂ orch `，收起时是 ` ▸ orch `（点一下切换）；每个 pane 一个芯片——成员名前面是 ● 忙、○ 闲，或 ✱ 未读（投递到了、成员还没开始处理）/ notify 后待关注，当前 pane 加粗，点一下选中那个 pane；然后是 `hive pr set` 盖过章的 `PR<n>`、session 名和时钟。第二行是 ticker：最新两条 bus 消息，格式 `from → to · 时间 · "开头几个字"`，有待处理的 notify 时其文本排在前面。状态栏上的每一项都是 CLI 或 hived 写下的 tmux 选项，它从不跑 shell 命令；点状态栏的其他地方仍是 tmux 原本的行为。
+hive 自己建的团 session——tmux 外 `hive create`、`hive attach` 重建丢失的窗口——带一根自己的两行状态栏，只动 session 级选项，你全局的 tmux 状态栏原样不动。第一行：团名芯片；orch 芯片，镜像 pane 在窗口里时是 ` ▾ orch `，收起时是 ` ▴ orch `（点一下切换）；每个 pane 一个芯片——成员名前面是 ● 忙、○ 闲，或 ✱ 未读（投递到了、成员还没开始处理）/ notify 后待关注，当前 pane 加粗，点一下选中那个 pane；然后是 `hive pr set` 盖过章的 `PR<n>`、session 名和时钟。第二行是 ticker：最新两条 bus 消息，格式 `from → to · 时间 · "开头几个字"`，有待处理的 notify 时其文本排在前面。状态栏上的每一项都是 CLI 或 hived 写下的 tmux 选项，它从不跑 shell 命令；点状态栏的其他地方仍是 tmux 原本的行为。
 
 ## 升级
 

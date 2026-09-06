@@ -110,6 +110,16 @@ fn join_hidden_mirror(window: &str, team: &str, member: &str) -> Option<String> 
 /// window it fires on, and the parked pane sat outside it.
 pub(crate) fn join_parked_pane(hidden: &str, first: &str) {
     tmux::join_pane_before(hidden, first);
+    // `join-pane -b` lands the pane before `first` on tmux 3.4 and after
+    // it on 3.7; the mirror belongs at the front either way, so the
+    // order is read back and settled here rather than trusted.
+    let index =
+        |pane: &str| tmux::display_value(pane, "#{pane_index}").and_then(|v| v.parse::<u32>().ok());
+    if let (Some(joined), Some(anchor)) = (index(hidden), index(first)) {
+        if joined > anchor {
+            tmux::swap_pane(hidden, first);
+        }
+    }
     tmux::clear_pane_option(hidden, crate::notify_ui::PANE_NOTIFY_ACTIVE_KEY);
 }
 

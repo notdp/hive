@@ -71,9 +71,9 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
             "#[bg={team_bg},fg={team_fg},bold] #{{@hive-team}} #[default] ",
             // orch chip only when the window records a mirror choice (`hive
             // mirror`, or `on` written at build for a session mirror);
-            // ▸ = closed, ◂ = open
+            // ▴ = closed (parked), ▾ = open (the mirror sits below)
             "#{{?@hive-mirror,#[range=user|hive-mirror]",
-            "#{{?#{{==:#{{@hive-mirror}},off}},#[bg={mirror_bg}#,fg={muted}] ▸ orch ,#[bg={mirror_bg}#,fg={open}] ◂ orch }}",
+            "#{{?#{{==:#{{@hive-mirror}},off}},#[bg={mirror_bg}#,fg={muted}] ▴ orch ,#[bg={mirror_bg}#,fg={open}] ▾ orch }}",
             "#[norange]#[default] ,}}",
             "#{{P:#{{?#{{==:#{{@hive-role}},mirror}},,",
             "#[range=pane|#{{pane_id}}]#{{?pane_active,#[bg={chip_active_bg}#,bold],#[bg={chip_bg}]}}",
@@ -111,10 +111,13 @@ pub fn team_status_format_1(p: &StatusPalette) -> String {
         alert = p.alert,
     )
 }
-/// tmux's stock root-table status click, verbatim (`list-keys -T root
-/// MouseDown1Status`, 3.4): the else branch of the hive click, so every
-/// other status line keeps the click it always had.
+/// tmux's stock root-table status click as 3.4 ships it: the else branch
+/// of the hive click when the server has no click of its own to keep
+/// (3.7 ships a different stock click, so the live key is read first).
 pub const STOCK_STATUS_CLICK: &str = "select-window -t =";
+/// Server option remembering what the status click ran before hive bound
+/// it — the same arrangement as `PREFIX_M_FALLBACK_OPTION`.
+pub const STATUS_CLICK_FALLBACK_OPTION: &str = "@hive-status-click";
 /// Window option tagging the hidden window that parks a closed mirror;
 /// value = team name.
 pub const HIDDEN_WINDOW_KEY: &str = "hive-hidden";
@@ -160,8 +163,9 @@ pub(crate) fn mirror_run_shell(hive: &str) -> String {
 }
 
 /// `bind-key` argv for the status click: the orch chip runs `hive mirror`,
-/// a pane chip selects that pane, anything else is the stock click.
-pub fn status_click_binding(hive: &str) -> Vec<String> {
+/// a pane chip selects that pane, anything else is *fallback*, the click
+/// the server had before.
+pub fn status_click_binding(hive: &str, fallback: &str) -> Vec<String> {
     vec![
         "bind-key".to_string(),
         "-T".to_string(),
@@ -172,9 +176,47 @@ pub fn status_click_binding(hive: &str) -> Vec<String> {
         "#{==:#{mouse_status_range},hive-mirror}".to_string(),
         mirror_run_shell(hive),
         format!(
-            "if-shell -F \"#{{==:#{{mouse_status_range}},pane}}\" \"select-pane -t =\" \"{STOCK_STATUS_CLICK}\""
+            "if-shell -F \"#{{==:#{{mouse_status_range}},pane}}\" \"select-pane -t =\" \"{fallback}\""
         ),
     ]
+}
+
+/// What a status click runs on a line hive does not own: the command
+/// found on `MouseDown1Status` when it is not hive's, remembered in
+/// `STATUS_CLICK_FALLBACK_OPTION`; what that option remembers when the
+/// key already carries hive's binding; tmux 3.4's stock click when the
+/// key is unbound.
+pub(crate) fn status_click_fallback() -> String {
+    remembered_fallback(
+        "root",
+        "MouseDown1Status",
+        "hive-mirror",
+        STATUS_CLICK_FALLBACK_OPTION,
+    )
+    .unwrap_or_else(|| STOCK_STATUS_CLICK.to_string())
+}
+
+/// The command on `key` in `table` when it is not hive's (`marker` absent)
+/// — remembered in `option` on the way — else what `option` remembers;
+/// None when the key is unbound and nothing was remembered.
+fn remembered_fallback(table: &str, key: &str, marker: &str, option: &str) -> Option<String> {
+    let listed = run(&["list-keys", "-T", table], false, 5)
+        .ok()
+        .filter(|r| r.returncode == 0)
+        .map(|r| r.stdout)
+        .unwrap_or_default();
+    // An unbound key has nothing to keep; only hive's own binding on it
+    // sends the probe to what was remembered when that binding went on.
+    let command = bound_command_for(&listed, table, key)?;
+    if !command.contains(marker) {
+        let _ = run(&["set-option", "-s", option, &command], false, 5);
+        return Some(command);
+    }
+    run(&["show-options", "-s", "-v", option], false, 5)
+        .ok()
+        .filter(|r| r.returncode == 0)
+        .map(|r| r.stdout.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Server option remembering what prefix+m ran before hive bound it, so a
@@ -183,18 +225,32 @@ pub fn status_click_binding(hive: &str) -> Vec<String> {
 /// branch.
 pub const PREFIX_M_FALLBACK_OPTION: &str = "@hive-prefix-m";
 
-/// The command `list-keys -T prefix m` prints (`bind-key [-r] -T prefix m
-/// <command>`), with tmux's `\;` command separator turned into the ` ; `
-/// an if-shell branch string splits on. None when the key is unbound.
+/// The command bound to prefix+m in a `list-keys -T prefix` table (or the
+/// one line 3.4's `list-keys -T prefix m` prints), with tmux's `\;`
+/// command separator turned into the ` ; ` an if-shell branch string
+/// splits on. None when the key is unbound. Read off the whole table:
+/// tmux 3.7 prints nothing for `list-keys -T prefix m`.
 pub fn bound_command(listed: &str) -> Option<String> {
-    let mut rest = listed.trim().strip_prefix("bind-key")?.trim_start();
-    if let Some(after) = rest.strip_prefix("-r ") {
-        rest = after.trim_start();
-    }
-    for token in ["-T", "prefix", "m"] {
-        rest = rest.strip_prefix(token)?.trim_start();
-    }
-    (!rest.is_empty()).then(|| rest.replace(" \\; ", " ; "))
+    bound_command_for(listed, "prefix", "m")
+}
+
+/// `bound_command` for any table and key.
+pub fn bound_command_for(listed: &str, table: &str, key: &str) -> Option<String> {
+    listed.lines().find_map(|line| {
+        let mut rest = line.trim().strip_prefix("bind-key")?.trim_start();
+        if let Some(after) = rest.strip_prefix("-r ") {
+            rest = after.trim_start();
+        }
+        for token in ["-T", table, key] {
+            rest = rest.strip_prefix(token)?;
+            // The key must end here: `m` is not `mm`.
+            if !rest.starts_with(char::is_whitespace) {
+                return None;
+            }
+            rest = rest.trim_start();
+        }
+        (!rest.is_empty()).then(|| rest.replace(" \\; ", " ; "))
+    })
 }
 
 /// What prefix+m runs on a non-team window: the command found on the key
@@ -202,31 +258,8 @@ pub fn bound_command(listed: &str) -> Option<String> {
 /// remembered in `PREFIX_M_FALLBACK_OPTION`; what that option remembers
 /// when the key already carries hive's binding; "" when the key is unbound.
 pub(crate) fn prefix_m_fallback() -> String {
-    let listed = run(&["list-keys", "-T", "prefix", "m"], false, 5)
-        .ok()
-        .filter(|r| r.returncode == 0)
-        .map(|r| r.stdout)
-        .unwrap_or_default();
-    let Some(command) = bound_command(&listed) else {
-        return String::new();
-    };
-    if !command.contains("mirror --window") {
-        let _ = run(
-            &["set-option", "-s", PREFIX_M_FALLBACK_OPTION, &command],
-            false,
-            5,
-        );
-        return command;
-    }
-    run(
-        &["show-options", "-s", "-v", PREFIX_M_FALLBACK_OPTION],
-        false,
-        5,
-    )
-    .ok()
-    .filter(|r| r.returncode == 0)
-    .map(|r| r.stdout.trim().to_string())
-    .unwrap_or_default()
+    remembered_fallback("prefix", "m", "mirror --window", PREFIX_M_FALLBACK_OPTION)
+        .unwrap_or_default()
 }
 
 /// `prefix+m` runs `hive mirror` on a team window; elsewhere it runs
@@ -255,7 +288,7 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
 pub fn install_team_status(session_id: &str) {
     let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
-    rows.push(status_click_binding(&hive));
+    rows.push(status_click_binding(&hive, &status_click_fallback()));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
     for row in rows {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();

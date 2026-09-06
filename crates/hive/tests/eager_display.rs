@@ -141,7 +141,9 @@ impl Rig {
             .env("CODEX_HOME", self.tmp.path().join("codex"))
             .env("GROK_HOME", self.tmp.path().join("grok"))
             .env("XDG_CACHE_HOME", self.tmp.path().join("cache"))
-            .env("TMUX_TMPDIR", self.tmp.path());
+            .env("TMUX_TMPDIR", self.tmp.path())
+            // What the hived reports to every team pane as its colours.
+            .env("HIVE_VIEW_THEME", "light");
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
         }
@@ -555,7 +557,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     let probe = format!("probe-{}", std::process::id());
     rig.tmux_ok(&["new-session", "-d", "-s", &probe]);
     let keys_before = rig.root_keys();
-    let prefix_before = rig.tmux_ok(&["list-keys", "-T", "prefix", "m"]);
+    let prefix_before = rig.tmux_ok(&["list-keys", "-T", "prefix"]);
     assert!(
         !prefix_before.contains("mirror --window"),
         "{prefix_before}"
@@ -608,8 +610,8 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert_eq!(rig.tmux_ok(&["show-options", "-g", "-v", "status"]), "on");
     let line = rig.status_line(&window_id, 0);
     assert!(line.contains(&format!(" {} ", rig.team)), "{line}");
-    assert!(line.contains(" ◂ orch "), "{line}");
-    assert!(!line.contains(" ▸ orch "), "{line}");
+    assert!(line.contains(" ▾ orch "), "{line}");
+    assert!(!line.contains(" ▴ orch "), "{line}");
 
     // The window build changed exactly one root binding: the status click,
     // whose else branch is the stock click, plus prefix+m.
@@ -628,19 +630,19 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert!(added[0].contains("MouseDown1Status"), "{}", added[0]);
     assert!(added[0].contains("hive-mirror"), "{}", added[0]);
     assert!(added[0].contains("mirror --window"), "{}", added[0]);
-    // The stock click hive hard-codes is the one tmux shipped, and the
-    // installed binding ends in that same text as its else branch — a tmux
-    // that changes its stock click fails here.
-    assert!(
-        gone[0].ends_with(hive::tmux::STOCK_STATUS_CLICK),
-        "{}",
-        gone[0]
+    // The installed binding's else branch is the click the server had
+    // (tmux's stock click, whichever this tmux ships), which the build also
+    // remembered in the server option.
+    let stock = hive::tmux::bound_command_for(gone[0], "root", "MouseDown1Status")
+        .expect("the stock status click was bound");
+    assert_eq!(
+        rig.tmux_ok(&["show-options", "-s", "-v", "@hive-status-click"]),
+        stock
     );
-    // `list-keys` prints the nested command with its quotes escaped.
+    // `list-keys` prints the nested command with its quotes escaped; the
+    // else branch is that same stock click.
     assert!(
-        added[0]
-            .trim_end_matches(['"', '\\'])
-            .ends_with(hive::tmux::STOCK_STATUS_CLICK),
+        added[0].trim_end_matches(['"', '\\']).ends_with(&stock),
         "{}",
         added[0]
     );
@@ -654,8 +656,12 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     // that is whatever they bound, else tmux's stock mark-pane), which the
     // build also remembered in the server option.
     let previous = hive::tmux::bound_command(&prefix_before).expect("prefix+m was bound");
-    let prefix_after = rig.tmux_ok(&["list-keys", "-T", "prefix", "m"]);
-    assert!(prefix_after.contains("mirror --window"), "{prefix_after}");
+    let prefix_after = rig
+        .tmux_ok(&["list-keys", "-T", "prefix"])
+        .lines()
+        .find(|l| l.contains("mirror --window"))
+        .map(str::to_string)
+        .expect("prefix+m carries hive's binding");
     // `list-keys` prints the else branch double-quoted, inner quotes escaped.
     let printed = format!(
         "\"{}\"",
@@ -702,7 +708,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert_eq!(rig.pane_pid(&mirror), pid0);
     assert_eq!(rig.window_option(&window_id, "hive-mirror"), "off");
     let line = rig.status_line(&window_id, 0);
-    assert!(line.contains(" ▸ orch "), "{line}");
+    assert!(line.contains(" ▴ orch "), "{line}");
 
     // The heal respects the recorded absence — and finds the team window,
     // not the hidden one (whose pane answers `@hive-team` for it).
@@ -746,7 +752,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert_eq!(rig.pane_pid(&mirror), pid0);
     assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
     let line = rig.status_line(&window_id, 0);
-    assert!(line.contains(" ◂ orch "), "{line}");
+    assert!(line.contains(" ▾ orch "), "{line}");
 
     // `on` with the mirror already up says so and keeps the human's zoom.
     rig.tmux_ok(&["resize-pane", "-Z", "-t", &plain]);
@@ -830,7 +836,7 @@ fn test_status_bar_reflects_pane_options_tmux_renders() {
     // No mirror choice recorded: no orch chip (the shell pane tagged as
     // the orch seat is an ordinary chip).
     assert!(
-        !line.contains("◂ orch") && !line.contains("▸ orch"),
+        !line.contains("▾ orch") && !line.contains("▴ orch"),
         "{line}"
     );
     let line = rig.status_line(&window_id, 1);
@@ -838,5 +844,60 @@ fn test_status_bar_reflects_pane_options_tmux_renders() {
     // The option value is inserted verbatim, never re-expanded.
     assert!(line.ends_with("x ##[y]"), "{line}");
 
+    rig.delete();
+}
+
+/// The hived's control client is what tmux answers a pane's OSC 11 query
+/// from; on tmux 3.5+ the hived hands it hive's own appearance for every
+/// pane of the team session, so an engine asking gets the configured
+/// light background, not the control client's uninitialised black.
+#[test]
+fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
+    let rig = Rig::new("osc");
+    if hive::tmux::version().is_none_or(|v| v < hive::tmux::PANE_COLOUR_REPORT_SINCE) {
+        eprintln!("tmux without refresh-client -r: nothing to report through");
+        return;
+    }
+    let window_id = rig.create_outside_tmux();
+    // A create with no orch starts no hived; the first team query does,
+    // and the hived attaches its control client to the team session.
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let control = rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"]);
+        if control.lines().any(|l| l == "1") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no control client attached to the team session"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // A pane's own OSC 11 query, answered by tmux, read back off the tty.
+    let pane = rig.panes(&window_id)[0].0.clone();
+    let out = rig.tmp.path().join("osc11.txt");
+    let probe = format!(
+        "python3 -c \"import os,sys,termios,tty,select;fd=os.open('/dev/tty',os.O_RDWR);o=termios.tcgetattr(fd);tty.setraw(fd);os.write(fd,b'\\x1b]11;?\\x1b\\\\\\\\');b=b''\nwhile select.select([fd],[],[],1)[0]: b+=os.read(fd,256)\ntermios.tcsetattr(fd,termios.TCSADRAIN,o);open('{}','wb').write(b)\"",
+        out.display()
+    );
+    rig.tmux_ok(&["send-keys", "-t", &pane, "-l", &probe]);
+    rig.tmux_ok(&["send-keys", "-t", &pane, "Enter"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !out.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe never wrote its reply"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let reply = std::fs::read(&out).unwrap();
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(
+        reply.contains("]11;rgb:ffff/ffff/ffff"),
+        "pane was told its background is {reply:?}"
+    );
     rig.delete();
 }

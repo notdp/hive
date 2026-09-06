@@ -95,7 +95,9 @@ def test_e2e_create_outside_tmux_builds_a_session_window_and_delete_closes_it():
         assert run_tmux(["show-options", "-t", team, "-v", "status"], env=env).stdout.strip() == "2"
         root_keys = run_tmux(["list-keys", "-T", "root"], env=env).stdout
         assert "mouse_status_range},hive-mirror" in root_keys and "mirror --window" in root_keys, root_keys
-        assert "mirror --window" in run_tmux(["list-keys", "-T", "prefix", "m"], env=env).stdout
+        # Read off the whole table: tmux 3.7 prints nothing for `list-keys -T prefix m`.
+        prefix_m = [l for l in run_tmux(["list-keys", "-T", "prefix"], env=env).stdout.splitlines() if l.split()[:4] == ["bind-key", "-T", "prefix", "m"]]
+        assert prefix_m and "mirror --window" in prefix_m[0], prefix_m
         entry = json.loads(registry_entry.read_text())
         assert entry["display"] == rows[0][0]
         assert entry["workspace"] == str(workspace)
