@@ -15,11 +15,14 @@
 //! exact input past that cursor. A turn the reader cannot attribute is
 //! reported (`ambiguous`), never guessed at.
 //!
-//! One run is one record, `<workspace>/run/nodes/<name>.json`, written at
-//! every transition (pending → input_bound → terminal) and held under the
-//! per-member flock `<name>.lock`; a pending record of a live member is
-//! another runner's, a pending record of a dead member is stale and
-//! replaced. `NodeOp` is the typed vocabulary of one hive interaction,
+//! One run is one record, `<workspace>/run/nodes/<name>.json`, written
+//! pending before the dispatch has any side effect and again at every
+//! transition (input_bound → terminal), held under the per-member flock
+//! `<name>.lock`; a pending record of a live member is another runner's, a
+//! pending record of a dead member is stale and replaced. Past the
+//! dispatch nothing is an `Err` any more: exit 1 means "not dispatched",
+//! so a record write that fails later is logged and the run still ends in
+//! a verdict. `NodeOp` is the typed vocabulary of one hive interaction,
 //! `run_op` executes one, and `run_node` (`hive node run`) strings them
 //! together for an external orchestrator. `NodeEnv` is the seam over
 //! cli/bus/team/readers; tests inject a fake.
@@ -52,8 +55,12 @@ const SESSION_ID_WAIT_SECONDS: f64 = 30.0;
 /// past it.
 const BUSY_SIGHTING_SECONDS: f64 = 60.0;
 /// How long a dispatch waits for the member to be between turns; past it
-/// the dispatch goes ahead and the reader's fold detection is the net.
+/// the run ends `member_busy` without dispatching.
 const IDLE_WAIT_SECONDS: f64 = 600.0;
+/// How long a closed turn may keep its final message off disk
+/// (`TurnOutcome::Flushing`), counted from the first such reading; past it
+/// the run ends `ambiguous`.
+const FLUSH_BUDGET_SECONDS: f64 = 30.0;
 const ATTEMPTS: usize = 3;
 const RETRY_GAP: f64 = 3.0;
 
@@ -174,6 +181,15 @@ pub fn mint_dispatch_id() -> String {
 // ---------------------------------------------------------------------------
 
 /// One run's persisted state, `<workspace>/run/nodes/<name>.json`.
+///
+/// The name is owned while the record is pending (`is_pending`) and free
+/// under any terminal status. That is a v1 narrowing: a terminal verdict
+/// says the runner stopped waiting, not that the member stopped working —
+/// after `ambiguous`, `transcript_unavailable` or `session_changed` the
+/// member may still be on the task, and the next run of that name is
+/// allowed to dispatch on top of it. Keeping the occupation open past the
+/// verdict needs a resolution step (a kill, or a read that proves the turn
+/// ended) that `hive node run` does not have yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub dispatch_id: String,
@@ -287,7 +303,9 @@ pub fn read_record(workspace: &str, name: &str) -> Option<NodeRecord> {
     NodeRecord::from_json(&value)
 }
 
-/// Atomic replace: a reader never sees a half-written record.
+/// Atomic replace: a reader never sees a half-written record. The `Err`
+/// is for the pending write before the dispatch; every later write goes
+/// through `update_record`.
 fn write_record(workspace: &str, name: &str, record: &NodeRecord) -> Result<(), NodeError> {
     let path = record_path(workspace, name);
     let dir = nodes_dir(workspace);
@@ -297,6 +315,17 @@ fn write_record(workspace: &str, name: &str, record: &NodeRecord) -> Result<(), 
         serde_json::to_string_pretty(&record.to_json()).map_err(|e| NodeError(e.to_string()))?;
     fs::write(&tmp, text).map_err(|e| NodeError(e.to_string()))?;
     fs::rename(&tmp, &path).map_err(|e| NodeError(e.to_string()))
+}
+
+/// A record write after the dispatch: the task is with the member, so a
+/// failure here is logged and the run goes on to its verdict.
+fn update_record(workspace: &str, name: &str, record: &NodeRecord) {
+    if let Err(err) = write_record(workspace, name, record) {
+        log(&format!(
+            "{name} record not updated to {} ({err}); the run goes on",
+            record.status
+        ));
+    }
 }
 
 /// Drop a member's node record: the member is retired (`hive kill`,
@@ -518,25 +547,6 @@ impl Verdict {
             reason: Some(reason.into()),
         }
     }
-
-    fn of_outcome(outcome: TurnOutcome) -> Verdict {
-        match outcome {
-            TurnOutcome::Completed { text } => Verdict {
-                status: STATUS_COMPLETED,
-                body: Some(text),
-                reason: None,
-            },
-            TurnOutcome::Interrupted { reason } => Verdict::reason(STATUS_INTERRUPTED, reason),
-            TurnOutcome::Failed { reason } => Verdict::reason(STATUS_FAILED, reason),
-            TurnOutcome::Ambiguous { reason } => Verdict::reason(STATUS_AMBIGUOUS, reason),
-            TurnOutcome::SessionChanged { reason } => {
-                Verdict::reason(STATUS_SESSION_CHANGED, reason)
-            }
-            // ponytail: the flush budget is not wired yet; the core slice
-            // turns this into "keep polling, then ambiguous".
-            TurnOutcome::Flushing { reason } => Verdict::reason(STATUS_AMBIGUOUS, reason),
-        }
-    }
 }
 
 /// The JSON line of `hive node run`.
@@ -596,10 +606,46 @@ impl ErrorBudget {
     }
 }
 
-/// What one poll of the transcript said.
-enum Probe<T> {
+/// Polls of a closed turn whose final message is still off disk, charged
+/// one poll each from the first `Flushing` reading on; the text is given
+/// up on when they add up to the budget.
+#[derive(Default)]
+struct FlushBudget {
+    polls: u32,
+    reason: Option<String>,
+}
+
+impl FlushBudget {
+    /// Whether this poll exhausts the budget; `reason` is the reader's
+    /// latest word on what is missing, None for a poll that said nothing.
+    fn charge(&mut self, reason: Option<String>) -> bool {
+        if reason.is_some() {
+            self.reason = reason;
+        }
+        if self.reason.is_none() {
+            return false;
+        }
+        self.polls += 1;
+        f64::from(self.polls) * POLL_SECONDS >= FLUSH_BUDGET_SECONDS
+    }
+
+    fn verdict(self) -> Verdict {
+        Verdict::reason(STATUS_AMBIGUOUS, self.reason.unwrap_or_default())
+    }
+}
+
+/// What one poll for the dispatched input said.
+enum InputProbe {
     Wait,
-    Ready(T),
+    Bound(TurnAnchor),
+    Terminal(Verdict),
+}
+
+/// What one poll for the bound turn's end said.
+enum OutcomeProbe {
+    Wait,
+    /// The turn is closed, its final message not on disk yet.
+    Flushing(String),
     Terminal(Verdict),
 }
 
@@ -608,21 +654,21 @@ fn probe_input(
     record: &NodeRecord,
     cwd: Option<&str>,
     budget: &mut ErrorBudget,
-) -> Probe<TurnAnchor> {
+) -> InputProbe {
     match reader.find_input(&record.session, cwd, &record.dispatch_id, &record.cursor) {
-        Ok(InputBinding::Bound(anchor)) => Probe::Ready(anchor),
+        Ok(InputBinding::Bound(anchor)) => InputProbe::Bound(anchor),
         Ok(InputBinding::Ambiguous(reason)) => {
-            Probe::Terminal(Verdict::reason(STATUS_AMBIGUOUS, reason))
+            InputProbe::Terminal(Verdict::reason(STATUS_AMBIGUOUS, reason))
         }
         Ok(InputBinding::NotYet) => {
             budget.reset();
-            Probe::Wait
+            InputProbe::Wait
         }
-        Err(err) if budget.charge(&err) => Probe::Terminal(Verdict::reason(
+        Err(err) if budget.charge(&err) => InputProbe::Terminal(Verdict::reason(
             STATUS_TRANSCRIPT_UNAVAILABLE,
             err.to_string(),
         )),
-        Err(_) => Probe::Wait,
+        Err(_) => InputProbe::Wait,
     }
 }
 
@@ -631,19 +677,38 @@ fn probe_outcome(
     anchor: &TurnAnchor,
     cwd: Option<&str>,
     budget: &mut ErrorBudget,
-) -> Probe<()> {
+) -> OutcomeProbe {
     match reader.outcome(anchor, cwd) {
-        Ok(Some(outcome)) => Probe::Terminal(Verdict::of_outcome(outcome)),
+        Ok(Some(outcome)) => {
+            budget.reset();
+            outcome_probe(outcome)
+        }
         Ok(None) => {
             budget.reset();
-            Probe::Wait
+            OutcomeProbe::Wait
         }
-        Err(err) if budget.charge(&err) => Probe::Terminal(Verdict::reason(
+        Err(err) if budget.charge(&err) => OutcomeProbe::Terminal(Verdict::reason(
             STATUS_TRANSCRIPT_UNAVAILABLE,
             err.to_string(),
         )),
-        Err(_) => Probe::Wait,
+        Err(_) => OutcomeProbe::Wait,
     }
+}
+
+fn outcome_probe(outcome: TurnOutcome) -> OutcomeProbe {
+    let verdict = match outcome {
+        TurnOutcome::Flushing { reason } => return OutcomeProbe::Flushing(reason),
+        TurnOutcome::Completed { text } => Verdict {
+            status: STATUS_COMPLETED,
+            body: Some(text),
+            reason: None,
+        },
+        TurnOutcome::Interrupted { reason } => Verdict::reason(STATUS_INTERRUPTED, reason),
+        TurnOutcome::Failed { reason } => Verdict::reason(STATUS_FAILED, reason),
+        TurnOutcome::Ambiguous { reason } => Verdict::reason(STATUS_AMBIGUOUS, reason),
+        TurnOutcome::SessionChanged { reason } => Verdict::reason(STATUS_SESSION_CHANGED, reason),
+    };
+    OutcomeProbe::Terminal(verdict)
 }
 
 fn gone(name: &str, phase: &str) -> Verdict {
@@ -651,6 +716,29 @@ fn gone(name: &str, phase: &str) -> Verdict {
         STATUS_MEMBER_GONE,
         format!("member '{name}' is gone {phase}; nothing more will be read"),
     )
+}
+
+/// Whether the member can still be read for this run: None while it is
+/// alive on the session the task was dispatched into, else the verdict
+/// that cuts the wait short — `member_gone`, or `session_changed` when its
+/// roster row now names a different engine session (`/clear`, a resume
+/// into another id). A row whose session id is momentarily missing is not
+/// a change; only a different non-empty id is.
+fn cut_off(env: &dyn NodeEnv, name: &str, record: &NodeRecord, phase: &str) -> Option<Verdict> {
+    if !env.alive(name) {
+        return Some(gone(name, phase));
+    }
+    let current = env.member(name)?.session_id?;
+    if current.is_empty() || current == record.session {
+        return None;
+    }
+    Some(Verdict::reason(
+        STATUS_SESSION_CHANGED,
+        format!(
+            "member '{name}' moved from session {} to {current} {phase}; the turn is not readable there",
+            record.session
+        ),
+    ))
 }
 
 /// Poll the roster until the member's row carries a session id (the hived
@@ -681,10 +769,12 @@ fn wait_for_session(env: &dyn NodeEnv, name: &str) -> Result<MemberInfo, Verdict
 /// spawned by this run is first watched until it has been seen with a turn
 /// open once — a fast bootstrap can close between polls, so that sighting
 /// is capped and a spawn never seen in a turn is taken as past it — then,
-/// like a reused member, until the daemon says the turn is closed. The
-/// wait is capped too: past it the dispatch goes ahead and the reader's
-/// fold detection stays the safety net. `Err` is the member dying
-/// meanwhile.
+/// like a reused member, until the daemon says the turn is closed. Only
+/// the daemon's own "closed" opens the dispatch: no answer says nothing
+/// about the turn, and the wait is capped too — past `IDLE_WAIT_SECONDS`
+/// the run ends `member_busy` without dispatching, since a task landing
+/// mid-turn cannot own a turn. `Err` is the member dying meanwhile or
+/// that cap.
 fn wait_turn_closed(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict> {
     let died = || gone(name, "before the task was dispatched");
     if spawned {
@@ -717,10 +807,10 @@ fn wait_turn_closed(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), 
         }
         env.sleep(POLL_SECONDS);
     }
-    log(&format!(
-        "{name} still in a turn after {IDLE_WAIT_SECONDS}s; dispatching anyway"
-    ));
-    Ok(())
+    Err(Verdict::reason(
+        STATUS_MEMBER_BUSY,
+        format!("turn still open after {}s", IDLE_WAIT_SECONDS as u64),
+    ))
 }
 
 /// The transcript cursor before the dispatch, under the read-error budget.
@@ -750,9 +840,12 @@ fn take_cursor(
     }
 }
 
-/// Bind the turn the dispatch started, then wait for its end. A member
-/// that dies gets one last read of the phase it was in before the run
-/// ends as `member_gone`.
+/// Bind the turn the dispatch started, then wait for its end. Every poll
+/// re-reads the member: one that dies or moves to another session gets one
+/// last read of the phase it was in — a terminal outcome on the old anchor
+/// still wins — before the run ends `member_gone` / `session_changed`. A
+/// closed turn whose text is still flushing is polled on under
+/// `FLUSH_BUDGET_SECONDS`, then `ambiguous`.
 fn await_turn(
     env: &dyn NodeEnv,
     reader: &dyn TurnReader,
@@ -760,23 +853,25 @@ fn await_turn(
     name: &str,
     record: &mut NodeRecord,
     cwd: Option<&str>,
-) -> Result<Verdict, NodeError> {
+) -> Verdict {
     let mut budget = ErrorBudget::default();
     let anchor = loop {
         match probe_input(reader, record, cwd, &mut budget) {
-            Probe::Ready(anchor) => break anchor,
-            Probe::Terminal(verdict) => return Ok(verdict),
-            Probe::Wait => {}
+            InputProbe::Bound(anchor) => break anchor,
+            InputProbe::Terminal(verdict) => return verdict,
+            InputProbe::Wait => {}
         }
-        if !env.alive(name) {
-            return Ok(match probe_input(reader, record, cwd, &mut budget) {
-                Probe::Terminal(verdict) => verdict,
-                Probe::Ready(anchor) => match probe_outcome(reader, &anchor, cwd, &mut budget) {
-                    Probe::Terminal(verdict) => verdict,
-                    _ => gone(name, "after its turn was bound"),
-                },
-                Probe::Wait => gone(name, "before its turn was bound"),
-            });
+        if let Some(cut) = cut_off(env, name, record, "before its turn was bound") {
+            return match probe_input(reader, record, cwd, &mut budget) {
+                InputProbe::Terminal(verdict) => verdict,
+                InputProbe::Bound(anchor) => {
+                    match probe_outcome(reader, &anchor, cwd, &mut budget) {
+                        OutcomeProbe::Terminal(verdict) => verdict,
+                        _ => cut,
+                    }
+                }
+                InputProbe::Wait => cut,
+            };
         }
         env.sleep(POLL_SECONDS);
     };
@@ -786,18 +881,23 @@ fn await_turn(
     ));
     record.anchor = Some(anchor.clone());
     record.status = STATUS_INPUT_BOUND.to_string();
-    write_record(workspace, name, record)?;
+    update_record(workspace, name, record);
     budget.reset();
+    let mut flush = FlushBudget::default();
     loop {
-        match probe_outcome(reader, &anchor, cwd, &mut budget) {
-            Probe::Terminal(verdict) => return Ok(verdict),
-            Probe::Wait | Probe::Ready(()) => {}
+        let flushing = match probe_outcome(reader, &anchor, cwd, &mut budget) {
+            OutcomeProbe::Terminal(verdict) => return verdict,
+            OutcomeProbe::Flushing(reason) => Some(reason),
+            OutcomeProbe::Wait => None,
+        };
+        if flush.charge(flushing) {
+            return flush.verdict();
         }
-        if !env.alive(name) {
-            return Ok(match probe_outcome(reader, &anchor, cwd, &mut budget) {
-                Probe::Terminal(verdict) => verdict,
-                _ => gone(name, "before its turn ended"),
-            });
+        if let Some(cut) = cut_off(env, name, record, "before its turn ended") {
+            return match probe_outcome(reader, &anchor, cwd, &mut budget) {
+                OutcomeProbe::Terminal(verdict) => verdict,
+                _ => cut,
+            };
         }
         env.sleep(POLL_SECONDS);
     }
@@ -931,6 +1031,26 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
         Err(verdict) => return Ok(pre_dispatch(verdict, session)),
     };
 
+    // The pending record goes down before the dispatch has any side effect
+    // (task artifact, hived delivery): a runner killed in between leaves
+    // the name owned, never a delivered task with no record. A refused
+    // dispatch takes the record back with it.
+    let mut record = NodeRecord {
+        dispatch_id: dispatch_id.clone(),
+        cli,
+        session: session.clone(),
+        cursor,
+        anchor: None,
+        status: STATUS_PENDING.to_string(),
+        body: None,
+        reason: None,
+        seq: None,
+        started_at: epoch_seconds(),
+    };
+    if let Err(err) = write_record(workspace, name, &record) {
+        rollback();
+        return Err(err);
+    }
     let dispatched = match run_op(
         env,
         &NodeOp::DispatchTask {
@@ -941,33 +1061,22 @@ pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>
     ) {
         Ok(d) => d,
         Err(err) => {
+            remove_record(workspace, name);
             rollback();
             return Err(err);
         }
     };
-    let seq = dispatched.get("seq").and_then(Value::as_i64);
-    let mut record = NodeRecord {
-        dispatch_id: dispatch_id.clone(),
-        cli,
-        session: session.clone(),
-        cursor,
-        anchor: None,
-        status: STATUS_PENDING.to_string(),
-        body: None,
-        reason: None,
-        seq,
-        started_at: epoch_seconds(),
-    };
-    write_record(workspace, name, &record)?;
+    record.seq = dispatched.get("seq").and_then(Value::as_i64);
+    update_record(workspace, name, &record);
     log(&format!(
         "{name} dispatched {dispatch_id}; waiting for its turn"
     ));
 
-    let verdict = await_turn(env, reader.as_ref(), workspace, name, &mut record, cwd)?;
+    let verdict = await_turn(env, reader.as_ref(), workspace, name, &mut record, cwd);
     record.status = verdict.status.to_string();
     record.body = verdict.body.clone();
     record.reason = verdict.reason.clone();
-    write_record(workspace, name, &record)?;
+    update_record(workspace, name, &record);
     log(&format!("{name} {}", verdict.status));
     Ok(NodeResult {
         name,
@@ -1292,6 +1401,15 @@ pub(crate) mod test_env {
         }
     }
 
+    /// The node records directory replaced by a plain file: every record
+    /// write from here on fails (`create_dir_all` on a non-directory) and
+    /// every read answers None.
+    fn break_records(workspace: &str) {
+        let dir = nodes_dir(workspace);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::write(&dir, "").unwrap();
+    }
+
     /// The env's handle on the shared reader.
     pub(crate) struct SharedReader(pub Arc<FakeReader>);
 
@@ -1335,7 +1453,8 @@ pub(crate) mod test_env {
     /// `turn_answers` is the daemons' `turn_open` answer queue (sticky
     /// last value, empty means no answer); a fresh env scripts one
     /// bootstrap turn — open once, then closed — and `add_live` an idle
-    /// member.
+    /// member. `session_changes` rewrites every roster member's session
+    /// id at a sleep count (None: the id is momentarily missing).
     pub(crate) struct FakeEnv {
         pub workspace: PathBuf,
         pub ready: bool,
@@ -1345,14 +1464,20 @@ pub(crate) mod test_env {
         pub dispatch_err: String,
         pub spawn_without_session: bool,
         pub no_reader: bool,
+        /// Make every later record write fail once a dispatch is delivered.
+        pub break_records_on_dispatch: bool,
         pub die_after_sleeps: Option<u32>,
         /// Backfill every roster member's session id at that sleep count.
         pub session_after_sleeps: Option<u32>,
+        pub session_changes: Mutex<Vec<(u32, Option<String>)>>,
         pub reader: Arc<FakeReader>,
         pub turn_answers: Mutex<VecDeque<Option<bool>>>,
         pub turn_calls: AtomicU32,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub dispatches: Mutex<Vec<DispatchCall>>,
+        /// The member's node record as it stood at every dispatch attempt,
+        /// delivered or refused.
+        pub dispatch_records: Mutex<Vec<Option<NodeRecord>>>,
         pub msg_seq: AtomicU32,
         pub spawn_calls: AtomicU32,
         pub send_calls: AtomicU32,
@@ -1374,13 +1499,16 @@ pub(crate) mod test_env {
             dispatch_err: "refused".to_string(),
             spawn_without_session: false,
             no_reader: false,
+            break_records_on_dispatch: false,
             die_after_sleeps: None,
             session_after_sleeps: None,
+            session_changes: Mutex::new(Vec::new()),
             reader: Arc::new(FakeReader::default()),
             turn_answers: Mutex::new(VecDeque::from([Some(true), Some(false)])),
             turn_calls: AtomicU32::new(0),
             spawns: Mutex::new(Vec::new()),
             dispatches: Mutex::new(Vec::new()),
+            dispatch_records: Mutex::new(Vec::new()),
             msg_seq: AtomicU32::new(0),
             spawn_calls: AtomicU32::new(0),
             send_calls: AtomicU32::new(0),
@@ -1456,6 +1584,10 @@ pub(crate) mod test_env {
         }
 
         fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
+            self.dispatch_records
+                .lock()
+                .unwrap()
+                .push(read_record(&self.workspace_str(), target));
             let n = self.send_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if n <= self.dispatch_fail_first {
                 return Err(self.dispatch_err.clone());
@@ -1467,6 +1599,9 @@ pub(crate) mod test_env {
                 artifact: artifact.to_string(),
                 sleeps: self.sleeps.load(Ordering::SeqCst),
             });
+            if self.break_records_on_dispatch {
+                break_records(&self.workspace_str());
+            }
             Ok(seq)
         }
 
@@ -1520,6 +1655,20 @@ pub(crate) mod test_env {
                 let mut sessions = self.sessions.lock().unwrap();
                 for name in self.agents.lock().unwrap().iter() {
                     sessions.insert(name.clone(), Some(format!("sess-{name}")));
+                }
+            }
+            let due: Vec<Option<String>> = self
+                .session_changes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(at, _)| *at == n)
+                .map(|(_, session)| session.clone())
+                .collect();
+            for session in due {
+                let mut sessions = self.sessions.lock().unwrap();
+                for name in self.agents.lock().unwrap().iter() {
+                    sessions.insert(name.clone(), session.clone());
                 }
             }
         }
@@ -2327,23 +2476,41 @@ mod tests {
     }
 
     #[test]
-    fn test_run_node_dispatches_anyway_when_the_idle_wait_expires() {
+    fn test_run_node_is_busy_when_the_idle_wait_expires() {
+        // A reused member that never closes its turn: no dispatch, no
+        // record, and the member is left as it was.
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         env.add_live("audit");
         *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
-        script_turn(
-            &env,
-            TurnOutcome::Completed {
-                text: "late".into(),
-            },
-        );
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
-        assert_eq!(r["status"], "completed");
-        assert_eq!(r["body"], "late");
-        let d = env.dispatches.lock().unwrap();
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].sleeps, (IDLE_WAIT_SECONDS / POLL_SECONDS) as u32);
+        assert_eq!(r["status"], "member_busy");
+        assert_eq!(r["reason"], "turn still open after 600s");
+        assert_eq!(r["reused"], true);
+        assert_eq!(r["session"], "");
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(env.dispatch_records.lock().unwrap().is_empty());
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+        assert!(env.alive("audit"));
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert_eq!(
+            env.sleeps.load(Ordering::SeqCst),
+            (IDLE_WAIT_SECONDS / POLL_SECONDS) as u32
+        );
+
+        // A member spawned by this run is rolled back like every other
+        // pre-dispatch end.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_busy");
+        assert_eq!(r["reason"], "turn still open after 600s");
+        assert_eq!(r["reused"], false);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(!env.alive("audit"));
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
     }
 
     #[test]
@@ -2385,12 +2552,283 @@ mod tests {
         *env.turn_answers.lock().unwrap() = VecDeque::from([None]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
-        assert_eq!(r["status"], "completed");
+        // No answer is never an idle reading: the whole sighting window and
+        // the whole idle wait pass, and the run ends without dispatching.
+        assert_eq!(r["status"], "member_busy");
+        assert_eq!(r["reason"], "turn still open after 600s");
         let sighting = (BUSY_SIGHTING_SECONDS / POLL_SECONDS) as u32;
         let idle = (IDLE_WAIT_SECONDS / POLL_SECONDS) as u32;
-        let d = env.dispatches.lock().unwrap();
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].sleeps, sighting + idle);
+        assert_eq!(env.sleeps.load(Ordering::SeqCst), sighting + idle);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+    }
+
+    #[test]
+    fn test_run_node_records_pending_before_the_dispatch_and_backfills_seq() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
+        let r = run_node(&env, &node("audit", Some("codex"), "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        // The record the hived saw when the dispatch reached it: already
+        // pending, with everything but the seq it was about to mint.
+        let at_dispatch = env.dispatch_records.lock().unwrap();
+        assert_eq!(at_dispatch.len(), 1);
+        let pending = at_dispatch[0].as_ref().expect("record before dispatch");
+        assert_eq!(pending.status, "pending");
+        assert_eq!(pending.dispatch_id, r["dispatchId"]);
+        assert_eq!(pending.cli, "codex");
+        assert_eq!(pending.session, "sess-audit");
+        assert_eq!(pending.cursor, "c0");
+        assert_eq!(pending.anchor, None);
+        assert_eq!(pending.seq, None);
+        assert!(pending.started_at > 0);
+        assert!(pending.is_pending());
+        // The seq is filled in once the hived answered.
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.seq, Some(1));
+        assert_eq!(record.started_at, pending.started_at);
+    }
+
+    #[test]
+    fn test_run_node_takes_the_record_back_when_the_dispatch_is_refused() {
+        // A reused member: every attempt saw the pending record, the
+        // refusal is still an Err, and nothing of the run is left behind.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.add_live("audit");
+        env.dispatch_fail_first = u32::MAX;
+        let err = run_node(&env, &node("audit", None, "t")).unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+        let at_dispatch = env.dispatch_records.lock().unwrap();
+        assert_eq!(at_dispatch.len(), 3);
+        assert!(at_dispatch
+            .iter()
+            .all(|r| r.as_ref().map(|r| r.status.as_str()) == Some("pending")));
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+        assert!(env.alive("audit"));
+        assert!(env.retired.lock().unwrap().is_empty());
+
+        // A spawn of this run is rolled back with the record.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.dispatch_fail_first = u32::MAX;
+        let err = run_node(&env, &node("audit", None, "t")).unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+        assert!(!env.alive("audit"));
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+    }
+
+    #[test]
+    fn test_run_node_keeps_its_verdict_when_the_record_fails_after_the_dispatch() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.break_records_on_dispatch = true;
+        script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
+        // The task is with the member: the seq backfill, the input_bound
+        // and the terminal write all fail, and the run still ends in its
+        // verdict, never an Err.
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "ok");
+        assert_eq!(r["turn"], "u-1");
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+        assert!(env.alive("audit"));
+    }
+
+    #[test]
+    fn test_run_node_ends_as_session_changed_when_the_member_moves_session() {
+        // The input is still awaited when the member's session changes:
+        // one last look at the old session, then the verdict names both.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.session_changes
+            .lock()
+            .unwrap()
+            .push((2, Some("sess-new".into())));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "session_changed");
+        let reason = r["reason"].as_str().unwrap();
+        assert!(reason.contains("sess-audit"), "{reason}");
+        assert!(reason.contains("sess-new"), "{reason}");
+        assert!(reason.contains("before its turn was bound"), "{reason}");
+        assert_eq!(r["session"], "sess-audit");
+        assert_eq!(r["turn"], Value::Null);
+        // Two polls before the change, the poll that saw it, one last read.
+        assert_eq!(env.reader.input_calls.lock().unwrap().len(), 4);
+        assert!(env
+            .reader
+            .input_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c.session == "sess-audit"));
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "session_changed");
+        assert!(env.alive("audit"));
+        assert!(env.retired.lock().unwrap().is_empty());
+
+        // Bound, then the session changes, and the last read of the old
+        // anchor has the end: the turn's outcome wins.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.session_changes
+            .lock()
+            .unwrap()
+            .push((1, Some("sess-new".into())));
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        env.reader.outcomes.lock().unwrap().extend([
+            Ok(None),
+            Ok(None),
+            Ok(Some(TurnOutcome::Completed {
+                text: "just in time".into(),
+            })),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "just in time");
+        assert_eq!(env.reader.outcome_calls.lock().unwrap().len(), 3);
+
+        // Bound, the session changes, and the old anchor never ends.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.session_changes
+            .lock()
+            .unwrap()
+            .push((1, Some("sess-new".into())));
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "session_changed");
+        assert_eq!(r["turn"], "u-1");
+        assert!(r["reason"]
+            .as_str()
+            .unwrap()
+            .contains("before its turn ended"));
+        assert_eq!(env.reader.outcome_calls.lock().unwrap().len(), 3);
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "session_changed");
+        assert_eq!(record.anchor, Some(anchor("sess-audit", "u-1")));
+    }
+
+    #[test]
+    fn test_run_node_ignores_a_session_id_that_goes_missing() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        // The roster row loses its session id for two polls (a hived
+        // backfill in flight), then carries the same id again.
+        env.session_changes
+            .lock()
+            .unwrap()
+            .extend([(1, None), (3, Some("sess-audit".into()))]);
+        env.reader.inputs.lock().unwrap().extend([
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))),
+        ]);
+        env.reader.outcomes.lock().unwrap().extend([
+            Ok(None),
+            Ok(Some(TurnOutcome::Completed {
+                text: "still mine".into(),
+            })),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "still mine");
+        assert_eq!(env.reader.input_calls.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_run_node_polls_a_flushing_turn_under_the_flush_budget() {
+        // The turn closed before its text landed: the reader is polled on,
+        // and the text that lands is the result.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        env.reader.outcomes.lock().unwrap().extend([
+            Ok(None),
+            Ok(Some(TurnOutcome::Flushing {
+                reason: "turn_ended, history line not written".into(),
+            })),
+            Ok(Some(TurnOutcome::Completed {
+                text: "landed".into(),
+            })),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "landed");
+        assert_eq!(env.reader.outcome_calls.lock().unwrap().len(), 3);
+
+        // The text never lands: the budget's worth of polls, then ambiguous
+        // with the reader's own reason.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        env.reader
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(TurnOutcome::Flushing {
+                reason: "turn_ended, history line not written".into(),
+            })));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "ambiguous");
+        assert_eq!(r["reason"], "turn_ended, history line not written");
+        assert_eq!(r["turn"], "u-1");
+        assert_eq!(
+            env.reader.outcome_calls.lock().unwrap().len(),
+            (FLUSH_BUDGET_SECONDS / POLL_SECONDS) as usize
+        );
+        assert!(env.alive("audit"));
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "ambiguous");
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("turn_ended, history line not written")
+        );
+
+        // The budget runs from the first Flushing reading, not from the
+        // last: a reader that falls back to "still running" keeps the
+        // clock going and the reason.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        env.reader.outcomes.lock().unwrap().extend([
+            Ok(Some(TurnOutcome::Flushing {
+                reason: "final block pending".into(),
+            })),
+            Ok(None),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "ambiguous");
+        assert_eq!(r["reason"], "final block pending");
+        assert_eq!(
+            env.reader.outcome_calls.lock().unwrap().len(),
+            (FLUSH_BUDGET_SECONDS / POLL_SECONDS) as usize
+        );
     }
 
     #[test]
