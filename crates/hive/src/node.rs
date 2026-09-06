@@ -736,7 +736,11 @@ fn wait_idle(env: &dyn NodeEnv, name: &str, spawned: bool) -> Result<(), Verdict
         if !env.alive(name) {
             return Err(died());
         }
-        if env.runtime(name).and_then(|rt| rt.idle()) != Some(false) {
+        // Only a positive idle reading opens the dispatch: a missing or
+        // unknown runtime (the hived answer can drop out for a poll) says
+        // nothing about the turn, and dispatching on it lands the task
+        // mid-turn.
+        if env.runtime(name).and_then(|rt| rt.idle()) == Some(true) {
             return Ok(());
         }
         if !logged {
@@ -2374,18 +2378,42 @@ mod tests {
     }
 
     #[test]
-    fn test_run_node_takes_an_unknown_runtime_as_idle_after_the_busy_sighting_cap() {
+    fn test_run_node_keeps_waiting_on_an_unknown_runtime_until_the_idle_cap() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         *env.runtimes.lock().unwrap() = VecDeque::from([None]);
         script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
         let r = run_node(&env, &node("audit", None, "t")).unwrap();
         assert_eq!(r["status"], "completed");
-        let polls = (BUSY_SIGHTING_SECONDS / POLL_SECONDS) as u32;
+        let sighting = (BUSY_SIGHTING_SECONDS / POLL_SECONDS) as u32;
+        let idle = (IDLE_WAIT_SECONDS / POLL_SECONDS) as u32;
         let d = env.dispatches.lock().unwrap();
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].sleeps, polls);
-        assert_eq!(env.runtime_calls.load(Ordering::SeqCst), polls + 1);
+        assert_eq!(d[0].sleeps, sighting + idle);
+    }
+
+    #[test]
+    fn test_run_node_does_not_dispatch_on_a_runtime_dropout_mid_turn() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let busy = MemberRuntime {
+            busy: Some(true),
+            turn_phase: Some("tool_open".into()),
+            session_id: None,
+        };
+        let idle = MemberRuntime {
+            busy: Some(false),
+            turn_phase: Some("turn_closed".into()),
+            session_id: None,
+        };
+        *env.runtimes.lock().unwrap() =
+            VecDeque::from([Some(busy.clone()), None, Some(busy), None, Some(idle)]);
+        script_turn(&env, TurnOutcome::Completed { text: "ok".into() });
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        let d = env.dispatches.lock().unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].sleeps, 3);
     }
 
     // -- RealEnv over the live wiring ------------------------------------------
