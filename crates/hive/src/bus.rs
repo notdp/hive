@@ -33,7 +33,7 @@ pub(crate) fn now_iso() -> String {
     format!("{}Z", crate::devlog::utc_now_iso_seconds())
 }
 
-/// Python `Path(workspace).expanduser()`: expand only a leading bare `~`.
+/// Expand only a leading bare `~`.
 fn expanduser(path: &Path) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~") {
         if let Ok(home) = std::env::var("HOME") {
@@ -81,8 +81,6 @@ pub fn format_msg_id(event_seq: i64) -> Result<String> {
 }
 
 /// Open a sqlite connection (schema initialized, WAL, 30s busy timeout).
-///
-/// Unlike Python's `_connect` contextmanager, closing is guaranteed by Drop.
 fn connect(workspace: &Path) -> Result<Connection> {
     let ws = expanduser(workspace);
     fs::create_dir_all(&ws)?;
@@ -101,8 +99,8 @@ pub struct EventWriteResult {
     pub msg_id: String,
 }
 
-/// A bus event as produced by Python `_row_to_event`. Field order matches the
-/// Python dict insertion order; empty optional fields are omitted from JSON.
+/// A bus event as read back from a row. Field order is the JSON output
+/// order; empty optional fields are omitted from JSON.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
     pub from: String,
@@ -563,8 +561,7 @@ mod tests {
 
     #[test]
     fn test_reset_workspace_removes_sqlite_trio_before_reconnect() {
-        // Python patches `_connect` out and asserts the trio is unlinked.
-        // Rust cannot monkeypatch; instead: garbage trio content would make
+        // Garbage trio content would make
         // the reconnect fail ("file is not a database") unless the files were
         // removed first, so a clean reset proves the same regression fix.
         let tmp = TempDir::new().unwrap();
@@ -631,8 +628,8 @@ mod tests {
         assert_eq!(seq, 1);
         let events = read_all_events(&workspace).unwrap();
         assert_eq!(events.len(), 1);
-        // Python pins `now_iso` via monkeypatch; here the actual timestamp is
-        // asserted for shape and reused in the full-event comparison.
+        // The actual timestamp is asserted for shape and reused in the
+        // full-event comparison.
         let created_at = events[0].created_at.clone();
         assert_created_at_shape(&created_at);
         assert_eq!(

@@ -228,7 +228,7 @@ impl ControlModeOutputMonitor {
         self.request_detach();
         let handle = self.thread.lock().unwrap().take();
         if let Some(h) = handle {
-            // ponytail: unbounded join (Python uses a 2s timeout); the loop
+            // ponytail: unbounded join; the loop
             // re-checks the stop flag every <=0.5s select tick plus the 1s
             // restart delay, so this is bounded in practice.
             let _ = h.join();
@@ -415,7 +415,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         buffer.extend_from_slice(&chunk[..nread as usize]);
         while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
             let raw_line: Vec<u8> = buffer.drain(..=pos).collect();
-            // Python decodes with errors="ignore": drop invalid bytes.
+            // Drop invalid UTF-8 bytes.
             let decoded =
                 String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]).replace('\u{fffd}', "");
             let decoded = decoded.trim_end_matches('\r');

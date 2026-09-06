@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Seams: every cross-module effect goes through one wrapper so the unit tests
-// can intercept it the way the Python suite monkeypatches the module globals.
+// can intercept it.
 // Without an installed test hook each wrapper is a plain passthrough.
 // ---------------------------------------------------------------------------
 

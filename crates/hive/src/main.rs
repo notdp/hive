@@ -1,20 +1,19 @@
 use hive::*;
 
-/// PEP 538 C-locale coercion, as CPython applies it at interpreter startup.
+/// Under the C/POSIX locale, give child processes `LC_CTYPE=C.UTF-8`.
 ///
-/// The Python CLI's subprocess children (notably tmux) inherit
-/// `LC_CTYPE=C.UTF-8` whenever the process started under the C/POSIX locale,
-/// because CPython coerces its own environment. tmux sanitizes control
-/// characters (the tab field separators of our `-F` formats) to `_` under a
-/// non-UTF-8 locale, so without this the pane/window parses silently lose
-/// every `@hive-*` field. Mirror the coercion so children see the same env.
+/// tmux sanitizes control characters (the tab field separators of our `-F`
+/// formats) to `_` under a non-UTF-8 locale, so without this the pane/window
+/// parses silently lose every `@hive-*` field. Same triage as CPython's PEP
+/// 538 coercion: only when LC_ALL is unset and the effective LC_CTYPE is
+/// C, POSIX or empty.
 fn coerce_c_locale() {
     let get = |k: &str| std::env::var(k).unwrap_or_default();
     if !get("LC_ALL").is_empty() {
         return;
     }
     // ponytail: effective LC_CTYPE = LC_CTYPE else LANG; full setlocale
-    // resolution not needed for the C/POSIX/unset triage CPython does.
+    // resolution is not needed for the C/POSIX/unset triage.
     let ctype = get("LC_CTYPE");
     let effective = if ctype.is_empty() { get("LANG") } else { ctype };
     if matches!(effective.as_str(), "" | "C" | "POSIX") {

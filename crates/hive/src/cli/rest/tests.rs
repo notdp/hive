@@ -5,6 +5,7 @@
 use serde_json::{json, Map, Value};
 
 use super::*;
+use crate::agent::uuid4;
 use crate::team::Team;
 use crate::testenv::EnvGuard;
 
@@ -1206,40 +1207,6 @@ fn test_parse_config_value_shapes() {
     assert_eq!(
         parse_config_value("hello"),
         Value::String("hello".to_string())
-    );
-}
-
-// --- python-style json dumps ---
-
-#[test]
-fn test_py_dumps_matches_python_separators() {
-    let value = json!({"a": 1, "b": [1, 2], "c": "x"});
-    assert_eq!(
-        py_dumps(&value, true, None, false),
-        r#"{"a": 1, "b": [1, 2], "c": "x"}"#
-    );
-    assert_eq!(
-        py_dumps(&json!({"b": 1, "a": 2}), true, None, true),
-        r#"{"a": 2, "b": 1}"#
-    );
-}
-
-#[test]
-fn test_py_dumps_indent_matches_python() {
-    let value = json!({"a": [1], "b": {}});
-    assert_eq!(
-        py_dumps(&value, true, Some(2), false),
-        "{\n  \"a\": [\n    1\n  ],\n  \"b\": {}\n}"
-    );
-}
-
-#[test]
-fn test_py_dumps_ensure_ascii_escapes_non_ascii() {
-    assert_eq!(py_dumps(&json!("你"), true, None, false), "\"\\u4f60\"");
-    assert_eq!(py_dumps(&json!("你"), false, None, false), "\"你\"");
-    assert_eq!(
-        py_dumps(&json!("🐝"), true, None, false),
-        "\"\\ud83d\\udc1d\""
     );
 }
 

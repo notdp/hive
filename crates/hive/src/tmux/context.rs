@@ -303,7 +303,7 @@ pub struct TTYProcessInfo {
     pub argv: String,
 }
 
-/// Python `row.split(None, 2)`: split on whitespace runs, at most 3 parts.
+/// Split on whitespace runs, at most 3 parts.
 fn split_whitespace_max3(row: &str) -> Vec<&str> {
     let mut parts: Vec<&str> = Vec::new();
     let mut rest = row.trim_start();

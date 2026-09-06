@@ -43,9 +43,9 @@ fn context_file() -> PathBuf {
     context_dir().join(format!("{}.json", pane_slug(&pane)))
 }
 
-/// Python truthy `str(v)`, or None for a falsy value.
-// ponytail: real payloads are all-string; container reprs use JSON, not
-// Python repr (never occurs in written context files).
+/// The value as a string, or None when it is unset (`null`, `false`, "").
+// ponytail: real payloads are all-string; containers render as JSON
+// (never occurs in written context files).
 fn truthy_str(v: &Value) -> Option<String> {
     match v {
         Value::Null | Value::Bool(false) => None,

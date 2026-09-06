@@ -167,12 +167,12 @@ pub struct CLIProfile {
 }
 
 impl CLIProfile {
-    /// Python `profile.fork_cmd.format(session_id=...)`.
+    /// `fork_cmd` with its `{session_id}` placeholder filled.
     pub fn fork_cmd_for(&self, session_id: &str) -> String {
         self.fork_cmd.replace("{session_id}", session_id)
     }
 
-    /// Python `profile.skill_cmd.format(name=...)`.
+    /// `skill_cmd` with its `{name}` placeholder filled.
     pub fn skill_cmd_for(&self, name: &str) -> String {
         self.skill_cmd.replace("{name}", name)
     }
@@ -248,8 +248,8 @@ pub fn detect_profile_from_process(command: &str, argv: &str) -> Option<&'static
     None
 }
 
-/// Python `shlex.split(argv)` with the whitespace-split fallback the Python
-/// code uses on `ValueError` (unbalanced quote / trailing escape).
+/// POSIX shell word split, falling back to a whitespace split on an
+/// unbalanced quote or a trailing escape.
 fn shlex_split(argv: &str) -> Vec<String> {
     match posix_shlex(argv) {
         Ok(parts) => parts,
@@ -258,7 +258,8 @@ fn shlex_split(argv: &str) -> Vec<String> {
 }
 
 /// POSIX-mode shlex: single quotes literal, double quotes with `\"`/`\\`
-/// escapes, bare backslash escapes the next char. Err = Python ValueError.
+/// escapes, bare backslash escapes the next char. Err on an unbalanced
+/// quote or a trailing escape.
 fn posix_shlex(s: &str) -> Result<Vec<String>, ()> {
     let mut parts: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -328,7 +329,7 @@ mod test_hooks {
     use crate::adapters::base::SessionAdapter;
     use crate::tmux::TTYProcessInfo;
 
-    /// Stand-in for the Python tests' monkeypatched `hive.agent_cli.tmux.*`.
+    /// The tmux probes a test pins per pane.
     #[derive(Default)]
     pub struct PaneProbes {
         pub current_command: Option<String>,
@@ -402,7 +403,7 @@ fn pane_display_value(pane_id: &str, fmt: &str) -> Option<String> {
     crate::tmux::display_value(pane_id, fmt)
 }
 
-/// Python `adapters.get(name)` (the registry in adapters/__init__.py).
+/// The session adapter for a CLI name.
 fn adapter_for(name: &str) -> Option<Box<dyn SessionAdapter>> {
     #[cfg(test)]
     {

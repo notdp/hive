@@ -1,4 +1,4 @@
-//! CLI entry point for hive — port of `src/hive/cli.py` (skeleton half).
+//! CLI entry point for hive.
 //!
 //! This module owns the clap command tree for the ENTIRE surface, `pub fn
 //! main()`, and the shared helpers both command halves use. Core registry
@@ -17,6 +17,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use crate::tmux;
 
+pub(crate) use crate::agent::uuid4;
 pub use team_ops::*;
 pub use util::*;
 
@@ -739,7 +740,7 @@ fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
     }
 }
 
-/// Root-group gates from the Python `cli()` callback.
+/// Root-group gates, run before any subcommand.
 fn run_root_gates(invoked: &str) {
     require_codex_native(Some(invoked));
     if let Some(message) = no_tmux_refusal(invoked) {
@@ -780,9 +781,8 @@ fn main_with_argv(argv: Vec<String>) {
 
     // Hidden helper subcommands, never listed in help: the cvim toolkit
     // (called back into by the materialized `cvim-command` bash asset) via
-    // $HIVE_BIN. They replace standalone Python beside the old asset trees,
-    // so they dispatch before the known-command gate and skip the root
-    // gates.
+    // $HIVE_BIN. They dispatch before the known-command gate and skip the
+    // root gates.
     match invoked.as_str() {
         "cvim-sendback" => std::process::exit(crate::cvim::sendback_main(&tail)),
         "cvim-payload" => std::process::exit(crate::cvim::payload_main(&tail)),
@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_command_tree_declares_every_python_command() {
+    fn test_command_tree_declares_every_known_command() {
         let cli = build_cli();
         for name in _KNOWN_COMMANDS {
             assert!(

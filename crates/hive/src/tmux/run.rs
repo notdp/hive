@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Mirror of Python's `subprocess.CompletedProcess` as `run` returns it.
+/// A finished tmux subprocess as `run` returns it.
 #[derive(Debug, Clone)]
 pub struct Run {
     pub returncode: i32,

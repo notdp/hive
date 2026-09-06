@@ -8,7 +8,7 @@ use crate::agent_cli::AGENT_CLI_NAMES;
 use super::seams::*;
 use super::support::*;
 
-/// Keyword arguments of Python `Agent.spawn` beyond name/team/target pane.
+/// Spawn options beyond name/team/target pane.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
     pub model: String,

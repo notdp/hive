@@ -86,17 +86,9 @@ pub fn emit(workspace: &str, event: &str, fields: &[(&str, Value)]) {
         }
         record.push((key.to_string(), value.clone()));
     }
-    // Insertion-order compact JSON: no whitespace, non-ASCII kept raw.
-    let mut payload = String::from("{");
-    for (index, (key, value)) in record.iter().enumerate() {
-        if index > 0 {
-            payload.push(',');
-        }
-        payload.push_str(&Value::String(key.clone()).to_string());
-        payload.push(':');
-        payload.push_str(&value.to_string());
-    }
-    payload.push_str("}\n");
+    let record: serde_json::Map<String, Value> = record.into_iter().collect();
+    let mut payload = Value::Object(record).to_string();
+    payload.push('\n');
 
     let path = if workspace.is_empty() {
         crate::devlog::global_notify_log_path()

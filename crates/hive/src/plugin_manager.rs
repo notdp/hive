@@ -353,7 +353,7 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
     if let Some(install_root) = &install_root {
-        if crate::pyval::truthy(plugin_state.get("tmux")) {
+        if crate::json_fields::is_set(plugin_state.get("tmux")) {
             uninstall_tmux_bindings(install_root);
         }
         remove_path(install_root);

@@ -647,7 +647,7 @@ pub(crate) fn resolve_guest_send_target(to_agent: &str, team: &str) -> (String, 
         .collect();
     let registry_teams: HashSet<String> = crate::registry::list_entries()
         .into_iter()
-        .filter(|e| !truthy(e.get("corrupt")))
+        .filter(|e| !is_set(e.get("corrupt")))
         .filter(|e| {
             e.get("members")
                 .and_then(Value::as_array)
@@ -883,7 +883,7 @@ mod tests {
                 m
             })
             .collect();
-        crate::registry::record_team(name, "/ws", &py_float_str(created_at), &rows, "").unwrap();
+        crate::registry::record_team(name, "/ws", &created_at_key(created_at), &rows, "").unwrap();
         Team {
             name: name.to_string(),
             created_at,
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(registry_record_member(&stale, &agent), RecordVerdict::Stale);
 
         let entry = crate::registry::load("honey").unwrap();
-        assert_eq!(entry["createdAt"], "200.0");
+        assert_eq!(entry["createdAt"], "200");
         assert_eq!(roster("honey"), vec!["new".to_string()]);
     }
 
@@ -959,7 +959,8 @@ mod tests {
     fn test_headless_created_at_round_trips_through_record_member() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _env = iso(tmp.path());
-        // an integral epoch is the case `format!("{now}")` got wrong
+        // an integral epoch formats without a fraction; the registry compares
+        // the key numerically, so it still names the same instance
         let t = registry_team("honey", 1_700_000_000.0, &[]);
         let agent = paneless_agent("worker", "codex");
 

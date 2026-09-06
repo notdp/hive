@@ -34,16 +34,16 @@ pub fn config_get(key: &str) {
     };
     match &value {
         Value::Object(_) | Value::Array(_) => {
-            println!("{}", py_dumps(&value, true, Some(2), true));
+            println!("{}", json_pretty(&crate::registry::sort_keys(&value)));
         }
-        _ => println!("{}", py_dumps(&value, true, None, false)),
+        _ => println!("{}", value),
     }
 }
 
 pub fn config_set(key: &str, value: &str) {
     let parsed = parse_config_value(value);
     ok_or_fail(crate::settings::set_setting(key, parsed.clone()));
-    println!("{}", py_dumps(&parsed, true, None, false));
+    println!("{}", parsed);
 }
 
 pub fn config_unset(key: &str) {
@@ -60,7 +60,7 @@ pub fn notify_cmd(message: &str) {
     let target_pane = resolve_target_pane();
     let payload = ok_or_fail(crate::notify_ui::notify(message, &target_pane, ""));
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
-    println!("{}", py_dumps(&value, true, None, false));
+    println!("{}", value);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,10 +118,10 @@ fn render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) -> 
 pub fn plugin_list(plain: bool) {
     let rows = ok_or_fail(crate::plugin_manager::list_plugins());
     if !plain {
-        println!("{}", py_dumps(&Value::Array(rows), false, None, false));
+        println!("{}", Value::Array(rows));
         return;
     }
-    let enabled_count = rows.iter().filter(|row| truthy(row.get("enabled"))).count();
+    let enabled_count = rows.iter().filter(|row| is_set(row.get("enabled"))).count();
     println!("Plugins ({enabled_count}/{} enabled)", rows.len());
     if rows.is_empty() {
         return;
@@ -134,7 +134,7 @@ pub fn plugin_list(plain: bool) {
     };
     let name_width = rows.iter().map(|row| name_of(row).len()).max().unwrap_or(0);
     for row in &rows {
-        let status = if truthy(row.get("enabled")) {
+        let status = if is_set(row.get("enabled")) {
             "enabled"
         } else {
             "disabled"
@@ -155,7 +155,7 @@ pub fn plugin_enable(name: &str, plain: bool) {
     match crate::plugin_manager::enable_plugin(name) {
         Ok(payload) => {
             if !plain {
-                println!("{}", py_dumps(&payload, false, None, false));
+                println!("{}", payload);
                 return;
             }
             let empty = Map::new();
@@ -268,7 +268,7 @@ pub fn plugin_disable(name: &str, plain: bool) {
     match crate::plugin_manager::disable_plugin(name, false) {
         Ok(payload) => {
             if !plain {
-                println!("{}", py_dumps(&payload, false, None, false));
+                println!("{}", payload);
                 return;
             }
             let empty = Map::new();

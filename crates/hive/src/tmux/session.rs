@@ -6,7 +6,7 @@ use std::process::Command;
 pub fn has_session(name: &str) -> bool {
     match run(&["has-session", "-t", name], false, 5) {
         Ok(r) => r.returncode == 0,
-        // Python would raise OSError here (missing tmux); read it as "no".
+        // A missing tmux reads as "no".
         Err(_) => false,
     }
 }

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// Test hook: one thread-local environment double, mirroring what the Python
-// suite pins with monkeypatch (`_setup_tmux_mocks` defaults in `Hook::new`).
+// Test hook: one thread-local environment double (`Hook::new` carries the
+// inside-tmux defaults).
 // ---------------------------------------------------------------------------
 
 use std::cell::RefCell;
@@ -159,7 +159,7 @@ pub struct Hook {
 }
 
 impl Hook {
-    /// Python `_setup_tmux_mocks` equivalents: inside tmux, split echoes
+    /// The inside-tmux defaults: split echoes
     /// the target, no daemons, readiness waits answer immediately, the
     /// claude bg spawn path succeeds without touching a real binary.
     pub fn new() -> Hook {

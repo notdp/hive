@@ -29,7 +29,7 @@ pub(crate) fn hived_metadata(started_at: &str) -> Map<String, Value> {
 
 /// Registry `createdAt` is compared as a string, so the hived formats its
 /// float exactly like the CLI writer did (whole seconds keep a `.0`).
-pub(super) use crate::pyval::py_float_str;
+pub(super) use crate::team::created_at_key;
 
 pub(super) fn map_get_str(map: &Map<String, Value>, key: &str) -> String {
     match map.get(key) {
