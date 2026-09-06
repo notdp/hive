@@ -410,7 +410,9 @@ impl CodexDaemonClient {
 
     /// Id of the thread's in-progress turn, read from the daemon: `Ok(None)`
     /// is the daemon answering that no turn is open, `Err` is no answer
-    /// (RPC error, closed connection).
+    /// (RPC error, closed connection, or a result missing `thread.turns` or
+    /// an in-progress turn's id — with `includeTurns` a real daemon always
+    /// returns both, so their absence is a schema error, never idle).
     ///
     /// `turn/interrupt` requires the turnId and `ThreadStatus::Active`
     /// carries none, so the id has to be read back — hive never owns the turn
@@ -428,18 +430,23 @@ impl CodexDaemonClient {
                 .map(Value::to_string)
                 .unwrap_or_else(|| "thread/read answered without a result".to_string()));
         };
-        let turns = result
+        let Some(turns) = result
             .get("thread")
             .and_then(|thread| thread.get("turns"))
-            .and_then(Value::as_array);
-        for turn in turns.map(Vec::as_slice).unwrap_or(&[]).iter().rev() {
+            .and_then(Value::as_array)
+        else {
+            return Err("thread/read answered without thread.turns".to_string());
+        };
+        for turn in turns.iter().rev() {
             if turn.get("status").and_then(Value::as_str) == Some("inProgress") {
-                let id = turn.get("id").and_then(Value::as_str).unwrap_or("");
-                return Ok(if id.is_empty() {
-                    None
-                } else {
-                    Some(id.to_string())
-                });
+                return match turn
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    Some(id) => Ok(Some(id.to_string())),
+                    None => Err("thread/read reports an inProgress turn without an id".to_string()),
+                };
             }
         }
         Ok(None)
