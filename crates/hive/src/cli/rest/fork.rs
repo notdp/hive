@@ -19,7 +19,7 @@ const _FORK_MIN_ROWS: i64 = 20;
 /// True for horizontal (left/right) split, false for vertical (top/bottom).
 ///
 /// Accounts for the 1-cell tmux separator consumed by the split.
-pub(crate) fn _choose_fork_split(width: i64, height: i64) -> bool {
+pub(crate) fn choose_fork_split(width: i64, height: i64) -> bool {
     let h_half = (width - 1) / 2;
     let v_half = (height - 1) / 2;
     let can_h = h_half >= _FORK_MIN_COLS;
@@ -45,14 +45,14 @@ pub(crate) fn _choose_fork_split(width: i64, height: i64) -> bool {
 }
 
 pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
-    let target = _resolve_pane_target(pane_id);
+    let target = resolve_pane_target(pane_id);
     if !target.is_team_bound {
         // Non-team pane: clone it bare — no member registration, no @hive-* tags.
         // The clone is an independent agent that belongs to no Hive team.
         if !join_as.is_empty() {
             fail("--join-as requires a team-bound pane");
         }
-        let new_pane = _fork_orphan_clone(&target.pane_id, split, prompt);
+        let new_pane = fork_orphan_clone(&target.pane_id, split, prompt);
         let mut payload = Map::new();
         payload.insert("pane".to_string(), Value::String(new_pane));
         payload.insert("registered".to_string(), Value::Null);
@@ -63,7 +63,7 @@ pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
 
     // Team-bound fork: register the clone as a new team member.
     let mut target_team = if !pane_id.is_empty() {
-        ok_or_fail(_load_team(&target.team_name, ""))
+        ok_or_fail(load_team(&target.team_name, ""))
     } else {
         ok_or_fail(resolve_scoped_team(None, true))
             .1
@@ -81,14 +81,14 @@ pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
         } else {
             tmux::list_panes_full(&window_target)
         };
-        let mut seen_names = _window_seen_names(&target_team, &panes);
-        _derive_agent_name(&mut seen_names)
+        let mut seen_names = window_seen_names(&target_team, &panes);
+        derive_agent_name(&mut seen_names)
     } else {
         join_as.to_string()
     };
 
     let (_registered_agent, new_pane) =
-        _fork_registered_agent(&mut target_team, pane_id, split, &join_as, prompt);
+        fork_registered_agent(&mut target_team, pane_id, split, &join_as, prompt);
     let mut payload = Map::new();
     payload.insert("pane".to_string(), Value::String(new_pane));
     payload.insert("registered".to_string(), Value::String(join_as));
@@ -97,7 +97,7 @@ pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
 }
 
 /// Resolve the fork source pane: (pane, profile, session_id, horizontal, cwd).
-fn _fork_source_details(
+fn fork_source_details(
     pane_id: &str,
     split: &str,
     workspace: &str,
@@ -133,7 +133,7 @@ fn _fork_source_details(
             .filter(|s| !s.is_empty())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(24);
-        _choose_fork_split(width, height)
+        choose_fork_split(width, height)
     } else {
         split == "h"
     };
@@ -201,7 +201,7 @@ arrive after this boundary. If no `NEW TASK FOR THIS FORK:` section is \
 present, stop and wait for new human input.";
 
 /// The boundary message every fork receives as its first user input.
-fn _fork_boundary_prompt(team_bound: bool) -> &'static str {
+fn fork_boundary_prompt(team_bound: bool) -> &'static str {
     if team_bound {
         _FORK_BOUNDARY_TEXT
     } else {
@@ -210,8 +210,8 @@ fn _fork_boundary_prompt(team_bound: bool) -> &'static str {
 }
 
 /// Cached static boundary file under `$HIVE_HOME`; rewritten on drift.
-fn _fork_boundary_file(team_bound: bool) -> PathBuf {
-    let text = _fork_boundary_prompt(team_bound);
+fn fork_boundary_file(team_bound: bool) -> PathBuf {
+    let text = fork_boundary_prompt(team_bound);
     let filename = if team_bound {
         "fork-boundary.txt"
     } else {
@@ -231,14 +231,14 @@ fn _fork_boundary_file(team_bound: bool) -> PathBuf {
     path
 }
 
-fn _fork_registered_agent(
+fn fork_registered_agent(
     t: &mut Team,
     pane_id: &str,
     split: &str,
     join_as: &str,
     prompt: &str,
 ) -> (Agent, String) {
-    _ensure_pane_in_scope(t, pane_id);
+    ensure_pane_in_scope(t, pane_id);
     let window_target = if !t.tmux_window.is_empty() {
         t.tmux_window.clone()
     } else {
@@ -249,12 +249,12 @@ fn _fork_registered_agent(
     } else {
         tmux::list_panes_full(&window_target)
     };
-    let mut seen_names = _window_seen_names(t, &panes);
-    _claim_member_name(join_as, &mut seen_names);
+    let mut seen_names = window_seen_names(t, &panes);
+    claim_member_name(join_as, &mut seen_names);
 
     let workspace = t.workspace.clone();
     let (current_pane, profile, session_id, horizontal, source_cwd) =
-        _fork_source_details(pane_id, split, &workspace);
+        fork_source_details(pane_id, split, &workspace);
 
     // Both clones launch through hive's managed launcher; boundary text is
     // static, so cache it under $HIVE_HOME and expand via shell command
@@ -264,7 +264,7 @@ fn _fork_registered_agent(
     let launch_cmd = if !prompt.is_empty() {
         let composed = format!(
             "{}\n\n{}\n{}",
-            _fork_boundary_prompt(true),
+            fork_boundary_prompt(true),
             _FORK_NEW_TASK_MARKER,
             prompt
         );
@@ -272,7 +272,7 @@ fn _fork_registered_agent(
     } else {
         format!(
             "{cmd_base} \"$(cat {})\"",
-            shlex_quote(&_fork_boundary_file(true).to_string_lossy())
+            shlex_quote(&fork_boundary_file(true).to_string_lossy())
         )
     };
     let new_pane = ok_or_fail(tmux::split_window(
@@ -298,7 +298,7 @@ fn _fork_registered_agent(
     } else {
         source_cwd.clone()
     };
-    let registered_agent = _register_agent_member(
+    let registered_agent = register_agent_member(
         t,
         &new_pane,
         &team_name,
@@ -312,14 +312,14 @@ fn _fork_registered_agent(
 }
 
 /// Fork a non-team agent pane into a bare, independent clone.
-fn _fork_orphan_clone(pane_id: &str, split: &str, prompt: &str) -> String {
+fn fork_orphan_clone(pane_id: &str, split: &str, prompt: &str) -> String {
     let (current_pane, profile, session_id, horizontal, source_cwd) =
-        _fork_source_details(pane_id, split, "");
+        fork_source_details(pane_id, split, "");
     let cmd_base = profile.fork_cmd_for(&session_id);
     let launch_cmd = if !prompt.is_empty() {
         let composed = format!(
             "{}\n\n{}\n{}",
-            _fork_boundary_prompt(false),
+            fork_boundary_prompt(false),
             _FORK_NEW_TASK_MARKER,
             prompt
         );
@@ -327,7 +327,7 @@ fn _fork_orphan_clone(pane_id: &str, split: &str, prompt: &str) -> String {
     } else {
         format!(
             "{cmd_base} \"$(cat {})\"",
-            shlex_quote(&_fork_boundary_file(false).to_string_lossy())
+            shlex_quote(&fork_boundary_file(false).to_string_lossy())
         )
     };
     let new_pane = ok_or_fail(tmux::split_window(
@@ -349,7 +349,7 @@ fn _fork_orphan_clone(pane_id: &str, split: &str, prompt: &str) -> String {
 // cvim / vim / vfork / hfork (human helpers)
 // ---------------------------------------------------------------------------
 
-fn _cvim_binary() -> PathBuf {
+fn cvim_binary() -> PathBuf {
     // The toolkit is embedded in this binary and materialized to
     // `$HIVE_HOME/core_assets/cvim/` at first use; HIVE_CORE_ASSETS stays as
     // the dev escape hatch pointing at an external asset tree.
@@ -363,7 +363,7 @@ fn _cvim_binary() -> PathBuf {
     }
 }
 
-fn _exec_cvim(mode: &str, args: &[String]) -> ! {
+fn exec_cvim(mode: &str, args: &[String]) -> ! {
     // The script reads TMUX_PANE for its reply pane; inside a codex tool env
     // that variable is the shared daemon's (stripped) one, so hand it the
     // thread-resolved pane identity instead.
@@ -377,7 +377,7 @@ fn _exec_cvim(mode: &str, args: &[String]) -> ! {
         std::env::set_var("HIVE_BIN", exe);
     }
     let mut argv: Vec<String> = vec![
-        _cvim_binary().to_string_lossy().into_owned(),
+        cvim_binary().to_string_lossy().into_owned(),
         mode.to_string(),
     ];
     argv.extend(args.iter().cloned());
@@ -385,14 +385,14 @@ fn _exec_cvim(mode: &str, args: &[String]) -> ! {
 }
 
 pub fn cvim_cmd(args: &[String]) {
-    _exec_cvim("cvim", args);
+    exec_cvim("cvim", args);
 }
 
 pub fn vim_cmd(args: &[String]) {
-    _exec_cvim("vim", args);
+    exec_cvim("vim", args);
 }
 
-fn _exec_fork_split(split: &str, args: &[String]) {
+fn exec_fork_split(split: &str, args: &[String]) {
     // Thread-aware pane resolution: in a codex tool env TMUX_PANE is gone.
     let reply_pane = tmux::get_current_pane_id().unwrap_or_default();
     let mut command = std::process::Command::new("hive");
@@ -420,9 +420,9 @@ fn _exec_fork_split(split: &str, args: &[String]) {
 }
 
 pub fn vfork_cmd(args: &[String]) {
-    _exec_fork_split("v", args);
+    exec_fork_split("v", args);
 }
 
 pub fn hfork_cmd(args: &[String]) {
-    _exec_fork_split("h", args);
+    exec_fork_split("h", args);
 }

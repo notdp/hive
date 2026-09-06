@@ -181,7 +181,7 @@ impl Drop for Guard {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        super::_set_output_busy_monitor(None);
+        super::set_output_busy_monitor(None);
     }
 }
 

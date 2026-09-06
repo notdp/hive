@@ -1,4 +1,4 @@
-use super::run::{_run, exec_capture};
+use super::run::{exec_capture, run};
 
 // --- Context detection ---
 
@@ -17,7 +17,7 @@ pub fn is_inside_tmux() -> bool {
     if !env_string("TMUX").is_empty() {
         return true;
     }
-    _member_env_pane().is_some()
+    member_env_pane().is_some()
 }
 
 /// Pane resolved from a member engine's per-tool env markers, or None.
@@ -38,8 +38,8 @@ pub fn is_inside_tmux() -> bool {
 ///
 /// A member whose pane is gone (window closed, server restarted) resolves
 /// nothing here; its identity is the registry row keyed by its sessionId —
-/// the ladder's session rung (`cli::util::_session_member_binding`).
-fn _member_env_pane() -> Option<String> {
+/// the ladder's session rung (`cli::util::session_member_binding`).
+fn member_env_pane() -> Option<String> {
     let thread_id = env_string("CODEX_THREAD_ID").trim().to_string();
     if !thread_id.is_empty() {
         if let Some(pane) = crate::adapters::codex_app_server::pane_for_thread(&thread_id) {
@@ -89,7 +89,7 @@ fn _member_env_pane() -> Option<String> {
     // the default server.
     let pinned = env_string("TMUX_PANE").trim().to_string();
     if !pinned.is_empty() && env_string("TMUX").is_empty() {
-        if let Ok(r) = _run(
+        if let Ok(r) = run(
             &["display-message", "-t", &pinned, "-p", "#{pane_id}"],
             false,
             5,
@@ -108,10 +108,10 @@ fn _member_env_pane() -> Option<String> {
 /// unreliable — the codex shared daemon's env is frozen at spawn time (and
 /// hive strips TMUX_PANE from it), and a claude bg engine has none at all —
 /// so the per-CLI identity markers win over the env var (see
-/// `_member_env_pane`); everywhere else the per-pane TMUX_PANE env var
+/// `member_env_pane`); everywhere else the per-pane TMUX_PANE env var
 /// is the answer.
 pub fn get_current_pane_id() -> Option<String> {
-    if let Some(pane) = _member_env_pane() {
+    if let Some(pane) = member_env_pane() {
         if !pane.is_empty() {
             return Some(pane);
         }
@@ -124,7 +124,7 @@ fn current_pane_display(fmt: &str) -> Option<String> {
     if pane_id.is_empty() {
         return None;
     }
-    let r = _run(&["display-message", "-t", &pane_id, "-p", fmt], false, 5).ok()?;
+    let r = run(&["display-message", "-t", &pane_id, "-p", fmt], false, 5).ok()?;
     let out = r.stdout.trim().to_string();
     if out.is_empty() {
         None
@@ -153,7 +153,7 @@ pub fn get_current_window_id() -> Option<String> {
 }
 
 pub fn display_value(target: &str, fmt: &str) -> Option<String> {
-    let r = _run(&["display-message", "-t", target, "-p", fmt], false, 5).ok()?;
+    let r = run(&["display-message", "-t", target, "-p", fmt], false, 5).ok()?;
     let val = r.stdout.trim().to_string();
     if val.is_empty() {
         None
@@ -170,7 +170,7 @@ pub fn window_exists(window_id: &str) -> bool {
     if window_id.is_empty() {
         return false;
     }
-    match _run(
+    match run(
         &["display-message", "-t", window_id, "-p", "#{window_id}"],
         false,
         5,
@@ -182,21 +182,21 @@ pub fn window_exists(window_id: &str) -> bool {
 
 /// `run-shell -b <command>`: the shell string is passed byte-for-byte.
 pub fn run_shell_detached(command: &str) {
-    let _ = _run(&["run-shell", "-b", command], false, 5);
+    let _ = run(&["run-shell", "-b", command], false, 5);
 }
 
 /// Source a tmux conf; false on missing tmux, timeout, or nonzero exit.
 pub fn source_file(path: &str) -> bool {
-    matches!(_run(&["source-file", path], false, 5), Ok(r) if r.returncode == 0)
+    matches!(run(&["source-file", path], false, 5), Ok(r) if r.returncode == 0)
 }
 
 pub fn get_most_recent_client_tty(session_name: Option<&str>) -> Option<String> {
-    let rows = _list_terminal_clients(session_name);
+    let rows = list_terminal_clients(session_name);
     rows.into_iter().next().map(|row| row.1)
 }
 
 /// Terminal (non-control-mode) clients as `(activity, tty)`, newest first.
-fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
+fn list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
     let mut args: Vec<&str> = vec!["list-clients"];
     if let Some(session) = session_name {
         if !session.is_empty() {
@@ -208,7 +208,7 @@ fn _list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
         "-F",
         "#{client_activity}\t#{client_control_mode}\t#{pane_id}\t#{client_tty}",
     ]);
-    let r = match _run(&args, false, 5) {
+    let r = match run(&args, false, 5) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -233,7 +233,7 @@ pub fn get_client_window_target(client_tty: &str) -> Option<String> {
     if client_tty.is_empty() {
         return None;
     }
-    let r = _run(
+    let r = run(
         &[
             "display-message",
             "-c",
@@ -281,7 +281,7 @@ pub fn get_pane_window_name(pane_id: &str) -> Option<String> {
 }
 
 pub fn rename_window(window_target: &str, name: &str) {
-    let _ = _run(&["rename-window", "-t", window_target, name], false, 5);
+    let _ = run(&["rename-window", "-t", window_target, name], false, 5);
 }
 
 pub fn get_pane_tty(pane_id: &str) -> Option<String> {

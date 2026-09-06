@@ -16,7 +16,7 @@ use crate::team::Team;
 /// Split out so the requirement is checked before the spawn: the dispatch
 /// needs a workspace, and discovering that after the member is registered
 /// and its engine minted leaves a half-born member on the roster.
-pub(crate) fn _task_dispatch_workspace(
+pub(crate) fn task_dispatch_workspace(
     t: &Team,
     task_artifact: Option<&str>,
 ) -> Result<Option<String>> {
@@ -47,7 +47,7 @@ pub fn spawn(
     // Before any spawn side effect: a `--task` spawn that cannot resolve its
     // workspace must fail while the roster is still clean, not after the
     // member is registered and its engine minted.
-    let task_workspace = ok_or_fail(_task_dispatch_workspace(&t, task_artifact));
+    let task_workspace = ok_or_fail(task_dispatch_workspace(&t, task_artifact));
     if t.tmux_window.is_empty() {
         // The display is gone (server restart, window closed by hand):
         // rebuild it before splitting.
@@ -55,9 +55,9 @@ pub fn spawn(
             crate::registry::load(&team_name)
                 .ok_or_else(|| anyhow!("team '{team_name}' has no registry entry (deleted?)")),
         );
-        let _ = _ensure_team_display(&entry);
+        let _ = ensure_team_display(&entry);
         // re-resolve: the anchor is now the new window's first pane
-        t = ok_or_fail(_load_team(&team_name, ""));
+        t = ok_or_fail(load_team(&team_name, ""));
     }
     let use_prompt = if task_artifact.is_some() { "" } else { prompt };
     let use_skill = if task_artifact.is_some() {
@@ -68,7 +68,7 @@ pub fn spawn(
     let entries: Map<String, Value> = if env.is_empty() {
         Map::new()
     } else {
-        _parse_entries(env)
+        parse_entries(env)
     };
     let pairs: Vec<(String, String)> = entries
         .iter()
@@ -92,7 +92,7 @@ pub fn spawn(
     };
 
     let workspace = task_workspace.expect("--task resolved its workspace before spawning");
-    let _ = _ensure_team_hived(&mut t, &workspace);
+    let _ = start_team_hived(&mut t, &workspace);
     if agent.cli != "claude" {
         // A claude member's inbox is a queue: the task can land while the
         // bootstrap turn is still running and waits its turn. Only CLIs
@@ -125,7 +125,7 @@ pub fn spawn(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let sender = _resolve_sender(None);
+    let sender = resolve_sender(None);
     let dispatch = request_send_payload(
         &workspace,
         &t,

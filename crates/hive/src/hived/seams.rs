@@ -152,7 +152,7 @@ pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {
         return f(tmux_window_id);
     }
-    _is_tmux_window_alive_impl(tmux_window_id)
+    is_tmux_window_alive_impl(tmux_window_id)
 }
 
 // --- agent_cli seams -------------------------------------------------------
@@ -584,156 +584,159 @@ pub(super) fn hooked_agent_send(
 
 // --- self seams (this module's own entry points, replaceable in tests) ----
 
-pub fn _resolve_live_agent(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
+fn resolve_live_agent(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.resolve_live_agent.clone()).flatten() {
         return f(team_name, agent_name);
     }
-    _resolve_live_agent_impl(team_name, agent_name)
+    resolve_live_agent_impl(team_name, agent_name)
 }
 
 pub(super) fn hooked_resolve_live_agent(
     team_name: &str,
     agent_name: &str,
 ) -> Result<(Team, Agent)> {
-    _resolve_live_agent(team_name, agent_name)
+    resolve_live_agent(team_name, agent_name)
 }
 
-pub fn _check_send_gate(target: &Agent) -> Result<()> {
+fn check_send_gate(target: &Agent) -> Result<()> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.check_send_gate.clone()).flatten() {
         return f(target);
     }
-    _check_send_gate_impl(target)
+    check_send_gate_impl(target)
 }
 
 pub(super) fn hooked_check_send_gate(target: &Agent) -> Result<()> {
-    _check_send_gate(target)
+    check_send_gate(target)
 }
 
-pub fn _member_runtime_payload(pane_id: &str, role: &str) -> Map<String, Value> {
+fn member_runtime_payload(pane_id: &str, role: &str) -> Map<String, Value> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.member_runtime_payload.clone()).flatten() {
         return f(pane_id, role);
     }
-    _member_runtime_payload_impl(pane_id, role)
+    member_runtime_payload_impl(pane_id, role)
 }
 
 pub(super) fn hooked_member_runtime_payload(pane_id: &str, role: &str) -> Map<String, Value> {
-    _member_runtime_payload(pane_id, role)
+    member_runtime_payload(pane_id, role)
 }
 
-pub fn _busy_output_payload(pane_id: &str) -> Map<String, Value> {
+fn busy_output_payload(pane_id: &str) -> Map<String, Value> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.busy_output_payload.clone()).flatten() {
         return f(pane_id);
     }
-    _busy_output_payload_impl(pane_id)
+    busy_output_payload_impl(pane_id)
 }
 
 pub(super) fn hooked_busy_output_payload(pane_id: &str) -> Map<String, Value> {
-    _busy_output_payload(pane_id)
+    busy_output_payload(pane_id)
 }
 
-pub fn _native_daemon_busy(pane_id: &str) -> Option<bool> {
+pub(crate) fn native_daemon_busy(pane_id: &str) -> Option<bool> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.native_daemon_busy.clone()).flatten() {
         return f(pane_id);
     }
-    _native_daemon_busy_impl(pane_id)
+    native_daemon_busy_impl(pane_id)
 }
 
 pub(super) fn hooked_native_daemon_busy(pane_id: &str) -> Option<bool> {
-    _native_daemon_busy(pane_id)
+    native_daemon_busy(pane_id)
 }
 
-pub fn _transcript_progressed_recently(pane_id: &str, threshold_seconds: f64) -> Option<bool> {
+pub(crate) fn transcript_progressed_recently(
+    pane_id: &str,
+    threshold_seconds: f64,
+) -> Option<bool> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.transcript_progressed_recently.clone()).flatten() {
         return f(pane_id, threshold_seconds);
     }
-    _transcript_progressed_recently_impl(pane_id, threshold_seconds)
+    transcript_progressed_recently_impl(pane_id, threshold_seconds)
 }
 
 pub(super) fn hooked_transcript_progressed_recently(
     pane_id: &str,
     threshold_seconds: f64,
 ) -> Option<bool> {
-    _transcript_progressed_recently(pane_id, threshold_seconds)
+    transcript_progressed_recently(pane_id, threshold_seconds)
 }
 
-pub fn _resolve_transcript_path_cached(pane_id: &str, force: bool) -> Option<String> {
+pub(crate) fn resolve_transcript_path_cached(pane_id: &str, force: bool) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.resolve_transcript_path_cached.clone()).flatten() {
         return f(pane_id, force);
     }
-    _resolve_transcript_path_cached_impl(pane_id, force)
+    resolve_transcript_path_cached_impl(pane_id, force)
 }
 
 pub(super) fn hooked_resolve_transcript_path_cached(pane_id: &str, force: bool) -> Option<String> {
-    _resolve_transcript_path_cached(pane_id, force)
+    resolve_transcript_path_cached(pane_id, force)
 }
 
-pub fn _claude_bg_runtime(pane_id: &str) -> Option<Map<String, Value>> {
+pub(crate) fn claude_bg_runtime(pane_id: &str) -> Option<Map<String, Value>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.claude_bg_runtime.clone()).flatten() {
         return f(pane_id);
     }
-    _claude_bg_runtime_impl(pane_id)
+    claude_bg_runtime_impl(pane_id)
 }
 
 pub(super) fn hooked_claude_bg_runtime(pane_id: &str) -> Option<Map<String, Value>> {
-    _claude_bg_runtime(pane_id)
+    claude_bg_runtime(pane_id)
 }
 
-pub fn _codex_app_server_runtime(pane_id: &str) -> Option<Map<String, Value>> {
+pub(crate) fn codex_app_server_runtime(pane_id: &str) -> Option<Map<String, Value>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.codex_app_server_runtime.clone()).flatten() {
         return f(pane_id);
     }
-    _codex_app_server_runtime_impl(pane_id)
+    codex_app_server_runtime_impl(pane_id)
 }
 
 pub(super) fn hooked_codex_app_server_runtime(pane_id: &str) -> Option<Map<String, Value>> {
-    _codex_app_server_runtime(pane_id)
+    codex_app_server_runtime(pane_id)
 }
 
-pub fn _idle_notify_agent_panes(team_name: &str) -> Vec<String> {
+pub(crate) fn idle_notify_agent_panes(team_name: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.idle_notify_agent_panes.clone()).flatten() {
         return f(team_name);
     }
-    _idle_notify_agent_panes_impl(team_name)
+    idle_notify_agent_panes_impl(team_name)
 }
 
 pub(super) fn hooked_idle_notify_agent_panes(team_name: &str) -> Vec<String> {
-    _idle_notify_agent_panes(team_name)
+    idle_notify_agent_panes(team_name)
 }
 
-pub fn _team_member_bindings(team_name: &str) -> Result<Vec<(String, Map<String, Value>)>> {
+fn team_member_bindings(team_name: &str) -> Result<Vec<(String, Map<String, Value>)>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.team_member_bindings.clone()).flatten() {
         return f(team_name);
     }
-    _team_member_bindings_impl(team_name)
+    team_member_bindings_impl(team_name)
 }
 
 pub(super) fn hooked_team_member_bindings(
     team_name: &str,
 ) -> Result<Vec<(String, Map<String, Value>)>> {
-    _team_member_bindings(team_name)
+    team_member_bindings(team_name)
 }
 
-pub fn _fresh_snapshot_session_id(pane_id: &str, now: Option<f64>) -> String {
+fn fresh_snapshot_session_id(pane_id: &str, now: Option<f64>) -> String {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.fresh_snapshot_session_id.clone()).flatten() {
         return f(pane_id);
     }
-    _fresh_snapshot_session_id_impl(pane_id, now)
+    fresh_snapshot_session_id_impl(pane_id, now)
 }
 
 pub(super) fn hooked_fresh_snapshot_session_id(pane_id: &str, now: Option<f64>) -> String {
-    _fresh_snapshot_session_id(pane_id, now)
+    fresh_snapshot_session_id(pane_id, now)
 }
 
 pub fn request_ping(workspace: &str) -> Option<Map<String, Value>> {
@@ -748,17 +751,17 @@ pub(super) fn hooked_request_ping(workspace: &str) -> Option<Map<String, Value>>
     request_ping(workspace)
 }
 
-pub fn _cleanup_socket(workspace: &str) {
+fn cleanup_socket(workspace: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cleanup_socket.clone()).flatten() {
         f(workspace);
         return;
     }
-    _cleanup_socket_impl(workspace)
+    cleanup_socket_impl(workspace)
 }
 
 pub(super) fn hooked_cleanup_socket(workspace: &str) {
-    _cleanup_socket(workspace)
+    cleanup_socket(workspace)
 }
 
 pub(super) fn hooked_run_dir(workspace: &str) -> PathBuf {
@@ -766,45 +769,45 @@ pub(super) fn hooked_run_dir(workspace: &str) -> PathBuf {
     if let Some(f) = hookget(|h| h.run_dir.clone()).flatten() {
         return f(workspace);
     }
-    _run_dir_impl(workspace)
+    run_dir_impl(workspace)
 }
 
-pub fn _write_hived_owner(workspace: &str, pid: i64, started_at: &str, token: &str) {
+fn write_hived_owner(workspace: &str, pid: i64, started_at: &str, token: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.write_hived_owner.clone()).flatten() {
         f(workspace, pid, started_at, token);
         return;
     }
-    _write_hived_owner_impl(workspace, pid, started_at, token)
+    write_hived_owner_impl(workspace, pid, started_at, token)
 }
 
 pub(super) fn hooked_write_hived_owner(workspace: &str, pid: i64, started_at: &str, token: &str) {
-    _write_hived_owner(workspace, pid, started_at, token)
+    write_hived_owner(workspace, pid, started_at, token)
 }
 
-pub fn _release_reexec_lock_fd(lock_fd: Option<i32>) {
+pub(crate) fn release_reexec_lock_fd(lock_fd: Option<i32>) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.release_reexec_lock_fd.clone()).flatten() {
         f(lock_fd);
         return;
     }
-    _release_reexec_lock_fd_impl(lock_fd)
+    release_reexec_lock_fd_impl(lock_fd)
 }
 
 pub(super) fn hooked_release_reexec_lock_fd(lock_fd: Option<i32>) {
-    _release_reexec_lock_fd(lock_fd)
+    release_reexec_lock_fd(lock_fd)
 }
 
-pub fn _try_acquire_reexec_lock(workspace: &str) -> Option<i32> {
+pub(crate) fn try_acquire_reexec_lock(workspace: &str) -> Option<i32> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.try_acquire_reexec_lock.clone()).flatten() {
         return f(workspace);
     }
-    _try_acquire_reexec_lock_impl(workspace)
+    try_acquire_reexec_lock_impl(workspace)
 }
 
 pub(super) fn hooked_try_acquire_reexec_lock(workspace: &str) -> Option<i32> {
-    _try_acquire_reexec_lock(workspace)
+    try_acquire_reexec_lock(workspace)
 }
 
 pub(super) fn hooked_execv(argv: &[String]) -> ExecOutcome {
@@ -812,7 +815,7 @@ pub(super) fn hooked_execv(argv: &[String]) -> ExecOutcome {
     if let Some(f) = hookget(|h| h.execv.clone()).flatten() {
         return f(argv);
     }
-    _execv_impl(argv)
+    execv_impl(argv)
 }
 
 pub(super) fn hooked_compute_build_hash() -> String {
@@ -820,7 +823,7 @@ pub(super) fn hooked_compute_build_hash() -> String {
     if let Some(f) = hookget(|h| h.compute_build_hash.clone()).flatten() {
         return f();
     }
-    _compute_build_hash()
+    compute_build_hash()
 }
 
 pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) -> Option<String> {
@@ -828,7 +831,7 @@ pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) ->
     if let Some(f) = hookget(|h| h.stale_disk_build_hash.clone()).flatten() {
         return f();
     }
-    _stale_disk_build_hash_for_reexec(state, now)
+    stale_disk_build_hash_for_reexec(state, now)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -845,7 +848,7 @@ pub(super) fn hooked_serve_requests(
     if let Some(f) = hookget(|h| h.serve_requests.clone()).flatten() {
         return f();
     }
-    _serve_requests(
+    serve_requests(
         server,
         workspace,
         team,
@@ -861,5 +864,5 @@ pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn Hived
     if let Some(f) = hookget(|h| h.open_server_socket.clone()).flatten() {
         return f(workspace);
     }
-    Ok(Box::new(_open_server_socket(workspace)?))
+    Ok(Box::new(open_server_socket(workspace)?))
 }

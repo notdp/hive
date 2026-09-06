@@ -56,7 +56,7 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
             .into_owned(),
     };
 
-    let (window, dock, _) = crate::cli::rest::_new_team_session_window(run)
+    let (window, dock, _) = crate::cli::rest::new_team_session_window(run)
         .with_context(|| format!("creating tmux session '{run}'"))?;
 
     let team = match Team::create_for_window(

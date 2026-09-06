@@ -1,4 +1,4 @@
-use super::transport::_find;
+use super::transport::find;
 use super::*;
 use crate::testenv::EnvGuard;
 use serde_json::{json, Value};
@@ -18,7 +18,7 @@ thread_local! {
     static SHARED_CLIENT_OVERRIDE: RefCell<Option<SharedClientOverride>> = RefCell::new(None);
 }
 
-/// Some(...) when this test thread overrode `_shared_client`.
+/// Some(...) when this test thread overrode `shared_client`.
 pub(super) fn shared_client_override() -> Option<Option<Arc<dyn DaemonClient>>> {
     SHARED_CLIENT_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|factory| factory()))
 }
@@ -34,7 +34,7 @@ fn override_client<T: DaemonClient + 'static>(fake: Arc<T>) {
     });
 }
 
-fn _bare_client() -> CodexDaemonClient {
+fn bare_client() -> CodexDaemonClient {
     CodexDaemonClient::bare()
 }
 
@@ -166,7 +166,7 @@ fn test_daemon_env_strips_pane_identity() {
     guard.set("CLAUDE_CODE_ENTRYPOINT", "cli");
     guard.set("ANTHROPIC_API_KEY", "sk-nope");
     guard.set("CODEX_HOME", "/tmp/codex-home");
-    let env_map = _daemon_env();
+    let env_map = daemon_env();
     assert!(!env_map.contains_key("TMUX_PANE"));
     assert!(!env_map.contains_key("HIVE_CODEX_PANE"));
     assert!(!env_map
@@ -183,7 +183,7 @@ fn test_daemon_env_strips_pane_identity() {
 #[test]
 fn test_apply_status_active_ready() {
     let mut rt = ThreadRuntime::default();
-    _apply_status(&mut rt, &json!({"type": "active", "activeFlags": []}));
+    apply_status(&mut rt, &json!({"type": "active", "activeFlags": []}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
     assert_eq!(rt.turn_phase, "tool_open");
@@ -192,7 +192,7 @@ fn test_apply_status_active_ready() {
 #[test]
 fn test_apply_status_active_waiting_on_user_input() {
     let mut rt = ThreadRuntime::default();
-    _apply_status(
+    apply_status(
         &mut rt,
         &json!({"type": "active", "activeFlags": ["waitingOnUserInput"]}),
     );
@@ -202,7 +202,7 @@ fn test_apply_status_active_waiting_on_user_input() {
 #[test]
 fn test_apply_status_active_waiting_on_approval() {
     let mut rt = ThreadRuntime::default();
-    _apply_status(
+    apply_status(
         &mut rt,
         &json!({"type": "active", "activeFlags": ["waitingOnApproval"]}),
     );
@@ -215,7 +215,7 @@ fn test_apply_status_idle() {
         busy: true,
         ..Default::default()
     };
-    _apply_status(&mut rt, &json!({"type": "idle"}));
+    apply_status(&mut rt, &json!({"type": "idle"}));
     assert!(!rt.busy);
     assert_eq!(rt.input_state, "ready");
     assert_eq!(rt.turn_phase, "turn_closed");
@@ -229,7 +229,7 @@ fn test_apply_status_unknown_kind_preserves_prior_fields() {
         turn_phase: "tool_open".to_string(),
         ..Default::default()
     };
-    _apply_status(&mut rt, &json!({"type": "systemError"}));
+    apply_status(&mut rt, &json!({"type": "systemError"}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
     assert_eq!(rt.turn_phase, "tool_open");
@@ -237,13 +237,13 @@ fn test_apply_status_unknown_kind_preserves_prior_fields() {
 
 #[test]
 fn test_on_notification_status_changed() {
-    let client = _bare_client();
-    client._on_notification(
+    let client = bare_client();
+    client.on_notification(
         "thread/status/changed",
         &json!({"threadId": "t1", "status": {"type": "active", "activeFlags": []}}),
     );
     assert!(client.runtime_for("t1").unwrap().busy);
-    client._on_notification(
+    client.on_notification(
         "thread/status/changed",
         &json!({"threadId": "t1", "status": {"type": "idle"}}),
     );
@@ -254,19 +254,19 @@ fn test_on_notification_status_changed() {
 fn test_on_notification_ignores_turn_events() {
     // turn/* only reaches the turn-owning client on a shared daemon;
     // folding them here would be dead code pretending to be signal.
-    let client = _bare_client();
-    client._on_notification(
+    let client = bare_client();
+    client.on_notification(
         "turn/started",
         &json!({"threadId": "t1", "turn": {"id": "x"}}),
     );
-    client._on_notification("turn/completed", &json!({"threadId": "t1"}));
+    client.on_notification("turn/completed", &json!({"threadId": "t1"}));
     assert!(client.threads_is_empty());
 }
 
 #[test]
 fn test_on_notification_ignores_missing_thread_id() {
-    let client = _bare_client();
-    client._on_notification(
+    let client = bare_client();
+    client.on_notification(
         "thread/status/changed",
         &json!({"status": {"type": "idle"}}),
     );
@@ -275,8 +275,8 @@ fn test_on_notification_ignores_missing_thread_id() {
 
 #[test]
 fn test_runtime_for_returns_copy_not_reference() {
-    let client = _bare_client();
-    client._on_notification(
+    let client = bare_client();
+    client.on_notification(
         "thread/status/changed",
         &json!({"threadId": "t1", "status": {"type": "idle"}}),
     );
@@ -291,7 +291,7 @@ fn test_runtime_for_returns_copy_not_reference() {
 fn test_resume_backfills_active_runtime_from_thread_status() {
     // Late-join recovery: resume must seed _threads from the thread's
     // status so runtime reads report native busy/turnPhase instead of None.
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| {
         json!({
             "result": {"thread": {"sessionId": "s", "status": {"type": "active", "activeFlags": []}}}
@@ -304,7 +304,7 @@ fn test_resume_backfills_active_runtime_from_thread_status() {
 
 #[test]
 fn test_resume_backfills_idle_runtime_from_thread_status() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| {
         json!({"result": {"thread": {"sessionId": "s", "status": {"type": "idle"}}}})
     });
@@ -316,7 +316,7 @@ fn test_resume_backfills_idle_runtime_from_thread_status() {
 
 #[test]
 fn test_resume_returns_false_on_error() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "no rollout found"}));
     assert!(!client.resume("t1"));
     assert!(client.threads_is_empty());
@@ -324,7 +324,7 @@ fn test_resume_returns_false_on_error() {
 
 #[test]
 fn test_attach_resumes_each_loaded_thread() {
-    let client = _bare_client();
+    let client = bare_client();
     let calls = recording_override(&client, |method| {
         if method == "thread/loaded/list" {
             json!({"result": {"data": ["t1", "t2"]}})
@@ -345,7 +345,7 @@ fn test_attach_resumes_each_loaded_thread() {
 
 #[test]
 fn test_runtime_or_backfill_resumes_once_per_cooldown() {
-    let client = _bare_client();
+    let client = bare_client();
     // keep the runtime missing: every resume answers with an error
     let calls = recording_override(&client, |_method| json!({"__error__": "missing"}));
     assert!(client.runtime_or_backfill("t1").is_none());
@@ -361,7 +361,7 @@ fn test_runtime_or_backfill_resumes_once_per_cooldown() {
 
 #[test]
 fn test_runtime_or_backfill_returns_backfilled_state() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(
         |_method, _params| json!({"result": {"thread": {"status": {"type": "idle"}}}}),
     );
@@ -375,7 +375,7 @@ fn test_runtime_or_backfill_returns_backfilled_state() {
 /// with a thread whose rollout path is *rollout*, and `thread/section/move`
 /// materializes that file the way the real daemon does. Everything else is
 /// an empty success.
-fn _minting_daemon(
+fn minting_daemon(
     start_method: &'static str,
     thread: Value,
     rollout: PathBuf,
@@ -399,10 +399,10 @@ fn _minting_daemon(
 fn test_start_thread_mints_and_flushes() {
     let tmp = tempfile::TempDir::new().unwrap();
     let rollout = tmp.path().join("rollout-tid-new.jsonl");
-    let client = _bare_client();
+    let client = bare_client();
     let calls = recording_override(
         &client,
-        _minting_daemon(
+        minting_daemon(
             "thread/start",
             json!({"id": "tid-new", "status": {"type": "idle"}}),
             rollout.clone(),
@@ -452,7 +452,7 @@ fn test_start_thread_fails_when_the_placement_is_refused() {
     // spawn must fail rather than hand out a thread id the TUI cannot resume
     let tmp = tempfile::TempDir::new().unwrap();
     let rollout = tmp.path().join("rollout-tid-new.jsonl");
-    let client = _bare_client();
+    let client = bare_client();
     let _calls = recording_override(&client, move |method| match method {
         "thread/start" => json!({"result": {"thread": {
             "id": "tid-new", "status": {"type": "idle"}, "path": rollout.to_string_lossy()
@@ -471,10 +471,10 @@ fn test_start_thread_fails_when_the_rollout_never_appears() {
     // materialize the rollout, the file on disk is the contract the TUI needs
     let tmp = tempfile::TempDir::new().unwrap();
     let rollout = tmp.path().join("rollout-tid-new.jsonl");
-    let client = _bare_client();
+    let client = bare_client();
     let _calls = recording_override(
         &client,
-        _minting_daemon(
+        minting_daemon(
             "thread/start",
             json!({"id": "tid-new", "status": {"type": "idle"}}),
             rollout.clone(),
@@ -489,7 +489,7 @@ fn test_start_thread_fails_when_the_rollout_never_appears() {
 fn test_start_thread_fails_without_a_rollout_path() {
     // a daemon that reports no path leaves nothing to verify: refuse rather
     // than trust a thread the TUI may not find
-    let client = _bare_client();
+    let client = bare_client();
     let _calls = recording_override(&client, |method| {
         if method == "thread/start" {
             json!({"result": {"thread": {"id": "tid-new", "status": {"type": "idle"}}}})
@@ -504,10 +504,10 @@ fn test_start_thread_fails_without_a_rollout_path() {
 fn test_start_thread_without_model_omits_param() {
     let tmp = tempfile::TempDir::new().unwrap();
     let rollout = tmp.path().join("rollout-t.jsonl");
-    let client = _bare_client();
+    let client = bare_client();
     let calls = recording_override(
         &client,
-        _minting_daemon("thread/start", json!({"id": "t"}), rollout, true),
+        minting_daemon("thread/start", json!({"id": "t"}), rollout, true),
     );
     assert_eq!(client.start_thread("/work", "n", "").as_deref(), Some("t"));
     let calls = calls.lock().unwrap();
@@ -522,7 +522,7 @@ fn test_start_thread_without_model_omits_param() {
 fn test_start_thread_fails_when_flush_fails() {
     // An unflushed thread is not attachable by the TUI; minting must not
     // report success for a thread `codex resume` would refuse.
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|method, _params| {
         if method == "thread/start" {
             json!({"result": {"thread": {"id": "t", "path": "/nonexistent/rollout-t.jsonl"}}})
@@ -535,7 +535,7 @@ fn test_start_thread_fails_when_flush_fails() {
 
 #[test]
 fn test_start_thread_fails_on_rpc_error() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "nope"}));
     assert_eq!(client.start_thread("/work", "n", ""), None);
 }
@@ -544,10 +544,10 @@ fn test_start_thread_fails_on_rpc_error() {
 fn test_fork_thread_returns_fork_id_and_flushes() {
     let tmp = tempfile::TempDir::new().unwrap();
     let rollout = tmp.path().join("rollout-tid-fork.jsonl");
-    let client = _bare_client();
+    let client = bare_client();
     let calls = recording_override(
         &client,
-        _minting_daemon(
+        minting_daemon(
             "thread/fork",
             json!({"id": "tid-fork", "forkedFromId": "tid-src"}),
             rollout.clone(),
@@ -582,14 +582,14 @@ fn test_fork_thread_returns_fork_id_and_flushes() {
 
 #[test]
 fn test_fork_thread_fails_on_rpc_error() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "no rollout found"}));
     assert_eq!(client.fork_thread("tid-src", "clone"), None);
 }
 
 // --- pane-keyed API over the shared client ------------------------------
 
-fn _record(guard: &mut EnvGuard, tmp: &Path, pane: &str, tid: &str) {
+fn record(guard: &mut EnvGuard, tmp: &Path, pane: &str, tid: &str) {
     guard.set("CODEX_HOME", tmp);
     write_pane_thread(pane, tid, "/work").unwrap();
 }
@@ -602,7 +602,7 @@ fn test_send_to_pane_turn_starts_even_when_busy() {
     // consult them.
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         sent: Mutex<Vec<(String, String)>>,
@@ -642,7 +642,7 @@ fn test_send_to_pane_fails_without_record() {
 fn test_send_to_pane_fails_without_daemon() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
     set_shared_client_override(|| None);
     assert_eq!(send_to_pane("%1", "hi"), None);
 }
@@ -651,7 +651,7 @@ fn test_send_to_pane_fails_without_daemon() {
 fn test_send_to_pane_fails_on_rpc_error_response() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -667,7 +667,7 @@ fn test_send_to_pane_fails_on_rpc_error_response() {
 fn test_send_to_pane_fails_on_rpc_exception() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -683,7 +683,7 @@ fn test_send_to_pane_fails_on_rpc_exception() {
 fn test_runtime_for_pane_reads_recorded_thread() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -715,7 +715,7 @@ fn test_runtime_for_pane_none_without_record() {
 fn test_compact_pane_compacts_when_idle() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         started: Mutex<Vec<String>>,
@@ -743,7 +743,7 @@ fn test_compact_pane_busy_defers_without_aborting_turn() {
     // be compacted out from under its in-flight work.
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -772,8 +772,8 @@ fn test_compact_pane_unavailable_without_record() {
 // --- interrupt ----------------------------------------------------------
 
 /// A client whose thread/read answers with *turns*, recording every call.
-fn _client_reading(turns: Value) -> (CodexDaemonClient, Calls) {
-    let client = _bare_client();
+fn client_reading(turns: Value) -> (CodexDaemonClient, Calls) {
+    let client = bare_client();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
     client.set_call_override(move |method, params| {
@@ -787,7 +787,7 @@ fn _client_reading(turns: Value) -> (CodexDaemonClient, Calls) {
 
 #[test]
 fn test_active_turn_id_reads_the_in_progress_turn() {
-    let (client, calls) = _client_reading(json!([
+    let (client, calls) = client_reading(json!([
         {"id": "old", "status": "completed"},
         {"id": "live", "status": "inProgress"},
     ]));
@@ -803,13 +803,13 @@ fn test_active_turn_id_reads_the_in_progress_turn() {
 
 #[test]
 fn test_active_turn_id_none_when_every_turn_is_finished() {
-    let (client, _calls) = _client_reading(json!([{"id": "old", "status": "completed"}]));
+    let (client, _calls) = client_reading(json!([{"id": "old", "status": "completed"}]));
     assert_eq!(client.active_turn_id("t1"), None);
 }
 
 #[test]
 fn test_active_turn_id_none_on_rpc_error() {
-    let client = _bare_client();
+    let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "boom"}));
     assert_eq!(client.active_turn_id("t1"), None);
 }
@@ -818,7 +818,7 @@ fn test_active_turn_id_none_on_rpc_error() {
 fn test_turn_interrupt_carries_thread_and_turn_id() {
     // The turnId is mandatory on this RPC and is checked against the live
     // turn, so it must be passed through verbatim.
-    let client = _bare_client();
+    let client = bare_client();
     let calls = recording_override(&client, |_method| json!({"result": {}}));
     assert!(client.turn_interrupt("t1", "live").get("result").is_some());
     assert_eq!(
@@ -834,7 +834,7 @@ fn test_turn_interrupt_carries_thread_and_turn_id() {
 fn test_interrupt_pane_aborts_the_running_turn() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient {
         aborted: Mutex<Vec<(String, String)>>,
@@ -867,7 +867,7 @@ fn test_interrupt_pane_aborts_the_running_turn() {
 fn test_interrupt_pane_reports_an_idle_thread_without_interrupting() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -897,7 +897,7 @@ fn test_interrupt_pane_fails_without_record() {
 fn test_interrupt_pane_fails_without_daemon() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
     set_shared_client_override(|| None);
     assert_eq!(interrupt_pane("%1"), None);
 }
@@ -906,7 +906,7 @@ fn test_interrupt_pane_fails_without_daemon() {
 fn test_interrupt_pane_fails_on_rpc_error_response() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -925,7 +925,7 @@ fn test_interrupt_pane_fails_on_rpc_error_response() {
 fn test_interrupt_pane_fails_on_rpc_exception() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    _record(&mut guard, tmp.path(), "%1", "t1");
+    record(&mut guard, tmp.path(), "%1", "t1");
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
@@ -1116,7 +1116,7 @@ fn test_wsconn_disarms_the_handshake_timeout_once_connected() {
     let server = thread::spawn(move || {
         let (mut conn, _addr) = listener.accept().unwrap();
         let mut data: Vec<u8> = Vec::new();
-        while _find(&data, b"\r\n\r\n").is_none() {
+        while find(&data, b"\r\n\r\n").is_none() {
             let mut buf = [0u8; 4096];
             let n = conn.read(&mut buf).unwrap();
             data.extend_from_slice(&buf[..n]);

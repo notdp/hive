@@ -149,39 +149,39 @@ static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
     )],
 }];
 
-fn _state_path() -> PathBuf {
+fn state_path() -> PathBuf {
     crate::team::hive_home().join("plugins").join("state.json")
 }
 
-fn _installed_root() -> PathBuf {
+fn installed_root() -> PathBuf {
     crate::team::hive_home().join("plugins").join("installed")
 }
 
-fn _default_state() -> Map<String, Value> {
+fn default_state() -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("plugins".to_string(), Value::Object(Map::new()));
     m
 }
 
-fn _load_state() -> Map<String, Value> {
-    let path = _state_path();
+fn load_state() -> Map<String, Value> {
+    let path = state_path();
     if !path.exists() {
-        return _default_state();
+        return default_state();
     }
     match fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
     {
         Some(Value::Object(m)) => m,
-        _ => _default_state(),
+        _ => default_state(),
     }
 }
 
-fn _save_state(data: &Map<String, Value>) -> Result<()> {
-    crate::core_hooks::_save_json_file(&_state_path(), data)
+fn save_state(data: &Map<String, Value>) -> Result<()> {
+    crate::core_hooks::save_json_file(&state_path(), data)
 }
 
-fn _remove_path(path: &Path) {
+fn remove_path(path: &Path) {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
             let _ = fs::remove_file(path);
@@ -194,7 +194,7 @@ fn _remove_path(path: &Path) {
 }
 
 /// Write the embedded plugin files under `dst`.
-fn _copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
+fn copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for (rel, content) in files {
         let target = dst.join(rel);
@@ -206,7 +206,7 @@ fn _copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn _plugin_resource_dir(name: &str) -> Result<&'static BuiltinPlugin> {
+fn plugin_resource_dir(name: &str) -> Result<&'static BuiltinPlugin> {
     BUILTIN_PLUGINS
         .iter()
         .find(|p| p.name == name && p.files.iter().any(|(rel, _)| *rel == "plugin.json"))
@@ -214,13 +214,13 @@ fn _plugin_resource_dir(name: &str) -> Result<&'static BuiltinPlugin> {
 }
 
 pub fn load_manifest(name: &str) -> Result<PluginManifest> {
-    let plugin = _plugin_resource_dir(name)?;
+    let plugin = plugin_resource_dir(name)?;
     let raw = plugin
         .files
         .iter()
         .find(|(rel, _)| *rel == "plugin.json")
         .map(|(_, content)| *content)
-        .expect("checked by _plugin_resource_dir");
+        .expect("checked by plugin_resource_dir");
     let data: Value = serde_json::from_str(raw)?;
     let manifest_name = data
         .get("name")
@@ -237,7 +237,7 @@ pub fn load_manifest(name: &str) -> Result<PluginManifest> {
 }
 
 pub fn is_plugin_enabled(name: &str) -> bool {
-    _load_state()
+    load_state()
         .get("plugins")
         .and_then(|v| v.as_object())
         .map(|m| m.contains_key(name))
@@ -245,7 +245,7 @@ pub fn is_plugin_enabled(name: &str) -> bool {
 }
 
 pub fn list_plugins() -> Result<Vec<Value>> {
-    let state = _load_state();
+    let state = load_state();
     let empty = Map::new();
     let enabled = state
         .get("plugins")
@@ -271,7 +271,7 @@ pub fn list_plugins() -> Result<Vec<Value>> {
 
 /// Legacy installs that set `tmux: true` sourced a `tmux/enable.conf`;
 /// undo it from the matching `disable.conf` when the file is still there.
-fn _uninstall_tmux_bindings(install_dir: &Path) -> bool {
+fn uninstall_tmux_bindings(install_dir: &Path) -> bool {
     let conf = install_dir.join("tmux").join("disable.conf");
     if !conf.is_file() {
         return false;
@@ -284,7 +284,7 @@ fn _uninstall_tmux_bindings(install_dir: &Path) -> bool {
 /// No shipped plugin installs skills anymore; this guard remains so
 /// `disable_plugin` can clean up legacy state entries (e.g. a retired
 /// `code-review` install) without touching user-owned skill directories.
-fn _is_plugin_managed_skill(path: &Path) -> bool {
+fn is_plugin_managed_skill(path: &Path) -> bool {
     let is_link = fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
@@ -296,12 +296,12 @@ fn _is_plugin_managed_skill(path: &Path) -> bool {
     };
     // canonicalize the root too: on macOS tempdirs, the resolved target is
     // /private/var/... while the raw root string is /var/...
-    let root = _installed_root();
+    let root = installed_root();
     let root = fs::canonicalize(&root).unwrap_or(root);
     target.starts_with(&root)
 }
 
-fn _string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
+fn string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
     plugin_state
         .get(key)
         .and_then(|v| v.as_array())
@@ -316,7 +316,7 @@ fn _string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
 }
 
 pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
-    let mut state = _load_state();
+    let mut state = load_state();
     if !state.get("plugins").is_some_and(|v| v.is_object()) {
         state.insert("plugins".to_string(), Value::Object(Map::new()));
     }
@@ -333,14 +333,14 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
     };
     let plugin_state = plugin_state.as_object().cloned().unwrap_or_default();
 
-    for path in _string_paths(&plugin_state, "commands") {
-        _remove_path(&path);
+    for path in string_paths(&plugin_state, "commands") {
+        remove_path(&path);
     }
-    for skill_path in _string_paths(&plugin_state, "skills") {
-        if skill_path.exists() && !_is_plugin_managed_skill(&skill_path) {
+    for skill_path in string_paths(&plugin_state, "skills") {
+        if skill_path.exists() && !is_plugin_managed_skill(&skill_path) {
             continue;
         }
-        _remove_path(&skill_path);
+        remove_path(&skill_path);
     }
     if let Some(Value::Object(hook_defs)) = plugin_state.get("hooks") {
         if !hook_defs.is_empty() {
@@ -354,14 +354,14 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
         .map(PathBuf::from);
     if let Some(install_root) = &install_root {
         if crate::pyval::truthy(plugin_state.get("tmux")) {
-            _uninstall_tmux_bindings(install_root);
+            uninstall_tmux_bindings(install_root);
         }
-        _remove_path(install_root);
+        remove_path(install_root);
     }
     if let Some(plugins) = state.get_mut("plugins").and_then(|v| v.as_object_mut()) {
         plugins.remove(name);
     }
-    _save_state(&state)?;
+    save_state(&state)?;
     Ok(json!({"name": name, "enabled": false}))
 }
 
@@ -374,7 +374,7 @@ pub const RETIRED_PLUGINS: [&str; 3] = ["cvim", "fork", "code-review"];
 /// their legacy command shims, skill symlinks, install root and state
 /// entries cleaned up automatically.
 pub fn cleanup_retired_plugins() -> Result<Vec<String>> {
-    let state = _load_state();
+    let state = load_state();
     let names: Vec<String> = state
         .get("plugins")
         .and_then(|v| v.as_object())
@@ -400,14 +400,14 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
     let manifest = load_manifest(name)?;
     disable_plugin(name, true)?;
 
-    let install_dir = _installed_root().join(name);
-    _remove_path(&install_dir);
+    let install_dir = installed_root().join(name);
+    remove_path(&install_dir);
     if let Some(parent) = install_dir.parent() {
         fs::create_dir_all(parent)?;
     }
-    _copy_tree(_plugin_resource_dir(name)?.files, &install_dir)?;
+    copy_tree(plugin_resource_dir(name)?.files, &install_dir)?;
 
-    let mut state = _load_state();
+    let mut state = load_state();
     let mut plugin_state = Map::new();
     plugin_state.insert(
         "installRoot".to_string(),
@@ -428,7 +428,7 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
         .and_then(|v| v.as_object_mut())
         .expect("plugins ensured above")
         .insert(name.to_string(), Value::Object(plugin_state));
-    _save_state(&state)?;
+    save_state(&state)?;
 
     Ok(json!({
         "name": manifest.name,

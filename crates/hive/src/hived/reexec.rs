@@ -14,9 +14,9 @@ use super::*;
 
 /// SHA-256 of the binary at `current_exe()` as it sits on disk right now.
 /// `hived_build_hash` caches the first result for the process lifetime (the
-/// running build); `_stale_disk_build_hash_for_reexec` recomputes it, which
+/// running build); `stale_disk_build_hash_for_reexec` recomputes it, which
 /// is how an install that replaced the file shows up as a different hash.
-pub fn _compute_build_hash() -> String {
+pub(crate) fn compute_build_hash() -> String {
     let inner = || -> std::io::Result<String> {
         let exe = std::env::current_exe()?;
         let bytes = fs::read(&exe)?;
@@ -34,7 +34,7 @@ pub fn _compute_build_hash() -> String {
 #[cfg(not(test))]
 pub fn hived_build_hash() -> &'static str {
     static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CELL.get_or_init(_compute_build_hash)
+    CELL.get_or_init(compute_build_hash)
 }
 
 /// Hashing the multi-megabyte test binary costs seconds per test process
@@ -47,7 +47,7 @@ pub fn hived_build_hash() -> &'static str {
     "test-build"
 }
 
-pub fn _hived_reexec_argv(
+pub(crate) fn hived_reexec_argv(
     workspace: &str,
     team: &str,
     tmux_window: &str,
@@ -82,7 +82,10 @@ impl Default for ReexecState {
 }
 
 /// Return a stable changed build hash that should trigger hived reexec.
-pub fn _stale_disk_build_hash_for_reexec(state: &mut ReexecState, now: f64) -> Option<String> {
+pub(crate) fn stale_disk_build_hash_for_reexec(
+    state: &mut ReexecState,
+    now: f64,
+) -> Option<String> {
     if now - state.last_code_check_at < HIVED_CODE_CHECK_SECONDS {
         return None;
     }
@@ -101,7 +104,7 @@ pub fn _stale_disk_build_hash_for_reexec(state: &mut ReexecState, now: f64) -> O
     None
 }
 
-pub fn _release_reexec_lock_fd_impl(lock_fd: Option<i32>) {
+pub(crate) fn release_reexec_lock_fd_impl(lock_fd: Option<i32>) {
     let Some(fd) = lock_fd else { return };
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
@@ -109,8 +112,8 @@ pub fn _release_reexec_lock_fd_impl(lock_fd: Option<i32>) {
     }
 }
 
-pub fn _try_acquire_reexec_lock_impl(workspace: &str) -> Option<i32> {
-    let lock_path = _lock_path(workspace);
+pub(crate) fn try_acquire_reexec_lock_impl(workspace: &str) -> Option<i32> {
+    let lock_path = lock_path(workspace);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
@@ -120,19 +123,19 @@ pub fn _try_acquire_reexec_lock_impl(workspace: &str) -> Option<i32> {
         return None;
     }
     if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        _release_reexec_lock_fd_impl(Some(fd));
+        release_reexec_lock_fd_impl(Some(fd));
         return None;
     }
     // The lock fd rides through execv into the new build: clear FD_CLOEXEC.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
-        _release_reexec_lock_fd_impl(Some(fd));
+        release_reexec_lock_fd_impl(Some(fd));
         return None;
     }
     Some(fd)
 }
 
-pub fn _take_reexec_lock_fd_from_env() -> Option<i32> {
+pub(crate) fn take_reexec_lock_fd_from_env() -> Option<i32> {
     let raw_fd = std::env::var(_HIVED_REEXEC_LOCK_ENV).unwrap_or_default();
     std::env::remove_var(_HIVED_REEXEC_LOCK_ENV);
     if raw_fd.is_empty() {
@@ -149,7 +152,7 @@ pub enum ExecOutcome {
     Failed(std::io::Error),
 }
 
-pub(super) fn _execv_impl(argv: &[String]) -> ExecOutcome {
+pub(crate) fn execv_impl(argv: &[String]) -> ExecOutcome {
     let cstrings: Vec<CString> = argv
         .iter()
         .filter_map(|a| CString::new(a.as_str()).ok())
@@ -173,7 +176,7 @@ pub(super) fn _execv_impl(argv: &[String]) -> ExecOutcome {
 /// fails, the old build has to keep serving rather than leave the window with
 /// a dead hived and no socket: the listener is rebound, the output monitor
 /// restarted, and the replacement socket returned for the caller to serve on.
-pub fn _reexec_hived(
+pub(crate) fn reexec_hived(
     workspace: &str,
     team: &str,
     tmux_window: &str,
@@ -189,13 +192,13 @@ pub fn _reexec_hived(
     if let Some(monitor) = busy_monitor {
         monitor.stop();
     }
-    _set_output_busy_monitor(None);
+    set_output_busy_monitor(None);
     server.close();
     hooked_cleanup_socket(workspace);
     if let Some(cb) = on_reexec {
         cb();
     }
-    let argv = _hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
+    let argv = hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
     let outcome = hooked_execv(&argv);
     // Only reached when execv came back (live: it failed; under test: the
     // hook reports Replaced) — undo the env and drop the lock either way.
@@ -226,7 +229,7 @@ pub fn _reexec_hived(
     };
     if let Some(monitor) = busy_monitor {
         monitor.start();
-        _set_output_busy_monitor(Some(Arc::clone(monitor)));
+        set_output_busy_monitor(Some(Arc::clone(monitor)));
     }
     Some(replacement)
 }

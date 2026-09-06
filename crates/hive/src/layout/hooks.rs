@@ -6,7 +6,7 @@
 //! it would apply against `@hive-layout` and writes nothing when they
 //! match — what keeps a drag alive and stops the hook from recursing.
 
-use crate::tmux::_run;
+use crate::tmux::run;
 
 pub const LAYOUT_HOOKS: [&str; 2] = ["window-resized", "window-layout-changed"];
 
@@ -17,7 +17,7 @@ pub const LAYOUT_HOOKS: [&str; 2] = ["window-resized", "window-layout-changed"];
 /// is discarded: run-shell shows any stdout in view mode over the active
 /// pane, a member's TUI, until someone presses q, and a nonzero exit
 /// the same way; a hook firing per drag step must never do that.
-fn _layout_run_shell(hive: &str) -> String {
+fn layout_run_shell(hive: &str) -> String {
     let hive = crate::cli::util::tmux_dquote_escape(hive);
     format!(
         "run-shell -b \"{hive} layout auto --on-change --window '#{{window_id}}' >/dev/null 2>&1 || true\""
@@ -36,7 +36,7 @@ pub fn hook_argv(window: &str, hive: &str) -> Vec<Vec<String>> {
                 "-t".to_string(),
                 window.to_string(),
                 hook.to_string(),
-                _layout_run_shell(hive),
+                layout_run_shell(hive),
             ]
         })
         .collect()
@@ -59,17 +59,17 @@ pub fn unhook_argv(window: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn _run_rows(rows: Vec<Vec<String>>) {
+fn run_rows(rows: Vec<Vec<String>>) {
     for row in rows {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
-        let _ = _run(&args, false, 5);
+        let _ = run(&args, false, 5);
     }
 }
 
 /// Install the hooks on `window` (idempotent: plain sets).
 pub fn install_hooks(window: &str) {
     let hive = crate::cli::util::shlex_quote(&crate::cli::util::self_exe());
-    _run_rows(hook_argv(window, &hive));
+    run_rows(hook_argv(window, &hive));
 }
 
 /// Unset the hooks on `window` and drop its `@hive-layout`: a window that
@@ -78,7 +78,7 @@ pub fn install_hooks(window: &str) {
 /// Hooks persist on the server across binaries, so a tag sweep that left
 /// them would keep re-tiling the human's panes forever.
 pub fn remove_hooks(window: &str) {
-    _run_rows(unhook_argv(window));
+    run_rows(unhook_argv(window));
     crate::tmux::clear_window_option(window, super::LAYOUT_KEY_OPTION);
 }
 

@@ -18,7 +18,7 @@ use crate::devlog;
 
 use super::*;
 
-pub fn _is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
+pub(crate) fn is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
     crate::tmux::window_exists(tmux_window_id)
 }
 
@@ -29,7 +29,7 @@ pub fn ensure_hived(
     tmux_window: &str,
     tmux_window_id: &str,
 ) -> Option<i32> {
-    let lock_path = _lock_path(workspace);
+    let lock_path = lock_path(workspace);
     if let Some(parent) = lock_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -41,18 +41,18 @@ pub fn ensure_hived(
     unsafe { libc::flock(lock_fd, libc::LOCK_EX) };
     let result = (|| {
         let response = hooked_request_ping(workspace);
-        if _hived_identity_matches(response.as_ref(), team) {
+        if hived_identity_matches(response.as_ref(), team) {
             return None;
         }
         if response.is_some() {
             stop_hived(workspace);
         }
         hooked_cleanup_socket(workspace);
-        let pid = _start_hived(workspace, team, tmux_window, tmux_window_id);
+        let pid = start_hived(workspace, team, tmux_window, tmux_window_id);
         let deadline = monotonic() + SOCKET_READY_TIMEOUT;
         while monotonic() < deadline {
             let response = hooked_request_ping(workspace);
-            if _hived_identity_matches(response.as_ref(), team) {
+            if hived_identity_matches(response.as_ref(), team) {
                 return pid;
             }
             thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
@@ -76,13 +76,13 @@ pub(super) fn hooked_current_exe() -> String {
         .unwrap_or_default()
 }
 
-pub fn _start_hived(
+pub(crate) fn start_hived(
     workspace: &str,
     team: &str,
     tmux_window: &str,
     tmux_window_id: &str,
 ) -> Option<i32> {
-    let command = _hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
+    let command = hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
     let stderr_path = devlog::hived_stderr_path(Path::new(workspace));
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.popen.clone()).flatten() {
@@ -113,7 +113,7 @@ pub fn _start_hived(
     Some(child.id() as i32)
 }
 
-pub fn _run_spawned_hived(argv: &[String]) -> i32 {
+pub fn run_spawned_hived(argv: &[String]) -> i32 {
     if argv.len() != 5 || argv[0] != "--hived" {
         eprintln!("usage: hive --hived <workspace> <team> <tmux_window> <tmux_window_id>");
         return 1;
@@ -140,7 +140,7 @@ fn hooked_hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window
         f(workspace, team, tmux_window, tmux_window_id);
         return;
     }
-    _hived_loop(workspace, team, tmux_window, tmux_window_id);
+    hived_loop(workspace, team, tmux_window, tmux_window_id);
 }
 
 fn hooked_make_busy_monitor(session_target: &str) -> Option<Arc<dyn OutputMonitor>> {
@@ -156,9 +156,9 @@ fn hooked_make_busy_monitor(session_target: &str) -> Option<Arc<dyn OutputMonito
     )))
 }
 
-pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
+pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
     _SHUTDOWN.store(false, Ordering::SeqCst);
-    let hived_started_at = _now_iso();
+    let hived_started_at = now_iso();
     let mut idle_notify: HashMap<String, IdleRecord> = HashMap::new();
     let mut notify_debug_state = NotifyDebugState::default();
     let mut code_reexec_state = ReexecState::default();
@@ -187,7 +187,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             ("startedAt", Value::from(hived_started_at.clone())),
         ],
     );
-    let inherited_reexec_lock_fd = _take_reexec_lock_fd_from_env();
+    let inherited_reexec_lock_fd = take_reexec_lock_fd_from_env();
     let mut server = match hooked_open_server_socket(workspace) {
         Ok(server) => server,
         Err(err) => {
@@ -195,7 +195,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             // `hive spawn` / `hive send` surface behind "hived unavailable".
             // A silent exit here once cost hours: an over-long workspace
             // path failed `bind` and every command just said unavailable.
-            let socket = _socket_path(workspace).display().to_string();
+            let socket = socket_path(workspace).display().to_string();
             eprintln!("hived: cannot open server socket {socket}: {err}");
             hooked_notify_debug_emit(
                 workspace,
@@ -219,7 +219,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         .trim()
         .to_string();
     let busy_monitor = hooked_make_busy_monitor(&session_target);
-    _set_output_busy_monitor(busy_monitor.clone());
+    set_output_busy_monitor(busy_monitor.clone());
     if let Some(monitor) = busy_monitor.as_ref() {
         monitor.start();
     }
@@ -252,15 +252,15 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             last_daemon_cleanup = now;
             // Supervision must never take the hived down: every tick below
             // swallows its own errors internally.
-            _cleanup_dead_daemons(workspace, team);
-            _codex_supervisor_tick(workspace, team);
-            _claude_supervisor_tick(workspace);
-            _write_registry_backfill(workspace, team);
+            cleanup_dead_daemons(workspace, team);
+            codex_supervisor_tick(workspace, team);
+            claude_supervisor_tick(workspace);
+            write_registry_backfill(workspace, team);
         }
 
         if now - last_owner_check >= HIVED_OWNER_CHECK_SECONDS {
             last_owner_check = now;
-            if let Some(foreign_pid) = _foreign_owner_pid(workspace, &owner_token) {
+            if let Some(foreign_pid) = foreign_owner_pid(workspace, &owner_token) {
                 hooked_notify_debug_emit(
                     workspace,
                     "hived.retire_orphan",
@@ -280,7 +280,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
         // Never exec out from under an in-flight request thread: its
         // transport work would die mid-flight with the message already on
         // the bus. The stale hash is still stale 5s later.
-        if let Some(stale_hash) = stale_hash.filter(|_| !_requests_in_flight()) {
+        if let Some(stale_hash) = stale_hash.filter(|_| !requests_in_flight()) {
             let emit_reexec = || {
                 hooked_notify_debug_emit(
                     workspace,
@@ -294,7 +294,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
                     ],
                 );
             };
-            if let Some(replacement) = _reexec_hived(
+            if let Some(replacement) = reexec_hived(
                 workspace,
                 team,
                 tmux_window,
@@ -313,9 +313,9 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
 
         // Job relabelling and border cosmetics must never take the hived
         // down (the tick fns swallow their own failures).
-        _claude_name_tick(&tick_members, team, &mut claude_view_state);
-        _claude_view_tick(workspace, team, &tick_members, &mut claude_view_state);
-        _status_tick(
+        claude_name_tick(&tick_members, team, &mut claude_view_state);
+        claude_view_tick(workspace, team, &tick_members, &mut claude_view_state);
+        status_tick(
             workspace,
             &tick_members,
             busy_monitor.as_deref(),
@@ -335,7 +335,7 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
             break;
         }
 
-        _idle_notify_tick(
+        idle_notify_tick(
             team,
             &session_target,
             &mut idle_notify,
@@ -350,9 +350,9 @@ pub fn _hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_i
     if let Some(monitor) = busy_monitor.as_ref() {
         monitor.stop();
     }
-    _set_output_busy_monitor(None);
+    set_output_busy_monitor(None);
     server.close();
-    _cleanup_socket_if_owner(workspace, &owner_token);
+    cleanup_socket_if_owner(workspace, &owner_token);
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -363,10 +363,10 @@ fn now_epoch_seconds() -> i64 {
 }
 
 pub fn stop_hived(workspace: &str) {
-    let _ = _request_hived(workspace, &action_payload("shutdown"), SOCKET_READY_TIMEOUT);
+    let _ = request_hived(workspace, &action_payload("shutdown"), SOCKET_READY_TIMEOUT);
     let deadline = monotonic() + SOCKET_READY_TIMEOUT;
     while monotonic() < deadline {
-        if !_socket_path(workspace).exists() {
+        if !socket_path(workspace).exists() {
             return;
         }
         thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));

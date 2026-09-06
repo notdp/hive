@@ -1,5 +1,5 @@
 use super::attach::{
-    Client, _attach_pipe, _close_pipe, _engine_screen_size, _wait_client_ready, _wait_engine_behind,
+    attach_pipe, close_pipe, engine_screen_size, wait_client_ready, wait_engine_behind, Client,
 };
 use super::testhook::{FakePipe, Hook};
 use super::*;
@@ -473,7 +473,7 @@ fn test_wait_engine_behind_polls_until_the_entry_appears() {
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(None);
 
-    let engine = _wait_engine_behind("cafe1234", &mut proc).unwrap();
+    let engine = wait_engine_behind("cafe1234", &mut proc).unwrap();
 
     assert_eq!(engine.job_id, "cafe1234");
     assert_eq!(engine_queue().len(), 1, "both misses were consumed");
@@ -495,7 +495,7 @@ fn test_wait_engine_behind_gives_up_once_the_client_exits() {
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(Some(1));
 
-    assert_eq!(_wait_engine_behind("cafe1234", &mut proc), None);
+    assert_eq!(wait_engine_behind("cafe1234", &mut proc), None);
     assert_eq!(engine_queue().len(), 2, "polled exactly once");
 }
 
@@ -514,7 +514,7 @@ fn test_wait_engine_behind_times_out_with_the_client_still_alive() {
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(None);
 
-    assert_eq!(_wait_engine_behind("cafe1234", &mut proc), None);
+    assert_eq!(wait_engine_behind("cafe1234", &mut proc), None);
     assert_eq!(engine_queue().len(), 2, "polled exactly once");
 }
 
@@ -552,7 +552,7 @@ fn test_wait_client_ready_once_the_journal_names_the_client() {
     pipe.state.lock().unwrap().pid = Some(me() as i32);
     attach_journal_entry(&home, me() as i32);
 
-    assert!(_wait_client_ready(&mut proc));
+    assert!(wait_client_ready(&mut proc));
 }
 
 #[test]
@@ -568,7 +568,7 @@ fn test_wait_client_ready_is_false_once_the_client_exits() {
     pipe.state.lock().unwrap().pid = Some(me() as i32);
     attach_journal_entry(&home, me() as i32);
 
-    assert!(!_wait_client_ready(&mut proc));
+    assert!(!wait_client_ready(&mut proc));
 }
 
 #[test]
@@ -584,7 +584,7 @@ fn test_wait_client_ready_times_out_on_a_journal_naming_someone_else() {
     pipe.state.lock().unwrap().pid = Some(me() as i32 + 1);
     attach_journal_entry(&home, me() as i32);
 
-    assert!(!_wait_client_ready(&mut proc));
+    assert!(!wait_client_ready(&mut proc));
 }
 
 #[test]
@@ -598,7 +598,7 @@ fn test_engine_screen_size_is_the_bound_panes_size() {
         "wide\ttall".to_string(),
     ])));
     let script = std::rc::Rc::clone(&answers);
-    crate::tmux::_set_run_override(move |args, _check, _timeout| {
+    crate::tmux::set_run_override(move |args, _check, _timeout| {
         recorded.borrow_mut().push(args.to_vec());
         Ok(crate::tmux::Run {
             returncode: 0,
@@ -607,7 +607,7 @@ fn test_engine_screen_size_is_the_bound_panes_size() {
         })
     });
 
-    assert_eq!(_engine_screen_size("cafe1234"), (132, 43));
+    assert_eq!(engine_screen_size("cafe1234"), (132, 43));
     assert_eq!(
         argv.borrow()[0],
         vec![
@@ -620,12 +620,12 @@ fn test_engine_screen_size_is_the_bound_panes_size() {
     );
     // an unparsable answer falls back to claude's own pty-host size
     assert_eq!(
-        _engine_screen_size("cafe1234"),
+        engine_screen_size("cafe1234"),
         (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
     );
     // a job on nobody's pane never asks tmux
     assert_eq!(
-        _engine_screen_size("beef5678"),
+        engine_screen_size("beef5678"),
         (_DEFAULT_PTY_COLS, _DEFAULT_PTY_ROWS)
     );
     assert_eq!(argv.borrow().len(), 2);
@@ -711,7 +711,7 @@ fn test_attach_puts_the_subcommand_first() {
         ),
     );
 
-    let client = _attach_pipe("cafe1234", &bin).unwrap();
+    let client = attach_pipe("cafe1234", &bin).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while !out.join("argv").exists() && Instant::now() < deadline {
@@ -719,7 +719,7 @@ fn test_attach_puts_the_subcommand_first() {
     }
     let argv = fs::read_to_string(out.join("argv")).unwrap();
     assert_eq!(argv.lines().collect::<Vec<_>>(), vec!["attach", "cafe1234"]);
-    _close_pipe(client);
+    close_pipe(client);
 }
 
 #[test]
@@ -1334,7 +1334,7 @@ fn test_the_draft_gate_reads_the_pane_only_when_it_shows_this_job() {
     };
     let _g = testhook::install(hook);
 
-    assert!(_composer_has_draft("cafe1234"));
+    assert!(composer_has_draft("cafe1234"));
     assert_eq!(
         testhook::with(|h| h.suspected_calls.clone()).unwrap(),
         vec![("%7".to_string(), "claude".to_string())]
@@ -1351,7 +1351,7 @@ fn test_the_draft_gate_is_closed_when_the_viewer_shows_someone_else() {
     };
     let _g = testhook::install(hook);
 
-    assert!(!_composer_has_draft("cafe1234"));
+    assert!(!composer_has_draft("cafe1234"));
     assert!(testhook::with(|h| h.suspected_calls.clone())
         .unwrap()
         .is_empty());
@@ -1364,7 +1364,7 @@ fn test_the_draft_gate_is_closed_without_a_pane() {
         ..Default::default()
     };
     let _g = testhook::install(hook);
-    assert!(!_composer_has_draft("cafe1234"));
+    assert!(!composer_has_draft("cafe1234"));
 }
 
 #[test]
@@ -1375,7 +1375,7 @@ fn test_a_probe_failure_closes_the_draft_gate() {
         ..Default::default()
     };
     let _g = testhook::install(hook);
-    assert!(!_composer_has_draft("cafe1234"));
+    assert!(!composer_has_draft("cafe1234"));
 }
 
 // --- job naming ---------------------------------------------------------
@@ -1480,7 +1480,7 @@ fn test_the_registry_name_is_read_into_the_engine_session() {
         "messagingSocketPath": sock.to_str().unwrap(),
         "name": "honey.worker",
     });
-    let engine = _entry_to_engine(entry.as_object().unwrap()).unwrap();
+    let engine = entry_to_engine(entry.as_object().unwrap()).unwrap();
     assert_eq!(engine.name, "honey.worker");
 }
 

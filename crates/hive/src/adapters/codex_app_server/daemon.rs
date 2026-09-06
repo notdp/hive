@@ -58,7 +58,7 @@ pub fn daemon_alive() -> bool {
 /// does): the spawner may itself run inside a claude engine, and an inherited
 /// CLAUDE_CODE_MESSAGING_SOCKET makes every hive call from a codex tool shell
 /// resolve to *that* engine's pane whenever the thread lookup misses.
-pub fn _daemon_env() -> HashMap<String, String> {
+pub(crate) fn daemon_env() -> HashMap<String, String> {
     washed_spawner_env(&["TMUX_PANE", "HIVE_CODEX_PANE"])
 }
 
@@ -100,7 +100,7 @@ pub fn spawn_daemon() -> bool {
         .arg("--listen")
         .arg(format!("unix://{}", sock.display()))
         .env_clear()
-        .envs(_daemon_env())
+        .envs(daemon_env())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file));
@@ -149,20 +149,20 @@ static _CLIENT: Mutex<SharedSlot> = Mutex::new(SharedSlot {
     cooldown_until: None,
 });
 
-fn _shared_client() -> Option<Arc<dyn DaemonClient>> {
+fn shared_client() -> Option<Arc<dyn DaemonClient>> {
     #[cfg(test)]
     {
         if let Some(overridden) = super::tests::shared_client_override() {
             return overridden;
         }
     }
-    _shared_client_prod().map(|client| {
+    shared_client_prod().map(|client| {
         let dynamic: Arc<dyn DaemonClient> = Arc::new(client);
         dynamic
     })
 }
 
-fn _shared_client_prod() -> Option<CodexDaemonClient> {
+fn shared_client_prod() -> Option<CodexDaemonClient> {
     {
         let mut slot = _CLIENT.lock().unwrap();
         if let Some(client) = slot.client.as_ref() {
@@ -181,19 +181,19 @@ fn _shared_client_prod() -> Option<CodexDaemonClient> {
     }
     let sock = shared_socket_path();
     if !sock.exists() {
-        _set_cooldown();
+        set_cooldown();
         return None;
     }
     let client = match CodexDaemonClient::new(&sock) {
         Ok(client) => client,
         Err(_) => {
-            _set_cooldown();
+            set_cooldown();
             return None;
         }
     };
     if !client.initialize() {
         client.close();
-        _set_cooldown();
+        set_cooldown();
         return None;
     }
     client.attach(); // busy late-join recovery
@@ -201,14 +201,14 @@ fn _shared_client_prod() -> Option<CodexDaemonClient> {
     Some(client)
 }
 
-fn _set_cooldown() {
+fn set_cooldown() {
     _CLIENT.lock().unwrap().cooldown_until =
         Some(Instant::now() + Duration::from_secs_f64(_CONNECT_COOLDOWN));
 }
 
 /// Eagerly bring hive's client online (spawn time / hived request).
 pub fn connect() -> bool {
-    _shared_client().is_some()
+    shared_client().is_some()
 }
 
 /// Close the process's client so the next use reconnects (daemon respawn).
@@ -233,7 +233,7 @@ pub fn runtime_for_pane(pane: &str) -> Option<ThreadRuntime> {
 }
 
 pub fn runtime_for_thread(thread_id: &str) -> Option<ThreadRuntime> {
-    let client = _shared_client()?;
+    let client = shared_client()?;
     client.runtime_or_backfill(thread_id)
 }
 
@@ -254,7 +254,7 @@ pub fn send_to_pane(pane: &str, text: &str) -> Option<&'static str> {
 
 /// Deliver text as a new turn on *thread_id* — the engine-keyed core.
 pub fn send_to_thread(thread_id: &str, text: &str) -> Option<&'static str> {
-    let client = _shared_client()?;
+    let client = shared_client()?;
     let response = client.turn_start(thread_id, text).ok()?;
     if response.get("result").is_some() {
         Some(TURN_START_ACCEPTED)
@@ -277,7 +277,7 @@ pub fn interrupt_pane(pane: &str) -> Option<&'static str> {
 
 /// Abort the running turn on *thread_id* — the engine-keyed core.
 pub fn interrupt_thread(thread_id: &str) -> Option<&'static str> {
-    let client = _shared_client()?;
+    let client = shared_client()?;
     let turn_id = client.active_turn_id(thread_id).ok()?;
     let turn_id = match turn_id {
         Some(turn_id) if !turn_id.is_empty() => turn_id,
@@ -307,7 +307,7 @@ pub fn compact_pane(pane: &str) -> &'static str {
         Some(tid) => tid,
         None => return "unavailable",
     };
-    let client = match _shared_client() {
+    let client = match shared_client() {
         Some(client) => client,
         None => return "unavailable",
     };
@@ -362,14 +362,14 @@ pub fn freshen_models_cache() -> bool {
 
 /// Mint a resumable thread for a new member; None on any failure.
 pub fn start_member_thread(cwd: &str, name: &str, model: &str) -> Option<String> {
-    let client = _shared_client()?;
+    let client = shared_client()?;
     freshen_models_cache();
     client.start_thread(cwd, name, model)
 }
 
 /// Server-side fork of *thread_id*; returns the fork's id, None on failure.
 pub fn fork_member_thread(thread_id: &str, name: &str) -> Option<String> {
-    let client = _shared_client()?;
+    let client = shared_client()?;
     freshen_models_cache();
     client.fork_thread(thread_id, name)
 }

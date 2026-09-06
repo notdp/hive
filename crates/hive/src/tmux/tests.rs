@@ -24,22 +24,22 @@ fn v(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
 }
 
-fn _timeout_run() {
+fn timeout_run() {
     set_exec_override(|_argv, _timeout, _input| Err(TmuxError::Timeout));
 }
 
-fn _capture_run(rc: i32, out: &'static str) -> Calls {
+fn capture_run(rc: i32, out: &'static str) -> Calls {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         Ok(ok_run(rc, out, ""))
     });
     calls
 }
 
-fn _raising_run() {
-    _set_run_override(|_args, _check, _timeout| Err(TmuxError::Os("no tmux".to_string())));
+fn raising_run() {
+    set_run_override(|_args, _check, _timeout| Err(TmuxError::Os("no tmux".to_string())));
 }
 
 fn is_timeout(err: &anyhow::Error) -> bool {
@@ -48,9 +48,9 @@ fn is_timeout(err: &anyhow::Error) -> bool {
 
 #[test]
 fn test_run_probe_reads_timeout_as_unknown() {
-    _timeout_run();
+    timeout_run();
 
-    let result = _run(&["list-panes"], false, 5).unwrap();
+    let result = run(&["list-panes"], false, 5).unwrap();
 
     assert_eq!(result.returncode, 1);
     assert_eq!(result.stderr, "timeout");
@@ -60,10 +60,10 @@ fn test_run_probe_reads_timeout_as_unknown() {
 fn test_run_timeout_raises_when_the_command_had_to_happen() {
     // check=true means the caller needs the command to have run: a busy tmux
     // server must not be able to fake a successful send-keys.
-    _timeout_run();
+    timeout_run();
 
     assert!(matches!(
-        _run(&["list-panes"], true, 5),
+        run(&["list-panes"], true, 5),
         Err(TmuxError::Timeout)
     ));
     assert!(is_timeout(&send_keys("%1", "hello", true).unwrap_err()));
@@ -74,7 +74,7 @@ fn test_run_timeout_raises_when_the_command_had_to_happen() {
 fn test_load_buffer_timeout_raises() {
     // A draft save that did not happen must not read as one — the caller
     // clears the pane's composer on the strength of this call.
-    _timeout_run();
+    timeout_run();
 
     assert!(is_timeout(
         &load_buffer("hive_draft_1", "unsent thought").unwrap_err()
@@ -85,7 +85,7 @@ fn test_load_buffer_timeout_raises() {
 fn test_session_helpers_delegate_to_tmux() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         if args[0] == "has-session" {
             return Ok(ok_run(0, "", ""));
@@ -112,7 +112,7 @@ fn test_session_helpers_delegate_to_tmux() {
 fn test_window_jump_helpers_issue_expected_tmux_commands() {
     // `attach` jumps with switch-client: select-window would only
     // retarget the window's own session, leaving this client where it is.
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
 
     select_window("dev:2");
     switch_client("dev:2");
@@ -130,7 +130,7 @@ fn test_window_jump_helpers_issue_expected_tmux_commands() {
 
 #[test]
 fn test_send_keys_and_send_key_issue_expected_tmux_commands() {
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
 
     send_keys("%1", "hello", true).unwrap();
     send_keys("%2", "raw", false).unwrap();
@@ -153,7 +153,7 @@ fn test_send_keys_and_send_key_issue_expected_tmux_commands() {
 fn test_pane_mode_helpers_use_tmux_display_and_copy_mode() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         let stdout = if args.len() >= 3 && args[..3] == v(&["display-message", "-t", "%1"]) {
             "1\n"
@@ -182,7 +182,7 @@ fn test_pane_mode_helpers_use_tmux_display_and_copy_mode() {
 
 #[test]
 fn test_capture_and_list_parsers() {
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         if args[0] == "capture-pane" {
             return Ok(ok_run(0, "line1\nline2\n", ""));
         }
@@ -198,7 +198,7 @@ fn test_capture_and_list_parsers() {
 
 #[test]
 fn test_is_pane_alive_parses_tmux_output() {
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "%1 0\n%2 1\n", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "%1 0\n%2 1\n", "")));
 
     assert!(is_pane_alive("%1"));
     assert!(!is_pane_alive("%2"));
@@ -207,7 +207,7 @@ fn test_is_pane_alive_parses_tmux_output() {
 
 #[test]
 fn test_is_pane_alive_treats_tmux_failure_as_alive() {
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
 
     assert!(is_pane_alive("%1"));
 }
@@ -220,7 +220,7 @@ fn test_context_helpers_use_environment_and_display_message() {
     env.remove("CODEX_THREAD_ID");
     env.remove("GROK_SESSION_ID");
     env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         let stdout = if args.iter().any(|a| a == "#{session_name}:#{window_index}") {
             "dev:2\n"
         } else if args.iter().any(|a| a == "#{session_name}") {
@@ -243,7 +243,7 @@ fn test_context_helpers_use_environment_and_display_message() {
 
 #[test]
 fn test_client_mode_and_popup_support_helpers() {
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         let stdout = if args.iter().any(|a| a == "#{client_control_mode}") {
             "1\n"
         } else {
@@ -257,16 +257,16 @@ fn test_client_mode_and_popup_support_helpers() {
 
 #[test]
 fn test_client_mode_returns_terminal_or_unknown() {
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "0\n", "")));
     assert_eq!(get_client_mode(Some("%8")), "terminal");
 
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
     assert_eq!(get_client_mode(Some("%8")), "unknown");
 }
 
 #[test]
 fn test_client_window_helpers_resolve_most_recent_client() {
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         if args[0] == "list-clients" {
             return Ok(ok_run(
                 0,
@@ -293,7 +293,7 @@ fn test_client_window_helpers_resolve_most_recent_client() {
 
 #[test]
 fn test_client_helpers_ignore_control_mode_clients() {
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         if args[0] == "list-clients" {
             return Ok(ok_run(
                 0,
@@ -390,7 +390,7 @@ fn test_grok_session_resolves_the_members_tagged_pane() {
     env.set("GROK_SESSION_ID", "s-rex");
     let calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, _check, _timeout| {
+    set_run_override(move |args, _check, _timeout| {
         recorded.borrow_mut().push(args.to_vec());
         let stdout = if args.first().map(String::as_str) == Some("list-panes") {
             concat!(
@@ -455,7 +455,7 @@ fn test_grok_member_without_a_pane_keeps_its_identity_but_no_display() {
     );
     crate::registry::record_team("honey", "/tmp/ws-h", "1.0", &[member], "").unwrap();
     env.set("GROK_SESSION_ID", "s-rex");
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
 
     assert!(!is_inside_tmux());
     assert_eq!(get_current_pane_id(), None);
@@ -467,7 +467,7 @@ fn test_grok_member_without_a_pane_keeps_its_identity_but_no_display() {
 
 #[test]
 fn test_list_panes_full_parses_rows() {
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         let fmt = args.last().map(String::as_str).unwrap_or("");
         let stdout = if fmt == _PANE_BASE_FMT {
             "%1\tmain\tcodex\tagent\tclaude\tteam-a\t\n%2\tshell\tzsh\tterminal\tterm-1\tteam-a\t\n"
@@ -498,7 +498,7 @@ fn test_list_panes_full_parses_rows() {
 fn test_pane_option_helpers_and_tagging() {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         let stdout = if args[0] == "show-options" {
             "value\n"
@@ -548,7 +548,7 @@ fn test_tagging_a_pane_onto_another_cli_drops_the_claude_view() {
     // panes — an in-place retag must clear it or the suffix is stale forever.
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         Ok(ok_run(0, "", ""))
     });
@@ -564,7 +564,7 @@ fn test_tagging_a_pane_onto_another_cli_drops_the_claude_view() {
 
 #[test]
 fn test_enable_pane_border_status_uses_hive_member_format() {
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
 
     enable_pane_border_status("dev:1");
 
@@ -597,7 +597,7 @@ fn test_enable_pane_border_status_uses_hive_member_format() {
 fn test_configure_hive_window_disables_native_tmux_alerts_and_installs_layout_hooks() {
     let mut env = EnvGuard::new();
     env.set("HIVE_BIN", "/x/hive");
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
 
     configure_hive_window("dev:1");
 
@@ -684,9 +684,9 @@ fn test_team_status_palettes_differ_in_colours_only() {
 
 #[test]
 fn test_mirror_run_shell_escapes_a_dollar_in_the_binary_path_for_tmux() {
-    assert_eq!(_mirror_run_shell("/x/hive"), _MIRROR_RUN_SHELL);
+    assert_eq!(mirror_run_shell("/x/hive"), _MIRROR_RUN_SHELL);
     assert_eq!(
-        _mirror_run_shell("'/tmp/we ird$x/hive'"),
+        mirror_run_shell("'/tmp/we ird$x/hive'"),
         "run-shell -b \"'/tmp/we ird\\$x/hive' mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\""
     );
 }
@@ -738,27 +738,27 @@ fn test_mirror_key_binding_is_gated_on_a_team_window_and_falls_back_elsewhere() 
 #[test]
 fn test_bound_command_reads_the_list_keys_line() {
     assert_eq!(
-        _bound_command("bind-key -T prefix m select-pane -m\n"),
+        bound_command("bind-key -T prefix m select-pane -m\n"),
         Some("select-pane -m".to_string())
     );
     // `-r` drops, tmux's `\;` separator becomes the ` ; ` an if-shell
     // branch string splits on, quoting stays verbatim.
     assert_eq!(
-        _bound_command(
+        bound_command(
             "bind-key -r -T prefix m swap-pane -s \"{top-left}\" \\; select-layout main-vertical"
         ),
         Some("swap-pane -s \"{top-left}\" ; select-layout main-vertical".to_string())
     );
-    assert_eq!(_bound_command(""), None);
-    assert_eq!(_bound_command("unknown key: m"), None);
+    assert_eq!(bound_command(""), None);
+    assert_eq!(bound_command("unknown key: m"), None);
 }
 
 /// A run override answering `list-keys -T prefix m` with *listed* and
 /// `show-options -s -v @hive-prefix-m` with *stored*, recording every call.
-fn _prefix_m_server(listed: &'static str, stored: &'static str) -> Calls {
+fn prefix_m_server(listed: &'static str, stored: &'static str) -> Calls {
     let calls: Calls = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&calls);
-    _set_run_override(move |args, check, timeout| {
+    set_run_override(move |args, check, timeout| {
         recorded.borrow_mut().push((args.to_vec(), check, timeout));
         let (rc, out) = match (args[0].as_str(), args.last().map(String::as_str)) {
             ("list-keys", _) if listed.is_empty() => (1, ""),
@@ -778,9 +778,9 @@ fn argvs(calls: &Calls) -> Vec<Vec<String>> {
 
 #[test]
 fn test_prefix_m_fallback_remembers_the_command_the_key_had() {
-    let calls = _prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
+    let calls = prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
 
-    assert_eq!(_prefix_m_fallback(), "select-pane -m");
+    assert_eq!(prefix_m_fallback(), "select-pane -m");
 
     assert_eq!(
         argvs(&calls),
@@ -799,9 +799,9 @@ fn test_prefix_m_fallback_remembers_the_command_the_key_had() {
 #[test]
 fn test_prefix_m_fallback_reads_the_remembered_command_behind_hives_own_binding() {
     let hive_binding = "bind-key -T prefix m if-shell -F \"#{@hive-team}\" \"run-shell -b \\\"/x/hive mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\\\"\" \"select-pane -m\"\n";
-    let calls = _prefix_m_server(hive_binding, "swap-pane -s \"{top-left}\"\n");
+    let calls = prefix_m_server(hive_binding, "swap-pane -s \"{top-left}\"\n");
 
-    assert_eq!(_prefix_m_fallback(), "swap-pane -s \"{top-left}\"");
+    assert_eq!(prefix_m_fallback(), "swap-pane -s \"{top-left}\"");
 
     // Nothing stored over the remembered command.
     assert_eq!(
@@ -815,9 +815,9 @@ fn test_prefix_m_fallback_reads_the_remembered_command_behind_hives_own_binding(
 
 #[test]
 fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
-    let calls = _prefix_m_server("", "");
+    let calls = prefix_m_server("", "");
 
-    assert_eq!(_prefix_m_fallback(), "");
+    assert_eq!(prefix_m_fallback(), "");
 
     assert_eq!(argvs(&calls), vec![v(&["list-keys", "-T", "prefix", "m"])]);
 }
@@ -826,7 +826,7 @@ fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
 fn test_install_team_status_runs_options_then_bindings() {
     let mut env = EnvGuard::new();
     env.set("HIVE_BIN", "/x/hive");
-    let calls = _prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
+    let calls = prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
 
     install_team_status("$3");
 
@@ -890,7 +890,7 @@ fn test_team_window_scans_mask_the_hidden_window() {
 
 #[test]
 fn test_break_pane_targets_the_session_when_given() {
-    let calls = _capture_run(0, "honey:9\t%3\n");
+    let calls = capture_run(0, "honey:9\t%3\n");
 
     let (window, pane) = break_pane("%3", "honey·mirror", true, Some("=honey:")).unwrap();
 
@@ -922,7 +922,7 @@ fn test_break_pane_targets_the_session_when_given() {
 fn test_hidden_mirror_lookups_parse_the_listings() {
     // Server-wide (`-a`) listings: the parked window lives in the team
     // session, the caller may be anywhere.
-    _set_run_override(|args, _check, _timeout| {
+    set_run_override(|args, _check, _timeout| {
         let out = if args == v(&["list-windows", "-a", "-F", "#{window_id}\t#{@hive-hidden}"]) {
             "@4\thoney\n@7\t\n"
         } else if args
@@ -988,24 +988,24 @@ fn test_control_mode_payload_activity_ignores_pure_repaint_sequence() {
         "\x1b[39m\x1b[49m\x1b[0m\x1b[?25h\x1b[51;3H\x1b[?2026l"
     );
 
-    assert!(!_control_mode_payload_has_activity(repaint));
+    assert!(!control_mode_payload_has_activity(repaint));
 }
 
 #[test]
 fn test_control_mode_payload_activity_accepts_visible_text_inside_styles() {
-    assert!(_control_mode_payload_has_activity("\x1b[2mhello\x1b[0m"));
+    assert!(control_mode_payload_has_activity("\x1b[2mhello\x1b[0m"));
 }
 
 #[test]
 fn test_control_mode_payload_activity_keeps_text_between_st_terminated_osc_sequences() {
     let payload = "\x1b]0;a\x1b\\hello\x1b]0;b\x1b\\";
 
-    assert!(_control_mode_payload_has_activity(payload));
+    assert!(control_mode_payload_has_activity(payload));
 }
 
 #[test]
 fn test_control_mode_payload_activity_ignores_pure_dcs_sequence() {
-    assert!(!_control_mode_payload_has_activity(
+    assert!(!control_mode_payload_has_activity(
         "\x1bP1;2;3payload\x1b\\"
     ));
 }
@@ -1014,7 +1014,7 @@ fn test_control_mode_payload_activity_ignores_pure_dcs_sequence() {
 fn test_control_mode_payload_activity_accepts_visible_text_between_dcs_and_osc() {
     let payload = "\x1bPignored\x1b\\hello\x1b]0;title\x1b\\";
 
-    assert!(_control_mode_payload_has_activity(payload));
+    assert!(control_mode_payload_has_activity(payload));
 }
 
 #[test]
@@ -1025,7 +1025,7 @@ fn test_control_mode_monitor_ignores_repaint_only_output() {
     let monitor = ControlModeOutputMonitor::new("613");
     let payload = "\x1b[?2026h\x1b[49;2H\x1b[K\x1b[?2026l";
 
-    monitor._record_control_mode_output("%9", payload);
+    monitor.record_control_mode_output("%9", payload);
 
     assert!(!monitor.is_busy("%9", 3.0));
 }
@@ -1034,14 +1034,14 @@ fn test_control_mode_monitor_ignores_repaint_only_output() {
 fn test_control_mode_monitor_marks_visible_text_busy() {
     let monitor = ControlModeOutputMonitor::new("613");
 
-    monitor._record_control_mode_output("%9", "\x1b[2mhello\x1b[0m");
+    monitor.record_control_mode_output("%9", "\x1b[2mhello\x1b[0m");
 
     assert!(monitor.is_busy("%9", 3.0));
 }
 
 #[test]
 fn test_window_option_helpers() {
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
 
     set_window_option("dev:1", "window-status-style", "fg=red");
     clear_window_option("dev:1", "window-status-style");
@@ -1071,7 +1071,7 @@ fn test_window_option_helpers() {
 
 #[test]
 fn test_get_global_window_option_is_read_only_global_scope() {
-    let calls = _capture_run(0, "  #I #W  \n");
+    let calls = capture_run(0, "  #I #W  \n");
 
     let value = get_global_window_option("window-status-format");
 
@@ -1091,13 +1091,13 @@ fn test_get_global_window_option_is_read_only_global_scope() {
 
 #[test]
 fn test_get_global_window_option_returns_none_when_unset() {
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "\n", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "\n", "")));
     assert_eq!(get_global_window_option("window-status-format"), None);
 }
 
 #[test]
 fn test_list_panes_full_or_none_is_status_aware() {
-    _set_run_override(|_args, _check, _timeout| {
+    set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             0,
             "%1\t[w]\tzsh\tagent\tworker\tt1\tclaude\tduo\t\n",
@@ -1109,11 +1109,11 @@ fn test_list_panes_full_or_none_is_status_aware() {
     assert_eq!(panes.unwrap()[0].pane_id, "%1");
     assert_eq!(list_panes_full("dev:0")[0].pane_id, "%1");
 
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
     assert_eq!(list_panes_full_or_none("dev:0"), None);
     assert_eq!(list_panes_full("dev:0"), Vec::new());
 
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(0, "", "")));
     assert_eq!(list_panes_full_or_none("dev:0"), Some(Vec::new()));
 }
 
@@ -1123,19 +1123,19 @@ fn test_pane_scan_status_maps_no_server_variants() {
         "no server running on /tmp/tmux-501/default",
         "error connecting to /x/tmux-501/default (No such file or directory)",
     ] {
-        _set_run_override(move |_args, _check, _timeout| Ok(ok_run(1, "", stderr)));
+        set_run_override(move |_args, _check, _timeout| Ok(ok_run(1, "", stderr)));
         assert_eq!(list_panes_all_status(), (None, "no-server"));
         assert_eq!(list_team_windows_status(), (None, "no-server"));
     }
 
-    _set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
+    set_run_override(|_args, _check, _timeout| Ok(ok_run(1, "", "timeout")));
     assert_eq!(list_panes_all_status(), (None, "unknown"));
     assert_eq!(list_team_windows_status(), (None, "unknown"));
 }
 
 #[test]
 fn test_pane_scan_status_keeps_permission_denied_unknown() {
-    _set_run_override(|_args, _check, _timeout| {
+    set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             1,
             "",
@@ -1148,7 +1148,7 @@ fn test_pane_scan_status_keeps_permission_denied_unknown() {
 
 #[test]
 fn test_team_window_scan_parses_pr_and_tolerates_short_lines() {
-    _set_run_override(|_args, _check, _timeout| {
+    set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
             0,
             // second line is an old 6-field line: pr backfills ""
@@ -1169,7 +1169,7 @@ fn test_team_window_scan_parses_pr_and_tolerates_short_lines() {
 
 #[test]
 fn test_window_exists_requires_exact_id_echo() {
-    let calls = _capture_run(0, "@7\n");
+    let calls = capture_run(0, "@7\n");
     assert!(window_exists("@7"));
     let calls = calls.borrow();
     assert_eq!(calls.len(), 1);
@@ -1185,19 +1185,19 @@ fn test_window_exists_requires_exact_id_echo() {
 
 #[test]
 fn test_window_exists_false_paths() {
-    let calls = _capture_run(0, "@8\n");
+    let calls = capture_run(0, "@8\n");
     assert!(!window_exists("")); // no subprocess for empty id
     assert!(calls.borrow().is_empty());
     assert!(!window_exists("@7")); // mismatched id
-    _capture_run(1, "@7\n");
+    capture_run(1, "@7\n");
     assert!(!window_exists("@7")); // nonzero exit
-    _raising_run();
+    raising_run();
     assert!(!window_exists("@7")); // missing binary never raises
 }
 
 #[test]
 fn test_run_shell_detached_passes_command_byte_for_byte() {
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
     let cmd = "sleep 0.2 && tmux send-keys -t '%9' Escape";
     run_shell_detached(cmd);
     assert_eq!(
@@ -1208,20 +1208,20 @@ fn test_run_shell_detached_passes_command_byte_for_byte() {
 
 #[test]
 fn test_source_file_bool_contract() {
-    let calls = _capture_run(0, "");
+    let calls = capture_run(0, "");
     assert!(source_file("/x/enable.conf"));
     assert_eq!(
         *calls.borrow(),
         vec![(v(&["source-file", "/x/enable.conf"]), false, 5)]
     );
-    _capture_run(1, "");
+    capture_run(1, "");
     assert!(!source_file("/x/enable.conf"));
-    _raising_run();
+    raising_run();
     assert!(!source_file("/x/enable.conf"));
 }
 
 #[test]
 fn test_display_value_none_on_failure() {
-    _capture_run(1, "");
+    capture_run(1, "");
     assert_eq!(display_value("%5", "#{pane_left}"), None);
 }

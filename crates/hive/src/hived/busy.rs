@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use super::*;
 
-pub fn _fresh_snapshot_session_id_impl(pane_id: &str, now: Option<f64>) -> String {
+pub(crate) fn fresh_snapshot_session_id_impl(pane_id: &str, now: Option<f64>) -> String {
     let store = runtime_snapshots()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -30,7 +30,7 @@ pub fn _fresh_snapshot_session_id_impl(pane_id: &str, now: Option<f64>) -> Strin
 /// When ``force=true`` the cache is bypassed and re-populated. Callers use
 /// this to recover from a session switch (e.g. ``/new``) where the cached
 /// path points at the previous session's jsonl that no longer advances.
-pub fn _resolve_transcript_path_cached_impl(pane_id: &str, force: bool) -> Option<String> {
+pub(crate) fn resolve_transcript_path_cached_impl(pane_id: &str, force: bool) -> Option<String> {
     let now = monotonic();
     let snapshot_exists = runtime_snapshots()
         .lock()
@@ -92,7 +92,7 @@ pub fn _resolve_transcript_path_cached_impl(pane_id: &str, force: bool) -> Optio
     }
 }
 
-pub fn _check_mtime_within(path: &str, threshold_seconds: f64) -> Option<bool> {
+fn check_mtime_within(path: &str, threshold_seconds: f64) -> Option<bool> {
     let metadata = fs::metadata(path).ok()?;
     let mtime = metadata.modified().ok()?;
     let age = std::time::SystemTime::now()
@@ -109,9 +109,12 @@ pub fn _check_mtime_within(path: &str, threshold_seconds: f64) -> Option<bool> {
 ///     Some(false) — jsonl mtime is older than threshold (phantom redraw)
 ///     None        — path could not be determined or stat failed; caller
 ///                   falls back to the underlying control-mode signal.
-pub fn _transcript_progressed_recently_impl(pane_id: &str, threshold_seconds: f64) -> Option<bool> {
+pub(crate) fn transcript_progressed_recently_impl(
+    pane_id: &str,
+    threshold_seconds: f64,
+) -> Option<bool> {
     let path = hooked_resolve_transcript_path_cached(pane_id, false)?;
-    let progressed = _check_mtime_within(&path, threshold_seconds);
+    let progressed = check_mtime_within(&path, threshold_seconds);
     if progressed != Some(false) {
         return progressed;
     }
@@ -120,7 +123,7 @@ pub fn _transcript_progressed_recently_impl(pane_id: &str, threshold_seconds: f6
     match fresh {
         None => Some(false),
         Some(fresh) if fresh == path => Some(false),
-        Some(fresh) => _check_mtime_within(&fresh, threshold_seconds),
+        Some(fresh) => check_mtime_within(&fresh, threshold_seconds),
     }
 }
 
@@ -129,7 +132,7 @@ pub fn _transcript_progressed_recently_impl(pane_id: &str, threshold_seconds: f6
 /// A bg member pane answers from its job's engine entry; an interactive
 /// claude on the pane tty answers from its own registry entry (real TUI
 /// sessions report ``status``; headless/desktop ones do not and stay None).
-pub fn _claude_registry_busy(pane_id: &str) -> Option<bool> {
+pub(crate) fn claude_registry_busy(pane_id: &str) -> Option<bool> {
     if let Some(job_id) = hooked_cb_job_id_for_pane(pane_id) {
         let engine = hooked_cb_engine_session_for_job(&job_id)?;
         return Some(engine.status == "busy");
@@ -144,7 +147,7 @@ pub fn _claude_registry_busy(pane_id: &str) -> Option<bool> {
 ///
 /// None when no native source holds live state for the pane, which is the
 /// signal to fall back to the heuristic monitor source.
-pub fn _native_daemon_busy_impl(pane_id: &str) -> Option<bool> {
+pub(crate) fn native_daemon_busy_impl(pane_id: &str) -> Option<bool> {
     if pane_id.is_empty() {
         return None;
     }
@@ -154,20 +157,20 @@ pub fn _native_daemon_busy_impl(pane_id: &str) -> Option<bool> {
     if let Some(rt) = hooked_gl_runtime_for_pane(pane_id) {
         return Some(rt.busy);
     }
-    _claude_registry_busy(pane_id)
+    claude_registry_busy(pane_id)
 }
 
 /// Public ``busy`` signal: true when the agent is in mid-turn.
-pub fn _pane_is_truly_busy(pane_id: &str, monitor: Option<&dyn OutputMonitor>) -> bool {
-    _is_output_busy(pane_id, monitor, None)
+pub(crate) fn pane_is_truly_busy(pane_id: &str, monitor: Option<&dyn OutputMonitor>) -> bool {
+    is_output_busy(pane_id, monitor, None)
 }
 
-pub fn _busy_output_payload_impl(pane_id: &str) -> Map<String, Value> {
-    let monitor = _get_output_busy_monitor();
+pub(crate) fn busy_output_payload_impl(pane_id: &str) -> Map<String, Value> {
+    let monitor = get_output_busy_monitor();
     let mut map = Map::new();
     map.insert(
         "busy".to_string(),
-        Value::Bool(_pane_is_truly_busy(pane_id, monitor.as_deref())),
+        Value::Bool(pane_is_truly_busy(pane_id, monitor.as_deref())),
     );
     map
 }
@@ -176,7 +179,7 @@ pub fn _busy_output_payload_impl(pane_id: &str) -> Map<String, Value> {
 /// the output monitor gated by transcript progress. With an `inactive_age`
 /// (idle-notify's window-inactive boundary) output the user already saw
 /// while the window was active does not count.
-pub fn _is_output_busy(
+pub(crate) fn is_output_busy(
     pane_id: &str,
     monitor: Option<&dyn OutputMonitor>,
     inactive_age: Option<f64>,
@@ -209,7 +212,10 @@ pub fn _is_output_busy(
     false
 }
 
-pub fn _most_recent_output_pane(panes: &[String], monitor: Option<&dyn OutputMonitor>) -> String {
+pub(crate) fn most_recent_output_pane(
+    panes: &[String],
+    monitor: Option<&dyn OutputMonitor>,
+) -> String {
     let Some(monitor) = monitor else {
         return String::new();
     };
@@ -230,7 +236,7 @@ pub fn _most_recent_output_pane(panes: &[String], monitor: Option<&dyn OutputMon
         .unwrap_or_default()
 }
 
-pub(super) fn _idle_notify_target_pane(
+pub(crate) fn idle_notify_target_pane(
     panes: &[String],
     record: &IdleRecord,
     busy_monitor: Option<&dyn OutputMonitor>,
@@ -240,7 +246,7 @@ pub(super) fn _idle_notify_target_pane(
             return recorded.clone();
         }
     }
-    let recent = _most_recent_output_pane(panes, busy_monitor);
+    let recent = most_recent_output_pane(panes, busy_monitor);
     if !recent.is_empty() {
         return recent;
     }

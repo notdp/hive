@@ -27,7 +27,7 @@ pub fn request_send_payload(
     warn_on_long_body: bool,
 ) -> Result<Map<String, Value>> {
     if warn_on_long_body {
-        _maybe_warn_long_body(body, command_name);
+        maybe_warn_long_body(body, command_name);
     }
     ensure_team_hived(team, Path::new(workspace));
     let payload = crate::hived::request_send(
@@ -100,14 +100,14 @@ pub fn wait_for_peer_ready(
 // Codex-native gate
 // ---------------------------------------------------------------------------
 
-pub(crate) fn _is_codex_tool_env() -> bool {
+pub(crate) fn is_codex_tool_env() -> bool {
     !env_string("CODEX_THREAD_ID").trim().is_empty()
 }
 
 /// Hive-managed identity for a codex tool thread: a pane record (display
 /// bound), or a codex roster row whose sessionId is this thread — the
 /// registry, not the pane record, is the truth layer.
-pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
+pub(crate) fn codex_thread_is_hive_managed(thread_id: &str) -> bool {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {
         return false;
@@ -118,7 +118,7 @@ pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
     {
         return true;
     }
-    _codex_thread_member(thread_id).is_some()
+    codex_thread_member(thread_id).is_some()
 }
 
 /// (team, member) of the codex roster row whose sessionId is *thread_id*.
@@ -128,13 +128,13 @@ pub(crate) fn _codex_thread_is_hive_managed(thread_id: &str) -> bool {
 /// no liveness for a thread, and no cheaper authority exists (the pane
 /// record is display binding, not a heartbeat), so liveness is enforced at
 /// delivery, where the daemon answers or does not.
-pub(crate) fn _codex_thread_member(thread_id: &str) -> Option<(String, String)> {
+fn codex_thread_member(thread_id: &str) -> Option<(String, String)> {
     crate::registry::member_for_session(thread_id.trim(), Some("codex"))
 }
 
 /// The codex member this process's own tool thread belongs to, or None.
-pub(crate) fn _codex_thread_member_env() -> Option<(String, String)> {
-    _codex_thread_member(&env_string("CODEX_THREAD_ID"))
+pub(crate) fn codex_thread_member_env() -> Option<(String, String)> {
+    codex_thread_member(&env_string("CODEX_THREAD_ID"))
 }
 
 /// The grok member this process's own leader session belongs to, or None.
@@ -144,11 +144,11 @@ pub(crate) fn _codex_thread_member_env() -> Option<(String, String)> {
 /// its roster row — the same shape as the codex rung, and narrowed to grok
 /// rows for the same reason: another cli's row carrying the same id is a
 /// stranger.
-pub(crate) fn _grok_session_member_env() -> Option<(String, String)> {
+pub(crate) fn grok_session_member_env() -> Option<(String, String)> {
     crate::registry::member_for_session(env_string("GROK_SESSION_ID").trim(), Some("grok"))
 }
 
-pub(crate) fn _codex_relaunch_message() -> String {
+pub(crate) fn codex_relaunch_message() -> String {
     "this codex isn't hive-managed — hive runtime is degraded.\n\
      for future launches use hcodex (one-time setup, any shell):\n  \
      grep -q 'hive shell-init' ~/.zshrc || \
@@ -157,19 +157,19 @@ pub(crate) fn _codex_relaunch_message() -> String {
         .to_string()
 }
 
-pub(crate) fn _require_codex_native(invoked: Option<&str>) {
+pub(crate) fn require_codex_native(invoked: Option<&str>) {
     if let Some(invoked) = invoked {
         if _CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS.contains(&invoked) {
             return;
         }
     }
-    if !_is_codex_tool_env() || _codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID")) {
+    if !is_codex_tool_env() || codex_thread_is_hive_managed(&env_string("CODEX_THREAD_ID")) {
         return;
     }
-    fail(&_codex_relaunch_message());
+    fail(&codex_relaunch_message());
 }
 
-pub(crate) fn _hive_version() -> &'static str {
+pub(crate) fn hive_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -184,7 +184,7 @@ pub(crate) fn _hive_version() -> &'static str {
 /// touched (conservative: cannot prove any team dead). Team directories are
 /// never swept here: one without a `team.json` is a workspace `hive delete`
 /// deliberately kept.
-pub(crate) fn _gc_dead_teams() {
+pub(crate) fn gc_dead_teams() {
     let live_names: HashSet<String> = match crate::team::list_teams() {
         Ok(teams) => teams.iter().map(|t| map_str(t, "name")).collect(),
         Err(_) => return,
@@ -201,7 +201,7 @@ pub(crate) fn _gc_dead_teams() {
 // Member naming
 // ---------------------------------------------------------------------------
 
-pub(crate) fn _names_used_in_window(panes: &[PaneInfo]) -> HashSet<String> {
+fn names_used_in_window(panes: &[PaneInfo]) -> HashSet<String> {
     panes
         .iter()
         .map(|pane| pane.agent.trim().to_string())
@@ -210,7 +210,7 @@ pub(crate) fn _names_used_in_window(panes: &[PaneInfo]) -> HashSet<String> {
 }
 
 /// Pick a short random peer name while avoiding collisions in this window.
-pub(crate) fn _derive_agent_name(seen: &mut HashSet<String>) -> String {
+pub(crate) fn derive_agent_name(seen: &mut HashSet<String>) -> String {
     let available: Vec<&str> = _RANDOM_AGENT_NAMES
         .iter()
         .copied()
@@ -233,10 +233,10 @@ pub(crate) fn _derive_agent_name(seen: &mut HashSet<String>) -> String {
 
 /// Names taken in the team: the window's tagged panes, the lead, and the
 /// registry roster (a member whose pane is gone owns its name too).
-pub(crate) fn _window_seen_names(t: &Team, panes: &[PaneInfo]) -> HashSet<String> {
-    let mut seen_names = _names_used_in_window(panes);
+pub(crate) fn window_seen_names(t: &Team, panes: &[PaneInfo]) -> HashSet<String> {
+    let mut seen_names = names_used_in_window(panes);
     if let Some(entry) = crate::registry::load(&t.name) {
-        seen_names.extend(_roster_names(&entry));
+        seen_names.extend(roster_names(&entry));
     }
     seen_names.insert(if t.lead_name.is_empty() {
         LEAD_AGENT_NAME.to_string()
@@ -247,7 +247,7 @@ pub(crate) fn _window_seen_names(t: &Team, panes: &[PaneInfo]) -> HashSet<String
 }
 
 /// Member names in a registry entry's roster.
-pub(crate) fn _roster_names(entry: &Map<String, Value>) -> HashSet<String> {
+pub(crate) fn roster_names(entry: &Map<String, Value>) -> HashSet<String> {
     entry
         .get("members")
         .and_then(Value::as_array)
@@ -262,10 +262,7 @@ pub(crate) fn _roster_names(entry: &Map<String, Value>) -> HashSet<String> {
 }
 
 /// Why *name_override* cannot be claimed against *seen_names*, or None.
-pub(crate) fn _member_name_conflict(
-    name_override: &str,
-    seen_names: &HashSet<String>,
-) -> Option<String> {
+fn member_name_conflict(name_override: &str, seen_names: &HashSet<String>) -> Option<String> {
     if name_override == "flow" || name_override.starts_with("flow.") {
         return Some(format!(
             "'{name_override}' collides with the flow runner's mailbox address kind (flow.run), not a member name"
@@ -279,17 +276,17 @@ pub(crate) fn _member_name_conflict(
     None
 }
 
-pub(crate) fn _claim_member_name(name_override: &str, seen_names: &mut HashSet<String>) {
+pub(crate) fn claim_member_name(name_override: &str, seen_names: &mut HashSet<String>) {
     if name_override.is_empty() {
         return;
     }
-    if let Some(error) = _member_name_conflict(name_override, seen_names) {
+    if let Some(error) = member_name_conflict(name_override, seen_names) {
         fail(&error);
     }
     seen_names.insert(name_override.to_string());
 }
 
-pub(crate) fn _resolve_pane_cli(pane: &PaneInfo) -> String {
+fn resolve_pane_cli(pane: &PaneInfo) -> String {
     let source = if !pane.cli.is_empty() {
         pane.cli.clone()
     } else {
@@ -304,8 +301,8 @@ pub(crate) fn _resolve_pane_cli(pane: &PaneInfo) -> String {
     pane_cli
 }
 
-pub(crate) fn _classify_pane(pane: &PaneInfo) -> (&'static str, String) {
-    let pane_cli = _resolve_pane_cli(pane);
+pub(crate) fn classify_pane(pane: &PaneInfo) -> (&'static str, String) {
+    let pane_cli = resolve_pane_cli(pane);
     if crate::agent_cli::AGENT_CLI_NAMES.contains(&pane_cli.as_str()) {
         ("agent", pane_cli)
     } else {
@@ -313,7 +310,7 @@ pub(crate) fn _classify_pane(pane: &PaneInfo) -> (&'static str, String) {
     }
 }
 
-pub(crate) fn _hive_join_message(agent_name: &str, team_name: &str) -> String {
+fn hive_join_message(agent_name: &str, team_name: &str) -> String {
     format!(
         "You are '{agent_name}' in hive team '{team_name}'. \
          Context is pre-bound. Run `/hive:hive {team_name}` first and follow \
@@ -329,7 +326,7 @@ pub(crate) fn _hive_join_message(agent_name: &str, team_name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn _register_agent_member(
+pub(crate) fn register_agent_member(
     t: &mut Team,
     pane_id: &str,
     team_name: &str,
@@ -365,7 +362,7 @@ pub(crate) fn _register_agent_member(
         }
     };
     if notify {
-        if let Err(e) = agent.send(&_hive_join_message(agent_name, team_name)) {
+        if let Err(e) = agent.send(&hive_join_message(agent_name, team_name)) {
             rollback(t);
             fail(&format!(
                 "pane {pane_id} is not reachable over its native transport ({}); \
@@ -375,7 +372,7 @@ pub(crate) fn _register_agent_member(
             ));
         }
     }
-    if _registry_record_member(t, &agent) == RecordVerdict::Missing {
+    if registry_record_member(t, &agent) == RecordVerdict::Missing {
         rollback(t);
         fail(&format!(
             "team '{team_name}' has no registry entry (deleted?); nothing was registered"
@@ -386,7 +383,7 @@ pub(crate) fn _register_agent_member(
 
 /// Registry roster row keyed by engine session rather than pane — the orch
 /// at create, a Claude session that joins — with the caller's cwd.
-pub(crate) fn _session_member_row(name: &str, cli: &str, session_id: &str) -> Map<String, Value> {
+pub(crate) fn session_member_row(name: &str, cli: &str, session_id: &str) -> Map<String, Value> {
     let mut row = Map::new();
     row.insert("name".to_string(), Value::String(name.to_string()));
     row.insert("cli".to_string(), Value::String(cli.to_string()));
@@ -400,7 +397,7 @@ pub(crate) fn _session_member_row(name: &str, cli: &str, session_id: &str) -> Ma
 }
 
 /// Registry roster row for *agent*, resolving its engine identity.
-pub(crate) fn _member_registry_row(agent: &Agent) -> Map<String, Value> {
+pub(crate) fn member_registry_row(agent: &Agent) -> Map<String, Value> {
     let mut session_id = agent.session_id.clone().unwrap_or_default();
     let pane_id = agent.pane_id.clone();
     let cli_name = agent.cli.clone();
@@ -425,7 +422,7 @@ pub(crate) fn _member_registry_row(agent: &Agent) -> Map<String, Value> {
     row
 }
 
-/// What `_registry_record_member` did with the roster row.
+/// What `registry_record_member` did with the roster row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordVerdict {
     Written,
@@ -444,8 +441,8 @@ pub(crate) enum RecordVerdict {
 /// means the name was recycled and the successor's roster is not ours to
 /// edit. Both are reported, never repaired, so the caller can back out.
 #[must_use = "a Missing verdict leaves the member's engine orphaned unless the caller retires it"]
-pub(crate) fn _registry_record_member(t: &Team, agent: &Agent) -> RecordVerdict {
-    let row = _member_registry_row(agent);
+fn registry_record_member(t: &Team, agent: &Agent) -> RecordVerdict {
+    let row = member_registry_row(agent);
     let verdict = match crate::registry::record_member(&t.name, &row, &t.created_at_key()) {
         Ok("written") => RecordVerdict::Written,
         Ok("stale") => RecordVerdict::Stale,
@@ -481,7 +478,7 @@ pub fn spawn_team_agent<'a>(
     extra_env: &[(String, String)],
     cli_name: Option<&str>,
 ) -> Result<&'a Agent> {
-    let resolved_cli_name = _resolve_spawn_cli_name(cli_name);
+    let resolved_cli_name = resolve_spawn_cli_name(cli_name);
     if let Some(model_error) = crate::agent_cli::validate_spawn_model(&resolved_cli_name, model) {
         bail!("{model_error}");
     }
@@ -505,8 +502,8 @@ pub fn spawn_team_agent<'a>(
     )?;
     let ws = resolve_workspace(Some(&*t), false).unwrap_or_default();
     let _ = crate::context::save_context_for_pane(&agent.pane_id, team_name, &ws, agent_name);
-    _remember_context(team_name, &ws, LEAD_AGENT_NAME);
-    if _registry_record_member(t, &agent) == RecordVerdict::Missing {
+    remember_context(team_name, &ws, LEAD_AGENT_NAME);
+    if registry_record_member(t, &agent) == RecordVerdict::Missing {
         t.retire(agent_name);
         bail!("team '{team_name}' has no registry entry (deleted?); '{agent_name}' retired");
     }
@@ -519,8 +516,8 @@ pub fn spawn_team_agent<'a>(
 // ---------------------------------------------------------------------------
 
 /// Locate a pane by qualified agent name `<prefix>.<name>` across a pane
-/// listing. Pure core of `_find_qualified_agent_target` for tests.
-pub(crate) fn _find_qualified_agent_target_in(
+/// listing. Pure core of `find_qualified_agent_target` for tests.
+fn find_qualified_agent_target_in(
     panes: &[PaneInfo],
     qualified: &str,
 ) -> std::result::Result<Option<(String, String)>, String> {
@@ -558,10 +555,10 @@ pub(crate) fn _find_qualified_agent_target_in(
     )))
 }
 
-pub(crate) fn _find_qualified_agent_target(
+fn find_qualified_agent_target(
     qualified: &str,
 ) -> std::result::Result<Option<(String, String)>, String> {
-    _find_qualified_agent_target_in(&tmux::list_panes_all(), qualified)
+    find_qualified_agent_target_in(&tmux::list_panes_all(), qualified)
 }
 
 /// Split `<team>.<member>` when the prefix names an existing team.
@@ -569,7 +566,7 @@ pub(crate) fn _find_qualified_agent_target(
 /// Team existence is the registry first (a team whose window is gone still exists),
 /// the window scan second (a live pre-registry team). Returns
 /// `(team, member)` or `("", addr)` when the prefix names no team.
-pub(crate) fn _split_team_address(addr: &str) -> (String, String) {
+pub(crate) fn split_team_address(addr: &str) -> (String, String) {
     if !addr.contains('.') {
         return (String::new(), addr.to_string());
     }
@@ -580,7 +577,7 @@ pub(crate) fn _split_team_address(addr: &str) -> (String, String) {
     if crate::registry::load(prefix).is_some() {
         return (prefix.to_string(), rest.to_string());
     }
-    let window_claims = crate::team::_find_team_window(prefix, "")
+    let window_claims = crate::team::find_team_window(prefix, "")
         .map(|(window, _)| !window.is_empty())
         .unwrap_or(false);
     if window_claims {
@@ -594,9 +591,9 @@ pub(crate) fn _split_team_address(addr: &str) -> (String, String) {
 /// Qualified names (`<group>.<name>`) bypass the current-window check and
 /// load the target pane's team directly, so cross-team sends work across
 /// tmux windows. Bare names fall back to the caller's scoped team.
-pub(crate) fn _resolve_send_target_team(to_agent: &str) -> (String, Team) {
+pub(crate) fn resolve_send_target_team(to_agent: &str) -> (String, Team) {
     if to_agent.contains('.') && to_agent != "flow.run" {
-        let resolved = match _find_qualified_agent_target(to_agent) {
+        let resolved = match find_qualified_agent_target(to_agent) {
             Ok(resolved) => resolved,
             Err(err) => fail(&err),
         };
@@ -607,7 +604,7 @@ pub(crate) fn _resolve_send_target_team(to_agent: &str) -> (String, Team) {
                  (check @hive-agent tag on the target pane)"
             )),
         };
-        let team = ok_or_fail(_load_team(&target_team_name, ""));
+        let team = ok_or_fail(load_team(&target_team_name, ""));
         return (target_team_name, team);
     }
     let (team_name, t) = ok_or_fail(resolve_scoped_team(None, true));
@@ -618,27 +615,27 @@ pub(crate) fn _resolve_send_target_team(to_agent: &str) -> (String, Team) {
 }
 
 /// (team, member) whose recorded engine identity is *session_id*, any cli.
-pub(crate) fn _registry_member_for_session(session_id: &str) -> Option<(String, String)> {
+pub(crate) fn registry_member_for_session(session_id: &str) -> Option<(String, String)> {
     crate::registry::member_for_session(session_id, None)
 }
 
 /// Target resolution for a Claude-session guest (outside tmux).
-pub(crate) fn _resolve_guest_send_target(to_agent: &str, team: &str) -> (String, Team) {
+pub(crate) fn resolve_guest_send_target(to_agent: &str, team: &str) -> (String, Team) {
     if to_agent == "flow.run" {
         let me = crate::adapters::claude_sessions::self_session();
         let membership = me
             .as_ref()
-            .and_then(|s| _registry_member_for_session(&s.session_id));
+            .and_then(|s| registry_member_for_session(&s.session_id));
         let membership = match membership {
             Some(m) => m,
             None => fail("the flow mailbox is a team-internal address; only members deliver to it"),
         };
-        let loaded = ok_or_fail(_load_team(&membership.0, ""));
+        let loaded = ok_or_fail(load_team(&membership.0, ""));
         return (membership.0, loaded);
     }
     if !team.is_empty() {
-        let t = ok_or_fail(_load_team(team, ""));
-        if _existing_team_agent(&t, to_agent).is_none() {
+        let t = ok_or_fail(load_team(team, ""));
+        if existing_team_agent(&t, to_agent).is_none() {
             fail(&format!("agent '{to_agent}' not found in team '{team}'"));
         }
         let name = t.name.clone();
@@ -690,16 +687,16 @@ pub(crate) fn _resolve_guest_send_target(to_agent: &str, team: &str) -> (String,
         ));
     }
     let team_name = teams.remove(0);
-    let loaded = ok_or_fail(_load_team(&team_name, ""));
+    let loaded = ok_or_fail(load_team(&team_name, ""));
     (team_name, loaded)
 }
 
-pub(crate) fn _existing_team_agent(t: &Team, agent_name: &str) -> Option<Agent> {
+fn existing_team_agent(t: &Team, agent_name: &str) -> Option<Agent> {
     t.get(agent_name).ok()
 }
 
 /// pid -> (team, agent) for every live claude team-member engine.
-pub(crate) fn _live_member_pids() -> HashMap<i32, (String, String)> {
+pub(crate) fn live_member_pids() -> HashMap<i32, (String, String)> {
     let mut out = HashMap::new();
     for p in tmux::list_panes_all() {
         if !p.team.is_empty() && !p.agent.is_empty() {
@@ -713,7 +710,7 @@ pub(crate) fn _live_member_pids() -> HashMap<i32, (String, String)> {
     out
 }
 
-pub(crate) fn _sorted_member_rows(rows: Vec<Map<String, Value>>) -> Vec<Map<String, Value>> {
+pub(crate) fn sorted_member_rows(rows: Vec<Map<String, Value>>) -> Vec<Map<String, Value>> {
     let mut rows = rows;
     rows.sort_by_key(|m| {
         let name = map_str(m, "name");
@@ -731,7 +728,7 @@ mod tests {
     use super::*;
     use crate::testenv::EnvGuard;
 
-    fn _pane(agent: &str, team: &str, group: &str, pane_id: &str) -> PaneInfo {
+    fn pane(agent: &str, team: &str, group: &str, pane_id: &str) -> PaneInfo {
         PaneInfo {
             pane_id: pane_id.to_string(),
             title: String::new(),
@@ -748,18 +745,18 @@ mod tests {
 
     #[test]
     fn test_find_qualified_returns_none_for_bare_name() {
-        assert_eq!(_find_qualified_agent_target_in(&[], "orch"), Ok(None));
+        assert_eq!(find_qualified_agent_target_in(&[], "orch"), Ok(None));
     }
 
     #[test]
     fn test_find_qualified_finds_unique_match() {
         let panes = vec![
-            _pane("kraken.worker-1", "peer-1", "kraken", "%1"),
-            _pane("kraken.judge-1", "peer-1", "kraken", "%2"),
-            _pane("other", "peer-1", "", "%3"),
+            pane("kraken.worker-1", "peer-1", "kraken", "%1"),
+            pane("kraken.judge-1", "peer-1", "kraken", "%2"),
+            pane("other", "peer-1", "", "%3"),
         ];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "kraken.worker-1"),
+            find_qualified_agent_target_in(&panes, "kraken.worker-1"),
             Ok(Some(("peer-1".to_string(), "kraken.worker-1".to_string())))
         );
     }
@@ -767,12 +764,12 @@ mod tests {
     #[test]
     fn test_find_qualified_supports_public_squad_name_namespace() {
         let panes = vec![
-            _pane("peaky.worker-1000", "dev-0-duo-1000", "peaky", "%1"),
-            _pane("shelby.worker-1000", "dev-1-duo-1000", "shelby", "%2"),
-            _pane("peaky.orch", "dev-0", "peaky", "%3"),
+            pane("peaky.worker-1000", "dev-0-duo-1000", "peaky", "%1"),
+            pane("shelby.worker-1000", "dev-1-duo-1000", "shelby", "%2"),
+            pane("peaky.orch", "dev-0", "peaky", "%3"),
         ];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "peaky.worker-1000"),
+            find_qualified_agent_target_in(&panes, "peaky.worker-1000"),
             Ok(Some((
                 "dev-0-duo-1000".to_string(),
                 "peaky.worker-1000".to_string()
@@ -782,9 +779,9 @@ mod tests {
 
     #[test]
     fn test_find_qualified_returns_none_when_agent_missing() {
-        let panes = vec![_pane("kraken.worker-1", "peer-1", "kraken", "%1")];
+        let panes = vec![pane("kraken.worker-1", "peer-1", "kraken", "%1")];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "kraken.worker-2"),
+            find_qualified_agent_target_in(&panes, "kraken.worker-2"),
             Ok(None)
         );
     }
@@ -792,19 +789,19 @@ mod tests {
     #[test]
     fn test_find_qualified_raises_on_ambiguous() {
         let panes = vec![
-            _pane("kraken.worker-1", "peer-1", "kraken", "%1"),
-            _pane("kraken.worker-1", "peer-2", "kraken", "%5"),
+            pane("kraken.worker-1", "peer-1", "kraken", "%1"),
+            pane("kraken.worker-1", "peer-2", "kraken", "%5"),
         ];
-        let err = _find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
+        let err = find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
         assert!(err.contains("unique"));
     }
 
     #[test]
     fn test_find_qualified_resolves_missing_group() {
         // A pane with matching @hive-agent but no @hive-group is still routable.
-        let panes = vec![_pane("kraken.worker-1", "peer-1", "", "%1")];
+        let panes = vec![pane("kraken.worker-1", "peer-1", "", "%1")];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "kraken.worker-1"),
+            find_qualified_agent_target_in(&panes, "kraken.worker-1"),
             Ok(Some(("peer-1".to_string(), "kraken.worker-1".to_string())))
         );
     }
@@ -813,47 +810,42 @@ mod tests {
     fn test_find_qualified_rejects_conflicting_group() {
         // A pane with @hive-agent=kraken.worker-1 but @hive-group=mafia is a
         // tagging mistake — the resolver must error, not silently route.
-        let panes = vec![_pane("kraken.worker-1", "peer-1", "mafia", "%1")];
-        let err = _find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
+        let panes = vec![pane("kraken.worker-1", "peer-1", "mafia", "%1")];
+        let err = find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
         assert!(err.contains("conflicting"));
     }
 
     #[test]
     fn test_find_qualified_ignores_same_suffix_in_other_public_squad() {
-        let panes = vec![_pane(
-            "shelby.worker-1000",
-            "dev-1-duo-1000",
-            "shelby",
-            "%2",
-        )];
+        let panes = vec![pane("shelby.worker-1000", "dev-1-duo-1000", "shelby", "%2")];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "peaky.worker-1000"),
+            find_qualified_agent_target_in(&panes, "peaky.worker-1000"),
             Ok(None)
         );
     }
 
     #[test]
     fn test_find_qualified_requires_non_empty_group_prefix() {
-        assert_eq!(_find_qualified_agent_target_in(&[], ".worker-1"), Ok(None));
+        assert_eq!(find_qualified_agent_target_in(&[], ".worker-1"), Ok(None));
     }
 
     #[test]
     fn test_find_qualified_ambiguous_with_missing_groups() {
         // Duplicate @hive-agent across panes is ambiguous even when both lack group.
         let panes = vec![
-            _pane("kraken.worker-1", "peer-1", "", "%1"),
-            _pane("kraken.worker-1", "peer-2", "", "%5"),
+            pane("kraken.worker-1", "peer-1", "", "%1"),
+            pane("kraken.worker-1", "peer-2", "", "%5"),
         ];
-        let err = _find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
+        let err = find_qualified_agent_target_in(&panes, "kraken.worker-1").unwrap_err();
         assert!(err.contains("unique"));
     }
 
     #[test]
     fn test_find_qualified_skips_pane_without_team() {
         // A pane with matching agent name but empty team is not a valid target.
-        let panes = vec![_pane("kraken.worker-1", "", "kraken", "%1")];
+        let panes = vec![pane("kraken.worker-1", "", "kraken", "%1")];
         assert_eq!(
-            _find_qualified_agent_target_in(&panes, "kraken.worker-1"),
+            find_qualified_agent_target_in(&panes, "kraken.worker-1"),
             Ok(None)
         );
     }
@@ -861,34 +853,28 @@ mod tests {
     #[test]
     fn test_split_team_address_passes_through_bare_and_malformed() {
         assert_eq!(
-            _split_team_address("plain"),
+            split_team_address("plain"),
             ("".to_string(), "plain".to_string())
         );
-        assert_eq!(
-            _split_team_address(".x"),
-            ("".to_string(), ".x".to_string())
-        );
-        assert_eq!(
-            _split_team_address("x."),
-            ("".to_string(), "x.".to_string())
-        );
+        assert_eq!(split_team_address(".x"), ("".to_string(), ".x".to_string()));
+        assert_eq!(split_team_address("x."), ("".to_string(), "x.".to_string()));
     }
 
     #[test]
     fn test_derive_agent_name_avoids_seen_and_falls_back() {
         let mut seen: HashSet<String> = ["yoyo", "lulu"].iter().map(|s| s.to_string()).collect();
-        let name = _derive_agent_name(&mut seen);
+        let name = derive_agent_name(&mut seen);
         assert!(_RANDOM_AGENT_NAMES.contains(&name.as_str()));
         assert_ne!(name, "yoyo");
         assert_ne!(name, "lulu");
         assert!(seen.contains(&name));
 
         let mut all: HashSet<String> = _RANDOM_AGENT_NAMES.iter().map(|s| s.to_string()).collect();
-        assert_eq!(_derive_agent_name(&mut all), "agent-1");
-        assert_eq!(_derive_agent_name(&mut all), "agent-2");
+        assert_eq!(derive_agent_name(&mut all), "agent-1");
+        assert_eq!(derive_agent_name(&mut all), "agent-2");
     }
 
-    fn _registry_team(name: &str, created_at: f64, members: &[&str]) -> Team {
+    fn registry_team(name: &str, created_at: f64, members: &[&str]) -> Team {
         let rows: Vec<Map<String, Value>> = members
             .iter()
             .map(|n| {
@@ -905,17 +891,17 @@ mod tests {
         }
     }
 
-    fn _paneless_agent(name: &str, cli: &str) -> Agent {
+    fn paneless_agent(name: &str, cli: &str) -> Agent {
         Agent {
             session_id: Some("sid-1".to_string()),
             ..crate::agent::testhook::fake_agent(name, "honey", "", cli)
         }
     }
 
-    fn _roster(name: &str) -> Vec<String> {
+    fn roster(name: &str) -> Vec<String> {
         crate::registry::load(name)
             .map(|e| {
-                let mut v: Vec<String> = _roster_names(&e).into_iter().collect();
+                let mut v: Vec<String> = roster_names(&e).into_iter().collect();
                 v.sort();
                 v
             })
@@ -925,31 +911,31 @@ mod tests {
     #[test]
     fn test_seen_names_include_registry_only_members() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
+        let _env = iso(tmp.path());
         let pool: Vec<&str> = _RANDOM_AGENT_NAMES.to_vec();
-        let t = _registry_team("honey", 100.0, &pool);
+        let t = registry_team("honey", 100.0, &pool);
 
-        let mut seen = _window_seen_names(&t, &[]);
+        let mut seen = window_seen_names(&t, &[]);
 
         for name in &pool {
             assert!(seen.contains(*name), "{name}");
         }
         assert_eq!(
-            _member_name_conflict(pool[0], &seen).unwrap(),
+            member_name_conflict(pool[0], &seen).unwrap(),
             format!("name '{}' is already taken in this team", pool[0])
         );
-        assert_eq!(_derive_agent_name(&mut seen), "agent-1");
+        assert_eq!(derive_agent_name(&mut seen), "agent-1");
     }
 
     #[test]
     fn test_record_member_never_resurrects_a_deleted_team() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
-        let t = _registry_team("honey", 100.0, &[]);
+        let _env = iso(tmp.path());
+        let t = registry_team("honey", 100.0, &[]);
         crate::registry::delete_team("honey").unwrap();
-        let agent = _paneless_agent("worker", "claude");
+        let agent = paneless_agent("worker", "claude");
 
-        assert_eq!(_registry_record_member(&t, &agent), RecordVerdict::Missing);
+        assert_eq!(registry_record_member(&t, &agent), RecordVerdict::Missing);
 
         assert!(!crate::registry::entry_path("honey").unwrap().exists());
     }
@@ -957,32 +943,29 @@ mod tests {
     #[test]
     fn test_record_member_leaves_a_recreated_team_alone() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
-        let stale = _registry_team("honey", 100.0, &["old"]);
-        let _fresh = _registry_team("honey", 200.0, &["new"]);
-        let agent = _paneless_agent("worker", "claude");
+        let _env = iso(tmp.path());
+        let stale = registry_team("honey", 100.0, &["old"]);
+        let _fresh = registry_team("honey", 200.0, &["new"]);
+        let agent = paneless_agent("worker", "claude");
 
-        assert_eq!(
-            _registry_record_member(&stale, &agent),
-            RecordVerdict::Stale
-        );
+        assert_eq!(registry_record_member(&stale, &agent), RecordVerdict::Stale);
 
         let entry = crate::registry::load("honey").unwrap();
         assert_eq!(entry["createdAt"], "200.0");
-        assert_eq!(_roster("honey"), vec!["new".to_string()]);
+        assert_eq!(roster("honey"), vec!["new".to_string()]);
     }
 
     #[test]
     fn test_headless_created_at_round_trips_through_record_member() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
+        let _env = iso(tmp.path());
         // an integral epoch is the case `format!("{now}")` got wrong
-        let t = _registry_team("honey", 1_700_000_000.0, &[]);
-        let agent = _paneless_agent("worker", "codex");
+        let t = registry_team("honey", 1_700_000_000.0, &[]);
+        let agent = paneless_agent("worker", "codex");
 
-        assert_eq!(_registry_record_member(&t, &agent), RecordVerdict::Written);
+        assert_eq!(registry_record_member(&t, &agent), RecordVerdict::Written);
 
-        assert_eq!(_roster("honey"), vec!["worker".to_string()]);
+        assert_eq!(roster("honey"), vec!["worker".to_string()]);
     }
 
     #[test]
@@ -992,7 +975,7 @@ mod tests {
             m.insert("name".to_string(), Value::String(name.to_string()));
             m
         };
-        let sorted = _sorted_member_rows(vec![row("zed"), row("orch"), row("abe")]);
+        let sorted = sorted_member_rows(vec![row("zed"), row("orch"), row("abe")]);
         let names: Vec<String> = sorted.iter().map(|m| map_str(m, "name")).collect();
         assert_eq!(names, vec!["orch", "abe", "zed"]);
     }
@@ -1000,7 +983,7 @@ mod tests {
     // --- codex-native gate: pane-less members are hive-managed via the registry ---
 
     /// Isolated HIVE_HOME and CODEX_HOME under *tmp*, for the test's lifetime.
-    fn _iso(tmp: &std::path::Path) -> EnvGuard {
+    fn iso(tmp: &std::path::Path) -> EnvGuard {
         let mut env = EnvGuard::new();
         env.set("HIVE_HOME", tmp.join("hive"));
         env.set("CODEX_HOME", tmp.join("codex"));
@@ -1010,23 +993,23 @@ mod tests {
     #[test]
     fn test_codex_thread_unknown_everywhere_is_unmanaged() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
-        assert!(!_codex_thread_is_hive_managed("01aa-unknown"));
-        assert!(!_codex_thread_is_hive_managed(""));
+        let _env = iso(tmp.path());
+        assert!(!codex_thread_is_hive_managed("01aa-unknown"));
+        assert!(!codex_thread_is_hive_managed(""));
     }
 
     #[test]
     fn test_codex_thread_with_pane_record_is_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
+        let _env = iso(tmp.path());
         crate::adapters::codex_app_server::write_pane_thread("%7", "01aa-pane", "/tmp").unwrap();
-        assert!(_codex_thread_is_hive_managed("01aa-pane"));
+        assert!(codex_thread_is_hive_managed("01aa-pane"));
     }
 
     #[test]
     fn test_codex_thread_matching_registry_member_is_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let _env = _iso(tmp.path());
+        let _env = iso(tmp.path());
         let member: Map<String, Value> = [
             ("name", "review"),
             ("cli", "codex"),
@@ -1037,10 +1020,10 @@ mod tests {
         .collect();
         crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
         // no pane record: a pane-less member's identity is the registry row
-        assert!(_codex_thread_is_hive_managed(" 01aa-headless "));
-        assert!(!_codex_thread_is_hive_managed("01aa-other"));
+        assert!(codex_thread_is_hive_managed(" 01aa-headless "));
+        assert!(!codex_thread_is_hive_managed("01aa-other"));
         assert_eq!(
-            _codex_thread_member(" 01aa-headless "),
+            codex_thread_member(" 01aa-headless "),
             Some(("rr".to_string(), "review".to_string()))
         );
     }
@@ -1048,7 +1031,7 @@ mod tests {
     #[test]
     fn test_codex_thread_matching_claude_row_is_not_managed() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut env = _iso(tmp.path());
+        let mut env = iso(tmp.path());
         let member: Map<String, Value> = [
             ("name", "orch"),
             ("cli", "claude"),
@@ -1060,10 +1043,10 @@ mod tests {
         crate::registry::record_team("rr", "", "1.0", &[member], "").unwrap();
         // A claude session id colliding with the thread id is a stranger to
         // the codex gate; the generic session lookup still sees the row.
-        assert_eq!(_codex_thread_member("01aa-claude"), None);
-        assert!(!_codex_thread_is_hive_managed("01aa-claude"));
-        assert!(_registry_member_for_session("01aa-claude").is_some());
+        assert_eq!(codex_thread_member("01aa-claude"), None);
+        assert!(!codex_thread_is_hive_managed("01aa-claude"));
+        assert!(registry_member_for_session("01aa-claude").is_some());
         env.set("CODEX_THREAD_ID", "01aa-claude");
-        assert_eq!(_codex_thread_member_env(), None);
+        assert_eq!(codex_thread_member_env(), None);
     }
 }

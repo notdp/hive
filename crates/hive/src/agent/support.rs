@@ -11,11 +11,11 @@ pub(super) const _TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
 /// Escape a string for safe shell use.
-pub(super) fn _shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn _resolve_session_id_from_runtime(pane_id: &str) -> Option<String> {
+fn resolve_session_id_from_runtime(pane_id: &str) -> Option<String> {
     let resolved_pane = if !pane_id.is_empty() {
         pane_id.to_string()
     } else {
@@ -29,7 +29,7 @@ fn _resolve_session_id_from_runtime(pane_id: &str) -> Option<String> {
 
 /// Best-effort lookup for the current pane's agent session ID.
 pub fn detect_current_session_id(pane_id: &str) -> Option<String> {
-    _resolve_session_id_from_runtime(pane_id)
+    resolve_session_id_from_runtime(pane_id)
 }
 
 /// A native transport (codex daemon / grok leader / claude inbox) did not accept the
@@ -48,8 +48,8 @@ impl std::fmt::Display for DeliveryError {
 impl std::error::Error for DeliveryError {}
 
 /// Submit text to an interactive agent TUI, preserving any pending draft.
-pub fn _submit_interactive_text(pane_id: &str, text: &str, cli: &str) -> anyhow::Result<()> {
-    let profile_name = _resolve_profile_name(pane_id, cli);
+pub(crate) fn submit_interactive_text(pane_id: &str, text: &str, cli: &str) -> anyhow::Result<()> {
+    let profile_name = resolve_profile_name(pane_id, cli);
     if profile_name == "claude" {
         let job_id = hooked_job_id_for_pane(pane_id).unwrap_or_default();
         if !job_id.is_empty() {
@@ -78,14 +78,14 @@ pub fn _submit_interactive_text(pane_id: &str, text: &str, cli: &str) -> anyhow:
         hooked_sleep(0.05);
     }
 
-    let buffer_name = _save_and_clear_draft(pane_id, &profile_name);
+    let buffer_name = save_and_clear_draft(pane_id, &profile_name);
 
     hooked_send_keys(pane_id, text, false)?;
     hooked_sleep(0.05);
     hooked_send_key(pane_id, "Enter")?;
 
     if !buffer_name.is_empty() {
-        _restore_draft(pane_id, &profile_name, &buffer_name);
+        restore_draft(pane_id, &profile_name, &buffer_name);
     }
     Ok(())
 }
@@ -97,7 +97,7 @@ pub fn _submit_interactive_text(pane_id: &str, text: &str, cli: &str) -> anyhow:
 /// buffer — a save that did not happen must not cost the user the draft —
 /// and a clear that failed halfway still reports its buffer so the restore
 /// pastes it back.
-pub(super) fn _save_and_clear_draft(pane_id: &str, profile_name: &str) -> String {
+pub(crate) fn save_and_clear_draft(pane_id: &str, profile_name: &str) -> String {
     if !hooked_supported_profile(profile_name) {
         return String::new();
     }
@@ -118,7 +118,7 @@ pub(super) fn _save_and_clear_draft(pane_id: &str, profile_name: &str) -> String
     buffer_name
 }
 
-fn _restore_draft(pane_id: &str, profile_name: &str, buffer_name: &str) {
+fn restore_draft(pane_id: &str, profile_name: &str, buffer_name: &str) {
     if hooked_wait_input_empty(pane_id, profile_name, 2.0).is_ok() {
         hooked_paste_buffer(buffer_name, pane_id, true);
     }
@@ -126,7 +126,7 @@ fn _restore_draft(pane_id: &str, profile_name: &str, buffer_name: &str) {
 }
 
 /// Prefer runtime detection; fall back to the declared cli.
-fn _resolve_profile_name(pane_id: &str, cli: &str) -> String {
+fn resolve_profile_name(pane_id: &str, cli: &str) -> String {
     #[cfg(test)]
     if let Some(Some(name)) = testhook::with(|h| h.resolve_profile_name.clone()) {
         return name;
@@ -147,7 +147,7 @@ fn _resolve_profile_name(pane_id: &str, cli: &str) -> String {
 /// command runs, so readiness is just the TUI being up — process evidence,
 /// no screen scraping. Best-effort like the banner wait it replaces: a
 /// timeout is not fatal.
-pub(super) fn _wait_codex_attached(pane_id: &str, timeout: f64, interval: f64) -> bool {
+pub(crate) fn wait_codex_attached(pane_id: &str, timeout: f64, interval: f64) -> bool {
     let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
     loop {
         if let Some(profile) = hooked_detect_cli_process_for_pane(pane_id) {
@@ -178,7 +178,7 @@ pub(super) fn _wait_codex_attached(pane_id: &str, timeout: f64, interval: f64) -
 /// the hived's eager connect. The grok acceptance run is the oracle: spawn
 /// time well under `AGENT_STARTUP_TIMEOUT`, `connect-grok` connected.
 /// Best-effort like the codex thread wait: a timeout is not fatal.
-pub(super) fn _wait_grok_session_ready(
+pub(crate) fn wait_grok_session_ready(
     pane_id: &str,
     session_id: &str,
     timeout: f64,
@@ -210,7 +210,7 @@ pub(super) fn _wait_grok_session_ready(
     }
 }
 
-pub(super) fn _uuid4() -> String {
+pub(crate) fn uuid4() -> String {
     let mut bytes = [0u8; 16];
     let read = std::fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes));

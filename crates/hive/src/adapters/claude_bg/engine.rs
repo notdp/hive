@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::adapters::base::read_json_object;
-use crate::adapters::claude_sessions::{_config_dir, _pid_alive, _registry_dir, truthy_str};
+use crate::adapters::claude_sessions::{config_dir, pid_alive, registry_dir, truthy_str};
 
 use super::{now_epoch, STATUS_STALE_AFTER_SECONDS};
 
@@ -14,15 +14,15 @@ use super::testhook;
 // --------------------------------------------------------------------------
 // pane <-> job records
 // --------------------------------------------------------------------------
-fn _control_dir() -> PathBuf {
-    _config_dir().join("hive-control")
+fn control_dir() -> PathBuf {
+    config_dir().join("hive-control")
 }
 
 /// Per-pane record of the bg job hive bound to this pane.
 pub fn pane_job_path(pane: &str) -> PathBuf {
     let slug = pane.replace('%', "");
     let slug = if slug.is_empty() { "default" } else { &slug };
-    _control_dir().join(format!("hive-pane-{slug}.job"))
+    control_dir().join(format!("hive-pane-{slug}.job"))
 }
 
 pub fn write_pane_job(
@@ -80,7 +80,7 @@ pub fn job_id_for_pane(pane: &str) -> Option<String> {
 }
 
 /// Inverse of [`pane_job_path`]: `hive-pane-19.job` -> `%19`.
-fn _pane_from_record_name(name: &str) -> Option<String> {
+fn pane_from_record_name(name: &str) -> Option<String> {
     let slug = name.strip_prefix("hive-pane-")?.strip_suffix(".job")?;
     if slug.is_empty() || slug == "default" {
         return None;
@@ -90,7 +90,7 @@ fn _pane_from_record_name(name: &str) -> Option<String> {
 
 /// Pane ids that currently have a job record on disk.
 pub fn list_recorded_panes() -> Vec<String> {
-    let root = _control_dir();
+    let root = control_dir();
     let Ok(entries) = fs::read_dir(&root) else {
         return Vec::new();
     };
@@ -98,7 +98,7 @@ pub fn list_recorded_panes() -> Vec<String> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if let Some(pane) = _pane_from_record_name(name) {
+        if let Some(pane) = pane_from_record_name(name) {
             panes.push(pane);
         }
     }
@@ -141,7 +141,7 @@ pub struct EngineSession {
     pub name: String,           // the job's label, as the panel and ledger show it
 }
 
-pub(super) fn _entry_to_engine(data: &Map<String, Value>) -> Option<EngineSession> {
+pub(crate) fn entry_to_engine(data: &Map<String, Value>) -> Option<EngineSession> {
     if data.get("kind").and_then(Value::as_str) != Some("bg") {
         return None;
     }
@@ -151,7 +151,7 @@ pub(super) fn _entry_to_engine(data: &Map<String, Value>) -> Option<EngineSessio
     if job_id.is_empty() || sock.is_empty() {
         return None;
     }
-    if !_pid_alive(pid as i32) || !Path::new(&sock).exists() {
+    if !pid_alive(pid as i32) || !Path::new(&sock).exists() {
         return None;
     }
     let updated = data
@@ -181,7 +181,7 @@ pub fn engine_session_for_job(job_id: &str) -> Option<EngineSession> {
     if job_id.is_empty() {
         return None;
     }
-    let root = _registry_dir();
+    let root = registry_dir();
     let entries = fs::read_dir(&root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -191,7 +191,7 @@ pub fn engine_session_for_job(job_id: &str) -> Option<EngineSession> {
         let Some(data) = read_json_object(&path) else {
             continue;
         };
-        if let Some(engine) = _entry_to_engine(&data) {
+        if let Some(engine) = entry_to_engine(&data) {
             if engine.job_id == job_id {
                 return Some(engine);
             }
@@ -226,8 +226,8 @@ pub(super) fn hooked_engine_for_job(job_id: &str) -> Option<EngineSession> {
 /// The bg engine entry registered under *pid*, or None (viewer pids and
 /// interactive sessions have no bg entry).
 pub fn engine_session_for_pid(pid: u32) -> Option<EngineSession> {
-    let data = read_json_object(&_registry_dir().join(format!("{pid}.json")))?;
-    _entry_to_engine(&data)
+    let data = read_json_object(&registry_dir().join(format!("{pid}.json")))?;
+    entry_to_engine(&data)
 }
 
 /// True when *pane* records a job whose engine is live right now.

@@ -179,7 +179,7 @@ server option `@hive-prefix-m` so a later install behind hive's own binding
 still has it), so a non-team window keeps tmux's `select-pane -m` or the
 human's binding. `@hive-busy`, `@hive-unread` and `@hive-ticker` are the
 hived's status tick (`hived/status.rs`), written as edges and only to
-agent-role panes: busy is the same `_is_output_busy` verdict idle-notify
+agent-role panes: busy is the same `is_output_busy` verdict idle-notify
 uses; unread is a send the hived accepted for the pane and has not seen it
 busy since; the ticker is the two newest bus sends as `from → to · age ·
 "first words"`, `#` doubled because the status line draws an option value

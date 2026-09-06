@@ -63,7 +63,7 @@ struct Completed {
     stderr: String,
 }
 
-fn _git(args: &[&str], cwd: Option<&Path>, timeout: f64) -> Result<Completed> {
+fn git(args: &[&str], cwd: Option<&Path>, timeout: f64) -> Result<Completed> {
     let mut cmd = Command::new("git");
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(c) = cwd {
@@ -117,8 +117,8 @@ fn _git(args: &[&str], cwd: Option<&Path>, timeout: f64) -> Result<Completed> {
     })
 }
 
-fn _git_ok(args: &[&str], cwd: Option<&Path>, timeout: f64) -> Result<String> {
-    let r = _git(args, cwd, timeout)?;
+fn git_ok(args: &[&str], cwd: Option<&Path>, timeout: f64) -> Result<String> {
+    let r = git(args, cwd, timeout)?;
     if r.code != 0 {
         let detail = if r.stderr.is_empty() {
             &r.stdout
@@ -183,7 +183,7 @@ fn py_repr(s: &str) -> String {
 /// in another feature worktree still lands new worktrees in the main pool
 /// instead of nesting them under the current worktree.
 pub fn repo_anchor(cwd: Option<&Path>) -> Result<PathBuf> {
-    let r = _git(
+    let r = git(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         cwd,
         10.0,
@@ -217,7 +217,7 @@ pub fn validate_feature(feature: &str) -> Result<()> {
             py_repr(feature)
         )));
     }
-    let r = _git(&["check-ref-format", "--branch", feature], None, 10.0)?;
+    let r = git(&["check-ref-format", "--branch", feature], None, 10.0)?;
     if r.code != 0 {
         return Err(WorktreeError(format!(
             "invalid feature name (not a valid branch name): {}",
@@ -240,7 +240,7 @@ pub struct WorktreeInfo {
 }
 
 pub fn list_worktrees(anchor: &Path) -> Result<Vec<WorktreeInfo>> {
-    let out = _git_ok(&["worktree", "list", "--porcelain"], Some(anchor), 15.0)?;
+    let out = git_ok(&["worktree", "list", "--porcelain"], Some(anchor), 15.0)?;
     let mut items: Vec<WorktreeInfo> = Vec::new();
     let mut current: Option<WorktreeInfo> = None;
     for line in out.lines() {
@@ -286,7 +286,7 @@ pub fn find_feature_worktree<'a>(
 
 pub fn branch_exists(anchor: &Path, feature: &str) -> Result<bool> {
     let refname = format!("refs/heads/{feature}");
-    let r = _git(
+    let r = git(
         &["show-ref", "--verify", "--quiet", &refname],
         Some(anchor),
         10.0,
@@ -296,7 +296,7 @@ pub fn branch_exists(anchor: &Path, feature: &str) -> Result<bool> {
 
 pub fn rev_parse(anchor: &Path, refname: &str) -> Result<String> {
     let spec = format!("{refname}^{{commit}}");
-    let r = _git(
+    let r = git(
         &["rev-parse", "--verify", "--quiet", &spec],
         Some(anchor),
         10.0,
@@ -310,7 +310,7 @@ pub fn rev_parse(anchor: &Path, refname: &str) -> Result<String> {
 }
 
 pub fn is_ancestor(anchor: &Path, ancestor_oid: &str, refname: &str) -> Result<bool> {
-    let r = _git(
+    let r = git(
         &["merge-base", "--is-ancestor", ancestor_oid, refname],
         Some(anchor),
         10.0,
@@ -319,7 +319,7 @@ pub fn is_ancestor(anchor: &Path, ancestor_oid: &str, refname: &str) -> Result<b
 }
 
 pub fn worktree_dirty(wt_path: &str) -> Result<bool> {
-    let out = _git_ok(
+    let out = git_ok(
         &["status", "--porcelain", "--untracked-files=all"],
         Some(Path::new(wt_path)),
         20.0,
@@ -334,7 +334,7 @@ pub fn in_progress_ops(wt_path: &str) -> Result<Vec<String>> {
         args.push("--git-path");
         args.push(marker);
     }
-    let out = _git_ok(&args, Some(Path::new(wt_path)), 10.0)?;
+    let out = git_ok(&args, Some(Path::new(wt_path)), 10.0)?;
     let paths: Vec<&str> = out.lines().collect();
     let mut ops: Vec<String> = Vec::new();
     let base = Path::new(wt_path);
@@ -354,8 +354,8 @@ pub fn in_progress_ops(wt_path: &str) -> Result<Vec<String>> {
 // --- Branch metadata (git config branch.<feature>.hive-*) ----------------------
 
 pub fn read_meta(anchor: &Path, feature: &str) -> Result<HashMap<String, String>> {
-    let pattern = format!("^branch\\.{}\\.(hive-|gh-merge-base)", _re_escape(feature));
-    let r = _git(&["config", "--get-regexp", &pattern], Some(anchor), 10.0)?;
+    let pattern = format!("^branch\\.{}\\.(hive-|gh-merge-base)", re_escape(feature));
+    let r = git(&["config", "--get-regexp", &pattern], Some(anchor), 10.0)?;
     let mut meta: HashMap<String, String> = HashMap::new();
     if r.code != 0 {
         return Ok(meta);
@@ -374,7 +374,7 @@ pub fn read_meta(anchor: &Path, feature: &str) -> Result<HashMap<String, String>
 }
 
 /// Python 3.7+ `re.escape`: backslash-escape the special set only.
-fn _re_escape(s: &str) -> String {
+fn re_escape(s: &str) -> String {
     const SPECIAL: &str = "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c";
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -389,7 +389,7 @@ fn _re_escape(s: &str) -> String {
 pub fn write_meta(anchor: &Path, feature: &str, meta: &HashMap<String, String>) -> Result<()> {
     for (key, value) in meta {
         let name = format!("branch.{feature}.{key}");
-        _git_ok(&["config", &name, value], Some(anchor), 10.0)?;
+        git_ok(&["config", &name, value], Some(anchor), 10.0)?;
     }
     Ok(())
 }
@@ -402,7 +402,7 @@ pub fn clear_meta(anchor: &Path, feature: &str) -> Result<Vec<String>> {
     for key in META_KEYS {
         if existing.contains_key(key) {
             let name = format!("branch.{feature}.{key}");
-            let _ = _git(&["config", "--unset", &name], Some(anchor), 10.0)?;
+            let _ = git(&["config", "--unset", &name], Some(anchor), 10.0)?;
             cleared.push(key.to_string());
         }
     }
@@ -410,7 +410,7 @@ pub fn clear_meta(anchor: &Path, feature: &str) -> Result<Vec<String>> {
 }
 
 pub fn hive_labeled_branches(anchor: &Path) -> Result<Vec<String>> {
-    let r = _git(
+    let r = git(
         &["config", "--get-regexp", "^branch\\..*\\.hive-owner$"],
         Some(anchor),
         10.0,
@@ -467,7 +467,7 @@ pub fn resolve_base(
             source: "integration".to_string(),
         });
     }
-    let r = _git(
+    let r = git(
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
         Some(anchor),
         10.0,
@@ -556,7 +556,7 @@ pub fn start(
 ) -> Result<StartResult> {
     validate_feature(feature)?;
     let expected = feature_path(anchor, feature);
-    let common_dir = _git_ok(
+    let common_dir = git_ok(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         Some(anchor),
         10.0,
@@ -639,7 +639,7 @@ pub fn start(
         if c.prunable || !Path::new(&c.path).exists() {
             // Stale registration (directory manually removed): prune, then
             // treat the feature as branch-only.
-            _git_ok(&["worktree", "prune"], Some(anchor), 15.0)?;
+            git_ok(&["worktree", "prune"], Some(anchor), 15.0)?;
             checkout = None;
         }
     }
@@ -700,7 +700,7 @@ pub fn start(
                 .map_err(|e| WorktreeError(format!("cannot create {}: {e}", parent.display())))?;
         }
         let expected_str = path_str(&expected);
-        _git_ok(
+        git_ok(
             &["worktree", "add", &expected_str, feature],
             Some(anchor),
             120.0,
@@ -731,7 +731,7 @@ pub fn start(
             .map_err(|e| WorktreeError(format!("cannot create {}: {e}", parent.display())))?;
     }
     let expected_str = path_str(&expected);
-    _git_ok(
+    git_ok(
         &["worktree", "add", "-b", feature, &expected_str, &base.oid],
         Some(anchor),
         120.0,
@@ -809,7 +809,7 @@ pub fn done(anchor: &Path, feature: &str, force: bool, caller_cwd: &str) -> Resu
         } else {
             // --force always reports what it is about to discard — a clean
             // tree still gets the summary so the abandon decision is auditable.
-            summary = _git_ok(
+            summary = git_ok(
                 &["status", "--short", "--branch", "--untracked-files=all"],
                 Some(Path::new(&wt.path)),
                 20.0,
@@ -826,7 +826,7 @@ pub fn done(anchor: &Path, feature: &str, force: bool, caller_cwd: &str) -> Resu
         remove_args.extend(["--force", "--force"]);
     }
     remove_args.push(&wt.path);
-    _git_ok(&remove_args, Some(anchor), 60.0)?;
+    git_ok(&remove_args, Some(anchor), 60.0)?;
 
     let cleared = clear_meta(anchor, feature)?;
     Ok(DoneResult {

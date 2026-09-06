@@ -81,7 +81,7 @@ fn py_str(v: Option<&Value>) -> String {
     }
 }
 
-fn _valid(entry: &Value) -> bool {
+fn valid(entry: &Value) -> bool {
     let obj = match entry.as_object() {
         Some(o) => o,
         None => return false,
@@ -106,7 +106,7 @@ pub fn load(team: &str) -> Option<Map<String, Value>> {
     }
     let text = fs::read_to_string(&path).ok()?;
     let entry: Value = serde_json::from_str(&text).ok()?;
-    if !_valid(&entry) {
+    if !valid(&entry) {
         return None;
     }
     match entry {
@@ -176,7 +176,7 @@ pub fn list_entries() -> Vec<Map<String, Value>> {
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok());
         match entry {
-            Some(v) if _valid(&v) => {
+            Some(v) if valid(&v) => {
                 if let Value::Object(o) = v {
                     out.push(o);
                 }
@@ -234,7 +234,7 @@ fn field_str(member: &Map<String, Value>, field: &str) -> String {
         .to_string()
 }
 
-fn _member_row(member: &Map<String, Value>) -> Map<String, Value> {
+fn member_row(member: &Map<String, Value>) -> Map<String, Value> {
     let mut row = Map::new();
     for field in MEMBER_FIELDS {
         row.insert(field.to_string(), Value::String(field_str(member, field)));
@@ -269,11 +269,11 @@ pub fn record_team(
     let rows: Vec<Value> = members
         .iter()
         .filter(|m| truthy(m.get("name")))
-        .map(|m| Value::Object(_member_row(m)))
+        .map(|m| Value::Object(member_row(m)))
         .collect();
     entry.insert("members".to_string(), Value::Array(rows));
     let _lock = locked()?;
-    _write_atomic(&path, &entry)?;
+    write_atomic(&path, &entry)?;
     Ok("written")
 }
 
@@ -342,9 +342,9 @@ pub fn record_member(
     };
     let mut rows = member_rows(&entry);
     rows.retain(|m| m.get("name").and_then(Value::as_str) != Some(name.as_str()));
-    rows.push(Value::Object(_member_row(member)));
+    rows.push(Value::Object(member_row(member)));
     entry.insert("members".to_string(), Value::Array(rows));
-    _write_atomic(&path, &entry)?;
+    write_atomic(&path, &entry)?;
     Ok("written")
 }
 
@@ -380,9 +380,9 @@ pub fn reserve_member(
     {
         return Ok("exists");
     }
-    rows.push(Value::Object(_member_row(member)));
+    rows.push(Value::Object(member_row(member)));
     entry.insert("members".to_string(), Value::Array(rows));
-    _write_atomic(&path, &entry)?;
+    write_atomic(&path, &entry)?;
     Ok("reserved")
 }
 
@@ -400,7 +400,7 @@ pub fn remove_member(team: &str, name: &str, created_at: &str) -> Result<&'stati
     let mut rows = member_rows(&entry);
     rows.retain(|m| m.get("name").and_then(Value::as_str) != Some(name));
     entry.insert("members".to_string(), Value::Array(rows));
-    _write_atomic(&path, &entry)?;
+    write_atomic(&path, &entry)?;
     Ok("written")
 }
 
@@ -418,7 +418,7 @@ pub fn set_display(team: &str, display: &str) -> Result<&'static str> {
         return Ok("unchanged");
     }
     entry.insert("display".to_string(), Value::String(display.to_string()));
-    _write_atomic(&path, &entry)?;
+    write_atomic(&path, &entry)?;
     Ok("written")
 }
 
@@ -458,7 +458,7 @@ pub fn backfill_members(
             continue;
         }
         let name = field_str(m, "name");
-        let row = _member_row(m);
+        let row = member_row(m);
         match rows.iter_mut().find(|(n, _)| *n == name) {
             Some(slot) => slot.1 = row,
             None => rows.push((name, row)),
@@ -532,7 +532,7 @@ pub fn backfill(
     if updated == entry {
         return Ok("unchanged");
     }
-    _write_atomic(&path, &updated)?;
+    write_atomic(&path, &updated)?;
     Ok("written")
 }
 
@@ -578,7 +578,7 @@ pub(crate) fn sort_keys(v: &Value) -> Value {
     }
 }
 
-fn _write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {
+fn write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {
     let parent = path.parent().context("registry path has no parent")?;
     fs::create_dir_all(parent)?;
     let (mut file, tmp) = mkstemp_in(parent, ".reg.", ".tmp")?;

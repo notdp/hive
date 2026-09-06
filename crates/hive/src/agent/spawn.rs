@@ -103,9 +103,9 @@ impl Agent {
             bail!("{}", _TMUX_REQUIRED_MESSAGE);
         }
 
-        let initial_prompt = _compose_initial_prompt(cli, &opts, team_name)?;
+        let initial_prompt = compose_spawn_prompt(cli, &opts, team_name)?;
 
-        let pane_id = _open_member_pane(name, team_name, target_pane, &opts)?;
+        let pane_id = open_member_pane(name, team_name, target_pane, &opts)?;
 
         // The pane runs hive's managed launcher (`hive claude` / `hive codex` /
         // `hive grok`), the same path a human's `hclaude` / `hcodex` / `hgrok`
@@ -124,11 +124,11 @@ impl Agent {
             initial_prompt: &initial_prompt,
         };
         if cli == "claude" {
-            cmd_parts.extend(mint._mint_claude()?);
+            cmd_parts.extend(mint.mint_claude()?);
         } else if cli == "codex" {
-            cmd_parts.extend(mint._mint_codex()?);
+            cmd_parts.extend(mint.mint_codex()?);
         } else if cli == "grok" {
-            let (parts, sid) = mint._mint_grok()?;
+            let (parts, sid) = mint.mint_grok()?;
             cmd_parts.extend(parts);
             grok_session_id = sid;
         }
@@ -137,17 +137,17 @@ impl Agent {
         // (codex rides `resume`'s own [PROMPT] positional); claude's already
         // went into the bg spawn.
         if !initial_prompt.is_empty() && cli != "claude" {
-            cmd_parts.push(_shell_escape(&initial_prompt));
+            cmd_parts.push(shell_escape(&initial_prompt));
         }
 
         let mut env_parts: Vec<String> = Vec::new();
         if let Some(extra) = &opts.extra_env {
             for (k, v) in extra {
-                env_parts.push(format!("{k}={}", _shell_escape(v)));
+                env_parts.push(format!("{k}={}", shell_escape(v)));
             }
         }
 
-        let mut cmd = format!("cd {}", _shell_escape(&cwd));
+        let mut cmd = format!("cd {}", shell_escape(&cwd));
         if !env_parts.is_empty() {
             cmd = format!("{cmd} && export {}", env_parts.join(" "));
         }
@@ -228,11 +228,7 @@ pub fn compose_initial_prompt(cli: &str, skill: &str, prompt: &str, team_name: &
 
 /// The pane spawn's prompt: a claude member's goes into the bg spawn
 /// itself, codex/grok pass it on the launch command line.
-fn _compose_initial_prompt(
-    cli: &str,
-    opts: &SpawnOptions,
-    team_name: &str,
-) -> anyhow::Result<String> {
+fn compose_spawn_prompt(cli: &str, opts: &SpawnOptions, team_name: &str) -> anyhow::Result<String> {
     let initial_prompt = compose_initial_prompt(cli, &opts.skill, &opts.prompt, team_name);
     // The launch goes through `hive <cli>`, whose parser strips any `--`
     // separator, so a prompt cannot be protected from being read as a
@@ -307,7 +303,7 @@ pub fn mint_codex_thread(cwd: &str, label: &str, model: &str) -> anyhow::Result<
 }
 
 /// Split (or take over) the target pane and tag it as the member's.
-fn _open_member_pane(
+fn open_member_pane(
     name: &str,
     team_name: &str,
     target_pane: &str,
@@ -351,7 +347,7 @@ struct _MintContext<'a> {
 impl _MintContext<'_> {
     /// Give the pane back after a daemon failure: a split pane is ours
     /// to kill, an in-place one only loses the tags/title just written.
-    fn _undo_pane_side_effects(&self) {
+    fn undo_pane_side_effects(&self) {
         if self.opts.split_window {
             hooked_kill_pane(self.pane_id);
         } else {
@@ -365,7 +361,7 @@ impl _MintContext<'_> {
     /// launcher's attach loop. The job is minted (or woken) up front — like
     /// codex's thread — so the member has a durable identity and a
     /// deliverable inbox before the pane even draws.
-    fn _mint_claude(&self) -> anyhow::Result<Vec<String>> {
+    fn mint_claude(&self) -> anyhow::Result<Vec<String>> {
         let opts = self.opts;
         let (name, team_name, cwd) = (self.name, self.team_name, self.cwd);
         let claude_job_id: String;
@@ -378,7 +374,7 @@ impl _MintContext<'_> {
             match hooked_ensure_engine(&claude_job_id, Some(AGENT_STARTUP_TIMEOUT)) {
                 Some(e) => engine = e,
                 None => {
-                    self._undo_pane_side_effects();
+                    self.undo_pane_side_effects();
                     bail!(
                         "claude job '{claude_job_id}' did not come back up \
                          (removed from the job ledger, or the wake failed); \
@@ -434,7 +430,7 @@ impl _MintContext<'_> {
                     engine = e;
                 }
                 Err(err) => {
-                    self._undo_pane_side_effects();
+                    self.undo_pane_side_effects();
                     return Err(err);
                 }
             }
@@ -442,7 +438,7 @@ impl _MintContext<'_> {
         hooked_write_pane_job(self.pane_id, &claude_job_id, &engine.session_id, cwd)?;
         // The managed launcher recognizes a jobId and runs the attach
         // watch loop (auto-reattach across engine respawns/upgrades).
-        Ok(vec!["--resume".to_string(), _shell_escape(&claude_job_id)])
+        Ok(vec!["--resume".to_string(), shell_escape(&claude_job_id)])
     }
 
     /// Every codex member runs on the shared app-server daemon and owns
@@ -451,7 +447,7 @@ impl _MintContext<'_> {
     /// recorded sessionId (== threadId), and the TUI attaches with `resume
     /// <threadId>` through the managed launcher (which injects
     /// --remote/--cd).
-    fn _mint_codex(&self) -> anyhow::Result<Vec<String>> {
+    fn mint_codex(&self) -> anyhow::Result<Vec<String>> {
         let opts = self.opts;
         let (name, team_name, cwd) = (self.name, self.team_name, self.cwd);
         let mut parts = vec![
@@ -463,7 +459,7 @@ impl _MintContext<'_> {
             // <sid>` → thread/fork → resume of the fork) and records the
             // pane's thread itself; nothing to mint here.
             parts.push("fork".to_string());
-            parts.push(_shell_escape(opts.session_id.as_deref().unwrap_or("")));
+            parts.push(shell_escape(opts.session_id.as_deref().unwrap_or("")));
             return Ok(parts);
         }
         // A daemon failure gives the pane back rather than leaving a
@@ -476,13 +472,13 @@ impl _MintContext<'_> {
         let codex_thread_id = match minted {
             Ok(tid) => tid,
             Err(err) => {
-                self._undo_pane_side_effects();
+                self.undo_pane_side_effects();
                 return Err(err);
             }
         };
         hooked_write_pane_thread(self.pane_id, &codex_thread_id, cwd)?;
         parts.push("resume".to_string());
-        parts.push(_shell_escape(&codex_thread_id));
+        parts.push(shell_escape(&codex_thread_id));
         // Bring the hived's client online now so it holds the
         // broadcast stream before the member's first turn.
         // Best-effort: a down/slow hived just falls back to the
@@ -505,20 +501,20 @@ impl _MintContext<'_> {
     /// --resume <old> --fork-session`) on the identity-keyed leader. Unlike
     /// claude and codex, grok takes the model on the launch line. Returns
     /// the launch arguments and the member's session id.
-    fn _mint_grok(&self) -> anyhow::Result<(Vec<String>, String)> {
+    fn mint_grok(&self) -> anyhow::Result<(Vec<String>, String)> {
         let opts = self.opts;
         let (name, team_name, cwd) = (self.name, self.team_name, self.cwd);
         let key = crate::adapters::grok_leader::member_key(team_name, name);
         let mut parts: Vec<String> = Vec::new();
         let grok_session_id = match (&opts.session_id, opts.session_mode.as_str()) {
             (None, _) => {
-                let sid = _uuid4();
+                let sid = uuid4();
                 if !hooked_grok_create_member_session(team_name, name, &sid, cwd) {
                     // Grok runtime state lives on the member's leader;
                     // without a materialized session the TUI would run
                     // detached from hive. Same deal as codex: give the pane
                     // back rather than tag an unreachable member.
-                    self._undo_pane_side_effects();
+                    self.undo_pane_side_effects();
                     bail!(
                         "grok leader for '{team_name}.{name}' did not materialize \
                          the session (cwd {cwd}); grok runtime is leader-only, \
@@ -529,13 +525,13 @@ impl _MintContext<'_> {
                 parts.push(sid.clone());
                 if !opts.model.is_empty() {
                     parts.push("-m".to_string());
-                    parts.push(_shell_escape(&opts.model));
+                    parts.push(shell_escape(&opts.model));
                 }
                 sid
             }
             (Some(old), mode) => {
                 if !hooked_grok_spawn_member_daemon(team_name, name) {
-                    self._undo_pane_side_effects();
+                    self.undo_pane_side_effects();
                     bail!(
                         "grok leader daemon failed to start for '{team_name}.{name}'; \
                          grok runtime is leader-only, refusing to spawn an \
@@ -545,7 +541,7 @@ impl _MintContext<'_> {
                 let sid = if mode == "resume" {
                     old.clone()
                 } else {
-                    _uuid4()
+                    uuid4()
                 };
                 hooked_grok_write_session_key(&key, &sid, cwd)?;
                 if mode != "resume" {
@@ -555,7 +551,7 @@ impl _MintContext<'_> {
                 }
                 // Resume/fork uses the original session's model.
                 parts.push("--resume".to_string());
-                parts.push(_shell_escape(old));
+                parts.push(shell_escape(old));
                 if mode != "resume" {
                     parts.push("--fork-session".to_string());
                 }

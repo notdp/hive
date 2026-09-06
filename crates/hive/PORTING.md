@@ -1,25 +1,12 @@
 # Python-shaped conventions in the Rust crate
 
 The Python tree is gone and nothing is being ported any more. `crates/hive/src/`
-is the whole implementation. What survives from the port is shape: function
-names, JSON key order, value-comparison rules, output bytes. Those shapes
-survive because the on-disk documents, the `<HIVE …>` envelope and the pytest
-suites were never rewritten alongside the code. This file records which of them
-still bind on new Rust, and why.
-
-## Underscore-prefixed names
-
-AGENTS.md carries the rule. It omits two things.
-
-Prose names these symbols. `docs/daemon-control-socket.md` names
-`_daemon_control_sock` and `_config_dir`; AGENTS.md names the first as well.
-Renaming either compiles clean and silently breaks the cross-reference; nothing
-checks it.
-
-The convention deliberately covers code with no Python ancestor.
-`transcript_view/` has none and still carries the prefix (`model.rs::_clip`,
-`stream.rs::_md`). New code follows the crate convention rather than the
-Rust default.
+is the whole implementation. What survives from the port is shape: JSON key
+order, value-comparison rules, output bytes. Those shapes survive because the
+on-disk documents, the `<HIVE …>` envelope and the pytest suites were never
+rewritten alongside the code. This file records which of them still bind on
+new Rust, and why. (The port-era `_name` function prefixes are gone; AGENTS.md
+carries the naming rule.)
 
 ## JSON documents
 

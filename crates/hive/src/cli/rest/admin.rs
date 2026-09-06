@@ -8,7 +8,7 @@ use super::*;
 // config
 // ---------------------------------------------------------------------------
 
-pub(crate) fn _parse_config_value(raw: &str) -> Value {
+pub(crate) fn parse_config_value(raw: &str) -> Value {
     let lowered = raw.trim().to_lowercase();
     if lowered == "true" {
         return Value::Bool(true);
@@ -41,7 +41,7 @@ pub fn config_get(key: &str) {
 }
 
 pub fn config_set(key: &str, value: &str) {
-    let parsed = _parse_config_value(value);
+    let parsed = parse_config_value(value);
     ok_or_fail(crate::settings::set_setting(key, parsed.clone()));
     println!("{}", py_dumps(&parsed, true, None, false));
 }
@@ -57,7 +57,7 @@ pub fn config_unset(key: &str) {
 // ---------------------------------------------------------------------------
 
 pub fn notify_cmd(message: &str) {
-    let target_pane = _resolve_target_pane();
+    let target_pane = resolve_target_pane();
     let payload = ok_or_fail(crate::notify_ui::notify(message, &target_pane, ""));
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
     println!("{}", py_dumps(&value, true, None, false));
@@ -67,7 +67,7 @@ pub fn notify_cmd(message: &str) {
 // plugin
 // ---------------------------------------------------------------------------
 
-fn _render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) -> String {
+fn render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) -> String {
     let name = map_str(payload, "name");
     let mut lines = vec![format!("Plugin '{name}' {action}.")];
     let install_root = map_str(payload, "installRoot");
@@ -160,7 +160,7 @@ pub fn plugin_enable(name: &str, plain: bool) {
             }
             let empty = Map::new();
             let map = payload.as_object().unwrap_or(&empty);
-            println!("{}", _render_plugin_mutation_result("enabled", map));
+            println!("{}", render_plugin_mutation_result("enabled", map));
         }
         Err(e) => fail(&e.to_string()),
     }
@@ -177,7 +177,7 @@ pub fn plugin_sync() {
 // materialized marketplace and installs the plugin for claude and codex on
 // PATH; each sub-step tolerates "already done" failures so re-running is
 // safe, and re-running is also how an install is repaired.
-fn _setup_step(label: &str, argv: &[&str]) {
+fn setup_step(label: &str, argv: &[&str]) {
     let out = match std::process::Command::new(argv[0])
         .args(&argv[1..])
         .output()
@@ -216,7 +216,7 @@ pub fn plugin_setup() {
 
     if which_on_path("claude") {
         let dir = marketplace.join("claude");
-        _setup_step(
+        setup_step(
             "claude marketplace",
             &[
                 "claude",
@@ -226,11 +226,11 @@ pub fn plugin_setup() {
                 &dir.to_string_lossy(),
             ],
         );
-        _setup_step(
+        setup_step(
             "claude plugin",
             &["claude", "plugin", "install", "hive@hive", "--yes"],
         );
-        _setup_step(
+        setup_step(
             "claude plugin refresh",
             &["claude", "plugin", "update", "hive@hive", "--yes"],
         );
@@ -240,7 +240,7 @@ pub fn plugin_setup() {
 
     if which_on_path("codex") {
         let dir = marketplace.join("codex");
-        _setup_step(
+        setup_step(
             "codex marketplace",
             &[
                 "codex",
@@ -250,7 +250,7 @@ pub fn plugin_setup() {
                 &dir.to_string_lossy(),
             ],
         );
-        _setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
+        setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
     } else {
         println!("setup: codex: not on PATH, skipped");
     }
@@ -273,7 +273,7 @@ pub fn plugin_disable(name: &str, plain: bool) {
             }
             let empty = Map::new();
             let map = payload.as_object().unwrap_or(&empty);
-            println!("{}", _render_plugin_mutation_result("disabled", map));
+            println!("{}", render_plugin_mutation_result("disabled", map));
         }
         Err(e) => fail(&e.to_string()),
     }
@@ -377,13 +377,13 @@ end
 "#;
 
 pub fn shell_init_cmd(shell: &str) {
-    print!("{}", _shell_init_script(shell));
+    print!("{}", shell_init_script(shell));
 }
 
 /// The launcher script for *shell* (`$SHELL`'s basename when empty, zsh
 /// when that is unset too): fish gets its own dialect, everything else the
 /// zsh/bash one.
-pub(crate) fn _shell_init_script(shell: &str) -> &'static str {
+pub(crate) fn shell_init_script(shell: &str) -> &'static str {
     let resolved = if shell.is_empty() {
         let env_shell = env_string("SHELL");
         if env_shell.is_empty() {

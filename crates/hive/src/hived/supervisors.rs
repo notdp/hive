@@ -35,7 +35,7 @@ use super::*;
 /// Killing a leader takes its attached TUI down with it, so every reap is
 /// logged; ``is_pane_alive`` only reports dead panes from a successful tmux
 /// listing, never from a transient tmux failure.
-pub fn _cleanup_dead_daemons(workspace: &str, team: &str) {
+pub(crate) fn cleanup_dead_daemons(workspace: &str, team: &str) {
     for key in hooked_gl_list_daemon_keys() {
         let binding = crate::adapters::grok_leader::member_from_key(&key);
         match binding {
@@ -106,7 +106,7 @@ pub fn _cleanup_dead_daemons(workspace: &str, team: &str) {
 }
 
 /// Keep this team's codex members riding the shared daemon.
-pub fn _codex_supervisor_tick(workspace: &str, team: &str) {
+pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
     let panes = hooked_list_panes_all();
     if panes.is_empty() {
         return; // an empty listing is a tmux failure, not an empty server
@@ -202,7 +202,7 @@ pub fn _codex_supervisor_tick(workspace: &str, team: &str) {
 /// business (wake happens on demand at delivery), and the pane viewer
 /// self-heals through the managed launcher's attach loop — a user who
 /// deliberately left the loop must not be typed at.
-pub fn _claude_supervisor_tick(workspace: &str) {
+pub(crate) fn claude_supervisor_tick(workspace: &str) {
     let panes = hooked_list_panes_all();
     if panes.is_empty() {
         return; // an empty listing is a tmux failure, not an empty server
@@ -249,7 +249,7 @@ pub struct ClaudeTickState {
 /// The rename is one control frame, but its confirmation polls the registry
 /// for up to a few seconds, so it goes to a thread: identity repair must not
 /// stall delivery.
-pub fn _claude_name_tick(
+pub(crate) fn claude_name_tick(
     members: &[(String, Map<String, Value>)],
     team: &str,
     state: &mut ClaudeTickState,
@@ -290,7 +290,7 @@ pub fn _claude_name_tick(
 /// appears/disappears on every attach, switch and detach) and the panes'
 /// titles (the panel writes the viewed session's name). Probing costs a ps
 /// per pane, so it only runs when one of those changed.
-pub fn _claude_view_tick(
+pub(crate) fn claude_view_tick(
     workspace: &str,
     team: &str,
     members: &[(String, Map<String, Value>)],
@@ -360,7 +360,7 @@ pub fn _claude_view_tick(
 /// belongs to the CLI writers, and the whole read-merge-write runs under the
 /// store lock so an observation racing a `hive kill` cannot resurrect the
 /// killed member.
-pub fn _write_registry_backfill(workspace: &str, team: &str) {
+pub(crate) fn write_registry_backfill(workspace: &str, team: &str) {
     let Ok(t) = hooked_team_load(team) else {
         return;
     };

@@ -29,7 +29,7 @@ use super::base::{
 pub struct CodexAdapter;
 
 impl CodexAdapter {
-    fn _sessions_root(&self) -> PathBuf {
+    fn sessions_root(&self) -> PathBuf {
         crate::adapters::codex_app_server::codex_home().join("sessions")
     }
 }
@@ -54,15 +54,15 @@ impl SessionAdapter for CodexAdapter {
         if session_id.is_empty() {
             return None;
         }
-        let root = self._sessions_root();
+        let root = self.sessions_root();
         if !root.is_dir() {
             return None;
         }
         let suffix = format!("-{session_id}.jsonl");
         let mut matches: Vec<PathBuf> = Vec::new();
-        _walk_files(&root, &mut |path| {
+        walk_files(&root, &mut |path| {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if _is_rollout_name(name) && name.ends_with(&suffix) {
+                if is_rollout_name(name) && name.ends_with(&suffix) {
                     matches.push(path.to_path_buf());
                 }
             }
@@ -156,12 +156,12 @@ impl SessionAdapter for CodexAdapter {
             if let Some(turn_id) = &current_turn_id {
                 raw_payload.insert("turn_id".to_string(), Value::String(turn_id.clone()));
             }
-            return Some(_codex_message_from_body(body, timestamp, raw_payload));
+            return Some(codex_message_from_body(body, timestamp, raw_payload));
         }))
     }
 }
 
-fn _codex_message_from_body(
+fn codex_message_from_body(
     body: &Map<String, Value>,
     timestamp: Option<DateTime>,
     raw: Map<String, Value>,
@@ -172,7 +172,7 @@ fn _codex_message_from_body(
             message_id: None,
             parent_id: None,
             role: str_or_none(body.get("role")).unwrap_or_else(|| "unknown".to_string()),
-            parts: _iter_codex_message_parts(body.get("content")),
+            parts: iter_codex_message_parts(body.get("content")),
             timestamp,
             raw,
         },
@@ -182,7 +182,7 @@ fn _codex_message_from_body(
             role: "assistant".to_string(),
             parts: vec![MessagePart {
                 kind: "thinking".to_string(),
-                text: _extract_reasoning_text(body),
+                text: extract_reasoning_text(body),
                 raw: Some(Value::Object(body.clone())),
                 ..Default::default()
             }],
@@ -213,7 +213,7 @@ fn _codex_message_from_body(
         "function_call_output" | "custom_tool_call_output" => {
             let output_text = match body.get("output") {
                 Some(Value::Object(output)) => {
-                    str_or_none(_first_truthy(output.get("content"), output.get("text")))
+                    str_or_none(first_truthy(output.get("content"), output.get("text")))
                 }
                 other => str_or_none(other),
             };
@@ -246,7 +246,7 @@ fn _codex_message_from_body(
     }
 }
 
-fn _iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
+fn iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
     let mut parts: Vec<MessagePart> = Vec::new();
     match content {
         Some(Value::String(text)) => {
@@ -286,10 +286,7 @@ fn _iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
                     }),
                     "tool_result" => parts.push(MessagePart {
                         kind: "tool_result".to_string(),
-                        tool_output: str_or_none(_first_truthy(
-                            map.get("content"),
-                            map.get("text"),
-                        )),
+                        tool_output: str_or_none(first_truthy(map.get("content"), map.get("text"))),
                         raw: Some(block.clone()),
                         ..Default::default()
                     }),
@@ -306,7 +303,7 @@ fn _iter_codex_message_parts(content: Option<&Value>) -> Vec<MessagePart> {
     parts
 }
 
-fn _extract_reasoning_text(body: &Map<String, Value>) -> Option<String> {
+fn extract_reasoning_text(body: &Map<String, Value>) -> Option<String> {
     if let Some(Value::Array(summary)) = body.get("summary") {
         let chunks: Vec<&str> = summary
             .iter()
@@ -330,7 +327,7 @@ fn _extract_reasoning_text(body: &Map<String, Value>) -> Option<String> {
 /// `a` when it is present and truthy (non-null, not `false`, `0`, or empty),
 /// else `b`. Callers read a tool result's `content` and fall back to its
 /// `text` when `content` is absent or empty.
-fn _first_truthy<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
+fn first_truthy<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
     match a {
         Some(value) if crate::pyval::truthy(Some(value)) => a,
         _ => b,
@@ -338,12 +335,12 @@ fn _first_truthy<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a V
 }
 
 /// fnmatch `rollout-*.jsonl`.
-fn _is_rollout_name(name: &str) -> bool {
+fn is_rollout_name(name: &str) -> bool {
     name.len() >= "rollout-.jsonl".len() && name.starts_with("rollout-") && name.ends_with(".jsonl")
 }
 
 /// Recursive file walk standing in for `Path.rglob`.
-fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
+fn walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -352,7 +349,7 @@ fn _walk_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            _walk_files(&path, visit);
+            walk_files(&path, visit);
         } else {
             visit(&path);
         }
@@ -365,7 +362,7 @@ mod tests {
     use crate::testenv::EnvGuard;
     use serde_json::json;
 
-    fn _write_jsonl(path: &Path, lines: &[Value]) {
+    fn write_jsonl(path: &Path, lines: &[Value]) {
         let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
         fs::write(path, text).unwrap();
     }
@@ -376,7 +373,7 @@ mod tests {
     fn test_codex_iter_messages_normalizes_message_reasoning_function_call() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("codex.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}}),
@@ -458,7 +455,7 @@ mod tests {
     fn test_codex_iter_messages_unknown_item_becomes_unknown_part() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("codex.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}}),
@@ -482,7 +479,7 @@ mod tests {
     fn test_codex_iter_messages_normalizes_custom_tool_calls() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("codex-custom.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}}),
@@ -541,7 +538,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let target =
             root.join("rollout-2026-04-02T00-00-00-019d4864-462c-7d41-bbb1-b00b17cdd0b2.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &target,
             &[json!({
                 "type": "session_meta",
@@ -560,7 +557,7 @@ mod tests {
         let path = tmp
             .path()
             .join("rollout-2026-04-02T00-00-00-deadbeef-dead-beef-dead-beefdeadbeef.jsonl");
-        _write_jsonl(
+        write_jsonl(
             &path,
             &[
                 json!({
@@ -588,7 +585,7 @@ mod tests {
     fn test_codex_read_meta_rejects_non_meta() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("rollout.jsonl");
-        _write_jsonl(&path, &[json!({"type": "response_item", "payload": {}})]);
+        write_jsonl(&path, &[json!({"type": "response_item", "payload": {}})]);
         assert!(CodexAdapter.read_meta(&path).is_none());
     }
 }

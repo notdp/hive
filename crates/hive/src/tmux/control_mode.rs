@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const _CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
 
 /// Decode tmux control-mode escape: control bytes and '\' are encoded as \NNN (3 octal digits).
-fn _decode_output_payload(raw: &str) -> String {
+fn decode_output_payload(raw: &str) -> String {
     if !raw.contains('\\') {
         return raw.to_string();
     }
@@ -72,7 +72,7 @@ pub fn parse_control_mode_output(line: &str) -> (String, String) {
     }
     (
         pane.to_string(),
-        _decode_output_payload(remainder.trim_start()),
+        decode_output_payload(remainder.trim_start()),
     )
 }
 
@@ -167,7 +167,7 @@ fn strip_control_chars(s: &str) -> String {
 }
 
 /// Return true when payload contains visible text, not only terminal repaint codes.
-pub(super) fn _control_mode_payload_has_activity(payload: &str) -> bool {
+pub(crate) fn control_mode_payload_has_activity(payload: &str) -> bool {
     if payload.is_empty() {
         return false;
     }
@@ -225,7 +225,7 @@ impl ControlModeOutputMonitor {
 
     pub fn stop(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
-        self._request_detach();
+        self.request_detach();
         let handle = self.thread.lock().unwrap().take();
         if let Some(h) = handle {
             // ponytail: unbounded join (Python uses a 2s timeout); the loop
@@ -266,11 +266,12 @@ impl ControlModeOutputMonitor {
         last.map(|t| t.elapsed().as_secs_f64().max(0.0))
     }
 
-    pub(super) fn _record_control_mode_output(&self, pane_id: &str, payload: &str) {
+    #[cfg(test)]
+    pub(crate) fn record_control_mode_output(&self, pane_id: &str, payload: &str) {
         record_control_mode_output(&self.inner, pane_id, payload);
     }
 
-    fn _request_detach(&self) {
+    fn request_detach(&self) {
         let fd = *self.inner.master_fd.lock().unwrap();
         if let Some(fd) = fd {
             let data = b"detach-client\n";
@@ -285,7 +286,7 @@ fn record_control_mode_output(inner: &MonitorInner, pane_id: &str, payload: &str
     if pane_id.is_empty() {
         return;
     }
-    if !_control_mode_payload_has_activity(payload) {
+    if !control_mode_payload_has_activity(payload) {
         return;
     }
     inner

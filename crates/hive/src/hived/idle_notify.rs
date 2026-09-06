@@ -91,7 +91,7 @@ struct TickCtx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn _idle_notify_tick(
+pub(crate) fn idle_notify_tick(
     team_name: &str,
     session_name: &str,
     idle_notify: &mut HashMap<String, IdleRecord>,
@@ -406,14 +406,14 @@ fn tick_window(
 
     let busy_panes: Vec<String> = panes
         .iter()
-        .filter(|p| _is_output_busy(p, ctx.busy_monitor, inactive_age))
+        .filter(|p| is_output_busy(p, ctx.busy_monitor, inactive_age))
         .cloned()
         .collect();
     let prev_busy = win_dbg.busy_observed;
     let is_busy = !busy_panes.is_empty();
     if is_busy {
         record.last_busy_ts = now;
-        let recent = _most_recent_output_pane(&busy_panes, ctx.busy_monitor);
+        let recent = most_recent_output_pane(&busy_panes, ctx.busy_monitor);
         record.last_busy_pane = Some(if recent.is_empty() {
             busy_panes[busy_panes.len() - 1].clone()
         } else {
@@ -477,7 +477,7 @@ fn tick_window(
     if now - record.last_busy_ts < IDLE_NOTIFY_THRESHOLD_SECONDS || record.notified {
         return;
     }
-    let target_pane = _idle_notify_target_pane(panes, record, ctx.busy_monitor);
+    let target_pane = idle_notify_target_pane(panes, record, ctx.busy_monitor);
     hooked_notify_debug_emit(
         workspace,
         "fire.attempt",

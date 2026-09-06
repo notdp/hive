@@ -25,7 +25,7 @@ const CLI_ALIASES: [(&str, &str); 3] = [
 /// codex and grok refresh these caches from their backends themselves, so
 /// the list never drifts the way a hand-maintained table did. claude keeps
 /// no local catalog — its aliases and ids are validated by the CLI itself.
-fn _catalog_model_ids(cli: &str) -> Vec<String> {
+fn catalog_model_ids(cli: &str) -> Vec<String> {
     let load = |path: PathBuf| -> Option<serde_json::Value> {
         let text = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&text).ok()
@@ -60,7 +60,7 @@ fn _catalog_model_ids(cli: &str) -> Vec<String> {
     Vec::new()
 }
 
-fn _cli_family(cli: &str) -> Option<&'static str> {
+fn cli_family(cli: &str) -> Option<&'static str> {
     match cli {
         "claude" => Some("anthropic"),
         "codex" => Some("openai"),
@@ -81,7 +81,7 @@ pub fn validate_spawn_model(cli: &str, model: &str) -> Option<String> {
         return None;
     }
     let family = classify_model_family(model);
-    let cli_family = _cli_family(cli);
+    let cli_family = cli_family(cli);
     if family != "unknown" {
         if let Some(cli_family) = cli_family {
             if family != cli_family {
@@ -92,7 +92,7 @@ pub fn validate_spawn_model(cli: &str, model: &str) -> Option<String> {
             }
         }
     }
-    let known = _catalog_model_ids(cli);
+    let known = catalog_model_ids(cli);
     if known.is_empty() || known.iter().any(|k| k == model) {
         return None;
     }

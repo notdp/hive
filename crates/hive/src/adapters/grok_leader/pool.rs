@@ -18,7 +18,7 @@ use super::{CANCEL_SENT, PROMPT_QUEUED, _CONNECT_COOLDOWN};
 
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
 /// only production implementation; tests substitute fakes through
-/// `_acting_client`'s override. `Err` is a transport failure: the client
+/// `acting_client`'s override. `Err` is a transport failure: the client
 /// could not reach its leader at all.
 pub trait LeaderClient: Send + Sync {
     fn prompt(&self, _text: &str) -> Result<bool> {
@@ -62,7 +62,7 @@ impl LeaderClient for GrokStdioClient {
 /// pane key answers to its pane, not to a roster, and is always live here;
 /// an unreadable entry reads as gone, which only postpones a reconnect to
 /// the next tick.
-fn _key_is_rostered(key: &str) -> bool {
+fn key_is_rostered(key: &str) -> bool {
     let Some((team, member)) = member_from_key(key) else {
         return true;
     };
@@ -108,12 +108,12 @@ impl GrokClientPool {
     }
 
     pub fn runtime_for_key(&self, key: &str) -> Option<SessionRuntime> {
-        self._acting_client(key)?.runtime()
+        self.acting_client(key)?.runtime()
     }
 
     /// Bring the stdio client online for a key (called at spawn time).
     pub fn connect_key(&self, key: &str) -> bool {
-        self._acting_client(key).is_some()
+        self.acting_client(key).is_some()
     }
 
     /// Deliver text as a prompt over the key's leader.
@@ -123,7 +123,7 @@ impl GrokClientPool {
     /// A busy session is not bounced — the leader queues the prompt FIFO and
     /// runs it when the current turn ends, the same as typing into the TUI.
     pub fn send_to_key(&self, key: &str, text: &str) -> Option<&'static str> {
-        let client = self._acting_client(key)?;
+        let client = self.acting_client(key)?;
         match client.prompt(text) {
             Ok(true) => Some(PROMPT_QUEUED),
             _ => None,
@@ -135,7 +135,7 @@ impl GrokClientPool {
     /// Returns [`CANCEL_SENT`] when the notification went out on a loaded
     /// session, else None: no daemon, no session record, or a dead pipe.
     pub fn interrupt_key(&self, key: &str) -> Option<&'static str> {
-        let client = self._acting_client(key)?;
+        let client = self.acting_client(key)?;
         match client.cancel() {
             Ok(true) => Some(CANCEL_SENT),
             _ => None,
@@ -143,26 +143,26 @@ impl GrokClientPool {
     }
 
     pub fn compact_key(&self, key: &str) -> &'static str {
-        match self._acting_client(key) {
+        match self.acting_client(key) {
             Some(client) => client.compact(),
             None => "unavailable",
         }
     }
 
-    /// `_client_for_key` behind the test override, so delivery paths can
+    /// `client_for_key` behind the test override, so delivery paths can
     /// run against a fake client.
-    fn _acting_client(&self, key: &str) -> Option<Arc<dyn LeaderClient>> {
+    fn acting_client(&self, key: &str) -> Option<Arc<dyn LeaderClient>> {
         #[cfg(test)]
         {
             if let Some(factory) = self.client_override.lock().unwrap().as_ref() {
                 return factory(key);
             }
         }
-        self._client_for_key(key)
+        self.client_for_key(key)
             .map(|client| client as Arc<dyn LeaderClient>)
     }
 
-    pub(super) fn _client_for_key(&self, key: &str) -> Option<Arc<GrokStdioClient>> {
+    pub(crate) fn client_for_key(&self, key: &str) -> Option<Arc<GrokStdioClient>> {
         // A relaunched grok on the same key mints a new session id, so the
         // record — not just the client's liveness — decides whether the bound
         // client is still the key's.
@@ -187,20 +187,20 @@ impl GrokClientPool {
             }
         }
 
-        if record.is_none() || !probe_socket(&socket_path_for_key(key)) || !_key_is_rostered(key) {
-            self._set_cooldown(key);
+        if record.is_none() || !probe_socket(&socket_path_for_key(key)) || !key_is_rostered(key) {
+            self.set_cooldown(key);
             return None;
         }
         let client = match GrokStdioClient::new(key) {
             Ok(client) => Arc::new(client),
             Err(_) => {
-                self._set_cooldown(key);
+                self.set_cooldown(key);
                 return None;
             }
         };
         if !client.handshake() {
             client.close();
-            self._set_cooldown(key);
+            self.set_cooldown(key);
             return None;
         }
         self.state
@@ -211,7 +211,7 @@ impl GrokClientPool {
         Some(client)
     }
 
-    fn _set_cooldown(&self, key: &str) {
+    fn set_cooldown(&self, key: &str) {
         self.state.lock().unwrap().cooldown.insert(
             key.to_string(),
             Instant::now() + Duration::from_secs_f64(_CONNECT_COOLDOWN),
@@ -244,7 +244,7 @@ impl GrokClientPool {
 
     /// Bind *client* as *key*'s pooled client (the mint's adopt path),
     /// closing whatever the pool held for the key before.
-    fn _adopt_client(&self, key: &str, client: Arc<GrokStdioClient>) {
+    fn adopt_client(&self, key: &str, client: Arc<GrokStdioClient>) {
         let existing = {
             let mut state = self.state.lock().unwrap();
             let existing = state.clients.remove(key);
@@ -343,6 +343,6 @@ pub fn create_member_session(team: &str, member: &str, session_id: &str, cwd: &s
     if write_session_key(&key, session_id, cwd).is_err() {
         return undo(Some(&client));
     }
-    pool()._adopt_client(&key, client);
+    pool().adopt_client(&key, client);
     true
 }

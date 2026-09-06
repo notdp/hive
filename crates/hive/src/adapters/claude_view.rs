@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::adapters::base::read_json_object;
-use crate::adapters::claude_sessions::{_config_dir, _pid_alive};
+use crate::adapters::claude_sessions::{config_dir, pid_alive};
 
 const _VIEWER_SUBCOMMANDS: [&str; 2] = ["attach", "agents"];
 const _PROC_START_FORMAT: &str = "%a %b %d %H:%M:%S %Y";
@@ -110,7 +110,7 @@ fn panes_all() -> Vec<crate::tmux::PaneInfo> {
 // attach journal
 // --------------------------------------------------------------------------
 pub fn journal_dir() -> PathBuf {
-    _config_dir().join("daemon").join("attach-journal")
+    config_dir().join("daemon").join("attach-journal")
 }
 
 /// Cheap change token for the journal: the entry names.
@@ -159,7 +159,7 @@ fn timegm_utc(tm: libc::tm) -> f64 {
 }
 
 /// Process start time of *pid* in epoch seconds, or None.
-fn _pid_start_epoch(pid: i32) -> Option<f64> {
+fn pid_start_epoch(pid: i32) -> Option<f64> {
     // ponytail: no 5s subprocess timeout — `ps -p` answers promptly; add a
     // spawn+poll harness only if it ever wedges.
     let out = std::process::Command::new("ps")
@@ -177,7 +177,7 @@ fn _pid_start_epoch(pid: i32) -> Option<f64> {
 }
 
 /// True when *pid* really started when the journal entry says it did.
-fn _start_matches(claimed: &str, pid: i32) -> bool {
+fn start_matches(claimed: &str, pid: i32) -> bool {
     // ponytail: the journal renders procStart in UTC (verified on 2.1.240)
     // while ps prints local time; both readings are accepted rather than
     // pinning a timezone the daemon never documented.
@@ -188,7 +188,7 @@ fn _start_matches(claimed: &str, pid: i32) -> bool {
     let Some(parsed) = strptime_lstart(&text) else {
         return false;
     };
-    let Some(actual) = _pid_start_epoch(pid) else {
+    let Some(actual) = pid_start_epoch(pid) else {
         return false;
     };
     [timegm_utc(parsed), mktime_local(parsed)]
@@ -216,11 +216,11 @@ pub fn attach_entry_for_pid(pid: i32) -> Option<Map<String, Value>> {
         if data.get("pid").and_then(Value::as_i64) != Some(pid as i64) {
             continue;
         }
-        if !_pid_alive(pid) {
+        if !pid_alive(pid) {
             continue;
         }
         let claimed = data.get("procStart").and_then(Value::as_str).unwrap_or("");
-        if !_start_matches(claimed, pid) {
+        if !start_matches(claimed, pid) {
             continue;
         }
         return Some(data);
@@ -315,7 +315,7 @@ fn shlex_split(s: &str) -> Option<Vec<String>> {
 /// Hidden subcommands are only recognized at argv[1], which is also what
 /// makes this safe: an argv that merely mentions "claude attach" (a grep, an
 /// editor) never matches.
-fn _viewer_argv(argv: &str) -> Option<(String, String)> {
+fn viewer_argv(argv: &str) -> Option<(String, String)> {
     let parts =
         shlex_split(argv).unwrap_or_else(|| argv.split_whitespace().map(str::to_string).collect());
     if parts.len() < 2 {
@@ -342,7 +342,7 @@ fn _viewer_argv(argv: &str) -> Option<(String, String)> {
 pub fn viewer_for_pane(pane_id: &str) -> Option<(i32, String, String)> {
     let tty = pane_tty(pane_id).unwrap_or_default();
     for process in tty_processes(&tty) {
-        let Some((subcommand, argument)) = _viewer_argv(&process.argv) else {
+        let Some((subcommand, argument)) = viewer_argv(&process.argv) else {
             continue;
         };
         return process
@@ -418,7 +418,7 @@ pub fn member_job_index(panes: Option<&[crate::tmux::PaneInfo]>) -> Vec<(String,
 /// would land in the wrong session. A name character on either side (`\w`,
 /// `.` or `-`) means the title names something else, which also keeps prefix
 /// siblings (`probe.red` vs `probe.red2`) apart.
-fn _title_names(title: &str, name: &str) -> bool {
+fn title_names(title: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -523,7 +523,7 @@ pub fn view_for_pane(pane_id: &str, panes: Option<&[crate::tmux::PaneInfo]>) -> 
     }
     let matches: Vec<&(String, String)> = index
         .iter()
-        .filter(|(name, _)| _title_names(&title, name))
+        .filter(|(name, _)| title_names(&title, name))
         .collect();
     if matches.len() == 1 {
         let (name, job) = matches[0];

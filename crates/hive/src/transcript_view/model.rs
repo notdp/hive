@@ -4,7 +4,7 @@ use serde_json::Value;
 /// char boundary and flagged `truncated`.
 pub const TOOL_RESULT_MAX_BYTES: usize = 512 * 1024;
 
-pub(super) fn _clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     let text = text.trim();
     match text.char_indices().nth(limit) {
         None => text.to_string(),
@@ -392,7 +392,7 @@ impl ToolOutcome {
     /// Collapsed display line: the whole text clipped at 160 chars, first
     /// line only.
     pub fn first_line(&self) -> String {
-        _clip(&self.text, 160)
+        clip(&self.text, 160)
             .lines()
             .next()
             .unwrap_or("")

@@ -16,7 +16,7 @@ use crate::tmux;
 // corrupting a user's format).
 pub(crate) const _PR_INDEX_TOKEN: &str = "#{?#{@hive-pr},PR#{@hive-pr},#I}";
 
-fn _replace_index_tokens(format: &str) -> String {
+fn replace_index_tokens(format: &str) -> String {
     let bytes = format.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -37,7 +37,7 @@ fn _replace_index_tokens(format: &str) -> String {
 }
 
 /// Per-window status format derived from the *global* value; None = skip.
-pub(crate) fn _derive_pr_window_status(global_format: Option<&str>) -> Option<String> {
+pub(crate) fn derive_pr_window_status(global_format: Option<&str>) -> Option<String> {
     let global_format = global_format?;
     if global_format.is_empty() {
         return None;
@@ -45,7 +45,7 @@ pub(crate) fn _derive_pr_window_status(global_format: Option<&str>) -> Option<St
     if global_format.contains("@hive-pr") {
         return None;
     }
-    let derived = _replace_index_tokens(global_format);
+    let derived = replace_index_tokens(global_format);
     if derived == global_format {
         return None; // no replaceable #I
     }
@@ -78,7 +78,7 @@ pub fn pr_set_cmd(number: i64, plain: bool) {
     let mut display = Map::new();
     for option in ["window-status-format", "window-status-current-format"] {
         let global_format = tmux::get_global_window_option(option);
-        match _derive_pr_window_status(global_format.as_deref()) {
+        match derive_pr_window_status(global_format.as_deref()) {
             None => {
                 let already = global_format
                     .as_deref()
@@ -174,8 +174,8 @@ fn wt_ok<T>(result: crate::worktree::Result<T>) -> T {
 
 /// Owner / integration context for worktree commands (pane-anchored, cwd-free).
 /// Returns (owner, team, integration).
-fn _worktree_context() -> (String, String, Option<String>) {
-    let binding = _discover_tmux_binding();
+fn worktree_context() -> (String, String, Option<String>) {
+    let binding = discover_tmux_binding();
     let window = {
         let bound = map_str(&binding, "tmuxWindow");
         if !bound.is_empty() {
@@ -240,7 +240,7 @@ pub fn worktree_set_base_cmd(refname: &str, plain: bool) {
 pub fn worktree_start_cmd(feature: &str, base_ref: Option<&str>, plain: bool) {
     let cwd = getcwd();
     let anchor = wt_ok(crate::worktree::repo_anchor(Some(Path::new(&cwd))));
-    let (owner, team, integration) = _worktree_context();
+    let (owner, team, integration) = worktree_context();
     let base = wt_ok(crate::worktree::resolve_base(
         &anchor,
         base_ref,

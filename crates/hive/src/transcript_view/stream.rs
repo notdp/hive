@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::grok_md;
-use super::model::{_clip, parse_hive_message, DisplayBlock, ToolOutcome};
+use super::model::{clip, parse_hive_message, DisplayBlock, ToolOutcome};
 use super::parser::TranscriptParser;
 
 const RESET: &str = "\x1b[0m";
@@ -39,11 +39,11 @@ pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     matches.into_iter().next().map(|(_, p)| p)
 }
 
-fn _md(text: &str) -> String {
+fn md(text: &str) -> String {
     grok_md::render(text)
 }
 
-fn _indent_block(text: &str, first: &str, rest: &str) -> String {
+fn indent_block(text: &str, first: &str, rest: &str) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         lines.push("");
@@ -61,12 +61,12 @@ fn _indent_block(text: &str, first: &str, rest: &str) -> String {
 // Plain (non-tty) ANSI stream over the block model
 // ---------------------------------------------------------------------------
 
-fn _tool_line(name: &str, hint: &str) -> String {
-    let hint = _clip(hint.lines().next().unwrap_or(""), 140);
+fn tool_line(name: &str, hint: &str) -> String {
+    let hint = clip(hint.lines().next().unwrap_or(""), 140);
     format!("{GREEN}⏺{RESET} {BOLD}{name}{RESET}({CYAN}{hint}{RESET})")
 }
 
-fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
+fn result_line(result: &Option<ToolOutcome>) -> Option<String> {
     let res = result.as_ref()?;
     let first = res.first_line();
     let first = first.trim();
@@ -76,18 +76,14 @@ fn _result_line(result: &Option<ToolOutcome>) -> Option<String> {
     Some(format!("\n  {DIM}⎿  {first}{RESET}"))
 }
 
-fn _user_line(text: &str) -> String {
+fn user_line(text: &str) -> String {
     if let Some(msg) = parse_hive_message(text) {
         let sender = msg.from.as_deref().unwrap_or("peer");
-        let body = _clip(&msg.body, 160);
+        let body = clip(&msg.body, 160);
         return format!("{MAGENTA}✉{RESET} {BOLD}{sender}{RESET} {DIM}▸{RESET} {body}");
     }
     let first = format!("{BOLD}❯{RESET} {BOLD}");
-    format!(
-        "{}{}",
-        _indent_block(&_clip(text, 1200), &first, "  "),
-        RESET
-    )
+    format!("{}{}", indent_block(&clip(text, 1200), &first, "  "), RESET)
 }
 
 /// Print [`DisplayBlock`]s as the plain ANSI stream (piped mode).
@@ -188,17 +184,17 @@ impl StreamPrinter {
 
     fn render_block(block: &DisplayBlock) -> Option<String> {
         match block {
-            DisplayBlock::User(u) => Some(format!("\n{}", _user_line(&u.text))),
+            DisplayBlock::User(u) => Some(format!("\n{}", user_line(&u.text))),
             DisplayBlock::Assistant(a) => Some(format!(
                 "\n{}",
-                _indent_block(&_md(&_clip(&a.markdown, 4000)), "⏺ ", "  ")
+                indent_block(&md(&clip(&a.markdown, 4000)), "⏺ ", "  ")
             )),
             DisplayBlock::ToolGroup(group) => {
                 let mut out = String::new();
                 for member in &group.members {
                     out.push('\n');
-                    out.push_str(&_tool_line(&member.name, &member.hint));
-                    if let Some(res) = _result_line(&member.result) {
+                    out.push_str(&tool_line(&member.name, &member.hint));
+                    if let Some(res) = result_line(&member.result) {
                         out.push_str(&res);
                     }
                 }
@@ -209,15 +205,15 @@ impl StreamPrinter {
                 }
             }
             DisplayBlock::Run(run) => {
-                let mut out = format!("\n{}", _tool_line("Bash", &run.description));
-                if let Some(res) = _result_line(&run.result) {
+                let mut out = format!("\n{}", tool_line("Bash", &run.description));
+                if let Some(res) = result_line(&run.result) {
                     out.push_str(&res);
                 }
                 Some(out)
             }
             DisplayBlock::Tool(tool) => {
-                let mut out = format!("\n{}", _tool_line(&tool.name, &tool.hint));
-                if let Some(res) = _result_line(&tool.result) {
+                let mut out = format!("\n{}", tool_line(&tool.name, &tool.hint));
+                if let Some(res) = result_line(&tool.result) {
                     out.push_str(&res);
                 }
                 Some(out)

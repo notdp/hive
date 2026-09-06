@@ -28,7 +28,7 @@ fn main() {
     // <team> <tmux_window> <tmux_window_id>` — route before clap parsing.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--hived") {
-        std::process::exit(hived::_run_spawned_hived(&args));
+        std::process::exit(hived::run_spawned_hived(&args));
     }
     cli::main();
 }

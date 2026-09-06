@@ -12,7 +12,7 @@ use crate::tmux;
 pub fn inject_cmd(agent_name: &str, text: &str) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let t = t.expect("required resolve returned no team");
-    let result = ok_or_fail(_inject_report(&t, agent_name, text));
+    let result = ok_or_fail(inject_report(&t, agent_name, text));
     println!("{}", json_pretty(&Value::Object(result)));
 }
 
@@ -20,11 +20,11 @@ pub fn inject_cmd(agent_name: &str, text: &str) {
 ///
 /// Documented low-level bypass: raw composer keystrokes for every CLI, so
 /// delivery paths (channel/RPC) can be debugged from outside themselves.
-pub(crate) fn _inject_report(t: &Team, agent_name: &str, text: &str) -> Result<Map<String, Value>> {
+pub(crate) fn inject_report(t: &Team, agent_name: &str, text: &str) -> Result<Map<String, Value>> {
     let agent = t
         .get(agent_name)
         .map_err(|_| anyhow!("member '{agent_name}' not found in team '{}'", t.name))?;
-    crate::agent::_submit_interactive_text(&agent.pane_id, text, &agent.cli)?;
+    crate::agent::submit_interactive_text(&agent.pane_id, text, &agent.cli)?;
     let mut result = Map::new();
     result.insert("member".to_string(), Value::String(agent_name.to_string()));
     result.insert("action".to_string(), Value::String("inject".to_string()));
@@ -34,7 +34,7 @@ pub(crate) fn _inject_report(t: &Team, agent_name: &str, text: &str) -> Result<M
 }
 
 /// Run `/compact` on the literal pane. Returns the compaction status.
-fn _compact_target(target: &PaneTarget) -> String {
+fn compact_target(target: &PaneTarget) -> String {
     if target.cli == "codex" || target.cli == "grok" {
         // Daemon-backed CLIs: an idle agent compacts via the dedicated RPC;
         // when busy we keystroke `/compact` into the CLI's own TUI so it can
@@ -45,7 +45,7 @@ fn _compact_target(target: &PaneTarget) -> String {
             crate::adapters::grok_leader::compact_pane(&target.pane_id)
         };
         if status != "compacted" {
-            ok_or_fail(crate::agent::_submit_interactive_text(
+            ok_or_fail(crate::agent::submit_interactive_text(
                 &target.pane_id,
                 "/compact",
                 &target.cli,
@@ -56,7 +56,7 @@ fn _compact_target(target: &PaneTarget) -> String {
     // claude (and embedded codex without a daemon): `/compact` is a TUI
     // slash command, so it must go through the composer.
     if let Err(exc) =
-        crate::agent::_submit_interactive_text(&target.pane_id, "/compact", &target.cli)
+        crate::agent::submit_interactive_text(&target.pane_id, "/compact", &target.cli)
     {
         fail(&exc.to_string());
     }
@@ -66,8 +66,8 @@ fn _compact_target(target: &PaneTarget) -> String {
 pub fn compact_cmd(pane_id: &str) {
     // Resolve the pane straight from its tmux options — never re-resolve
     // through Team state (the cross-window same-name bug PR #8 fixed).
-    let target = _resolve_pane_target(pane_id);
-    let status = _compact_target(&target);
+    let target = resolve_pane_target(pane_id);
+    let status = compact_target(&target);
     let mut result = Map::new();
     result.insert(
         "member".to_string(),
@@ -156,7 +156,7 @@ pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
 // attach
 // ---------------------------------------------------------------------------
 
-fn _attach_launcher(cli_name: &str, quoted_sid: &str) -> Option<String> {
+fn attach_launcher(cli_name: &str, quoted_sid: &str) -> Option<String> {
     match cli_name {
         "claude" => Some(format!("hive claude --resume {quoted_sid}")),
         "codex" => Some(format!("hive codex resume {quoted_sid}")),
@@ -165,10 +165,10 @@ fn _attach_launcher(cli_name: &str, quoted_sid: &str) -> Option<String> {
     }
 }
 
-fn _member_attach_command(member: &Map<String, Value>, mirrors: bool) -> String {
+fn member_attach_command(member: &Map<String, Value>, mirrors: bool) -> String {
     let cli_name = map_str(member, "cli");
     let quoted_sid = shlex_quote(&map_str(member, "sessionId"));
-    let launch = _attach_launcher(&cli_name, &quoted_sid).expect("attachable cli");
+    let launch = attach_launcher(&cli_name, &quoted_sid).expect("attachable cli");
     let cwd = map_str(member, "cwd");
     let cwd = if cwd.is_empty() { getcwd() } else { cwd };
     if mirrors {
@@ -188,7 +188,7 @@ fn _member_attach_command(member: &Map<String, Value>, mirrors: bool) -> String 
 /// A claude member whose sessionId is an interactive session (a creating
 /// or joined desktop/ccd session), not a bg job: its pane can only mirror
 /// it, never resume it.
-pub(crate) fn _mirrors_a_session(member: &Map<String, Value>) -> bool {
+fn mirrors_a_session(member: &Map<String, Value>) -> bool {
     map_str(member, "cli") == "claude"
         && crate::adapters::claude_bg::job_row(&map_str(member, "sessionId"), "claude").is_none()
 }
@@ -196,7 +196,7 @@ pub(crate) fn _mirrors_a_session(member: &Map<String, Value>) -> bool {
 /// The window's recorded mirror choice: `@hive-mirror` `on` / `off`
 /// (`hive mirror`, or `on` written when a session mirror is built), None
 /// when nothing is recorded yet — which reads as open.
-fn _mirror_preference(window: &str) -> Option<bool> {
+fn mirror_preference(window: &str) -> Option<bool> {
     match tmux::get_window_option(window, "hive-mirror").as_deref() {
         Some("on") => Some(true),
         Some("off") => Some(false),
@@ -206,14 +206,14 @@ fn _mirror_preference(window: &str) -> Option<bool> {
 
 /// The `@hive-role` of the pane *member* gets — `agent` riding its engine,
 /// `mirror` for a session mirror — or None when no pane is drawn: a session
-/// mirror is withheld while *mirror_pref* (the window's `_mirror_preference`,
+/// mirror is withheld while *mirror_pref* (the window's `mirror_preference`,
 /// or the `on` a `hive mirror on` is enforcing) is `off`. Decided once per
-/// member: the job-ledger probe behind `_mirrors_a_session` is a CLI call.
-pub(crate) fn _pane_role(
+/// member: the job-ledger probe behind `mirrors_a_session` is a CLI call.
+pub(crate) fn pane_role(
     mirror_pref: Option<bool>,
     member: &Map<String, Value>,
 ) -> Option<&'static str> {
-    if !_mirrors_a_session(member) {
+    if !mirrors_a_session(member) {
         return Some("agent");
     }
     if mirror_pref == Some(false) {
@@ -224,8 +224,8 @@ pub(crate) fn _pane_role(
 
 /// A session mirror on screen makes the orch chip appear: the window
 /// records `on` unless a choice is already recorded.
-fn _record_mirror_shown(window: &str) {
-    if !window.is_empty() && _mirror_preference(window).is_none() {
+fn record_mirror_shown(window: &str) {
+    if !window.is_empty() && mirror_preference(window).is_none() {
         tmux::set_window_option(window, "@hive-mirror", "on");
     }
 }
@@ -234,28 +234,28 @@ fn _record_mirror_shown(window: &str) {
 /// window) joined back as *window*'s first pane, tags and viewer intact —
 /// so a rebuilt or healed window never starts a second viewer of one
 /// session. None when nothing of *member*'s is parked.
-fn _join_hidden_mirror(window: &str, team: &str, member: &str) -> Option<String> {
+fn join_hidden_mirror(window: &str, team: &str, member: &str) -> Option<String> {
     let hidden = tmux::hidden_mirror_pane(team)?;
     if tmux::get_pane_option(&hidden, "hive-agent").as_deref() != Some(member) {
         return None;
     }
     let first = tmux::list_panes(window).into_iter().next()?;
-    _join_parked_pane(&hidden, &first);
-    _record_mirror_shown(window);
+    join_parked_pane(&hidden, &first);
+    record_mirror_shown(window);
     Some(hidden)
 }
 
 /// The parked pane *hidden* joined back before *first*. A notify mark it
 /// carries is stale: the select hook reconciles only the panes of the
 /// window it fires on, and the parked pane sat outside it.
-pub(crate) fn _join_parked_pane(hidden: &str, first: &str) {
+pub(crate) fn join_parked_pane(hidden: &str, first: &str) {
     tmux::join_pane_before(hidden, first);
     tmux::clear_pane_option(hidden, crate::notify_ui::PANE_NOTIFY_ACTIVE_KEY);
 }
 
 /// Title + tags + context + viewer launcher for one member's display pane,
-/// *role* being what `_pane_role` decided for it.
-pub(crate) fn _bind_member_viewer(
+/// *role* being what `pane_role` decided for it.
+pub(crate) fn bind_member_viewer(
     pane: &str,
     member: &Map<String, Value>,
     team: &str,
@@ -267,25 +267,25 @@ pub(crate) fn _bind_member_viewer(
     tmux::set_pane_title(pane, &format!("[{name}]"));
     tmux::tag_pane(pane, role, &name, team, &cli_name, "");
     if role == "mirror" {
-        _record_mirror_shown(&tmux::get_pane_window_target(pane).unwrap_or_default());
+        record_mirror_shown(&tmux::get_pane_window_target(pane).unwrap_or_default());
     }
     if !ws.is_empty() {
         let _ = crate::context::save_context_for_pane(pane, team, ws, &name);
     }
     ok_or_fail(tmux::send_keys(
         pane,
-        &_member_attach_command(member, role == "mirror"),
+        &member_attach_command(member, role == "mirror"),
         true,
     ));
 }
 
 /// A member a pane can ride: engine identity recorded, on a CLI
-/// `_attach_launcher` has a resume form for.
-fn _attachable(member: &Map<String, Value>) -> bool {
-    truthy(member.get("sessionId")) && _attach_launcher(&map_str(member, "cli"), "").is_some()
+/// `attach_launcher` has a resume form for.
+fn attachable(member: &Map<String, Value>) -> bool {
+    truthy(member.get("sessionId")) && attach_launcher(&map_str(member, "cli"), "").is_some()
 }
 
-fn _entry_members(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {
+fn entry_members(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {
     entry
         .get("members")
         .and_then(Value::as_array)
@@ -299,21 +299,21 @@ fn _entry_members(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {
 
 /// Roster members an existing window should gain panes for: not rendered
 /// yet and attachable — in roster order.
-pub(super) fn _members_to_backfill(
+pub(crate) fn members_to_backfill(
     rendered: &std::collections::HashSet<String>,
     members: Vec<Map<String, Value>>,
 ) -> Vec<Map<String, Value>> {
-    _sorted_member_rows(members)
+    sorted_member_rows(members)
         .into_iter()
-        .filter(|member| !rendered.contains(&map_str(member, "name")) && _attachable(member))
+        .filter(|member| !rendered.contains(&map_str(member, "name")) && attachable(member))
         .collect()
 }
 
 /// Split panes into an existing team window for roster members it does not
 /// render yet (a member spawned after the window was built, a session
 /// mirror `hive mirror on` asks back — *mirror_pref* is what decides a
-/// session member's pane, see `_pane_role`). Re-tiles when it added any.
-pub(super) fn _backfill_missing_member_panes(
+/// session member's pane, see `pane_role`). Re-tiles when it added any.
+pub(crate) fn backfill_missing_member_panes(
     window: &str,
     entry: &Map<String, Value>,
     mirror_pref: Option<bool>,
@@ -333,12 +333,12 @@ pub(super) fn _backfill_missing_member_panes(
         return Vec::new();
     }
     let mut added = Vec::new();
-    for member in _members_to_backfill(&rendered, _entry_members(entry)) {
-        let Some(role) = _pane_role(mirror_pref, &member) else {
+    for member in members_to_backfill(&rendered, entry_members(entry)) {
+        let Some(role) = pane_role(mirror_pref, &member) else {
             continue;
         };
         let name = map_str(&member, "name");
-        if role == "mirror" && _join_hidden_mirror(window, &team, &name).is_some() {
+        if role == "mirror" && join_hidden_mirror(window, &team, &name).is_some() {
             added.push(name);
             continue;
         }
@@ -354,7 +354,7 @@ pub(super) fn _backfill_missing_member_panes(
         if split.is_empty() {
             continue;
         }
-        _bind_member_viewer(&split, &member, &team, &ws, role);
+        bind_member_viewer(&split, &member, &team, &ws, role);
         added.push(name);
         prev_pane = split;
     }
@@ -370,22 +370,22 @@ const _TEAM_SESSION_ROWS: u32 = 60;
 
 /// Marks a window hive built itself (as opposed to one a human's session
 /// lent the team): `hive delete` closes only these.
-fn _mark_hive_built(window: &str) {
+fn mark_hive_built(window: &str) {
     tmux::set_window_option(window, "@hive-built", "1");
 }
 
 /// The team's window in the session named after it: a fresh detached
 /// session when none exists, a new window in it otherwise. Returns
 /// (window target, first pane id, created_session).
-pub fn _new_team_session_window(team: &str) -> Result<(String, String, bool)> {
+pub(crate) fn new_team_session_window(team: &str) -> Result<(String, String, bool)> {
     // `=` pins the exact name: a bare `-t <team>` falls back to prefix
     // matching and would put the window into a stranger's `<team>-x`.
     let exact = format!("={team}");
     if tmux::has_session(&exact) {
         // new_window forces "<team>:" so a numeric name is a session, not an index
         let (window, pane) = tmux::new_window(&exact, team, None, true)?;
-        _mark_hive_built(&window);
-        _install_team_status(&pane);
+        mark_hive_built(&window);
+        install_team_status(&pane);
         return Ok((window, pane, false));
     }
     let pane = tmux::new_session(team, _TEAM_SESSION_COLS, _TEAM_SESSION_ROWS)?;
@@ -395,15 +395,15 @@ pub fn _new_team_session_window(team: &str) -> Result<(String, String, bool)> {
         .filter(|w| !w.is_empty())
         .ok_or_else(|| anyhow!("tmux did not report the window of pane {pane}"))?;
     tmux::rename_window(&window, team);
-    _mark_hive_built(&window);
-    _install_team_status(&pane);
+    mark_hive_built(&window);
+    install_team_status(&pane);
     Ok((window, pane, true))
 }
 
 /// hive's status bar on the session *pane* belongs to — the team session
 /// only; a window built inside the caller's own session leaves their
 /// status line alone.
-fn _install_team_status(pane: &str) {
+fn install_team_status(pane: &str) {
     let sid = tmux::display_value(pane, "#{session_id}").unwrap_or_default();
     if !sid.is_empty() {
         tmux::install_team_status(&sid);
@@ -413,9 +413,9 @@ fn _install_team_status(pane: &str) {
 /// Where a team window goes for the caller: inside tmux the caller's own
 /// session, outside tmux the team session. Returns (window target, first
 /// pane id).
-fn _team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
+fn team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
     if !tmux::is_inside_tmux() {
-        let (window, pane, _) = ok_or_fail(_new_team_session_window(team));
+        let (window, pane, _) = ok_or_fail(new_team_session_window(team));
         return (window, pane);
     }
     let session_name = tmux::get_current_session_name()
@@ -429,7 +429,7 @@ fn _team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
     if window.is_empty() || first_pane.is_empty() {
         fail("failed to create a window for the team");
     }
-    _mark_hive_built(&window);
+    mark_hive_built(&window);
     (window, first_pane)
 }
 
@@ -438,14 +438,14 @@ fn _team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
 /// shell).
 ///
 /// Returns (window_target, attached_member_names, skipped_member_names).
-fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>, Vec<String>) {
+fn materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>, Vec<String>) {
     let team = map_str(entry, "team");
     let ws = map_str(entry, "workspace");
-    let members = _sorted_member_rows(_entry_members(entry));
+    let members = sorted_member_rows(entry_members(entry));
     let attachable_idx: Vec<usize> = members
         .iter()
         .enumerate()
-        .filter(|(_, member)| _attachable(member))
+        .filter(|(_, member)| attachable(member))
         .map(|(index, _)| index)
         .collect();
     let mut skipped: Vec<String> = members
@@ -460,7 +460,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
         .map(|index| map_str(&members[*index], "cwd"))
         .filter(|cwd| !cwd.is_empty())
         .unwrap_or_else(getcwd);
-    let (window, first_pane) = _team_window_for_caller(&team, &anchor_cwd);
+    let (window, first_pane) = team_window_for_caller(&team, &anchor_cwd);
 
     tmux::configure_hive_window(&window);
     tmux::set_window_option(&window, "@hive-team", &team);
@@ -472,14 +472,14 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
     // The first member to take a pane gets the window's own; a withheld
     // mirror leaves it a shell, as a window with nobody attachable is.
     let mut first_free = true;
-    let mirror_pref = _mirror_preference(&window);
+    let mirror_pref = mirror_preference(&window);
     for index in &attachable_idx {
         let member = &members[*index];
-        let Some(role) = _pane_role(mirror_pref, member) else {
+        let Some(role) = pane_role(mirror_pref, member) else {
             continue;
         };
         let name = map_str(member, "name");
-        if role == "mirror" && _join_hidden_mirror(&window, &team, &name).is_some() {
+        if role == "mirror" && join_hidden_mirror(&window, &team, &name).is_some() {
             attached.push(name);
             continue;
         }
@@ -501,7 +501,7 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
             }
             split
         };
-        _bind_member_viewer(&pane, member, &team, &ws, role);
+        bind_member_viewer(&pane, member, &team, &ws, role);
         attached.push(name);
         prev_pane = pane;
     }
@@ -512,13 +512,13 @@ fn _materialize_team_display(entry: &Map<String, Value>) -> (String, Vec<String>
 }
 
 /// The registry entry for *team_name*, or the `hive ls` refusal.
-pub(super) fn _team_entry(team_name: &str) -> Result<Map<String, Value>, String> {
+pub(crate) fn team_entry(team_name: &str) -> Result<Map<String, Value>, String> {
     crate::registry::load(team_name)
         .ok_or_else(|| format!("team '{team_name}' not found (see `hive ls`)"))
 }
 
-fn _team_window(team_name: &str) -> String {
-    crate::team::_find_team_window(team_name, "")
+fn team_window(team_name: &str) -> String {
+    crate::team::find_team_window(team_name, "")
         .map(|(window, _)| window)
         .unwrap_or_default()
 }
@@ -526,17 +526,17 @@ fn _team_window(team_name: &str) -> String {
 /// The team's display, made whole: rebuilt when the window is gone,
 /// backfilled with a pane per roster member it does not show yet. Returns
 /// (window, built).
-pub(crate) fn _ensure_team_display(entry: &Map<String, Value>) -> (String, bool) {
+pub(crate) fn ensure_team_display(entry: &Map<String, Value>) -> (String, bool) {
     let team = map_str(entry, "team");
-    let window = _team_window(&team);
+    let window = team_window(&team);
     if window.is_empty() {
-        let (window, _attached, skipped) = _materialize_team_display(entry);
+        let (window, _attached, skipped) = materialize_team_display(entry);
         for name in skipped {
             eprintln!("! {name}: no attachable engine identity — no pane");
         }
         return (window, true);
     }
-    for name in _backfill_missing_member_panes(&window, entry, _mirror_preference(&window)) {
+    for name in backfill_missing_member_panes(&window, entry, mirror_preference(&window)) {
         eprintln!("+ {name}: pane added to the existing window");
     }
     (window, false)
@@ -545,7 +545,7 @@ pub(crate) fn _ensure_team_display(entry: &Map<String, Value>) -> (String, bool)
 /// The jump attach ends on. Inside tmux, `switch-client` moves *this*
 /// client — `select-window` would only retarget the window's own session and
 /// leave a client attached elsewhere untouched.
-fn _jump_to_window(window: &str, verdict: &str) {
+fn jump_to_window(window: &str, verdict: &str) {
     if tmux::is_inside_tmux() {
         tmux::switch_client(window);
         println!("{verdict} {window}");
@@ -559,18 +559,18 @@ fn _jump_to_window(window: &str, verdict: &str) {
 }
 
 pub fn attach_cmd(team_name: &str) {
-    let entry = match _team_entry(team_name) {
+    let entry = match team_entry(team_name) {
         Ok(entry) => entry,
         Err(message) => fail(&message),
     };
-    let (window, built) = _ensure_team_display(&entry);
+    let (window, built) = ensure_team_display(&entry);
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {
         if let Ok(mut t) = Team::load(team_name, "") {
-            let _ = _ensure_team_hived(&mut t, &ws);
+            let _ = start_team_hived(&mut t, &ws);
         }
     }
-    _jump_to_window(&window, if built { "built" } else { "found" });
+    jump_to_window(&window, if built { "built" } else { "found" });
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ pub fn thread(message_id: &str) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let mut t = t.expect("required resolve returned no team");
     let ws = ok_or_fail(resolve_workspace(Some(&t), true));
-    let _ = _ensure_team_hived(&mut t, &ws);
+    let _ = start_team_hived(&mut t, &ws);
     let payload = crate::hived::request_thread(&ws, message_id);
     let mut payload = match payload {
         Some(payload) if !payload.is_empty() => payload,
@@ -604,12 +604,12 @@ pub fn thread(message_id: &str) {
 pub fn capture(member_name: &str, lines: i64) {
     let (_, t) = ok_or_fail(resolve_scoped_team(None, true));
     let t = t.expect("required resolve returned no team");
-    println!("{}", ok_or_fail(_capture_text(&t, member_name, lines)));
+    println!("{}", ok_or_fail(capture_text(&t, member_name, lines)));
 }
 
 /// The last *lines* of the member's own pane (the pane its roster row
 /// resolved to), or the not-found refusal.
-pub(crate) fn _capture_text(t: &Team, member_name: &str, lines: i64) -> Result<String> {
+pub(crate) fn capture_text(t: &Team, member_name: &str, lines: i64) -> Result<String> {
     let agent = t
         .get(member_name)
         .map_err(|_| anyhow!("member '{member_name}' not found in team '{}'", t.name))?;

@@ -94,7 +94,7 @@ impl TmuxOps for RealTmux {
         }
     }
     fn select_layout(&mut self, target: &str, layout: &str) -> bool {
-        crate::tmux::_run(&["select-layout", "-t", target, layout], false, 5)
+        crate::tmux::run(&["select-layout", "-t", target, layout], false, 5)
             .is_ok_and(|r| r.returncode == 0)
     }
 }
@@ -104,7 +104,7 @@ impl TmuxOps for RealTmux {
 /// apply's own `select-layout` landing beside the next spawn) would each
 /// see the dock out of place and both swap it — a double swap puts it
 /// back where it was — and the hook must see the key its predecessor
-/// wrote. The lock file is named by the window's `@N` id (`_lock_key`):
+/// wrote. The lock file is named by the window's `@N` id (`lock_key`):
 /// the hooks address the window by id and every explicit site by
 /// `session:index`, and both spellings must take the same lock.
 struct WindowLock(std::fs::File);
@@ -118,7 +118,7 @@ impl Drop for WindowLock {
 
 /// The lock file stem for `window_target`: its window id when tmux
 /// resolves one, else the target as spelled.
-fn _lock_key(window_target: &str, tmux: &mut dyn TmuxOps) -> String {
+fn lock_key(window_target: &str, tmux: &mut dyn TmuxOps) -> String {
     tmux.window_id(window_target)
         .unwrap_or_else(|| window_target.to_string())
         .chars()
@@ -150,7 +150,7 @@ pub fn ensure(window_target: &str, force: bool) -> Outcome {
         return Outcome::Skipped("no-window");
     }
     let mut tmux = RealTmux;
-    let _lock = window_lock(&_lock_key(window_target, &mut tmux));
+    let _lock = window_lock(&lock_key(window_target, &mut tmux));
     ensure_with(window_target, force, &mut tmux)
 }
 
@@ -177,7 +177,7 @@ fn ensure_with(window_target: &str, force: bool, tmux: &mut dyn TmuxOps) -> Outc
         return Outcome::Unchanged(planned);
     }
     // Cells apply in window order: the mirror must be first, the dock last.
-    let panes = _cell_order(window_target, panes, tmux);
+    let panes = cell_order(window_target, panes, tmux);
     let Some(planned) = plan(size, &panes) else {
         return Outcome::Skipped("no-plan");
     };
@@ -192,7 +192,7 @@ fn ensure_with(window_target: &str, force: bool, tmux: &mut dyn TmuxOps) -> Outc
 /// order, re-reading after each swap rather than trusting it: the layout
 /// string is applied by window order, so it must describe what tmux has
 /// now.
-fn _cell_order(window: &str, mut panes: Vec<PaneInfo>, tmux: &mut dyn TmuxOps) -> Vec<PaneInfo> {
+fn cell_order(window: &str, mut panes: Vec<PaneInfo>, tmux: &mut dyn TmuxOps) -> Vec<PaneInfo> {
     if let Some(at) = panes.iter().position(|p| p.role == "mirror") {
         if at != 0 {
             tmux.swap_pane(&panes[at].pane_id.clone(), &panes[0].pane_id.clone());
@@ -374,12 +374,12 @@ mod tests {
         // The hook says `@0`, a spawn says `dev:0`: one lock file.
         let mut tmux = FakeTmux::new((200, 50), &[]);
         tmux.id = Some("@0".to_string());
-        assert_eq!(_lock_key("dev:0", &mut tmux), "_0");
-        assert_eq!(_lock_key("@0", &mut tmux), "_0");
-        assert_eq!(_lock_key("dev:0", &mut tmux), _lock_key("@0", &mut tmux));
+        assert_eq!(lock_key("dev:0", &mut tmux), "_0");
+        assert_eq!(lock_key("@0", &mut tmux), "_0");
+        assert_eq!(lock_key("dev:0", &mut tmux), lock_key("@0", &mut tmux));
         // tmux silent: the spelling as given
         tmux.id = None;
-        assert_eq!(_lock_key("dev:0", &mut tmux), "dev_0");
+        assert_eq!(lock_key("dev:0", &mut tmux), "dev_0");
     }
 
     #[test]

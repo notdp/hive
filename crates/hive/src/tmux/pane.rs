@@ -1,5 +1,5 @@
 use super::context::display_value;
-use super::run::{_run, _run_output, exec_capture, TmuxError};
+use super::run::{exec_capture, run, run_output, TmuxError};
 
 // --- Pane ---
 
@@ -29,7 +29,7 @@ pub fn split_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{pane_id}"]);
-    match _run(&args, true, 5) {
+    match run(&args, true, 5) {
         Ok(r) => Ok(r.stdout.trim().to_string()),
         Err(TmuxError::CalledProcess { stderr, .. }) => {
             let stderr = stderr.trim();
@@ -52,16 +52,16 @@ full; kill a finished member (hive kill <name>) and retry"
 /// Uses two separate tmux invocations to avoid command-chaining (;)
 /// interfering with literal text parsing, which caused truncation.
 pub fn send_keys(pane_id: &str, text: &str, enter: bool) -> anyhow::Result<()> {
-    _run(&["send-keys", "-t", pane_id, "-l", text], true, 5)?;
+    run(&["send-keys", "-t", pane_id, "-l", text], true, 5)?;
     if enter {
-        _run(&["send-keys", "-t", pane_id, "Enter"], true, 5)?;
+        run(&["send-keys", "-t", pane_id, "Enter"], true, 5)?;
     }
     Ok(())
 }
 
 /// Send a special key (Escape, C-c, C-n, etc.).
 pub fn send_key(pane_id: &str, key: &str) -> anyhow::Result<()> {
-    _run(&["send-keys", "-t", pane_id, key], true, 5)?;
+    run(&["send-keys", "-t", pane_id, key], true, 5)?;
     Ok(())
 }
 
@@ -72,7 +72,7 @@ pub fn send_keys_batch(pane_id: &str, keys: &[&str]) -> anyhow::Result<()> {
     }
     let mut args: Vec<&str> = vec!["send-keys", "-t", pane_id];
     args.extend_from_slice(keys);
-    _run(&args, true, 5)?;
+    run(&args, true, 5)?;
     Ok(())
 }
 
@@ -103,11 +103,11 @@ pub fn paste_buffer(name: &str, target: &str, bracketed: bool) {
     if bracketed {
         args.insert(1, "-p");
     }
-    let _ = _run(&args, false, 5);
+    let _ = run(&args, false, 5);
 }
 
 pub fn delete_buffer(name: &str) {
-    let _ = _run(&["delete-buffer", "-b", name], false, 5);
+    let _ = run(&["delete-buffer", "-b", name], false, 5);
 }
 
 /// The pid of the process tmux runs in *pane_id*, when tmux answers.
@@ -128,7 +128,7 @@ pub fn is_pane_in_mode(pane_id: &str) -> bool {
 }
 
 pub fn cancel_pane_mode(pane_id: &str) {
-    let _ = _run(&["copy-mode", "-q", "-t", pane_id], false, 5);
+    let _ = run(&["copy-mode", "-q", "-t", pane_id], false, 5);
 }
 
 /// Capture pane content.
@@ -139,11 +139,11 @@ pub fn capture_pane(pane_id: &str, lines: u32, preserve_styles: bool) -> anyhow:
         args.push("-e");
     }
     args.extend(["-p", "-S", &start]);
-    _run_output(&args)
+    run_output(&args)
 }
 
 pub fn is_pane_alive(pane_id: &str) -> bool {
-    let r = match _run(
+    let r = match run(
         &["list-panes", "-a", "-F", "#{pane_id} #{pane_dead}"],
         false,
         5,
@@ -167,17 +167,17 @@ pub fn is_pane_alive(pane_id: &str) -> bool {
 }
 
 pub fn kill_pane(pane_id: &str) {
-    let _ = _run(&["kill-pane", "-t", pane_id], false, 5);
+    let _ = run(&["kill-pane", "-t", pane_id], false, 5);
 }
 
 // --- Layout & Appearance ---
 
 pub fn select_layout(target: &str, layout: &str) {
-    let _ = _run(&["select-layout", "-t", target, layout], false, 5);
+    let _ = run(&["select-layout", "-t", target, layout], false, 5);
 }
 
 pub fn set_pane_title(pane_id: &str, title: &str) {
-    let _ = _run(&["select-pane", "-t", pane_id, "-T", title], false, 5);
+    let _ = run(&["select-pane", "-t", pane_id, "-T", title], false, 5);
 }
 
 // A claude member pane is an attach *viewer*: the human can switch it to
@@ -200,7 +200,7 @@ pub const _HIVE_PANE_BORDER_FORMAT: &str = concat!(
 /// Hive-tagged panes show their member name; untagged panes fall back to the
 /// native tmux pane title.
 pub fn enable_pane_border_status(target: &str) {
-    let _ = _run(
+    let _ = run(
         &[
             "set-window-option",
             "-t",
@@ -211,7 +211,7 @@ pub fn enable_pane_border_status(target: &str) {
         false,
         5,
     );
-    let _ = _run(
+    let _ = run(
         &[
             "set-window-option",
             "-t",
@@ -234,7 +234,7 @@ pub fn configure_hive_window(target: &str) {
 }
 
 pub fn set_window_option(target: &str, option: &str, value: &str) {
-    let _ = _run(
+    let _ = run(
         &["set-window-option", "-t", target, option, value],
         false,
         5,
@@ -243,7 +243,7 @@ pub fn set_window_option(target: &str, option: &str, value: &str) {
 
 pub fn get_window_option(target: &str, key: &str) -> Option<String> {
     let fmt = format!("#{{@{key}}}");
-    let r = _run(&["display-message", "-t", target, "-p", &fmt], false, 5).ok()?;
+    let r = run(&["display-message", "-t", target, "-p", &fmt], false, 5).ok()?;
     let val = r.stdout.trim().to_string();
     if val.is_empty() {
         None
@@ -257,7 +257,7 @@ pub fn get_window_option(target: &str, key: &str) -> Option<String> {
 /// Values keep their exact spacing (status formats carry meaningful
 /// leading/trailing padding); only the trailing newline is removed.
 pub fn get_global_window_option(option: &str) -> Option<String> {
-    let r = _run(&["show-options", "-w", "-g", "-v", option], false, 5).ok()?;
+    let r = run(&["show-options", "-w", "-g", "-v", option], false, 5).ok()?;
     let val = r.stdout.trim_end_matches('\n').to_string();
     if val.is_empty() {
         None
@@ -267,12 +267,12 @@ pub fn get_global_window_option(option: &str) -> Option<String> {
 }
 
 pub fn clear_window_option(target: &str, option: &str) {
-    let _ = _run(&["set-window-option", "-t", target, "-u", option], false, 5);
+    let _ = run(&["set-window-option", "-t", target, "-u", option], false, 5);
 }
 
 /// List all pane ids in a window/session.
 pub fn list_panes(target: &str) -> Vec<String> {
-    match _run(&["list-panes", "-t", target, "-F", "#{pane_id}"], false, 5) {
+    match run(&["list-panes", "-t", target, "-F", "#{pane_id}"], false, 5) {
         Ok(r) => r
             .stdout
             .trim()
@@ -286,11 +286,11 @@ pub fn list_panes(target: &str) -> Vec<String> {
 
 /// Replace whatever runs in `pane_id` with `command` (a shell line).
 pub fn respawn_pane(pane_id: &str, command: &str) -> anyhow::Result<()> {
-    _run(&["respawn-pane", "-k", "-t", pane_id, command], true, 5)?;
+    run(&["respawn-pane", "-k", "-t", pane_id, command], true, 5)?;
     Ok(())
 }
 
 /// Swap two panes' positions in the window (and in its pane order).
 pub fn swap_pane(src: &str, dst: &str) {
-    let _ = _run(&["swap-pane", "-d", "-s", src, "-t", dst], false, 5);
+    let _ = run(&["swap-pane", "-d", "-s", src, "-t", dst], false, 5);
 }

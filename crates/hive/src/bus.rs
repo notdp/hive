@@ -29,7 +29,7 @@ fn msg_id_space() -> i64 {
     (MSG_ID_ALPHABET.len() as i64).pow(MSG_ID_WIDTH as u32)
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     format!("{}Z", crate::devlog::utc_now_iso_seconds())
 }
 
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(seq, 1);
         let events = read_all_events(&workspace).unwrap();
         assert_eq!(events.len(), 1);
-        // Python pins `_now_iso` via monkeypatch; here the actual timestamp is
+        // Python pins `now_iso` via monkeypatch; here the actual timestamp is
         // asserted for shape and reused in the full-event comparison.
         let created_at = events[0].created_at.clone();
         assert_created_at_shape(&created_at);

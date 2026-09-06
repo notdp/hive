@@ -39,9 +39,9 @@ pub(crate) fn materialize_asset_tree(root: &Path, files: &[(&str, &str, bool)]) 
 }
 
 /// The claude config tree, resolved the one way hive resolves it
-/// (`claude_sessions::_config_dir`: CLAUDE_HOME, then CLAUDE_CONFIG_DIR).
+/// (`claude_sessions::config_dir`: CLAUDE_HOME, then CLAUDE_CONFIG_DIR).
 pub fn claude_home() -> PathBuf {
-    crate::adapters::claude_sessions::_config_dir()
+    crate::adapters::claude_sessions::config_dir()
 }
 
 pub fn claude_settings_path() -> PathBuf {
@@ -52,7 +52,7 @@ pub fn codex_hooks_path() -> PathBuf {
     crate::adapters::codex_app_server::codex_home().join("hooks.json")
 }
 
-pub(crate) fn _load_json_file(path: &Path) -> Map<String, Value> {
+fn load_json_file(path: &Path) -> Map<String, Value> {
     if !path.exists() {
         return Map::new();
     }
@@ -65,7 +65,7 @@ pub(crate) fn _load_json_file(path: &Path) -> Map<String, Value> {
     }
 }
 
-pub(crate) fn _save_json_file(path: &Path, data: &Map<String, Value>) -> Result<()> {
+pub(crate) fn save_json_file(path: &Path, data: &Map<String, Value>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -74,7 +74,7 @@ pub(crate) fn _save_json_file(path: &Path, data: &Map<String, Value>) -> Result<
     Ok(())
 }
 
-fn _remove_hooks_in_data(data: &mut Map<String, Value>, hook_defs: &HookDefs) -> bool {
+fn remove_hooks_in_data(data: &mut Map<String, Value>, hook_defs: &HookDefs) -> bool {
     let Some(hooks) = data.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
         return false;
     };
@@ -114,7 +114,7 @@ pub const CODEX_SUPPORTED_HOOK_EVENTS: [&str; 5] = [
     "Stop",
 ];
 
-fn _filter_hook_defs_for_codex(hook_defs: &HookDefs) -> HookDefs {
+fn filter_hook_defs_for_codex(hook_defs: &HookDefs) -> HookDefs {
     hook_defs
         .iter()
         .filter(|(k, _)| CODEX_SUPPORTED_HOOK_EVENTS.contains(&k.as_str()))
@@ -125,17 +125,17 @@ fn _filter_hook_defs_for_codex(hook_defs: &HookDefs) -> HookDefs {
 pub fn remove_hook_groups(hook_defs: &HookDefs) -> Result<()> {
     // Claude Code
     let claude_path = claude_settings_path();
-    let mut claude_data = _load_json_file(&claude_path);
-    if _remove_hooks_in_data(&mut claude_data, hook_defs) {
-        _save_json_file(&claude_path, &claude_data)?;
+    let mut claude_data = load_json_file(&claude_path);
+    if remove_hooks_in_data(&mut claude_data, hook_defs) {
+        save_json_file(&claude_path, &claude_data)?;
     }
     // Codex
     let codex_path = codex_hooks_path();
-    let codex_defs = _filter_hook_defs_for_codex(hook_defs);
+    let codex_defs = filter_hook_defs_for_codex(hook_defs);
     if !codex_defs.is_empty() {
-        let mut codex_data = _load_json_file(&codex_path);
-        if _remove_hooks_in_data(&mut codex_data, &codex_defs) {
-            _save_json_file(&codex_path, &codex_data)?;
+        let mut codex_data = load_json_file(&codex_path);
+        if remove_hooks_in_data(&mut codex_data, &codex_defs) {
+            save_json_file(&codex_path, &codex_data)?;
         }
     }
     Ok(())

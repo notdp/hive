@@ -1466,7 +1466,7 @@ fn test_save_and_clear_draft_keeps_the_draft_when_the_buffer_save_fails() {
         h.parse_draft = Some("unsent thought".to_string());
         h.load_buffer_fails = true;
     });
-    assert_eq!(_save_and_clear_draft("%3", "claude"), "");
+    assert_eq!(save_and_clear_draft("%3", "claude"), "");
     assert!(hook(|h| h.draft_cleared.clone()).is_empty());
 }
 
@@ -1480,7 +1480,7 @@ fn test_save_and_clear_draft_still_restores_when_the_clear_fails() {
         h.parse_draft = Some("unsent thought".to_string());
         h.clear_input_fails = true;
     });
-    assert_eq!(_save_and_clear_draft("%3", "claude"), "hive_draft_3");
+    assert_eq!(save_and_clear_draft("%3", "claude"), "hive_draft_3");
 }
 
 // --- session detection ---------------------------------------------------
@@ -1717,13 +1717,13 @@ fn test_wait_codex_attached_polls_for_the_codex_process() {
         h.cli_probe_seq = vec![None, Some("claude".to_string()), Some("codex".to_string())];
     });
     // None and a non-codex profile are both "not attached yet"
-    assert!(_wait_codex_attached("%9", 60.0, 0.0));
+    assert!(wait_codex_attached("%9", 60.0, 0.0));
 }
 
 #[test]
 fn test_wait_codex_attached_timeout_is_deterministic_and_nonfatal() {
     let _guard = setup();
-    assert!(!_wait_codex_attached("%9", 0.0, 0.0));
+    assert!(!wait_codex_attached("%9", 0.0, 0.0));
 
     // spawn survives a readiness timeout and still completes
     mock_daemon_up();
@@ -1769,16 +1769,16 @@ fn test_wait_grok_session_ready_sees_the_session_dir_and_is_nonfatal() {
         let _guard = setup();
         hook(|h| h.wait_grok_ready = None); // run the real wait
         pin_cli_probe("grok");
-        assert!(!_wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
+        assert!(!wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
 
         // grok creates $GROK_HOME/sessions/<quoted cwd>/<sid>/ at startup
         std::fs::create_dir_all(tmp.path().join("sessions").join("%2Ftmp").join("sess-x")).unwrap();
-        assert!(_wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
+        assert!(wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
 
         // on resume the dir predates the launch, so the pane's own grok
         // must be up
         pin_cli_probe("");
-        assert!(!_wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
+        assert!(!wait_grok_session_ready("%0", "sess-x", 0.0, 0.0));
     }
 
     // a readiness timeout is not fatal: spawn still completes
@@ -2158,7 +2158,7 @@ fn test_submit_on_a_member_pane_pipes_into_the_job() {
             why: String::new(),
         })
     });
-    _submit_interactive_text("%1", "hello", "claude").unwrap();
+    submit_interactive_text("%1", "hello", "claude").unwrap();
     assert_eq!(
         hook(|h| h.typed.clone()),
         vec![("cafe1234".to_string(), "hello".to_string())]
@@ -2177,7 +2177,7 @@ fn test_submit_raises_when_the_job_did_not_take_the_text() {
             why: "never echoed".to_string(),
         })
     });
-    let err = err_of(_submit_interactive_text("%1", "hello", "claude"));
+    let err = err_of(submit_interactive_text("%1", "hello", "claude"));
     assert!(err.contains("never echoed"), "{err}");
 }
 
@@ -2188,11 +2188,11 @@ fn test_a_non_member_claude_pane_still_goes_through_tmux() {
     let _guard = setup();
     member_pane(None);
     hook(|h| h.interactive_claude_pid = Some(456));
-    _submit_interactive_text("%1", "hello", "claude").unwrap();
+    submit_interactive_text("%1", "hello", "claude").unwrap();
     assert_eq!(calls(), vec!["hello", "<Enter>"]);
 
     hook(|h| h.interactive_claude_pid = None);
-    let err = err_of(_submit_interactive_text("%1", "hello", "claude"));
+    let err = err_of(submit_interactive_text("%1", "hello", "claude"));
     assert!(err.contains("no interactive claude"), "{err}");
 }
 
@@ -2204,7 +2204,7 @@ fn test_a_pane_whose_claude_is_an_attach_viewer_is_refused() {
     let _guard = setup();
     member_pane(None);
     hook(|h| h.interactive_claude_pid = None); // the viewer is not an interactive claude
-    let err = err_of(_submit_interactive_text("%1", "hello", "claude"));
+    let err = err_of(submit_interactive_text("%1", "hello", "claude"));
     assert!(err.contains("no interactive claude"), "{err}");
     assert!(calls().is_empty());
 }

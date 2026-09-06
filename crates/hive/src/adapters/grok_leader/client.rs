@@ -38,7 +38,7 @@ impl Default for SessionRuntime {
     }
 }
 
-fn _now_epoch() -> f64 {
+fn now_epoch() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -143,7 +143,7 @@ impl LeaderProc for RealProc {
     }
 }
 
-fn _spawn_stdio_proc(argv: &[String]) -> io::Result<Arc<dyn LeaderProc>> {
+fn spawn_stdio_proc(argv: &[String]) -> io::Result<Arc<dyn LeaderProc>> {
     #[cfg(test)]
     {
         super::tests::stdio_spawn_override(argv)
@@ -231,7 +231,7 @@ impl ClientInner {
 }
 
 /// Fail every in-flight waiter: a dead child never answers them.
-fn _fail_pending(inner: &ClientInner) {
+fn fail_pending(inner: &ClientInner) {
     let slots: Vec<Arc<Slot>> = inner
         .pending
         .lock()
@@ -250,7 +250,7 @@ fn _fail_pending(inner: &ClientInner) {
 /// The decision belongs to the human at the TUI, which gets its own copy of
 /// the request; hive must still answer its copy or the turn stalls, and
 /// cancelling is the only answer that neither approves nor rejects for them.
-fn _on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
+fn on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
     if method != "session/request_permission" {
         return;
     }
@@ -264,10 +264,10 @@ fn _on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
         return;
     }
     state.runtime.input_state = "waiting_user".to_string();
-    state.runtime.observed_at = _now_epoch();
+    state.runtime.observed_at = now_epoch();
 }
 
-fn _on_notification(inner: &ClientInner, method: &str, params: &Value) {
+fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
     let mut state = inner.state.lock().unwrap();
     if !state.loaded {
         return; // session/load replays past updates; replay is not evidence
@@ -283,7 +283,7 @@ fn _on_notification(inner: &ClientInner, method: &str, params: &Value) {
                 && entry.get("sessionId").and_then(Value::as_str)
                     == state.runtime.session_id.as_deref()
             {
-                _apply_activity(&mut state, entry.get("activity"));
+                apply_activity(&mut state, entry.get("activity"));
             }
         }
         return;
@@ -291,11 +291,11 @@ fn _on_notification(inner: &ClientInner, method: &str, params: &Value) {
     if params.get("sessionId").and_then(Value::as_str) != state.runtime.session_id.as_deref() {
         return;
     }
-    state.runtime.observed_at = _now_epoch();
+    state.runtime.observed_at = now_epoch();
     match method {
         "session/update" => {
             let update = params.get("update").cloned().unwrap_or_else(|| json!({}));
-            _apply_update(&mut state, &update);
+            apply_update(&mut state, &update);
         }
         "_x.ai/session_notification" => {
             let kind = params
@@ -308,14 +308,14 @@ fn _on_notification(inner: &ClientInner, method: &str, params: &Value) {
                 state.runtime.input_state = "ready".to_string();
             }
         }
-        "_x.ai/queue/changed" => _apply_queue(&mut state, params),
+        "_x.ai/queue/changed" => apply_queue(&mut state, params),
         _ => {}
     }
 }
 
 /// Fold `activity` — the leader's busy authority — into the runtime.
-fn _apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
-    state.runtime.observed_at = _now_epoch();
+fn apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
+    state.runtime.observed_at = now_epoch();
     match activity.and_then(Value::as_str) {
         Some("working") => state.runtime.busy = true,
         Some("idle") => {
@@ -327,7 +327,7 @@ fn _apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
     }
 }
 
-fn _apply_update(state: &mut ClientShared, update: &Value) {
+fn apply_update(state: &mut ClientShared, update: &Value) {
     let kind = update
         .get("sessionUpdate")
         .and_then(Value::as_str)
@@ -355,14 +355,14 @@ fn _apply_update(state: &mut ClientShared, update: &Value) {
                 let text = update
                     .get("content")
                     .and_then(|content| content.get("text"));
-                _note_ack(state, text);
+                note_ack(state, text);
             }
         }
         _ => {}
     }
 }
 
-fn _apply_queue(state: &mut ClientShared, params: &Value) {
+fn apply_queue(state: &mut ClientShared, params: &Value) {
     let entries: Vec<Value> = params
         .get("entries")
         .and_then(Value::as_array)
@@ -378,12 +378,12 @@ fn _apply_queue(state: &mut ClientShared, params: &Value) {
         state.runtime.turn_phase = "input_backlog".to_string();
     }
     for entry in &entries {
-        _note_ack(state, entry.get("text"));
+        note_ack(state, entry.get("text"));
     }
-    _note_ack(state, params.get("runningText"));
+    note_ack(state, params.get("runningText"));
 }
 
-fn _note_ack(state: &ClientShared, text: Option<&Value>) {
+fn note_ack(state: &ClientShared, text: Option<&Value>) {
     if let (Some(ack), Some(text)) = (state.ack.as_ref(), text) {
         if text.as_str() == Some(ack.text.as_str()) {
             ack.event.set();
@@ -391,7 +391,7 @@ fn _note_ack(state: &ClientShared, text: Option<&Value>) {
     }
 }
 
-fn _reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
+fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
     let mut reader = BufReader::new(stdout);
     while !inner.closed.load(Ordering::SeqCst) {
         let mut line = String::new();
@@ -414,8 +414,8 @@ fn _reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
         let rid = msg.get("id").filter(|rid| !rid.is_null()).cloned();
         let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
         match (method, rid) {
-            (Some(method), Some(rid)) => _on_request(&inner, &rid, &method, &params),
-            (Some(method), None) => _on_notification(&inner, &method, &params),
+            (Some(method), Some(rid)) => on_request(&inner, &rid, &method, &params),
+            (Some(method), None) => on_notification(&inner, &method, &params),
             _ => {
                 // Pop atomically: a `call()` that timed out concurrently may have
                 // removed this rid already, and a missing slot only means the
@@ -439,7 +439,7 @@ fn _reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
         }
     }
     inner.closed.store(true, Ordering::SeqCst);
-    _fail_pending(&inner);
+    fail_pending(&inner);
 }
 
 /// `grok agent --leader stdio` subprocess bound to one daemon key's session.
@@ -461,7 +461,7 @@ impl GrokStdioClient {
             "--leader-socket".to_string(),
             socket_path.clone(),
         ];
-        let proc = _spawn_stdio_proc(&argv)?;
+        let proc = spawn_stdio_proc(&argv)?;
         let stdout = proc
             .take_stdout()
             .ok_or_else(|| io::Error::other("stdout unavailable"))?;
@@ -474,7 +474,7 @@ impl GrokStdioClient {
             closed: AtomicBool::new(false),
         });
         let reader_inner = inner.clone();
-        let handle = thread::spawn(move || _reader_loop(reader_inner, stdout));
+        let handle = thread::spawn(move || reader_loop(reader_inner, stdout));
         Ok(GrokStdioClient {
             key: key.to_string(),
             socket_path,
@@ -623,7 +623,7 @@ impl GrokStdioClient {
                     "prompt": [{"type": "text", "text": text}],
                 },
             }));
-            if !sent || !done.wait(_ack_timeout()) {
+            if !sent || !done.wait(ack_timeout()) {
                 return false;
             }
             let msg = slot.msg.lock().unwrap();
@@ -710,7 +710,7 @@ impl GrokStdioClient {
 
     pub fn close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
-        _fail_pending(&self.inner);
+        fail_pending(&self.inner);
         self.inner.proc.close_stdin();
         self.inner.proc.terminate();
         self.inner.proc.wait(1.0);
@@ -726,7 +726,7 @@ impl Drop for GrokStdioClient {
     }
 }
 
-fn _ack_timeout() -> f64 {
+fn ack_timeout() -> f64 {
     #[cfg(test)]
     {
         if let Some(timeout) = super::tests::ack_timeout_override() {
