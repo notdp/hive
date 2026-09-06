@@ -63,7 +63,7 @@ Consequences across modules:
   missing), `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
-  these verbs do not require the caller to have one. `node run` rides the
+  these verbs do not require the caller to have one. `workflow run` rides the
   same doctrine; `view`, the read-only listings (`ls`, `ccd`), `worktree`, and
   the setup/launcher commands never needed a pane. The full list is
   `cli/mod.rs::TMUX_OPTIONAL_ROOT_COMMANDS`; everything else (layout,
@@ -199,17 +199,17 @@ them.
 
 Of the send address kinds, only a member names an engine with a transport.
 `ccd.<name>` reaches a Claude session outside any team over that session's
-own inbox. A `hive node run` dispatch has no reply address at all: the
+own inbox. A `hive workflow run` dispatch has no reply address at all: the
 member is never asked to send anything back, and the roster holds engines
 only.
 
-### Node dispatch: the result is the turn's final message
+### Workflow node: the result is an explicit return
 
-`hive node run --team T --name N [--cli C] [--model M]` runs one task on a
-member the way a Claude Code Workflow runs a subagent: the member is told
-nothing about replying, does the task, ends its turn, and the runner
-(`node.rs`) reads the final assistant message of that turn from the engine's
-own transcript. Nothing travels back over the bus.
+`hive workflow run --team T --name N [--cli C] [--model M]` runs one task on
+a member the way a Claude Code Workflow runs a subagent: the member is told
+nothing about replying, does the task, and hands its result back with
+`hive workflow done` — its own return statement. Nothing travels back over
+the bus, and nothing is read from the engine's transcript.
 
 - **The dispatch.** The runner mints a dispatch id `nd-<12 lowercase hex>`,
   writes the task to `<workspace>/artifacts/tasks/<name>-<dispatch_id>.md`,
@@ -219,10 +219,10 @@ own transcript. Nothing travels back over the bus.
   verbatim in the text the member receives (header and body). The ledger row
   has `from_agent` empty (there is no sender), `to_agent` the member name and
   `artifact` the task path; it is the only bus write a node makes. The run
-  record (below) is written `pending` — dispatch id, engine session, reader
-  cursor — before that write, so a runner that dies between the delivery
-  and its own bookkeeping leaves a pending record behind, never a gap a
-  same-name run could walk through.
+  record (below) is written `pending` — dispatch id, cli, start time —
+  before that write, so a runner that dies between the delivery and its own
+  bookkeeping leaves a pending record behind, never a gap a same-name run
+  could walk through.
 - **A refused dispatch and a lost answer are different failures.** The
   hived's answer to the dispatch is what the runner keys on
   (`send.rs::DispatchFailure`). `Refused` is a definite no — the hived
@@ -234,17 +234,16 @@ own transcript. Nothing travels back over the bus.
   and no usable answer coming back (read timeout, dropped connection,
   empty or unparsable reply): the hived may have injected the task, so it
   is never sent again. The run keeps its pending record (`seq` stays
-  null, since the seq rode the lost answer) and goes into the normal wait:
-  the id binding in the transcript is the delivery confirmation, and the
-  run then proceeds exactly as a delivered dispatch. If the input is not
-  observed within 120 polls at the 1s interval while the member lives, the
-  run ends `ambiguous` ("dispatch answer lost and the task was not
-  observed in the transcript within 120s"), exit 0, with the record left
-  `pending` — not terminal — so the name stays owned and the next
-  same-name run is `member_busy` until `hive kill` of the member; a
-  spawned member is not retired, since it may be working. The member
-  dying during that wait is `member_gone` as usual, a terminal record. An
-  unknown answer never frees the name.
+  null, since the seq rode the lost answer) and goes into the normal wait
+  for a done file or a closed turn, exactly as a delivered dispatch. If
+  neither shows within 120 polls at the 1s interval while the member
+  lives, the run ends `ambiguous` ("dispatch answer lost and no return"),
+  exit 0, with the record left `pending` — not terminal — so the name
+  stays owned and the next same-name run is `member_busy` until
+  `hive kill` of the member; a spawned member is not retired, since it may
+  be working. The member dying during that wait is `member_gone` as usual,
+  a terminal record. An unknown answer never frees the name. This is the
+  only `ambiguous` left.
 - **Readiness.** The runner dispatches only between turns, and only on a
   positive reading from the engine's own daemon that no turn is open. The
   runner asks the hived's `turn-open` for the member and the hived queries
@@ -255,167 +254,59 @@ own transcript. Nothing travels back over the bus.
   answer says nothing about the turn and never opens the dispatch; every
   null answer carries a `reason` and is recorded as a `turn_open.null`
   notify event (cli, agent, reason), so a run stalled on null leaves
-  evidence in `notify.jsonl`. A member still in a turn after 600s ends the
-  run `member_busy` without dispatching — a task dropped into a running
-  turn would be folded into it, and the fold detection below is a net,
-  not a plan.
-- **Anchoring is input identity, never time.** Before dispatching, the
-  runner takes the reader's cursor (where the transcript ends now). After
-  dispatching it asks the reader for the input record carrying the id past
-  that cursor, binds the turn that input started, and waits for that turn's
-  terminal record. A turn the reader cannot attribute to the id is reported,
-  not guessed at: an id that landed inside a running turn instead of
-  opening one, a second input folded into the bound turn after it opened
-  (a human typing into the pane, a teammate's message absorbed mid-turn —
-  the two fold paths are detected separately), a compaction that rewrote
-  the branch — all `ambiguous`. A member whose engine session is no longer
-  the one the dispatch landed in (`/clear`, a resume into another id, a
-  fork) is `session_changed`: the old transcript by itself cannot show that
-  a new file was opened, so the core re-reads the member's engine session
-  while it waits and voids the anchor when it moved, after one last read of
-  the old transcript for a terminal record already there. The readers
-  (`adapters/turn.rs`, one per CLI) are the only place transcript turn and
-  terminal shapes are interpreted; `node.rs` sees `TurnOutcome` values and
-  nothing else.
-- **A closed turn whose text is not on disk yet.** Engines close a turn
-  before its final message is fully written: grok writes `turn_ended`
-  before the history line, claude writes a message one content block per
-  record. A reader in that state returns `TurnOutcome::Flushing`, which is
-  not a result: the core keeps polling under a flush budget of 30 polls at
-  the 1s poll interval, counted from the first `Flushing` reading (polls,
-  not wall clock: a slow read stretches it), and ends `ambiguous` when the
-  text never lands.
-  Earlier text of the same turn (a tool-calling step's narration, a block
-  of an earlier message) never stands in for the final message.
-- **The result.** `body` is every text block of the bound turn's final
-  assistant message, original order, thinking and tool blocks excluded, not
-  truncated to a sentence or a line; it is empty when the turn closed
-  without a text block. A completed turn says the engine closed it, not that
-  the task succeeded: a refusal or a request for help is a normal final
-  message.
-- **The JSON line** (stdout, exit 0 whenever a verdict was reached): `status`,
-  `name`, `pane` (may be empty), `reused`, `dispatchId`, `session` (the
-  engine's own session id — for claude the session uuid the bg job runs,
-  never the job id the roster row holds), `turn` (engine turn key, or
-  null), `body` when `status` is `completed`, `reason` (the engine's own
-  label or an explanation) otherwise. `status` is one of `completed |
-  interrupted | failed | ambiguous | session_changed |
-  transcript_unavailable | member_gone | member_busy`: the first five are
-  the same-named `TurnOutcome`; `transcript_unavailable` is a reader that
-  kept failing to read for 60s after the dispatch, or a roster row that
-  never got a session id; `member_gone` is a member the roster reports dead
-  with no outcome readable on one final read; `member_busy` is a pending
-  node record for the member whose member is alive, the per-member lock
-  held by another runner, or the 600s readiness cap above. Polling is 1s,
-  the reader is re-invoked on every poll, and a half-written trailing line
-  is "not yet"; the turn itself has no timeout (the caller decides).
-  stderr and exit 1 mean the task was not dispatched — bad team, spawn or
-  ready failure, no reader for the cli — and the run can be repeated
-  (`member_busy` is the other not-dispatched verdict, reported as a JSON
-  line because it names a state the caller acts on); a dispatched task
-  always ends in a JSON line.
-- **The record.** `<workspace>/run/nodes/<name>.json` — `dispatchId`,
-  `cli`, `session`, `cursor`, `anchor` (session/turn/cursor once bound),
-  `status` (`pending | input_bound | <terminal status>`), `body`/`reason`
-  when terminal, `seq` (ledger seq of the dispatch, filled in after the
-  delivery), `startedAt` (epoch seconds) — under the flock
-  `<workspace>/run/nodes/<name>.lock` held for the whole run; the lock
+  evidence in `notify.jsonl`. A member still in a turn after 600 polls
+  ends the run `member_busy` without dispatching — a task dropped into a
+  running turn would be folded into it.
+- **The return.** `hive workflow done "<summary>" [--artifact <file>|-]`
+  is run by the member itself, from inside the task's turn. The calling
+  process resolves its own identity through the crate's identity ladder
+  (`identity::default_team()` / `identity::default_agent()`, the way
+  `hive send` finds its sender), the team workspace through
+  `team::scope::resolve_workspace`, reads its own pending record
+  `<workspace>/run/workflow/<name>.json` for the one pending dispatch id,
+  and writes `<workspace>/run/workflow/<name>.done.json` atomically (tmp +
+  rename) with `dispatchId`, `body`, `artifact`, `doneAt`. No hived hop,
+  no bus row, no address. Body and artifact follow the `hive send` rules
+  (`--artifact -` reads stdin), except that the body is a return value and
+  gets none of send's short-message warnings. No pending dispatch is an
+  error ("no workflow task is waiting for <name>", exit 1); a second call
+  for the same dispatch is "already returned".
+- **The wait.** The runner polls at 1s. A done file whose `dispatchId`
+  matches ends the run `completed`, `body` and `artifact` taken from the
+  file, which the runner consumes (deletes). A member the roster reports
+  dead is `member_gone`. A turn the hived reports closed (`turn-open`
+  `false`) on 5 consecutive polls after the delivery, with no done file, is
+  `no_result` ("the member ended its turn without hive workflow done"): the
+  member may or may not have done the task, and the caller decides. All
+  three are terminal records. A done file carrying another dispatch id is
+  not this run's and is left alone. The turn itself has no timeout (the
+  caller decides how long to wait).
+- **The JSON line** (stdout, exit 0 whenever a verdict was reached):
+  `status`, `name`, `pane` (may be empty), `reused`, `dispatchId`, `body`
+  and `artifact` (possibly empty) when `status` is `completed`, `reason`
+  otherwise. `status` is one of `completed | no_result | member_gone |
+  member_busy | ambiguous`; `member_busy` is a pending node record for the
+  member whose member is alive, the per-member lock held by another runner,
+  or the readiness cap above. No session or turn field: the runner never
+  learns the engine's session and never needs to. stderr and exit 1 mean
+  the task was not dispatched — bad team, spawn or ready failure — and the
+  run can be repeated (`member_busy` is the other not-dispatched verdict,
+  reported as a JSON line because it names a state the caller acts on); a
+  dispatched task always ends in a JSON line.
+- **The record.** `<workspace>/run/workflow/<name>.json` — `dispatchId`,
+  `cli`, `status` (`pending | <terminal status>`), `body`/`artifact`/
+  `reason` when terminal, `seq` (ledger seq of the dispatch, filled in
+  after the delivery), `startedAt` (epoch seconds) — under the flock
+  `<workspace>/run/workflow/<name>.lock` held for the whole run; the lock
   file itself is never deleted, the record is. A stale pending record whose
   member is dead is replaced by the next run; `hive kill` of the member
   removes its record. A same-name node reuses a live member. A dispatch
-  whose answer was lost and whose input never showed leaves the record
-  pending on purpose (above). Two v1
-  limitations: Ctrl-C on the runner leaves the record pending until
-  `hive kill` of the member, and a terminal verdict frees the name even
-  though the member may still be working (an `ambiguous` or
-  `transcript_unavailable` run releases the lock while the engine can be
-  mid-task, so the next same-name run dispatches into whatever the member
-  is doing and its fold detection is the net).
-
-#### Node turn anchors, per CLI
-
-What each reader binds and waits for, in the engine's own records. Every
-reader re-opens the transcript on every call, holds no state between calls,
-and treats a trailing line without its newline as not written yet.
-
-- **claude** — transcript `~/.claude/projects/<cwd slug>/<sessionId>.jsonl`
-  (the slug is the cwd with every non-alphanumeric character replaced by
-  `-`; the session id is the engine's uuid, resolved from the roster's job
-  id through the job's engine record). The input is the `user` record whose
-  `message.content` (a string or text blocks) carries the dispatch id;
-  a `tool_result` row and a row flagged `isMeta` or `turnCompanion` (a
-  harness companion) are never inputs. Between turns the daemon lane writes
-  it as `promptSource: queued` after a `queue-operation enqueue`/`dequeue`.
-  The turn key is that record's `uuid`; the turn is the records whose
-  `parentUuid` chains back to it, and because claude repairs its own chain
-  through records it never wrote (a refusal fallback, an interrupt), a
-  chained record after the anchor whose parent nobody since the anchor
-  wrote is adopted as the running turn's. The terminal record is an
-  assistant record on the turn with `message.stop_reason == "end_turn"`.
-  Claude writes one API message as one record per content block, every
-  block carrying the message's `stop_reason` and `message.id`, and the
-  thinking block with `end_turn` lands before the text block that follows
-  it — so the final message is the text blocks of the records sharing that
-  `message.id`, complete only once a barrier has landed after them: a
-  record with a `uuid` that is not one of its blocks, or one of the
-  uuid-less rows claude writes only after a turn closes (`last-prompt`, the
-  `dequeue` that opens the next queued turn). Until then the reader is
-  `Flushing`. A `user` record `[Request interrupted by user…]` (Escape, or
-  a rejected tool call) is `interrupted`; an `isApiErrorMessage` assistant
-  record, `stop_reason` `max_tokens` or `refusal`, and a `system
-  model_refusal_no_fallback` are `failed`. `ambiguous`: at dispatch, the id
-  landing only in a `queued_command` attachment and a terminal
-  `queue-operation remove` (folded into a turn already running — see "What
-  a delivery leaves in the receiver's transcript"); after binding, a
-  `queued_command` attachment or an absorbed `remove` inside the turn (a
-  second input folded in, whose text may have redirected the member), a
-  fresh `user` input chained into or started outside the turn, a
-  `compact_boundary` or an `isCompactSummary` row. A replaced or truncated
-  file, or a record from another `sessionId`, is `session_changed`.
-- **codex** — rollout `~/.codex/sessions/**/rollout-*-<threadId>.jsonl`.
-  Every turn is bracketed by `event_msg` records: `task_started
-  {turn_id}`, the turn's `response_item`s, one terminal event for the same
-  `turn_id`. The input is the `response_item` user message whose
-  `input_text` carries the id; the turn key is the `turn_id` of the
-  `task_started` open at that point, not the message's own metadata. An id
-  that lands with no `task_started` since the cursor, or into an open turn
-  that has already written engine output (an assistant message, a tool
-  call or its output), was steered into a running turn: `ambiguous`.
-  Codex's own user-role injections before the id inside the same turn
-  (`<environment_context>`, a skill expansion) do not disqualify it. The
-  terminal record is `task_complete` with the bound `turn_id`: the final
-  message is its `last_agent_message`, else the turn's last `final_answer`
-  assistant message, else empty (commentary never stands in). `turn_aborted`
-  (`reason: interrupted`; older builds omit the `turn_id`) is
-  `interrupted`; `error {message, codex_error_info}`, which carries no
-  `turn_id` and in every sample precedes a null `task_complete`, is
-  `failed`. A `task_complete` or `task_started` for another `turn_id`
-  before the bound turn closed, a `thread_rolled_back`, or another user
-  message inside the turn is `ambiguous`; a replaced or shortened rollout,
-  or a `session_meta` naming another id, is `session_changed`.
-- **grok** — two files under
-  `~/.grok/sessions/<urlencode(cwd, safe='')>/<sessionId>/`.
-  `chat_history.jsonl`: the input is the `user` record whose text carries
-  the id and that has a `prompt_index` — the same coordinate as the turn
-  number; a mid-turn user record (a `<system-reminder>`, an interjection
-  folded into the running turn) carries `synthetic_reason` and no
-  `prompt_index`, and an id in one of those is `ambiguous`. `events.jsonl`:
-  `turn_started` carries `session_id` and `turn_number`, `turn_ended`
-  carries `outcome` (and `cancellation_category` for a cancel) but no turn
-  number, so the reader binds the `turn_started` whose `turn_number` is the
-  prompt's `prompt_index` (its `session_id` must be the member's) and walks
-  the events after it in order: the first `turn_ended` closes the turn,
-  another `turn_started` first or an `interjected` event is `ambiguous`.
-  `conversation_message_count` is never used. The turn key is
-  `<session_id>/<turn_number>`. On `outcome: completed` the final message is
-  the last `assistant` record of the turn's history span (up to the next
-  prompt) that carries no `tool_calls` — a tool-calling record is a step and
-  its narration is not the answer. `turn_ended` lands before that record is
-  flushed, so a completed turn with no such record yet is `Flushing` under
-  the flush budget, and empty once a later prompt or `turn_started` shows
-  nothing is coming. `cancelled` is `interrupted` with the category,
-  `error` is `failed`, any other outcome is `ambiguous`; a session
-  directory gone or events from another `session_id` is `session_changed`.
+  whose answer was lost and that never returned leaves the record pending
+  on purpose (above). Two v1 limitations: Ctrl-C on the runner leaves the
+  record pending until `hive kill` of the member, and a terminal verdict
+  frees the name even though the member may still be working (a
+  `no_result` run releases the lock while the engine can be mid-task, so
+  the next same-name run dispatches into whatever the member is doing).
 
 ## Runtime fields and their sources
 
