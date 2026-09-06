@@ -13,10 +13,15 @@ pub const LAYOUT_HOOKS: [&str; 2] = ["window-resized", "window-layout-changed"];
 /// The shell line both hooks run. A run-shell job carries no TMUX_PANE, so
 /// the window travels as an argument; run-shell expands the format. `hive`
 /// is already shell-quoted; the tmux double-quote parser gets its own
-/// escaping on top, or a `$` in the path would be expanded away.
+/// escaping on top, or a `$` in the path would be expanded away. Output
+/// is discarded: run-shell shows any stdout in view mode over the active
+/// pane, a member's TUI, until someone presses q, and a nonzero exit
+/// the same way; a hook firing per drag step must never do that.
 fn _layout_run_shell(hive: &str) -> String {
     let hive = crate::cli::util::tmux_dquote_escape(hive);
-    format!("run-shell -b \"{hive} layout auto --on-change --window '#{{window_id}}'\"")
+    format!(
+        "run-shell -b \"{hive} layout auto --on-change --window '#{{window_id}}' >/dev/null 2>&1 || true\""
+    )
 }
 
 /// `set-hook` argv for the two hooks on `window`, `hive` being the
@@ -84,7 +89,7 @@ mod tests {
     #[test]
     fn test_hook_argv_sets_both_window_hooks_naming_the_window_id() {
         let rows = hook_argv("dev:1", "/x/hive");
-        let run = "run-shell -b \"/x/hive layout auto --on-change --window '#{window_id}'\"";
+        let run = "run-shell -b \"/x/hive layout auto --on-change --window '#{window_id}' >/dev/null 2>&1 || true\"";
         assert_eq!(
             rows,
             vec![
@@ -123,7 +128,7 @@ mod tests {
             rows[0][5]
         );
         assert!(
-            rows[0][5].ends_with("--window '#{window_id}'\""),
+            rows[0][5].ends_with("--window '#{window_id}' >/dev/null 2>&1 || true\""),
             "{}",
             rows[0][5]
         );

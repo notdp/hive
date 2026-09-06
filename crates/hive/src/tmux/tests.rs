@@ -632,7 +632,7 @@ fn test_configure_hive_window_disables_native_tmux_alerts_and_installs_layout_ho
 }
 
 const _MIRROR_RUN_SHELL: &str =
-    "run-shell -b \"/x/hive mirror --window '#{q:session_name}:#{window_index}'\"";
+    "run-shell -b \"/x/hive mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
 
 #[test]
 fn test_team_status_argv_targets_the_session_id() {
@@ -687,7 +687,7 @@ fn test_mirror_run_shell_escapes_a_dollar_in_the_binary_path_for_tmux() {
     assert_eq!(_mirror_run_shell("/x/hive"), _MIRROR_RUN_SHELL);
     assert_eq!(
         _mirror_run_shell("'/tmp/we ird$x/hive'"),
-        "run-shell -b \"'/tmp/we ird\\$x/hive' mirror --window '#{q:session_name}:#{window_index}'\""
+        "run-shell -b \"'/tmp/we ird\\$x/hive' mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\""
     );
 }
 
@@ -798,7 +798,7 @@ fn test_prefix_m_fallback_remembers_the_command_the_key_had() {
 
 #[test]
 fn test_prefix_m_fallback_reads_the_remembered_command_behind_hives_own_binding() {
-    let hive_binding = "bind-key -T prefix m if-shell -F \"#{@hive-team}\" \"run-shell -b \\\"/x/hive mirror --window '#{q:session_name}:#{window_index}'\\\"\" \"select-pane -m\"\n";
+    let hive_binding = "bind-key -T prefix m if-shell -F \"#{@hive-team}\" \"run-shell -b \\\"/x/hive mirror --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\\\"\" \"select-pane -m\"\n";
     let calls = _prefix_m_server(hive_binding, "swap-pane -s \"{top-left}\"\n");
 
     assert_eq!(_prefix_m_fallback(), "swap-pane -s \"{top-left}\"");
