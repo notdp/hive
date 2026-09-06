@@ -124,10 +124,33 @@ pub(crate) fn start_hived(
     Some(child.id() as i32)
 }
 
+/// Whether this process may serve *team*: its registry entry must exist
+/// under this process's hive home. A hived that cannot see the registry
+/// owns nothing and can only do harm — `cleanup_dead_daemons` would read
+/// every engine of the team as an orphan and reap it, and every team load
+/// would fail — so it must not run ticks at all.
+pub(crate) fn registry_visible(team: &str) -> std::result::Result<(), String> {
+    let home = crate::paths::hive_home();
+    match crate::registry::entry_path(team) {
+        Some(path) if path.is_file() => Ok(()),
+        Some(path) => Err(format!(
+            "no registry entry for team '{team}' at {} (HIVE_HOME {})",
+            path.display(),
+            home.display()
+        )),
+        None => Err(format!("'{team}' is not a team name")),
+    }
+}
+
 pub fn run_spawned_hived(argv: &[String]) -> i32 {
     if argv.len() != 5 || argv[0] != "--hived" {
         eprintln!("usage: hive --hived <workspace> <team> <tmux_window> <tmux_window_id>");
         return 1;
+    }
+    if let Err(reason) = registry_visible(&argv[2]) {
+        // stderr is the hived.stderr log under the workspace run dir.
+        eprintln!("hived: refusing to serve {}: {reason}", argv[1]);
+        return 2;
     }
     hooked_ignore_sigint();
     hooked_hived_loop(&argv[1], &argv[2], &argv[3], &argv[4]);

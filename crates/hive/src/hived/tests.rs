@@ -3585,7 +3585,61 @@ fn test_start_hived_spawns_current_exe_with_hived_argv() {
 }
 
 #[test]
+fn test_registry_visible_requires_the_entry_under_this_hive_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let entry = crate::registry::entry_path("team-a").unwrap();
+
+    let refused = registry_visible("team-a").unwrap_err();
+    assert!(
+        refused.contains(&entry.to_string_lossy().into_owned()),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&tmp.path().to_string_lossy().into_owned()),
+        "{refused}"
+    );
+    assert!(registry_visible("../escape").is_err());
+
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(&entry, "{}").unwrap();
+    assert_eq!(registry_visible("team-a"), Ok(()));
+
+    // Another home does not see it.
+    let other = tempfile::tempdir().unwrap();
+    env.set("HIVE_HOME", other.path());
+    assert!(registry_visible("team-a").is_err());
+}
+
+#[test]
+fn test_run_spawned_hived_refuses_a_team_missing_from_its_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let _guard = testhook::install(Hook {
+        ignore_sigint: Some(Arc::new(|| panic!("must not reach the loop"))),
+        hived_loop: Some(Arc::new(|_, _, _, _| panic!("must not reach the loop"))),
+        ..Default::default()
+    });
+    let exit_code = run_spawned_hived(&[
+        "--hived".to_string(),
+        "/tmp/ws".to_string(),
+        "team-a".to_string(),
+        "dev:3".to_string(),
+        "@99".to_string(),
+    ]);
+    assert_eq!(exit_code, 2);
+}
+
+#[test]
 fn test_run_spawned_hived_ignores_sigint_and_runs_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path());
+    let entry = crate::registry::entry_path("team-a").unwrap();
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::write(&entry, "{}").unwrap();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sigint_sink = Arc::clone(&calls);
     let loop_sink = Arc::clone(&calls);

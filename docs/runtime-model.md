@@ -41,7 +41,8 @@ Consequences across modules:
   binary; a client of another home is refused (`ensure_hived` errors,
   naming both homes) and starts nothing — a replacement would run with the
   client's home, could not see the team's registry, and would reap the
-  members it does not own.
+  members it does not own. A hived whose own home holds no registry entry
+  for its team exits at start instead of serving.
 - **One directory per team.** `$HIVE_HOME/teams/<team>/` holds everything
   hive owns for the team: `team.json` (the entry — present means the team
   exists), and, on the default workspace, `hive.db` (the bus), `run/`
