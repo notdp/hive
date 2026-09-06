@@ -490,16 +490,18 @@ fn test_claude_turn_open_reads_busy_unless_the_status_is_stale() {
     let open = |status: &str, updated_at: f64| {
         claude_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
     };
-    assert_eq!(open("busy", now - 1.0), Some(true));
-    assert_eq!(open("idle", now - 1.0), Some(false));
-    assert_eq!(open("waiting", now - 1.0), Some(false));
+    assert_eq!(open("busy", now - 1.0), Ok(true));
+    assert_eq!(open("idle", now - 1.0), Ok(false));
+    assert_eq!(open("waiting", now - 1.0), Ok(false));
     // An engine with no status record answers "not busy" — its runtime
     // folds an unknown status to busy=false, which is still the daemon's
     // own word.
-    assert_eq!(open("", 0.0), Some(false));
+    assert_eq!(open("", 0.0), Ok(false));
     // A status that stopped advancing is a wedged engine, no answer.
-    assert_eq!(open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0), None);
-    assert_eq!(claude_turn_open(&Map::new()), None);
+    let stale = open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0).unwrap_err();
+    assert!(stale.contains("stale status"), "{stale}");
+    let blank = claude_turn_open(&Map::new()).unwrap_err();
+    assert!(blank.contains("no busy flag"), "{blank}");
 }
 
 fn turn_open_team(name: &str) -> Team {
@@ -536,6 +538,8 @@ fn test_turn_open_payload_asks_each_engine_directly() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
+    let debug_events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
+    let debug_sink = Arc::clone(&debug_events);
     let hook = Hook {
         team_load: Some(Arc::new(|name| Ok(turn_open_team(name)))),
         // codex: the app-server's `thread/read` on the roster thread id.
@@ -560,54 +564,118 @@ fn test_turn_open_payload_asks_each_engine_directly() {
             }
         })),
         // grok: the leader pool's push-fed turn evidence.
-        gl_runtime_for_key: Some(Arc::new(|key| match key {
-            "m-honey.g" => Some(SessionRuntime {
-                turn_open: Some(true),
-                ..session_runtime(true, "ready")
-            }),
-            "m-honey.g-idle" => Some(SessionRuntime {
-                turn_open: Some(false),
-                ..session_runtime(false, "ready")
-            }),
-            // loaded and reporting (a command table, an announcement), but
-            // nothing the turn itself said: busy defaults to false
-            "m-honey.g-seen" => Some(session_runtime(false, "")),
+        gl_turn_open_for_key: Some(Arc::new(|key| match key {
+            "m-honey.g" => Some(Some(true)),
+            "m-honey.g-idle" => Some(Some(false)),
+            // a client on the key (loaded and reporting a command table,
+            // an announcement) that has seen no turn event
+            "m-honey.g-seen" => Some(None),
             _ => None,
+        })),
+        notify_debug_emit: Some(Arc::new(move |ws, event, fields| {
+            assert_eq!(ws, "/ws");
+            debug_sink.lock().unwrap().push((
+                event.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
         })),
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let open = |agent: &str| turn_open_payload("honey", agent).unwrap()["open"].clone();
+    let open = |agent: &str| turn_open_payload("/ws", "honey", agent).unwrap()["open"].clone();
+    // A null answer carries its reason, and the same reason went out as a
+    // `turn_open.null` event for the member.
+    let null_reason = |agent: &str, cli: &str| -> String {
+        let payload = turn_open_payload("/ws", "honey", agent).unwrap();
+        assert_eq!(payload["open"], Value::Null, "{agent}");
+        let reason = payload["reason"].as_str().unwrap().to_string();
+        let events = debug_events.lock().unwrap();
+        let (_, fields) = events
+            .iter()
+            .rev()
+            .find(|(event, _)| event == "turn_open.null")
+            .expect("turn_open.null emitted");
+        let field = |k: &str| fields.iter().find(|(key, _)| key == k).unwrap().1.clone();
+        assert_eq!(field("team"), Value::from("honey"));
+        assert_eq!(field("cli"), Value::from(cli));
+        assert_eq!(field("agent"), Value::from(agent));
+        assert_eq!(field("reason"), Value::from(reason.as_str()));
+        reason
+    };
 
-    let payload = turn_open_payload("honey", "c").unwrap();
+    let payload = turn_open_payload("/ws", "honey", "c").unwrap();
     assert_eq!(payload["ok"], Value::Bool(true));
     assert_eq!(payload["agent"], Value::from("c"));
     assert_eq!(payload["open"], Value::Bool(true));
+    assert!(payload.get("reason").is_none());
     // No daemon answer, or no thread to ask about, is no answer.
-    assert_eq!(open("c-mute"), Value::Null);
-    assert_eq!(open("c-blank"), Value::Null);
+    assert!(null_reason("c-mute", "codex").contains("thr-mute"));
+    assert!(null_reason("c-blank", "codex").contains("no session id"));
 
     assert_eq!(open("k"), Value::Bool(true));
     assert_eq!(open("k-idle"), Value::Bool(false));
     // A stale status is a wedged engine's last word; no engine entry is a
     // daemon that cannot be asked; a row naming the engine session rather
     // than a job has no engine record to read.
-    assert_eq!(open("k-stale"), Value::Null);
-    assert_eq!(open("k-gone"), Value::Null);
-    assert_eq!(open("k-joined"), Value::Null);
+    assert!(null_reason("k-stale", "claude").contains("stale status"));
+    assert!(null_reason("k-gone", "claude").contains("no engine entry for job 0000aaaa"));
+    assert!(null_reason("k-joined", "claude").contains("not a bg job id"));
 
     assert_eq!(open("g"), Value::Bool(true));
     assert_eq!(open("g-idle"), Value::Bool(false));
-    // A leader that has only sent notifications the turn did not — the
-    // default busy=false — is no answer, and so is one that reported
-    // nothing yet.
-    assert_eq!(open("g-seen"), Value::Null);
-    assert_eq!(open("quiet"), Value::Null);
+    // A leader client that has seen no turn event is no answer, and so is
+    // a key with no client at all.
+    assert!(null_reason("g-seen", "grok").contains("no turn evidence yet"));
+    assert!(null_reason("quiet", "grok").contains("no leader client for m-honey.quiet"));
 
     // An engine hive cannot ask has no answer; a member off the roster is
     // an error, not a null.
-    assert_eq!(open("sh"), Value::Null);
-    assert!(turn_open_payload("honey", "nobody").is_err());
+    assert!(null_reason("sh", "bash").contains("no turn evidence"));
+    assert!(turn_open_payload("/ws", "honey", "nobody").is_err());
+    // Nothing positive emitted an event.
+    let events = debug_events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(event, _)| event == "turn_open.null")
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn test_turn_open_payload_records_a_failed_team_load() {
+    let debug_events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
+    let debug_sink = Arc::clone(&debug_events);
+    let _guard = testhook::install(Hook {
+        team_load: Some(Arc::new(|name| Err(anyhow::anyhow!("no entry for {name}")))),
+        notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
+            debug_sink.lock().unwrap().push((
+                event.to_string(),
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ));
+        })),
+        ..Default::default()
+    });
+    let err = turn_open_payload("/ws", "honey", "g")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no entry for honey"), "{err}");
+    let events = debug_events.lock().unwrap();
+    let (event, fields) = &events[0];
+    assert_eq!(event, "turn_open.null");
+    let field = |k: &str| fields.iter().find(|(key, _)| key == k).unwrap().1.clone();
+    assert_eq!(field("agent"), Value::from("g"));
+    assert!(field("reason")
+        .as_str()
+        .unwrap()
+        .starts_with("team load failed: no entry for honey"));
 }
 
 #[test]
@@ -616,12 +684,9 @@ fn test_handle_request_turn_open_answers_for_the_team() {
         team_load: Some(Arc::new(|name| {
             Ok(fake_team(name, vec![fake_agent("g", "%3", "grok")]))
         })),
-        gl_runtime_for_key: Some(Arc::new(|key| {
+        gl_turn_open_for_key: Some(Arc::new(|key| {
             assert_eq!(key, "m-honey.g");
-            Some(SessionRuntime {
-                turn_open: Some(false),
-                ..session_runtime(false, "ready")
-            })
+            Some(Some(false))
         })),
         ..Default::default()
     };

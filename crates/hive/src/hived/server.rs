@@ -177,8 +177,12 @@ pub(crate) fn handle_request(
             (response, true)
         }
         "turn-open" => {
-            let response = turn_open_payload(&team_in_request(), &map_get_str(request, "agent"))
-                .unwrap_or_else(err_response);
+            let response = turn_open_payload(
+                workspace,
+                &team_in_request(),
+                &map_get_str(request, "agent"),
+            )
+            .unwrap_or_else(err_response);
             (response, true)
         }
         "connect-codex" => {

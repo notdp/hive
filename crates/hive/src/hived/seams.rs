@@ -471,6 +471,14 @@ pub(super) fn hooked_gl_runtime_for_key(
     crate::adapters::grok_leader::runtime_for_key(key)
 }
 
+pub(super) fn hooked_gl_turn_open_for_key(key: &str) -> Option<Option<bool>> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_turn_open_for_key.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::turn_open_for_key(key)
+}
+
 pub(super) fn hooked_gl_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_session_id_for_pane.clone()).flatten() {

@@ -93,6 +93,7 @@ pub struct Hook {
     // grok_leader
     pub gl_runtime_for_pane: Option<S1<Option<SessionRuntime>>>,
     pub gl_runtime_for_key: Option<S1<Option<SessionRuntime>>>,
+    pub gl_turn_open_for_key: Option<S1<Option<Option<bool>>>>,
     pub gl_session_id_for_pane: Option<S1<Option<String>>>,
     pub gl_read_session_key: Option<S1<Option<SessionRecord>>>,
     pub gl_list_daemon_keys: Option<F0<Vec<String>>>,

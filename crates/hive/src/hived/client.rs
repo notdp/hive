@@ -109,8 +109,9 @@ pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
 /// Ask the hived to bring the grok 2nd client for the pane's daemon key online now.
 ///
 /// Called at spawn time so the stdio client has loaded the pane's session
-/// before its first turn: ``session/load`` replays past updates, and a replay
-/// is not evidence — only a live-attached client sees the first real turn.
+/// before its first turn: ``session/load`` replays past updates, which the
+/// display ignores — only a live-attached client sees the first real turn
+/// as busy.
 /// Best-effort: returns None when the hived is down, and the lazy connect on
 /// the next runtime tick covers that case.
 pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, Value>> {

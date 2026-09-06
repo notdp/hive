@@ -492,6 +492,78 @@ fn test_notifications_before_load_response_are_discarded() {
     teardown(&client, &proc);
 }
 
+fn turn_completed_for(session_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session_notification",
+        "params": {
+            "sessionId": session_id,
+            "update": {"sessionUpdate": "turn_completed", "stop_reason": "end_turn"},
+        },
+    })
+}
+
+#[test]
+fn test_replayed_history_is_turn_evidence_but_not_display_state() {
+    // The load replay is the engine's own turn history: its last turn
+    // event says whether a turn is open at load time. The display fields
+    // still ignore it.
+    let _bed = setup();
+    let chunk = || {
+        update(
+            "agent_message_chunk",
+            json!({"content": {"type": "text", "text": "old turn"}}),
+        )
+    };
+
+    // A completed turn: idle at load time.
+    let (client, proc) = loaded(None, vec![turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // A turn that ran and completed.
+    let (client, proc) = loaded(None, vec![chunk(), turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // A turn still running when the load happened.
+    let (client, proc) = loaded(None, vec![chunk()]);
+    assert_eq!(client.turn_open(), Some(true));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // Nothing replayed, or another session's history: no evidence.
+    let (client, proc) = loaded(None, vec![]);
+    assert_eq!(client.turn_open(), None);
+    teardown(&client, &proc);
+    let (client, proc) = loaded(
+        None,
+        vec![
+            update_for("other-session", "agent_message_chunk", json!({})),
+            turn_completed_for("other-session"),
+        ],
+    );
+    assert_eq!(client.turn_open(), None);
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_live_turn_evidence_overrides_the_replayed_history() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![turn_completed_for(SID)]);
+    assert_eq!(client.turn_open(), Some(false));
+    proc.feed(&update(
+        "agent_message_chunk",
+        json!({"content": {"type": "text", "text": "new turn"}}),
+    ));
+    let runtime = settle(&client, |rt| rt.busy);
+    assert_eq!(runtime.turn_open, Some(true));
+    assert_eq!(client.turn_open(), Some(true));
+    teardown(&client, &proc);
+}
+
 #[test]
 fn test_notification_right_behind_the_load_response_is_folded() {
     // A live turn queued behind the load response must not count as replay.

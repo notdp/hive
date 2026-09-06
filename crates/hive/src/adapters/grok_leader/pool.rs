@@ -33,6 +33,9 @@ pub trait LeaderClient: Send + Sync {
     fn runtime(&self) -> Option<SessionRuntime> {
         unreachable!("runtime not expected on this client")
     }
+    fn turn_open(&self) -> Option<bool> {
+        unreachable!("turn_open not expected on this client")
+    }
 }
 
 impl LeaderClient for GrokStdioClient {
@@ -50,6 +53,10 @@ impl LeaderClient for GrokStdioClient {
 
     fn runtime(&self) -> Option<SessionRuntime> {
         GrokStdioClient::runtime(self)
+    }
+
+    fn turn_open(&self) -> Option<bool> {
+        GrokStdioClient::turn_open(self)
     }
 }
 
@@ -109,6 +116,13 @@ impl GrokClientPool {
 
     pub fn runtime_for_key(&self, key: &str) -> Option<SessionRuntime> {
         self.acting_client(key)?.runtime()
+    }
+
+    /// The key's turn evidence: `None` with no client on the key (no
+    /// daemon, no session record), `Some(None)` from a client that has
+    /// seen no turn event, else the evidence.
+    pub fn turn_open_for_key(&self, key: &str) -> Option<Option<bool>> {
+        Some(self.acting_client(key)?.turn_open())
     }
 
     /// Bring the stdio client online for a key (called at spawn time).
@@ -275,6 +289,10 @@ pub fn runtime_for_pane(pane: &str) -> Option<SessionRuntime> {
 
 pub fn runtime_for_key(key: &str) -> Option<SessionRuntime> {
     pool().runtime_for_key(key)
+}
+
+pub fn turn_open_for_key(key: &str) -> Option<Option<bool>> {
+    pool().turn_open_for_key(key)
 }
 
 pub fn connect_pane(pane: &str) -> bool {

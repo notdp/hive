@@ -251,8 +251,11 @@ own transcript. Nothing travels back over the bus.
   the engine directly, with no tick cache in between (codex: the
   app-server's `thread/read`; claude: the bg job's engine record, whose
   `busy` flag is no answer once its status is stale; grok: the leader
-  pool's push-fed state). No answer says nothing about the turn and never
-  opens the dispatch. A member still in a turn after 600s ends the
+  pool's push-fed turn evidence, the session load replay included). No
+  answer says nothing about the turn and never opens the dispatch; every
+  null answer carries a `reason` and is recorded as a `turn_open.null`
+  notify event (cli, agent, reason), so a run stalled on null leaves
+  evidence in `notify.jsonl`. A member still in a turn after 600s ends the
   run `member_busy` without dispatching — a task dropped into a running
   turn would be folded into it, and the fold detection below is a net,
   not a plan.
@@ -740,10 +743,14 @@ outside any team gets a pane-keyed leader with the pane's lifecycle.
   fork has no leader-side primitive, so the pane's TUI branches it under the
   id hive recorded.
 - **Session load replay.** Session load replays the session's past updates
-  before it answers, so everything received before the load response is
-  discarded; a replayed turn must not mark the pane busy. Spawn therefore asks
-  the hived to connect once the pane's grok is up on the session, rather than
-  lazily on the next tick.
+  before it answers. For the display that replay is discarded: a replayed
+  turn must not mark the pane busy, so spawn asks the hived to connect once
+  the pane's grok is up on the session, rather than lazily on the next tick.
+  For the dispatch gate it is evidence: the replay is the engine's own turn
+  history, and its last turn event (a message chunk or tool call opens,
+  `turn_completed` closes) is the session's state at load time — so a
+  hived restarted onto an idle member answers `turn-open` `false` at once
+  instead of `null` until the member's next turn.
 - **Permission requests.** Hive answers its own copy with `cancelled` and
   reports the member as waiting: the decision belongs to the human at the TUI,
   which gets its own copy.

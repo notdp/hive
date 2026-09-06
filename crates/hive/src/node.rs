@@ -3156,15 +3156,10 @@ mod tests {
                 assert_eq!(thread, "thr-1");
                 Some(false)
             })),
-            // The grok leader pool's push-fed state, as the hived's
-            // `turn-open` reads it for the grok row.
-            gl_runtime_for_key: Some(Arc::new(move |key| {
-                (key == format!("m-{team}.g")).then(|| {
-                    crate::adapters::grok_leader::SessionRuntime {
-                        turn_open: Some(true),
-                        ..Default::default()
-                    }
-                })
+            // The grok leader pool's push-fed turn evidence, as the
+            // hived's `turn-open` reads it for the grok row.
+            gl_turn_open_for_key: Some(Arc::new(move |key| {
+                (key == format!("m-{team}.g")).then_some(Some(true))
             })),
             agent_send: Some(Arc::new(move |_agent, text, sender| {
                 handed_sink

@@ -30,7 +30,13 @@ pub struct SessionRuntime {
     /// prompt queued or running — a backlog counts as open because the
     /// leader runs it FIFO, so nothing dispatched now runs between turns;
     /// `Some(false)` only on `turn_completed` / `activity: idle`; `None`
-    /// until one of those has been seen. Not a runtime field.
+    /// until one of those has been seen. The `session/load` replay counts:
+    /// it is the engine's own turn history, and its last turn event says
+    /// whether a turn was open at load time, so a client (re)connected to
+    /// an idle session answers `Some(false)` without waiting for the next
+    /// turn — while `busy` and the other display fields ignore the replay.
+    /// Read through `GrokStdioClient::turn_open`, not `runtime()`, which
+    /// stays None until a live notification. Not a runtime field.
     pub turn_open: Option<bool>,
 }
 
@@ -213,6 +219,9 @@ struct ClientShared {
     runtime: SessionRuntime,
     ack: Option<Ack>,
     loaded: bool,
+    /// Session id of the `session/load` in flight: the one whose replayed
+    /// history is turn evidence until the load response binds it.
+    loading: Option<String>,
 }
 
 pub(super) struct ClientInner {
@@ -278,7 +287,12 @@ fn on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
 fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
     let mut state = inner.state.lock().unwrap();
     if !state.loaded {
-        return; // session/load replays past updates; replay is not evidence
+        // session/load replays past updates: no live turn for the display
+        // (`busy`, `input_state`, `observed_at` stay put), only turn
+        // evidence — the history's last turn event is the session's state
+        // at load time.
+        fold_replayed_turn(&mut state, method, params);
+        return;
     }
     if method == "_x.ai/sessions/changed" {
         let entries: Vec<Value> = params
@@ -336,6 +350,34 @@ fn apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
         }
         _ => {}
     }
+}
+
+/// Fold one replayed notification of the loading session into `turn_open`
+/// and nothing else.
+fn fold_replayed_turn(state: &mut ClientShared, method: &str, params: &Value) {
+    let Some(loading) = state.loading.as_deref() else {
+        return;
+    };
+    if params.get("sessionId").and_then(Value::as_str) != Some(loading) {
+        return;
+    }
+    let kind = params
+        .get("update")
+        .and_then(|update| update.get("sessionUpdate"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match method {
+        "session/update" if update_opens_turn(kind) => state.runtime.turn_open = Some(true),
+        "_x.ai/session_notification" if kind == "turn_completed" => {
+            state.runtime.turn_open = Some(false)
+        }
+        _ => {}
+    }
+}
+
+/// A `session/update` kind that only a running turn produces.
+fn update_opens_turn(kind: &str) -> bool {
+    kind == "tool_call" || kind == "tool_call_update" || MESSAGE_CHUNKS.contains(&kind)
 }
 
 fn apply_update(state: &mut ClientShared, update: &Value) {
@@ -435,8 +477,9 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
                     .and_then(|rid| inner.pending.lock().unwrap().remove(&rid));
                 if let Some(slot) = slot {
                     if let Some(session_id) = slot.loads.as_ref() {
+                        let mut state = inner.state.lock().unwrap();
+                        state.loading = None;
                         if msg.get("error").is_none() {
-                            let mut state = inner.state.lock().unwrap();
                             state.runtime.session_id = Some(session_id.clone());
                             state.loaded = true;
                         }
@@ -507,6 +550,9 @@ impl GrokStdioClient {
             msg: Mutex::new(None),
             loads: loads.map(str::to_string),
         });
+        if let Some(session_id) = loads {
+            self.inner.state.lock().unwrap().loading = Some(session_id.to_string());
+        }
         self.inner.pending.lock().unwrap().insert(rid, slot.clone());
         let message = json!({"jsonrpc": "2.0", "id": rid, "method": method, "params": params});
         if !self.inner.write(&message) {
@@ -694,6 +740,13 @@ impl GrokStdioClient {
         } else {
             "unavailable"
         }
+    }
+
+    /// Turn evidence, replay included: `Some(false)` for a session whose
+    /// history ends in a completed turn, `Some(true)` for one mid-turn,
+    /// `None` while no turn event has been seen at all.
+    pub fn turn_open(&self) -> Option<bool> {
+        self.inner.state.lock().unwrap().runtime.turn_open
     }
 
     /// Snapshot, or None while nothing has been observed for this session.

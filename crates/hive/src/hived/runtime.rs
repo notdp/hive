@@ -638,12 +638,16 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
 /// Whether a claude bg engine has a turn open, read off the runtime fields
 /// `claude_bg::runtime_from_engine` folds its registry status into: the
 /// `busy` flag, unless the status is stale (`inputReason: stale_status`),
-/// which is a wedged engine's last word and no answer.
-pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Option<bool> {
+/// which is a wedged engine's last word and no answer. `Err` is why there
+/// is no answer.
+pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Result<bool, String> {
     if fields.get("inputReason").and_then(Value::as_str) == Some("stale_status") {
-        return None;
+        return Err("stale status: the engine's status stopped advancing".to_string());
     }
-    fields.get("busy").and_then(Value::as_bool)
+    fields
+        .get("busy")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "engine record carries no busy flag".to_string())
 }
 
 /// Whether the named member has a turn open, asked of its engine directly
@@ -654,41 +658,91 @@ pub(super) fn claude_turn_open(fields: &Map<String, Value>) -> Option<bool> {
 /// stale. grok: the member's ACP connection is held by the hived's leader
 /// pool (a second process must not `session/load` the same session), and
 /// the pool client's `turn_open` is push-fed by the turn's own
-/// notifications — not the display `busy` flag, which a client that has
-/// only seen a command table or an announcement reports as false. `open`
-/// is null whenever the engine cannot be asked (no daemon, no engine
-/// entry, no turn evidence yet) — never a guess; a member off the roster
-/// is an error.
-pub(crate) fn turn_open_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
-    let team = hooked_team_load(team_name)?;
+/// notifications, the load replay included — not the display `busy` flag,
+/// which a client that has only seen a command table or an announcement
+/// reports as false. `open` is null whenever the engine cannot be asked
+/// (no daemon, no engine entry, no turn evidence yet) — never a guess —
+/// and then `reason` says why and a `turn_open.null` notify event records
+/// it, so a node run stalled on null answers leaves evidence; a member off
+/// the roster is an error.
+pub(crate) fn turn_open_payload(
+    workspace: &str,
+    team_name: &str,
+    agent_name: &str,
+) -> Result<Map<String, Value>> {
+    let team = match hooked_team_load(team_name) {
+        Ok(team) => team,
+        Err(err) => {
+            emit_turn_open_null(
+                workspace,
+                team_name,
+                "",
+                agent_name,
+                &format!("team load failed: {err}"),
+            );
+            return Err(err);
+        }
+    };
     let agent = team
         .agent_named(agent_name)
         .ok_or_else(|| anyhow::anyhow!("unknown member '{agent_name}'"))?;
     let sid = agent.session_id.as_deref().filter(|s| !s.is_empty());
-    let open = match agent.cli.as_str() {
-        "codex" => sid.and_then(hooked_cas_turn_open_for_thread),
+    let open: Result<bool, String> = match agent.cli.as_str() {
+        "codex" => sid
+            .ok_or_else(|| "no session id on the roster row".to_string())
+            .and_then(|sid| {
+                hooked_cas_turn_open_for_thread(sid)
+                    .ok_or_else(|| format!("codex app-server unreachable or thread {sid} unknown"))
+            }),
         "claude" => sid
-            .filter(|s| crate::adapters::claude_bg::looks_like_job_id(s))
-            .and_then(hooked_cb_engine_session_for_job)
-            .and_then(|engine| {
+            .ok_or_else(|| "no session id on the roster row".to_string())
+            .and_then(|sid| {
+                if !crate::adapters::claude_bg::looks_like_job_id(sid) {
+                    return Err(format!("roster session {sid} is not a bg job id"));
+                }
+                let engine = hooked_cb_engine_session_for_job(sid)
+                    .ok_or_else(|| format!("no engine entry for job {sid}"))?;
                 claude_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
                     &engine, None,
                 ))
             }),
         "grok" => {
             let key = crate::adapters::grok_leader::member_key(team_name, agent_name);
-            hooked_gl_runtime_for_key(&key).and_then(|rt| rt.turn_open)
+            match hooked_gl_turn_open_for_key(&key) {
+                None => Err(format!("no leader client for {key}")),
+                Some(None) => Err("no turn evidence yet".to_string()),
+                Some(Some(open)) => Ok(open),
+            }
         }
-        _ => None,
+        other => Err(format!("cli '{other}' has no turn evidence")),
     };
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
     payload.insert("agent".to_string(), Value::from(agent_name));
-    payload.insert(
-        "open".to_string(),
-        open.map(Value::Bool).unwrap_or(Value::Null),
-    );
+    match open {
+        Ok(open) => {
+            payload.insert("open".to_string(), Value::Bool(open));
+        }
+        Err(reason) => {
+            payload.insert("open".to_string(), Value::Null);
+            payload.insert("reason".to_string(), Value::from(reason.as_str()));
+            emit_turn_open_null(workspace, team_name, &agent.cli, agent_name, &reason);
+        }
+    }
     Ok(payload)
+}
+
+fn emit_turn_open_null(workspace: &str, team: &str, cli: &str, agent: &str, reason: &str) {
+    hooked_notify_debug_emit(
+        workspace,
+        "turn_open.null",
+        &[
+            ("team", Value::from(team)),
+            ("cli", Value::from(cli)),
+            ("agent", Value::from(agent)),
+            ("reason", Value::from(reason)),
+        ],
+    );
 }
 
 pub(crate) fn runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
