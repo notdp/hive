@@ -15,6 +15,7 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
+use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::SessionRecord;
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::runtime_snapshot::RuntimeSnapshot;
@@ -3573,7 +3574,7 @@ fn test_node_result_payload_reads_each_engines_own_word() {
         })),
         gl_prompt_result: Some(Arc::new(|key, rid| {
             assert_eq!(key, "m-honey.g");
-            match rid {
+            match rid.rid {
                 1 => Some(PromptResult::Running),
                 2 => Some(PromptResult::Ended {
                     stop_reason: "end_turn".to_string(),
@@ -3599,7 +3600,7 @@ fn test_node_result_payload_reads_each_engines_own_word() {
     };
     let grok = |rid: u64| TurnHandle::Grok {
         key: "m-honey.g".to_string(),
-        rid,
+        prompt_id: PromptId { generation: 1, rid },
     };
     hold("c-run", codex("t-run"));
     hold("c-failed", codex("t-failed"));
@@ -4650,7 +4651,10 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
             .push((text.to_string(), agent.name.clone()));
         Ok(TurnHandle::Grok {
             key: "m-team-x.b".to_string(),
-            rid: 7,
+            prompt_id: PromptId {
+                generation: 1,
+                rid: 7,
+            },
         })
     }));
     let _guard = testhook::install(hook);
@@ -4693,7 +4697,10 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
         node_turns().lock().unwrap().get("nd-0123456789ab"),
         Some(&TurnHandle::Grok {
             key: "m-team-x.b".to_string(),
-            rid: 7,
+            prompt_id: PromptId {
+                generation: 1,
+                rid: 7
+            },
         })
     );
 

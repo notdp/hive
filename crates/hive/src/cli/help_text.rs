@@ -741,10 +741,11 @@ Commands:
   turn was cut short: codex interrupted, grok cancelled) | failed (the
   engine ended the turn on an error; reason carries its word) | no_result
   (the turn is not running and nothing holds its result: the hived was
-  restarted since the dispatch, or never answered) | member_gone (the
-  member died before its turn ended) | member_busy (another runner owns a
-  pending run on that member, or its turn stayed open for 600s). Every
-  status exits 0; exit 1 with the error on stderr only when no dispatch
+  restarted since the dispatch) | unknown (120 result polls went
+  unanswered; the record still owns the member) | member_gone (the
+  member died before its turn ended) | member_busy (a pending or unknown
+  dispatch owns the member, another runner holds its lock, or its turn
+  stayed open for 600s). Every status exits 0; exit 1 with the error on stderr only when no dispatch
   happened: bad team, a claude member, spawn or ready failure, the dispatch
   refused three times. A spawn made here is retired when the run ends
   before the dispatch.

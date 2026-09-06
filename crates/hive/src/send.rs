@@ -134,6 +134,9 @@ fn hived_answer(
         };
         return Err(DispatchFailure::Refused(error));
     }
+    if let Some(reason) = payload.get("dispatchUnknown").and_then(Value::as_str) {
+        return Err(DispatchFailure::Unknown(reason.to_string()));
+    }
     let mut normalized = payload;
     normalized.shift_remove("ok");
     Ok(normalized)

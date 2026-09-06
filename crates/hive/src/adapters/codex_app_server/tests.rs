@@ -617,7 +617,7 @@ fn test_turn_start_tracked_keeps_frames_that_beat_the_response() {
 fn test_turn_start_tracked_refused_on_rpc_error() {
     let client = bare_client();
     client.set_call_override(
-        |_method, _params| json!({"__error__": {"code": -32600, "message": "thread not found"}}),
+        |_method, _params| json!({"__error__": {"code": -32600, "message": "thread not found"}, "__rejected__": true}),
     );
     match client.turn_start_tracked("t1", "go") {
         Err(TurnStartFailure::Refused(reason)) => {
@@ -629,12 +629,12 @@ fn test_turn_start_tracked_refused_on_rpc_error() {
 }
 
 #[test]
-fn test_turn_start_tracked_refused_on_timeout() {
+fn test_turn_start_tracked_unknown_on_timeout() {
     let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__timeout__": true}));
     match client.turn_start_tracked("t1", "go") {
-        Err(TurnStartFailure::Refused(reason)) => assert!(reason.contains("timed out"), "{reason}"),
-        other => panic!("expected Refused, got {other:?}"),
+        Err(TurnStartFailure::Unknown(reason)) => assert!(reason.contains("timed out"), "{reason}"),
+        other => panic!("expected Unknown, got {other:?}"),
     }
 }
 
@@ -1759,4 +1759,47 @@ fn test_freshen_models_cache_tolerates_missing_and_garbage() {
     assert!(!freshen_models_cache()); // no file
     fs::write(tmp.path().join("models_cache.json"), "not json").unwrap();
     assert!(!freshen_models_cache());
+}
+
+#[test]
+fn test_turn_start_tracked_keeps_transport_uncertainty_after_execution() {
+    for failure in [
+        json!({"__timeout__": true}),
+        json!({"__error__": "broken pipe"}),
+        json!({}),
+    ] {
+        let client = bare_client();
+        let early = client.clone();
+        client.set_call_override(move |_method, _params| {
+            turn_started(&early, TURN);
+            item_completed(
+                &early,
+                TURN,
+                agent_message("result", "task already executed"),
+            );
+            turn_completed(
+                &early,
+                json!({"id": TURN, "status": "completed", "items": []}),
+            );
+            failure.clone()
+        });
+        assert!(matches!(
+            client.turn_start_tracked("t1", "task"),
+            Err(TurnStartFailure::Unknown(_))
+        ));
+        assert_eq!(
+            client.turn_result(TURN).unwrap().final_text(),
+            "task already executed"
+        );
+    }
+}
+
+#[test]
+fn test_turn_start_tracked_refuses_a_request_not_written() {
+    let client = bare_client();
+    // No socket on a bare client; exercise call's real pre-write check.
+    assert!(matches!(
+        client.turn_start_tracked("t1", "go"),
+        Err(TurnStartFailure::Refused(_))
+    ));
 }

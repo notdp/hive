@@ -57,7 +57,7 @@ echo "exit=$(cat "$D/exit")"; tail -n 1 "$D/out"
 **4. Return** the last line of `out` verbatim as your final message when
 `exit=0` — it is one JSON object — nothing before it, nothing after it.
 Its `status` is `completed` with the member's last message in `body`, or
-another status (`interrupted`, `failed`, `no_result`, `member_gone`,
+another status (`interrupted`, `failed`, `no_result`, `unknown`, `member_gone`,
 `member_busy`) with a `reason` (and `body` whenever the turn ended);
 either way that JSON line is the return value — no retry, no rewording, no
 verdict of your own. When the exit code is not 0, the task was never

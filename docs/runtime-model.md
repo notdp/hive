@@ -225,7 +225,9 @@ runner refuses a claude member before anything is spawned.
   followed by the task's first line, `</HIVE>` — as **one tracked turn**
   (`Agent::dispatch_turn`): codex `turn/start` on the member's thread,
   whose response carries the turn id; grok `session/prompt` on the
-  member's session, whose request id is kept until its response. The hived
+  member's session, whose request id and client generation are kept until
+  its response. A Grok result lookup requires the original generation;
+  a replacement client cannot supply a result for the old handle. The hived
   holds that engine handle under the dispatch id (`hived/state.rs::node_turns`)
   for as long as it runs. The run record (below) is written `pending`
   before any of that, so a runner that dies between the delivery and its
@@ -258,9 +260,11 @@ runner refuses a claude member before anything is spawned.
   turn open or unanswered the runner keeps waiting (the turn may still end
   in front of a client that never saw it start), and only 5 consecutive
   unknowns with the turn closed (`turn-open` `false`) end the run
-  `no_result`. No answer at all from the hived on 120 consecutive polls is
-  `no_result` too. A member the roster reports dead is `member_gone`. The
-  turn itself has no timeout (the caller decides how long to wait).
+  `no_result`. No answer at all from the hived on 120 consecutive polls
+  returns `unknown`: the waiter exits, but the record retains ownership
+  because execution has not been resolved. A member the roster reports
+  dead is `member_gone`. The turn itself has no timeout (the caller
+  decides how long to wait).
 - **A refused dispatch and a lost answer are different failures.** The
   hived's answer to the dispatch is what the runner keys on
   (`send.rs::DispatchFailure`). `Refused` is a definite no — the hived
@@ -275,8 +279,13 @@ runner refuses a claude member before anything is spawned.
   null, since the seq rode the lost answer) and reads the turn back
   exactly as a delivered dispatch — the hived holds the turn under the
   dispatch id whether or not its answer arrived, so a lost answer costs
-  nothing but the seq. Nothing is left non-terminal: the read-back ends
-  every run.
+  nothing but the seq when the hived still holds a usable turn handle.
+  The engine boundary follows the same rule: Codex requests not written
+  or explicitly rejected are retryable; write failures and lost responses
+  are `Unknown`. The hived retains an unknown handle and returns
+  `dispatchUnknown`, which the runner treats as a lost answer, not a
+  refusal. It cannot recover a turn id from that response, so result
+  queries remain unknown.
 - **Readiness.** The runner dispatches only between turns, and only on a
   positive reading from the engine's own daemon that no turn is open. The
   runner asks the hived's `turn-open` for the member and the hived queries
@@ -297,7 +306,8 @@ runner refuses a claude member before anything is spawned.
   (codex `interrupted`, grok `cancelled`; `body` is what was said by
   then) | `failed` (any other engine word — codex `failed`, grok an error
   response, `max_tokens`, `refusal`…; `reason` carries the word and the
-  engine's error) | `no_result` | `member_gone` | `member_busy` (a pending
+  engine's error) | `no_result` | `unknown` (waiter lost contact; execution
+  unresolved) | `member_gone` | `member_busy` (a pending or unknown
   node record for the member whose member is alive, the per-member lock
   held by another runner, or the readiness cap above). No session, turn
   or artifact field: the runner never learns the engine's session, and a
@@ -308,19 +318,19 @@ runner refuses a claude member before anything is spawned.
   as a JSON line because it names a state the caller acts on); a
   dispatched task always ends in a JSON line.
 - **The record.** `<workspace>/run/workflow/<name>.json` — `dispatchId`,
-  `cli`, `status` (`pending | <terminal status>`), `body`/`reason` when
-  terminal, `seq` (ledger seq of the dispatch, filled in after the
+  `cli`, `status` (`pending | unknown | <terminal status>`), `body`/`reason` from
+  the waiter's verdict, `seq` (ledger seq of the dispatch, filled in after the
   delivery), `startedAt` (epoch seconds) — under the flock
   `<workspace>/run/workflow/<name>.lock` held for the whole run; the lock
   file itself is never deleted, the record is. A stale pending record whose
   member is dead is replaced by the next run; `hive kill` of the member
   removes its record. A same-name node reuses a live member, whatever
-  `--cli` says (its engine is the roster's). Two v1 limitations: Ctrl-C on
-  the runner leaves the record pending until `hive kill` of the member,
-  and a terminal verdict frees the name even though the member may still
-  be working (a `no_result` run on an unanswering hived releases the lock
-  while the engine can be mid-turn, so the next same-name run dispatches
-  into whatever the member is doing).
+  `--cli` says (its engine is the roster's). Pending and unknown records
+  both block a new same-name dispatch while the member is alive. The v1
+  recovery limit remains: after Ctrl-C or an unknown verdict there is no
+  resume command; the record remains until `hive kill` removes it or a
+  subsequent run finds the member dead. `no_result` releases ownership
+  only after the closed-turn observations described above.
 
 ## Runtime fields and their sources
 

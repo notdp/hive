@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
 use crate::adapters::codex_app_server::TurnResult;
+use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
 use crate::agent::{Agent, DeliveryError, TurnHandle};
@@ -489,7 +490,7 @@ pub(super) fn hooked_gl_turn_open_for_key(key: &str) -> Option<Option<bool>> {
     crate::adapters::grok_leader::turn_open_for_key(key)
 }
 
-pub(super) fn hooked_gl_prompt_result(key: &str, rid: u64) -> Option<PromptResult> {
+pub(super) fn hooked_gl_prompt_result(key: &str, rid: PromptId) -> Option<PromptResult> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_prompt_result.clone()).flatten() {
         return f(key, rid);

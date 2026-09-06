@@ -137,7 +137,8 @@ impl Agent {
     /// grok: a claude member has no turn-end signal hive can read (a bg
     /// job reports no turn end over any RPC), and Claude Code runs its own
     /// subagents natively. `Err` is the task not with the member; an
-    /// engine that took it and handed back no id is `Untracked`.
+    /// engine that took it and handed back no id is `Untracked`. A lost
+    /// answer is `Unknown`, never a retryable delivery error.
     pub fn dispatch_turn(&self, text: &str) -> Result<TurnHandle, DeliveryError> {
         match self.cli.as_str() {
             "codex" | "grok" => {}
@@ -178,6 +179,7 @@ impl Agent {
             return match hooked_codex_dispatch_to_pane(&self.pane_id, text) {
                 Ok((thread_id, turn_id)) => Ok(TurnHandle::Codex { thread_id, turn_id }),
                 Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
                 Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
                     "codex pane {} did not accept the turn ({reason})",
                     self.pane_id
@@ -185,7 +187,7 @@ impl Agent {
             };
         }
         match hooked_grok_dispatch_to_pane(&self.pane_id, text) {
-            Ok((key, rid)) => Ok(TurnHandle::Grok { key, rid }),
+            Ok((key, prompt_id)) => Ok(TurnHandle::Grok { key, prompt_id }),
             Err(reason) => Err(DeliveryError(format!(
                 "grok pane {} did not accept the prompt ({reason})",
                 self.pane_id
@@ -205,6 +207,7 @@ impl Agent {
             return match hooked_codex_dispatch_to_thread(&thread_id, text) {
                 Ok(turn_id) => Ok(TurnHandle::Codex { thread_id, turn_id }),
                 Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
                 Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
                     "codex member '{}' did not accept the turn ({reason})",
                     self.name
@@ -213,7 +216,7 @@ impl Agent {
         }
         let key = crate::adapters::grok_leader::member_key(&self.team_name, &self.name);
         match hooked_grok_dispatch_to_key(&key, text) {
-            Ok(rid) => Ok(TurnHandle::Grok { key, rid }),
+            Ok(prompt_id) => Ok(TurnHandle::Grok { key, prompt_id }),
             Err(reason) => Err(DeliveryError(format!(
                 "grok member '{}' did not accept the prompt ({reason})",
                 self.name

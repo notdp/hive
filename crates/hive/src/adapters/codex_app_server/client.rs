@@ -313,7 +313,7 @@ impl CodexDaemonClient {
         }
         let stream = match self.inner.stream.as_ref() {
             Some(stream) => stream,
-            None => return json!({"__error__": "closed"}),
+            None => return json!({"__error__": "closed", "__not_sent__": true}),
         };
         let slot = Arc::new(Slot {
             msg: Mutex::new(None),
@@ -323,7 +323,7 @@ impl CodexDaemonClient {
         {
             let mut next_id = self.inner.next_id.lock().unwrap();
             if self.inner.closed.load(Ordering::SeqCst) {
-                return json!({"__error__": "closed"});
+                return json!({"__error__": "closed", "__not_sent__": true});
             }
             *next_id += 1;
             rid = *next_id;
@@ -349,7 +349,7 @@ impl CodexDaemonClient {
             }
         };
         if let Some(err) = msg.get("error") {
-            return json!({"__error__": err.clone()});
+            return json!({"__error__": err.clone(), "__rejected__": true});
         }
         json!({"result": msg.get("result").cloned().unwrap_or(Value::Null)})
     }
@@ -776,12 +776,13 @@ impl TurnResult {
 }
 
 /// Why a `turn/start` did not hand back a trackable turn: `Refused` is
-/// the daemon not taking it (no result, RPC error, closed connection) —
-/// the turn is not running; `Untracked` is a result with no turn id — the
-/// turn is running but nothing will be collected for it.
+/// a request not written or explicitly rejected by the daemon. `Unknown`
+/// means it may have been accepted (write failure, timeout, lost response).
+/// `Untracked` is an accepted request whose result carries no turn id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnStartFailure {
     Refused(String),
+    Unknown(String),
     Untracked(String),
 }
 
@@ -802,7 +803,15 @@ impl CodexDaemonClient {
                     .map(render_error)
                     .unwrap_or_else(|| "turn/start answered without a result".to_string())
             };
-            return Err(TurnStartFailure::Refused(reason));
+            return Err(
+                if res.get("__not_sent__") == Some(&Value::Bool(true))
+                    || res.get("__rejected__") == Some(&Value::Bool(true))
+                {
+                    TurnStartFailure::Refused(reason)
+                } else {
+                    TurnStartFailure::Unknown(reason)
+                },
+            );
         };
         let turn_id = result.get("turn").and_then(turn_id_of).ok_or_else(|| {
             TurnStartFailure::Untracked("turn/start answered without turn.id".to_string())

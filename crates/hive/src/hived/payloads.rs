@@ -123,6 +123,9 @@ pub(crate) fn send_payload(
                 Ok(handle) => handle,
                 Err(exc) => return Ok(refused(exc)),
             };
+            if let TurnHandle::Unknown(reason) = &handle {
+                payload.insert("dispatchUnknown".to_string(), Value::from(reason.as_str()));
+            }
             if let TurnHandle::Untracked(reason) = &handle {
                 payload.insert("untracked".to_string(), Value::from(reason.as_str()));
             }
@@ -190,6 +193,10 @@ pub(crate) fn node_result_payload(dispatch_id: &str) -> Map<String, Value> {
             payload,
             format!("this hived holds no turn for dispatch {dispatch_id}"),
         ),
+        Some(TurnHandle::Unknown(reason)) => unknown(
+            payload,
+            format!("the engine may have taken the task but its answer was lost ({reason})"),
+        ),
         Some(TurnHandle::Untracked(reason)) => unknown(
             payload,
             format!("the engine took the task but handed back no turn id ({reason})"),
@@ -207,10 +214,14 @@ pub(crate) fn node_result_payload(dispatch_id: &str) -> Map<String, Value> {
                 }
             },
         },
-        Some(TurnHandle::Grok { key, rid }) => match hooked_gl_prompt_result(&key, rid) {
+        Some(TurnHandle::Grok { key, prompt_id }) => match hooked_gl_prompt_result(&key, prompt_id)
+        {
             None => unknown(
                 payload,
-                format!("the grok client that sent prompt {rid} on {key} is gone"),
+                format!(
+                    "the grok client that sent prompt {} on {key} (generation {}) is gone",
+                    prompt_id.rid, prompt_id.generation
+                ),
             ),
             Some(PromptResult::Running) => running(payload),
             Some(PromptResult::Ended {

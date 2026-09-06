@@ -13,6 +13,7 @@ use anyhow::bail;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
 use crate::adapters::codex_app_server::TurnStartFailure;
+use crate::adapters::grok_leader::PromptId;
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -774,7 +775,7 @@ pub(super) fn hooked_grok_send_to_key(key: &str, text: &str) -> Option<&'static 
 pub(super) fn hooked_grok_dispatch_to_pane(
     pane_id: &str,
     text: &str,
-) -> Result<(String, u64), String> {
+) -> Result<(String, PromptId), String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.grok_sent.push((pane_id.to_string(), text.to_string()));
@@ -787,7 +788,7 @@ pub(super) fn hooked_grok_dispatch_to_pane(
     crate::adapters::grok_leader::dispatch_to_pane(pane_id, text)
 }
 
-pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<u64, String> {
+pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.grok_sent_key.push((key.to_string(), text.to_string()));

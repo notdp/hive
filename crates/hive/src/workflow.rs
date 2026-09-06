@@ -63,8 +63,8 @@ const IDLE_WAIT_SECONDS: f64 = 600.0;
 /// single closed reading can be the gap before the task's turn opens.
 const UNKNOWN_CLOSED_POLLS: u32 = 5;
 /// Consecutive polls with no answer at all from the hived after the
-/// dispatch before the run ends `no_result`: the turn may run to its end,
-/// but nothing is there to read it.
+/// dispatch before the waiter returns `unknown`. Execution is unresolved,
+/// so the record continues to own the member.
 const UNANSWERED_POLLS: u32 = 120;
 const ATTEMPTS: usize = 3;
 const RETRY_GAP: f64 = 3.0;
@@ -81,8 +81,10 @@ pub const STATUS_INTERRUPTED: &str = "interrupted";
 /// word, `body` what was said.
 pub const STATUS_FAILED: &str = "failed";
 /// The turn is not running and nothing can read its end: the hived holds
-/// no turn for the dispatch, or never answered.
+/// no turn for the dispatch and the member is between turns.
 pub const STATUS_NO_RESULT: &str = "no_result";
+/// The waiter stopped receiving answers; execution remains unresolved.
+pub const STATUS_UNKNOWN: &str = "unknown";
 pub const STATUS_MEMBER_GONE: &str = "member_gone";
 pub const STATUS_MEMBER_BUSY: &str = "member_busy";
 
@@ -244,11 +246,9 @@ pub fn mint_dispatch_id() -> String {
 
 /// One run's persisted state, `<workspace>/run/workflow/<name>.json`.
 ///
-/// The name is owned while the record is pending (`is_pending`) and free
-/// under any terminal status. That is a v1 narrowing: a terminal verdict
-/// says the runner stopped waiting, not that the member stopped working —
-/// after `no_result` on an unanswering hived the turn may still run, and
-/// the next run of that name is allowed to dispatch on top of it.
+/// The name is owned while the execution is pending or unknown
+/// (`is_pending`), even after its waiter exits. Only a terminal verdict
+/// releases it; loss of the result transport is not a terminal verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRecord {
     pub dispatch_id: String,
@@ -265,9 +265,9 @@ pub struct WorkflowRecord {
 
 impl WorkflowRecord {
     /// A run that has not reached a terminal status: the member is owned
-    /// by the runner that wrote it.
+    /// by that dispatch, whether or not its runner is still waiting.
     pub fn is_pending(&self) -> bool {
-        self.status == STATUS_PENDING
+        matches!(self.status.as_str(), STATUS_PENDING | STATUS_UNKNOWN)
     }
 
     fn to_json(&self) -> Value {
@@ -756,7 +756,8 @@ fn wait_turn_closed(env: &dyn WorkflowEnv, name: &str, spawned: bool) -> Result<
 /// running); an unknown with the turn open or unanswered keeps waiting,
 /// since the hived may be the one that restarted and the turn may still
 /// end in front of a client that never saw it start. `UNANSWERED_POLLS`
-/// consecutive polls with no answer at all is `no_result` too. A
+/// consecutive polls with no answer at all returns `unknown` while
+/// retaining the dispatch record and its ownership of the member. A
 /// dispatch whose answer was lost is waited on exactly the same way: the
 /// hived keeps the turn under the dispatch id whether or not its answer
 /// arrived.
@@ -793,9 +794,12 @@ fn await_result(env: &dyn WorkflowEnv, name: &str, dispatch_id: &str) -> Verdict
             None => {
                 unknown_closed = 0;
                 unanswered += 1;
+                if !env.alive(name) {
+                    return gone(name, "before its turn ended");
+                }
                 if unanswered >= UNANSWERED_POLLS {
                     return Verdict::reason(
-                        STATUS_NO_RESULT,
+                        STATUS_UNKNOWN,
                         format!("the hived did not answer for {UNANSWERED_POLLS} polls"),
                     );
                 }
@@ -842,7 +846,7 @@ pub fn run_workflow(
     if let Some(record) = read_record(workspace, name) {
         if record.is_pending() && env.alive(name) {
             return Ok(busy(format!(
-                "member '{name}' has a pending workflow run {} owned by another runner",
+                "member '{name}' has an unresolved workflow dispatch {}",
                 record.dispatch_id
             )));
         }
@@ -1934,22 +1938,29 @@ mod tests {
     }
 
     #[test]
-    fn test_run_workflow_is_no_result_when_the_hived_never_answers() {
+    fn test_run_workflow_keeps_ownership_when_the_hived_never_answers() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         env.add_live("audit");
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
         *env.node_answers.lock().unwrap() = VecDeque::from([None]);
         let r = run_workflow(&env, &codex("audit", "t")).unwrap();
-        assert_eq!(r["status"], "no_result");
+        assert_eq!(r["status"], "unknown");
         assert_eq!(
             r["reason"],
             format!("the hived did not answer for {UNANSWERED_POLLS} polls")
         );
         assert_eq!(env.sleeps.load(Ordering::SeqCst), UNANSWERED_POLLS - 1);
-        assert_eq!(
-            read_record(&env.workspace_str(), "audit").unwrap().status,
-            "no_result"
-        );
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "unknown");
+        assert!(record.is_pending());
+        assert_eq!(env.turn_open("audit"), Some(true));
+        assert_eq!(record.dispatch_id, r["dispatchId"]);
+        // Dropping the waiter lock does not release an unresolved dispatch.
+        let again = run_workflow(&env, &codex("audit", "another task")).unwrap();
+        assert_eq!(again["status"], "member_busy");
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        assert_eq!(read_record(&env.workspace_str(), "audit"), Some(record));
 
         // An answer in between resets the count.
         let tmp = TempDir::new().unwrap();
@@ -2674,6 +2685,21 @@ mod tests {
             real_tmux_argv.borrow().is_empty(),
             "real tmux reached: {:?}",
             real_tmux_argv.borrow()
+        );
+
+        let uncertain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = uncertain_calls.clone();
+        crate::hived::testhook::update(|h| {
+            h.agent_dispatch_turn = Some(Arc::new(move |_agent, _text| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(TurnHandle::Unknown("turn/start timed out".to_string()))
+            }));
+        });
+        let result = dispatch(&env, "b", "task", "", "nd-abcdef012345").unwrap();
+        assert!(matches!(result, Dispatched::AnswerLost(reason) if reason.contains("timed out")));
+        assert_eq!(uncertain_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(env.node_result("nd-abcdef012345"), Some(NodeResult::Unknown(reason)) if reason.contains("may have taken"))
         );
 
         let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);

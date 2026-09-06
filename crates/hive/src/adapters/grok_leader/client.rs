@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -260,7 +260,10 @@ impl ClientShared {
     }
 }
 
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 pub(super) struct ClientInner {
+    generation: u64,
     proc: Arc<dyn LeaderProc>,
     /// Held across each stdin write: one message per line, never interleaved.
     io_lock: Mutex<()>,
@@ -628,6 +631,10 @@ pub struct GrokStdioClient {
 }
 
 impl GrokStdioClient {
+    pub fn generation(&self) -> u64 {
+        self.inner.generation
+    }
+
     pub fn new(key: &str) -> io::Result<GrokStdioClient> {
         let socket_path = socket_path_for_key(key).to_string_lossy().into_owned();
         let argv: Vec<String> = vec![
@@ -643,6 +650,7 @@ impl GrokStdioClient {
             .take_stdout()
             .ok_or_else(|| io::Error::other("stdout unavailable"))?;
         let inner = Arc::new(ClientInner {
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             proc,
             io_lock: Mutex::new(()),
             next_id: Mutex::new(0),

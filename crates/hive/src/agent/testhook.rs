@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::codex_app_server::TurnStartFailure;
+use crate::adapters::grok_leader::PromptId;
 use crate::agent::Agent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,8 +155,8 @@ pub struct Hook {
     pub grok_create_member_session: bool,
     pub grok_send_to_pane: Option<&'static str>,
     pub grok_send_to_key: Option<&'static str>,
-    /// `Ok(rid)` or the error `dispatch_to_pane` / `dispatch_to_key` answer.
-    pub grok_dispatch: Option<Result<u64, String>>,
+    /// `Ok(PromptId)` or the error `dispatch_to_pane` / `dispatch_to_key` answer.
+    pub grok_dispatch: Option<Result<PromptId, String>>,
     pub grok_interrupt_pane: Option<&'static str>,
     pub grok_interrupt_key: Option<&'static str>,
     pub grok_probe_socket: Option<bool>,

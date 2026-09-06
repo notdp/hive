@@ -2122,6 +2122,9 @@ struct FakeTrackedClient {
 }
 
 impl LeaderClient for FakeTrackedClient {
+    fn generation(&self) -> u64 {
+        1
+    }
     fn prompt_tracked(&self, text: &str) -> Result<u64> {
         self.sent.lock().unwrap().push(text.to_string());
         Ok(7)
@@ -2156,7 +2159,13 @@ fn tracked_pool() -> TrackedPool {
 #[test]
 fn test_pool_dispatch_to_key_returns_the_rid() {
     let (grok_pool, sent, _asked) = tracked_pool();
-    assert_eq!(grok_pool.dispatch_to_key("p19", "task"), Ok(7));
+    assert_eq!(
+        grok_pool.dispatch_to_key("p19", "task"),
+        Ok(PromptId {
+            generation: 1,
+            rid: 7
+        })
+    );
     assert_eq!(*sent.lock().unwrap(), vec!["task"]);
 }
 
@@ -2164,10 +2173,25 @@ fn test_pool_dispatch_to_key_returns_the_rid() {
 fn test_pool_prompt_result_for_key_relays_the_client() {
     let (grok_pool, _sent, asked) = tracked_pool();
     assert_eq!(
-        grok_pool.prompt_result_for_key("p19", 7),
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 7
+            }
+        ),
         Some(ended("end_turn", "relayed"))
     );
-    assert_eq!(grok_pool.prompt_result_for_key("p19", 8), None);
+    assert_eq!(
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 8
+            }
+        ),
+        None
+    );
     assert_eq!(*asked.lock().unwrap(), vec![7, 8]);
 }
 
@@ -2177,7 +2201,16 @@ fn test_pool_dispatch_to_key_err_without_client() {
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
     let err = grok_pool.dispatch_to_key("p19", "task").unwrap_err();
     assert!(err.contains("p19"), "{err}");
-    assert_eq!(grok_pool.prompt_result_for_key("p19", 7), None);
+    assert_eq!(
+        grok_pool.prompt_result_for_key(
+            "p19",
+            PromptId {
+                generation: 1,
+                rid: 7
+            }
+        ),
+        None
+    );
 }
 
 struct FakeRaisingTrackedClient;
@@ -2804,4 +2837,47 @@ fn test_kill_daemon_key_removes_socket_pid_and_session() {
     assert!(!sock.exists());
     assert!(!sock.with_extension("pid").exists());
     assert!(!sock.with_extension("session").exists());
+}
+
+#[test]
+fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
+    let _bed = setup();
+    let pool = GrokClientPool::new();
+    let (first, first_proc) = loaded(None, vec![]);
+    let handout = first.clone();
+    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
+    let old_id = pool.dispatch_to_key("p19", "old task").unwrap();
+    first_proc.feed(&agent_chunk(Some("old-prompt"), "OLD RESULT"));
+    first_proc.feed(&prompt_response(old_id.rid, "old-prompt", "end_turn"));
+    assert_eq!(
+        settle_ended(&first, old_id.rid),
+        ended("end_turn", "OLD RESULT")
+    );
+    assert_eq!(
+        pool.prompt_result_for_key("p19", old_id),
+        Some(ended("end_turn", "OLD RESULT"))
+    );
+    teardown(&first, &first_proc);
+
+    let (replacement, replacement_proc) = loaded(None, vec![]);
+    let handout = replacement.clone();
+    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
+    let new_id = pool.dispatch_to_key("p19", "new task").unwrap();
+    assert_eq!(
+        old_id.rid, new_id.rid,
+        "client counters restart at handshake"
+    );
+    assert_ne!(old_id.generation, new_id.generation);
+    replacement_proc.feed(&agent_chunk(Some("new-prompt"), "NEW RESULT"));
+    replacement_proc.feed(&prompt_response(new_id.rid, "new-prompt", "end_turn"));
+    assert_eq!(
+        settle_ended(&replacement, new_id.rid),
+        ended("end_turn", "NEW RESULT")
+    );
+    assert_eq!(pool.prompt_result_for_key("p19", old_id), None);
+    assert_eq!(
+        pool.prompt_result_for_key("p19", new_id),
+        Some(ended("end_turn", "NEW RESULT"))
+    );
+    teardown(&replacement, &replacement_proc);
 }

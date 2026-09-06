@@ -16,11 +16,22 @@ use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 // per-key client pool (hived-side)
 // --------------------------------------------------------------------------
 
+/// A request id is unique only within one connection. These handles live
+/// in the hived process and must not be restored across daemon restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptId {
+    pub generation: u64,
+    pub rid: u64,
+}
+
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
 /// only production implementation; tests substitute fakes through
 /// `acting_client`'s override. `Err` is a transport failure: the client
 /// could not reach its leader at all.
 pub trait LeaderClient: Send + Sync {
+    fn generation(&self) -> u64 {
+        unreachable!("generation not expected on this client")
+    }
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
     }
@@ -45,6 +56,9 @@ pub trait LeaderClient: Send + Sync {
 }
 
 impl LeaderClient for GrokStdioClient {
+    fn generation(&self) -> u64 {
+        GrokStdioClient::generation(self)
+    }
     fn prompt(&self, text: &str) -> Result<bool> {
         Ok(GrokStdioClient::prompt(self, text))
     }
@@ -159,19 +173,27 @@ impl GrokClientPool {
     }
 
     /// A workflow node's task as a tracked prompt over the key's leader:
-    /// the request id comes back so `prompt_result_for_key` can read the
+    /// the connection and request ids let `prompt_result_for_key` read the
     /// turn's outcome. `Err` covers no daemon and no session record too.
-    pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<u64, String> {
+    pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<PromptId, String> {
         let client = self
             .acting_client(key)
             .ok_or_else(|| format!("no grok leader client on {key}"))?;
-        client.prompt_tracked(text).map_err(|e| e.to_string())
+        let rid = client.prompt_tracked(text).map_err(|e| e.to_string())?;
+        Ok(PromptId {
+            generation: client.generation(),
+            rid,
+        })
     }
 
     /// The outcome of a prompt `dispatch_to_key` sent; None with no client
     /// on the key or one that never sent it (reconnected since).
-    pub fn prompt_result_for_key(&self, key: &str, rid: u64) -> Option<PromptResult> {
-        self.acting_client(key)?.prompt_result(rid)
+    pub fn prompt_result_for_key(&self, key: &str, id: PromptId) -> Option<PromptResult> {
+        let client = self.acting_client(key)?;
+        if client.generation() != id.generation {
+            return None;
+        }
+        client.prompt_result(id.rid)
     }
 
     /// Cancel the running turn over the key's leader.
@@ -337,18 +359,18 @@ pub fn send_to_key(key: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(key, text)
 }
 
-pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, u64), String> {
+pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, PromptId), String> {
     let key = resolve_pane_key(pane);
-    let rid = pool().dispatch_to_key(&key, text)?;
-    Ok((key, rid))
+    let id = pool().dispatch_to_key(&key, text)?;
+    Ok((key, id))
 }
 
-pub fn dispatch_to_key(key: &str, text: &str) -> Result<u64, String> {
+pub fn dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
     pool().dispatch_to_key(key, text)
 }
 
-pub fn prompt_result_for_key(key: &str, rid: u64) -> Option<PromptResult> {
-    pool().prompt_result_for_key(key, rid)
+pub fn prompt_result_for_key(key: &str, id: PromptId) -> Option<PromptResult> {
+    pool().prompt_result_for_key(key, id)
 }
 
 pub fn interrupt_pane(pane: &str) -> Option<&'static str> {

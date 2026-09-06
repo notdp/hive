@@ -9,6 +9,7 @@ use crate::adapters::claude_bg::{EngineSession, PaneJob};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{ThreadRuntime, TurnResult};
+use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::{PromptResult, SessionRecord, SessionRuntime};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
@@ -96,7 +97,7 @@ pub struct Hook {
     pub gl_runtime_for_key: Option<S1<Option<SessionRuntime>>>,
     pub gl_turn_open_for_key: Option<S1<Option<Option<bool>>>>,
     #[allow(clippy::type_complexity)]
-    pub gl_prompt_result: Option<Arc<dyn Fn(&str, u64) -> Option<PromptResult> + Send + Sync>>,
+    pub gl_prompt_result: Option<Arc<dyn Fn(&str, PromptId) -> Option<PromptResult> + Send + Sync>>,
     pub gl_session_id_for_pane: Option<S1<Option<String>>>,
     pub gl_read_session_key: Option<S1<Option<SessionRecord>>>,
     pub gl_list_daemon_keys: Option<F0<Vec<String>>>,
