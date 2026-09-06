@@ -1,0 +1,2225 @@
+//! hive::node — one task on one live member, as one blocking call.
+//!
+//! A node is one task placed on one live member, the way a Claude Code
+//! Workflow subagent takes one: spawn a real pane (or reuse a live member
+//! of that name), wait until it is ready, dispatch the task as a `<HIVE>`
+//! envelope with no sender, and read the member's own turn. The member is
+//! never asked to send anything back — the final assistant message of the
+//! turn its task started is the node's result, read from the engine's
+//! transcript through `adapters::turn`.
+//!
+//! The anchor is input identity, never time: the runner mints a dispatch
+//! id, puts it verbatim in the text the member receives (the envelope body
+//! and the task artifact name), takes the transcript cursor before
+//! dispatching, and asks the reader to bind the turn that consumed that
+//! exact input past that cursor. A turn the reader cannot attribute is
+//! reported (`ambiguous`), never guessed at.
+//!
+//! One run is one record, `<workspace>/run/nodes/<name>.json`, written at
+//! every transition (pending → input_bound → terminal) and held under the
+//! per-member flock `<name>.lock`; a pending record of a live member is
+//! another runner's, a pending record of a dead member is stale and
+//! replaced. `NodeOp` is the typed vocabulary of one hive interaction,
+//! `run_op` executes one, and `run_node` (`hive node run`) strings them
+//! together for an external orchestrator. `NodeEnv` is the seam over
+//! cli/bus/team/readers; tests inject a fake.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{Map, Value};
+
+use crate::adapters::turn::{InputBinding, ReadError, TurnAnchor, TurnOutcome, TurnReader};
+
+const POLL_SECONDS: f64 = 1.0;
+/// How long the reader may keep failing (`ReadError`) before the node
+/// gives up on the transcript.
+const READ_ERROR_BUDGET_SECONDS: f64 = 60.0;
+/// How long a ready member's roster row may lack a session id: the id is
+/// backfilled by the hived, not written by the spawn.
+const SESSION_ID_WAIT_SECONDS: f64 = 30.0;
+const ATTEMPTS: usize = 3;
+const RETRY_GAP: f64 = 3.0;
+
+pub const STATUS_PENDING: &str = "pending";
+pub const STATUS_INPUT_BOUND: &str = "input_bound";
+pub const STATUS_COMPLETED: &str = "completed";
+pub const STATUS_INTERRUPTED: &str = "interrupted";
+pub const STATUS_FAILED: &str = "failed";
+pub const STATUS_AMBIGUOUS: &str = "ambiguous";
+pub const STATUS_SESSION_CHANGED: &str = "session_changed";
+pub const STATUS_TRANSCRIPT_UNAVAILABLE: &str = "transcript_unavailable";
+pub const STATUS_MEMBER_GONE: &str = "member_gone";
+pub const STATUS_MEMBER_BUSY: &str = "member_busy";
+
+// tmux splits and team registration race each other in-process; spawns
+// serialize, everything else stays parallel. (Cross-process, the registry
+// name claim inside Team::spawn is the guard.)
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// The node could not reach a dispatch: bad team, spawn, ready gate, no
+/// reader for the member's CLI, or the dispatch itself refused. Everything
+/// after the dispatch is a verdict in the result, never an error.
+#[derive(Debug)]
+pub struct NodeError(pub String);
+
+impl fmt::Display for NodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NodeError {}
+
+#[derive(Debug, Clone)]
+pub struct Ctx {
+    pub team_name: String,
+    pub workspace: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnedAgent {
+    pub pane_id: String,
+    pub cli: String,
+}
+
+/// A roster row as the node needs it: where the member sits, which engine
+/// it runs, and the engine's own session id and cwd the reader resolves
+/// the transcript through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberInfo {
+    pub pane_id: String,
+    pub cli: String,
+    pub session_id: Option<String>,
+    pub cwd: String,
+}
+
+/// The seams a node reaches through. `Err(String)` from `spawn`/`dispatch`
+/// is a transient failure the retry loops absorb.
+pub trait NodeEnv: Send + Sync {
+    fn context(&self) -> Result<Ctx, NodeError>;
+    fn spawn(&self, name: &str, cli: Option<&str>, model: &str) -> Result<SpawnedAgent, String>;
+    fn ensure_hived(&self);
+    /// Agents still not ready when the gate expires.
+    fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String>;
+    /// Dispatch the task with no sender; returns the ledger seq of the row.
+    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String>;
+    /// Runtime liveness (`Team::member_alive`): can this member still take a
+    /// dispatch and run a turn.
+    fn alive(&self, name: &str) -> bool;
+    /// A fresh read of the member's roster row; None when it is not on
+    /// the roster.
+    fn member(&self, name: &str) -> Option<MemberInfo>;
+    /// `Team::retire`: no-op when the member is not on the roster.
+    fn retire(&self, name: &str);
+    /// The transcript reader for a roster `cli` value; None when hive has
+    /// no reader for it.
+    fn reader(&self, cli: &str) -> Option<Box<dyn TurnReader>>;
+    fn sleep(&self, seconds: f64);
+}
+
+/// Progress goes to stderr so stdout carries only the result (the JSON
+/// line of `hive node run`).
+fn log(message: &str) {
+    eprintln!("[node] {message}");
+    let _ = std::io::stderr().flush();
+}
+
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A fresh dispatch id, `nd-<12 lowercase hex>`: unique per process and
+/// call (time, pid and a counter hashed), never derived from the task.
+pub fn mint_dispatch_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    COUNTER.fetch_add(1, Ordering::SeqCst).hash(&mut hasher);
+    format!("nd-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
+}
+
+// ---------------------------------------------------------------------------
+// node record and lock
+// ---------------------------------------------------------------------------
+
+/// One run's persisted state, `<workspace>/run/nodes/<name>.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRecord {
+    pub dispatch_id: String,
+    pub cli: String,
+    pub session: String,
+    pub cursor: String,
+    pub anchor: Option<TurnAnchor>,
+    pub status: String,
+    pub body: Option<String>,
+    pub reason: Option<String>,
+    /// Ledger seq of the dispatch row; None when the run ended before it.
+    pub seq: Option<i64>,
+    pub started_at: u64,
+}
+
+impl NodeRecord {
+    /// A run that has not reached a terminal status: the member is owned
+    /// by the runner that wrote it.
+    pub fn is_pending(&self) -> bool {
+        self.status == STATUS_PENDING || self.status == STATUS_INPUT_BOUND
+    }
+
+    fn to_json(&self) -> Value {
+        let mut map = Map::new();
+        map.insert("dispatchId".into(), Value::from(self.dispatch_id.as_str()));
+        map.insert("cli".into(), Value::from(self.cli.as_str()));
+        map.insert("session".into(), Value::from(self.session.as_str()));
+        map.insert("cursor".into(), Value::from(self.cursor.as_str()));
+        map.insert(
+            "anchor".into(),
+            match &self.anchor {
+                Some(anchor) => {
+                    let mut a = Map::new();
+                    a.insert("session".into(), Value::from(anchor.session.as_str()));
+                    a.insert("turn".into(), Value::from(anchor.turn.as_str()));
+                    a.insert("cursor".into(), Value::from(anchor.cursor.as_str()));
+                    Value::Object(a)
+                }
+                None => Value::Null,
+            },
+        );
+        map.insert("status".into(), Value::from(self.status.as_str()));
+        if let Some(body) = &self.body {
+            map.insert("body".into(), Value::from(body.as_str()));
+        }
+        if let Some(reason) = &self.reason {
+            map.insert("reason".into(), Value::from(reason.as_str()));
+        }
+        map.insert(
+            "seq".into(),
+            self.seq.map(Value::from).unwrap_or(Value::Null),
+        );
+        map.insert("startedAt".into(), Value::from(self.started_at));
+        Value::Object(map)
+    }
+
+    fn from_json(value: &Value) -> Option<NodeRecord> {
+        let map = value.as_object()?;
+        let text = |key: &str| {
+            map.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let anchor = map.get("anchor").and_then(Value::as_object).map(|a| {
+            let field = |key: &str| {
+                a.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            TurnAnchor {
+                session: field("session"),
+                turn: field("turn"),
+                cursor: field("cursor"),
+            }
+        });
+        Some(NodeRecord {
+            dispatch_id: text("dispatchId"),
+            cli: text("cli"),
+            session: text("session"),
+            cursor: text("cursor"),
+            anchor,
+            status: text("status"),
+            body: map.get("body").and_then(Value::as_str).map(str::to_string),
+            reason: map
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            seq: map.get("seq").and_then(Value::as_i64),
+            started_at: map.get("startedAt").and_then(Value::as_u64).unwrap_or(0),
+        })
+    }
+}
+
+fn nodes_dir(workspace: &str) -> PathBuf {
+    Path::new(workspace).join("run").join("nodes")
+}
+
+pub fn record_path(workspace: &str, name: &str) -> PathBuf {
+    nodes_dir(workspace).join(format!("{name}.json"))
+}
+
+fn lock_path(workspace: &str, name: &str) -> PathBuf {
+    nodes_dir(workspace).join(format!("{name}.lock"))
+}
+
+pub fn read_record(workspace: &str, name: &str) -> Option<NodeRecord> {
+    let text = fs::read_to_string(record_path(workspace, name)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    NodeRecord::from_json(&value)
+}
+
+/// Atomic replace: a reader never sees a half-written record.
+fn write_record(workspace: &str, name: &str, record: &NodeRecord) -> Result<(), NodeError> {
+    let path = record_path(workspace, name);
+    let dir = nodes_dir(workspace);
+    fs::create_dir_all(&dir).map_err(|e| NodeError(e.to_string()))?;
+    let tmp = dir.join(format!(".{name}.json.{}", std::process::id()));
+    let text =
+        serde_json::to_string_pretty(&record.to_json()).map_err(|e| NodeError(e.to_string()))?;
+    fs::write(&tmp, text).map_err(|e| NodeError(e.to_string()))?;
+    fs::rename(&tmp, &path).map_err(|e| NodeError(e.to_string()))
+}
+
+/// Drop a member's node record: the member is retired (`hive kill`,
+/// `hive delete --down`, a node's own dead-row retire before it spawns),
+/// so no run can own it any more. The lock file stays: a flock lives on
+/// the inode, so unlinking it under a runner that holds it would hand the
+/// next runner a fresh file and a second lock on the same member.
+pub fn remove_record(workspace: &str, name: &str) {
+    let _ = fs::remove_file(record_path(workspace, name));
+}
+
+/// The per-member run lock, held for the whole `run_node`; dropping it
+/// releases the flock.
+pub struct NodeLock {
+    file: fs::File,
+}
+
+impl Drop for NodeLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// `Ok(None)` when another process holds the member's lock.
+pub fn try_lock(workspace: &str, name: &str) -> Result<Option<NodeLock>, NodeError> {
+    let dir = nodes_dir(workspace);
+    fs::create_dir_all(&dir).map_err(|e| NodeError(e.to_string()))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path(workspace, name))
+        .map_err(|e| NodeError(e.to_string()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(NodeLock { file }));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(NodeError(format!("node lock for '{name}': {err}")))
+}
+
+// ---------------------------------------------------------------------------
+// ops
+// ---------------------------------------------------------------------------
+
+/// One hive interaction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeOp {
+    Spawn {
+        name: String,
+        cli: Option<String>,
+        model: String,
+    },
+    Ready {
+        name: String,
+        cli: String,
+    },
+    /// The task: the prompt rides a task artifact named after the dispatch
+    /// id, the body opens with the id, the envelope has no sender.
+    DispatchTask {
+        name: String,
+        prompt: String,
+        dispatch_id: String,
+    },
+}
+
+/// `<workspace>/artifacts/tasks/<name>-<dispatch_id>.md`, created new: the
+/// id is fresh per run, so an existing file is a collision to refuse, not
+/// a file to overwrite.
+fn task_artifact(
+    env: &dyn NodeEnv,
+    name: &str,
+    dispatch_id: &str,
+    text: &str,
+) -> Result<String, NodeError> {
+    let ctx = env.context()?;
+    let tasks_dir = Path::new(&ctx.workspace).join("artifacts").join("tasks");
+    fs::create_dir_all(&tasks_dir).map_err(|e| NodeError(e.to_string()))?;
+    let path = tasks_dir.join(format!("{name}-{dispatch_id}.md"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| NodeError(format!("task artifact {}: {e}", path.display())))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| NodeError(e.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// The envelope body: the dispatch id first (the input marker the reader
+/// binds on), then the task's first line as the summary.
+fn dispatch_body(dispatch_id: &str, prompt: &str) -> String {
+    let first = prompt.lines().next().unwrap_or_default().trim();
+    format!("task {dispatch_id}\n{first}")
+}
+
+/// Dispatch with bounded retries: a cloud-backed transport can refuse
+/// transiently under provider throttling, and a single blip must not kill
+/// a whole orchestration. Still loud on exhaustion.
+fn dispatch(env: &dyn NodeEnv, name: &str, body: &str, artifact: &str) -> Result<i64, NodeError> {
+    let mut last = String::new();
+    for attempt in 0..ATTEMPTS {
+        match env.dispatch(name, body, artifact) {
+            Ok(seq) => return Ok(seq),
+            Err(exc) => {
+                last = exc;
+                if attempt + 1 < ATTEMPTS {
+                    log(&format!(
+                        "{name} dispatch refused ({last}); retry {}/{ATTEMPTS}",
+                        attempt + 2
+                    ));
+                    env.sleep(RETRY_GAP);
+                }
+            }
+        }
+    }
+    Err(NodeError(format!(
+        "dispatch to '{name}' failed after {ATTEMPTS} attempts: {last}"
+    )))
+}
+
+fn spawn_member(
+    env: &dyn NodeEnv,
+    name: &str,
+    cli: Option<&str>,
+    model: &str,
+) -> Result<SpawnedAgent, NodeError> {
+    let mut last = String::new();
+    for attempt in 0..ATTEMPTS {
+        let result = {
+            let _guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            env.spawn(name, cli, model)
+        };
+        match result {
+            Ok(agent) => return Ok(agent),
+            // A cloud transport (codex mint, grok leader) fails fast under
+            // provider throttling; absorb blips here, each retry visible.
+            Err(exc) => last = exc,
+        }
+        if attempt + 1 < ATTEMPTS {
+            log(&format!(
+                "{name} spawn failed ({last}); retry {}/{ATTEMPTS}",
+                attempt + 2
+            ));
+            env.sleep(RETRY_GAP);
+        }
+    }
+    Err(NodeError(format!(
+        "spawn '{name}' failed after {ATTEMPTS} attempts: {last}"
+    )))
+}
+
+fn ready_gate(env: &dyn NodeEnv, name: &str, cli: &str) -> Result<(), NodeError> {
+    env.ensure_hived();
+    if cli != "claude" {
+        // claude inboxes queue; only TUI-injected CLIs need the ready gate.
+        let not_ready = env.wait_ready(&HashSet::from([name.to_string()]));
+        if !not_ready.is_empty() {
+            return Err(NodeError(format!(
+                "member '{name}' did not reach ready within the gate; inspect its pane"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Execute one op against the live seams.
+pub fn run_op(env: &dyn NodeEnv, op: &NodeOp) -> Result<Map<String, Value>, NodeError> {
+    let mut result = Map::new();
+    match op {
+        NodeOp::Spawn { name, cli, model } => {
+            let spawned = spawn_member(env, name, cli.as_deref(), model)?;
+            result.insert("pane".to_string(), Value::String(spawned.pane_id));
+            result.insert("cli".to_string(), Value::String(spawned.cli));
+        }
+        NodeOp::Ready { name, cli } => ready_gate(env, name, cli)?,
+        NodeOp::DispatchTask {
+            name,
+            prompt,
+            dispatch_id,
+        } => {
+            let artifact = task_artifact(env, name, dispatch_id, prompt)?;
+            let seq = dispatch(env, name, &dispatch_body(dispatch_id, prompt), &artifact)?;
+            result.insert("seq".to_string(), Value::from(seq));
+            result.insert("artifact".to_string(), Value::String(artifact));
+        }
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// node: one task on one member, as a single blocking call
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct NodeSpec {
+    pub name: String,
+    pub cli: Option<String>,
+    pub model: String,
+    pub task: String,
+}
+
+/// How a run ended: the status word and what goes with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Verdict {
+    status: &'static str,
+    body: Option<String>,
+    reason: Option<String>,
+}
+
+impl Verdict {
+    fn reason(status: &'static str, reason: impl Into<String>) -> Verdict {
+        Verdict {
+            status,
+            body: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    fn of_outcome(outcome: TurnOutcome) -> Verdict {
+        match outcome {
+            TurnOutcome::Completed { text } => Verdict {
+                status: STATUS_COMPLETED,
+                body: Some(text),
+                reason: None,
+            },
+            TurnOutcome::Interrupted { reason } => Verdict::reason(STATUS_INTERRUPTED, reason),
+            TurnOutcome::Failed { reason } => Verdict::reason(STATUS_FAILED, reason),
+            TurnOutcome::Ambiguous { reason } => Verdict::reason(STATUS_AMBIGUOUS, reason),
+            TurnOutcome::SessionChanged { reason } => {
+                Verdict::reason(STATUS_SESSION_CHANGED, reason)
+            }
+        }
+    }
+}
+
+/// The JSON line of `hive node run`.
+struct NodeResult<'a> {
+    name: &'a str,
+    pane: String,
+    reused: bool,
+    dispatch_id: String,
+    session: String,
+    turn: Option<String>,
+    verdict: Verdict,
+}
+
+impl NodeResult<'_> {
+    fn into_map(self) -> Map<String, Value> {
+        let mut result = Map::new();
+        result.insert("status".to_string(), Value::from(self.verdict.status));
+        result.insert("name".to_string(), Value::from(self.name));
+        result.insert("pane".to_string(), Value::String(self.pane));
+        result.insert("reused".to_string(), Value::Bool(self.reused));
+        result.insert("dispatchId".to_string(), Value::String(self.dispatch_id));
+        result.insert("session".to_string(), Value::String(self.session));
+        result.insert(
+            "turn".to_string(),
+            self.turn.map(Value::String).unwrap_or(Value::Null),
+        );
+        if let Some(body) = self.verdict.body {
+            result.insert("body".to_string(), Value::String(body));
+        }
+        if let Some(reason) = self.verdict.reason {
+            result.insert("reason".to_string(), Value::String(reason));
+        }
+        result
+    }
+}
+
+/// Consecutive reader errors, charged one poll each; the transcript is
+/// given up on when they add up to the budget.
+#[derive(Default)]
+struct ErrorBudget {
+    consecutive: u32,
+}
+
+impl ErrorBudget {
+    fn reset(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// Whether this error exhausts the budget.
+    fn charge(&mut self, err: &ReadError) -> bool {
+        self.consecutive += 1;
+        let exhausted = f64::from(self.consecutive) * POLL_SECONDS >= READ_ERROR_BUDGET_SECONDS;
+        if self.consecutive == 1 || exhausted {
+            log(&format!("transcript read failed: {err}"));
+        }
+        exhausted
+    }
+}
+
+/// What one poll of the transcript said.
+enum Probe<T> {
+    Wait,
+    Ready(T),
+    Terminal(Verdict),
+}
+
+fn probe_input(
+    reader: &dyn TurnReader,
+    record: &NodeRecord,
+    cwd: Option<&str>,
+    budget: &mut ErrorBudget,
+) -> Probe<TurnAnchor> {
+    match reader.find_input(&record.session, cwd, &record.dispatch_id, &record.cursor) {
+        Ok(InputBinding::Bound(anchor)) => Probe::Ready(anchor),
+        Ok(InputBinding::Ambiguous(reason)) => {
+            Probe::Terminal(Verdict::reason(STATUS_AMBIGUOUS, reason))
+        }
+        Ok(InputBinding::NotYet) => {
+            budget.reset();
+            Probe::Wait
+        }
+        Err(err) if budget.charge(&err) => Probe::Terminal(Verdict::reason(
+            STATUS_TRANSCRIPT_UNAVAILABLE,
+            err.to_string(),
+        )),
+        Err(_) => Probe::Wait,
+    }
+}
+
+fn probe_outcome(
+    reader: &dyn TurnReader,
+    anchor: &TurnAnchor,
+    cwd: Option<&str>,
+    budget: &mut ErrorBudget,
+) -> Probe<()> {
+    match reader.outcome(anchor, cwd) {
+        Ok(Some(outcome)) => Probe::Terminal(Verdict::of_outcome(outcome)),
+        Ok(None) => {
+            budget.reset();
+            Probe::Wait
+        }
+        Err(err) if budget.charge(&err) => Probe::Terminal(Verdict::reason(
+            STATUS_TRANSCRIPT_UNAVAILABLE,
+            err.to_string(),
+        )),
+        Err(_) => Probe::Wait,
+    }
+}
+
+fn gone(name: &str, phase: &str) -> Verdict {
+    Verdict::reason(
+        STATUS_MEMBER_GONE,
+        format!("member '{name}' is gone {phase}; nothing more will be read"),
+    )
+}
+
+/// Poll the roster until the member's row carries a session id (the hived
+/// backfills it after the engine starts). `Err` names the verdict when it
+/// never does or the member dies first.
+fn wait_for_session(env: &dyn NodeEnv, name: &str) -> Result<MemberInfo, Verdict> {
+    let polls = (SESSION_ID_WAIT_SECONDS / POLL_SECONDS) as u32;
+    for _ in 0..=polls {
+        if let Some(member) = env.member(name) {
+            if member.session_id.is_some() {
+                return Ok(member);
+            }
+        }
+        if !env.alive(name) {
+            return Err(gone(name, "before its session id was known"));
+        }
+        env.sleep(POLL_SECONDS);
+    }
+    Err(Verdict::reason(
+        STATUS_TRANSCRIPT_UNAVAILABLE,
+        format!("roster row for '{name}' never got a session id"),
+    ))
+}
+
+/// The transcript cursor before the dispatch, under the read-error budget.
+fn take_cursor(
+    env: &dyn NodeEnv,
+    reader: &dyn TurnReader,
+    name: &str,
+    session: &str,
+    cwd: Option<&str>,
+) -> Result<String, Verdict> {
+    let mut budget = ErrorBudget::default();
+    loop {
+        match reader.cursor(session, cwd) {
+            Ok(cursor) => return Ok(cursor),
+            Err(err) if budget.charge(&err) => {
+                return Err(Verdict::reason(
+                    STATUS_TRANSCRIPT_UNAVAILABLE,
+                    err.to_string(),
+                ))
+            }
+            Err(_) => {}
+        }
+        if !env.alive(name) {
+            return Err(gone(name, "before the task was dispatched"));
+        }
+        env.sleep(POLL_SECONDS);
+    }
+}
+
+/// Bind the turn the dispatch started, then wait for its end. A member
+/// that dies gets one last read of the phase it was in before the run
+/// ends as `member_gone`.
+fn await_turn(
+    env: &dyn NodeEnv,
+    reader: &dyn TurnReader,
+    workspace: &str,
+    name: &str,
+    record: &mut NodeRecord,
+    cwd: Option<&str>,
+) -> Result<Verdict, NodeError> {
+    let mut budget = ErrorBudget::default();
+    let anchor = loop {
+        match probe_input(reader, record, cwd, &mut budget) {
+            Probe::Ready(anchor) => break anchor,
+            Probe::Terminal(verdict) => return Ok(verdict),
+            Probe::Wait => {}
+        }
+        if !env.alive(name) {
+            return Ok(match probe_input(reader, record, cwd, &mut budget) {
+                Probe::Terminal(verdict) => verdict,
+                Probe::Ready(anchor) => match probe_outcome(reader, &anchor, cwd, &mut budget) {
+                    Probe::Terminal(verdict) => verdict,
+                    _ => gone(name, "after its turn was bound"),
+                },
+                Probe::Wait => gone(name, "before its turn was bound"),
+            });
+        }
+        env.sleep(POLL_SECONDS);
+    };
+    log(&format!(
+        "{name} took the task in session {} turn {}",
+        anchor.session, anchor.turn
+    ));
+    record.anchor = Some(anchor.clone());
+    record.status = STATUS_INPUT_BOUND.to_string();
+    write_record(workspace, name, record)?;
+    budget.reset();
+    loop {
+        match probe_outcome(reader, &anchor, cwd, &mut budget) {
+            Probe::Terminal(verdict) => return Ok(verdict),
+            Probe::Wait | Probe::Ready(()) => {}
+        }
+        if !env.alive(name) {
+            return Ok(match probe_outcome(reader, &anchor, cwd, &mut budget) {
+                Probe::Terminal(verdict) => verdict,
+                _ => gone(name, "before its turn ended"),
+            });
+        }
+        env.sleep(POLL_SECONDS);
+    }
+}
+
+/// `hive node run`: the whole node as one blocking call — what an external
+/// orchestrator's proxy runs in the background and reads the result of. A
+/// member of that name still alive is reused (the task becomes a follow-up
+/// to it); a dead roster row is retired first. A spawn made here is rolled
+/// back if the node fails before the task is dispatched, so the name never
+/// stays occupied by a corpse. Past the dispatch every end is a verdict in
+/// the returned map, never an `Err`.
+pub fn run_node(env: &dyn NodeEnv, spec: &NodeSpec) -> Result<Map<String, Value>, NodeError> {
+    let ctx = env.context()?;
+    let workspace = ctx.workspace.as_str();
+    let name = spec.name.as_str();
+    let busy = |reason: String| {
+        let existing = read_record(workspace, name);
+        let member = env.member(name).unwrap_or_default();
+        NodeResult {
+            name,
+            pane: member.pane_id,
+            reused: true,
+            dispatch_id: existing
+                .as_ref()
+                .map(|r| r.dispatch_id.clone())
+                .unwrap_or_default(),
+            session: existing
+                .as_ref()
+                .map(|r| r.session.clone())
+                .unwrap_or_default(),
+            turn: existing.and_then(|r| r.anchor.map(|a| a.turn)),
+            verdict: Verdict::reason(STATUS_MEMBER_BUSY, reason),
+        }
+        .into_map()
+    };
+    let Some(_lock) = try_lock(workspace, name)? else {
+        return Ok(busy(format!(
+            "the node lock for '{name}' is held by another runner"
+        )));
+    };
+    if let Some(record) = read_record(workspace, name) {
+        if record.is_pending() && env.alive(name) {
+            return Ok(busy(format!(
+                "member '{name}' has a pending node run {} owned by another runner",
+                record.dispatch_id
+            )));
+        }
+    }
+
+    let dispatch_id = mint_dispatch_id();
+    let reused = env.alive(name);
+    let (pane, cli) = if reused {
+        let member = env.member(name).unwrap_or_default();
+        log(&format!("{name} alive in {}; reusing", member.pane_id));
+        (member.pane_id, member.cli)
+    } else {
+        env.retire(name);
+        let spawned = run_op(
+            env,
+            &NodeOp::Spawn {
+                name: name.to_string(),
+                cli: spec.cli.clone(),
+                model: spec.model.clone(),
+            },
+        )?;
+        let pane = spawned
+            .get("pane")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let cli = spawned
+            .get("cli")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        log(&format!("{name} spawned in {pane}"));
+        if let Err(err) = run_op(
+            env,
+            &NodeOp::Ready {
+                name: name.to_string(),
+                cli: cli.clone(),
+            },
+        ) {
+            env.retire(name);
+            return Err(err);
+        }
+        (pane, cli)
+    };
+    // Rollback of the spawn made here, for every end before the dispatch.
+    let rollback = || {
+        if !reused {
+            env.retire(name);
+        }
+    };
+    let pre_dispatch = |verdict: Verdict, session: String| {
+        rollback();
+        NodeResult {
+            name,
+            pane: pane.clone(),
+            reused,
+            dispatch_id: dispatch_id.clone(),
+            session,
+            turn: None,
+            verdict,
+        }
+        .into_map()
+    };
+
+    let Some(reader) = env.reader(&cli) else {
+        rollback();
+        return Err(NodeError(format!(
+            "no transcript reader for cli '{cli}'; a node reads its member's turn and cannot run on it"
+        )));
+    };
+    let member = match wait_for_session(env, name) {
+        Ok(member) => member,
+        Err(verdict) => return Ok(pre_dispatch(verdict, String::new())),
+    };
+    let session = member.session_id.clone().unwrap_or_default();
+    let cwd = if member.cwd.is_empty() {
+        None
+    } else {
+        Some(member.cwd.as_str())
+    };
+    let cursor = match take_cursor(env, reader.as_ref(), name, &session, cwd) {
+        Ok(cursor) => cursor,
+        Err(verdict) => return Ok(pre_dispatch(verdict, session)),
+    };
+
+    let dispatched = match run_op(
+        env,
+        &NodeOp::DispatchTask {
+            name: name.to_string(),
+            prompt: spec.task.clone(),
+            dispatch_id: dispatch_id.clone(),
+        },
+    ) {
+        Ok(d) => d,
+        Err(err) => {
+            rollback();
+            return Err(err);
+        }
+    };
+    let seq = dispatched.get("seq").and_then(Value::as_i64);
+    let mut record = NodeRecord {
+        dispatch_id: dispatch_id.clone(),
+        cli,
+        session: session.clone(),
+        cursor,
+        anchor: None,
+        status: STATUS_PENDING.to_string(),
+        body: None,
+        reason: None,
+        seq,
+        started_at: epoch_seconds(),
+    };
+    write_record(workspace, name, &record)?;
+    log(&format!(
+        "{name} dispatched {dispatch_id}; waiting for its turn"
+    ));
+
+    let verdict = await_turn(env, reader.as_ref(), workspace, name, &mut record, cwd)?;
+    record.status = verdict.status.to_string();
+    record.body = verdict.body.clone();
+    record.reason = verdict.reason.clone();
+    write_record(workspace, name, &record)?;
+    log(&format!("{name} {}", verdict.status));
+    Ok(NodeResult {
+        name,
+        pane,
+        reused,
+        dispatch_id,
+        session,
+        turn: record.anchor.map(|a| a.turn),
+        verdict,
+    }
+    .into_map())
+}
+
+// ---------------------------------------------------------------------------
+// live wiring
+// ---------------------------------------------------------------------------
+
+struct RealCtx {
+    team_name: String,
+    workspace: String,
+    team: crate::team::Team,
+}
+
+/// Production `NodeEnv`: resolves the scoped team once and forwards every
+/// seam to the team/send/adapter modules.
+pub struct RealEnv {
+    team_arg: Option<String>,
+    ctx: Mutex<Option<RealCtx>>,
+}
+
+impl Default for RealEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RealEnv {
+    pub fn new() -> Self {
+        Self::for_team(None)
+    }
+
+    /// Scope to an explicit team name instead of the caller's pane identity
+    /// — the `--team` lane for callers outside tmux.
+    pub fn for_team(team_arg: Option<String>) -> Self {
+        RealEnv {
+            team_arg,
+            ctx: Mutex::new(None),
+        }
+    }
+
+    fn with_ctx<R>(&self, f: impl FnOnce(&mut RealCtx) -> R) -> Result<R, NodeError> {
+        let mut guard = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.is_none() {
+            let (team_name, team) =
+                crate::team::resolve_scoped_team(self.team_arg.as_deref(), true)
+                    .map_err(|e| NodeError(e.to_string()))?;
+            let team = team.ok_or_else(|| NodeError("no team resolved".to_string()))?;
+            let workspace = crate::team::resolve_workspace(Some(&team), true)
+                .map_err(|e| NodeError(e.to_string()))?;
+            *guard = Some(RealCtx {
+                team_name: team_name.unwrap_or_default(),
+                workspace,
+                team,
+            });
+        }
+        Ok(f(guard.as_mut().expect("ctx resolved above")))
+    }
+
+    /// A fresh roster read — probes must not trust the snapshot this
+    /// process resolved at start.
+    fn fresh_team(&self) -> Option<crate::team::Team> {
+        let name = self.context().ok()?.team_name;
+        crate::team::Team::load(&name, "").ok()
+    }
+}
+
+impl NodeEnv for RealEnv {
+    fn context(&self) -> Result<Ctx, NodeError> {
+        self.with_ctx(|c| Ctx {
+            team_name: c.team_name.clone(),
+            workspace: c.workspace.clone(),
+        })
+    }
+
+    fn spawn(&self, name: &str, cli: Option<&str>, model: &str) -> Result<SpawnedAgent, String> {
+        self.with_ctx(|c| {
+            let team_name = c.team_name.clone();
+            crate::team::spawn_team_agent(
+                &mut c.team,
+                &team_name,
+                name,
+                model,
+                "",
+                "",
+                "hive:hive",
+                &[],
+                cli,
+            )
+            .map(|a| SpawnedAgent {
+                pane_id: a.pane_id.clone(),
+                cli: a.cli.clone(),
+            })
+            .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.0)
+        .and_then(|inner| inner)
+    }
+
+    fn ensure_hived(&self) {
+        let _ = self.with_ctx(|c| {
+            crate::team::ensure_team_hived(&c.team, Path::new(&c.workspace));
+        });
+    }
+
+    fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String> {
+        match self.context() {
+            Ok(ctx) => {
+                crate::send::wait_for_peer_ready(&ctx.workspace, &ctx.team_name, agents, 30.0, 0.5)
+            }
+            Err(_) => agents.clone(),
+        }
+    }
+
+    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
+        self.with_ctx(|c| {
+            crate::send::request_node_dispatch(&c.workspace, &c.team, target, body, artifact)
+                .map(|payload| payload.get("seq").and_then(Value::as_i64).unwrap_or(0))
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.0)
+        .and_then(|inner| inner)
+    }
+
+    fn alive(&self, name: &str) -> bool {
+        self.fresh_team()
+            .map(|t| t.member_alive(name))
+            .unwrap_or(false)
+    }
+
+    fn member(&self, name: &str) -> Option<MemberInfo> {
+        let team = self.fresh_team()?;
+        let agent = team.agent_named(name)?;
+        Some(MemberInfo {
+            pane_id: agent.pane_id.clone(),
+            cli: agent.cli.clone(),
+            session_id: agent.session_id.clone(),
+            cwd: agent.cwd.clone(),
+        })
+    }
+
+    fn retire(&self, name: &str) {
+        let _ = self.with_ctx(|c| {
+            c.team.retire(name);
+        });
+    }
+
+    fn reader(&self, cli: &str) -> Option<Box<dyn TurnReader>> {
+        crate::adapters::turn::reader_for(cli)
+    }
+
+    fn sleep(&self, seconds: f64) {
+        std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// test env
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use super::*;
+    use crate::adapters::turn::Cursor;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    pub(crate) struct SpawnCall {
+        pub name: String,
+        pub cli: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct DispatchCall {
+        pub target: String,
+        pub body: String,
+        pub artifact: String,
+    }
+
+    /// One `find_input` call as the reader saw it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct InputCall {
+        pub session: String,
+        pub cwd: Option<String>,
+        pub marker: String,
+        pub cursor: String,
+    }
+
+    /// Answers are queues the test fills; the last answer of a queue
+    /// sticks, an empty queue answers "nothing yet" (`Ok("c0")` /
+    /// `NotYet` / `None`). Every call notes the status of the record at
+    /// `record_path`, so a test can see the transitions a blocking run
+    /// wrote along the way.
+    #[derive(Default)]
+    pub(crate) struct FakeReader {
+        pub cursors: Mutex<VecDeque<Result<Cursor, ReadError>>>,
+        pub inputs: Mutex<VecDeque<Result<InputBinding, ReadError>>>,
+        pub outcomes: Mutex<VecDeque<Result<Option<TurnOutcome>, ReadError>>>,
+        pub input_calls: Mutex<Vec<InputCall>>,
+        pub outcome_calls: Mutex<Vec<TurnAnchor>>,
+        pub record_path: Mutex<Option<PathBuf>>,
+        pub statuses_seen: Mutex<Vec<String>>,
+    }
+
+    fn next<T: Clone>(queue: &Mutex<VecDeque<T>>, default: T) -> T {
+        let mut queue = queue.lock().unwrap();
+        match queue.len() {
+            0 => default,
+            1 => queue.front().cloned().unwrap_or(default),
+            _ => queue.pop_front().unwrap_or(default),
+        }
+    }
+
+    impl FakeReader {
+        fn note_status(&self) {
+            let path = self.record_path.lock().unwrap().clone();
+            let status = path
+                .and_then(|p| fs::read_to_string(p).ok())
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| "(none)".to_string());
+            let mut seen = self.statuses_seen.lock().unwrap();
+            if seen.last() != Some(&status) {
+                seen.push(status);
+            }
+        }
+    }
+
+    /// The env's handle on the shared reader.
+    pub(crate) struct SharedReader(pub Arc<FakeReader>);
+
+    impl TurnReader for SharedReader {
+        fn cursor(&self, _session_id: &str, _cwd: Option<&str>) -> Result<Cursor, ReadError> {
+            self.0.note_status();
+            next(&self.0.cursors, Ok("c0".to_string()))
+        }
+
+        fn find_input(
+            &self,
+            session_id: &str,
+            cwd: Option<&str>,
+            marker: &str,
+            cursor: &Cursor,
+        ) -> Result<InputBinding, ReadError> {
+            self.0.note_status();
+            self.0.input_calls.lock().unwrap().push(InputCall {
+                session: session_id.to_string(),
+                cwd: cwd.map(str::to_string),
+                marker: marker.to_string(),
+                cursor: cursor.clone(),
+            });
+            next(&self.0.inputs, Ok(InputBinding::NotYet))
+        }
+
+        fn outcome(
+            &self,
+            anchor: &TurnAnchor,
+            _cwd: Option<&str>,
+        ) -> Result<Option<TurnOutcome>, ReadError> {
+            self.0.note_status();
+            self.0.outcome_calls.lock().unwrap().push(anchor.clone());
+            next(&self.0.outcomes, Ok(None))
+        }
+    }
+
+    /// Failure knobs replace flaky seams; `sleep` is a no-op that counts,
+    /// and `die_after_sleeps` drops the member off the roster at that
+    /// count. `agents` is the roster; a member is alive iff it is there.
+    pub(crate) struct FakeEnv {
+        pub workspace: PathBuf,
+        pub ready: bool,
+        pub spawn_fail_first: u32,
+        pub dispatch_fail_first: u32,
+        pub spawn_err: String,
+        pub dispatch_err: String,
+        pub spawn_without_session: bool,
+        pub no_reader: bool,
+        pub die_after_sleeps: Option<u32>,
+        /// Backfill every roster member's session id at that sleep count.
+        pub session_after_sleeps: Option<u32>,
+        pub reader: Arc<FakeReader>,
+        pub spawns: Mutex<Vec<SpawnCall>>,
+        pub dispatches: Mutex<Vec<DispatchCall>>,
+        pub msg_seq: AtomicU32,
+        pub spawn_calls: AtomicU32,
+        pub send_calls: AtomicU32,
+        pub sleeps: AtomicU32,
+        pub agents: Mutex<Vec<String>>,
+        pub sessions: Mutex<HashMap<String, Option<String>>>,
+        pub retired: Mutex<Vec<String>>,
+    }
+
+    pub(crate) fn fake_env(tmp: &Path) -> FakeEnv {
+        let ws = tmp.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        FakeEnv {
+            workspace: ws,
+            ready: true,
+            spawn_fail_first: 0,
+            dispatch_fail_first: 0,
+            spawn_err: "mint refused".to_string(),
+            dispatch_err: "refused".to_string(),
+            spawn_without_session: false,
+            no_reader: false,
+            die_after_sleeps: None,
+            session_after_sleeps: None,
+            reader: Arc::new(FakeReader::default()),
+            spawns: Mutex::new(Vec::new()),
+            dispatches: Mutex::new(Vec::new()),
+            msg_seq: AtomicU32::new(0),
+            spawn_calls: AtomicU32::new(0),
+            send_calls: AtomicU32::new(0),
+            sleeps: AtomicU32::new(0),
+            agents: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            retired: Mutex::new(Vec::new()),
+        }
+    }
+
+    impl FakeEnv {
+        /// Put a live member on the roster with a known session id.
+        pub(crate) fn add_live(&self, name: &str) {
+            self.agents.lock().unwrap().push(name.to_string());
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), Some(format!("sess-{name}")));
+        }
+
+        pub(crate) fn workspace_str(&self) -> String {
+            self.workspace.to_string_lossy().into_owned()
+        }
+    }
+
+    impl NodeEnv for FakeEnv {
+        fn context(&self) -> Result<Ctx, NodeError> {
+            Ok(Ctx {
+                team_name: "t-x".to_string(),
+                workspace: self.workspace_str(),
+            })
+        }
+
+        fn spawn(
+            &self,
+            name: &str,
+            cli: Option<&str>,
+            _model: &str,
+        ) -> Result<SpawnedAgent, String> {
+            let n = self.spawn_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= self.spawn_fail_first {
+                return Err(self.spawn_err.clone());
+            }
+            let mut spawns = self.spawns.lock().unwrap();
+            spawns.push(SpawnCall {
+                name: name.to_string(),
+                cli: cli.map(str::to_string),
+            });
+            self.agents.lock().unwrap().push(name.to_string());
+            self.sessions.lock().unwrap().insert(
+                name.to_string(),
+                if self.spawn_without_session {
+                    None
+                } else {
+                    Some(format!("sess-{name}"))
+                },
+            );
+            Ok(SpawnedAgent {
+                pane_id: format!("%{}", spawns.len()),
+                cli: cli.unwrap_or("claude").to_string(),
+            })
+        }
+
+        fn ensure_hived(&self) {}
+
+        fn wait_ready(&self, agents: &HashSet<String>) -> HashSet<String> {
+            if self.ready {
+                HashSet::new()
+            } else {
+                agents.clone()
+            }
+        }
+
+        fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, String> {
+            let n = self.send_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= self.dispatch_fail_first {
+                return Err(self.dispatch_err.clone());
+            }
+            let seq = i64::from(self.msg_seq.fetch_add(1, Ordering::SeqCst) + 1);
+            self.dispatches.lock().unwrap().push(DispatchCall {
+                target: target.to_string(),
+                body: body.to_string(),
+                artifact: artifact.to_string(),
+            });
+            Ok(seq)
+        }
+
+        fn alive(&self, name: &str) -> bool {
+            self.agents.lock().unwrap().iter().any(|a| a == name)
+        }
+
+        fn member(&self, name: &str) -> Option<MemberInfo> {
+            if !self.alive(name) {
+                return None;
+            }
+            Some(MemberInfo {
+                pane_id: format!("%{name}"),
+                cli: "claude".to_string(),
+                session_id: self.sessions.lock().unwrap().get(name).cloned().flatten(),
+                cwd: "/repo".to_string(),
+            })
+        }
+
+        fn retire(&self, name: &str) {
+            let mut agents = self.agents.lock().unwrap();
+            if let Some(pos) = agents.iter().position(|a| a == name) {
+                agents.remove(pos);
+                self.retired.lock().unwrap().push(name.to_string());
+            }
+            remove_record(&self.workspace_str(), name);
+        }
+
+        fn reader(&self, _cli: &str) -> Option<Box<dyn TurnReader>> {
+            if self.no_reader {
+                return None;
+            }
+            Some(Box::new(SharedReader(Arc::clone(&self.reader))))
+        }
+
+        fn sleep(&self, _seconds: f64) {
+            let n = self.sleeps.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.die_after_sleeps == Some(n) {
+                self.agents.lock().unwrap().clear();
+            }
+            if self.session_after_sleeps == Some(n) {
+                let mut sessions = self.sessions.lock().unwrap();
+                for name in self.agents.lock().unwrap().iter() {
+                    sessions.insert(name.clone(), Some(format!("sess-{name}")));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_env::*;
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
+
+    fn spawn(name: &str, cli: Option<&str>) -> NodeOp {
+        NodeOp::Spawn {
+            name: name.into(),
+            cli: cli.map(str::to_string),
+            model: String::new(),
+        }
+    }
+
+    fn node(name: &str, cli: Option<&str>, task: &str) -> NodeSpec {
+        NodeSpec {
+            name: name.into(),
+            cli: cli.map(str::to_string),
+            model: String::new(),
+            task: task.into(),
+        }
+    }
+
+    fn anchor(session: &str, turn: &str) -> TurnAnchor {
+        TurnAnchor {
+            session: session.into(),
+            turn: turn.into(),
+            cursor: "c1".into(),
+        }
+    }
+
+    /// A reader scripted for one bound turn that ends with `outcome`.
+    fn script_turn(env: &FakeEnv, outcome: TurnOutcome) {
+        env.reader.inputs.lock().unwrap().extend([
+            Ok(InputBinding::NotYet),
+            Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))),
+        ]);
+        env.reader
+            .outcomes
+            .lock()
+            .unwrap()
+            .extend([Ok(None), Ok(Some(outcome))]);
+    }
+
+    fn watch_record(env: &FakeEnv, name: &str) {
+        *env.reader.record_path.lock().unwrap() = Some(record_path(&env.workspace_str(), name));
+    }
+
+    #[test]
+    fn test_mint_dispatch_id_shape_and_uniqueness() {
+        let a = mint_dispatch_id();
+        let b = mint_dispatch_id();
+        for id in [&a, &b] {
+            assert_eq!(id.len(), 15, "{id}");
+            assert!(id.starts_with("nd-"), "{id}");
+            assert!(
+                id[3..]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{id}"
+            );
+        }
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_ops_cover_the_whole_node_protocol() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+
+        let r = run_op(&env, &spawn("impl", None)).unwrap();
+        assert_eq!(r["pane"], "%1");
+        assert_eq!(r["cli"], "claude");
+        run_op(
+            &env,
+            &NodeOp::Ready {
+                name: "impl".into(),
+                cli: "claude".into(),
+            },
+        )
+        .unwrap();
+
+        let r = run_op(
+            &env,
+            &NodeOp::DispatchTask {
+                name: "impl".into(),
+                prompt: "explore auth\nwrite findings".into(),
+                dispatch_id: "nd-0123456789ab".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(r["seq"], 1);
+        let artifact = r["artifact"].as_str().unwrap();
+        assert_eq!(
+            fs::read_to_string(artifact).unwrap(),
+            "explore auth\nwrite findings"
+        );
+        assert!(
+            artifact.ends_with("/artifacts/tasks/impl-nd-0123456789ab.md"),
+            "{artifact}"
+        );
+        let d = env.dispatches.lock().unwrap();
+        assert_eq!(d[0].target, "impl");
+        assert_eq!(d[0].artifact, artifact);
+        // The dispatch id is the input marker: verbatim in the body's
+        // first line and in the artifact path the envelope carries.
+        assert_eq!(d[0].body, "task nd-0123456789ab\nexplore auth");
+        assert!(d[0].artifact.contains("nd-0123456789ab"));
+    }
+
+    #[test]
+    fn test_task_artifact_never_clobbers() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let p1 = task_artifact(&env, "explore", "nd-000000000001", "one").unwrap();
+        let p2 = task_artifact(&env, "explore", "nd-000000000002", "two").unwrap();
+        assert_ne!(p1, p2);
+        assert_eq!(fs::read_to_string(&p1).unwrap(), "one");
+        assert_eq!(fs::read_to_string(&p2).unwrap(), "two");
+        // The same id twice is a collision, refused rather than overwritten.
+        let err = task_artifact(&env, "explore", "nd-000000000001", "three").unwrap_err();
+        assert!(err.0.contains("task artifact"), "{err}");
+        assert_eq!(fs::read_to_string(&p1).unwrap(), "one");
+    }
+
+    #[test]
+    fn test_ready_gates_non_claude_and_skips_claude() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.ready = false;
+        run_op(
+            &env,
+            &NodeOp::Ready {
+                name: "impl".into(),
+                cli: "claude".into(),
+            },
+        )
+        .unwrap();
+        let err = run_op(
+            &env,
+            &NodeOp::Ready {
+                name: "impl".into(),
+                cli: "codex".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.0.contains("did not reach ready"), "{err}");
+    }
+
+    #[test]
+    fn test_spawn_and_dispatch_retry_transient_failures_then_stay_loud() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.spawn_fail_first = 1;
+        env.dispatch_fail_first = 1;
+        run_op(&env, &spawn("impl", Some("codex"))).unwrap();
+        assert_eq!(env.spawn_calls.load(Ordering::SeqCst), 2);
+        {
+            let spawns = env.spawns.lock().unwrap();
+            assert_eq!(spawns[0].name, "impl");
+            assert_eq!(spawns[0].cli.as_deref(), Some("codex"));
+        }
+        run_op(
+            &env,
+            &NodeOp::DispatchTask {
+                name: "impl".into(),
+                prompt: "t".into(),
+                dispatch_id: "nd-000000000001".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(env.send_calls.load(Ordering::SeqCst), 2);
+
+        let mut env = fake_env(tmp.path());
+        env.spawn_fail_first = u32::MAX;
+        let err = run_op(&env, &spawn("impl", None)).unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+        env.dispatch_fail_first = u32::MAX;
+        let err = run_op(
+            &env,
+            &NodeOp::DispatchTask {
+                name: "impl".into(),
+                prompt: "t".into(),
+                dispatch_id: "nd-000000000002".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+    }
+
+    #[test]
+    fn test_run_node_returns_the_turns_final_message_in_full() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let text = "Findings:\n\n- one\n- two\n\n```rs\nfn x() {}\n```\nDone at /tmp/report.md";
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: text.to_string(),
+            },
+        );
+        watch_record(&env, "audit");
+
+        let r = run_node(&env, &node("audit", Some("codex"), "review it\nclosely")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["name"], "audit");
+        assert_eq!(r["pane"], "%1");
+        assert_eq!(r["reused"], false);
+        assert_eq!(r["session"], "sess-audit");
+        assert_eq!(r["turn"], "u-1");
+        assert_eq!(r["body"], text);
+        assert!(r.get("reason").is_none());
+        let id = r["dispatchId"].as_str().unwrap();
+        assert!(id.starts_with("nd-") && id.len() == 15, "{id}");
+
+        // The reader was asked for exactly this dispatch, past the cursor
+        // taken before the dispatch, in the member's own session and cwd.
+        let calls = env.reader.input_calls.lock().unwrap();
+        assert_eq!(calls[0].marker, id);
+        assert_eq!(calls[0].cursor, "c0");
+        assert_eq!(calls[0].session, "sess-audit");
+        assert_eq!(calls[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            env.reader.outcome_calls.lock().unwrap()[0],
+            anchor("sess-audit", "u-1")
+        );
+        // The injected text carries the id, and the artifact holds the task.
+        let d = env.dispatches.lock().unwrap();
+        assert!(d[0].body.contains(id), "{}", d[0].body);
+        assert!(d[0].artifact.contains(id), "{}", d[0].artifact);
+        assert_eq!(
+            fs::read_to_string(&d[0].artifact).unwrap(),
+            "review it\nclosely"
+        );
+        // The record moved pending → input_bound → completed.
+        assert_eq!(
+            *env.reader.statuses_seen.lock().unwrap(),
+            vec!["(none)", "pending", "input_bound"]
+        );
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "completed");
+        assert_eq!(record.dispatch_id, id);
+        assert_eq!(record.body.as_deref(), Some(text));
+        assert_eq!(record.anchor, Some(anchor("sess-audit", "u-1")));
+        assert_eq!(record.seq, Some(1));
+        assert_eq!(record.cursor, "c0");
+        assert_eq!(record.cli, "codex");
+        assert!(record.started_at > 0);
+        assert!(!record.is_pending());
+    }
+
+    #[test]
+    fn test_run_node_completed_with_no_text_is_an_empty_body() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: String::new(),
+            },
+        );
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "");
+    }
+
+    #[test]
+    fn test_run_node_reports_the_engines_own_end_labels() {
+        for (outcome, status, reason) in [
+            (
+                TurnOutcome::Interrupted {
+                    reason: "user_cancelled".into(),
+                },
+                "interrupted",
+                "user_cancelled",
+            ),
+            (
+                TurnOutcome::Failed {
+                    reason: "api error".into(),
+                },
+                "failed",
+                "api error",
+            ),
+            (
+                TurnOutcome::Ambiguous {
+                    reason: "compaction rewrote the branch".into(),
+                },
+                "ambiguous",
+                "compaction rewrote the branch",
+            ),
+            (
+                TurnOutcome::SessionChanged {
+                    reason: "session id changed".into(),
+                },
+                "session_changed",
+                "session id changed",
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let env = fake_env(tmp.path());
+            script_turn(&env, outcome);
+            let r = run_node(&env, &node("audit", None, "t")).unwrap();
+            assert_eq!(r["status"], status);
+            assert_eq!(r["reason"], reason);
+            assert_eq!(r["turn"], "u-1");
+            assert!(r.get("body").is_none());
+            let record = read_record(&env.workspace_str(), "audit").unwrap();
+            assert_eq!(record.status, status);
+            assert_eq!(record.reason.as_deref(), Some(reason));
+        }
+    }
+
+    #[test]
+    fn test_run_node_ambiguous_input_is_terminal_before_any_turn_is_bound() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Ambiguous(
+                "folded into a running turn".into(),
+            )));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "ambiguous");
+        assert_eq!(r["reason"], "folded into a running turn");
+        assert_eq!(r["turn"], Value::Null);
+        assert!(env.reader.outcome_calls.lock().unwrap().is_empty());
+        let record = read_record(&env.workspace_str(), "audit").unwrap();
+        assert_eq!(record.status, "ambiguous");
+        assert_eq!(record.anchor, None);
+    }
+
+    #[test]
+    fn test_run_node_gives_up_on_a_transcript_that_keeps_failing() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Err(ReadError::Unavailable("no file".into())));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "transcript_unavailable");
+        assert_eq!(r["reason"], "transcript unavailable: no file");
+        // 60s of 1s polls, then the verdict — not one error, not forever.
+        assert_eq!(env.reader.input_calls.lock().unwrap().len(), 60);
+        assert_eq!(
+            read_record(&env.workspace_str(), "audit").unwrap().status,
+            "transcript_unavailable"
+        );
+
+        // A transient error is absorbed: the budget resets on every read.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader.inputs.lock().unwrap().extend([
+            Err(ReadError::UnsupportedSchema("half line".into())),
+            Ok(InputBinding::NotYet),
+            Err(ReadError::Unavailable("blip".into())),
+            Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))),
+        ]);
+        env.reader.outcomes.lock().unwrap().extend([
+            Err(ReadError::Unavailable("blip".into())),
+            Ok(Some(TurnOutcome::Completed { text: "ok".into() })),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "ok");
+    }
+
+    #[test]
+    fn test_run_node_needs_a_cursor_before_it_dispatches() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.reader
+            .cursors
+            .lock()
+            .unwrap()
+            .push_back(Err(ReadError::Unavailable("not written yet".into())));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "transcript_unavailable");
+        assert_eq!(r["reused"], false);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        // The spawn made here is rolled back, like every pre-dispatch end.
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+    }
+
+    #[test]
+    fn test_run_node_needs_the_members_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.spawn_without_session = true;
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "transcript_unavailable");
+        assert!(r["reason"]
+            .as_str()
+            .unwrap()
+            .contains("never got a session id"));
+        assert_eq!(r["session"], "");
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+        // The id is backfilled: a row that gets one while polled proceeds.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.spawn_without_session = true;
+        env.session_after_sleeps = Some(3);
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: "late".into(),
+            },
+        );
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["session"], "sess-audit");
+        assert_eq!(r["body"], "late");
+    }
+
+    #[test]
+    fn test_run_node_ends_as_member_gone_after_one_last_read() {
+        // Dies while the input is still awaited.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.die_after_sleeps = Some(2);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_gone");
+        assert!(r["reason"]
+            .as_str()
+            .unwrap()
+            .contains("before its turn was bound"));
+        assert_eq!(
+            read_record(&env.workspace_str(), "audit").unwrap().status,
+            "member_gone"
+        );
+
+        // Dies while the outcome is awaited, but the last read has it: the
+        // turn's end wins over the death.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.die_after_sleeps = Some(1);
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        env.reader.outcomes.lock().unwrap().extend([
+            Ok(None),
+            Ok(None),
+            Ok(Some(TurnOutcome::Completed {
+                text: "just made it".into(),
+            })),
+        ]);
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "just made it");
+
+        // Dies with the turn bound and no end readable.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.die_after_sleeps = Some(1);
+        env.reader
+            .inputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(InputBinding::Bound(anchor("sess-audit", "u-1"))));
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_gone");
+        assert_eq!(r["turn"], "u-1");
+    }
+
+    #[test]
+    fn test_run_node_is_busy_on_a_live_members_pending_record() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        let ws = env.workspace_str();
+        write_record(
+            &ws,
+            "audit",
+            &NodeRecord {
+                dispatch_id: "nd-aaaaaaaaaaaa".into(),
+                cli: "claude".into(),
+                session: "sess-audit".into(),
+                cursor: "c0".into(),
+                anchor: Some(anchor("sess-audit", "u-9")),
+                status: STATUS_INPUT_BOUND.into(),
+                body: None,
+                reason: None,
+                seq: Some(4),
+                started_at: 1,
+            },
+        )
+        .unwrap();
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_busy");
+        assert_eq!(r["dispatchId"], "nd-aaaaaaaaaaaa");
+        assert_eq!(r["session"], "sess-audit");
+        assert_eq!(r["turn"], "u-9");
+        assert_eq!(r["reused"], true);
+        assert_eq!(r["pane"], "%audit");
+        assert!(r["reason"].as_str().unwrap().contains("nd-aaaaaaaaaaaa"));
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        // The other runner's record is untouched.
+        assert_eq!(read_record(&ws, "audit").unwrap().status, "input_bound");
+
+        // A terminal record never blocks.
+        let mut done = read_record(&ws, "audit").unwrap();
+        done.status = STATUS_COMPLETED.into();
+        write_record(&ws, "audit", &done).unwrap();
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: "next".into(),
+            },
+        );
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_ne!(r["dispatchId"], "nd-aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn test_run_node_replaces_a_dead_members_stale_pending_record() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let ws = env.workspace_str();
+        write_record(
+            &ws,
+            "audit",
+            &NodeRecord {
+                dispatch_id: "nd-aaaaaaaaaaaa".into(),
+                cli: "claude".into(),
+                session: "old".into(),
+                cursor: "c0".into(),
+                anchor: None,
+                status: STATUS_PENDING.into(),
+                body: None,
+                reason: None,
+                seq: Some(4),
+                started_at: 1,
+            },
+        )
+        .unwrap();
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: "fresh".into(),
+            },
+        );
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        let record = read_record(&ws, "audit").unwrap();
+        assert_ne!(record.dispatch_id, "nd-aaaaaaaaaaaa");
+        assert_eq!(record.dispatch_id, r["dispatchId"]);
+        assert_eq!(record.session, "sess-audit");
+    }
+
+    #[test]
+    fn test_run_node_is_busy_when_the_member_lock_is_held() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        let ws = env.workspace_str();
+        let held = try_lock(&ws, "audit").unwrap().expect("first lock");
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "member_busy");
+        assert!(r["reason"].as_str().unwrap().contains("lock"));
+        assert_eq!(r["dispatchId"], "");
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(read_record(&ws, "audit").is_none());
+        drop(held);
+        script_turn(&env, TurnOutcome::Completed { text: "now".into() });
+        let r = run_node(&env, &node("audit", None, "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        // The run's own lock is released with it.
+        assert!(try_lock(&ws, "audit").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_remove_record_drops_the_record_and_keeps_the_lock_file() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        script_turn(&env, TurnOutcome::Completed { text: "x".into() });
+        run_node(&env, &node("audit", None, "t")).unwrap();
+        let ws = env.workspace_str();
+        assert!(record_path(&ws, "audit").exists());
+        assert!(lock_path(&ws, "audit").exists());
+        remove_record(&ws, "audit");
+        assert!(!record_path(&ws, "audit").exists());
+        assert!(lock_path(&ws, "audit").exists());
+        // Idempotent.
+        remove_record(&ws, "audit");
+
+        // The lock survives a retire under a running node: a second runner
+        // is still refused while the first holds it.
+        let held = try_lock(&ws, "audit").unwrap().expect("lock");
+        remove_record(&ws, "audit");
+        assert!(try_lock(&ws, "audit").unwrap().is_none());
+        drop(held);
+        assert!(try_lock(&ws, "audit").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_record_round_trips_through_json() {
+        let record = NodeRecord {
+            dispatch_id: "nd-0123456789ab".into(),
+            cli: "grok".into(),
+            session: "s".into(),
+            cursor: "events.jsonl:120".into(),
+            anchor: Some(anchor("s", "s/3")),
+            status: STATUS_COMPLETED.into(),
+            body: Some("done".into()),
+            reason: None,
+            seq: Some(7),
+            started_at: 1_700_000_000,
+        };
+        let json = record.to_json();
+        assert_eq!(json["dispatchId"], "nd-0123456789ab");
+        assert_eq!(json["anchor"]["turn"], "s/3");
+        assert_eq!(json["startedAt"], 1_700_000_000u64);
+        assert!(json.get("reason").is_none());
+        assert_eq!(NodeRecord::from_json(&json), Some(record));
+        let pending = NodeRecord {
+            anchor: None,
+            status: STATUS_PENDING.into(),
+            body: None,
+            seq: None,
+            ..NodeRecord::from_json(&json).unwrap()
+        };
+        let json = pending.to_json();
+        assert_eq!(json["anchor"], Value::Null);
+        assert_eq!(json["seq"], Value::Null);
+        assert_eq!(NodeRecord::from_json(&json), Some(pending));
+    }
+
+    #[test]
+    fn test_run_node_reuses_a_living_member_and_retires_a_dead_row() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        script_turn(
+            &env,
+            TurnOutcome::Completed {
+                text: "again".into(),
+            },
+        );
+        let r = run_node(&env, &node("audit", None, "follow-up task")).unwrap();
+        assert_eq!(r["reused"], true);
+        assert_eq!(r["status"], "completed");
+        // a reused member reports the pane it already sits in
+        assert_eq!(r["pane"], "%audit");
+        assert!(env.spawns.lock().unwrap().is_empty());
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_run_node_rolls_back_its_own_spawn_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.ready = false; // codex hits the gate after the spawn registered
+        let err = run_node(&env, &node("audit", Some("codex"), "t")).unwrap_err();
+        assert!(err.0.contains("did not reach ready"), "{err}");
+        assert!(!env.alive("audit"));
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+
+        // No reader for the member's CLI: loud, and the spawn is undone.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.no_reader = true;
+        let err = run_node(&env, &node("audit", None, "t")).unwrap_err();
+        assert!(err.0.contains("no transcript reader"), "{err}");
+        assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+    }
+
+    #[test]
+    fn test_run_node_does_not_retire_a_reused_member_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.add_live("audit");
+        env.dispatch_fail_first = u32::MAX;
+        let err = run_node(&env, &node("audit", None, "t")).unwrap_err();
+        assert!(err.0.contains("after 3 attempts"), "{err}");
+        assert!(env.alive("audit"));
+        // Nothing was dispatched, so nothing is recorded.
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+    }
+
+    // -- RealEnv over the live wiring ------------------------------------------
+    //
+    // The production env resolves the team from the registry, asks the hived
+    // over its socket, and reads the roster back. Everything below is real
+    // except what needs a live member: the hived's member lookup
+    // (`resolve_live_agent`), send gate (`check_send_gate`) and transport
+    // hand-off (`agent_send`) answer through the hived test hook, and tmux is
+    // the fake `team/mod.rs` uses in test builds.
+
+    #[test]
+    fn test_real_env_dispatches_without_a_sender_and_reads_the_roster() {
+        use crate::hived::testhook::Hook as HivedHook;
+        use crate::hived::HivedServerApi;
+        use std::sync::{Arc, Mutex};
+
+        let mut env = crate::testenv::EnvGuard::new();
+        let home = TempDir::new().unwrap();
+        env.set("HIVE_HOME", home.path().join(".hive"));
+        // A short workspace path keeps the hived socket in-tree; an overlong
+        // one is relocated under /tmp/hive-<uid>/ and would outlive the TempDir.
+        let ws_tmp = tempfile::Builder::new()
+            .prefix("hive-nd-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let workspace = ws_tmp.path().to_string_lossy().to_string();
+        crate::bus::init_workspace(&workspace).unwrap();
+
+        // The registry row RealEnv::for_team resolves; the fake tmux answers
+        // list-windows with the window that claims it, so the team loads
+        // with its window identity and ensure_hived never asks tmux.
+        let team = "nodet";
+        let member = Map::from_iter([
+            ("name".to_string(), Value::from("b")),
+            ("cli".to_string(), Value::from("codex")),
+            ("sessionId".to_string(), Value::from("thr-1")),
+            ("cwd".to_string(), Value::from("/repo")),
+        ]);
+        assert_eq!(
+            crate::registry::record_team(team, &workspace, "1700000000", &[member], "dev:1")
+                .unwrap(),
+            "written"
+        );
+        let window_row = format!("dev:1\t@7\t{team}\t{workspace}\t\t1700000000\n");
+        crate::team::set_fake_tmux_run(move |args, _check| {
+            let stdout = if args.first().map(String::as_str) == Some("list-windows") {
+                window_row.clone()
+            } else {
+                String::new()
+            };
+            Ok(crate::tmux::Run {
+                returncode: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        });
+        // The real tmux module must stay untouched on the RealEnv (this
+        // thread's) path; the override is thread-local, so the serve thread
+        // is not covered by this recorder.
+        let real_tmux_argv: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>> = Default::default();
+        let recorded = std::rc::Rc::clone(&real_tmux_argv);
+        crate::tmux::set_run_override(move |args, _check, _timeout| {
+            recorded.borrow_mut().push(args.to_vec());
+            Err(crate::tmux::TmuxError::Os(
+                "no tmux in this test".to_string(),
+            ))
+        });
+
+        // A hived on a real socket: the node-dispatch arm writes the bus row
+        // itself and hands the envelope to the hooked transport.
+        let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let handed_sink = Arc::clone(&handed);
+        let ws_hook = workspace.clone();
+        let _hived_guard = crate::hived::testhook::install(HivedHook {
+            resolve_live_agent: Some(Arc::new(move |team_name, agent| {
+                let team = crate::team::Team {
+                    name: team_name.to_string(),
+                    workspace: ws_hook.clone(),
+                    tmux_session: "dev".to_string(),
+                    tmux_window: "dev:1".to_string(),
+                    tmux_window_id: "@7".to_string(),
+                    ..Default::default()
+                };
+                Ok((
+                    team,
+                    crate::agent::testhook::fake_agent(agent, team_name, "%9", "codex"),
+                ))
+            })),
+            check_send_gate: Some(Arc::new(|_target| Ok(()))),
+            agent_send: Some(Arc::new(move |_agent, text, sender| {
+                handed_sink
+                    .lock()
+                    .unwrap()
+                    .push((text.to_string(), sender.to_string()));
+                Ok("accepted".to_string())
+            })),
+            ..Default::default()
+        });
+        let server = Arc::new(crate::hived::open_server_socket(&workspace).unwrap());
+        let serve_thread = {
+            let server = Arc::clone(&server);
+            let workspace = workspace.clone();
+            std::thread::spawn(move || {
+                crate::hived::serve_requests(
+                    server.as_ref(),
+                    &workspace,
+                    team,
+                    "dev:1",
+                    "@7",
+                    "2026-04-17T00:00:00Z",
+                    2.0,
+                )
+            })
+        };
+
+        let env = RealEnv::for_team(Some(team.to_string()));
+        let ctx = env.context().unwrap();
+        assert_eq!(ctx.team_name, team);
+        assert_eq!(ctx.workspace, workspace);
+
+        // The roster row as the node reads it: engine, session id, cwd.
+        assert_eq!(
+            env.member("b"),
+            Some(MemberInfo {
+                pane_id: String::new(),
+                cli: "codex".to_string(),
+                session_id: Some("thr-1".to_string()),
+                cwd: "/repo".to_string(),
+            })
+        );
+        assert_eq!(env.member("nobody"), None);
+        assert!(env.reader("codex").is_some());
+        assert!(env.reader("bash").is_none());
+
+        let artifact = format!("{workspace}/artifacts/tasks/b-nd-0123456789ab.md");
+        let seq = env
+            .dispatch("b", "task nd-0123456789ab\nfirst task", &artifact)
+            .unwrap();
+        assert!(seq > 0);
+        let events = crate::bus::read_all_events(&workspace).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, seq);
+        // No sender on the ledger row, no `from` on the envelope, and the
+        // transport's origin label is the team.
+        assert_eq!(events[0].from, "");
+        assert_eq!(events[0].to, "b");
+        assert_eq!(events[0].body, "task nd-0123456789ab\nfirst task");
+        assert_eq!(events[0].artifact, artifact);
+        {
+            let handed = handed.lock().unwrap();
+            assert_eq!(handed.len(), 1);
+            assert_eq!(
+                handed[0].0,
+                format!(
+                    "<HIVE to=b artifact={artifact}>\ntask nd-0123456789ab\nfirst task\n</HIVE>"
+                )
+            );
+            assert_eq!(handed[0].1, team);
+        }
+
+        assert!(
+            real_tmux_argv.borrow().is_empty(),
+            "real tmux reached: {:?}",
+            real_tmux_argv.borrow()
+        );
+
+        let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);
+        let bye =
+            crate::hived::request_hived(&workspace, &shutdown, crate::hived::SOCKET_READY_TIMEOUT);
+        assert_eq!(
+            bye.and_then(|m| m.get("ok").cloned()),
+            Some(Value::Bool(true))
+        );
+        // The loop is parked in accept: one more client wakes it to notice
+        // the shutdown flag instead of waiting out the accept timeout.
+        let ping = Map::from_iter([("action".to_string(), Value::from("ping"))]);
+        let _ = crate::hived::request_hived(&workspace, &ping, crate::hived::SOCKET_READY_TIMEOUT);
+        assert!(!serve_thread.join().unwrap());
+        server.close();
+        crate::hived::cleanup_socket_impl(&workspace);
+    }
+}

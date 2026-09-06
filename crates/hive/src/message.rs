@@ -110,7 +110,19 @@ pub fn format_hive_envelope(
     body: &str,
     artifact: &str,
 ) -> String {
-    let mut attrs: Vec<(&str, &str)> = vec![("from", from_agent), ("to", to_agent)];
+    render_envelope(&[("from", from_agent), ("to", to_agent)], body, artifact)
+}
+
+/// The envelope of a `hive node run` dispatch: `to` and the task artifact,
+/// and no `from` — nobody is waiting for a message back, the runner reads
+/// the member's turn. Only the node dispatch path renders this; a normal
+/// send always carries its sender.
+pub fn format_node_envelope(to_agent: &str, body: &str, artifact: &str) -> String {
+    render_envelope(&[("to", to_agent)], body, artifact)
+}
+
+fn render_envelope(attrs: &[(&str, &str)], body: &str, artifact: &str) -> String {
+    let mut attrs: Vec<(&str, &str)> = attrs.to_vec();
     if !artifact.is_empty() {
         attrs.push(("artifact", artifact));
     }
@@ -159,6 +171,22 @@ mod tests {
         assert_eq!(
             format_hive_envelope("a.b", "c.d", "", ""),
             "<HIVE from=a.b to=c.d>\n(no message)\n</HIVE>"
+        );
+    }
+
+    #[test]
+    fn test_format_node_envelope_has_no_from() {
+        assert_eq!(
+            format_node_envelope(
+                "impl",
+                "task nd-0123456789ab\nreview it",
+                "/ws/artifacts/tasks/impl-nd-0123456789ab.md"
+            ),
+            "<HIVE to=impl artifact=/ws/artifacts/tasks/impl-nd-0123456789ab.md>\ntask nd-0123456789ab\nreview it\n</HIVE>"
+        );
+        assert_eq!(
+            format_node_envelope("impl", "", ""),
+            "<HIVE to=impl>\n(no message)\n</HIVE>"
         );
     }
 }

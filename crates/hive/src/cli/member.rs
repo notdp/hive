@@ -12,7 +12,6 @@ use super::util::{
     value_as_env_string,
 };
 use crate::identity;
-use crate::json_fields::is_set;
 use crate::team::{
     live_member_pids, load_team, resolve_scoped_team, resolve_workspace, spawn_team_agent,
     start_team_hived, Team,
@@ -74,7 +73,7 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
         fail("message body required");
     }
     let resolved_artifact = resolve_artifact_path(artifact, &ws);
-    let payload = match crate::send::request_send_payload(
+    if let Err(e) = crate::send::request_send_payload(
         &ws,
         &t,
         &sender,
@@ -84,13 +83,7 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
         "send",
         true,
     ) {
-        Ok(payload) => payload,
-        Err(e) => fail(&e.to_string()),
-    };
-    if is_set(payload.get("mailbox")) {
-        // A mailbox has no peer runtime to go silent about: say so once,
-        // in the sender's own tool result, so nobody invents a follow-up.
-        println!("delivered to flow mailbox (not a member; no ack will arrive)");
+        fail(&e.to_string());
     }
     // Peer sends stay silent (rule of silence).
 }

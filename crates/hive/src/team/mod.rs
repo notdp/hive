@@ -113,12 +113,6 @@ pub fn validate_team_name(name: &str) -> String {
              address for Claude sessions outside any team"
         );
     }
-    if name == "flow" {
-        return format!(
-            "team name '{name}' is invalid: 'flow' is the node runner's \
-             send-address kind (flow.run), not a team name"
-        );
-    }
     if name.contains('.') {
         return format!(
             "team name '{name}' is invalid: dots separate send-address \
@@ -619,11 +613,6 @@ impl Team {
         extra_env: Option<&HashMap<String, String>>,
         cli: &str,
     ) -> Result<Agent> {
-        if name == "flow" || name.starts_with("flow.") {
-            bail!(
-                "'{name}' collides with the node runner's mailbox address kind (flow.run), not a member name"
-            );
-        }
         if self.agent_named(name).is_some() {
             bail!("Agent '{name}' already exists in team '{}'", self.name);
         }
@@ -759,6 +748,9 @@ impl Team {
         self.agents.remove(pos);
         if !self.name.is_empty() {
             let _ = crate::registry::remove_member(&self.name, name, &self.created_at_key());
+        }
+        if !self.workspace.is_empty() {
+            crate::node::remove_record(&self.workspace, name);
         }
         let window = self.display_window();
         if !window.is_empty() {

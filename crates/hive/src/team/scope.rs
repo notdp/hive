@@ -136,7 +136,7 @@ pub(crate) fn start_team_hived(t: &mut Team, workspace: &str) -> Option<i32> {
     crate::hived::ensure_hived(workspace, &t.name, &window_target, &window_id)
 }
 
-/// Seam used by flow.rs (return ignored there; team not mutated).
+/// Seam used by node.rs (return ignored there; team not mutated).
 pub(crate) fn ensure_team_hived(t: &Team, workspace: &Path) {
     let mut clone = t.clone();
     let _ = start_team_hived(&mut clone, &workspace.to_string_lossy());
@@ -211,13 +211,6 @@ fn should_show_description(desc: Option<&Value>) -> bool {
 pub(crate) fn team_status_payload(t: &mut Team) -> Map<String, Value> {
     let status = t.status();
     let mut payload = augment_team_payload_with_runtime(t, status);
-    // The node runner's mailbox is a reserved address, not a member — list
-    // it beside the roster so "hive team can't find flow" never reads as
-    // "my report was lost".
-    payload.insert(
-        "mailboxes".to_string(),
-        serde_json::json!([{"addr": "flow.run", "kind": "flow", "delivery": "bus"}]),
-    );
     if !should_show_description(payload.get("description")) {
         payload.shift_remove("description");
     }

@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
 use crate::agent::Agent;
-use crate::message::format_hive_envelope;
+use crate::message::{format_hive_envelope, format_node_envelope};
 use crate::team::Team;
 use crate::{bus, devlog};
 
@@ -45,35 +45,39 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
     bail!("target agent is waiting for a user answer; answer it in the target pane")
 }
 
+/// Who a send is from. A member (or guest) send carries its sender on the
+/// ledger row and in the envelope; a `hive node run` dispatch has no sender
+/// at all — the runner reads the member's turn instead of waiting for a
+/// message back — so its row's `from_agent` is empty and its envelope has
+/// no `from`. The mode is explicit: an empty member name is never a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOrigin<'a> {
+    Member(&'a str),
+    Node,
+}
+
 pub(crate) fn send_payload(
     workspace: &str,
     team_name: &str,
-    sender_agent: &str,
+    origin: SendOrigin<'_>,
     target_agent: &str,
     body: &str,
     artifact: &str,
 ) -> Result<Map<String, Value>> {
-    if target_agent == FLOW_MAILBOX_AGENT {
-        // The node runner's mailbox (`hive node run`): it owns no pane and
-        // no transport — the durable bus row IS the delivery, and the runner
-        // polls for it. Members answer a node dispatch with an ordinary
-        // `hive send flow.run`, which lands here.
-        let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
-        let mut payload = Map::new();
-        payload.insert("ok".to_string(), Value::Bool(true));
-        payload.insert("to".to_string(), Value::from(target_agent));
-        payload.insert("seq".to_string(), Value::from(seq));
-        payload.insert("mailbox".to_string(), Value::Bool(true));
-        return Ok(payload);
-    }
-
     let (_team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
 
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
 
-    let seq = bus::write_send_event(workspace, sender_agent, target_agent, body, artifact)?;
-    let envelope = format_hive_envelope(sender_agent, target_agent, body, artifact);
+    let from_agent = match origin {
+        SendOrigin::Member(sender) => sender,
+        SendOrigin::Node => "",
+    };
+    let seq = bus::write_send_event(workspace, from_agent, target_agent, body, artifact)?;
+    let envelope = match origin {
+        SendOrigin::Member(sender) => format_hive_envelope(sender, target_agent, body, artifact),
+        SendOrigin::Node => format_node_envelope(target_agent, body, artifact),
+    };
 
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
@@ -87,11 +91,12 @@ pub(crate) fn send_payload(
     // folds it in at the next tool boundary) — no hived hold on top.
     // The transport's origin label is the message author, qualified so a
     // Claude session outside the team can address it back verbatim. A guest
-    // or ccd sender already carries its prefix.
-    let sender_label = if sender_agent.contains('.') {
-        sender_agent.to_string()
-    } else {
-        format!("{team_name}.{sender_agent}")
+    // or ccd sender already carries its prefix; a node dispatch has no
+    // author, so the team itself is the label.
+    let sender_label = match origin {
+        SendOrigin::Member(sender) if sender.contains('.') => sender.to_string(),
+        SendOrigin::Member(sender) => format!("{team_name}.{sender}"),
+        SendOrigin::Node => team_name.to_string(),
     };
     if let Err(exc) = hooked_agent_send(&target, &envelope, &sender_label) {
         let mut refused = Map::new();

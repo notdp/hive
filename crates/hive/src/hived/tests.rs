@@ -3064,6 +3064,61 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
 }
 
 #[test]
+fn test_handle_request_node_dispatch_carries_no_sender() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.agent_send = Some(Arc::new(move |_agent, text, sender| {
+        handed_sink
+            .lock()
+            .unwrap()
+            .push((text.to_string(), sender.to_string()));
+        Ok("udsWriteAccepted".to_string())
+    }));
+    let _guard = testhook::install(hook);
+
+    // The wire shape: action `node-dispatch`, no `senderAgent` key at all.
+    let (response, keep_running) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("node-dispatch")),
+            ("targetAgent", Value::from("b")),
+            ("body", Value::from("task nd-0123456789ab\ndo it")),
+            (
+                "artifact",
+                Value::from("/ws/artifacts/tasks/b-nd-0123456789ab.md"),
+            ),
+        ]),
+    );
+
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["to"], Value::from("b"));
+    let seq = response["seq"].as_i64().unwrap();
+    let events = bus::read_all_events(&workspace).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].seq, seq);
+    assert_eq!(events[0].from, "");
+    assert_eq!(events[0].to, "b");
+    let handed = handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].1, "team-a");
+    assert!(
+        handed[0].0.starts_with("<HIVE to=b artifact="),
+        "{}",
+        handed[0].0
+    );
+}
+
+#[test]
 fn test_handle_request_doctor_embeds_hived_identity_and_defaults_the_team() {
     let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&asked);
@@ -3872,7 +3927,7 @@ fn send_payload_for_test(
     send_payload(
         &workspace.to_string_lossy(),
         "team-x",
-        sender,
+        SendOrigin::Member(sender),
         target,
         body,
         artifact,
@@ -3995,31 +4050,87 @@ fn test_three_message_busy_incident_regression() {
 }
 
 #[test]
-fn test_send_to_flow_mailbox_writes_bus_row_without_transport() {
-    // `flow.run` is a mailbox: the durable bus row IS the delivery. No
-    // member resolution, no gate, no transport — a member's
-    // `hive send flow.run` must succeed with no flow-runner pane
-    // anywhere.
+fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
+    // A `hive node run` dispatch rides the normal transport (member
+    // resolution, send gate, hand-off) but has no sender: the ledger row's
+    // from_agent is empty, the envelope carries no `from`, and the
+    // transport's origin label is the team itself.
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     bus::init_workspace(&workspace).unwrap();
-    let hook = Hook {
-        resolve_live_agent: Some(Arc::new(|_team, _agent| {
-            panic!("mailbox send must not resolve a live agent")
-        })),
-        ..Default::default()
-    };
+    let gated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let gated_sink = Arc::clone(&gated);
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.check_send_gate = Some(Arc::new(move |target| {
+        gated_sink.lock().unwrap().push(target.name.clone());
+        Ok(())
+    }));
+    hook.agent_send = Some(Arc::new(move |_agent, text, sender| {
+        handed_sink
+            .lock()
+            .unwrap()
+            .push((text.to_string(), sender.to_string()));
+        Ok("udsWriteAccepted".to_string())
+    }));
     let _guard = testhook::install(hook);
 
-    let payload = send_payload_for_test(&workspace, "impl", "flow.run", "done", "/tmp/a.md");
+    let payload = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node,
+        "b",
+        "task nd-0123456789ab\nreview it",
+        "/ws/artifacts/tasks/b-nd-0123456789ab.md",
+    )
+    .unwrap();
 
     assert_eq!(payload["ok"], Value::Bool(true));
-    assert_eq!(payload["mailbox"], Value::Bool(true));
+    assert_eq!(payload["to"], Value::from("b"));
+    assert_eq!(*gated.lock().unwrap(), vec!["b".to_string()]);
     let events = bus::read_all_events(&workspace).unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].to, "flow.run");
-    assert_eq!(events[0].from, "impl");
-    assert_eq!(events[0].artifact, "/tmp/a.md");
+    assert_eq!(events[0].seq, payload["seq"].as_i64().unwrap());
+    assert_eq!(events[0].from, "");
+    assert_eq!(events[0].to, "b");
+    assert_eq!(events[0].body, "task nd-0123456789ab\nreview it");
+    assert_eq!(
+        events[0].artifact,
+        "/ws/artifacts/tasks/b-nd-0123456789ab.md"
+    );
+    let handed = handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(
+        handed[0].0,
+        "<HIVE to=b artifact=/ws/artifacts/tasks/b-nd-0123456789ab.md>\ntask nd-0123456789ab\nreview it\n</HIVE>"
+    );
+    assert_eq!(handed[0].1, "team-x");
+}
+
+#[test]
+fn test_send_with_an_empty_sender_is_not_a_node_dispatch() {
+    // Only the explicit node mode drops `from`; a malformed member send
+    // with no sender still renders the normal envelope.
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.agent_send = Some(Arc::new(move |_agent, text, _sender| {
+        handed_sink.lock().unwrap().push(text.to_string());
+        Ok("accepted".to_string())
+    }));
+    let _guard = testhook::install(hook);
+
+    send_payload_for_test(&workspace, "", "b", "hi", "");
+    assert_eq!(
+        *handed.lock().unwrap(),
+        vec!["<HIVE from= to=b>\nhi\n</HIVE>".to_string()]
+    );
 }
 
 // ---- retained-shell liveness -------------------------------------------
@@ -4786,9 +4897,5 @@ fn test_send_marks_the_target_pane_unread() {
     });
     let refused = send_payload_for_test(&workspace, "a", "b", "hi", "");
     assert_eq!(refused["ok"], Value::Bool(false));
-    assert_eq!(pending(), Vec::<String>::new());
-
-    // The flow mailbox owns no pane: the bus row is the delivery.
-    send_payload_for_test(&workspace, "a", FLOW_MAILBOX_AGENT, "hi", "");
     assert_eq!(pending(), Vec::<String>::new());
 }

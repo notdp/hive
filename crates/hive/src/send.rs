@@ -38,6 +38,29 @@ pub(crate) fn request_send_payload(
         body,
         artifact,
     );
+    hived_send_result(workspace, payload, command_name)
+}
+
+/// The dispatch of a `hive node run` task: the hived's node mode, which
+/// writes a senderless ledger row and injects a from-less envelope.
+pub(crate) fn request_node_dispatch(
+    workspace: &str,
+    team: &Team,
+    target_agent: &str,
+    body: &str,
+    artifact: &str,
+) -> Result<Map<String, Value>> {
+    ensure_team_hived(team, std::path::Path::new(workspace));
+    let payload =
+        crate::hived::request_node_dispatch(workspace, &team.name, target_agent, body, artifact);
+    hived_send_result(workspace, payload, "node dispatch")
+}
+
+fn hived_send_result(
+    workspace: &str,
+    payload: Option<Map<String, Value>>,
+    command_name: &str,
+) -> Result<Map<String, Value>> {
     let payload = match payload {
         Some(p) if !p.is_empty() => p,
         _ => bail!(
@@ -172,7 +195,7 @@ pub(crate) fn split_team_address(addr: &str) -> (String, String) {
 /// load the target pane's team directly, so cross-team sends work across
 /// tmux windows. Bare names fall back to the caller's scoped team.
 pub(crate) fn resolve_send_target_team(to_agent: &str) -> Result<(String, Team)> {
-    if to_agent.contains('.') && to_agent != "flow.run" {
+    if to_agent.contains('.') {
         let resolved = match find_qualified_agent_target(to_agent) {
             Ok(resolved) => resolved,
             Err(err) => bail!("{err}"),
@@ -196,20 +219,6 @@ pub(crate) fn resolve_send_target_team(to_agent: &str) -> Result<(String, Team)>
 
 /// Target resolution for a Claude-session guest (outside tmux).
 pub(crate) fn resolve_guest_send_target(to_agent: &str, team: &str) -> Result<(String, Team)> {
-    if to_agent == "flow.run" {
-        let me = crate::adapters::claude_sessions::self_session();
-        let membership = me
-            .as_ref()
-            .and_then(|s| crate::registry::member_for_session(&s.session_id, None));
-        let membership = match membership {
-            Some(m) => m,
-            None => {
-                bail!("the flow mailbox is a team-internal address; only members deliver to it")
-            }
-        };
-        let loaded = load_team(&membership.0, "")?;
-        return Ok((membership.0, loaded));
-    }
     if !team.is_empty() {
         let t = load_team(team, "")?;
         if existing_team_agent(&t, to_agent).is_none() {

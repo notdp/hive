@@ -171,11 +171,6 @@ pub(crate) fn roster_names(entry: &Map<String, Value>) -> HashSet<String> {
 
 /// Why *name_override* cannot be claimed against *seen_names*, or None.
 fn member_name_conflict(name_override: &str, seen_names: &HashSet<String>) -> Option<String> {
-    if name_override == "flow" || name_override.starts_with("flow.") {
-        return Some(format!(
-            "'{name_override}' collides with the node runner's mailbox address kind (flow.run), not a member name"
-        ));
-    }
     if seen_names.contains(name_override) {
         return Some(format!(
             "name '{name_override}' is already taken in this team"

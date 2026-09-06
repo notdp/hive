@@ -298,21 +298,41 @@ Options:
   -h, --help  Show this message and exit.
 
 Commands:
-  run  Place the task on stdin onto member NAME and block for its reply.
+  run  Place the task on stdin onto member NAME and block for the final
+       message of the turn it starts.
 "#
         }
         ["node", "run"] => {
             r#"Usage: hive node run [OPTIONS] --name <NAME> < task.md
 
-  Place the task on stdin onto member NAME and block for its reply.
+  Place the task on stdin onto member NAME and block for the final message
+  of the turn it starts.
 
   Spawns the member (or reuses one of that name that is still alive),
-  dispatches the task atomically, waits without timeout, and prints one JSON
-  object on stdout: {"status":"replied","body":…,"artifact":…,"name":…,
-  "pane":…,"reused":…}. Progress goes to stderr. A member that
-  dies before replying ends the call with an error and exit 1; a spawn or
-  dispatch that fails retires the member it created. The member replies
-  with an ordinary `hive send flow.run`, the runner's mailbox address.
+  dispatches the task as a `<HIVE>` envelope with no sender, and reads the
+  member's own turn from its engine's transcript: the member is not asked
+  to send anything back, and the result is every text block of the final
+  assistant message of the turn that took the task, in full. The wait has
+  no timeout. Progress goes to stderr; stdout is one JSON object:
+  {"status":…,"name":…,"pane":…,"reused":…,"dispatchId":"nd-…",
+  "session":…,"turn":…} plus "body" when completed, else "reason".
+
+  status: completed (body may be empty) | interrupted | failed | ambiguous
+  (the task's input could not be tied to one turn of its own, or the turn's
+  end could not be attributed) | session_changed (the member's session was
+  cleared, forked or resumed elsewhere) | transcript_unavailable (the
+  transcript stayed unreadable for 60s, or the roster never got a session
+  id) | member_gone (the member died with no end readable) | member_busy
+  (another runner owns a pending run on that member). Every status exits 0;
+  exit 1 with the error on stderr only when no dispatch happened: bad team,
+  spawn or ready failure, no transcript reader for the CLI. A spawn made
+  here is retired when the run ends before the dispatch.
+
+  The run's record is `<workspace>/run/nodes/<NAME>.json` (dispatch id,
+  session, cursor, bound turn, status, body/reason); `hive kill` of the
+  member removes it. The task text lands in
+  `<workspace>/artifacts/tasks/<NAME>-<dispatchId>.md`, the artifact of
+  the envelope.
 
   This is the seam the `hive-node` agent (shipped by the hive plugin) runs in
   the background from a Claude Code Workflow script.
@@ -593,9 +613,8 @@ Options:
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
   outside any team is `ccd.<name or title or pid>` (how a member reaches out).
-  `flow.run` is the mailbox of a `hive node run` runner — an address kind,
-  not a member; sends to it confirm with one `delivered to flow mailbox`
-  line and never get a HIVE ack back.
+  An envelope with no `from=` is a `hive node run` task: nobody is waiting
+  for a message back — do the task and end the turn.
 
   New-thread sends must keep `body` to a short summary and put details in
   `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,

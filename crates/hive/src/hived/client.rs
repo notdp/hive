@@ -129,6 +129,23 @@ pub fn request_send(
     request_hived(workspace, &payload, timeout)
 }
 
+/// A `hive node run` dispatch: the same transport as a send, no sender.
+pub fn request_node_dispatch(
+    workspace: &str,
+    team: &str,
+    target_agent: &str,
+    body: &str,
+    artifact: &str,
+) -> Option<Map<String, Value>> {
+    let timeout = send_request_timeout();
+    let mut payload = action_payload("node-dispatch");
+    payload.insert("team".to_string(), Value::from(team));
+    payload.insert("targetAgent".to_string(), Value::from(target_agent));
+    payload.insert("body".to_string(), Value::from(body));
+    payload.insert("artifact".to_string(), Value::from(artifact));
+    request_hived(workspace, &payload, timeout)
+}
+
 pub fn request_doctor(
     workspace: &str,
     team: &str,

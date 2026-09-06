@@ -126,10 +126,23 @@ pub(crate) fn handle_request(
             (response, true)
         }
         "send" => {
+            let sender = map_get_str(request, "senderAgent");
             let response = send_payload(
                 workspace,
                 &team_in_request(),
-                &map_get_str(request, "senderAgent"),
+                SendOrigin::Member(&sender),
+                &map_get_str(request, "targetAgent"),
+                &map_get_str(request, "body"),
+                &map_get_str(request, "artifact"),
+            )
+            .unwrap_or_else(err_response);
+            (response, true)
+        }
+        "node-dispatch" => {
+            let response = send_payload(
+                workspace,
+                &team_in_request(),
+                SendOrigin::Node,
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),
