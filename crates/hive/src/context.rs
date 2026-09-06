@@ -2,7 +2,7 @@
 //!
 //! Context is stored **per tmux pane** so that multiple agents in the same
 //! window don't overwrite each other's identity. Pane identity resolves
-//! through the tmux facade (see `context_file`); with no pane the file is
+//! through `crate::identity` (see `context_file`); with no pane the file is
 //! `default.json`.
 
 use std::collections::HashMap;
@@ -28,12 +28,12 @@ fn pane_slug(pane_id: &str) -> String {
 
 /// The per-pane context file path.
 ///
-/// Pane identity routes through the tmux facade so a member engine's tool
+/// Pane identity routes through `crate::identity` so a member engine's tool
 /// subprocess — codex (whose env TMUX_PANE is the shared daemon's frozen
 /// value, stripped by hive) or a claude bg engine (which has none at all) —
 /// still resolves its own pane via its thread/job record.
 fn context_file() -> PathBuf {
-    let pane = crate::tmux::get_current_pane_id().unwrap_or_default();
+    let pane = crate::identity::current_pane_id().unwrap_or_default();
     context_dir().join(format!("{}.json", pane_slug(&pane)))
 }
 
@@ -202,7 +202,7 @@ mod tests {
     use crate::testenv::EnvGuard;
     use std::cell::RefCell;
 
-    /// Pin the env inputs of `crate::tmux::get_current_pane_id` so no member
+    /// Pin the env inputs of `crate::identity::current_pane_id` so no member
     /// marker or live tmux server is consulted: with $TMUX set, the pinned
     /// TMUX_PANE probe is skipped and the env var is the answer.
     fn setup(pane: Option<&str>) -> (tempfile::TempDir, EnvGuard) {

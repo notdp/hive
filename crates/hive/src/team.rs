@@ -11,9 +11,13 @@ use crate::json_fields::is_set;
 use crate::tmux::PaneInfo;
 
 #[cfg(test)]
+use self::tests::fake_identity as identity;
+#[cfg(test)]
 use self::tests::fake_layout as layout;
 #[cfg(test)]
 use self::tests::fake_tmux as tmux;
+#[cfg(not(test))]
+use crate::identity;
 #[cfg(not(test))]
 use crate::layout;
 #[cfg(not(test))]
@@ -347,7 +351,7 @@ impl Team {
         // An explicit window target is addressable from anywhere (`hive
         // flow rig` binds a team to a session it just created, from outside
         // tmux); only the implicit "the window I am in" needs a client.
-        if window_target.is_empty() && !tmux::is_inside_tmux() {
+        if window_target.is_empty() && !identity::is_inside_tmux() {
             bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
         let error = validate_team_name(name);
@@ -384,13 +388,13 @@ impl Team {
         team.lead_pane_id = if !lead_pane_id.is_empty() {
             lead_pane_id.to_string()
         } else {
-            tmux::get_current_pane_id().unwrap_or_default()
+            identity::current_pane_id().unwrap_or_default()
         };
         team.lead_session_id = detect_current_session_id(&team.lead_pane_id);
         team.tmux_session = if window_target.contains(':') {
             window_target.split(':').next().unwrap_or("").to_string()
         } else {
-            tmux::get_current_session_name().unwrap_or_default()
+            identity::current_session_name().unwrap_or_default()
         };
         team.tmux_window = window_target.to_string();
         team.tmux_window_id = tmux::get_window_id(window_target).unwrap_or_default();
@@ -411,13 +415,13 @@ impl Team {
 
     /// Create a new team in the currently-focused tmux window.
     pub fn create(name: &str, description: &str, workspace: &str) -> Result<Team> {
-        if !tmux::is_inside_tmux() {
+        if !identity::is_inside_tmux() {
             bail!("{}", TMUX_REQUIRED_MESSAGE);
         }
         Team::create_for_window(
             name,
-            &tmux::get_current_window_target().unwrap_or_default(),
-            &tmux::get_current_pane_id().unwrap_or_default(),
+            &identity::current_window_target().unwrap_or_default(),
+            &identity::current_pane_id().unwrap_or_default(),
             LEAD_AGENT_NAME,
             description,
             workspace,
@@ -440,7 +444,7 @@ impl Team {
         let hint = if !prefer_pane.is_empty() {
             prefer_pane.to_string()
         } else {
-            tmux::get_current_pane_id().unwrap_or_default()
+            identity::current_pane_id().unwrap_or_default()
         };
         let (window_target, window_data) = find_team_window(name, &hint)?;
         if snap.is_none() && window_target.is_empty() {
@@ -689,7 +693,7 @@ impl Team {
         if !self.tmux_window.is_empty() {
             self.tmux_window.clone()
         } else {
-            tmux::get_current_window_target().unwrap_or_default()
+            identity::current_window_target().unwrap_or_default()
         }
     }
 
@@ -711,7 +715,7 @@ impl Team {
                 return p.pane_id.clone();
             }
         }
-        tmux::get_current_pane_id().unwrap_or_default()
+        identity::current_pane_id().unwrap_or_default()
     }
 
     /// Whether a member can still receive a dispatch and answer. The hived's
@@ -1288,28 +1292,32 @@ mod tests {
         out
     }
 
+    pub mod fake_identity {
+        use super::with_state;
+
+        pub fn is_inside_tmux() -> bool {
+            with_state(|st| st.tmux_inside)
+        }
+
+        pub fn current_pane_id() -> Option<String> {
+            with_state(|st| Some(st.current_pane.clone()))
+        }
+
+        pub fn current_session_name() -> Option<String> {
+            with_state(|st| Some(st.session_name.clone()))
+        }
+
+        pub fn current_window_target() -> Option<String> {
+            with_state(|st| st.current_window_target.clone())
+        }
+    }
+
     pub mod fake_tmux {
         use super::with_state;
         use crate::tmux::{PaneInfo, Run, TmuxError};
 
         fn strip(option: &str) -> String {
             option.trim_start_matches('@').to_string()
-        }
-
-        pub fn is_inside_tmux() -> bool {
-            with_state(|st| st.tmux_inside)
-        }
-
-        pub fn get_current_pane_id() -> Option<String> {
-            with_state(|st| Some(st.current_pane.clone()))
-        }
-
-        pub fn get_current_session_name() -> Option<String> {
-            with_state(|st| Some(st.session_name.clone()))
-        }
-
-        pub fn get_current_window_target() -> Option<String> {
-            with_state(|st| st.current_window_target.clone())
         }
 
         pub fn get_window_id(target: &str) -> Option<String> {

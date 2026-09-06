@@ -74,7 +74,7 @@ pub fn fork_cmd(pane_id: &str, split: &str, join_as: &str, prompt: &str) {
         let window_target = if !target_team.tmux_window.is_empty() {
             target_team.tmux_window.clone()
         } else {
-            tmux::get_current_window_target().unwrap_or_default()
+            identity::current_window_target().unwrap_or_default()
         };
         let panes = if window_target.is_empty() {
             Vec::new()
@@ -108,13 +108,13 @@ fn fork_source_details(
     bool,
     String,
 ) {
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         fail("hive fork requires tmux");
     }
     let current_pane = if !pane_id.is_empty() {
         pane_id.to_string()
     } else {
-        tmux::get_current_pane_id().unwrap_or_default()
+        identity::current_pane_id().unwrap_or_default()
     };
     if current_pane.is_empty() {
         fail("cannot determine current pane (pass --pane explicitly)");
@@ -242,7 +242,7 @@ fn fork_registered_agent(
     let window_target = if !t.tmux_window.is_empty() {
         t.tmux_window.clone()
     } else {
-        tmux::get_current_window_target().unwrap_or_default()
+        identity::current_window_target().unwrap_or_default()
     };
     let panes = if window_target.is_empty() {
         Vec::new()
@@ -367,7 +367,7 @@ fn exec_cvim(mode: &str, args: &[String]) -> ! {
     // The script reads TMUX_PANE for its reply pane; inside a codex tool env
     // that variable is the shared daemon's (stripped) one, so hand it the
     // thread-resolved pane identity instead.
-    if let Some(pane) = tmux::get_current_pane_id().filter(|pane| !pane.is_empty()) {
+    if let Some(pane) = identity::current_pane_id().filter(|pane| !pane.is_empty()) {
         std::env::set_var("TMUX_PANE", pane);
     }
     // The script's helper callbacks are hidden subcommands of this binary;
@@ -393,7 +393,7 @@ pub fn vim_cmd(args: &[String]) {
 
 fn exec_fork_split(split: &str, args: &[String]) {
     // Thread-aware pane resolution: in a codex tool env TMUX_PANE is gone.
-    let reply_pane = tmux::get_current_pane_id().unwrap_or_default();
+    let reply_pane = identity::current_pane_id().unwrap_or_default();
     let mut command = std::process::Command::new("hive");
     command
         .arg("fork")

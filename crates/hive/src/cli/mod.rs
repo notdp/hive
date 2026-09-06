@@ -15,7 +15,7 @@ use std::path::Path;
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::tmux;
+use crate::identity;
 
 pub(crate) use crate::agent::uuid4;
 pub use team_ops::*;
@@ -722,18 +722,18 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 /// in, and the tmux line would send it hunting for a terminal it is never
 /// going to have.
 fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
-    if TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || tmux::is_inside_tmux() {
+    if TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || identity::is_inside_tmux() {
         return None;
     }
     if invoked != "send" {
         return Some(TMUX_REQUIRED_MESSAGE);
     }
     if crate::adapters::claude_sessions::self_session().is_some()
-        || !session_member_binding().is_empty()
+        || !identity::session_member_binding().is_empty()
     {
         return None;
     }
-    if engine_marker_env() {
+    if identity::engine_marker_env() {
         Some(UNROSTERED_ENGINE_MESSAGE)
     } else {
         Some(TMUX_REQUIRED_MESSAGE)

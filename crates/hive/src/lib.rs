@@ -14,6 +14,7 @@ pub mod flow_board;
 pub mod flow_rig;
 pub mod flow_script;
 pub mod hived;
+pub mod identity;
 pub mod json_fields;
 pub mod layout;
 pub mod message;

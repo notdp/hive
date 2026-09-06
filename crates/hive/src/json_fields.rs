@@ -3,7 +3,7 @@
 //! plugin state). Every layer may depend on this module; it depends on
 //! nothing in the crate.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// The field is present and carries something: a non-empty string, array
 /// or object, `true`, or any number. `null`, `false`, `""`, `[]`, `{}` and
@@ -34,6 +34,16 @@ pub fn sort_keys(v: &Value) -> Value {
         }
         Value::Array(a) => Value::Array(a.iter().map(sort_keys).collect()),
         other => other.clone(),
+    }
+}
+
+/// `str(map.get(key) or "")` for JSON payload rows.
+pub(crate) fn map_str(map: &Map<String, Value>, key: &str) -> String {
+    match map.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(Value::Bool(false)) => String::new(),
+        Some(other) => other.to_string(),
     }
 }
 

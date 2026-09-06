@@ -199,7 +199,7 @@ pub fn spawn_daemon(pane: &str) -> bool {
 /// markers are washed as for the pane lane (see `daemon_env_for_pane`),
 /// and no `TMUX_PANE` is pinned: the member's tool subprocesses identify
 /// by the `GROK_SESSION_ID` the leader exports, matched against the roster,
-/// and find their pane from that row (`tmux::get_current_pane_id`) — the
+/// and find their pane from that row (`identity::current_pane_id`) — the
 /// pane is display resolved on top of identity, never the other way round.
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);

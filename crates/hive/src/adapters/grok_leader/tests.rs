@@ -1924,7 +1924,7 @@ fn test_spawn_member_daemon_env_carries_no_inherited_identity() {
     assert!(!env_map.contains_key("GROK_SESSION_ID"));
     assert!(!env_map.contains_key("CODEX_THREAD_ID"));
     assert!(!env_map.contains_key("TMUX_PANE"));
-    // no TMUX either: tmux::is_inside_tmux takes any non-empty TMUX as a client
+    // no TMUX either: identity::is_inside_tmux takes any non-empty TMUX as a client
     assert!(!env_map.contains_key("TMUX"));
     // the member's name is in the socket key, never in the leader's env
     assert!(!env_map

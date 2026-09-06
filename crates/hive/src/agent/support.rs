@@ -19,7 +19,7 @@ fn resolve_session_id_from_runtime(pane_id: &str) -> Option<String> {
     let resolved_pane = if !pane_id.is_empty() {
         pane_id.to_string()
     } else {
-        crate::tmux::get_current_pane_id().unwrap_or_default()
+        crate::identity::current_pane_id().unwrap_or_default()
     };
     if resolved_pane.is_empty() {
         return None;
