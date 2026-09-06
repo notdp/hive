@@ -42,7 +42,6 @@ Requires:
 
 - `tmux` 3.2+ — for the `hive cvim` / `hive vim` popups, and because a pane only answers the bare OSC 11 background query that `hive view` uses to pick a theme from 3.2 on
 - a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries
-- `python3` — the notify popup is a python heredoc (`hive flow run` needs no interpreter: flow scripts are JavaScript, evaluated by the engine embedded in the binary)
 - at least one agent CLI: `claude`, `codex`, or `grok`
 
 ## Start in your agent session
@@ -82,6 +81,10 @@ wrong source.
 An interactive Claude session has no attachable pty (`claude attach` is job-only), but its transcript is appended event by event as the turn unfolds, so a renderer over that file is a live mirror that cannot type back. `hive view` is that renderer.
 
 The display layer binds it automatically for a claude member whose sessionId has no bg-job row: an interactive session, a desktop `ccd` or one that was joined. Resuming such a session would mint a forked job that steals the member's deliveries, so that pane gets the mirror instead of a resume, and the pane is read-only. Delivery is unaffected: the same missing job row routes `hive send` to the live interactive session instead of the pane. Nobody can type at that member except the app that owns the session.
+
+The mirror is an ordinary pane, the first of the team window, and it is there by default: nothing withholds it until you park it. Parking is `hive mirror off` (`on` restores, no argument toggles), the orch chip on the status bar, or `prefix+m`. All three move the pane between the window and a hidden window of the team session with `break-pane` / `join-pane`, so the viewer process never restarts; the choice lands on the window as `@hive-mirror`, and `hive attach` respects it when it heals the display.
+
+A team session hive builds — `hive create` outside tmux, `hive attach` rebuilding a lost window, `hive flow rig` — carries its own two-line status bar, set through session options only, so your global tmux status is untouched. Line one: the team chip; the orch chip, ` ◂ orch ` while the mirror pane is in the window and ` ▸ orch ` while it is parked (a click toggles it); one chip per pane — the member name after ● busy, ○ idle or ✱ unread (a message delivered while the member has not started on it) or awaiting attention after a notify, the active pane bold, a click selects that pane, a flow board reads ⬡ board; then `PR<n>` once `hive pr set` stamped one, the session name and the clock. Line two is a ticker: the two newest bus messages as `from → to · age · "first words"`, with a pending notify's text ahead of them. Everything on the bar is a tmux option the CLI or the hived wrote, so it never runs a shell command; a click anywhere else on a status line does what tmux always did.
 
 ## Upgrade
 

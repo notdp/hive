@@ -17,10 +17,17 @@ behavior is documented in the modules themselves.
   inherit its predecessor's bus); `hive delete` removes `team.json` only,
   `--delete-workspace` the whole directory. The store lock is
   `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
-  pane or a window is not the authority on who is on a team. The write lanes
-  are split, with the CLI owning roster membership and the hived only
-  backfilling fields of names already there, so an observation racing a kill
-  cannot resurrect the member that was killed.
+  pane or a window is not the authority on who is on a team. The orch
+  mirror is display state of the same kind: `@hive-role mirror` on the
+  pane, `@hive-mirror on|off` on the team window (`hive mirror`; unset
+  means open), `@hive-hidden <team>` on the window that parks a closed
+  mirror pane, and nothing in the registry. The team session's status bar
+  (`tmux/status.rs`) is rendered from tmux options alone —
+  `@hive-busy`/`@hive-unread` per pane and `@hive-ticker` per window are
+  the hived's display writes (`hived/status.rs`), never authority. The
+  write lanes are split, with the CLI owning roster membership and the
+  hived only backfilling fields of names already there, so an observation
+  racing a kill cannot resurrect the member that was killed.
 - The `hive view` transcript viewer is a read-only mirror by construction: in
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;
@@ -82,9 +89,9 @@ Design truth lives in these docs, one question each:
   protocol. Every claim there is pinned to one Claude Code build and must be
   re-verified on upgrade. Hive consumes only `op: "reply"`; the rest is
   recorded, not used.
-- `docs/notify-effects-hacker-lock.md` — the notify attention effect
-  (`notify_ui.rs`): why it plays on window select rather than at fire
-  time, and which parts are allowed to be lost.
+- `docs/notify-effects.md` — the notify attention effect
+  (`notify_ui.rs`): what a fire marks on the window and pane, what the
+  select-window hook clears, and why hive draws nothing itself.
 
 ## Build, test, and development commands
 

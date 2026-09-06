@@ -398,6 +398,15 @@ pub fn latest_inbound_send_event(
     Ok(event)
 }
 
+/// The newest `limit` send events, newest first (the status bar's ticker).
+pub fn latest_send_events(workspace: impl AsRef<Path>, limit: usize) -> Result<Vec<Event>> {
+    let conn = connect(workspace.as_ref())?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM messages WHERE intent = 'send' ORDER BY seq DESC LIMIT ?1")?;
+    let rows = stmt.query_map(params![limit as i64], row_to_event)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Return the first send event anchored to `msg_id`, or None.
 ///
 /// A non-empty `from_agent` scopes the match to one sender; empty means any
@@ -752,6 +761,40 @@ mod tests {
 
         assert_eq!(event.msg_id, second.msg_id);
         assert_eq!(event.body, "second");
+    }
+
+    #[test]
+    fn test_latest_send_events_returns_newest_first_and_only_sends() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = init_workspace(tmp.path().join("ws")).unwrap();
+
+        write_send_event(&workspace, "a", "b", "first", "", None, "").unwrap();
+        write_event(
+            &workspace,
+            "_system",
+            "",
+            "observation",
+            "",
+            "",
+            None,
+            "",
+            "",
+        )
+        .unwrap();
+        write_send_event(&workspace, "b", "a", "second", "", None, "").unwrap();
+        write_send_event(&workspace, "a", "b", "third", "", None, "").unwrap();
+
+        let bodies: Vec<String> = latest_send_events(&workspace, 2)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.body)
+            .collect();
+
+        assert_eq!(bodies, vec!["third".to_string(), "second".to_string()]);
+        assert!(latest_send_events(&workspace, 10)
+            .unwrap()
+            .iter()
+            .all(|e| e.intent == "send"));
     }
 
     #[test]

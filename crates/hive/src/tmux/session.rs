@@ -80,14 +80,24 @@ pub fn new_window(
     }
 }
 
-/// Break *pane_id* out into its own new window. Returns (window_target, pane_id).
+/// Break *pane_id* out into its own new window, in the session *target*
+/// names when given. Returns (window_target, pane_id).
 ///
 /// The pane's running process (e.g. agent CLI) continues — only its window
 /// parent changes.
-pub fn break_pane(pane_id: &str, name: &str, detach: bool) -> anyhow::Result<(String, String)> {
+pub fn break_pane(
+    pane_id: &str,
+    name: &str,
+    detach: bool,
+    target: Option<&str>,
+) -> anyhow::Result<(String, String)> {
     let mut args: Vec<&str> = vec!["break-pane", "-s", pane_id];
     if detach {
         args.push("-d");
+    }
+    if let Some(target) = target {
+        args.push("-t");
+        args.push(target);
     }
     if !name.is_empty() {
         args.push("-n");
@@ -107,6 +117,16 @@ pub fn break_pane(pane_id: &str, name: &str, detach: bool) -> anyhow::Result<(St
             Ok((target.to_string(), new_pane_id.to_string()))
         }
     }
+}
+
+/// Move pane *src* into *dst*'s window, left of *dst*, without selecting
+/// it. The window *src* leaves closes by itself when it was its only pane.
+pub fn join_pane_before(src: &str, dst: &str) {
+    let _ = _run(
+        &["join-pane", "-h", "-b", "-d", "-s", src, "-t", dst],
+        false,
+        5,
+    );
 }
 
 /// Return (width, height) for *window_target*, or (0, 0) on error.

@@ -108,7 +108,58 @@ stay registry-only until they have one. A window hive built itself carries
 session lent the team (an in-tmux create). A claude member whose sessionId names an interactive session (a
 creating or joined desktop/ccd session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
-steals the member's deliveries.
+steals the member's deliveries. That mirror is an ordinary pane
+tagged `@hive-role mirror` beside its member tags: the first pane of a team
+window (a landscape window's `main-vertical` makes it the main one), a pane
+above the dock strip in a flow rig. The mirror is display state only.
+`@hive-mirror` on the window is the recorded choice: `off`, written by
+`hive mirror off`, keeps heal and backfill from drawing it; `on`, written by
+`hive mirror on` or when a session mirror is built, is what makes the status
+bar's orch chip appear; unset reads as open — nothing withholds the mirror
+by default. `hive mirror off` parks the pane with `break-pane -d` in a hidden
+window of the team session (the caller's session when the team has none)
+tagged `@hive-hidden <team>`: the viewer keeps running, every team-window
+scan masks that window (`#{?@hive-hidden,,#{@hive-team}}` — a window format
+reads the parked pane's `@hive-team` through), and `hive delete` closes it.
+`on` joins the same pane back as the first pane with `join-pane -b`, or
+rebuilds it the way a heal would when the parked pane is gone; a heal or
+backfill that finds a parked pane of the member joins that one rather than
+starting a second viewer. `off` refuses when the mirror is the window's only
+pane, because `break-pane` on a lone pane renames the window in place. The
+status bar's orch chip and `prefix+m` run the same verb with `--window`: a
+`run-shell` job carries no `TMUX_PANE`.
+
+The team session hive builds — `hive create` outside tmux, `hive attach`
+rebuilding a lost window, `hive flow rig` — carries hive's own two-line
+status bar, installed by session id at build (`tmux/status.rs`; `status*`
+are session options, so a window a human's session lent the team gets none
+and the human's global status is untouched). Its colours follow the
+viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
+detection (`view_theme.rs`), resolved once at install, so a theme change
+shows at the next session build — and the bar is rendered from tmux options
+alone, with no `#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
+▸ parked / ◂ open, absent while unset); per pane `@hive-role`, `@hive-agent`,
+`@hive-busy`, `@hive-unread` and `@hive-notify-active` (✱, the attention
+mark); `@hive-pr`; on the second line `@hive-notify-text`, then
+`@hive-ticker`. The chips are `range=pane|<id>` click targets and the orch
+chip a `range=user|hive-mirror` one (the install also sets the session's
+`mouse on`, so clicks reach them whatever the global setting); the root
+`MouseDown1Status` binding
+installed with the bar routes them to `select-pane -t =` and `hive mirror
+--window`, and falls through to tmux's stock `select-window -t =` for every
+other status line. The `prefix+m` binding installed with it is gated on
+`@hive-team` the same way: its else branch is the command the key ran
+before hive bound it (`list-keys -T prefix m` at install, kept in the
+server option `@hive-prefix-m` so a later install behind hive's own binding
+still has it), so a non-team window keeps tmux's `select-pane -m` or the
+human's binding. `@hive-busy`, `@hive-unread` and `@hive-ticker` are the
+hived's status tick (`hived/status.rs`), written as edges and only to
+agent-role panes: busy is the same `_is_output_busy` verdict idle-notify
+uses; unread is a send the hived accepted for the pane and has not seen it
+busy since; the ticker is the two newest bus sends as `from → to · age ·
+"first words"`, `#` doubled because the status line draws an option value
+verbatim. They are display of the runtime fields below, never a source for
+them.
 
 ### Mailbox addresses
 
@@ -215,7 +266,8 @@ deliberately must not be typed at.
 Not every claude member is a bg job. A joined interactive session — a desktop
 Claude that ran `hive create` or `hive join` — is a member whose engine is that
 session, and its pane is a read-only `hive view` mirror (built at create or
-join, or by `hive attach`). No CLI process runs on that pane's tty, so the
+join, or by `hive attach`; `hive mirror` parks or restores it). No CLI
+process runs on that pane's tty, so the
 pane-keyed probe alone would report the member dead; the roster sessionId is
 the engine identity, and while it names a live session that session's registry
 status is the member's `cliAlive`, `busy` and `inputState`. `alive` stays the

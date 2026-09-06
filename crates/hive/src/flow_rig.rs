@@ -104,6 +104,8 @@ fn rig_up(run: &str, orch: Option<&str>, workspace: Option<&str>) -> Result<()> 
         tmux::set_pane_title(&mirror, "⬡ orch 「mirror」");
         tmux::respawn_pane(&mirror, &format!("{hive} view {}", shell_quote(session_id)))
             .context("starting the orch mirror")?;
+        // What makes the status bar's orch chip appear.
+        tmux::set_window_option(&window, "@hive-mirror", "on");
         let _ = crate::layout::apply_adaptive(&window);
     }
 

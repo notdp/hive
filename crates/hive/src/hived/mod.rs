@@ -19,6 +19,7 @@ mod runtime;
 mod seams;
 mod server;
 mod state;
+mod status;
 mod supervisors;
 
 #[cfg(test)]
@@ -37,6 +38,7 @@ pub use runtime::*;
 pub use seams::*;
 pub use server::*;
 pub use state::*;
+pub use status::*;
 pub use supervisors::*;
 
 pub const IDLE_NOTIFY_TICK_SECONDS: f64 = 1.0;

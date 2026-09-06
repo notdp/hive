@@ -235,6 +235,14 @@ pub fn _send_payload(
         refused.insert("msgId".to_string(), Value::from(message_id));
         return Ok(refused);
     }
+    // Accepted for a pane member: unread on the status bar until the
+    // status tick next sees that pane busy.
+    if !target.pane_id.is_empty() {
+        unread_pending()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(target.pane_id.clone());
+    }
 
     if !artifact.is_empty() {
         payload.insert("artifact".to_string(), Value::from(artifact));

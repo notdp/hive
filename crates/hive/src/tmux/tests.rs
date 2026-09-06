@@ -629,6 +629,311 @@ fn test_configure_hive_window_disables_native_tmux_alerts() {
     );
 }
 
+const _MIRROR_RUN_SHELL: &str =
+    "run-shell -b \"/x/hive mirror --window '#{q:session_name}:#{window_index}'\"";
+
+#[test]
+fn test_team_status_argv_targets_the_session_id() {
+    use crate::view_theme::ThemeKind;
+    let rows = |option: &str, value: &str| v(&["set-option", "-t", "$3", option, value]);
+    let p = status_palette(ThemeKind::Dark);
+    assert_eq!(
+        team_status_argv("$3", ThemeKind::Dark),
+        vec![
+            rows("mouse", "on"),
+            rows("status", "2"),
+            rows("status-style", p.bar),
+            rows("status-left", ""),
+            rows("status-right", ""),
+            rows("status-format[0]", &team_status_format_0(p)),
+            rows("status-format[1]", &team_status_format_1(p)),
+        ]
+    );
+}
+
+/// Light and dark differ in colours only: with every `#[…]` style stripped
+/// the two bars are the same text, so a theme can never change what the
+/// bar shows or which ranges it marks.
+#[test]
+fn test_team_status_palettes_differ_in_colours_only() {
+    use crate::view_theme::ThemeKind;
+    fn strip(format: &str) -> String {
+        let mut out = String::new();
+        let mut rest = format;
+        while let Some(i) = rest.find("#[") {
+            out.push_str(&rest[..i]);
+            let j = rest[i..].find(']').expect("closed style") + i;
+            rest = &rest[j + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+    let dark = status_palette(ThemeKind::Dark);
+    let light = status_palette(ThemeKind::Light);
+    for (d, l) in [
+        (team_status_format_0(dark), team_status_format_0(light)),
+        (team_status_format_1(dark), team_status_format_1(light)),
+    ] {
+        assert_ne!(d, l);
+        assert_eq!(strip(&d), strip(&l));
+    }
+    assert!(team_status_format_0(light).contains(&format!("bg={}", light.team_bg)));
+}
+
+#[test]
+fn test_status_click_binding_ends_in_the_stock_status_click() {
+    let binding = status_click_binding("/x/hive");
+    assert_eq!(binding.len(), 9);
+    assert_eq!(
+        binding[..4],
+        v(&["bind-key", "-T", "root", "MouseDown1Status"])[..]
+    );
+    assert_eq!(
+        binding[4..7],
+        v(&["if-shell", "-F", "#{==:#{mouse_status_range},hive-mirror}"])[..]
+    );
+    assert_eq!(binding[7], _MIRROR_RUN_SHELL);
+    assert_eq!(
+        binding[8],
+        "if-shell -F \"#{==:#{mouse_status_range},pane}\" \"select-pane -t =\" \"select-window -t =\""
+    );
+    assert!(binding[8]
+        .trim_end_matches('"')
+        .ends_with(_STOCK_STATUS_CLICK));
+    assert_eq!(_STOCK_STATUS_CLICK, "select-window -t =");
+}
+
+#[test]
+fn test_mirror_key_binding_is_gated_on_a_team_window_and_falls_back_elsewhere() {
+    let head = [
+        "bind-key",
+        "-T",
+        "prefix",
+        "m",
+        "if-shell",
+        "-F",
+        "#{@hive-team}",
+        _MIRROR_RUN_SHELL,
+    ];
+    assert_eq!(mirror_key_binding("/x/hive", ""), v(&head));
+    let mut with_fallback = v(&head);
+    with_fallback.push("select-pane -m".to_string());
+    assert_eq!(
+        mirror_key_binding("/x/hive", "select-pane -m"),
+        with_fallback
+    );
+}
+
+#[test]
+fn test_bound_command_reads_the_list_keys_line() {
+    assert_eq!(
+        _bound_command("bind-key -T prefix m select-pane -m\n"),
+        Some("select-pane -m".to_string())
+    );
+    // `-r` drops, tmux's `\;` separator becomes the ` ; ` an if-shell
+    // branch string splits on, quoting stays verbatim.
+    assert_eq!(
+        _bound_command(
+            "bind-key -r -T prefix m swap-pane -s \"{top-left}\" \\; select-layout main-vertical"
+        ),
+        Some("swap-pane -s \"{top-left}\" ; select-layout main-vertical".to_string())
+    );
+    assert_eq!(_bound_command(""), None);
+    assert_eq!(_bound_command("unknown key: m"), None);
+}
+
+/// A run override answering `list-keys -T prefix m` with *listed* and
+/// `show-options -s -v @hive-prefix-m` with *stored*, recording every call.
+fn _prefix_m_server(listed: &'static str, stored: &'static str) -> Calls {
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&calls);
+    _set_run_override(move |args, check, timeout| {
+        recorded.borrow_mut().push((args.to_vec(), check, timeout));
+        let (rc, out) = match (args[0].as_str(), args.last().map(String::as_str)) {
+            ("list-keys", _) if listed.is_empty() => (1, ""),
+            ("list-keys", _) => (0, listed),
+            ("show-options", Some(PREFIX_M_FALLBACK_OPTION)) if stored.is_empty() => (1, ""),
+            ("show-options", Some(PREFIX_M_FALLBACK_OPTION)) => (0, stored),
+            _ => (0, ""),
+        };
+        Ok(ok_run(rc, out, if rc == 0 { "" } else { "unknown key: m" }))
+    });
+    calls
+}
+
+fn argvs(calls: &Calls) -> Vec<Vec<String>> {
+    calls.borrow().iter().map(|c| c.0.clone()).collect()
+}
+
+#[test]
+fn test_prefix_m_fallback_remembers_the_command_the_key_had() {
+    let calls = _prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
+
+    assert_eq!(_prefix_m_fallback(), "select-pane -m");
+
+    assert_eq!(
+        argvs(&calls),
+        vec![
+            v(&["list-keys", "-T", "prefix", "m"]),
+            v(&[
+                "set-option",
+                "-s",
+                PREFIX_M_FALLBACK_OPTION,
+                "select-pane -m"
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn test_prefix_m_fallback_reads_the_remembered_command_behind_hives_own_binding() {
+    let hive_binding = "bind-key -T prefix m if-shell -F \"#{@hive-team}\" \"run-shell -b \\\"/x/hive mirror --window '#{q:session_name}:#{window_index}'\\\"\" \"select-pane -m\"\n";
+    let calls = _prefix_m_server(hive_binding, "swap-pane -s \"{top-left}\"\n");
+
+    assert_eq!(_prefix_m_fallback(), "swap-pane -s \"{top-left}\"");
+
+    // Nothing stored over the remembered command.
+    assert_eq!(
+        argvs(&calls),
+        vec![
+            v(&["list-keys", "-T", "prefix", "m"]),
+            v(&["show-options", "-s", "-v", PREFIX_M_FALLBACK_OPTION]),
+        ]
+    );
+}
+
+#[test]
+fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
+    let calls = _prefix_m_server("", "");
+
+    assert_eq!(_prefix_m_fallback(), "");
+
+    assert_eq!(argvs(&calls), vec![v(&["list-keys", "-T", "prefix", "m"])]);
+}
+
+#[test]
+fn test_install_team_status_runs_options_then_bindings() {
+    let mut env = EnvGuard::new();
+    env.set("HIVE_BIN", "/x/hive");
+    let calls = _prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
+
+    install_team_status("$3");
+
+    // The prefix+m probe comes first (the rows are built before they run),
+    // then the session options, then the two bindings.
+    let mut expected = vec![
+        v(&["list-keys", "-T", "prefix", "m"]),
+        v(&[
+            "set-option",
+            "-s",
+            PREFIX_M_FALLBACK_OPTION,
+            "select-pane -m",
+        ]),
+    ];
+    expected.extend(team_status_argv(
+        "$3",
+        crate::view_theme::active_theme_kind(),
+    ));
+    expected.push(status_click_binding("/x/hive"));
+    expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
+    assert_eq!(argvs(&calls), expected);
+}
+
+/// The bar reads options only — no `#(` shell-out — and every `@hive-`
+/// key it names is one the CLI or the hived writes.
+#[test]
+fn test_team_status_format_reads_only_options() {
+    let known = [
+        "hive-team",
+        "hive-mirror",
+        "hive-role",
+        "hive-agent",
+        "hive-notify-active",
+        "hive-unread",
+        "hive-busy",
+        "hive-pr",
+        "hive-notify-text",
+        "hive-ticker",
+    ];
+    let p = status_palette(crate::view_theme::ThemeKind::Dark);
+    for format in [team_status_format_0(p), team_status_format_1(p)] {
+        assert!(!format.contains("#("), "{format}");
+        for (i, _) in format.match_indices("@hive-") {
+            let key: String = format[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            assert!(known.contains(&key.as_str()), "{key} is not a bar option");
+        }
+    }
+}
+
+/// Every team-window scan reads the tag through the hidden-window mask.
+#[test]
+fn test_team_window_scans_mask_the_hidden_window() {
+    assert!(_TEAM_WINDOW_FMT.contains(_WINDOW_TEAM_FMT));
+    assert!(!_TEAM_WINDOW_FMT
+        .replace(_WINDOW_TEAM_FMT, "")
+        .contains("@hive-team"));
+}
+
+#[test]
+fn test_break_pane_targets_the_session_when_given() {
+    let calls = _capture_run(0, "honey:9\t%3\n");
+
+    let (window, pane) = break_pane("%3", "honey·mirror", true, Some("=honey:")).unwrap();
+
+    assert_eq!((window.as_str(), pane.as_str()), ("honey:9", "%3"));
+    assert_eq!(
+        calls.borrow()[0].0,
+        v(&[
+            "break-pane",
+            "-s",
+            "%3",
+            "-d",
+            "-t",
+            "=honey:",
+            "-n",
+            "honey·mirror",
+            "-P",
+            "-F",
+            "#{session_name}:#{window_index}\t#{pane_id}",
+        ])
+    );
+    join_pane_before("%3", "%1");
+    assert_eq!(
+        calls.borrow()[1].0,
+        v(&["join-pane", "-h", "-b", "-d", "-s", "%3", "-t", "%1"])
+    );
+}
+
+#[test]
+fn test_hidden_mirror_lookups_parse_the_listings() {
+    // Server-wide (`-a`) listings: the parked window lives in the team
+    // session, the caller may be anywhere.
+    _set_run_override(|args, _check, _timeout| {
+        let out = if args == v(&["list-windows", "-a", "-F", "#{window_id}\t#{@hive-hidden}"]) {
+            "@4\thoney\n@7\t\n"
+        } else if args
+            == v(&[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}\t#{window_id}\t#{@hive-role}",
+            ])
+        {
+            "%9\t@4\tmirror\n%2\t@7\tagent\n"
+        } else {
+            ""
+        };
+        Ok(ok_run(0, out, ""))
+    });
+
+    assert_eq!(hidden_mirror_windows("honey"), vec!["@4".to_string()]);
+    assert_eq!(hidden_mirror_pane("honey"), Some("%9".to_string()));
+    assert_eq!(hidden_mirror_pane("comb"), None);
+}
+
 #[test]
 fn test_parse_control_mode_output_matches_output_notifications() {
     assert_eq!(
@@ -877,60 +1182,6 @@ fn test_window_exists_false_paths() {
     assert!(!window_exists("@7")); // nonzero exit
     _raising_run();
     assert!(!window_exists("@7")); // missing binary never raises
-}
-
-#[test]
-fn test_display_popup_preserves_argv_order_and_never_raises() {
-    let calls = _capture_run(0, "");
-    display_popup(
-        "%5",
-        "run-me",
-        "/dev/ttys001",
-        "#{popup_pane_left}",
-        "#{popup_pane_top}",
-        "40",
-        "20",
-        true,
-        true,
-        5,
-    );
-    assert_eq!(
-        *calls.borrow(),
-        vec![(
-            v(&[
-                "display-popup",
-                "-c",
-                "/dev/ttys001",
-                "-t",
-                "%5",
-                "-B",
-                "-x",
-                "#{popup_pane_left}",
-                "-y",
-                "#{popup_pane_top}",
-                "-w",
-                "40",
-                "-h",
-                "20",
-                "-E",
-                "run-me",
-            ]),
-            false,
-            5
-        )]
-    );
-    _raising_run();
-    display_popup("%5", "run-me", "", "", "", "", "", false, false, 5); // non-raising
-}
-
-#[test]
-fn test_display_popup_omits_optional_flags() {
-    let calls = _capture_run(0, "");
-    display_popup("%5", "run-me", "", "", "", "", "", false, false, 5);
-    assert_eq!(
-        *calls.borrow(),
-        vec![(v(&["display-popup", "-t", "%5", "run-me"]), false, 5)]
-    );
 }
 
 #[test]

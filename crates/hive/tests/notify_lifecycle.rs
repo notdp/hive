@@ -1,10 +1,10 @@
-//! Real-tmux e2e for the notify lifecycle: fire, select-window, clear.
+//! Real-tmux e2e for the notify lifecycle: mark, select-window, clear.
 //! Runs entirely inside its own detached session; never touches a live one.
 
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{kill_session, require_tmux, run_tmux, EnvVarGuard};
+use common::{kill_session, private_server, require_tmux, run_tmux, EnvVarGuard};
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", std::process::id())
@@ -13,6 +13,7 @@ fn unique(prefix: &str) -> String {
 #[test]
 fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
     require_tmux();
+    let _server = private_server();
     let session = unique("hive-e2e-notify-a");
     let result = std::panic::catch_unwind(|| {
         let window_target = run_tmux(&[
@@ -30,20 +31,12 @@ fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
         ]);
         let pane = run_tmux(&["display-message", "-p", "-t", &window_target, "#{pane_id}"]);
         let token = format!("{pane}:manual-fire");
-        run_tmux(&["rename-window", "-t", &window_target, "[!] target"]);
         run_tmux(&[
             "set-window-option",
             "-t",
             &window_target,
             "@hive-notify-token",
             &token,
-        ]);
-        run_tmux(&[
-            "set-window-option",
-            "-t",
-            &window_target,
-            "@hive-notify-original-name",
-            "target",
         ]);
         run_tmux(&[
             "set-window-option",
@@ -56,15 +49,8 @@ fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
             "set-window-option",
             "-t",
             &window_target,
-            "window-status-style",
-            "reverse,bold",
-        ]);
-        run_tmux(&[
-            "set-window-option",
-            "-t",
-            &window_target,
-            "window-status-current-style",
-            "reverse,bold",
+            "@hive-notify-text",
+            "orch: manual",
         ]);
         run_tmux(&[
             "set-option",
@@ -93,29 +79,20 @@ fn test_e2e_cleanup_selected_window_clears_durable_state_without_hook() {
                 "-p",
                 "-t",
                 &window_target,
+                "#{@hive-notify-text}"
+            ]),
+            ""
+        );
+        // the window is never renamed any more: the mark is options only
+        assert_eq!(
+            run_tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &window_target,
                 "#{window_name}"
             ]),
             "target"
-        );
-        assert_eq!(
-            run_tmux(&[
-                "show-window-option",
-                "-v",
-                "-t",
-                &window_target,
-                "window-status-style"
-            ]),
-            ""
-        );
-        assert_eq!(
-            run_tmux(&[
-                "show-window-option",
-                "-v",
-                "-t",
-                &window_target,
-                "window-status-current-style"
-            ]),
-            ""
         );
         assert_eq!(
             run_tmux(&[
@@ -140,6 +117,7 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
     // it on a detached session too, so the whole flow runs inside its own
     // session.
     require_tmux();
+    let _server = private_server();
     let session = unique("hive-e2e-notify-b");
     // The select hook must call back into the real hive binary, not this
     // test harness (current_exe here is the test executable); `self_exe`
@@ -175,16 +153,8 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
         ]);
         let pane = run_tmux(&["display-message", "-p", "-t", &window_target, "#{pane_id}"]);
 
-        hive::notify_ui::show_window_flash(
-            "Agent finished",
-            &pane,
-            &window_target,
-            "hive-notify-test",
-            "orch",
-            false,
-            "",
-        )
-        .expect("flash succeeds");
+        hive::notify_ui::mark_attention("Agent finished", &pane, &window_target, "orch", "")
+            .expect("mark succeeds");
 
         let token = run_tmux(&[
             "display-message",
@@ -194,6 +164,27 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
             "#{@hive-notify-token}",
         ]);
         assert!(token.starts_with(&format!("{pane}:")), "token {token:?}");
+        assert_eq!(
+            run_tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &window_target,
+                "#{@hive-notify-text}"
+            ]),
+            "orch: Agent finished"
+        );
+        let pane_active = run_tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{@hive-notify-active}",
+        ]);
+        assert!(
+            pane_active.starts_with(&format!("{pane}:")),
+            "pane mark {pane_active:?}"
+        );
         let hooks = run_tmux(&["show-hooks", "-t", &session]);
         assert!(hooks.contains(hive::notify_ui::SELECT_HOOK_NAME));
 
@@ -221,29 +212,29 @@ fn test_e2e_notify_select_hook_cleans_selected_window() {
                 "-p",
                 "-t",
                 &window_target,
+                "#{@hive-notify-text}"
+            ]),
+            ""
+        );
+        assert_eq!(
+            run_tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &pane,
+                "#{@hive-notify-active}"
+            ]),
+            ""
+        );
+        assert_eq!(
+            run_tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &window_target,
                 "#{window_name}"
             ]),
             "hive-notify-test"
-        );
-        assert_eq!(
-            run_tmux(&[
-                "show-window-option",
-                "-v",
-                "-t",
-                &window_target,
-                "window-status-style"
-            ]),
-            ""
-        );
-        assert_eq!(
-            run_tmux(&[
-                "show-window-option",
-                "-v",
-                "-t",
-                &window_target,
-                "window-status-current-style"
-            ]),
-            ""
         );
     });
     kill_session(&session);

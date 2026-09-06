@@ -180,53 +180,6 @@ pub fn window_exists(window_id: &str) -> bool {
     }
 }
 
-/// Open a popup over `target` running `shell_command`. Never errors.
-#[allow(clippy::too_many_arguments)]
-pub fn display_popup(
-    target: &str,
-    shell_command: &str,
-    client: &str,
-    x: &str,
-    y: &str,
-    width: &str,
-    height: &str,
-    borderless: bool,
-    close_on_exit: bool,
-    timeout: u64,
-) {
-    let mut args: Vec<&str> = vec!["display-popup"];
-    if !client.is_empty() {
-        args.push("-c");
-        args.push(client);
-    }
-    args.push("-t");
-    args.push(target);
-    if borderless {
-        args.push("-B");
-    }
-    if !x.is_empty() {
-        args.push("-x");
-        args.push(x);
-    }
-    if !y.is_empty() {
-        args.push("-y");
-        args.push(y);
-    }
-    if !width.is_empty() {
-        args.push("-w");
-        args.push(width);
-    }
-    if !height.is_empty() {
-        args.push("-h");
-        args.push(height);
-    }
-    if close_on_exit {
-        args.push("-E");
-    }
-    args.push(shell_command);
-    let _ = _run(&args, false, timeout);
-}
-
 /// `run-shell -b <command>`: the shell string is passed byte-for-byte.
 pub fn run_shell_detached(command: &str) {
     let _ = _run(&["run-shell", "-b", command], false, 5);

@@ -2085,7 +2085,6 @@ struct Cleanup {
     window: String,
     panes: Vec<String>,
     token: String,
-    remove_attention: bool,
     source: String,
     workspace: String,
 }
@@ -2150,18 +2149,15 @@ fn idle_setup(
                 .push((message.to_string(), pane.to_string()));
             (notify_suppressed, None)
         })),
-        clear_stale_notify: Some(Arc::new(
-            move |window, panes, token, remove_attention, source, workspace| {
-                cleanups_sink.lock().unwrap().push(Cleanup {
-                    window: window.to_string(),
-                    panes: panes.to_vec(),
-                    token: token.to_string(),
-                    remove_attention,
-                    source: source.to_string(),
-                    workspace: workspace.to_string(),
-                })
-            },
-        )),
+        clear_stale_notify: Some(Arc::new(move |window, panes, token, source, workspace| {
+            cleanups_sink.lock().unwrap().push(Cleanup {
+                window: window.to_string(),
+                panes: panes.to_vec(),
+                token: token.to_string(),
+                source: source.to_string(),
+                workspace: workspace.to_string(),
+            })
+        })),
         is_plugin_enabled: Some(Arc::new(move |_name| plugin_enabled)),
         transcript_progressed_recently: Some(Arc::new(|_pane, _threshold| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
@@ -2465,7 +2461,6 @@ fn test_idle_notify_clears_notify_when_target_window_is_selected() {
             window: WINDOW.to_string(),
             panes: vec!["%1".to_string()],
             token: "%1:selected-fire".to_string(),
-            remove_attention: false,
             source: "hived.active_window".to_string(),
             workspace: String::new(),
         }]
@@ -2495,7 +2490,6 @@ fn test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled() {
             window: WINDOW.to_string(),
             panes: vec!["%1".to_string()],
             token: "%1:selected-fire".to_string(),
-            remove_attention: false,
             source: "hived.active_window".to_string(),
             workspace: String::new(),
         }]
@@ -4552,4 +4546,334 @@ fn test_writer_without_registry_entry_writes_nothing() {
     _write_registry_backfill("/ws", "honey");
 
     assert!(crate::registry::load("honey").is_none());
+}
+
+// ---- status tick (the team status bar's pane and window options) -------
+
+/// A workspace with a bus, a listing of `(pane, role)` panes, recorders for
+/// the pane and window options the tick writes, and the window every pane
+/// reports as its own.
+struct StatusEnv {
+    _tmp: tempfile::TempDir,
+    workspace: PathBuf,
+    pane_writes: Arc<Mutex<Vec<(String, String, String)>>>,
+    window_writes: Arc<Mutex<Vec<(String, String, String)>>>,
+    state: StatusTickState,
+}
+
+fn status_env(panes: &[(&str, &str)], busy: Option<bool>) -> (StatusEnv, testhook::Guard) {
+    status_env_in_windows(panes, busy, &[])
+}
+
+/// `status_env` whose panes report the window of their `(pane, window)`
+/// row in *windows* (`dev:1` for the rest).
+fn status_env_in_windows(
+    panes: &[(&str, &str)],
+    busy: Option<bool>,
+    windows: &[(&str, &str)],
+) -> (StatusEnv, testhook::Guard) {
+    let windows: HashMap<String, String> = windows
+        .iter()
+        .map(|(pane, window)| (pane.to_string(), window.to_string()))
+        .collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = bus::init_workspace(tmp.path().join("ws")).unwrap();
+    let listing: Vec<PaneInfo> = panes
+        .iter()
+        .map(|(pane, role)| PaneInfo {
+            pane_id: (*pane).to_string(),
+            role: (*role).to_string(),
+            ..Default::default()
+        })
+        .collect();
+    let pane_writes: Arc<Mutex<Vec<(String, String, String)>>> = Default::default();
+    let window_writes: Arc<Mutex<Vec<(String, String, String)>>> = Default::default();
+    let pane_sink = Arc::clone(&pane_writes);
+    let window_sink = Arc::clone(&window_writes);
+    let hook = Hook {
+        list_panes_all: Some(Arc::new(move || listing.clone())),
+        native_daemon_busy: Some(Arc::new(move |_pane| busy)),
+        set_pane_option: Some(Arc::new(move |pane, key, value| {
+            pane_sink
+                .lock()
+                .unwrap()
+                .push((pane.to_string(), key.to_string(), value.to_string()));
+        })),
+        set_window_option: Some(Arc::new(move |target, key, value| {
+            window_sink.lock().unwrap().push((
+                target.to_string(),
+                key.to_string(),
+                value.to_string(),
+            ));
+        })),
+        get_pane_window_target: Some(Arc::new(move |pane| {
+            Some(
+                windows
+                    .get(pane)
+                    .cloned()
+                    .unwrap_or_else(|| "dev:1".to_string()),
+            )
+        })),
+        ..Default::default()
+    };
+    let guard = testhook::install(hook);
+    (
+        StatusEnv {
+            _tmp: tmp,
+            workspace,
+            pane_writes,
+            window_writes,
+            state: StatusTickState::default(),
+        },
+        guard,
+    )
+}
+
+fn status_members(rows: &[(&str, &str)]) -> Vec<(String, Map<String, Value>)> {
+    rows.iter()
+        .map(|(name, pane)| {
+            let mut row = Map::new();
+            row.insert("name".to_string(), Value::from(*name));
+            row.insert("pane".to_string(), Value::from(*pane));
+            (name.to_string(), row)
+        })
+        .collect()
+}
+
+fn status_tick(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], now: i64) {
+    _status_tick(
+        &env.workspace.to_string_lossy(),
+        members,
+        None,
+        &mut env.state,
+        now,
+    );
+}
+
+fn drain(sink: &Arc<Mutex<Vec<(String, String, String)>>>) -> Vec<(String, String, String)> {
+    std::mem::take(&mut *sink.lock().unwrap())
+}
+
+fn row(pane: &str, key: &str, value: &str) -> (String, String, String) {
+    (pane.to_string(), key.to_string(), value.to_string())
+}
+
+#[test]
+fn test_status_tick_writes_busy_and_unread_only_on_edges() {
+    let (mut env, _guard) = status_env(&[("%1", "agent")], Some(true));
+    let members = status_members(&[("sage", "%1")]);
+
+    status_tick(&mut env, &members, 1_000);
+    assert_eq!(
+        drain(&env.pane_writes),
+        vec![row("%1", "hive-busy", "1"), row("%1", "hive-unread", "0")]
+    );
+
+    status_tick(&mut env, &members, 1_001);
+    assert_eq!(drain(&env.pane_writes), Vec::new());
+
+    testhook::update(|h| stub_app_server_busy(h, Some(false)));
+    status_tick(&mut env, &members, 1_002);
+    assert_eq!(drain(&env.pane_writes), vec![row("%1", "hive-busy", "0")]);
+}
+
+#[test]
+fn test_status_tick_clears_unread_when_the_member_goes_busy() {
+    let (mut env, _guard) = status_env(&[("%1", "agent")], Some(false));
+    let members = status_members(&[("sage", "%1")]);
+    unread_pending().lock().unwrap().insert("%1".to_string());
+
+    status_tick(&mut env, &members, 1_000);
+    assert_eq!(
+        drain(&env.pane_writes),
+        vec![row("%1", "hive-busy", "0"), row("%1", "hive-unread", "1")]
+    );
+
+    // The turn that reads the message: busy consumes the pending mark…
+    testhook::update(|h| stub_app_server_busy(h, Some(true)));
+    status_tick(&mut env, &members, 1_001);
+    assert_eq!(
+        drain(&env.pane_writes),
+        vec![row("%1", "hive-busy", "1"), row("%1", "hive-unread", "0")]
+    );
+
+    // …so idle again is not unread again.
+    testhook::update(|h| stub_app_server_busy(h, Some(false)));
+    status_tick(&mut env, &members, 1_002);
+    assert_eq!(drain(&env.pane_writes), vec![row("%1", "hive-busy", "0")]);
+}
+
+#[test]
+fn test_status_tick_skips_mirror_terminal_and_dock_panes() {
+    let (mut env, _guard) = status_env(
+        &[("%1", "mirror"), ("%2", "terminal"), ("%3", "dock")],
+        Some(true),
+    );
+    let members = status_members(&[("orch", "%1"), ("shell", "%2"), ("board", "%3")]);
+    unread_pending().lock().unwrap().insert("%1".to_string());
+
+    status_tick(&mut env, &members, 1_000);
+
+    assert_eq!(drain(&env.pane_writes), Vec::new());
+    // No engine pane, no ticker anchor: the parked mirror's window never
+    // gets one.
+    assert_eq!(drain(&env.window_writes), Vec::new());
+    // A message to a pane without a chip is not pending unread.
+    assert!(!unread_pending().lock().unwrap().contains("%1"));
+}
+
+#[test]
+fn test_status_tick_anchors_the_ticker_on_an_engine_pane_not_the_parked_mirror() {
+    let (mut env, _guard) = status_env_in_windows(
+        &[("%1", "mirror"), ("%2", "agent")],
+        Some(false),
+        &[("%1", "honey:9"), ("%2", "dev:1")],
+    );
+    bus::write_send_event(&env.workspace, "orch", "sage", "hi", "", None, "").unwrap();
+    // The mirror is bound first; the ticker still lands on the engine
+    // pane's window.
+    let members = status_members(&[("orch", "%1"), ("sage", "%2")]);
+
+    status_tick(&mut env, &members, 1_000);
+
+    let writes = drain(&env.window_writes);
+    assert_eq!(writes.len(), 1);
+    assert_eq!(
+        (writes[0].0.as_str(), writes[0].1.as_str()),
+        ("dev:1", "@hive-ticker")
+    );
+}
+
+#[test]
+fn test_status_tick_writes_nothing_on_an_empty_listing() {
+    let (mut env, _guard) = status_env(&[], Some(true));
+    let members = status_members(&[("sage", "%1")]);
+    unread_pending().lock().unwrap().insert("%1".to_string());
+
+    status_tick(&mut env, &members, 1_000);
+
+    assert_eq!(drain(&env.pane_writes), Vec::new());
+    assert_eq!(drain(&env.window_writes), Vec::new());
+    // A tmux failure, not an empty server: nothing is forgotten either.
+    assert!(unread_pending().lock().unwrap().remove("%1"));
+}
+
+#[test]
+fn test_status_tick_writes_the_ticker_once_per_text() {
+    let (mut env, _guard) = status_env(&[("%1", "agent")], Some(false));
+    let members = status_members(&[("sage", "%1")]);
+    bus::write_send_event(&env.workspace, "orch", "sage", "first #1", "", None, "").unwrap();
+    bus::write_send_event(&env.workspace, "sage", "orch", "second", "", None, "").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let events = bus::latest_send_events(&env.workspace, TICKER_ROWS).unwrap();
+
+    status_tick(&mut env, &members, now);
+    let text = ticker_text(&events, now);
+    assert!(
+        text.starts_with("sage → orch · now · \"second\"   │   orch → sage · now · \"first ##1\""),
+        "{text}"
+    );
+    assert_eq!(
+        drain(&env.window_writes),
+        vec![row("dev:1", "@hive-ticker", &text)]
+    );
+
+    status_tick(&mut env, &members, now);
+    assert_eq!(drain(&env.window_writes), Vec::new());
+
+    // The age bucket moved: one write, with the new text.
+    status_tick(&mut env, &members, now + 120);
+    assert_eq!(
+        drain(&env.window_writes),
+        vec![row(
+            "dev:1",
+            "@hive-ticker",
+            &ticker_text(&events, now + 120)
+        )]
+    );
+}
+
+#[test]
+fn test_ticker_text_escapes_hashes_clips_the_body_and_orders_newest_first() {
+    // 2023-11-14T22:13:20Z, and stamps that many seconds before it.
+    let now = 1_700_000_000;
+    let stamp = |age: i64| -> String {
+        match age {
+            10 => "2023-11-14T22:13:10Z",
+            120 => "2023-11-14T22:11:20Z",
+            7_200 => "2023-11-14T20:13:20Z",
+            200_000 => "2023-11-12T14:40:00Z",
+            _ => unreachable!(),
+        }
+        .to_string()
+    };
+    let event = |from: &str, to: &str, body: &str, created_at: String| bus::Event {
+        from: from.to_string(),
+        to: to.to_string(),
+        intent: "send".to_string(),
+        metadata: Map::new(),
+        created_at,
+        msg_id: String::new(),
+        in_reply_to: String::new(),
+        body: body.to_string(),
+        artifact: String::new(),
+    };
+
+    assert_eq!(
+        ticker_head(&"x".repeat(100)),
+        format!("{}…", "x".repeat(80))
+    );
+    assert_eq!(ticker_head("a #tag\n\n  b\tc"), "a ##tag b c");
+    assert_eq!(ticker_age(&stamp(10), now), "now");
+    assert_eq!(ticker_age(&stamp(120), now), "2m");
+    assert_eq!(ticker_age(&stamp(7_200), now), "2h");
+    assert_eq!(ticker_age(&stamp(200_000), now), "2d");
+    assert_eq!(ticker_age("yesterday", now), "?");
+    assert_eq!(
+        ticker_text(
+            &[
+                event("b", "a", "hi", stamp(10)),
+                event("a", "b", "yo #1", stamp(120)),
+            ],
+            now
+        ),
+        "b → a · now · \"hi\"   │   a → b · 2m · \"yo ##1\""
+    );
+}
+
+#[test]
+fn test_send_marks_the_target_pane_unread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.resolve_live_agent = Some(Arc::new(|_team, _agent| {
+        Ok((fake_team("team-x", vec![]), fake_agent("b", "%4", "claude")))
+    }));
+    hook.agent_send = Some(Arc::new(
+        |_agent, _text, _sender| Ok("accepted".to_string()),
+    ));
+    let _guard = testhook::install(hook);
+    let pending = || -> Vec<String> { unread_pending().lock().unwrap().iter().cloned().collect() };
+
+    send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    assert_eq!(pending(), vec!["%4".to_string()]);
+
+    unread_pending().lock().unwrap().clear();
+    testhook::update(|h| {
+        h.agent_send = Some(Arc::new(|_agent, _text, _sender| {
+            Err(DeliveryError("no channel".to_string()))
+        }));
+    });
+    let refused = send_payload_for_test(&workspace, "a", "b", "hi", "", "");
+    assert_eq!(refused["ok"], Value::Bool(false));
+    assert_eq!(pending(), Vec::<String>::new());
+
+    // The flow mailbox owns no pane: the bus row is the delivery.
+    send_payload_for_test(&workspace, "a", FLOW_MAILBOX_AGENT, "hi", "", "");
+    assert_eq!(pending(), Vec::<String>::new());
 }

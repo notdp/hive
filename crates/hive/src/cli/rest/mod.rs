@@ -1,5 +1,5 @@
 //! The remaining command handlers — port of the non-core half of
-//! `src/hive/cli.py`: fork, spawn, config, inject, compact, layout, pr, flow,
+//! `src/hive/cli.py`: fork, spawn, config, inject, compact, layout, mirror, pr, flow,
 //! attach, thread, capture, cvim/vim/vfork/hfork, notify, plugin,
 //! the claude/codex/grok launchers, ccd, resume-hint, shell-init, and
 //! worktree.
@@ -10,6 +10,7 @@ mod admin;
 mod attach;
 mod fork;
 mod launchers;
+mod mirror;
 mod pyfmt;
 mod spawn;
 mod worktree_pr;
@@ -21,6 +22,7 @@ pub use admin::*;
 pub use attach::*;
 pub use fork::*;
 pub use launchers::*;
+pub use mirror::*;
 pub(crate) use pyfmt::*;
 pub use spawn::*;
 pub use worktree_pr::*;

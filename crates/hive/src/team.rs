@@ -74,7 +74,8 @@ fn new_agent(
 }
 
 /// Drop every `@hive-*` window tag `_write_window_options` (or a Python-era
-/// hive, which also wrote `@hive-peers`) left on *window*.
+/// hive, which also wrote `@hive-peers`) left on *window*, with the display
+/// carriers the hived and notify wrote on it.
 pub fn clear_window_tags(window: &str) {
     for key in [
         "hive-team",
@@ -83,6 +84,12 @@ pub fn clear_window_tags(window: &str) {
         "hive-created",
         "hive-peers",
         "hive-built",
+        "hive-mirror",
+        "hive-hidden",
+        "hive-ticker",
+        "hive-notify-token",
+        "hive-notify-hook",
+        "hive-notify-text",
     ] {
         tmux::clear_window_option(window, &format!("@{key}"));
     }
@@ -526,7 +533,7 @@ impl Team {
             if pane.team != name {
                 continue;
             }
-            if pane.role == "agent" {
+            if pane.is_member_pane() {
                 if !pane.agent.is_empty() && !pane.group.is_empty() {
                     team.member_groups
                         .insert(pane.agent.clone(), pane.group.clone());
@@ -883,16 +890,11 @@ pub fn _window_has_live_team_members(window_target: &str, team_name: &str) -> bo
 /// (no live member panes) get their `@hive-team` tag stripped; live
 /// duplicates are preserved so two colliding teams never lose their tags.
 pub fn _find_team_window(name: &str, prefer_pane: &str) -> Result<(String, TeamWindowData)> {
-    let r = tmux::_run(
-        &[
-            "list-windows",
-            "-a",
-            "-F",
-            "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}\t#{@hive-desc}\t#{@hive-created}",
-        ],
-        false,
-        5,
-    )?;
+    let fmt = format!(
+        "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}\t#{{@hive-desc}}\t#{{@hive-created}}",
+        crate::tmux::_WINDOW_TEAM_FMT
+    );
+    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
     let mut candidates: Vec<(String, TeamWindowData)> = Vec::new();
     for line in r.stdout.trim().split('\n') {
@@ -979,16 +981,11 @@ pub fn _gc_stale_team_windows(name: &str, keep: &str, all_windows: &[String]) {
 /// retagging a live team can break hived identity / pane context / pending
 /// sends, so repair is left to a human.
 pub fn duplicate_team_bindings() -> Result<Vec<Map<String, Value>>> {
-    let r = tmux::_run(
-        &[
-            "list-windows",
-            "-a",
-            "-F",
-            "#{session_name}:#{window_index}\t#{window_id}\t#{@hive-team}\t#{@hive-workspace}",
-        ],
-        false,
-        5,
-    )?;
+    let fmt = format!(
+        "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t{}\t#{{@hive-workspace}}",
+        crate::tmux::_WINDOW_TEAM_FMT
+    );
+    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
 
     // serde_json's preserve_order Map keeps team insertion order like the
     // Python dict.
@@ -1067,16 +1064,11 @@ pub fn list_teams() -> Result<Vec<Map<String, Value>>> {
         );
     }
 
-    let r = tmux::_run(
-        &[
-            "list-windows",
-            "-a",
-            "-F",
-            "#{session_name}:#{window_index}\t#{@hive-team}\t#{@hive-workspace}",
-        ],
-        false,
-        5,
-    )?;
+    let fmt = format!(
+        "#{{session_name}}:#{{window_index}}\t{}\t#{{@hive-workspace}}",
+        crate::tmux::_WINDOW_TEAM_FMT
+    );
+    let r = tmux::_run(&["list-windows", "-a", "-F", &fmt], false, 5)?;
     for line in r.stdout.trim().split('\n') {
         if line.is_empty() {
             continue;
@@ -1268,7 +1260,14 @@ mod tests {
         };
         let mut out = String::new();
         for (target, opts) in &st.window_options {
+            // The hidden-window mask, as tmux would resolve it.
+            let team_tag = if opts.get("hive-hidden").is_some_and(|h| !h.is_empty()) {
+                ""
+            } else {
+                "#{@hive-team}"
+            };
             let mut line = fmt
+                .replace(crate::tmux::_WINDOW_TEAM_FMT, team_tag)
                 .replace("#{session_name}:#{window_index}", target)
                 .replace("#{window_id}", &window_id_for_target(target));
             while let Some(start) = line.find("#{@") {
@@ -1738,6 +1737,26 @@ mod tests {
         let loaded = Team::load("team-a", "").unwrap();
 
         assert_eq!(loaded.agent_named("claude").unwrap().cwd, "/repo");
+    }
+
+    /// The mirror is the member's pane as much as an engine pane is: a verb
+    /// addressing the orch (kill, capture, inject) lands on it.
+    #[test]
+    fn test_team_load_binds_a_member_to_its_mirror_pane() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        set_hive_window("dev:0", "team-a", "/tmp/ws", "", "0");
+        with_state(|st| {
+            st.list_panes_full_fn = Some(Box::new(|_target| {
+                let mut pane = pane_info("%1", "hive", "mirror", "orch", "team-a");
+                pane.cli = "claude".to_string();
+                vec![pane]
+            }));
+        });
+
+        let loaded = Team::load("team-a", "").unwrap();
+
+        assert_eq!(loaded.get("orch").unwrap().pane_id, "%1");
+        assert_eq!(loaded.agent_named("orch").unwrap().cli, "claude");
     }
 
     #[test]
@@ -2231,6 +2250,42 @@ mod tests {
         assert_eq!(alive.cwd, "/fresh"); // live pane is fresher than the registry row
         assert_eq!(alive.session_id.as_deref(), Some("sid-a")); // wiped pane record falls back to registry
         assert_eq!(loaded.agent_named("headless").unwrap().pane_id, "");
+    }
+
+    /// A parked mirror's hidden window answers `@hive-team` through its
+    /// pane; every team-window scan masks it.
+    #[test]
+    fn test_window_scans_mask_the_hidden_mirror_window() {
+        let (_tmp, _guard) = configure_hive_home(true, "%0");
+        with_state(|st| {
+            st.window_options.insert(
+                "dev:1".to_string(),
+                HashMap::from([
+                    ("hive-team".to_string(), "honey".to_string()),
+                    ("hive-workspace".to_string(), "/tmp/ws".to_string()),
+                ]),
+            );
+            st.window_options.insert(
+                "honey:9".to_string(),
+                HashMap::from([
+                    ("hive-hidden".to_string(), "honey".to_string()),
+                    ("hive-team".to_string(), "honey".to_string()),
+                ]),
+            );
+            st.list_panes_full_fn = Some(Box::new(|target| match target {
+                "dev:1" => vec![pane_info("%2", "grok", "agent", "sage", "honey")],
+                "honey:9" => vec![pane_info("%1", "hive", "mirror", "orch", "honey")],
+                _ => Vec::new(),
+            }));
+        });
+
+        let teams = list_teams().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].get("tmuxWindow").unwrap(), "dev:1");
+        assert!(duplicate_team_bindings().unwrap().is_empty());
+        let (wt, _) = _find_team_window("honey", "").unwrap();
+        assert_eq!(wt, "dev:1");
+        assert!(with_state(|st| st.cleared.is_empty()));
     }
 
     #[test]

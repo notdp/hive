@@ -18,6 +18,28 @@ pub fn require_tmux() {
     }
 }
 
+/// A private tmux server for the calling test process: `TMUX_TMPDIR` in
+/// the process env, so `run_tmux`, the in-process hive tmux calls and any
+/// server-side callback into hive all reach the same throwaway server and
+/// never the developer's. The directory outlives the guard's holder; the
+/// server exits with its last session.
+pub struct PrivateServer {
+    // Declaration order is drop order: the env var goes before the
+    // directory, so no tmux client can run with TMUX_TMPDIR naming a
+    // removed directory (tmux then falls through to the default server).
+    _env: EnvVarGuard,
+    _dir: tempfile::TempDir,
+}
+
+pub fn private_server() -> PrivateServer {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = EnvVarGuard::set("TMUX_TMPDIR", dir.path().to_str().unwrap());
+    PrivateServer {
+        _env: env,
+        _dir: dir,
+    }
+}
+
 pub fn run_tmux(args: &[&str]) -> String {
     let out = Command::new("tmux").args(args).output().expect("tmux runs");
     assert!(
