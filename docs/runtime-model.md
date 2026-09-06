@@ -82,7 +82,7 @@ Consequences across modules:
   orch. Display is then resolved on top of identity, not read from env: a
   member engine's tools carry no usable `TMUX_PANE` (a claude bg engine has
   none, codex's daemon env is frozen at spawn, a grok member's leader is
-  minted before any pane exists and pins none), so `get_current_pane_id`
+  minted before any pane exists and pins none), so `identity::current_pane_id`
   walks from the engine's own marker to its pane — a codex thread to its
   pane record, a claude socket to its engine's job to the job's pane, a grok
   session id to its roster row to the pane tagged with that member. That is

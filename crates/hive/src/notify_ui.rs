@@ -322,7 +322,7 @@ pub fn notify(message: &str, pane_id: &str, workspace: &str) -> anyhow::Result<N
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "target".to_string());
     let agent_name = tmux::get_pane_option(pane_id, "hive-agent").unwrap_or_default();
-    let client_mode = tmux::get_client_mode(Some(pane_id));
+    let client_mode = tmux::get_client_mode(pane_id);
     let suppressed = target_window_is_focused(&session_name, &window_target);
     notify_debug::emit_for_window(
         &window_target,
@@ -445,7 +445,7 @@ mod tests {
             with_state(|state| state.most_recent_client_window.clone())
         }
 
-        pub fn get_client_mode(_target: Option<&str>) -> String {
+        pub fn get_client_mode(_target: &str) -> String {
             with_state(|state| state.client_mode.clone()).unwrap_or_else(|| "unknown".to_string())
         }
 

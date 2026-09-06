@@ -103,7 +103,7 @@ pub fn layout_cmd(preset: &str, on_change: bool, window: &str) {
         if !t.tmux_window.is_empty() {
             t.tmux_window.clone()
         } else {
-            tmux::get_current_window_target().unwrap_or_default()
+            identity::current_window_target().unwrap_or_default()
         }
     };
     if window_target.is_empty() {
@@ -402,11 +402,11 @@ fn install_team_status(pane: &str) {
 /// session, outside tmux the team session. Returns (window target, first
 /// pane id).
 fn team_window_for_caller(team: &str, anchor_cwd: &str) -> (String, String) {
-    if !tmux::is_inside_tmux() {
+    if !identity::is_inside_tmux() {
         let (window, pane, _) = ok_or_fail(new_team_session_window(team));
         return (window, pane);
     }
-    let session_name = tmux::get_current_session_name()
+    let session_name = identity::current_session_name()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "hive".to_string());
     if !tmux::has_session(&session_name) {
@@ -534,7 +534,7 @@ pub(crate) fn ensure_team_display(entry: &Map<String, Value>) -> (String, bool) 
 /// client — `select-window` would only retarget the window's own session and
 /// leave a client attached elsewhere untouched.
 fn jump_to_window(window: &str, verdict: &str) {
-    if tmux::is_inside_tmux() {
+    if identity::is_inside_tmux() {
         tmux::switch_client(window);
         println!("{verdict} {window}");
         return;

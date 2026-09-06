@@ -86,6 +86,14 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Isolated HIVE_HOME and CODEX_HOME under *tmp*, for the test's lifetime.
+pub(crate) fn iso(tmp: &std::path::Path) -> EnvGuard {
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.join("hive"));
+    env.set("CODEX_HOME", tmp.join("codex"));
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -194,10 +194,10 @@ fn exec_codex_managed(args: &[String]) -> ! {
         if !env_pane.is_empty() {
             env_pane
         } else {
-            tmux::get_current_pane_id().unwrap_or_default()
+            identity::current_pane_id().unwrap_or_default()
         }
     };
-    if pane.is_empty() || !tmux::is_inside_tmux() {
+    if pane.is_empty() || !identity::is_inside_tmux() {
         codex_raw(args); // hive needs a tmux pane to bind a thread to
     }
     let sub_index = codex_subcommand_index(args);
@@ -587,10 +587,10 @@ fn exec_grok_managed(args: &[String]) -> ! {
         if !env_pane.is_empty() {
             env_pane
         } else {
-            tmux::get_current_pane_id().unwrap_or_default()
+            identity::current_pane_id().unwrap_or_default()
         }
     };
-    if pane.is_empty() || !tmux::is_inside_tmux() {
+    if pane.is_empty() || !identity::is_inside_tmux() {
         grok_raw(args); // hive needs a tmux pane to bind a daemon to
     }
     if let Some(first) = args.first() {
