@@ -13,6 +13,8 @@ mod plan;
 pub use hooks::{hook_argv, install_hooks, remove_hooks, unhook_argv, LAYOUT_HOOKS};
 pub use plan::{layout_checksum, plan, split_beside, Plan, DOCK_ROWS, MIN_COLS, MIN_ROWS};
 
+use std::path::PathBuf;
+
 use crate::tmux::PaneInfo;
 
 /// Window option holding the key of the last applied plan.
@@ -126,32 +128,132 @@ fn lock_key(window_target: &str, tmux: &mut dyn TmuxOps) -> String {
         .collect()
 }
 
-fn window_lock(key: &str) -> Option<WindowLock> {
-    use std::os::unix::io::AsRawFd;
+/// How an apply waits for the window lock. In-process callers wait their
+/// turn; the hook form must not: a border or terminal drag fires
+/// `window-resized` per step, and a queue of blocked hook processes once
+/// filled the process table. The hook tries the lock and, when another
+/// apply holds it, leaves a rerun marker and exits; the holder plans once
+/// more when it finds the marker, so a burst collapses into at most two
+/// applies.
+enum LockState {
+    Held(WindowLock),
+    Busy,
+    Unavailable,
+}
+
+fn lock_dir() -> Option<PathBuf> {
     let dir = crate::team::hive_home().join("state").join("locks");
     std::fs::create_dir_all(&dir).ok()?;
-    let file = std::fs::OpenOptions::new()
+    Some(dir)
+}
+
+fn window_lock(key: &str, wait: bool) -> LockState {
+    use std::os::unix::io::AsRawFd;
+    let Some(dir) = lock_dir() else {
+        return LockState::Unavailable;
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join(format!("layout-{key}.lock")))
-        .ok()?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
+    else {
+        return LockState::Unavailable;
+    };
+    let flags = if wait {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_EX | libc::LOCK_NB
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), flags) } == 0 {
+        return LockState::Held(WindowLock(file));
     }
-    Some(WindowLock(file))
+    if !wait && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+        return LockState::Busy;
+    }
+    LockState::Unavailable
+}
+
+fn rerun_marker(key: &str) -> Option<PathBuf> {
+    Some(lock_dir()?.join(format!("layout-{key}.rerun")))
+}
+
+fn leave_rerun(key: &str) {
+    if let Some(marker) = rerun_marker(key) {
+        let _ = std::fs::write(marker, b"");
+    }
+}
+
+/// Take the rerun marker: true when a skipped apply left one.
+fn take_rerun(key: &str) -> bool {
+    rerun_marker(key).is_some_and(|marker| std::fs::remove_file(marker).is_ok())
 }
 
 /// Bring the window to the plan it should have: apply when `force` or when
-/// the plan's key differs from `@hive-layout`, else touch nothing.
+/// the plan's key differs from `@hive-layout`, else touch nothing. Waits
+/// for the window lock: the caller has just changed the window (a split,
+/// a join, a dock tag) and its apply must land after an apply in flight.
 pub fn ensure(window_target: &str, force: bool) -> Outcome {
     if window_target.is_empty() {
         return Outcome::Skipped("no-window");
     }
     let mut tmux = RealTmux;
-    let _lock = window_lock(&lock_key(window_target, &mut tmux));
-    ensure_with(window_target, force, &mut tmux)
+    ensure_locked(window_target, force, true, &mut tmux)
+}
+
+/// The window hooks' form of [`ensure`]: never forces, never waits — an
+/// apply in flight gets a rerun marker instead (see `LockState`).
+pub fn ensure_hook(window_target: &str) -> Outcome {
+    if window_target.is_empty() {
+        return Outcome::Skipped("no-window");
+    }
+    let mut tmux = RealTmux;
+    ensure_locked(window_target, false, false, &mut tmux)
+}
+
+fn ensure_locked(window_target: &str, force: bool, wait: bool, tmux: &mut dyn TmuxOps) -> Outcome {
+    let key = lock_key(window_target, tmux);
+    let mut lock = match window_lock(&key, wait) {
+        LockState::Held(lock) => Some(lock),
+        LockState::Busy => {
+            leave_rerun(&key);
+            // The holder may already have looked for markers: try once more,
+            // and plan ourselves if it let go in between.
+            match window_lock(&key, false) {
+                LockState::Held(lock) => Some(lock),
+                _ => return Outcome::Skipped("busy"),
+            }
+        }
+        LockState::Unavailable => None,
+    };
+    let mut outcome = ensure_with(window_target, force, tmux);
+    for _ in 0..3 {
+        if !take_rerun(&key) {
+            // Nobody asked for another pass while we held the lock. Release,
+            // then look once more: a marker left between that check and the
+            // release is ours to take while the lock is still free.
+            drop(lock.take());
+            if !rerun_marker(&key).is_some_and(|marker| marker.exists()) {
+                break;
+            }
+            lock = match window_lock(&key, false) {
+                LockState::Held(lock) => Some(lock),
+                _ => break,
+            };
+            if !take_rerun(&key) {
+                break;
+            }
+        }
+        // An apply that found us holding the lock left the marker: its event
+        // may postdate the state read above, so plan once more.
+        let again = ensure_with(window_target, force, tmux);
+        // Report the apply that happened, not the no-op that confirmed it.
+        if again.applied() || !outcome.applied() {
+            outcome = again;
+        }
+    }
+    outcome
 }
 
 fn ensure_with(window_target: &str, force: bool, tmux: &mut dyn TmuxOps) -> Outcome {
@@ -301,6 +403,69 @@ mod tests {
 
     fn expected(size: (i64, i64), spec: &[(&str, &str)]) -> Plan {
         plan(size, &FakeTmux::new(size, spec).panes).unwrap()
+    }
+
+    fn locks_home() -> (tempfile::TempDir, crate::testenv::EnvGuard) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("HIVE_HOME", tmp.path());
+        (tmp, env)
+    }
+
+    #[test]
+    fn test_a_hook_apply_yields_to_the_holder_and_leaves_a_rerun_marker() {
+        let (_tmp, _env) = locks_home();
+        let spec = [("%1", "agent"), ("%2", "agent")];
+        let mut tmux = FakeTmux::new((200, 50), &spec);
+        let key = lock_key("dev:0", &mut tmux);
+        let held = match window_lock(&key, true) {
+            LockState::Held(lock) => lock,
+            _ => panic!("lock dir unavailable"),
+        };
+
+        assert_eq!(
+            ensure_locked("dev:0", false, false, &mut tmux),
+            Outcome::Skipped("busy")
+        );
+        assert!(tmux.calls.is_empty(), "{:?}", tmux.calls);
+        assert!(rerun_marker(&key).unwrap().exists());
+
+        // The holder finishes: the next apply takes the lock, plans, and
+        // consumes the marker.
+        drop(held);
+        let outcome = ensure_locked("dev:0", false, false, &mut tmux);
+        assert!(outcome.applied(), "{outcome:?}");
+        assert!(!rerun_marker(&key).unwrap().exists());
+    }
+
+    #[test]
+    fn test_the_holder_plans_once_more_when_a_rerun_marker_was_left() {
+        let (_tmp, _env) = locks_home();
+        let spec = [("%1", "agent"), ("%2", "agent")];
+        let mut tmux = FakeTmux::new((200, 50), &spec);
+        let key = lock_key("dev:0", &mut tmux);
+        leave_rerun(&key);
+
+        let outcome = ensure_locked("dev:0", false, true, &mut tmux);
+
+        assert!(outcome.applied(), "{outcome:?}");
+        assert!(!rerun_marker(&key).unwrap().exists());
+        // The second pass found the key it had just written: one layout.
+        let layouts = tmux.calls.iter().filter(|c| c[0] == "layout").count();
+        assert_eq!(layouts, 1, "{:?}", tmux.calls);
+    }
+
+    #[test]
+    fn test_a_forced_apply_waits_for_the_lock() {
+        let (_tmp, _env) = locks_home();
+        let key = "dev_0";
+        let held = match window_lock(key, true) {
+            LockState::Held(lock) => lock,
+            _ => panic!("lock dir unavailable"),
+        };
+        assert!(matches!(window_lock(key, false), LockState::Busy));
+        drop(held);
+        assert!(matches!(window_lock(key, false), LockState::Held(_)));
     }
 
     #[test]

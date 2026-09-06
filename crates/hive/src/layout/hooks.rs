@@ -4,7 +4,9 @@
 //! unzoom, a border drag, and hive's own `select-layout`). Both run
 //! `hive layout auto --on-change --window <id>`, which compares the plan
 //! it would apply against `@hive-layout` and writes nothing when they
-//! match — what keeps a drag alive and stops the hook from recursing.
+//! match — what keeps a drag alive and stops the hook from recursing —
+//! and yields to an apply already holding the window lock (`mod.rs`),
+//! so a drag firing the hook per step never queues processes.
 
 use crate::tmux::run;
 
