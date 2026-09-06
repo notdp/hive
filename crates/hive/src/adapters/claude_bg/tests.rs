@@ -292,8 +292,10 @@ fn test_job_row_separates_asleep_from_gone() {
             .cloned()
             .unwrap(),
     ];
-    let mut hook = Hook::default();
-    hook.list_jobs_rows = Some(Some(rows));
+    let hook = Hook {
+        list_jobs_rows: Some(Some(rows)),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert_eq!(
@@ -408,13 +410,15 @@ fn test_spawn_job_refuses_an_announcement_that_is_not_a_job_id() {
 
 #[test]
 fn test_ensure_engine_wakes_a_parked_job_once() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![
-        None,
-        Some(fake_engine("cafe1234", "idle")),
-    ]));
-    hook.wake_result = Some(true);
-    hook.no_sleep = true;
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![
+            None,
+            Some(fake_engine("cafe1234", "idle")),
+        ])),
+        wake_result: Some(true),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     let engine = ensure_engine("cafe1234", Some(0.0), "claude").unwrap();
@@ -427,10 +431,12 @@ fn test_ensure_engine_wakes_a_parked_job_once() {
 
 #[test]
 fn test_ensure_engine_gives_up_when_wake_fails() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![None]));
-    hook.wake_result = Some(false);
-    hook.no_sleep = true;
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![None])),
+        wake_result: Some(false),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(ensure_engine("cafe1234", Some(0.0), "claude").is_none());
@@ -455,13 +461,15 @@ fn engine_queue() -> Vec<Option<EngineSession>> {
 fn test_wait_engine_behind_polls_until_the_entry_appears() {
     // Two misses, then the entry: the wait keeps polling while the client
     // lives, and the answer is the entry the third poll found.
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![
-        None,
-        None,
-        Some(fake_engine("cafe1234", "idle")),
-    ]));
-    hook.no_sleep = true;
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![
+            None,
+            None,
+            Some(fake_engine("cafe1234", "idle")),
+        ])),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(None);
 
@@ -475,13 +483,15 @@ fn test_wait_engine_behind_polls_until_the_entry_appears() {
 fn test_wait_engine_behind_gives_up_once_the_client_exits() {
     // The entry is one more poll away, but the client already exited: the
     // wait stops on the first miss instead of finding it.
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![
-        None,
-        None,
-        Some(fake_engine("cafe1234", "idle")),
-    ]));
-    hook.no_sleep = true;
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![
+            None,
+            None,
+            Some(fake_engine("cafe1234", "idle")),
+        ])),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(Some(1));
 
@@ -491,14 +501,16 @@ fn test_wait_engine_behind_gives_up_once_the_client_exits() {
 
 #[test]
 fn test_wait_engine_behind_times_out_with_the_client_still_alive() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![
-        None,
-        None,
-        Some(fake_engine("cafe1234", "idle")),
-    ]));
-    hook.engine_ready_timeout = Some(0.0);
-    hook.no_sleep = true;
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![
+            None,
+            None,
+            Some(fake_engine("cafe1234", "idle")),
+        ])),
+        engine_ready_timeout: Some(0.0),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (_pipe, mut proc) = client(None);
 
@@ -531,8 +543,10 @@ fn attach_journal_entry(home: &Home, pid: i32) {
 #[test]
 fn test_wait_client_ready_once_the_journal_names_the_client() {
     let home = claude_home();
-    let mut hook = Hook::default();
-    hook.no_sleep = true;
+    let hook = Hook {
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (pipe, mut proc) = client(None);
     pipe.state.lock().unwrap().pid = Some(me() as i32);
@@ -545,8 +559,10 @@ fn test_wait_client_ready_once_the_journal_names_the_client() {
 fn test_wait_client_ready_is_false_once_the_client_exits() {
     // The journal entry alone would say ready; an exited client wins.
     let home = claude_home();
-    let mut hook = Hook::default();
-    hook.no_sleep = true;
+    let hook = Hook {
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (pipe, mut proc) = client(Some(0));
     pipe.state.lock().unwrap().pid = Some(me() as i32);
@@ -558,9 +574,11 @@ fn test_wait_client_ready_is_false_once_the_client_exits() {
 #[test]
 fn test_wait_client_ready_times_out_on_a_journal_naming_someone_else() {
     let home = claude_home();
-    let mut hook = Hook::default();
-    hook.client_ready_timeout = Some(0.05);
-    hook.no_sleep = true;
+    let hook = Hook {
+        client_ready_timeout: Some(0.05),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     let (pipe, mut proc) = client(None);
     pipe.state.lock().unwrap().pid = Some(me() as i32 + 1);
@@ -942,10 +960,12 @@ fn test_a_removed_job_fails_as_soon_as_the_client_gives_up() {
     // engine that will never register just delays the error.
     let pipe = FakePipe::default();
     pipe.state.lock().unwrap().poll = Some(1);
-    let mut hook = Hook::default();
-    hook.attach_pipe = Some(pipe.clone());
-    hook.engine_for_job = Some(VecDeque::from(vec![None]));
-    hook.no_sleep = true;
+    let hook = Hook {
+        attach_pipe: Some(pipe.clone()),
+        engine_for_job: Some(VecDeque::from(vec![None])),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     let result = type_into_job("deadbeef", "ping", "claude");
@@ -1306,10 +1326,12 @@ fn test_the_draft_gate_reads_the_pane_only_when_it_shows_this_job() {
     // The logs replay is an incremental paint stream and cannot answer
     // "what is in the composer"; the member's own pane render can — but
     // only while it is actually showing this member.
-    let mut hook = Hook::default();
-    hook.pane_for_job = Some(Some("%7".to_string()));
-    hook.view_probe = Some(Ok(("cafe1234".to_string(), "certain".to_string())));
-    hook.suspected_draft = Some(true);
+    let hook = Hook {
+        pane_for_job: Some(Some("%7".to_string())),
+        view_probe: Some(Ok(("cafe1234".to_string(), "certain".to_string()))),
+        suspected_draft: Some(true),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(_composer_has_draft("cafe1234"));
@@ -1321,10 +1343,12 @@ fn test_the_draft_gate_reads_the_pane_only_when_it_shows_this_job() {
 
 #[test]
 fn test_the_draft_gate_is_closed_when_the_viewer_shows_someone_else() {
-    let mut hook = Hook::default();
-    hook.pane_for_job = Some(Some("%7".to_string()));
-    hook.view_probe = Some(Ok(("other999".to_string(), "certain".to_string())));
-    hook.suspected_draft = Some(true); // must not capture
+    let hook = Hook {
+        pane_for_job: Some(Some("%7".to_string())),
+        view_probe: Some(Ok(("other999".to_string(), "certain".to_string()))),
+        suspected_draft: Some(true), // must not capture
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(!_composer_has_draft("cafe1234"));
@@ -1335,17 +1359,21 @@ fn test_the_draft_gate_is_closed_when_the_viewer_shows_someone_else() {
 
 #[test]
 fn test_the_draft_gate_is_closed_without_a_pane() {
-    let mut hook = Hook::default();
-    hook.pane_for_job = Some(None);
+    let hook = Hook {
+        pane_for_job: Some(None),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     assert!(!_composer_has_draft("cafe1234"));
 }
 
 #[test]
 fn test_a_probe_failure_closes_the_draft_gate() {
-    let mut hook = Hook::default();
-    hook.pane_for_job = Some(Some("%7".to_string()));
-    hook.view_probe = Some(Err(())); // tmux gone
+    let hook = Hook {
+        pane_for_job: Some(Some("%7".to_string())),
+        view_probe: Some(Err(())), // tmux gone
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     assert!(!_composer_has_draft("cafe1234"));
 }
@@ -1368,14 +1396,16 @@ fn named_engine(name: &str) -> EngineSession {
 
 #[test]
 fn test_a_wrongly_named_job_is_renamed_with_a_control_frame() {
-    let mut hook = Hook::default();
-    // pre-check, then confirm poll
-    hook.engine_for_job = Some(VecDeque::from(vec![
-        Some(named_engine("hive-183")),
-        Some(named_engine("honey.worker")),
-    ]));
-    hook.rename_result = Some(true);
-    hook.no_sleep = true;
+    let hook = Hook {
+        // pre-check, then confirm poll
+        engine_for_job: Some(VecDeque::from(vec![
+            Some(named_engine("hive-183")),
+            Some(named_engine("honey.worker")),
+        ])),
+        rename_result: Some(true),
+        no_sleep: true,
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(ensure_job_named("cafe1234", "honey.worker"));
@@ -1391,9 +1421,11 @@ fn test_a_wrongly_named_job_is_renamed_with_a_control_frame() {
 
 #[test]
 fn test_a_correctly_named_job_sends_no_frame() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![Some(named_engine("honey.worker"))]));
-    hook.rename_result = Some(true); // any frame would be recorded
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![Some(named_engine("honey.worker"))])),
+        rename_result: Some(true), // any frame would be recorded
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(ensure_job_named("cafe1234", "honey.worker"));
@@ -1402,9 +1434,11 @@ fn test_a_correctly_named_job_sends_no_frame() {
 
 #[test]
 fn test_a_refused_rename_frame_reports_failure() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![Some(named_engine("hive-183"))]));
-    hook.rename_result = Some(false);
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![Some(named_engine("hive-183"))])),
+        rename_result: Some(false),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(!ensure_job_named("cafe1234", "honey.worker"));
@@ -1412,11 +1446,13 @@ fn test_a_refused_rename_frame_reports_failure() {
 
 #[test]
 fn test_a_rename_the_registry_never_confirms_reports_failure() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![Some(named_engine("hive-183"))]));
-    hook.rename_result = Some(true);
-    hook.rename_confirm_timeout = Some(0.2);
-    hook.rename_poll_interval = Some(0.05);
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![Some(named_engine("hive-183"))])),
+        rename_result: Some(true),
+        rename_confirm_timeout: Some(0.2),
+        rename_poll_interval: Some(0.05),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
 
     assert!(!ensure_job_named("cafe1234", "honey.worker"));
@@ -1424,8 +1460,10 @@ fn test_a_rename_the_registry_never_confirms_reports_failure() {
 
 #[test]
 fn test_naming_an_engineless_job_reports_failure() {
-    let mut hook = Hook::default();
-    hook.engine_for_job = Some(VecDeque::from(vec![None]));
+    let hook = Hook {
+        engine_for_job: Some(VecDeque::from(vec![None])),
+        ..Default::default()
+    };
     let _g = testhook::install(hook);
     assert!(!ensure_job_named("cafe1234", "honey.worker"));
 }

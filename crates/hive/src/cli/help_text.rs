@@ -494,16 +494,25 @@ Options:
             r#"Usage: hive layout [OPTIONS] {auto|main-vertical|main-horizontal|tiled|even-
                    horizontal|even-vertical}
 
-  Apply a tmux layout preset to the current team window.
+  Plan the team window's layout, or apply a tmux preset over it.
 
-  Use ``auto`` to pick a preset adaptively from the window's aspect ratio.
-  With ``auto``, a window with a flow dock (`@hive-role dock`) gets a
-  generated layout instead: the dock strip at the bottom, members tiled
-  above; an explicit preset applies as given and flattens it until the
-  next adaptive apply.
+  hive owns the layout: from the window's size and its panes' roles it
+  plans a mirror column (landscape) or row (portrait), a member grid
+  sized toward 80x24 cells, and a flow dock strip at the bottom, and
+  re-plans on every layout event — a resize, a spawn or kill, a mirror or
+  dock coming and going — through two window hooks. A dragged pane
+  border holds until the plan changes. ``auto`` applies the plan now
+  (the repair for a window dragged out of shape); an explicit preset
+  applies as given and holds until the next event.
+
+  The window records the applied plan's key as `@hive-layout`; ``auto``
+  prints it as `layout`, with `applied` and a `reason` when it did not.
 
 Options:
-  -h, --help  Show this message and exit.
+  --on-change      Hook form: apply only when the plan's key changed; prints
+                   nothing.
+  --window TARGET  The team window (default: the caller's)
+  -h, --help       Show this message and exit.
 "#
         }
         ["mirror"] => {

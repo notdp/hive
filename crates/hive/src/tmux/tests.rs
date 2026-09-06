@@ -594,39 +594,41 @@ fn test_enable_pane_border_status_uses_hive_member_format() {
 }
 
 #[test]
-fn test_configure_hive_window_disables_native_tmux_alerts() {
+fn test_configure_hive_window_disables_native_tmux_alerts_and_installs_layout_hooks() {
+    let mut env = EnvGuard::new();
+    env.set("HIVE_BIN", "/x/hive");
     let calls = _capture_run(0, "");
 
     configure_hive_window("dev:1");
 
     let argvs: Vec<Vec<String>> = calls.borrow().iter().map(|c| c.0.clone()).collect();
-    assert_eq!(
-        argvs,
-        vec![
-            v(&[
-                "set-window-option",
-                "-t",
-                "dev:1",
-                "pane-border-status",
-                "top"
-            ]),
-            v(&[
-                "set-window-option",
-                "-t",
-                "dev:1",
-                "pane-border-format",
-                _HIVE_PANE_BORDER_FORMAT,
-            ]),
-            v(&[
-                "set-window-option",
-                "-t",
-                "dev:1",
-                "monitor-activity",
-                "off"
-            ]),
-            v(&["set-window-option", "-t", "dev:1", "monitor-bell", "off"]),
-        ]
-    );
+    let mut expected = vec![
+        v(&[
+            "set-window-option",
+            "-t",
+            "dev:1",
+            "pane-border-status",
+            "top",
+        ]),
+        v(&[
+            "set-window-option",
+            "-t",
+            "dev:1",
+            "pane-border-format",
+            _HIVE_PANE_BORDER_FORMAT,
+        ]),
+        v(&[
+            "set-window-option",
+            "-t",
+            "dev:1",
+            "monitor-activity",
+            "off",
+        ]),
+        v(&["set-window-option", "-t", "dev:1", "monitor-bell", "off"]),
+    ];
+    expected.extend(crate::layout::hook_argv("dev:1", "/x/hive"));
+    assert_eq!(argvs, expected);
+    assert_eq!(argvs.len(), 4 + crate::layout::LAYOUT_HOOKS.len());
 }
 
 const _MIRROR_RUN_SHELL: &str =
@@ -678,6 +680,15 @@ fn test_team_status_palettes_differ_in_colours_only() {
         assert_eq!(strip(&d), strip(&l));
     }
     assert!(team_status_format_0(light).contains(&format!("bg={}", light.team_bg)));
+}
+
+#[test]
+fn test_mirror_run_shell_escapes_a_dollar_in_the_binary_path_for_tmux() {
+    assert_eq!(_mirror_run_shell("/x/hive"), _MIRROR_RUN_SHELL);
+    assert_eq!(
+        _mirror_run_shell("'/tmp/we ird$x/hive'"),
+        "run-shell -b \"'/tmp/we ird\\$x/hive' mirror --window '#{q:session_name}:#{window_index}'\""
+    );
 }
 
 #[test]

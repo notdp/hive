@@ -8,7 +8,7 @@
 //! node its state and elapsed time. Phases come from the pane groups the
 //! spawns set, so serial/parallel structure needs no sidecar.
 //!
-//! The pane tags itself `@hive-role dock`; `layout::apply_adaptive` keeps
+//! The pane tags itself `@hive-role dock`; `layout::ensure` keeps
 //! the strip at the bottom and tiles the members above it.
 
 use std::collections::{HashMap, HashSet};
@@ -323,7 +323,7 @@ pub fn board_cmd(team: Option<&str>) -> i32 {
         crate::tmux::set_pane_option(&pane, "hive-role", "dock");
         crate::tmux::set_pane_title(&pane, "⬡ flow board");
         if !team.tmux_window.is_empty() {
-            let _ = crate::layout::apply_adaptive(&team.tmux_window);
+            let _ = crate::layout::ensure(&team.tmux_window, false);
         }
     }
 

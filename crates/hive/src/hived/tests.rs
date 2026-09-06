@@ -28,6 +28,14 @@ use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::ThreadRuntime;
 use crate::adapters::grok_leader::SessionRuntime;
+
+/// Collectors the hook closures push into: `(target, option, value)` tmux
+/// writes, `(event, payload)` notify emits, `(argv, stderr path)` spawns and
+/// `(event, fields)` debug emits.
+type OptionWrites = Arc<Mutex<Vec<(String, String, String)>>>;
+type EventSink = Arc<Mutex<Vec<(String, Map<String, Value>)>>>;
+type SpawnSink = Arc<Mutex<Vec<(Vec<String>, PathBuf)>>>;
+type DebugEventSink = Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>>;
 use crate::tmux::PaneInfo;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
@@ -1345,8 +1353,8 @@ struct ViewTickEnv {
     panes: Arc<Mutex<Vec<PaneInfo>>>,
     signature: Arc<Mutex<Vec<String>>>,
     view: Arc<Mutex<PaneView>>,
-    options: Arc<Mutex<Vec<(String, String, String)>>>,
-    events: Arc<Mutex<Vec<(String, Map<String, Value>)>>>,
+    options: OptionWrites,
+    events: EventSink,
     state: ClaudeTickState,
     _guard: testhook::Guard,
 }
@@ -1361,8 +1369,8 @@ fn view_tick_env() -> ViewTickEnv {
         "probe.red",
         "",
     )));
-    let options: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-    let events: Arc<Mutex<Vec<(String, Map<String, Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let options: OptionWrites = Arc::new(Mutex::new(Vec::new()));
+    let events: EventSink = Arc::new(Mutex::new(Vec::new()));
 
     let panes_src = Arc::clone(&panes);
     let signature_src = Arc::clone(&signature);
@@ -3139,7 +3147,7 @@ fn test_handle_request_reports_a_failing_handler_without_retiring_the_loop() {
 
 #[test]
 fn test_start_hived_spawns_current_exe_with_hived_argv() {
-    let captured: Arc<Mutex<Vec<(Vec<String>, PathBuf)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: SpawnSink = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&captured);
     let hook = Hook {
         current_exe: Some(Arc::new(|| "/tmp/fake-hive".to_string())),
@@ -3218,8 +3226,10 @@ fn test_stale_disk_build_hash_requires_stable_changed_hash() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    let mut state = ReexecState::default();
-    state.last_code_check_at = 5.0;
+    let mut state = ReexecState {
+        last_code_check_at: 5.0,
+        ..Default::default()
+    };
 
     assert_eq!(_stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
     assert_eq!(state.candidate_hash.as_deref(), Some("new-hash"));
@@ -3472,7 +3482,7 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let events: Arc<Mutex<Vec<(String, Map<String, Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let events: EventSink = Arc::new(Mutex::new(Vec::new()));
     let open_sink = Arc::clone(&calls);
     let open_calls = Arc::clone(&calls);
     let serve_sink = Arc::clone(&calls);
@@ -3605,7 +3615,7 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     env.set(_HIVED_REEXEC_LOCK_ENV, "78");
     let workspace = tmp.path().to_string_lossy().to_string();
-    let events: Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
     let released: Arc<Mutex<Vec<Option<i32>>>> = Arc::new(Mutex::new(Vec::new()));
     let release_sink = Arc::clone(&released);
@@ -4241,12 +4251,14 @@ fn test_send_with_live_cli_still_uses_native_transport() {
         }
         let _agent_guard = crate::agent::testhook::install(agent_hook);
 
-        let mut hook = Hook::default();
-        hook.check_send_gate = Some(Arc::new(|_target| Ok(())));
-        hook.resolve_live_agent = Some(Arc::new({
-            let cli = cli_name.to_string();
-            move |_team, _agent| Ok((fake_team("team-x", vec![]), fake_agent("v", "%9", &cli)))
-        }));
+        let hook = Hook {
+            check_send_gate: Some(Arc::new(|_target| Ok(()))),
+            resolve_live_agent: Some(Arc::new({
+                let cli = cli_name.to_string();
+                move |_team, _agent| Ok((fake_team("team-x", vec![]), fake_agent("v", "%9", &cli)))
+            })),
+            ..Default::default()
+        };
         let _guard = testhook::install(hook);
 
         let payload = send_payload_for_test(&workspace, "w", "v", "hi", "", "");
@@ -4556,8 +4568,8 @@ fn test_writer_without_registry_entry_writes_nothing() {
 struct StatusEnv {
     _tmp: tempfile::TempDir,
     workspace: PathBuf,
-    pane_writes: Arc<Mutex<Vec<(String, String, String)>>>,
-    window_writes: Arc<Mutex<Vec<(String, String, String)>>>,
+    pane_writes: OptionWrites,
+    window_writes: OptionWrites,
     state: StatusTickState,
 }
 
@@ -4586,8 +4598,8 @@ fn status_env_in_windows(
             ..Default::default()
         })
         .collect();
-    let pane_writes: Arc<Mutex<Vec<(String, String, String)>>> = Default::default();
-    let window_writes: Arc<Mutex<Vec<(String, String, String)>>> = Default::default();
+    let pane_writes: OptionWrites = Default::default();
+    let window_writes: OptionWrites = Default::default();
     let pane_sink = Arc::clone(&pane_writes);
     let window_sink = Arc::clone(&window_writes);
     let hook = Hook {
@@ -4650,7 +4662,7 @@ fn status_tick(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], no
     );
 }
 
-fn drain(sink: &Arc<Mutex<Vec<(String, String, String)>>>) -> Vec<(String, String, String)> {
+fn drain(sink: &OptionWrites) -> Vec<(String, String, String)> {
     std::mem::take(&mut *sink.lock().unwrap())
 }
 

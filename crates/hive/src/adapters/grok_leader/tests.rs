@@ -29,16 +29,16 @@ type StdioSpawn = Box<dyn FnMut(&[String]) -> io::Result<Arc<dyn LeaderProc>>>;
 type DaemonSpawn =
     Box<dyn FnMut(&[String], &HashMap<String, String>) -> io::Result<Box<dyn DaemonChild>>>;
 type ProcessListing = Box<dyn Fn() -> Vec<(libc::pid_t, String)>>;
+type PaneOption = Box<dyn Fn(&str, &str) -> Option<String>>;
+type TerminatePg = Box<dyn FnMut(libc::pid_t)>;
+type ProcessArgs = Box<dyn Fn(libc::pid_t) -> Option<String>>;
 
 thread_local! {
-    static PANE_OPTION_OVERRIDE: RefCell<Option<Box<dyn Fn(&str, &str) -> Option<String>>>> =
-        RefCell::new(None);
+    static PANE_OPTION_OVERRIDE: RefCell<Option<PaneOption>> = RefCell::new(None);
     static STDIO_SPAWN_OVERRIDE: RefCell<Option<StdioSpawn>> = RefCell::new(None);
     static DAEMON_SPAWN_OVERRIDE: RefCell<Option<DaemonSpawn>> = RefCell::new(None);
-    static TERMINATE_PG_OVERRIDE: RefCell<Option<Box<dyn FnMut(libc::pid_t)>>> =
-        RefCell::new(None);
-    static PROCESS_ARGS_OVERRIDE: RefCell<Option<Box<dyn Fn(libc::pid_t) -> Option<String>>>> =
-        RefCell::new(None);
+    static TERMINATE_PG_OVERRIDE: RefCell<Option<TerminatePg>> = RefCell::new(None);
+    static PROCESS_ARGS_OVERRIDE: RefCell<Option<ProcessArgs>> = RefCell::new(None);
     static PROCESS_LISTING_OVERRIDE: RefCell<Option<ProcessListing>> = RefCell::new(None);
     static ACK_TIMEOUT_OVERRIDE: Cell<Option<f64>> = const { Cell::new(None) };
 }

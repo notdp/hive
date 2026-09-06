@@ -270,7 +270,7 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("layout")
-                .about("Apply a tmux layout preset to the current team window.")
+                .about("Plan the team window's layout, or apply a tmux preset over it.")
                 .arg(
                     Arg::new("preset")
                         .required(true)
@@ -283,6 +283,19 @@ pub(crate) fn build_cli() -> Command {
                             "even-horizontal",
                             "even-vertical",
                         ]),
+                )
+                .arg(
+                    Arg::new("on_change")
+                        .long("on-change")
+                        .action(ArgAction::SetTrue)
+                        .help("Hook form: apply only when the plan changed (silent)"),
+                )
+                .arg(
+                    Arg::new("window")
+                        .long("window")
+                        .value_name("TARGET")
+                        .default_value("")
+                        .help("The team window (default: the caller's)"),
                 ),
         )
         .subcommand(
@@ -915,7 +928,11 @@ fn dispatch(matches: &ArgMatches) {
         Some(("inject", m)) => rest::inject_cmd(arg_str(m, "agent_name"), arg_str(m, "text")),
         Some(("compact", m)) => rest::compact_cmd(arg_str(m, "pane_id")),
         Some(("team", m)) => core_cmds::team_cmd(arg_str(m, "team_arg")),
-        Some(("layout", m)) => rest::layout_cmd(&arg_str(m, "preset").to_lowercase()),
+        Some(("layout", m)) => rest::layout_cmd(
+            &arg_str(m, "preset").to_lowercase(),
+            m.get_flag("on_change"),
+            arg_str(m, "window"),
+        ),
         Some(("mirror", m)) => rest::mirror_cmd(arg_str(m, "mode"), arg_str(m, "window")),
         Some(("flow", m)) => match m.subcommand() {
             Some(("run", m)) => {

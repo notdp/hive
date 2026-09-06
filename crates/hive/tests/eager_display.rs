@@ -739,8 +739,7 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
         (mirror.as_str(), "mirror", "orch"),
         "{panes:?}"
     );
-    // main-vertical: the mirror is the main pane, half the 220 columns
-    // less tmux's separator rounding.
+    // The plan's mirror column: half the 220 columns less the separator.
     assert!((109..=110).contains(&panes[0].3), "{panes:?}");
     assert_eq!(panes[1].0, plain);
     assert!(rig.hidden_panes(&rig.team).is_empty());

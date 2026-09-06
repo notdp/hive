@@ -149,8 +149,10 @@ pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) ->
 
 /// The shell line both bindings run: `hive mirror` on the clicked/current
 /// window. A run-shell job carries no TMUX_PANE, so the window travels as
-/// an argument; `q:` shell-quotes it.
+/// an argument; `q:` shell-quotes it. `hive` is shell-quoted already and
+/// gets tmux's double-quote escaping on top (a `$` in the path).
 pub fn _mirror_run_shell(hive: &str) -> String {
+    let hive = crate::cli::util::tmux_dquote_escape(hive);
     format!("run-shell -b \"{hive} mirror --window '#{{q:session_name}}:#{{window_index}}'\"")
 }
 

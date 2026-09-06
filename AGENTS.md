@@ -21,7 +21,14 @@ behavior is documented in the modules themselves.
   mirror is display state of the same kind: `@hive-role mirror` on the
   pane, `@hive-mirror on|off` on the team window (`hive mirror`; unset
   means open), `@hive-hidden <team>` on the window that parks a closed
-  mirror pane, and nothing in the registry. The team session's status bar
+  mirror pane, and nothing in the registry. The window's layout is
+  display state of the same kind: the planner (`layout/plan.rs`) is pure,
+  `@hive-layout` on the team window is the key of the plan last applied,
+  the two window hooks (`layout/hooks.rs`, installed with every other
+  window mark by `tmux::configure_hive_window`) re-run the comparison on
+  every resize and layout change, and nothing is in the registry; a
+  human's border drag holds until the plan itself changes. The team
+  session's status bar
   (`tmux/status.rs`) is rendered from tmux options alone —
   `@hive-busy`/`@hive-unread` per pane and `@hive-ticker` per window are
   the hived's display writes (`hived/status.rs`), never authority. The

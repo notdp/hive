@@ -1254,6 +1254,16 @@ fn test_shlex_quote_matches_python() {
 }
 
 #[test]
+fn test_tmux_dquote_escape_protects_dollar_backslash_and_quote() {
+    assert_eq!(tmux_dquote_escape("/x/hive"), "/x/hive");
+    assert_eq!(
+        tmux_dquote_escape("'/x/we ird$x/hive'"),
+        "'/x/we ird\\$x/hive'"
+    );
+    assert_eq!(tmux_dquote_escape("a\\b\"c"), "a\\\\b\\\"c");
+}
+
+#[test]
 fn test_uuid4_shape() {
     let sid = uuid4();
     assert_eq!(sid.len(), 36);
@@ -2091,11 +2101,36 @@ fn test_attach_heal_builds_the_mirror_when_not_suppressed() {
         &argv,
         &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
     ));
-    // An ordinary pane: the landscape preset, no generated layout.
+    // The mirror beside the shell pane: the plan for a 200x50 window with
+    // a mirror and one member, its key recorded on the window.
+    let planned = planned_layout((200, 50), &[("%1", "mirror"), ("%0", "")]);
     assert!(has_row(
         &argv,
-        &["select-layout", "-t", "dev:1", "main-vertical"]
+        &["select-layout", "-t", "dev:1", &planned.layout]
     ));
+    assert!(has_row(
+        &argv,
+        &[
+            "set-window-option",
+            "-t",
+            "dev:1",
+            "@hive-layout",
+            &planned.key
+        ]
+    ));
+}
+
+/// The real planner's answer for `panes` (`(id, role)`, window order).
+fn planned_layout(size: (i64, i64), panes: &[(&str, &str)]) -> crate::layout::Plan {
+    let panes: Vec<crate::tmux::PaneInfo> = panes
+        .iter()
+        .map(|(id, role)| crate::tmux::PaneInfo {
+            pane_id: id.to_string(),
+            role: role.to_string(),
+            ..Default::default()
+        })
+        .collect();
+    crate::layout::plan(size, &panes).expect("a plan for two panes")
 }
 
 // --- hive mirror -------------------------------------------------------------
@@ -2156,10 +2191,12 @@ fn test_mirror_off_breaks_the_pane_into_the_team_session_records_off_and_retiles
         ]
     ));
     assert_eq!(count(&argv, "kill-pane"), 0);
-    // The two survivors get the landscape preset.
+    // The two survivors are planned side by side (200x50 is landscape).
+    let planned = planned_layout((200, 50), &[("%0", ""), ("%2", "agent")]);
+    assert_eq!(planned.key, "landscape/m2/no-mirror/no-dock/2x1");
     assert!(has_row(
         &argv,
-        &["select-layout", "-t", "dev:1", "main-vertical"]
+        &["select-layout", "-t", "dev:1", &planned.layout]
     ));
     assert_eq!(count(&argv, "select-layout"), 1);
 }

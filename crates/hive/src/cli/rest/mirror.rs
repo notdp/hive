@@ -85,7 +85,7 @@ pub(crate) fn _mirror(mode: &str, window_arg: &str) -> Result<String, String> {
                 .map_err(|e| format!("break-pane {pane}: {e}"))?;
         tmux::set_window_option(&hidden, &format!("@{}", tmux::HIDDEN_WINDOW_KEY), &team);
     }
-    let _ = crate::layout::apply_adaptive(&window);
+    let _ = crate::layout::ensure(&window, false);
     Ok(format!("mirror off ({team})"))
 }
 
@@ -111,5 +111,5 @@ fn _join_rig_mirror(window: &str, team: &str) {
         return;
     };
     _join_parked_pane(&hidden, &first);
-    let _ = crate::layout::apply_adaptive(window);
+    let _ = crate::layout::ensure(window, false);
 }
