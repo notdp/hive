@@ -1207,20 +1207,6 @@ fn test_run_shell_detached_passes_command_byte_for_byte() {
 }
 
 #[test]
-fn test_source_file_bool_contract() {
-    let calls = capture_run(0, "");
-    assert!(source_file("/x/enable.conf"));
-    assert_eq!(
-        *calls.borrow(),
-        vec![(v(&["source-file", "/x/enable.conf"]), false, 5)]
-    );
-    capture_run(1, "");
-    assert!(!source_file("/x/enable.conf"));
-    raising_run();
-    assert!(!source_file("/x/enable.conf"));
-}
-
-#[test]
 fn test_display_value_none_on_failure() {
     capture_run(1, "");
     assert_eq!(display_value("%5", "#{pane_left}"), None);

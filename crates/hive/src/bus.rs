@@ -10,15 +10,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 pub const WORKSPACE_DIRS: [&str; 3] = ["artifacts", "state", "run"];
-pub const LEGACY_WORKSPACE_DIRS: [&str; 4] = ["status", "presence", "events", "cursors"];
 pub const DB_FILENAME: &str = "hive.db";
 
-const LEGACY_MESSAGE_RUNTIME_COLUMNS: [&str; 4] = [
-    "inject_status",
-    "turn_observed",
-    "runtime_queue_state",
-    "queue_source",
-];
 const MSG_ID_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const MSG_ID_WIDTH: usize = 4;
 // Keep short IDs non-obvious without introducing collisions inside the 4-char space.
@@ -137,57 +130,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq
             ON messages(msg_id, intent, seq);",
     )?;
-    migrate_messages_table(conn)?;
     Ok(())
-}
-
-fn table_columns(conn: &Connection, table_name: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>("name"))?;
-    rows.collect()
-}
-
-fn migrate_messages_table(conn: &Connection) -> rusqlite::Result<()> {
-    let columns = table_columns(conn, "messages")?;
-    if columns.is_empty() {
-        return Ok(());
-    }
-    if !LEGACY_MESSAGE_RUNTIME_COLUMNS
-        .iter()
-        .any(|legacy| columns.iter().any(|column| column == legacy))
-    {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "BEGIN IMMEDIATE;
-        DROP INDEX IF EXISTS idx_messages_msg_intent_seq;
-        ALTER TABLE messages RENAME TO messages_legacy;
-        CREATE TABLE messages (
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            msg_id TEXT NOT NULL DEFAULT '',
-            from_agent TEXT NOT NULL,
-            to_agent TEXT NOT NULL,
-            intent TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            artifact TEXT NOT NULL DEFAULT '',
-            in_reply_to TEXT NOT NULL DEFAULT '',
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL
-        );
-        INSERT INTO messages (
-            seq, msg_id, from_agent, to_agent, intent, body, artifact,
-            in_reply_to, metadata_json, created_at
-        )
-        SELECT
-            seq, msg_id, from_agent, to_agent, intent, body, artifact,
-            in_reply_to, metadata_json, created_at
-        FROM messages_legacy
-        ORDER BY seq ASC;
-        DROP TABLE messages_legacy;
-        CREATE INDEX IF NOT EXISTS idx_messages_msg_intent_seq ON messages(msg_id, intent, seq);
-        COMMIT;",
-    )
 }
 
 fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
@@ -227,14 +170,12 @@ pub fn reset_workspace(workspace: impl AsRef<Path>) -> Result<PathBuf> {
         bail!("{reason}");
     }
     fs::create_dir_all(&ws)?;
-    for name in WORKSPACE_DIRS.iter().chain(LEGACY_WORKSPACE_DIRS.iter()) {
+    for name in WORKSPACE_DIRS.iter() {
         let root = ws.join(name);
         if root.exists() {
             fs::remove_dir_all(&root)?;
         }
-        if WORKSPACE_DIRS.contains(name) {
-            fs::create_dir_all(&root)?;
-        }
+        fs::create_dir_all(&root)?;
     }
     let db = db_path(&ws);
     let mut wal = db.clone().into_os_string();
@@ -525,19 +466,6 @@ mod tests {
         .unwrap();
         fs::write(workspace.join("artifacts").join("note.txt"), "artifact").unwrap();
         fs::write(workspace.join("state").join("mode"), "busy").unwrap();
-        // Legacy dirs are cleaned up on reset.
-        fs::create_dir_all(workspace.join("status")).unwrap();
-        fs::write(
-            workspace.join("status").join("legacy.json"),
-            "{\"state\":\"done\"}",
-        )
-        .unwrap();
-        fs::create_dir_all(workspace.join("presence")).unwrap();
-        fs::write(
-            workspace.join("presence").join("team.json"),
-            "{\"team\":\"dev\"}",
-        )
-        .unwrap();
         fs::write(workspace.join("keep.txt"), "keep").unwrap();
 
         reset_workspace(&workspace).unwrap();
@@ -549,10 +477,6 @@ mod tests {
         }
         assert!(workspace.join(DB_FILENAME).is_file());
         assert!(read_all_events(&workspace).unwrap().is_empty());
-        assert!(!workspace.join("status").exists());
-        assert!(!workspace.join("presence").exists());
-        assert!(!workspace.join("events").exists());
-        assert!(!workspace.join("cursors").exists());
         assert_eq!(
             fs::read_to_string(workspace.join("keep.txt")).unwrap(),
             "keep"
@@ -816,80 +740,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let workspace = init_workspace(tmp.path().join("ws")).unwrap();
         assert!(!has_send_reply_to(&workspace, "", "orch", "dodo").unwrap());
-    }
-
-    #[test]
-    fn test_init_workspace_migrates_legacy_runtime_columns() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = tmp.path().join("ws");
-        fs::create_dir_all(&workspace).unwrap();
-        let db_path = workspace.join(DB_FILENAME);
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE messages (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                msg_id TEXT NOT NULL DEFAULT '',
-                from_agent TEXT NOT NULL,
-                to_agent TEXT NOT NULL,
-                intent TEXT NOT NULL,
-                body TEXT NOT NULL DEFAULT '',
-                artifact TEXT NOT NULL DEFAULT '',
-                in_reply_to TEXT NOT NULL DEFAULT '',
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                inject_status TEXT NOT NULL DEFAULT '',
-                turn_observed TEXT NOT NULL DEFAULT '',
-                runtime_queue_state TEXT NOT NULL DEFAULT '',
-                queue_source TEXT NOT NULL DEFAULT ''
-            )",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO messages (
-                msg_id, from_agent, to_agent, intent, body, artifact,
-                in_reply_to, metadata_json, created_at,
-                inject_status, turn_observed, runtime_queue_state, queue_source
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                "a1b2",
-                "orch",
-                "claude",
-                "send",
-                "hello",
-                "",
-                "",
-                "{}",
-                "2026-03-17T10:00:00Z",
-                "submitted",
-                "pending",
-                "queued",
-                "capture",
-            ],
-        )
-        .unwrap();
-        drop(conn);
-
-        init_workspace(&workspace).unwrap();
-
-        let conn = Connection::open(&db_path).unwrap();
-        let columns = table_columns(&conn, "messages").unwrap();
-        drop(conn);
-        assert!(!columns.iter().any(|column| column == "inject_status"));
-        assert!(!columns.iter().any(|column| column == "turn_observed"));
-        assert!(!columns.iter().any(|column| column == "runtime_queue_state"));
-        assert!(!columns.iter().any(|column| column == "queue_source"));
-        assert_eq!(
-            serde_json::to_value(read_all_events(&workspace).unwrap()).unwrap(),
-            json!([{
-                "msgId": "a1b2",
-                "from": "orch",
-                "to": "claude",
-                "intent": "send",
-                "body": "hello",
-                "metadata": {},
-                "createdAt": "2026-03-17T10:00:00Z",
-            }])
-        );
     }
 
     #[test]

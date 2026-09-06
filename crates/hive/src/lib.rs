@@ -1,10 +1,10 @@
 pub mod adapters;
 pub mod agent;
 pub mod agent_cli;
+pub mod assets;
 pub mod bus;
 pub mod cli;
 pub mod context;
-pub mod core_hooks;
 pub mod cvim;
 pub mod devlog;
 pub mod draft_guard;

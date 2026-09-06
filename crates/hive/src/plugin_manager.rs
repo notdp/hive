@@ -9,10 +9,7 @@
 //! lives on disk under `$HIVE_HOME/plugins/`. The one shipped
 //! plugin (`notify`) is a manifest-only toggle the hived reads through
 //! `is_plugin_enabled`, so enabling copies the manifest under
-//! `installed/<name>/` and records the state entry, nothing more. Disable
-//! still understands the commands / skills / hooks / tmux fields older
-//! installs recorded, because `cleanup_retired_plugins` sweeps those legacy
-//! entries.
+//! `installed/<name>/` and records the state entry, nothing more.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -124,7 +121,7 @@ pub fn materialize_marketplace() -> Result<PathBuf> {
         .iter()
         .map(|(rel, content, executable)| (rel.as_str(), *content, *executable))
         .collect();
-    crate::core_hooks::materialize_asset_tree(&root, &borrowed)?;
+    crate::assets::materialize_asset_tree(&root, &borrowed)?;
     Ok(root.join(_PAYLOAD_SUBDIR))
 }
 
@@ -177,8 +174,16 @@ fn load_state() -> Map<String, Value> {
     }
 }
 
+fn save_json_file(path: &Path, data: &Map<String, Value>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(data)?))?;
+    Ok(())
+}
+
 fn save_state(data: &Map<String, Value>) -> Result<()> {
-    crate::core_hooks::save_json_file(&state_path(), data)
+    save_json_file(&state_path(), data)
 }
 
 fn remove_path(path: &Path) {
@@ -269,52 +274,6 @@ pub fn list_plugins() -> Result<Vec<Value>> {
     Ok(rows)
 }
 
-/// Legacy installs that set `tmux: true` sourced a `tmux/enable.conf`;
-/// undo it from the matching `disable.conf` when the file is still there.
-fn uninstall_tmux_bindings(install_dir: &Path) -> bool {
-    let conf = install_dir.join("tmux").join("disable.conf");
-    if !conf.is_file() {
-        return false;
-    }
-    crate::tmux::source_file(&conf.to_string_lossy())
-}
-
-/// True if *path* is a symlink pointing into the hive plugin installed tree.
-///
-/// No shipped plugin installs skills anymore; this guard remains so
-/// `disable_plugin` can clean up legacy state entries (e.g. a retired
-/// `code-review` install) without touching user-owned skill directories.
-fn is_plugin_managed_skill(path: &Path) -> bool {
-    let is_link = fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if !is_link {
-        return false;
-    }
-    let Ok(target) = fs::canonicalize(path) else {
-        return false;
-    };
-    // canonicalize the root too: on macOS tempdirs, the resolved target is
-    // /private/var/... while the raw root string is /var/...
-    let root = installed_root();
-    let root = fs::canonicalize(&root).unwrap_or(root);
-    target.starts_with(&root)
-}
-
-fn string_paths(plugin_state: &Map<String, Value>, key: &str) -> Vec<PathBuf> {
-    plugin_state
-        .get(key)
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
     let mut state = load_state();
     if !state.get("plugins").is_some_and(|v| v.is_object()) {
@@ -333,29 +292,12 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
     };
     let plugin_state = plugin_state.as_object().cloned().unwrap_or_default();
 
-    for path in string_paths(&plugin_state, "commands") {
-        remove_path(&path);
-    }
-    for skill_path in string_paths(&plugin_state, "skills") {
-        if skill_path.exists() && !is_plugin_managed_skill(&skill_path) {
-            continue;
-        }
-        remove_path(&skill_path);
-    }
-    if let Some(Value::Object(hook_defs)) = plugin_state.get("hooks") {
-        if !hook_defs.is_empty() {
-            crate::core_hooks::remove_hook_groups(hook_defs)?;
-        }
-    }
     let install_root = plugin_state
         .get("installRoot")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
     if let Some(install_root) = &install_root {
-        if crate::json_fields::is_set(plugin_state.get("tmux")) {
-            uninstall_tmux_bindings(install_root);
-        }
         remove_path(install_root);
     }
     if let Some(plugins) = state.get_mut("plugins").and_then(|v| v.as_object_mut()) {
@@ -365,38 +307,7 @@ pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
     Ok(json!({"name": name, "enabled": false}))
 }
 
-pub const RETIRED_PLUGINS: [&str; 3] = ["cvim", "fork", "code-review"];
-
-/// Disable any retired plugin left over from an older install.
-///
-/// cvim/fork were promoted into core hive; code-review was removed.
-/// Called during `hive create` so users who previously enabled them have
-/// their legacy command shims, skill symlinks, install root and state
-/// entries cleaned up automatically.
-pub fn cleanup_retired_plugins() -> Result<Vec<String>> {
-    let state = load_state();
-    let names: Vec<String> = state
-        .get("plugins")
-        .and_then(|v| v.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    let mut removed = Vec::new();
-    for name in names {
-        if RETIRED_PLUGINS.contains(&name.as_str()) {
-            disable_plugin(&name, true)?;
-            removed.push(name);
-        }
-    }
-    Ok(removed)
-}
-
 pub fn enable_plugin(name: &str) -> Result<Value> {
-    if RETIRED_PLUGINS.contains(&name) {
-        return Err(anyhow!(
-            "plugin '{}' is retired — nothing to enable. Run `hive create` to clean up any legacy plugin state.",
-            name
-        ));
-    }
     let manifest = load_manifest(name)?;
     disable_plugin(name, true)?;
 
@@ -442,7 +353,7 @@ pub fn enable_plugin(name: &str) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::testenv::EnvGuard;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     fn setup() -> (tempfile::TempDir, EnvGuard) {
         let mut env = EnvGuard::new();
@@ -535,99 +446,5 @@ mod tests {
         .unwrap();
         ensure_codex_plugin_current();
         assert_eq!(fs::read_to_string(&log).unwrap(), "plugin add hive@hive\n");
-    }
-
-    #[test]
-    fn test_plugin_list_does_not_offer_retired_plugins() {
-        let (_tmp, _guard) = setup();
-        let names: Vec<String> = list_plugins()
-            .unwrap()
-            .iter()
-            .map(|row| row["name"].as_str().unwrap().to_string())
-            .collect();
-        assert!(!names.contains(&"cvim".to_string()));
-        assert!(!names.contains(&"fork".to_string()));
-        assert!(!names.contains(&"code-review".to_string()));
-        assert!(names.contains(&"notify".to_string()));
-    }
-
-    #[test]
-    fn test_plugin_enable_rejects_retired_plugins() {
-        let (_tmp, _guard) = setup();
-        for retired in ["cvim", "fork", "code-review"] {
-            let err = enable_plugin(retired).unwrap_err();
-            assert!(err.to_string().contains("retired"), "{}", err);
-        }
-    }
-
-    #[test]
-    fn test_init_retired_cleanup_removes_legacy_code_review_install() {
-        let (tmp, _guard) = setup();
-        let hive_home = tmp.path().join(".hive");
-        let claude_home = tmp.path().join(".claude");
-        let codex_home = tmp.path().join(".codex");
-
-        // Legacy on-disk layout left behind by an old `hive plugin enable code-review`.
-        let install_root = hive_home
-            .join("plugins")
-            .join("installed")
-            .join("code-review");
-        let skill_src = install_root.join("skills").join("code-review");
-        fs::create_dir_all(&skill_src).unwrap();
-        fs::write(skill_src.join("SKILL.md"), "legacy\n").unwrap();
-        let mut plugin_links = Vec::new();
-        for home in [&claude_home, &codex_home] {
-            let link = home.join("skills").join("code-review");
-            fs::create_dir_all(link.parent().unwrap()).unwrap();
-            symlink(&skill_src, &link).unwrap();
-            plugin_links.push(link);
-        }
-
-        // A user-owned (non-symlink) skill listed in state must survive cleanup.
-        let user_skill = claude_home.join("skills").join("review");
-        fs::create_dir_all(&user_skill).unwrap();
-        fs::write(
-            user_skill.join("SKILL.md"),
-            "---\nname: review\ndescription: user custom\n---\n",
-        )
-        .unwrap();
-
-        let state_path = hive_home.join("plugins").join("state.json");
-        let mut skills: Vec<String> = plugin_links
-            .iter()
-            .map(|link| link.to_string_lossy().to_string())
-            .collect();
-        skills.push(user_skill.to_string_lossy().to_string());
-        fs::write(
-            &state_path,
-            serde_json::to_string(&json!({
-                "plugins": {
-                    "code-review": {
-                        "installRoot": install_root.to_string_lossy(),
-                        "skills": skills,
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let removed = cleanup_retired_plugins().unwrap();
-
-        assert_eq!(removed, vec!["code-review".to_string()]);
-        for link in &plugin_links {
-            assert!(!link.exists() && fs::symlink_metadata(link).is_err());
-        }
-        assert!(!install_root.exists());
-        assert!(user_skill.is_dir());
-        assert!(!fs::symlink_metadata(&user_skill)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(fs::read_to_string(user_skill.join("SKILL.md"))
-            .unwrap()
-            .starts_with("---\nname: review"));
-        let state: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-        assert!(state["plugins"].get("code-review").is_none());
     }
 }
