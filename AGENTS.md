@@ -55,26 +55,24 @@ behavior is documented in the modules themselves.
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;
   the viewer must stay usable against a transcript file alone.
-- Orchestration is not hive's: `hive node run` is one node as one blocking
-  command (`--team`, `--name`, `--cli`, `--model`; the task on stdin, the
-  member's final message for it as one JSON line on stdout), and a Claude
+- Orchestration is not hive's: `hive workflow run` is one node as one
+  blocking command (`--team`, `--name`, `--cli`, `--model`; the task on
+  stdin, the member's return as one JSON line on stdout), and a Claude
   Code Workflow drives those nodes through the plugin's `hive-node` agent,
   which is only a relay for the command. A node has no reply address: the
   dispatch envelope carries no `from` (its ledger row has an empty
-  `from_agent`), the member is never asked to send anything back, and
-  `run_node` (`node.rs`) reads the result from the engine's own transcript
-  through the `adapters/turn.rs` readers — cursor before the dispatch, the
-  input record carrying the dispatch id (`nd-<12 hex>`, in the task
-  artifact path and the first body line) binds the turn, that turn's
-  terminal record ends the wait. The readers (`claude_turn`, `codex_turn`,
-  `grok_turn`) are the only place a transcript's turn and terminal shapes
-  are interpreted; `node.rs` sees `TurnOutcome` values and nothing else,
-  and what it cannot attribute to the id it reports (`ambiguous`,
-  `session_changed`) rather than guesses; a turn the engine closed before
-  its final message reached disk is `TurnOutcome::Flushing`, which the core
-  polls under a bounded flush budget and never treats as a result. Each run
-  is recorded at `<workspace>/run/nodes/<name>.json` under the flock
-  `<workspace>/run/nodes/<name>.lock`, written `pending` before the bus
+  `from_agent`), the member is never asked to send anything back, and the
+  result is an explicit return — the member runs `hive workflow done
+  "<summary>" [--artifact <file>|-]`, which resolves its own identity
+  through the identity ladder, reads its pending record for the one
+  dispatch id (`nd-<12 hex>`, also in the task artifact path and the
+  first body line) and writes `<workspace>/run/workflow/<name>.done.json`
+  (tmp + rename); `run_node` polls for that file and consumes it. Nothing
+  reads the engine's transcript. A member whose turn the hived reports
+  closed with no done file is `no_result`; the only `ambiguous` left is a
+  lost dispatch answer with no return. Each run is recorded at
+  `<workspace>/run/workflow/<name>.json` under the flock
+  `<workspace>/run/workflow/<name>.lock`, written `pending` before the bus
   write so exit 1 always means "not dispatched"; a pending record whose
   member is alive is `member_busy`, one whose member is dead is replaced,
   and `hive kill` removes it. A same-name node reuses a live member; the
@@ -113,9 +111,9 @@ Design truth lives in these docs, one question each:
 
 - `docs/runtime-model.md` — what hive knows about an engine: team identity
   (registry vs tmux display), the runtime fields and their per-CLI native
-  sources, send addressing, the node dispatch and its per-CLI turn anchors,
-  active-turn fork routing. Runtime-field semantics belong there; keep them
-  in sync with the code that computes them.
+  sources, send addressing, the workflow node dispatch and its explicit
+  return, active-turn fork routing. Runtime-field semantics belong there;
+  keep them in sync with the code that computes them.
 - `docs/transcript-view.md` — what a reader sees on screen: the JSONL →
   `DisplayBlock` parse model, the TUI's chrome and interaction layer, theme
   and appearance resolution. The boundary against `runtime-model.md` follows
@@ -144,9 +142,10 @@ Design truth lives in these docs, one question each:
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok python -m pytest tests/acceptance -q`
   — post-install live acceptance: one real agent per CLI, spawned through the
   installed `hive`. It asserts what unit suites structurally cannot see (the
-  node's body against the member's own transcript, absence of acks and
-  replies, pane color as tmux actually renders it, picker residue, nonce
-  causality) plus a headless-claude semantic coroner. Run it
+  node's return against the member's done file and the dispatch landing
+  once in its transcript, absence of acks and replies, pane color as tmux
+  actually renders it, picker residue, nonce causality) plus a
+  headless-claude semantic coroner. Run it
   after every live install; it is skipped everywhere else.
 - Plugin/skill materialization and hived behavior that must exercise new
   source code need an isolated dev lane: disposable `HIVE_HOME`,
