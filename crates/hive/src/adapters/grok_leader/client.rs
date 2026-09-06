@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
-use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, TOOL_PHASES};
+use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS};
 
 // --------------------------------------------------------------------------
 // per-session runtime state, kept current by the reader thread
@@ -18,7 +18,6 @@ use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNK
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionRuntime {
     pub busy: bool,
-    pub turn_phase: String,
     pub input_state: String,
     pub session_id: Option<String>,
     pub observed_at: f64,
@@ -28,7 +27,6 @@ impl Default for SessionRuntime {
     fn default() -> Self {
         SessionRuntime {
             busy: false,
-            turn_phase: "unknown_evidence".to_string(),
             input_state: String::new(),
             session_id: None,
             observed_at: 0.0,
@@ -302,11 +300,10 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
                 .and_then(Value::as_str);
             if kind == Some("turn_completed") {
                 state.runtime.busy = false;
-                state.runtime.turn_phase = "turn_closed".to_string();
                 state.runtime.input_state = "ready".to_string();
             }
         }
-        "_x.ai/queue/changed" => apply_queue(&mut state, params),
+        "_x.ai/queue/changed" => apply_queue(&state, params),
         _ => {}
     }
 }
@@ -318,7 +315,6 @@ fn apply_activity(state: &mut ClientShared, activity: Option<&Value>) {
         Some("working") => state.runtime.busy = true,
         Some("idle") => {
             state.runtime.busy = false;
-            state.runtime.turn_phase = "turn_closed".to_string();
             state.runtime.input_state = "ready".to_string();
         }
         _ => {}
@@ -331,24 +327,15 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("");
     match kind {
-        "tool_call" => {
-            state.runtime.busy = true;
-            state.runtime.turn_phase = "tool_open".to_string();
-        }
+        "tool_call" => state.runtime.busy = true,
         "tool_call_update" => {
             // An update on a tool call means the turn is running and any
             // permission it was blocked on has been decided.
             state.runtime.busy = true;
             state.runtime.input_state = "ready".to_string();
-            if update.get("status").and_then(Value::as_str) == Some("completed") {
-                state.runtime.turn_phase = "tool_result_pending_reply".to_string();
-            }
         }
         kind if MESSAGE_CHUNKS.contains(&kind) => {
             state.runtime.busy = true;
-            if !TOOL_PHASES.contains(&state.runtime.turn_phase.as_str()) {
-                state.runtime.turn_phase = "user_prompt_pending".to_string();
-            }
             if kind == "user_message_chunk" {
                 let text = update
                     .get("content")
@@ -360,23 +347,11 @@ fn apply_update(state: &mut ClientShared, update: &Value) {
     }
 }
 
-fn apply_queue(state: &mut ClientShared, params: &Value) {
-    let entries: Vec<Value> = params
-        .get("entries")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter(|entry| entry.is_object())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    if !entries.is_empty() {
-        state.runtime.turn_phase = "input_backlog".to_string();
-    }
-    for entry in &entries {
-        note_ack(state, entry.get("text"));
+fn apply_queue(state: &ClientShared, params: &Value) {
+    if let Some(entries) = params.get("entries").and_then(Value::as_array) {
+        for entry in entries.iter().filter(|entry| entry.is_object()) {
+            note_ack(state, entry.get("text"));
+        }
     }
     note_ack(state, params.get("runningText"));
 }

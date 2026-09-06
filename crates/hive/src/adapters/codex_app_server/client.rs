@@ -21,7 +21,6 @@ use super::{CALL_TIMEOUT, HANDSHAKE_TIMEOUT, RESUME_COOLDOWN};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadRuntime {
     pub busy: bool,
-    pub turn_phase: String,
     pub input_state: String,
     pub observed_at: f64,
 }
@@ -30,7 +29,6 @@ impl Default for ThreadRuntime {
     fn default() -> Self {
         ThreadRuntime {
             busy: false,
-            turn_phase: "unknown_evidence".to_string(),
             input_state: String::new(),
             observed_at: 0.0,
         }
@@ -48,7 +46,6 @@ pub(crate) fn apply_status(rt: &mut ThreadRuntime, status: &Value) {
     match status.get("type").and_then(Value::as_str) {
         Some("active") => {
             rt.busy = true;
-            rt.turn_phase = "tool_open".to_string();
             let waiting = status
                 .get("activeFlags")
                 .and_then(Value::as_array)
@@ -64,7 +61,6 @@ pub(crate) fn apply_status(rt: &mut ThreadRuntime, status: &Value) {
         }
         Some("idle") => {
             rt.busy = false;
-            rt.turn_phase = "turn_closed".to_string();
             rt.input_state = "ready".to_string();
         }
         // notLoaded / systemError: leave prior fields, only observed_at advanced

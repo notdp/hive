@@ -188,7 +188,6 @@ fn test_apply_status_active_ready() {
     apply_status(&mut rt, &json!({"type": "active", "activeFlags": []}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "tool_open");
 }
 
 #[test]
@@ -220,7 +219,6 @@ fn test_apply_status_idle() {
     apply_status(&mut rt, &json!({"type": "idle"}));
     assert!(!rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "turn_closed");
 }
 
 #[test]
@@ -228,13 +226,11 @@ fn test_apply_status_unknown_kind_preserves_prior_fields() {
     let mut rt = ThreadRuntime {
         busy: true,
         input_state: "ready".to_string(),
-        turn_phase: "tool_open".to_string(),
         ..Default::default()
     };
     apply_status(&mut rt, &json!({"type": "systemError"}));
     assert!(rt.busy);
     assert_eq!(rt.input_state, "ready");
-    assert_eq!(rt.turn_phase, "tool_open");
 }
 
 #[test]
@@ -292,7 +288,7 @@ fn test_runtime_for_returns_copy_not_reference() {
 #[test]
 fn test_resume_backfills_active_runtime_from_thread_status() {
     // Late-join recovery: resume must seed _threads from the thread's
-    // status so runtime reads report native busy/turnPhase instead of None.
+    // status so runtime reads report native busy/inputState instead of None.
     let client = bare_client();
     client.set_call_override(|_method, _params| {
         json!({
@@ -313,7 +309,7 @@ fn test_resume_backfills_idle_runtime_from_thread_status() {
     assert!(client.resume("t1"));
     let rt = client.runtime_for("t1").unwrap();
     assert!(!rt.busy);
-    assert_eq!(rt.turn_phase, "turn_closed");
+    assert_eq!(rt.input_state, "ready");
 }
 
 #[test]
@@ -368,7 +364,8 @@ fn test_runtime_or_backfill_returns_backfilled_state() {
         |_method, _params| json!({"result": {"thread": {"status": {"type": "idle"}}}}),
     );
     let rt = client.runtime_or_backfill("t1").unwrap();
-    assert_eq!(rt.turn_phase, "turn_closed");
+    assert!(!rt.busy);
+    assert_eq!(rt.input_state, "ready");
 }
 
 // --- mint / fork protocol -----------------------------------------------

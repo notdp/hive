@@ -178,7 +178,6 @@ fn augment_team_payload_with_runtime(
                 "sessionId",
                 "inputState",
                 "inputReason",
-                "turnPhase",
             ] {
                 match runtime_fields.get(key) {
                     None | Some(Value::Null) => continue,
