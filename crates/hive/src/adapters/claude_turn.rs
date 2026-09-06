@@ -7,17 +7,32 @@
 //!
 //! - An idle delivery writes `queue-operation enqueue`, `dequeue`, then a
 //!   `user` record (`promptSource: queued`) carrying the text: that record
-//!   is the anchor. A mid-turn arrival writes `enqueue`, an `attachment` of
-//!   type `queued_command`, and a terminal `queue-operation remove`
-//!   (`reason: absorbed_mid_turn` from 2.1.246, no reason before) and no
-//!   `user` record at all: the marker is folded into someone else's turn,
-//!   and the node cannot own it.
+//!   is the anchor. A `user` record marked `isMeta` or `turnCompanion` (a
+//!   skill body, a local-command caveat, an inbox-lane peer wrapper) is not
+//!   an input, the same rule the acceptance oracle applies. A mid-turn
+//!   arrival writes `enqueue`, an `attachment` of type `queued_command`,
+//!   and a terminal `queue-operation remove` (`reason: absorbed_mid_turn`
+//!   from 2.1.246, no reason before) and no `user` record at all: the
+//!   marker is folded into someone else's turn, and the node cannot own
+//!   it. The same three rows inside the bound turn are another input
+//!   folded into the node's turn, reported ambiguous wherever they land.
+//!   The one fold that is the turn's own is a `queued_command` with
+//!   `commandMode: task-notification` (no `origin`): the harness handing
+//!   a background tool's result back, its `<tool-use-id>` naming a
+//!   `tool_use` block of this turn.
 //! - One API message is written as one record per content block
 //!   (`apiBlockIndex`), every block record carrying the whole message's
 //!   `stop_reason` and `message.id`; a thinking block with
 //!   `stop_reason: end_turn` lands before the text block that follows it.
-//!   The final message is therefore complete only once a record that is
-//!   not one of its blocks has landed after it.
+//!   The final message is therefore complete only once a record that
+//!   cannot sit between two of its blocks has landed after it (see
+//!   `completes_message`); until then the turn is `Flushing`. Block
+//!   records are flushed late: a `dequeue` with a later timestamp has been
+//!   seen on disk before the blocks of the message it followed.
+//! - After the final message a bg member session writes `system
+//!   turn_duration`, `cost-state`, then `last-prompt` (51 of 51 idle turn
+//!   ends sampled); a desktop session writes `system stop_hook_summary`
+//!   or the next turn's queue rows first.
 //! - A human interrupt is a `user` record whose text is
 //!   `[Request interrupted by user]` (Escape) or
 //!   `[Request interrupted by user for tool use]` (a rejected tool call,
@@ -177,10 +192,13 @@ impl TurnReader for ClaudeTurnReader {
     }
 }
 
-/// The chain walk after the anchor record: `None` while the turn runs.
+/// The chain walk after the anchor record: `None` while the turn runs,
+/// `Flushing` once an `end_turn` block is on disk and nothing that proves
+/// the message complete is.
 fn walk_turn(anchor: &TurnAnchor, records: impl Iterator<Item = Record>) -> Option<TurnOutcome> {
     let mut turn: HashSet<String> = HashSet::from([anchor.turn.clone()]);
     let mut seen: HashSet<String> = turn.clone();
+    let mut tool_ids: HashSet<String> = HashSet::new();
     let mut final_message: Option<FinalMessage> = None;
     for record in records {
         if let Some(session) = session_of(&record) {
@@ -192,12 +210,27 @@ fn walk_turn(anchor: &TurnAnchor, records: impl Iterator<Item = Record>) -> Opti
         }
         let kind = record_type(&record);
         let uuid = uuid_of(&record).map(str::to_string);
+        if let Some((shape, text)) = folded_input(&record) {
+            // A fold after the final message says the turn was still open
+            // when that message closed; even the turn's own task
+            // notification cannot be placed then.
+            if final_message.is_some() {
+                return Some(TurnOutcome::Ambiguous {
+                    reason: format!("{shape} after the final message"),
+                });
+            }
+            if !own_task_notification(&record, &text, &tool_ids) {
+                return Some(TurnOutcome::Ambiguous {
+                    reason: format!("{shape} folded into the turn"),
+                });
+            }
+        }
         if let Some(message) = &mut final_message {
             if kind == "assistant" && message_id(&record) == message.id {
                 message.texts.extend(text_blocks(&record));
                 continue;
             }
-            if uuid.is_some() || closes_message(&record) {
+            if completes_message(&record) {
                 return Some(TurnOutcome::Completed {
                     text: message.texts.join("\n"),
                 });
@@ -226,10 +259,7 @@ fn walk_turn(anchor: &TurnAnchor, records: impl Iterator<Item = Record>) -> Opti
                         reason: "compaction summary replaced the turn's context".into(),
                     });
                 }
-                if user_input_text(&record).is_none()
-                    || flag(&record, "isMeta")
-                    || flag(&record, "turnCompanion")
-                {
+                if user_input_text(&record).is_none() {
                     // A tool result or a harness companion: the turn goes on.
                     if ours {
                         turn.extend(uuid);
@@ -249,6 +279,7 @@ fn walk_turn(anchor: &TurnAnchor, records: impl Iterator<Item = Record>) -> Opti
                     continue;
                 }
                 turn.extend(uuid);
+                tool_ids.extend(tool_use_ids(&record));
                 if flag(&record, "isApiErrorMessage") {
                     let label = record
                         .get("error")
@@ -330,7 +361,12 @@ fn walk_turn(anchor: &TurnAnchor, records: impl Iterator<Item = Record>) -> Opti
             }
         }
     }
-    None
+    final_message.map(|message| TurnOutcome::Flushing {
+        reason: format!(
+            "final message {} has no closing record yet",
+            message.id.as_deref().unwrap_or("without id")
+        ),
+    })
 }
 
 struct FinalMessage {
@@ -338,14 +374,100 @@ struct FinalMessage {
     texts: Vec<String>,
 }
 
-/// Records without a uuid that claude writes only once a turn has closed:
-/// `last-prompt` and the dequeue that opens the next queued turn. (An
-/// `enqueue` is a human typing and can interleave with a streaming message.)
-fn closes_message(record: &Record) -> bool {
+/// Records that cannot sit between two blocks of one assistant message, so
+/// one of them after an `end_turn` block says the message is on disk in
+/// full: the next message (a different `message.id`), a `user` record (an
+/// `end_turn` message has no `tool_use` block, so no tool result of its own
+/// is pending; an input opens the next turn), `last-prompt`, and the
+/// dequeue that opens the next queued turn. Nothing else is: `system` rows
+/// (`turn_duration`, `stop_hook_summary`) and attachments chain but are
+/// harness writes with their own timing, an `enqueue` is a human typing,
+/// and the `file-history-*`, `cost-state` and title rows are bookkeeping.
+/// On 300 transcripts (2.1.215 – 2.1.260, duplicate rewrites removed) no
+/// record of any kind was seen between two blocks of an `end_turn`
+/// message; the narrower set is what the reader relies on.
+///
+/// ponytail: a chained assistant message after the `end_turn` one (seen
+/// once, 34 minutes later, with no input row between; a stop hook that
+/// refuses the stop would look the same, and none has been seen) completes
+/// the message but is not followed: the node's result is the message that
+/// closed the turn. A real sample of a hook-continued turn is what would
+/// justify following it instead.
+fn completes_message(record: &Record) -> bool {
     match record_type(record) {
-        "last-prompt" => true,
+        "assistant" | "user" | "last-prompt" => true,
         "queue-operation" => record.get("operation").and_then(Value::as_str) == Some("dequeue"),
         _ => false,
+    }
+}
+
+/// The shape and text of a record that folds a queued input into the
+/// running turn: a `queued_command` attachment, or the terminal
+/// `queue-operation remove` (which alone is the pre-2.1.246 shape).
+fn folded_input(record: &Record) -> Option<(String, String)> {
+    match record_type(record) {
+        "attachment" => {
+            let attachment = record.get("attachment").and_then(Value::as_object)?;
+            if attachment.get("type").and_then(Value::as_str) != Some("queued_command") {
+                return None;
+            }
+            let mode = attachment
+                .get("commandMode")
+                .and_then(Value::as_str)
+                .unwrap_or("prompt");
+            Some((
+                format!("queued_command attachment ({mode})"),
+                content_text(attachment.get("prompt")),
+            ))
+        }
+        "queue-operation" => {
+            if record.get("operation").and_then(Value::as_str) != Some("remove") {
+                return None;
+            }
+            let reason = record
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            Some((
+                format!("queue-operation remove{reason}"),
+                content_text(record.get("content")),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a fold is the harness returning one of this turn's own
+/// background tools: a `task-notification` whose `<tool-use-id>` names a
+/// `tool_use` block the turn has issued. A `remove` row has no
+/// `commandMode`, so its content is what is checked.
+fn own_task_notification(record: &Record, text: &str, tool_ids: &HashSet<String>) -> bool {
+    let mode = record
+        .get("attachment")
+        .and_then(|a| a.get("commandMode"))
+        .and_then(Value::as_str);
+    if record_type(record) == "attachment" && mode != Some("task-notification") {
+        return false;
+    }
+    let Some(rest) = text.trim_start().strip_prefix("<task-notification>") else {
+        return false;
+    };
+    rest.split_once("<tool-use-id>")
+        .and_then(|(_, after)| after.split_once("</tool-use-id>"))
+        .is_some_and(|(id, _)| tool_ids.contains(id.trim()))
+}
+
+/// The `tool_use` block ids of an assistant record.
+fn tool_use_ids(record: &Record) -> Vec<String> {
+    match record.get("message").and_then(|m| m.get("content")) {
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .filter_map(|b| b.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -439,8 +561,11 @@ fn content_text(content: Option<&Value>) -> String {
 }
 
 /// The text of a `user` record that is an input (human or injected);
-/// `None` for a tool result.
+/// `None` for a tool result and for a meta or turn-companion row.
 fn user_input_text(record: &Record) -> Option<String> {
+    if flag(record, "isMeta") || flag(record, "turnCompanion") {
+        return None;
+    }
     let content = record.get("message").and_then(|m| m.get("content"))?;
     if let Value::Array(blocks) = content {
         if blocks
@@ -638,6 +763,62 @@ mod tests {
         row
     }
 
+    /// The row a session writes once a turn has ended and it is idle.
+    fn last_prompt() -> Value {
+        json!({"type": "last-prompt", "lastPrompt": envelope(), "leafUuid": "x", "sessionId": SESSION})
+    }
+
+    /// A mid-turn fold: the `queued_command` attachment of `prompt`. Real
+    /// shape for a human or peer message (`origin`, `commandMode: prompt`).
+    fn queued_command(uuid: &str, parent: &str, prompt: &str) -> Value {
+        attachment(
+            uuid,
+            parent,
+            json!({
+                "type": "queued_command",
+                "prompt": prompt,
+                "source_uuid": "q1",
+                "commandMode": "prompt",
+                "origin": {"kind": "human"},
+                "timestamp": 1788681889694u64,
+            }),
+        )
+    }
+
+    /// The harness handing a background tool's result back mid-turn: no
+    /// `origin`, `commandMode: task-notification`.
+    fn task_notification(uuid: &str, parent: &str, tool_id: &str) -> Value {
+        attachment(
+            uuid,
+            parent,
+            json!({
+                "type": "queued_command",
+                "prompt": task_notification_text(tool_id),
+                "commandMode": "task-notification",
+                "timestamp": 1788681889694u64,
+            }),
+        )
+    }
+
+    fn task_notification_text(tool_id: &str) -> String {
+        format!("<task-notification>\n<task-id>b20oyonkc</task-id>\n<tool-use-id>{tool_id}</tool-use-id>\n<output-file>/tmp/out.txt</output-file>\n<status>completed</status>\n</task-notification>")
+    }
+
+    /// The reviewer's synthetic shape ([未验证]: no `progress` record
+    /// exists on this machine's transcripts): a chained record with a uuid
+    /// that is not one of the message's blocks.
+    fn progress(uuid: &str, parent: &str) -> Value {
+        json!({
+            "parentUuid": parent,
+            "isSidechain": false,
+            "type": "progress",
+            "data": {"type": "hook_progress", "hookName": "Stop"},
+            "uuid": uuid,
+            "timestamp": "2026-09-06T10:55:12.000Z",
+            "sessionId": SESSION,
+        })
+    }
+
     fn text(text: &str) -> Value {
         json!({"type": "text", "text": text})
     }
@@ -652,6 +833,22 @@ mod tests {
 
     fn envelope() -> String {
         format!("<HIVE to=hornet.bee artifact=/w/artifacts/tasks/bee-{MARKER}.md>\ntask {MARKER}\ndo the thing\n</HIVE>")
+    }
+
+    fn flushing(outcome: Option<TurnOutcome>) {
+        assert!(
+            matches!(outcome, Some(TurnOutcome::Flushing { .. })),
+            "expected Flushing, got {outcome:?}"
+        );
+    }
+
+    fn ambiguous(outcome: Option<TurnOutcome>, names: &str) {
+        match outcome {
+            Some(TurnOutcome::Ambiguous { reason }) => {
+                assert!(reason.contains(names), "{reason:?} does not name {names:?}")
+            }
+            other => panic!("expected Ambiguous naming {names:?}, got {other:?}"),
+        }
     }
 
     /// The previous turn, so the anchor has something to chain from and the
@@ -822,6 +1019,31 @@ mod tests {
         );
     }
 
+    /// A meta or turn-companion `user` row (a skill body, a caveat, an
+    /// inbox-lane wrapper) is not an input, as `docs/runtime-model.md` and
+    /// the acceptance oracle have it; the marker inside one binds nothing.
+    #[test]
+    fn test_find_input_meta_row_is_not_an_input() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        let mut meta = input("m1", Some("s0"), &envelope());
+        meta["isMeta"] = json!(true);
+        let mut companion = input("m2", Some("m1"), &envelope());
+        companion["message"]["content"] = json!([text(&envelope())]);
+        companion["isMeta"] = json!(true);
+        companion["turnCompanion"] = json!(true);
+        append(&fx.path, &[meta, companion]);
+        assert_eq!(
+            ClaudeTurnReader
+                .find_input(SESSION, Some(CWD), MARKER, &cursor)
+                .unwrap(),
+            InputBinding::NotYet
+        );
+        append(&fx.path, &[input("u1", Some("m2"), &envelope())]);
+        assert_eq!(bind(&cursor).turn, "u1");
+    }
+
     #[test]
     fn test_find_input_rescans_a_replaced_file_from_the_start() {
         let fx = fixture();
@@ -854,7 +1076,8 @@ mod tests {
     // --- outcome ---
 
     /// The probe-6406 shape: the final message is a thinking block record
-    /// and a text block record sharing one message id, then turn_duration.
+    /// and a text block record sharing one message id, then turn_duration,
+    /// cost-state and last-prompt.
     #[test]
     fn test_outcome_completed_with_tool_rounds_and_multi_block_final() {
         let fx = fixture();
@@ -884,7 +1107,7 @@ mod tests {
             ],
         );
         // end_turn on the thinking block: the text block is still coming.
-        assert_eq!(outcome(&anchor), None);
+        flushing(outcome(&anchor));
         append(
             &fx.path,
             &[
@@ -892,12 +1115,141 @@ mod tests {
                 assistant("a6", "a5", "msg_2", "end_turn", text("second\nparagraph")),
             ],
         );
-        assert_eq!(outcome(&anchor), None);
-        append(&fx.path, &[turn_duration("s1", "a6")]);
+        flushing(outcome(&anchor));
+        // turn_duration chains and has a uuid, and is still not proof.
+        append(
+            &fx.path,
+            &[
+                turn_duration("s1", "a6"),
+                json!({"type": "cost-state", "sessionId": SESSION, "totalCostUSD": 0.1}),
+            ],
+        );
+        flushing(outcome(&anchor));
+        append(&fx.path, &[last_prompt()]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
                 text: "first paragraph\nsecond\nparagraph".into()
+            })
+        );
+    }
+
+    /// The reviewer's synthetic order: a chained record with a uuid lands
+    /// between the end_turn thinking block and the text block of the same
+    /// message. The text block must still be read.
+    #[test]
+    fn test_outcome_record_between_final_blocks_is_not_a_barrier() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "end_turn", thinking()),
+                progress("p1", "a1"),
+                json!({"type": "file-history-snapshot", "messageId": "u1", "snapshot": {}, "isSnapshotUpdate": false}),
+            ],
+        );
+        flushing(outcome(&anchor));
+        append(
+            &fx.path,
+            &[assistant(
+                "a2",
+                "a1",
+                "msg_1",
+                "end_turn",
+                text("the answer"),
+            )],
+        );
+        flushing(outcome(&anchor));
+        append(&fx.path, &[last_prompt()]);
+        assert_eq!(
+            outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "the answer".into()
+            })
+        );
+    }
+
+    /// The desktop shape after a turn: stop_hook_summary chains to the
+    /// final block and is not proof either; the next turn's dequeue is.
+    #[test]
+    fn test_outcome_hook_summary_is_not_a_barrier_but_dequeue_is() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        let mut hook = turn_duration("s1", "a1");
+        hook["subtype"] = json!("stop_hook_summary");
+        hook["hookCount"] = json!(2);
+        hook["preventedContinuation"] = json!(false);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "end_turn", text("done")),
+                hook,
+                queue_op("enqueue", Some("next question"), None),
+            ],
+        );
+        flushing(outcome(&anchor));
+        append(&fx.path, &[queue_op("dequeue", None, None)]);
+        assert_eq!(
+            outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "done".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_outcome_next_input_completes_the_final_message() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "end_turn", text("done")),
+                turn_duration("s1", "a1"),
+            ],
+        );
+        flushing(outcome(&anchor));
+        append(&fx.path, &[input("u2", Some("s1"), "next question")]);
+        assert_eq!(
+            outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "done".into()
+            })
+        );
+    }
+
+    /// Real shape (kind-murdock 50c8bb0c): an assistant message with a new
+    /// id chained straight after the end_turn one, with no input row
+    /// between. The final message's blocks are complete by then.
+    #[test]
+    fn test_outcome_next_message_completes_the_final_message() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "end_turn", thinking()),
+                assistant("a2", "a1", "msg_1", "end_turn", text("done")),
+                assistant("a3", "a2", "msg_2", "tool_use", tool_use()),
+            ],
+        );
+        assert_eq!(
+            outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "done".into()
             })
         );
     }
@@ -916,13 +1268,8 @@ mod tests {
                 json!({"type": "cost-state", "sessionId": SESSION, "totalCostUSD": 0.1}),
             ],
         );
-        assert_eq!(outcome(&anchor), None);
-        append(
-            &fx.path,
-            &[
-                json!({"type": "last-prompt", "lastPrompt": envelope(), "leafUuid": "a1", "sessionId": SESSION}),
-            ],
-        );
+        flushing(outcome(&anchor));
+        append(&fx.path, &[last_prompt()]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
@@ -945,11 +1292,162 @@ mod tests {
                 turn_duration("s1", "a1"),
             ],
         );
+        // Never an empty Completed on its own: the text block may be next.
+        flushing(outcome(&anchor));
+        append(&fx.path, &[last_prompt()]);
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
                 text: String::new()
             })
+        );
+    }
+
+    /// Reviewer item 2: the dispatch bound its own turn, then a human
+    /// message was folded in mid-turn (attachment + absorbed remove) and
+    /// the reply answers that instead. Not the node's result.
+    #[test]
+    fn test_outcome_input_folded_after_bind_is_ambiguous() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "tool_use", tool_use()),
+                queue_op("enqueue", Some("drop that, do something else"), None),
+                tool_result("t1", "a1", "ok"),
+                queued_command("q1", "t1", "drop that, do something else"),
+                attachment(
+                    "at1",
+                    "q1",
+                    json!({"type": "total_tokens_reminder", "text": "<total_tokens>1</total_tokens>"}),
+                ),
+                queue_op(
+                    "remove",
+                    Some("drop that, do something else"),
+                    Some("absorbed_mid_turn"),
+                ),
+                assistant(
+                    "a2",
+                    "at1",
+                    "msg_2",
+                    "end_turn",
+                    text("unrelated task finished"),
+                ),
+                last_prompt(),
+            ],
+        );
+        ambiguous(outcome(&anchor), "queued_command attachment (prompt)");
+    }
+
+    /// The pre-2.1.246 shape: the absorbed remove without an attachment
+    /// row is still a fold.
+    #[test]
+    fn test_outcome_absorbed_remove_after_bind_is_ambiguous() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "tool_use", tool_use()),
+                tool_result("t1", "a1", "ok"),
+                queue_op("remove", Some("drop that"), None),
+                assistant("a2", "t1", "msg_2", "end_turn", text("done")),
+                last_prompt(),
+            ],
+        );
+        ambiguous(outcome(&anchor), "queue-operation remove");
+    }
+
+    /// A fold that lands after the end_turn block: the turn was still
+    /// open, and the message that closed is not known to be the last.
+    #[test]
+    fn test_outcome_fold_after_final_message_is_ambiguous() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "end_turn", text("done")),
+                queued_command("q1", "a1", "one more thing"),
+            ],
+        );
+        ambiguous(outcome(&anchor), "after the final message");
+    }
+
+    /// Real shape (kind-murdock 50c8bb0c:1486): the turn's own background
+    /// tool reports back through the queue. Non-input: the turn goes on,
+    /// and its end_turn message is the result.
+    #[test]
+    fn test_outcome_own_task_notification_continues_the_turn() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        let notification = task_notification_text("toolu_1");
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "tool_use", tool_use()),
+                tool_result(
+                    "t1",
+                    "a1",
+                    "Command running in background with ID: b20oyonkc",
+                ),
+                assistant("a2", "t1", "msg_2", "tool_use", tool_use()),
+                queue_op("enqueue", Some(&notification), None),
+                tool_result("t2", "a2", "ok"),
+                task_notification("q1", "t2", "toolu_1"),
+                queue_op("remove", Some(&notification), Some("absorbed_mid_turn")),
+                assistant("a3", "q1", "msg_3", "end_turn", text("build passed")),
+                last_prompt(),
+            ],
+        );
+        assert_eq!(
+            outcome(&anchor),
+            Some(TurnOutcome::Completed {
+                text: "build passed".into()
+            })
+        );
+    }
+
+    /// A task notification for a tool this turn never issued (a prior
+    /// turn's background job) is another input.
+    #[test]
+    fn test_outcome_foreign_task_notification_is_ambiguous() {
+        let fx = fixture();
+        prior_turn(&fx.path);
+        let cursor = ClaudeTurnReader.cursor(SESSION, Some(CWD)).unwrap();
+        append(&fx.path, &[input("u1", Some("s0"), &envelope())]);
+        let anchor = bind(&cursor);
+        append(
+            &fx.path,
+            &[
+                assistant("a1", "u1", "msg_1", "tool_use", tool_use()),
+                tool_result("t1", "a1", "ok"),
+                task_notification("q1", "t1", "toolu_from_before"),
+                queue_op(
+                    "remove",
+                    Some(&task_notification_text("toolu_from_before")),
+                    Some("absorbed_mid_turn"),
+                ),
+                assistant("a2", "q1", "msg_2", "end_turn", text("done")),
+                last_prompt(),
+            ],
+        );
+        ambiguous(
+            outcome(&anchor),
+            "queued_command attachment (task-notification)",
         );
     }
 
@@ -992,6 +1490,7 @@ mod tests {
                 companion,
                 assistant("a1", "u2", "msg_1", "end_turn", text("done")),
                 turn_duration("s1", "a1"),
+                last_prompt(),
             ],
         );
         assert_eq!(
@@ -1088,7 +1587,10 @@ mod tests {
         fallback["fallbackModel"] = json!("claude-opus-4-8");
         let mut retried = assistant("a2", "never-written", "msg_2", "end_turn", text("done"));
         retried["supersedesUuids"] = json!(["a1"]);
-        append(&fx.path, &[fallback, retried, turn_duration("s2", "a2")]);
+        append(
+            &fx.path,
+            &[fallback, retried, turn_duration("s2", "a2"), last_prompt()],
+        );
         assert_eq!(
             outcome(&anchor),
             Some(TurnOutcome::Completed {
@@ -1276,10 +1778,10 @@ mod tests {
         append_raw(&fx.path, &whole[..whole.len() - 5]);
         assert_eq!(outcome(&anchor), None);
         append_raw(&fx.path, &format!("{}\n", &whole[whole.len() - 5..]));
-        assert_eq!(outcome(&anchor), None);
-        let closer = turn_duration("s1", "a1").to_string();
+        flushing(outcome(&anchor));
+        let closer = last_prompt().to_string();
         append_raw(&fx.path, &closer[..closer.len() - 5]);
-        assert_eq!(outcome(&anchor), None);
+        flushing(outcome(&anchor));
         append_raw(&fx.path, &format!("{}\n", &closer[closer.len() - 5..]));
         assert_eq!(
             outcome(&anchor),
