@@ -630,7 +630,13 @@ pub(super) fn hooked_codex_dispatch_to_pane(
         h.codex_sent.push((pane_id.to_string(), text.to_string()));
         h.codex_dispatch.clone()
     }) {
-        return v.map(|turn_id| (format!("thread-of-{pane_id}"), turn_id));
+        return v
+            .unwrap_or_else(|| {
+                Err(TurnStartFailure::Refused(
+                    "codex dispatch not hooked".into(),
+                ))
+            })
+            .map(|turn_id| (format!("thread-of-{pane_id}"), turn_id));
     }
     crate::adapters::codex_app_server::dispatch_to_pane(pane_id, text)
 }
@@ -645,7 +651,11 @@ pub(super) fn hooked_codex_dispatch_to_thread(
             .push((thread_id.to_string(), text.to_string()));
         h.codex_dispatch.clone()
     }) {
-        return v;
+        return v.unwrap_or_else(|| {
+            Err(TurnStartFailure::Refused(
+                "codex dispatch not hooked".into(),
+            ))
+        });
     }
     crate::adapters::codex_app_server::dispatch_to_thread(thread_id, text)
 }
@@ -770,7 +780,9 @@ pub(super) fn hooked_grok_dispatch_to_pane(
         h.grok_sent.push((pane_id.to_string(), text.to_string()));
         h.grok_dispatch.clone()
     }) {
-        return v.map(|rid| (format!("key-of-{pane_id}"), rid));
+        return v
+            .unwrap_or_else(|| Err("grok dispatch not hooked".to_string()))
+            .map(|rid| (format!("key-of-{pane_id}"), rid));
     }
     crate::adapters::grok_leader::dispatch_to_pane(pane_id, text)
 }
@@ -781,7 +793,7 @@ pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<u64, 
         h.grok_sent_key.push((key.to_string(), text.to_string()));
         h.grok_dispatch.clone()
     }) {
-        return v;
+        return v.unwrap_or_else(|| Err("grok dispatch not hooked".to_string()));
     }
     crate::adapters::grok_leader::dispatch_to_key(key, text)
 }

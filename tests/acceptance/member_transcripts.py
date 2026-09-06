@@ -1,8 +1,8 @@
 """The acceptance oracle's one transcript read: how many input records of
 the member's own transcript carry the dispatch id.
 
-A node's result is the member's explicit return (`hive workflow done`), so
-the transcript is no longer where the result comes from. What it still
+A node's result is the engine's own end of the turn, read by the hived
+that started it, so the transcript is not where the result comes from. What it still
 proves is delivery causality: the dispatch envelope landed in the member's
 conversation exactly once — not zero times (the hived answered ok without
 injecting), not twice (a retry after a lost answer). These readers resolve

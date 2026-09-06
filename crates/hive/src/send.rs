@@ -48,7 +48,8 @@ pub(crate) fn request_send_payload(
 /// never reached it — the task is definitely not with the member.
 /// `Unknown`: the request went out and no usable answer came back (a read
 /// timeout, a dropped connection, an empty or unparsable reply) — the
-/// hived may have injected the task, and only the transcript can say.
+/// hived may have injected the task, and holds its turn under the
+/// dispatch id if it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailure {
     Refused(String),

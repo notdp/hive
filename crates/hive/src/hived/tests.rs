@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::agent::{Agent, DeliveryError};
+use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::runtime_snapshot::RuntimeSnapshot;
 use crate::team::Team;
 use crate::testenv::EnvGuard;
@@ -26,8 +26,8 @@ use super::testhook::{self, FakeAdapter, Hook};
 use super::*;
 use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::ThreadRuntime;
-use crate::adapters::grok_leader::SessionRuntime;
+use crate::adapters::codex_app_server::{ThreadRuntime, TurnResult};
+use crate::adapters::grok_leader::{PromptResult, SessionRuntime};
 
 /// Collectors the hook closures push into: `(target, option, value)` tmux
 /// writes, `(event, payload)` notify emits, `(argv, stderr path)` spawns and
@@ -478,32 +478,6 @@ fn test_runtime_snapshot_payload_reports_stale_snapshot() {
     assert_eq!(payload["snapshot"]["_sessionIdFresh"], Value::Bool(false));
 }
 
-#[test]
-fn test_claude_bg_turn_open_reads_busy_unless_the_status_is_stale() {
-    use crate::adapters::claude_bg::{runtime_from_engine, STATUS_STALE_AFTER_SECONDS};
-    let engine = |status: &str, updated_at: f64| EngineSession {
-        status: status.to_string(),
-        status_updated_at: updated_at,
-        ..crate::agent::testhook::fake_engine(4242, "b9beb2b8", "sess-1")
-    };
-    let now = 1_000_000.0;
-    let open = |status: &str, updated_at: f64| {
-        claude_bg_turn_open(&runtime_from_engine(&engine(status, updated_at), Some(now)))
-    };
-    assert_eq!(open("busy", now - 1.0), Ok(true));
-    assert_eq!(open("idle", now - 1.0), Ok(false));
-    assert_eq!(open("waiting", now - 1.0), Ok(false));
-    // An engine with no status record answers "not busy" — its runtime
-    // folds an unknown status to busy=false, which is still the daemon's
-    // own word.
-    assert_eq!(open("", 0.0), Ok(false));
-    // A status that stopped advancing is a wedged engine, no answer.
-    let stale = open("busy", now - STATUS_STALE_AFTER_SECONDS - 1.0).unwrap_err();
-    assert!(stale.contains("stale status"), "{stale}");
-    let blank = claude_bg_turn_open(&Map::new()).unwrap_err();
-    assert!(blank.contains("no busy flag"), "{blank}");
-}
-
 fn turn_open_team(name: &str) -> Team {
     let with_session = |agent: Agent, sid: &str| Agent {
         session_id: Some(sid.to_string()),
@@ -516,13 +490,6 @@ fn turn_open_team(name: &str) -> Team {
             with_session(fake_agent("c-mute", "%5", "codex"), "thr-mute"),
             fake_agent("c-blank", "", "codex"),
             with_session(fake_agent("k", "%6", "claude"), "cafe1234"),
-            with_session(fake_agent("k-idle", "%7", "claude"), "beef5678"),
-            with_session(fake_agent("k-stale", "%8", "claude"), "dead0000"),
-            with_session(fake_agent("k-gone", "%9", "claude"), "0000aaaa"),
-            with_session(
-                fake_agent("k-joined", "%10", "claude"),
-                "0f4e2a9c-6b1d-4e0a-9c3b-1d2e3f4a5b6c",
-            ),
             fake_agent("g", "%3", "grok"),
             fake_agent("g-idle", "%12", "grok"),
             fake_agent("g-seen", "%13", "grok"),
@@ -534,10 +501,6 @@ fn turn_open_team(name: &str) -> Team {
 
 #[test]
 fn test_turn_open_payload_asks_each_engine_directly() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
     let debug_events: DebugEventSink = Arc::new(Mutex::new(Vec::new()));
     let debug_sink = Arc::clone(&debug_events);
     let hook = Hook {
@@ -547,21 +510,6 @@ fn test_turn_open_payload_asks_each_engine_directly() {
             "thr-1" => Some(true),
             "thr-mute" => None,
             _ => panic!("unexpected thread {thread}"),
-        })),
-        // claude: the bg job's engine record, keyed by the roster job id.
-        cb_engine_session_for_job: Some(Arc::new(move |job| {
-            let engine = |status: &str, updated_at: f64| EngineSession {
-                status: status.to_string(),
-                status_updated_at: updated_at,
-                ..crate::agent::testhook::fake_engine(4242, job, "sess-1")
-            };
-            match job {
-                "cafe1234" => Some(engine("busy", now)),
-                "beef5678" => Some(engine("idle", now)),
-                "dead0000" => Some(engine("busy", 1.0)),
-                "0000aaaa" => None,
-                _ => panic!("unexpected job {job}"),
-            }
         })),
         // grok: the leader pool's push-fed turn evidence.
         gl_turn_open_for_key: Some(Arc::new(|key| match key {
@@ -615,14 +563,10 @@ fn test_turn_open_payload_asks_each_engine_directly() {
     assert!(null_reason("c-mute", "codex").contains("thr-mute"));
     assert!(null_reason("c-blank", "codex").contains("no session id"));
 
-    assert_eq!(open("k"), Value::Bool(true));
-    assert_eq!(open("k-idle"), Value::Bool(false));
-    // A stale status is a wedged engine's last word; no engine entry is a
-    // daemon that cannot be asked; a row naming the engine session rather
-    // than a job has no engine record to read.
-    assert!(null_reason("k-stale", "claude").contains("stale status"));
-    assert!(null_reason("k-gone", "claude").contains("no engine entry for job 0000aaaa"));
-    assert!(null_reason("k-joined", "claude").contains("not a bg job id"));
+    // A claude bg job reports no turn end over any RPC, and a claude
+    // member is no workflow node: no turn evidence, like any other engine
+    // hive cannot ask.
+    assert!(null_reason("k", "claude").contains("no turn evidence"));
 
     assert_eq!(open("g"), Value::Bool(true));
     assert_eq!(open("g-idle"), Value::Bool(false));
@@ -642,7 +586,7 @@ fn test_turn_open_payload_asks_each_engine_directly() {
             .iter()
             .filter(|(event, _)| event == "turn_open.null")
             .count(),
-        8
+        6
     );
 }
 
@@ -3484,20 +3428,23 @@ fn test_handle_request_node_dispatch_carries_no_sender() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     bus::init_workspace(&workspace).unwrap();
-    let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let handed_sink = Arc::clone(&handed);
     let mut hook = Hook::default();
     wire_send(&mut hook, &workspace);
-    hook.agent_send = Some(Arc::new(move |_agent, text, sender| {
-        handed_sink
-            .lock()
-            .unwrap()
-            .push((text.to_string(), sender.to_string()));
-        Ok("udsWriteAccepted".to_string())
+    hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
+        panic!("a node dispatch is a tracked turn, never a plain send")
+    }));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text| {
+        handed_sink.lock().unwrap().push(text.to_string());
+        Ok(TurnHandle::Codex {
+            thread_id: "thr-b".to_string(),
+            turn_id: "turn-1".to_string(),
+        })
     }));
     let _guard = testhook::install(hook);
 
-    // The wire shape: action `node-dispatch`, no `senderAgent` key at all.
+    // No dispatch id is no dispatch.
     let (response, keep_running) = handle_request(
         &workspace.to_string_lossy(),
         "team-a",
@@ -3506,6 +3453,25 @@ fn test_handle_request_node_dispatch_carries_no_sender() {
         "2026-04-17T00:00:00Z",
         &json_obj(&[
             ("action", Value::from("node-dispatch")),
+            ("targetAgent", Value::from("b")),
+            ("body", Value::from("task")),
+        ]),
+    );
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(false));
+    assert!(bus::read_all_events(&workspace).unwrap().is_empty());
+
+    // The wire shape: action `node-dispatch`, a `dispatchId`, no
+    // `senderAgent` key at all.
+    let (response, keep_running) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[
+            ("action", Value::from("node-dispatch")),
+            ("dispatchId", Value::from("nd-0123456789ab")),
             ("targetAgent", Value::from("b")),
             ("body", Value::from("task nd-0123456789ab\ndo it")),
             (
@@ -3526,12 +3492,151 @@ fn test_handle_request_node_dispatch_carries_no_sender() {
     assert_eq!(events[0].to, "b");
     let handed = handed.lock().unwrap();
     assert_eq!(handed.len(), 1);
-    assert_eq!(handed[0].1, "team-a");
     assert!(
-        handed[0].0.starts_with("<HIVE to=b artifact="),
+        handed[0].starts_with("<HIVE to=b artifact="),
         "{}",
-        handed[0].0
+        handed[0]
     );
+
+    // The turn is held under the dispatch id from here: `node-result`
+    // reads it running, then ended with the engine's word and text.
+    let ask = |dispatch_id: &str| {
+        handle_request(
+            &workspace.to_string_lossy(),
+            "team-a",
+            "dev:3",
+            "@99",
+            "2026-04-17T00:00:00Z",
+            &json_obj(&[
+                ("action", Value::from("node-result")),
+                ("dispatchId", Value::from(dispatch_id)),
+            ]),
+        )
+        .0
+    };
+    let running = Arc::new(Mutex::new(true));
+    let running_hook = Arc::clone(&running);
+    testhook::update(|h| {
+        h.cas_turn_result = Some(Arc::new(move |turn_id| {
+            assert_eq!(turn_id, "turn-1");
+            Some(TurnResult {
+                thread_id: "thr-b".to_string(),
+                status: (!*running_hook.lock().unwrap()).then(|| "completed".to_string()),
+                error: None,
+                messages: vec!["on it".to_string(), "done: see /tmp/out.md".to_string()],
+            })
+        }))
+    });
+    assert_eq!(ask("nd-0123456789ab")["state"], Value::from("running"));
+    *running.lock().unwrap() = false;
+    let ended = ask("nd-0123456789ab");
+    assert_eq!(ended["state"], Value::from("ended"));
+    assert_eq!(ended["status"], Value::from("completed"));
+    assert_eq!(ended["text"], Value::from("done: see /tmp/out.md"));
+    assert_eq!(ended["error"], Value::Null);
+    // A dispatch this hived never made is unknown, with the reason.
+    let unknown = ask("nd-ffffffffffff");
+    assert_eq!(unknown["state"], Value::from("unknown"));
+    assert!(unknown["reason"]
+        .as_str()
+        .unwrap()
+        .contains("holds no turn for dispatch nd-ffffffffffff"));
+    let (missing, _) = handle_request(
+        &workspace.to_string_lossy(),
+        "team-a",
+        "dev:3",
+        "@99",
+        "2026-04-17T00:00:00Z",
+        &json_obj(&[("action", Value::from("node-result"))]),
+    );
+    assert_eq!(missing["ok"], Value::Bool(false));
+}
+
+#[test]
+fn test_node_result_payload_reads_each_engines_own_word() {
+    let _guard = testhook::install(Hook {
+        cas_turn_result: Some(Arc::new(|turn_id| match turn_id {
+            "t-run" => Some(TurnResult {
+                thread_id: "thr".to_string(),
+                status: None,
+                error: None,
+                messages: vec!["partial".to_string()],
+            }),
+            "t-failed" => Some(TurnResult {
+                thread_id: "thr".to_string(),
+                status: Some("failed".to_string()),
+                error: Some("{\"code\":1}".to_string()),
+                messages: vec![],
+            }),
+            "t-gone" => None,
+            _ => panic!("unexpected turn {turn_id}"),
+        })),
+        gl_prompt_result: Some(Arc::new(|key, rid| {
+            assert_eq!(key, "m-honey.g");
+            match rid {
+                1 => Some(PromptResult::Running),
+                2 => Some(PromptResult::Ended {
+                    stop_reason: "end_turn".to_string(),
+                    text: "SAGE_FINAL".to_string(),
+                    error: None,
+                }),
+                3 => Some(PromptResult::Ended {
+                    stop_reason: "error".to_string(),
+                    text: String::new(),
+                    error: Some("closed".to_string()),
+                }),
+                _ => None,
+            }
+        })),
+        ..Default::default()
+    });
+    let hold = |id: &str, handle: TurnHandle| {
+        node_turns().lock().unwrap().insert(id.to_string(), handle);
+    };
+    let codex = |turn_id: &str| TurnHandle::Codex {
+        thread_id: "thr".to_string(),
+        turn_id: turn_id.to_string(),
+    };
+    let grok = |rid: u64| TurnHandle::Grok {
+        key: "m-honey.g".to_string(),
+        rid,
+    };
+    hold("c-run", codex("t-run"));
+    hold("c-failed", codex("t-failed"));
+    hold("c-gone", codex("t-gone"));
+    hold("g-run", grok(1));
+    hold("g-done", grok(2));
+    hold("g-err", grok(3));
+    hold("g-gone", grok(4));
+    hold("untracked", TurnHandle::Untracked("no turn id".to_string()));
+
+    let state = |id: &str| node_result_payload(id)["state"].clone();
+    assert_eq!(state("c-run"), Value::from("running"));
+    let failed = node_result_payload("c-failed");
+    assert_eq!(failed["state"], Value::from("ended"));
+    assert_eq!(failed["status"], Value::from("failed"));
+    assert_eq!(failed["text"], Value::from(""));
+    assert_eq!(failed["error"], Value::from("{\"code\":1}"));
+    let gone = node_result_payload("c-gone");
+    assert_eq!(gone["state"], Value::from("unknown"));
+    assert!(gone["reason"].as_str().unwrap().contains("t-gone"));
+
+    assert_eq!(state("g-run"), Value::from("running"));
+    let done = node_result_payload("g-done");
+    assert_eq!(done["state"], Value::from("ended"));
+    assert_eq!(done["status"], Value::from("end_turn"));
+    assert_eq!(done["text"], Value::from("SAGE_FINAL"));
+    let err = node_result_payload("g-err");
+    assert_eq!(err["status"], Value::from("error"));
+    assert_eq!(err["error"], Value::from("closed"));
+    assert!(node_result_payload("g-gone")["reason"]
+        .as_str()
+        .unwrap()
+        .contains("prompt 4"));
+    let untracked = node_result_payload("untracked");
+    assert_eq!(untracked["state"], Value::from("unknown"));
+    assert!(untracked["reason"].as_str().unwrap().contains("no turn id"));
+    assert_eq!(node_result_payload("nope")["state"], Value::from("unknown"));
 }
 
 #[test]
@@ -4538,19 +4643,24 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
         gated_sink.lock().unwrap().push(target.name.clone());
         Ok(())
     }));
-    hook.agent_send = Some(Arc::new(move |_agent, text, sender| {
+    hook.agent_dispatch_turn = Some(Arc::new(move |agent, text| {
         handed_sink
             .lock()
             .unwrap()
-            .push((text.to_string(), sender.to_string()));
-        Ok("udsWriteAccepted".to_string())
+            .push((text.to_string(), agent.name.clone()));
+        Ok(TurnHandle::Grok {
+            key: "m-team-x.b".to_string(),
+            rid: 7,
+        })
     }));
     let _guard = testhook::install(hook);
 
     let payload = send_payload(
         &workspace.to_string_lossy(),
         "team-x",
-        SendOrigin::Node,
+        SendOrigin::Node {
+            dispatch_id: "nd-0123456789ab",
+        },
         "b",
         "task nd-0123456789ab\nreview it",
         "/ws/artifacts/tasks/b-nd-0123456789ab.md",
@@ -4576,7 +4686,74 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
         handed[0].0,
         "<HIVE to=b artifact=/ws/artifacts/tasks/b-nd-0123456789ab.md>\ntask nd-0123456789ab\nreview it\n</HIVE>"
     );
-    assert_eq!(handed[0].1, "team-x");
+    assert_eq!(handed[0].1, "b");
+    assert!(payload.get("untracked").is_none());
+    // The engine's handle is held under the dispatch id.
+    assert_eq!(
+        node_turns().lock().unwrap().get("nd-0123456789ab"),
+        Some(&TurnHandle::Grok {
+            key: "m-team-x.b".to_string(),
+            rid: 7,
+        })
+    );
+
+    // A refused turn is a refused dispatch: the row is on the ledger (the
+    // dispatch was attempted), nothing is held for it.
+    testhook::update(|h| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+            Err(DeliveryError(
+                "codex pane %1 did not accept the turn".to_string(),
+            ))
+        }))
+    });
+    let refused = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node {
+            dispatch_id: "nd-refused000000",
+        },
+        "b",
+        "task nd-refused000000\nagain",
+        "",
+    )
+    .unwrap();
+    assert_eq!(refused["ok"], Value::Bool(false));
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("transport refused b: codex pane %1 did not accept the turn"));
+    assert!(!node_turns()
+        .lock()
+        .unwrap()
+        .contains_key("nd-refused000000"));
+
+    // A turn the engine took without a trackable id is dispatched, flagged,
+    // and held as untracked.
+    testhook::update(|h| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+            Ok(TurnHandle::Untracked("result without turn.id".to_string()))
+        }))
+    });
+    let untracked = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Node {
+            dispatch_id: "nd-untracked0000",
+        },
+        "b",
+        "task nd-untracked0000\nagain",
+        "",
+    )
+    .unwrap();
+    assert_eq!(untracked["ok"], Value::Bool(true));
+    assert_eq!(
+        untracked["untracked"],
+        Value::from("result without turn.id")
+    );
+    assert_eq!(
+        node_turns().lock().unwrap().get("nd-untracked0000"),
+        Some(&TurnHandle::Untracked("result without turn.id".to_string()))
+    );
 }
 
 #[test]

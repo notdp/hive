@@ -170,19 +170,17 @@ pub(crate) fn node_result_payload(dispatch_id: &str) -> Map<String, Value> {
         payload.insert("reason".to_string(), Value::from(reason));
         payload
     };
-    let ended = |mut payload: Map<String, Value>,
-                 status: String,
-                 text: String,
-                 error: Option<String>| {
-        payload.insert("state".to_string(), Value::from("ended"));
-        payload.insert("status".to_string(), Value::from(status));
-        payload.insert("text".to_string(), Value::from(text));
-        payload.insert(
-            "error".to_string(),
-            error.map(Value::from).unwrap_or(Value::Null),
-        );
-        payload
-    };
+    let ended =
+        |mut payload: Map<String, Value>, status: String, text: String, error: Option<String>| {
+            payload.insert("state".to_string(), Value::from("ended"));
+            payload.insert("status".to_string(), Value::from(status));
+            payload.insert("text".to_string(), Value::from(text));
+            payload.insert(
+                "error".to_string(),
+                error.map(Value::from).unwrap_or(Value::Null),
+            );
+            payload
+        };
     let running = |mut payload: Map<String, Value>| {
         payload.insert("state".to_string(), Value::from("running"));
         payload
@@ -196,21 +194,19 @@ pub(crate) fn node_result_payload(dispatch_id: &str) -> Map<String, Value> {
             payload,
             format!("the engine took the task but handed back no turn id ({reason})"),
         ),
-        Some(TurnHandle::Codex { thread_id, turn_id }) => {
-            match hooked_cas_turn_result(&turn_id) {
-                None => unknown(
-                    payload,
-                    format!("the codex client that started turn {turn_id} on {thread_id} is gone"),
-                ),
-                Some(result) => match result.status.clone() {
-                    None => running(payload),
-                    Some(status) => {
-                        let text = result.final_text();
-                        ended(payload, status, text, result.error)
-                    }
-                },
-            }
-        }
+        Some(TurnHandle::Codex { thread_id, turn_id }) => match hooked_cas_turn_result(&turn_id) {
+            None => unknown(
+                payload,
+                format!("the codex client that started turn {turn_id} on {thread_id} is gone"),
+            ),
+            Some(result) => match result.status.clone() {
+                None => running(payload),
+                Some(status) => {
+                    let text = result.final_text();
+                    ended(payload, status, text, result.error)
+                }
+            },
+        },
         Some(TurnHandle::Grok { key, rid }) => match hooked_gl_prompt_result(&key, rid) {
             None => unknown(
                 payload,

@@ -239,7 +239,7 @@ pub fn mint_dispatch_id() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// run record, done file and lock
+// run record and lock
 // ---------------------------------------------------------------------------
 
 /// One run's persisted state, `<workspace>/run/workflow/<name>.json`.
@@ -1188,20 +1188,9 @@ pub(crate) mod test_env {
         pub target: String,
         pub body: String,
         pub artifact: String,
+        pub dispatch_id: String,
         /// The env's sleep count when the dispatch was made.
         pub sleeps: u32,
-    }
-
-    /// The member's `hive workflow done`, scripted at a sleep count; with
-    /// `dispatch_id` set, a return planted by hand for that id instead —
-    /// `record_done` itself always answers the pending record's id.
-    #[derive(Debug, Clone)]
-    pub(crate) struct ScriptedDone {
-        pub at_sleep: u32,
-        pub name: String,
-        pub body: String,
-        pub artifact: String,
-        pub dispatch_id: Option<String>,
     }
 
     fn next<T: Clone>(queue: &Mutex<VecDeque<T>>, default: T) -> T {
@@ -1224,13 +1213,16 @@ pub(crate) mod test_env {
 
     /// Failure knobs replace flaky seams; `sleep` is a no-op that counts,
     /// `die_after_sleeps` drops the member off the roster at that count,
-    /// and `done` plays the member's return at one. `agents` is the
-    /// roster; a member is alive iff it is there. `turn_answers` is the
-    /// daemons' `turn_open` answer queue (sticky last value, empty means
-    /// no answer); a fresh env scripts one bootstrap turn — open once,
-    /// then closed — and `add_live` an idle member. Every turn question
-    /// and sleep notes the status of the record at `record_path`, so a
-    /// test can see the transitions a blocking run wrote along the way.
+    /// and `ending` plays the engine's end of the turn at one. `agents` is
+    /// the roster; a member is alive iff it is there. `turn_answers` is
+    /// the daemons' `turn_open` answer queue (sticky last value, empty
+    /// means no answer); a fresh env scripts one bootstrap turn — open
+    /// once, then closed — and `add_live` an idle member. `node_answers`
+    /// is the hived's `node-result` answer queue the same way (sticky
+    /// last; a fresh env answers `Running`), overridden by `ending` once
+    /// its sleep count is reached. Every turn question and sleep notes the
+    /// status of the record at `record_path`, so a test can see the
+    /// transitions a blocking run wrote along the way.
     pub(crate) struct FakeEnv {
         pub workspace: PathBuf,
         pub ready: bool,
@@ -1246,11 +1238,14 @@ pub(crate) mod test_env {
         /// Make every later record write fail once a dispatch is delivered.
         pub break_records_on_dispatch: bool,
         pub die_after_sleeps: Option<u32>,
-        pub scripted_done: Mutex<Option<ScriptedDone>>,
-        /// What the scripted `hive workflow done` answered.
-        pub done_results: Mutex<Vec<Result<DoneRecord, String>>>,
+        /// The engine's end of the turn, from that sleep count on.
+        pub ending: Mutex<Option<(u32, NodeResult)>>,
+        pub node_answers: Mutex<VecDeque<Option<NodeResult>>>,
+        pub node_calls: Mutex<Vec<String>>,
         pub turn_answers: Mutex<VecDeque<Option<bool>>>,
         pub turn_calls: AtomicU32,
+        /// The engine a reused member reports.
+        pub member_cli: Mutex<String>,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub dispatches: Mutex<Vec<DispatchCall>>,
         /// The member's run record as it stood at every dispatch attempt,
@@ -1279,10 +1274,12 @@ pub(crate) mod test_env {
             dispatch_err: "refused".to_string(),
             break_records_on_dispatch: false,
             die_after_sleeps: None,
-            scripted_done: Mutex::new(None),
-            done_results: Mutex::new(Vec::new()),
+            ending: Mutex::new(None),
+            node_answers: Mutex::new(VecDeque::from([Some(NodeResult::Running)])),
+            node_calls: Mutex::new(Vec::new()),
             turn_answers: Mutex::new(VecDeque::from([Some(true), Some(false)])),
             turn_calls: AtomicU32::new(0),
+            member_cli: Mutex::new("codex".to_string()),
             spawns: Mutex::new(Vec::new()),
             dispatches: Mutex::new(Vec::new()),
             dispatch_records: Mutex::new(Vec::new()),
@@ -1297,6 +1294,14 @@ pub(crate) mod test_env {
         }
     }
 
+    pub(crate) fn ended(status: &str, text: &str) -> NodeResult {
+        NodeResult::Ended {
+            status: status.to_string(),
+            text: text.to_string(),
+            error: None,
+        }
+    }
+
     impl FakeEnv {
         /// Put a live, idle member on the roster.
         pub(crate) fn add_live(&self, name: &str) {
@@ -1304,26 +1309,14 @@ pub(crate) mod test_env {
             *self.turn_answers.lock().unwrap() = VecDeque::from([Some(false)]);
         }
 
-        /// Script the member's return at that sleep count.
-        pub(crate) fn return_at(&self, at_sleep: u32, name: &str, body: &str, artifact: &str) {
-            *self.scripted_done.lock().unwrap() = Some(ScriptedDone {
-                at_sleep,
-                name: name.to_string(),
-                body: body.to_string(),
-                artifact: artifact.to_string(),
-                dispatch_id: None,
-            });
+        /// Script the engine's end of the turn at that sleep count: codex
+        /// `completed` with that text.
+        pub(crate) fn end_at(&self, at_sleep: u32, text: &str) {
+            self.end_with_at(at_sleep, ended("completed", text));
         }
 
-        /// Plant a return for another dispatch at that sleep count.
-        pub(crate) fn plant_return_at(&self, at_sleep: u32, name: &str, dispatch_id: &str) {
-            *self.scripted_done.lock().unwrap() = Some(ScriptedDone {
-                at_sleep,
-                name: name.to_string(),
-                body: "stale".to_string(),
-                artifact: String::new(),
-                dispatch_id: Some(dispatch_id.to_string()),
-            });
+        pub(crate) fn end_with_at(&self, at_sleep: u32, result: NodeResult) {
+            *self.ending.lock().unwrap() = Some((at_sleep, result));
         }
 
         pub(crate) fn watch_record(&self, name: &str) {
@@ -1374,7 +1367,7 @@ pub(crate) mod test_env {
             self.agents.lock().unwrap().push(name.to_string());
             Ok(SpawnedAgent {
                 pane_id: format!("%{}", spawns.len()),
-                cli: cli.unwrap_or("claude").to_string(),
+                cli: cli.unwrap_or("codex").to_string(),
             })
         }
 
@@ -1395,6 +1388,7 @@ pub(crate) mod test_env {
             target: &str,
             body: &str,
             artifact: &str,
+            dispatch_id: &str,
         ) -> Result<i64, DispatchFailure> {
             self.dispatch_records
                 .lock()
@@ -1409,6 +1403,7 @@ pub(crate) mod test_env {
                 target: target.to_string(),
                 body: body.to_string(),
                 artifact: artifact.to_string(),
+                dispatch_id: dispatch_id.to_string(),
                 sleeps: self.sleeps.load(Ordering::SeqCst),
             });
             if self.break_records_on_dispatch {
@@ -1430,7 +1425,7 @@ pub(crate) mod test_env {
             }
             Some(MemberInfo {
                 pane_id: format!("%{name}"),
-                cli: "claude".to_string(),
+                cli: self.member_cli.lock().unwrap().clone(),
             })
         }
 
@@ -1441,6 +1436,20 @@ pub(crate) mod test_env {
             }
             self.turn_calls.fetch_add(1, Ordering::SeqCst);
             next(&self.turn_answers, None)
+        }
+
+        fn node_result(&self, dispatch_id: &str) -> Option<NodeResult> {
+            self.node_calls
+                .lock()
+                .unwrap()
+                .push(dispatch_id.to_string());
+            let sleeps = self.sleeps.load(Ordering::SeqCst);
+            if let Some((at, result)) = self.ending.lock().unwrap().clone() {
+                if sleeps >= at {
+                    return Some(result);
+                }
+            }
+            next(&self.node_answers, None)
         }
 
         fn retire(&self, name: &str) {
@@ -1458,31 +1467,6 @@ pub(crate) mod test_env {
             if self.die_after_sleeps == Some(n) {
                 self.agents.lock().unwrap().clear();
             }
-            let due = self
-                .scripted_done
-                .lock()
-                .unwrap()
-                .clone()
-                .filter(|d| d.at_sleep == n);
-            let Some(done) = due else {
-                return;
-            };
-            let ws = self.workspace_str();
-            let result = match done.dispatch_id {
-                None => record_done(&ws, &done.name, &done.body, &done.artifact).map_err(|e| e.0),
-                Some(dispatch_id) => {
-                    let planted = DoneRecord {
-                        dispatch_id,
-                        body: done.body,
-                        artifact: done.artifact,
-                        done_at: n.into(),
-                    };
-                    write_atomic(&ws, &done_path(&ws, &done.name), &planted.to_json())
-                        .map(|_| planted)
-                        .map_err(|e| e.0)
-                }
-            };
-            self.done_results.lock().unwrap().push(result);
         }
     }
 }
@@ -1512,10 +1496,15 @@ mod tests {
         }
     }
 
+    /// A codex node spec: the cli every spawn here needs.
+    fn codex(name: &str, task: &str) -> WorkflowSpec {
+        workflow(name, Some("codex"), task)
+    }
+
     fn pending(dispatch_id: &str) -> WorkflowRecord {
         WorkflowRecord {
             dispatch_id: dispatch_id.into(),
-            cli: "claude".into(),
+            cli: "codex".into(),
             status: STATUS_PENDING.into(),
             body: None,
             artifact: None,
@@ -1543,18 +1532,78 @@ mod tests {
     }
 
     #[test]
+    fn test_node_result_from_answer_reads_the_three_states() {
+        let answer = |pairs: &[(&str, Value)]| {
+            Map::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())))
+        };
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(true)),
+                ("state", Value::from("running")),
+            ])),
+            Some(NodeResult::Running)
+        );
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(true)),
+                ("state", Value::from("ended")),
+                ("status", Value::from("failed")),
+                ("text", Value::from("half")),
+                ("error", Value::from("boom")),
+            ])),
+            Some(NodeResult::Ended {
+                status: "failed".into(),
+                text: "half".into(),
+                error: Some("boom".into()),
+            })
+        );
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(true)),
+                ("state", Value::from("ended")),
+                ("status", Value::from("end_turn")),
+                ("text", Value::from("done")),
+                ("error", Value::Null),
+            ])),
+            Some(ended("end_turn", "done"))
+        );
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(true)),
+                ("state", Value::from("unknown")),
+                ("reason", Value::from("restarted")),
+            ])),
+            Some(NodeResult::Unknown("restarted".into()))
+        );
+        // An error envelope or an unknown shape is no answer.
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(false)),
+                ("error", Value::from("unknown action")),
+            ])),
+            None
+        );
+        assert_eq!(
+            NodeResult::from_answer(&answer(&[
+                ("ok", Value::Bool(true)),
+                ("state", Value::from("lost")),
+            ])),
+            None
+        );
+    }
+
+    #[test]
     fn test_ops_cover_the_whole_workflow_protocol() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
 
-        let r = run_op(&env, &spawn("impl", None)).unwrap();
+        let r = run_op(&env, &spawn("impl", Some("grok"))).unwrap();
         assert_eq!(r["pane"], "%1");
-        assert_eq!(r["cli"], "claude");
+        assert_eq!(r["cli"], "grok");
         run_op(
             &env,
             &WorkflowOp::Ready {
                 name: "impl".into(),
-                cli: "claude".into(),
             },
         )
         .unwrap();
@@ -1581,10 +1630,12 @@ mod tests {
         let d = env.dispatches.lock().unwrap();
         assert_eq!(d[0].target, "impl");
         assert_eq!(d[0].artifact, artifact);
-        // The dispatch id is verbatim in the body's first line and in the
-        // artifact path the envelope carries.
+        // The dispatch id is verbatim in the body's first line, in the
+        // artifact path the envelope carries, and on the dispatch itself
+        // — the hived holds the turn under it.
         assert_eq!(d[0].body, "task nd-0123456789ab\nexplore auth");
         assert!(d[0].artifact.contains("nd-0123456789ab"));
+        assert_eq!(d[0].dispatch_id, "nd-0123456789ab");
     }
 
     #[test]
@@ -1603,27 +1654,62 @@ mod tests {
     }
 
     #[test]
-    fn test_ready_gates_non_claude_and_skips_claude() {
+    fn test_ready_gates_every_node() {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.ready = false;
-        run_op(
-            &env,
-            &WorkflowOp::Ready {
-                name: "impl".into(),
-                cli: "claude".into(),
-            },
-        )
-        .unwrap();
         let err = run_op(
             &env,
             &WorkflowOp::Ready {
                 name: "impl".into(),
-                cli: "codex".into(),
             },
         )
         .unwrap_err();
         assert!(err.0.contains("did not reach ready"), "{err}");
+        env.ready = true;
+        run_op(
+            &env,
+            &WorkflowOp::Ready {
+                name: "impl".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_node_cli_is_codex_or_grok() {
+        node_cli("codex").unwrap();
+        node_cli("grok").unwrap();
+        let err = node_cli("").unwrap_err();
+        assert!(err.0.contains("pass --cli"), "{err}");
+        let err = node_cli("claude").unwrap_err();
+        assert!(err.0.contains("Claude Code's own subagent"), "{err}");
+        assert!(node_cli("bash").is_err());
+    }
+
+    #[test]
+    fn test_run_workflow_refuses_a_claude_node_before_anything_happens() {
+        // A spawn asked for claude, or none: nothing is spawned.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        let err = run_workflow(&env, &workflow("audit", Some("claude"), "t")).unwrap_err();
+        assert!(err.0.contains("Claude Code's own subagent"), "{err}");
+        let err = run_workflow(&env, &workflow("audit", None, "t")).unwrap_err();
+        assert!(err.0.contains("pass --cli"), "{err}");
+        assert!(env.spawns.lock().unwrap().is_empty());
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+
+        // A live claude member of that name is not reused as a node, and
+        // is left as it is.
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        *env.member_cli.lock().unwrap() = "claude".to_string();
+        let err = run_workflow(&env, &codex("audit", "t")).unwrap_err();
+        assert!(err.0.contains("runs codex or grok, not claude"), "{err}");
+        assert!(env.alive("audit"));
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert!(env.dispatches.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1667,7 +1753,7 @@ mod tests {
         assert!(err.0.contains("after 3 attempts"), "{err}");
 
         // A lost answer is not a refusal: one attempt, no seq, the reason
-        // handed on for the run to wait on the return.
+        // handed on for the run to wait on the turn.
         let mut env = fake_env(tmp.path());
         env.lose_answer = true;
         let r = run_op(
@@ -1686,55 +1772,49 @@ mod tests {
     }
 
     #[test]
-    fn test_run_workflow_completes_on_the_members_return() {
+    fn test_run_workflow_completes_when_the_engine_ends_the_turn() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         let text = "Findings:\n\n- one\n- two\n\n```rs\nfn x() {}\n```\nDone at /tmp/report.md";
-        env.return_at(3, "audit", text, "/tmp/report.md");
+        env.end_at(3, text);
         env.watch_record("audit");
 
-        let r = run_workflow(
-            &env,
-            &workflow("audit", Some("codex"), "review it\nclosely"),
-        )
-        .unwrap();
+        let r = run_workflow(&env, &codex("audit", "review it\nclosely")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["name"], "audit");
         assert_eq!(r["pane"], "%1");
         assert_eq!(r["reused"], false);
         assert_eq!(r["body"], text);
-        assert_eq!(r["artifact"], "/tmp/report.md");
+        assert!(r.get("artifact").is_none());
         assert!(r.get("reason").is_none());
-        assert!(r.get("session").is_none());
-        assert!(r.get("turn").is_none());
         let id = r["dispatchId"].as_str().unwrap();
         assert!(id.starts_with("nd-") && id.len() == 15, "{id}");
 
-        // The return went against this very dispatch, and was consumed.
-        let ws = env.workspace_str();
-        let done = env.done_results.lock().unwrap();
-        assert_eq!(done.len(), 1);
-        assert_eq!(done[0].as_ref().unwrap().dispatch_id, id);
-        assert!(!done_path(&ws, "audit").exists());
+        // The hived was asked about this very dispatch, every poll.
+        let asked = env.node_calls.lock().unwrap();
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|d| d == id), "{asked:?}");
         // The injected text carries the id, and the artifact holds the task.
         let d = env.dispatches.lock().unwrap();
         assert!(d[0].body.contains(id), "{}", d[0].body);
         assert!(d[0].artifact.contains(id), "{}", d[0].artifact);
+        assert_eq!(d[0].dispatch_id, id);
         assert_eq!(
             fs::read_to_string(&d[0].artifact).unwrap(),
             "review it\nclosely"
         );
-        // The record moved pending → completed, and no closed turn was
-        // counted against a run that returned.
+        // The record moved pending → completed; no turn question was
+        // needed once the dispatch was out and the hived answered.
         assert_eq!(
             *env.statuses_seen.lock().unwrap(),
             vec!["(none)", "pending"]
         );
+        let ws = env.workspace_str();
         let record = read_record(&ws, "audit").unwrap();
         assert_eq!(record.status, "completed");
         assert_eq!(record.dispatch_id, id);
         assert_eq!(record.body.as_deref(), Some(text));
-        assert_eq!(record.artifact.as_deref(), Some("/tmp/report.md"));
+        assert_eq!(record.artifact, None);
         assert_eq!(record.seq, Some(1));
         assert_eq!(record.cli, "codex");
         assert!(record.started_at > 0);
@@ -1742,22 +1822,70 @@ mod tests {
     }
 
     #[test]
-    fn test_run_workflow_completed_with_no_artifact_is_an_empty_artifact() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        env.return_at(1, "audit", "done", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+    fn test_run_workflow_maps_each_engines_terminal_word() {
+        let run = |result: NodeResult| {
+            let tmp = TempDir::new().unwrap();
+            let env = fake_env(tmp.path());
+            env.end_with_at(1, result);
+            let r = run_workflow(&env, &codex("audit", "t")).unwrap();
+            let record = read_record(&env.workspace_str(), "audit").unwrap();
+            assert_eq!(record.status, r["status"]);
+            assert_eq!(record.body.as_deref(), r["body"].as_str());
+            assert_eq!(
+                record.reason.as_deref(),
+                r.get("reason").and_then(Value::as_str)
+            );
+            r
+        };
+        // grok's normal end is completed too.
+        let r = run(ended("end_turn", "SAGE_FINAL"));
         assert_eq!(r["status"], "completed");
-        assert_eq!(r["body"], "done");
-        assert_eq!(r["artifact"], "");
+        assert_eq!(r["body"], "SAGE_FINAL");
+        assert!(r.get("reason").is_none());
+
+        // Cut short: what was said by then, and why.
+        let r = run(ended("interrupted", "half"));
+        assert_eq!(r["status"], "interrupted");
+        assert_eq!(r["body"], "half");
+        assert_eq!(r["reason"], "the turn was cut short (interrupted)");
+        let r = run(ended("cancelled", ""));
+        assert_eq!(r["status"], "interrupted");
+        assert_eq!(r["body"], "");
+        assert_eq!(r["reason"], "the turn was cut short (cancelled)");
+
+        // The engine's error is the reason, its word first.
+        let r = run(NodeResult::Ended {
+            status: "failed".into(),
+            text: "so far".into(),
+            error: Some("context window exceeded".into()),
+        });
+        assert_eq!(r["status"], "failed");
+        assert_eq!(r["body"], "so far");
+        assert_eq!(
+            r["reason"],
+            "the engine ended the turn: failed (context window exceeded)"
+        );
+        let r = run(ended("max_tokens", "…"));
+        assert_eq!(r["status"], "failed");
+        assert_eq!(r["reason"], "the engine ended the turn: max_tokens");
+        let r = run(NodeResult::Ended {
+            status: "error".into(),
+            text: String::new(),
+            error: Some("closed".into()),
+        });
+        assert_eq!(r["status"], "failed");
+        assert_eq!(r["reason"], "the engine ended the turn: error (closed)");
     }
 
     #[test]
-    fn test_run_workflow_is_no_result_after_five_closed_polls_with_no_return() {
+    fn test_run_workflow_is_no_result_when_nothing_holds_the_turn_and_it_is_closed() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        // The bootstrap turn closes, the task's turn opens, then closes for
-        // good; the member never returned.
+        env.watch_record("audit");
+        // The hived holds nothing for the dispatch (restarted since); the
+        // bootstrap turn closes, the task's turn opens, then closes for good.
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(NodeResult::Unknown("restarted".into()))]);
         *env.turn_answers.lock().unwrap() = VecDeque::from([
             Some(true),
             Some(false),
@@ -1768,11 +1896,11 @@ mod tests {
             None,
             Some(false),
         ]);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "no_result");
         assert_eq!(
             r["reason"],
-            "the member ended its turn without hive workflow done"
+            "the turn is not running and nothing holds its result (restarted)"
         );
         assert!(r.get("body").is_none());
         // Two open polls, two closed, a no-answer that reset the count,
@@ -1785,25 +1913,93 @@ mod tests {
     }
 
     #[test]
+    fn test_run_workflow_keeps_waiting_through_unknowns_while_the_turn_runs() {
+        // The hived answers unknown while the turn is open (a client that
+        // never saw it start), then the turn's end arrives: completed.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        *env.node_answers.lock().unwrap() = VecDeque::from([
+            Some(NodeResult::Unknown("no client".into())),
+            Some(NodeResult::Unknown("no client".into())),
+            Some(NodeResult::Unknown("no client".into())),
+            Some(NodeResult::Running),
+            Some(ended("completed", "late but here")),
+        ]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "late but here");
+        assert_eq!(env.sleeps.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn test_run_workflow_is_no_result_when_the_hived_never_answers() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        *env.node_answers.lock().unwrap() = VecDeque::from([None]);
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
+        assert_eq!(r["status"], "no_result");
+        assert_eq!(
+            r["reason"],
+            format!("the hived did not answer for {UNANSWERED_POLLS} polls")
+        );
+        assert_eq!(env.sleeps.load(Ordering::SeqCst), UNANSWERED_POLLS - 1);
+        assert_eq!(
+            read_record(&env.workspace_str(), "audit").unwrap().status,
+            "no_result"
+        );
+
+        // An answer in between resets the count.
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        let mut answers: VecDeque<Option<NodeResult>> =
+            (0..UNANSWERED_POLLS - 1).map(|_| None).collect();
+        answers.push_back(Some(NodeResult::Running));
+        answers.push_back(None);
+        *env.node_answers.lock().unwrap() = answers;
+        env.end_at(UNANSWERED_POLLS + 10, "eventually");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "eventually");
+    }
+
+    #[test]
     fn test_run_workflow_ends_as_member_gone_when_the_member_dies_waiting() {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
-        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(false), Some(true)]);
-        env.die_after_sleeps = Some(2);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.die_after_sleeps = Some(3);
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_gone");
-        assert!(r["reason"].as_str().unwrap().contains("before it returned"));
+        assert!(r["reason"]
+            .as_str()
+            .unwrap()
+            .contains("before its turn ended"));
         assert_eq!(
             read_record(&env.workspace_str(), "audit").unwrap().status,
             "member_gone"
         );
 
-        // A return written before the death is still the result.
+        // A death under unknown answers is member_gone too, not no_result.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.add_live("audit");
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(NodeResult::Unknown("restarted".into()))]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
+        env.die_after_sleeps = Some(2);
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
+        assert_eq!(r["status"], "member_gone");
+
+        // The turn's end read on the poll the member dies is still the
+        // result.
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.die_after_sleeps = Some(1);
-        env.return_at(1, "audit", "just made it", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(1, "just made it");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["body"], "just made it");
     }
@@ -1815,7 +2011,7 @@ mod tests {
         env.add_live("audit");
         let ws = env.workspace_str();
         write_record(&ws, "audit", &pending("nd-aaaaaaaaaaaa")).unwrap();
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_busy");
         assert_eq!(r["dispatchId"], "nd-aaaaaaaaaaaa");
         assert_eq!(r["reused"], true);
@@ -1829,8 +2025,8 @@ mod tests {
         let mut done = read_record(&ws, "audit").unwrap();
         done.status = STATUS_COMPLETED.into();
         write_record(&ws, "audit", &done).unwrap();
-        env.return_at(1, "audit", "next", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(1, "next");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_ne!(r["dispatchId"], "nd-aaaaaaaaaaaa");
     }
@@ -1841,76 +2037,13 @@ mod tests {
         let env = fake_env(tmp.path());
         let ws = env.workspace_str();
         write_record(&ws, "audit", &pending("nd-aaaaaaaaaaaa")).unwrap();
-        // The dead member's return, never consumed, goes with its record.
-        record_done(&ws, "audit", "old news", "").unwrap();
-        env.return_at(2, "audit", "fresh", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(2, "fresh");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["body"], "fresh");
         let record = read_record(&ws, "audit").unwrap();
         assert_ne!(record.dispatch_id, "nd-aaaaaaaaaaaa");
         assert_eq!(record.dispatch_id, r["dispatchId"]);
-        assert!(!done_path(&ws, "audit").exists());
-    }
-
-    #[test]
-    fn test_run_workflow_ignores_a_return_for_another_dispatch() {
-        let tmp = TempDir::new().unwrap();
-        let env = fake_env(tmp.path());
-        let ws = env.workspace_str();
-        // A return with a foreign id lands after the dispatch: it is not
-        // this run's, and the run ends no_result on its own closed turn.
-        env.plant_return_at(1, "audit", "nd-stale0000000");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
-        assert_eq!(r["status"], "no_result");
-        assert!(r.get("body").is_none());
-        assert_eq!(env.sleeps.load(Ordering::SeqCst), 4);
-        // The foreign return was left where it was.
-        assert_eq!(
-            read_done(&ws, "audit").map(|d| d.dispatch_id),
-            Some("nd-stale0000000".to_string())
-        );
-    }
-
-    #[test]
-    fn test_record_done_needs_a_pending_record_and_returns_once() {
-        let tmp = TempDir::new().unwrap();
-        let ws = tmp.path().join("ws").to_string_lossy().into_owned();
-        // Nothing waiting: no record at all, then a terminal one.
-        let err = record_done(&ws, "audit", "x", "").unwrap_err();
-        assert_eq!(err.0, "no workflow task is waiting for audit");
-        let mut terminal = pending("nd-aaaaaaaaaaaa");
-        terminal.status = STATUS_NO_RESULT.into();
-        write_record(&ws, "audit", &terminal).unwrap();
-        let err = record_done(&ws, "audit", "x", "").unwrap_err();
-        assert_eq!(err.0, "no workflow task is waiting for audit");
-        assert!(!done_path(&ws, "audit").exists());
-
-        // A pending record: the return names its dispatch, in full.
-        write_record(&ws, "audit", &pending("nd-aaaaaaaaaaaa")).unwrap();
-        let long =
-            "line one\nline two\nline three\n\n# heading\n- a very long return value ".repeat(20);
-        let done = record_done(&ws, "audit", &long, "/tmp/out.md").unwrap();
-        assert_eq!(done.dispatch_id, "nd-aaaaaaaaaaaa");
-        assert!(done.done_at > 0);
-        assert_eq!(read_done(&ws, "audit"), Some(done.clone()));
-        let json: Value =
-            serde_json::from_str(&fs::read_to_string(done_path(&ws, "audit")).unwrap()).unwrap();
-        assert_eq!(json["dispatchId"], "nd-aaaaaaaaaaaa");
-        assert_eq!(json["body"], long);
-        assert_eq!(json["artifact"], "/tmp/out.md");
-        assert_eq!(json["doneAt"], done.done_at);
-
-        // Twice for the same dispatch is refused, the first return kept.
-        let err = record_done(&ws, "audit", "again", "").unwrap_err();
-        assert_eq!(err.0, "audit already returned for nd-aaaaaaaaaaaa");
-        assert_eq!(read_done(&ws, "audit"), Some(done));
-
-        // A new pending dispatch takes a new return over the old file.
-        write_record(&ws, "audit", &pending("nd-bbbbbbbbbbbb")).unwrap();
-        let next = record_done(&ws, "audit", "next", "").unwrap();
-        assert_eq!(next.dispatch_id, "nd-bbbbbbbbbbbb");
-        assert_eq!(read_done(&ws, "audit"), Some(next));
     }
 
     #[test]
@@ -1920,36 +2053,31 @@ mod tests {
         env.add_live("audit");
         let ws = env.workspace_str();
         let held = try_lock(&ws, "audit").unwrap().expect("first lock");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_busy");
         assert!(r["reason"].as_str().unwrap().contains("lock"));
         assert_eq!(r["dispatchId"], "");
         assert!(env.dispatches.lock().unwrap().is_empty());
         assert!(read_record(&ws, "audit").is_none());
         drop(held);
-        env.return_at(1, "audit", "now", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(1, "now");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         // The run's own lock is released with it.
         assert!(try_lock(&ws, "audit").unwrap().is_some());
     }
 
     #[test]
-    fn test_remove_record_drops_the_record_and_return_and_keeps_the_lock_file() {
+    fn test_remove_record_drops_the_record_and_keeps_the_lock_file() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        env.return_at(1, "audit", "x", "");
-        run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(1, "x");
+        run_workflow(&env, &codex("audit", "t")).unwrap();
         let ws = env.workspace_str();
         assert!(record_path(&ws, "audit").exists());
         assert!(lock_path(&ws, "audit").exists());
-        // A return left unconsumed (the member answered a pending run that
-        // nobody collected) goes with the record.
-        write_record(&ws, "audit", &pending("nd-aaaaaaaaaaaa")).unwrap();
-        record_done(&ws, "audit", "late", "").unwrap();
         remove_record(&ws, "audit");
         assert!(!record_path(&ws, "audit").exists());
-        assert!(!done_path(&ws, "audit").exists());
         assert!(lock_path(&ws, "audit").exists());
         // Idempotent.
         remove_record(&ws, "audit");
@@ -2000,7 +2128,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         env.add_live("audit");
-        env.return_at(1, "audit", "again", "");
+        env.end_at(1, "again");
+        // A reused member keeps its own engine; the spec's cli is not
+        // consulted.
         let r = run_workflow(&env, &workflow("audit", None, "follow-up task")).unwrap();
         assert_eq!(r["reused"], true);
         assert_eq!(r["status"], "completed");
@@ -2008,14 +2138,18 @@ mod tests {
         assert_eq!(r["pane"], "%audit");
         assert!(env.spawns.lock().unwrap().is_empty());
         assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+        assert_eq!(
+            read_record(&env.workspace_str(), "audit").unwrap().cli,
+            "codex"
+        );
     }
 
     #[test]
     fn test_run_workflow_rolls_back_its_own_spawn_on_failure() {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
-        env.ready = false; // codex hits the gate after the spawn registered
-        let err = run_workflow(&env, &workflow("audit", Some("codex"), "t")).unwrap_err();
+        env.ready = false; // the gate after the spawn registered
+        let err = run_workflow(&env, &codex("audit", "t")).unwrap_err();
         assert!(err.0.contains("did not reach ready"), "{err}");
         assert!(!env.alive("audit"));
         assert_eq!(*env.retired.lock().unwrap(), vec!["audit".to_string()]);
@@ -2028,7 +2162,7 @@ mod tests {
         let mut env = fake_env(tmp.path());
         env.add_live("audit");
         env.dispatch_fail_first = u32::MAX;
-        let err = run_workflow(&env, &workflow("audit", None, "t")).unwrap_err();
+        let err = run_workflow(&env, &codex("audit", "t")).unwrap_err();
         assert!(err.0.contains("after 3 attempts"), "{err}");
         assert!(env.alive("audit"));
         // Nothing was dispatched, so nothing is recorded.
@@ -2060,8 +2194,8 @@ mod tests {
         // No answer yet, then a turn open (the bootstrap turn), then closed.
         *env.turn_answers.lock().unwrap() =
             VecDeque::from([None, Some(true), Some(true), Some(false)]);
-        env.return_at(3, "audit", "ok", "");
-        let r = run_workflow(&env, &workflow("audit", Some("codex"), "t")).unwrap();
+        env.end_at(3, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         // One poll to see the turn open, one more while it stays so; the
         // dispatch went out only on the closed answer.
@@ -2076,8 +2210,8 @@ mod tests {
         let env = fake_env(tmp.path());
         env.add_live("audit");
         *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(true), Some(false)]);
-        env.return_at(3, "audit", "ok", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(3, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["reused"], true);
         let d = env.dispatches.lock().unwrap();
@@ -2092,7 +2226,7 @@ mod tests {
         let env = fake_env(tmp.path());
         env.add_live("audit");
         *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_busy");
         assert_eq!(r["reason"], "turn still open after 600s");
         assert_eq!(r["reused"], true);
@@ -2109,7 +2243,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_busy");
         assert_eq!(r["reused"], false);
         assert!(!env.alive("audit"));
@@ -2123,7 +2257,7 @@ mod tests {
         env.add_live("audit");
         *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true)]);
         env.die_after_sleeps = Some(3);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "member_gone");
         assert!(r["reason"]
             .as_str()
@@ -2138,7 +2272,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         *env.turn_answers.lock().unwrap() = VecDeque::from([None]);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         // No answer is never an idle reading: the whole sighting window and
         // the whole idle wait pass, and the run ends without dispatching.
         assert_eq!(r["status"], "member_busy");
@@ -2154,8 +2288,8 @@ mod tests {
     fn test_run_workflow_records_pending_before_the_dispatch_and_backfills_seq() {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
-        env.return_at(1, "audit", "ok", "");
-        let r = run_workflow(&env, &workflow("audit", Some("codex"), "t")).unwrap();
+        env.end_at(1, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         // The record the hived saw when the dispatch reached it: already
         // pending, with everything but the seq it was about to mint.
@@ -2182,7 +2316,7 @@ mod tests {
         let mut env = fake_env(tmp.path());
         env.add_live("audit");
         env.dispatch_fail_first = u32::MAX;
-        let err = run_workflow(&env, &workflow("audit", None, "t")).unwrap_err();
+        let err = run_workflow(&env, &codex("audit", "t")).unwrap_err();
         assert!(err.0.contains("after 3 attempts"), "{err}");
         let at_dispatch = env.dispatch_records.lock().unwrap();
         assert_eq!(at_dispatch.len(), 3);
@@ -2197,7 +2331,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.dispatch_fail_first = u32::MAX;
-        let err = run_workflow(&env, &workflow("audit", None, "t")).unwrap_err();
+        let err = run_workflow(&env, &codex("audit", "t")).unwrap_err();
         assert!(err.0.contains("after 3 attempts"), "{err}");
         assert!(read_record(&env.workspace_str(), "audit").is_none());
         assert!(!env.alive("audit"));
@@ -2210,9 +2344,9 @@ mod tests {
         let mut env = fake_env(tmp.path());
         env.add_live("audit");
         env.dispatch_fail_first = 1;
-        // One retry gap sleeps before the delivery; the return follows it.
-        env.return_at(2, "audit", "ok", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        // One retry gap sleeps before the delivery; the end follows it.
+        env.end_at(2, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         // Two attempts, one delivery, and the seq of that one delivery.
         assert_eq!(env.send_calls.load(Ordering::SeqCst), 2);
@@ -2234,19 +2368,18 @@ mod tests {
     fn test_run_workflow_never_repeats_a_dispatch_whose_answer_was_lost() {
         // The hived took the task and the answer never came back: the
         // dispatch is not retried, the record stays pending with no seq,
-        // and the member's return is the delivery confirmation — the run
-        // then ends like any delivered dispatch.
+        // and the hived's own word on the turn — held under the dispatch
+        // id whether or not its answer arrived — ends the run like any
+        // delivered dispatch.
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.lose_answer = true;
         env.add_live("audit");
         env.watch_record("audit");
-        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
-        env.return_at(3, "audit", "ok", "/tmp/r.md");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(3, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(r["body"], "ok");
-        assert_eq!(r["artifact"], "/tmp/r.md");
         assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
         assert_eq!(env.dispatches.lock().unwrap().len(), 1);
         assert_eq!(
@@ -2257,74 +2390,27 @@ mod tests {
         let record = read_record(&env.workspace_str(), "audit").unwrap();
         assert_eq!(record.seq, None);
         assert_eq!(record.status, "completed");
-    }
 
-    #[test]
-    fn test_run_workflow_leaves_a_lost_dispatch_pending_when_nothing_shows() {
-        // A spawn of this run, the answer lost, the member's turn open
-        // and no return: the polls of the unknown-dispatch budget, then
-        // ambiguous — with the record still pending and the member not
-        // retired, since it may be on the task.
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.lose_answer = true;
-        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(false), Some(true)]);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
-        assert_eq!(r["status"], "ambiguous");
-        assert_eq!(r["reused"], false);
-        assert_eq!(r["reason"], "dispatch answer lost and no return");
-        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            env.sleeps.load(Ordering::SeqCst),
-            (DISPATCH_UNKNOWN_SECONDS / POLL_SECONDS) as u32 - 1
-        );
-        assert!(env.alive("audit"));
-        assert!(env.retired.lock().unwrap().is_empty());
-        let record = read_record(&env.workspace_str(), "audit").unwrap();
-        assert_eq!(record.status, "pending");
-        assert_eq!(record.seq, None);
-        assert_eq!(record.dispatch_id, r["dispatchId"]);
-        assert!(record.is_pending());
-
-        // The name stays owned: the next run of it is member_busy on that
-        // very record, and dispatches nothing.
-        let r2 = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
-        assert_eq!(r2["status"], "member_busy");
-        assert_eq!(r2["dispatchId"], r["dispatchId"]);
-        assert_eq!(r2["reused"], true);
-        assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            read_record(&env.workspace_str(), "audit").unwrap().status,
-            "pending"
-        );
-    }
-
-    #[test]
-    fn test_run_workflow_ends_a_lost_dispatch_on_a_closed_turn_or_a_death() {
-        // The unknown-dispatch wait is cut short like any other: a closed
-        // turn is no_result, a death is member_gone, and both are terminal.
+        // The answer lost and the hived holding nothing (it never got the
+        // dispatch, or restarted): no_result once the turn is closed, and
+        // the name is free again.
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.lose_answer = true;
         env.add_live("audit");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(NodeResult::Unknown("nothing held".into()))]);
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "no_result");
         assert_eq!(env.send_calls.load(Ordering::SeqCst), 1);
         let record = read_record(&env.workspace_str(), "audit").unwrap();
         assert_eq!(record.status, "no_result");
         assert!(!record.is_pending());
-
-        let tmp = TempDir::new().unwrap();
-        let mut env = fake_env(tmp.path());
-        env.lose_answer = true;
-        env.add_live("audit");
-        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
-        env.die_after_sleeps = Some(5);
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
-        assert_eq!(r["status"], "member_gone");
-        let record = read_record(&env.workspace_str(), "audit").unwrap();
-        assert_eq!(record.status, "member_gone");
-        assert!(!record.is_pending());
+        env.end_at(0, "second");
+        *env.node_answers.lock().unwrap() = VecDeque::from([Some(NodeResult::Running)]);
+        let r2 = run_workflow(&env, &codex("audit", "t")).unwrap();
+        assert_eq!(r2["status"], "completed");
+        assert_ne!(r2["dispatchId"], r["dispatchId"]);
     }
 
     #[test]
@@ -2332,12 +2418,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut env = fake_env(tmp.path());
         env.break_records_on_dispatch = true;
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(2, "done anyway");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         // The task is with the member: the seq backfill and the terminal
         // write both fail, and the run still ends in its verdict, never an
-        // Err. With no record on disk the member cannot return either, so
-        // the closed turn ends it.
-        assert_eq!(r["status"], "no_result");
+        // Err.
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["body"], "done anyway");
         assert_eq!(env.dispatches.lock().unwrap().len(), 1);
         assert!(read_record(&env.workspace_str(), "audit").is_none());
         assert!(env.alive("audit"));
@@ -2352,19 +2439,22 @@ mod tests {
         // never open the dispatch.
         *env.turn_answers.lock().unwrap() =
             VecDeque::from([Some(true), None, None, None, Some(false)]);
-        env.return_at(5, "audit", "ok", "");
-        let r = run_workflow(&env, &workflow("audit", None, "t")).unwrap();
+        env.end_at(5, "ok");
+        let r = run_workflow(&env, &codex("audit", "t")).unwrap();
         assert_eq!(r["status"], "completed");
         assert_eq!(env.dispatches.lock().unwrap()[0].sleeps, 4);
     }
 
     // RealEnv over a hived on a real socket: the only place the production
     // seams are exercised end to end. The socket and the ledger are real;
-    // the transport hand-off (`agent_send`) answers through the hived test
-    // hook, and tmux is the fake `team/mod.rs` uses in test builds.
+    // the transport hand-off (`agent_dispatch_turn`) and the engine's word
+    // on the turn (`cas_turn_result`) answer through the hived test hook,
+    // and tmux is the fake `team/mod.rs` uses in test builds.
 
     #[test]
-    fn test_real_env_dispatches_without_a_sender_and_reads_the_roster() {
+    fn test_real_env_dispatches_without_a_sender_and_reads_the_turn_back() {
+        use crate::adapters::codex_app_server::TurnResult;
+        use crate::agent::TurnHandle;
         use crate::hived::testhook::Hook as HivedHook;
         use crate::hived::HivedServerApi;
         use std::sync::{Arc, Mutex};
@@ -2434,9 +2524,12 @@ mod tests {
         });
 
         // A hived on a real socket: the node-dispatch arm writes the bus row
-        // itself and hands the envelope to the hooked transport.
-        let handed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        // itself and hands the envelope to the hooked transport as one
+        // tracked turn; node-result reads that turn back.
+        let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let handed_sink = Arc::clone(&handed);
+        let turn_ended = Arc::new(Mutex::new(false));
+        let turn_ended_hook = Arc::clone(&turn_ended);
         let ws_hook = workspace.clone();
         let _hived_guard = crate::hived::testhook::install(HivedHook {
             resolve_live_agent: Some(Arc::new(move |team_name, agent| {
@@ -2469,12 +2562,24 @@ mod tests {
             gl_turn_open_for_key: Some(Arc::new(move |key| {
                 (key == format!("m-{team}.g")).then_some(Some(true))
             })),
-            agent_send: Some(Arc::new(move |_agent, text, sender| {
-                handed_sink
-                    .lock()
-                    .unwrap()
-                    .push((text.to_string(), sender.to_string()));
-                Ok("accepted".to_string())
+            agent_dispatch_turn: Some(Arc::new(move |_agent, text| {
+                handed_sink.lock().unwrap().push(text.to_string());
+                Ok(TurnHandle::Codex {
+                    thread_id: "thr-1".to_string(),
+                    turn_id: "turn-9".to_string(),
+                })
+            })),
+            // The turn as the shared codex client saw it: running until
+            // the test flips it, then completed with its messages.
+            cas_turn_result: Some(Arc::new(move |turn_id| {
+                assert_eq!(turn_id, "turn-9");
+                let ended = *turn_ended_hook.lock().unwrap();
+                Some(TurnResult {
+                    thread_id: "thr-1".to_string(),
+                    status: ended.then(|| "completed".to_string()),
+                    error: None,
+                    messages: vec!["looking".to_string(), "done: /tmp/out.md".to_string()],
+                })
             })),
             ..Default::default()
         });
@@ -2516,16 +2621,28 @@ mod tests {
         assert_eq!(env.turn_open("g"), Some(true));
         assert_eq!(env.turn_open("nobody"), None);
 
+        // Before any dispatch the hived holds nothing for the id.
+        assert_eq!(
+            env.node_result("nd-0123456789ab"),
+            Some(NodeResult::Unknown(
+                "this hived holds no turn for dispatch nd-0123456789ab".to_string()
+            ))
+        );
+
         let artifact = format!("{workspace}/artifacts/tasks/b-nd-0123456789ab.md");
         let seq = env
-            .dispatch("b", "task nd-0123456789ab\nfirst task", &artifact)
+            .dispatch(
+                "b",
+                "task nd-0123456789ab\nfirst task",
+                &artifact,
+                "nd-0123456789ab",
+            )
             .unwrap();
         assert!(seq > 0);
         let events = crate::bus::read_all_events(&workspace).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, seq);
-        // No sender on the ledger row, no `from` on the envelope, and the
-        // transport's origin label is the team.
+        // No sender on the ledger row, no `from` on the envelope.
         assert_eq!(events[0].from, "");
         assert_eq!(events[0].to, "b");
         assert_eq!(events[0].body, "task nd-0123456789ab\nfirst task");
@@ -2534,13 +2651,24 @@ mod tests {
             let handed = handed.lock().unwrap();
             assert_eq!(handed.len(), 1);
             assert_eq!(
-                handed[0].0,
+                handed[0],
                 format!(
                     "<HIVE to=b artifact={artifact}>\ntask nd-0123456789ab\nfirst task\n</HIVE>"
                 )
             );
-            assert_eq!(handed[0].1, team);
         }
+
+        // The turn is read back under the dispatch id: running, then the
+        // engine's end with the last message as the text.
+        assert_eq!(
+            env.node_result("nd-0123456789ab"),
+            Some(NodeResult::Running)
+        );
+        *turn_ended.lock().unwrap() = true;
+        assert_eq!(
+            env.node_result("nd-0123456789ab"),
+            Some(ended("completed", "done: /tmp/out.md"))
+        );
 
         assert!(
             real_tmux_argv.borrow().is_empty(),

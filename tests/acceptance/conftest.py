@@ -5,7 +5,7 @@ panes, real claude/codex/grok sessions) against the live install, so they
 never run from a plain `pytest tests/`. Run after every install:
 
     HIVE_ACCEPTANCE=1 python -m pytest tests/acceptance -q
-    HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=claude,codex,grok \
+    HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=codex,grok \
         python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
@@ -16,16 +16,19 @@ task wording is deliberately NOT "mechanical, do not improvise" — drift
 (acks, stray replies, self-invented scope) only shows itself when the
 member has room to move.
 
-The node's result is the member's own return (`hive workflow done`), and
-the oracle does not take the node's word for that either: after the nodes
-return, the rig reads the ledger, the node record and done file under the
-workspace's `run/workflow/`, and — the one transcript read left — counts
-how often the dispatch id landed in the member's own conversation, by the
-engine session resolved from its registry row (`member_transcripts` — a
-claude row holds the bg job id, and the engine session behind it comes
-from the job's own state file, never from the node's answer). The task
-carries a bait string the member is told never to repeat, so the body is
-shown to be the member's words and not the task's.
+The node's result is the engine's own end of the turn (codex
+`turn/completed`, grok the `session/prompt` response), read by the hived
+that started it, with the last thing the member said as the body — the
+member runs nothing to return. The oracle does not take the node's word
+for that: after the nodes return, the rig reads the ledger and the node
+record under the workspace's `run/workflow/`, and — the one transcript
+read left — counts how often the dispatch id landed in the member's own
+conversation, by the engine session resolved from its registry row
+(`member_transcripts`). The task carries a bait string the member is told
+never to repeat, so the body is shown to be the member's words and not the
+task's. A node runs codex or grok (a claude node is Claude Code's own
+subagent), so HIVE_ACCEPTANCE_CLIS names those two; a claude entry is
+rejected by the rig before anything is spawned.
 """
 
 from __future__ import annotations
@@ -80,7 +83,6 @@ class Rig:
     roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
     dispatch_inputs: dict[str, int] = field(default_factory=dict)  # member -> transcript input records carrying the id
     records: dict[str, dict] = field(default_factory=dict)  # member -> run/workflow/<member>.json after the run
-    done_files: dict[str, bool] = field(default_factory=dict)  # member -> run/workflow/<member>.done.json still exists
 
     def member(self, cli: str) -> str:
         return f"probe-{cli}"
@@ -109,9 +111,6 @@ class Rig:
     def record_path(self, member: str) -> Path:
         return self.workspace / "run" / "workflow" / f"{member}.json"
 
-    def done_path(self, member: str) -> Path:
-        return self.workspace / "run" / "workflow" / f"{member}.done.json"
-
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
         if not pane:
@@ -135,7 +134,10 @@ class Rig:
 
 @pytest.fixture(scope="session")
 def rig():
-    clis = [c.strip() for c in os.environ.get("HIVE_ACCEPTANCE_CLIS", "claude").split(",") if c.strip()]
+    clis = [c.strip() for c in os.environ.get("HIVE_ACCEPTANCE_CLIS", "codex,grok").split(",") if c.strip()]
+    unsupported = [c for c in clis if c not in ("codex", "grok")]
+    if unsupported:
+        raise RuntimeError(f"a workflow node runs codex or grok; HIVE_ACCEPTANCE_CLIS names {unsupported}")
     run_id = uuid.uuid4().hex[:6]
     r = Rig(
         clis=clis,
@@ -161,7 +163,7 @@ def rig():
             time.sleep(1)
 
         task = (
-            "请把这段口令写进 {path}：{nonce}。写完后用 `hive workflow done` 返回，返回的摘要里原样写出口令 {nonce}，"
+            "请把这段口令写进 {path}：{nonce}。写完后，你这一轮最后说的话就是结果：在最后一段话里原样写出口令 {nonce}，"
             "顺便说一句你对这个任务的看法。另外有一个干扰词 {bait}——它不是口令，任何地方都不要复述它。"
         )
         # Reproduce the honest parentage: a Workflow's node runner lives
@@ -209,15 +211,12 @@ def rig():
             r.bus_rows = sqlite3.connect(db).execute(
                 "select seq, from_agent, to_agent, body, artifact from messages"
             ).fetchall()
-        # The record and done file are read the moment the nodes return,
-        # before teardown retires the members and removes the records.
+        # The record is read the moment the nodes return, before teardown
+        # retires the members and removes the records.
         for member in procs:
             r.records[member] = _read_json(r.record_path(member))
-            r.done_files[member] = r.done_path(member).exists()
-        # The registry row names the member's engine session (a claude row
-        # is a job id — its engine session comes from the job's state file,
-        # never from the node's answer); the transcript read counts how
-        # often the dispatch id landed there.
+        # The registry row names the member's engine session; the
+        # transcript read counts how often the dispatch id landed there.
         r.roster = _registry_members(r.team)
         for member in procs:
             row = r.roster.get(member, {})
