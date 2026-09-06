@@ -89,11 +89,13 @@ pub(super) struct PoolState {
 /// first time a read finds both a socket and a session record, and a dead
 /// one is dropped and retried after a cooldown so a missing daemon does not
 /// storm subprocess spawns.
+#[cfg(test)]
+type ClientOverride = Box<dyn Fn(&str) -> Option<Arc<dyn LeaderClient>> + Send>;
+
 pub struct GrokClientPool {
     pub(super) state: Mutex<PoolState>,
     #[cfg(test)]
-    pub(super) client_override:
-        Mutex<Option<Box<dyn Fn(&str) -> Option<Arc<dyn LeaderClient>> + Send>>>,
+    pub(super) client_override: Mutex<Option<ClientOverride>>,
 }
 
 impl GrokClientPool {

@@ -37,13 +37,16 @@ impl std::fmt::Display for TmuxError {
 impl std::error::Error for TmuxError {}
 
 #[cfg(test)]
+type RunOverride = Box<dyn FnMut(&[String], bool, u64) -> Result<Run, TmuxError>>;
+#[cfg(test)]
+type ExecOverride = Box<dyn FnMut(&[String], u64, Option<&str>) -> Result<Run, TmuxError>>;
+
+#[cfg(test)]
 thread_local! {
-    pub(super) static RUN_OVERRIDE: std::cell::RefCell<
-        Option<Box<dyn FnMut(&[String], bool, u64) -> Result<Run, TmuxError>>>,
-    > = const { std::cell::RefCell::new(None) };
-    pub(super) static EXEC_OVERRIDE: std::cell::RefCell<
-        Option<Box<dyn FnMut(&[String], u64, Option<&str>) -> Result<Run, TmuxError>>>,
-    > = const { std::cell::RefCell::new(None) };
+    pub(super) static RUN_OVERRIDE: std::cell::RefCell<Option<RunOverride>> =
+        const { std::cell::RefCell::new(None) };
+    pub(super) static EXEC_OVERRIDE: std::cell::RefCell<Option<ExecOverride>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Test seam: route every `_run` through *f*, which sees `(argv, check,

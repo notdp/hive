@@ -19,49 +19,58 @@ use std::sync::{Arc, Mutex};
 pub type F0<R> = Arc<dyn Fn() -> R + Send + Sync>;
 pub type S1<R> = Arc<dyn Fn(&str) -> R + Send + Sync>;
 pub type S2<R> = Arc<dyn Fn(&str, &str) -> R + Send + Sync>;
+pub type S3<R> = Arc<dyn Fn(&str, &str, &str) -> R + Send + Sync>;
+pub type S4<R> = Arc<dyn Fn(&str, &str, &str, &str) -> R + Send + Sync>;
+pub type A1<R> = Arc<dyn Fn(&Agent) -> R + Send + Sync>;
+pub type P1<R> = Arc<dyn Fn(&Path) -> R + Send + Sync>;
+pub type V1<R> = Arc<dyn Fn(&[String]) -> R + Send + Sync>;
+pub type FindSessionFile = Arc<dyn Fn(&str, Option<&str>) -> Option<PathBuf> + Send + Sync>;
+pub type SessionStatus = Arc<dyn Fn(Option<i32>) -> Option<(String, String)> + Send + Sync>;
+pub type WriteHivedOwner = Arc<dyn Fn(&str, i64, &str, &str) + Send + Sync>;
+pub type Popen = Arc<dyn Fn(&[String], &Path) -> i32 + Send + Sync>;
+pub type JobRows = Vec<Map<String, Value>>;
 
 /// The two adapter methods the hived consumes
 /// (`resolve_current_session_id` / `find_session_file`).
 #[derive(Clone)]
 pub struct FakeAdapter {
-    pub resolve: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
-    pub find: Arc<dyn Fn(&str, Option<&str>) -> Option<PathBuf> + Send + Sync>,
+    pub resolve: S1<Option<String>>,
+    pub find: FindSessionFile,
 }
 
 #[derive(Default)]
 pub struct Hook {
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
-    pub check_input_gate: Option<Arc<dyn Fn(&Path) -> GateResult + Send + Sync>>,
+    pub check_input_gate: Option<P1<GateResult>>,
     // tmux
     pub is_pane_alive: Option<S1<bool>>,
     pub display_value: Option<S2<Option<String>>>,
     pub get_most_recent_client_window: Option<S1<Option<String>>>,
     pub get_pane_window_target: Option<S1<Option<String>>>,
     pub get_window_option: Option<S2<Option<String>>>,
-    pub set_pane_option: Option<Arc<dyn Fn(&str, &str, &str) + Send + Sync>>,
-    pub set_window_option: Option<Arc<dyn Fn(&str, &str, &str) + Send + Sync>>,
-    pub send_keys: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    pub set_pane_option: Option<S3<()>>,
+    pub set_window_option: Option<S3<()>>,
+    pub send_keys: Option<S2<()>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub claude_pid_for_pane: Option<S1<Option<i32>>>,
-    pub resolve_model_for_pane: Option<Arc<dyn Fn(&str, &str, &str) -> String + Send + Sync>>,
+    pub resolve_model_for_pane: Option<S3<String>>,
     pub member_role_for_pane: Option<S1<&'static str>>,
     // claude_bg
     pub cb_read_pane_job: Option<S1<Option<PaneJob>>>,
     pub cb_engine_session_for_job: Option<S1<Option<EngineSession>>>,
-    pub cb_list_jobs: Option<F0<Option<Vec<Map<String, Value>>>>>,
+    pub cb_list_jobs: Option<F0<Option<JobRows>>>,
     pub cb_job_id_for_pane: Option<S1<Option<String>>>,
     pub cb_list_recorded_panes: Option<F0<Vec<String>>>,
     pub cb_clear_pane_job: Option<S1<()>>,
     pub cb_stop_job: Option<S1<()>>,
-    pub ensure_job_named: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    pub ensure_job_named: Option<S2<()>>,
     // claude_sessions
-    pub cs_session_status:
-        Option<Arc<dyn Fn(Option<i32>) -> Option<(String, String)> + Send + Sync>>,
+    pub cs_session_status: Option<SessionStatus>,
     pub cs_list_sessions: Option<F0<Vec<ClaudeSession>>>,
     // claude_view
     pub cv_journal_signature: Option<F0<Vec<String>>>,
@@ -91,23 +100,19 @@ pub struct Hook {
     // notify / plugin
     #[allow(clippy::type_complexity)]
     pub notify_debug_emit: Option<Arc<dyn Fn(&str, &str, &[(&str, Value)]) + Send + Sync>>,
-    #[allow(clippy::type_complexity)]
-    pub notify_ui_notify:
-        Option<Arc<dyn Fn(&str, &str, &str) -> (bool, Option<String>) + Send + Sync>>,
+    pub notify_ui_notify: Option<S3<(bool, Option<String>)>>,
     #[allow(clippy::type_complexity)]
     pub clear_stale_notify: Option<Arc<dyn Fn(&str, &[String], &str, &str, &str) + Send + Sync>>,
     pub is_plugin_enabled: Option<S1<bool>>,
     // team / agent
-    pub team_load: Option<Arc<dyn Fn(&str) -> anyhow::Result<Team> + Send + Sync>>,
-    pub agent_is_alive: Option<Arc<dyn Fn(&Agent) -> bool + Send + Sync>>,
+    pub team_load: Option<S1<anyhow::Result<Team>>>,
+    pub agent_is_alive: Option<A1<bool>>,
     #[allow(clippy::type_complexity)]
     pub agent_send:
         Option<Arc<dyn Fn(&Agent, &str, &str) -> Result<String, DeliveryError> + Send + Sync>>,
     // hived self-seams
-    #[allow(clippy::type_complexity)]
-    pub resolve_live_agent:
-        Option<Arc<dyn Fn(&str, &str) -> anyhow::Result<(Team, Agent)> + Send + Sync>>,
-    pub check_send_gate: Option<Arc<dyn Fn(&Agent) -> anyhow::Result<()> + Send + Sync>>,
+    pub resolve_live_agent: Option<S2<anyhow::Result<(Team, Agent)>>>,
+    pub check_send_gate: Option<A1<anyhow::Result<()>>>,
     pub member_runtime_payload: Option<S2<Map<String, Value>>>,
     pub busy_output_payload: Option<S1<Map<String, Value>>>,
     pub native_daemon_busy: Option<S1<Option<bool>>>,
@@ -129,10 +134,10 @@ pub struct Hook {
     pub request_ping: Option<S1<Option<Map<String, Value>>>>,
     pub cleanup_socket: Option<S1<()>>,
     pub run_dir: Option<S1<PathBuf>>,
-    pub write_hived_owner: Option<Arc<dyn Fn(&str, i64, &str, &str) + Send + Sync>>,
+    pub write_hived_owner: Option<WriteHivedOwner>,
     pub release_reexec_lock_fd: Option<Arc<dyn Fn(Option<i32>) + Send + Sync>>,
     pub try_acquire_reexec_lock: Option<S1<Option<i32>>>,
-    pub execv: Option<Arc<dyn Fn(&[String]) -> ExecOutcome + Send + Sync>>,
+    pub execv: Option<V1<ExecOutcome>>,
     pub compute_build_hash: Option<F0<String>>,
     pub stale_disk_build_hash: Option<F0<Option<String>>>,
     pub serve_requests: Option<F0<bool>>,
@@ -143,9 +148,9 @@ pub struct Hook {
     pub handle_request:
         Option<Arc<dyn Fn(&Map<String, Value>) -> (Map<String, Value>, bool) + Send + Sync>>,
     pub current_exe: Option<F0<String>>,
-    pub popen: Option<Arc<dyn Fn(&[String], &Path) -> i32 + Send + Sync>>,
+    pub popen: Option<Popen>,
     pub ignore_sigint: Option<F0<()>>,
-    pub hived_loop: Option<Arc<dyn Fn(&str, &str, &str, &str) + Send + Sync>>,
+    pub hived_loop: Option<S4<()>>,
     pub make_busy_monitor: Option<S1<Option<Arc<dyn OutputMonitor>>>>,
 }
 

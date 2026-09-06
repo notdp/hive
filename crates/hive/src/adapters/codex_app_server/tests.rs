@@ -12,9 +12,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+type SharedClientOverride = Box<dyn Fn() -> Option<Arc<dyn DaemonClient>>>;
+
 thread_local! {
-    static SHARED_CLIENT_OVERRIDE: RefCell<Option<Box<dyn Fn() -> Option<Arc<dyn DaemonClient>>>>> =
-        RefCell::new(None);
+    static SHARED_CLIENT_OVERRIDE: RefCell<Option<SharedClientOverride>> = RefCell::new(None);
 }
 
 /// Some(...) when this test thread overrode `_shared_client`.

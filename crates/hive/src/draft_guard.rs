@@ -345,10 +345,13 @@ mod tests {
         seen_preserve_styles: Option<bool>,
     }
 
+    /// `(target, keys)` per send-keys call.
+    type SentKeys = Vec<(String, Vec<String>)>;
+
     thread_local! {
         static DISPLAY_VALUE: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
         static CAPTURE: RefCell<Option<CaptureMock>> = const { RefCell::new(None) };
-        static SENT_KEYS: RefCell<Option<Vec<(String, Vec<String>)>>> = const { RefCell::new(None) };
+        static SENT_KEYS: RefCell<Option<SentKeys>> = const { RefCell::new(None) };
     }
 
     pub(super) fn mock_display_value(_target: &str, _fmt: &str) -> Option<Option<String>> {
