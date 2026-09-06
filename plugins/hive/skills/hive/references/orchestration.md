@@ -86,12 +86,16 @@ spawn explore ──> 回报(摘要+findings artifact) ──> 验收 ──> ki
 
 开工:在编排的 Claude session 里 `hive create <run>`——建团者即 orch,你以 `<run>.orch` 入册,团窗口首格是你的只读镜像;human `hive attach <run>` 看全场。session=team=run 名。
 
-节点就是一条阻塞命令:`hive node run --team <run> --name <member> [--cli] [--model]`,task 从 stdin 进,回信以一行 JSON 从 stdout 出。hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——把这条命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
+节点就是一条阻塞命令:`hive node run --team <run> --name <member> [--cli] [--model]`,task 从 stdin 进,结果以一行 JSON 从 stdout 出。节点像 Workflow 自己的子代理一样工作:成员不被要求回信。它收到的是一封没有 `from` 的信封——`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,正文首行是任务号 `task nd-…`——干完结束 turn,runner 从引擎自己的对话记录里读走那一轮的最后一条 assistant 消息(全部文本段,原顺序,不截断)作为结果。所以 task 里要写明成员该把什么写进最后一条消息(commit sha、报告路径、verdict),而不是「完成后回报」。
+
+JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头)、`session`、`turn`;`status=completed` 时有 `body`(最后一条消息全文,可能为空串),否则有 `reason`(引擎自己的标签)。`status` 取值:`completed | interrupted | failed | ambiguous | session_changed | transcript_unavailable | member_gone | member_busy`。human 在 pane 里插话或打断、消息折进成员正在跑的一轮、成员 `/clear` 换了 session——runner 按实际情况报 `ambiguous` / `interrupted` / `session_changed`,不猜哪一轮是任务那轮;非 `completed` 一样是节点的返回值,由脚本决定重派、改任务还是升级 human,代理不重试、不解读。每次跑在 `<workspace>/run/nodes/<member>.json` 留记录;上一跑还 pending 且成员活着时,同名节点得到 `member_busy`。
+
+hive 插件分发的 `hive-node` 代理 agent 就只做这一件事——把这条命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回 workflow。写法:prompt 第一行是这条命令,其余是 task:
 
 ```js
-const reply = await agent(`hive node run --team ${run} --name impl-auth --cli codex
+const result = await agent(`hive node run --team ${run} --name impl-auth --cli codex
 
-实现 auth 模块;交付 commit;完成后回报。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
+实现 auth 模块;交付 commit;最后一条消息写 commit sha 和改动摘要。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
 ```
 
 代理定义里已固定 `model: haiku`,不用在调用处写。Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> 「<cli>」`,显式指定了成员模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`。

@@ -187,15 +187,107 @@ busy since; the ticker is the two newest bus sends as `from → to · age ·
 verbatim. They are display of the runtime fields below, never a source for
 them.
 
-### Mailbox addresses
+### Addresses beyond the roster
 
-Of the three send address kinds, only a member names an engine with a
-transport. `ccd.<name>` reaches a Claude session outside any team over that
-session's own inbox. `flow.run` is the mailbox a `hive node run` dispatch
-names as its reply address, where delivery is the durable bus row itself:
-`run_node` polls it, owns no transport, and sends no ack. Mailboxes are
-listed under `mailboxes`, not in `members`; the roster holds engines only,
-and `flow` is a reserved prefix like `ccd`.
+Of the send address kinds, only a member names an engine with a transport.
+`ccd.<name>` reaches a Claude session outside any team over that session's
+own inbox. A `hive node run` dispatch has no reply address at all: the
+member is never asked to send anything back, and the roster holds engines
+only.
+
+### Node dispatch: the result is the turn's final message
+
+`hive node run --team T --name N [--cli C] [--model M]` runs one task on a
+member the way a Claude Code Workflow runs a subagent: the member is told
+nothing about replying, does the task, ends its turn, and the runner
+(`node.rs`) reads the final assistant message of that turn from the engine's
+own transcript. Nothing travels back over the bus.
+
+- **The dispatch.** The runner mints a dispatch id `nd-<12 lowercase hex>`,
+  writes the task to `<workspace>/artifacts/tasks/<name>-<dispatch_id>.md`,
+  and injects an envelope with no `from`:
+  `<HIVE to=<team>.<name> artifact=<that path>>`, body `task <dispatch_id>`
+  followed by the task's first line, `</HIVE>`. The id therefore appears
+  verbatim in the text the member receives (header and body). The ledger row
+  has `from_agent` empty (there is no sender), `to_agent` the member name and
+  `artifact` the task path; it is the only bus write a node makes.
+- **Anchoring is input identity, never time.** Before dispatching, the
+  runner takes the reader's cursor (where the transcript ends now). After
+  dispatching it asks the reader for the input record carrying the id past
+  that cursor, binds the turn that input started, and waits for that turn's
+  terminal record. A turn the reader cannot attribute to the id is reported,
+  not guessed at: a message folded into a running turn, a human typing into
+  the pane before or during the turn, a compaction that breaks the chain,
+  a second input merged in — all `ambiguous`; `/clear`, a resume into another
+  id or a fork — `session_changed`. The readers (`adapters/turn.rs`, one
+  per CLI) are the only place transcript turn and terminal shapes are
+  interpreted; `node.rs` sees `TurnOutcome` values and nothing else.
+- **The result.** `body` is every text block of the bound turn's final
+  assistant message, original order, thinking and tool blocks excluded, not
+  truncated to a sentence or a line; it is empty when the turn closed
+  without a text block. A completed turn says the engine closed it, not that
+  the task succeeded: a refusal or a request for help is a normal final
+  message.
+- **The JSON line** (stdout, exit 0 whenever a verdict was reached; stderr
+  and exit 1 only when no dispatch happened — bad team, spawn or ready
+  failure, no reader for the cli): `status`, `name`, `pane` (may be empty),
+  `reused`, `dispatchId`, `session` (engine session id, may be empty),
+  `turn` (engine turn key, or null), `body` when `status` is `completed`,
+  `reason` (the engine's own label or an explanation) otherwise. `status`
+  is one of `completed | interrupted | failed | ambiguous | session_changed
+  | transcript_unavailable | member_gone | member_busy`: the first five are
+  the same-named `TurnOutcome`; `transcript_unavailable` is a reader that
+  kept failing to read for 60s after the dispatch, or a roster row that
+  never got a session id; `member_gone` is a member the roster reports dead
+  with no outcome readable on one final read; `member_busy` is a pending
+  node record for the member whose member is alive, or the per-member lock
+  held by another runner. Polling is 1s, the reader is re-invoked on every
+  poll, and a half-written trailing line is "not yet"; there is no timeout
+  (the caller decides), and Ctrl-C leaves the record pending.
+- **The record.** `<workspace>/run/nodes/<name>.json` — `dispatchId`,
+  `cli`, `session`, `cursor`, `anchor` (session/turn/cursor once bound),
+  `status` (`pending | input_bound | <terminal status>`), `body`/`reason`
+  when terminal, `seq` (ledger seq of the dispatch), `startedAt` (epoch
+  seconds) — under the flock `<workspace>/run/nodes/<name>.lock` held for
+  the whole run. A stale pending record whose member is dead is replaced by
+  the next run; `hive kill` of the member removes its record. A same-name
+  node reuses a live member.
+
+#### Node turn anchors, per CLI
+
+What each reader binds and waits for, in the engine's own records:
+
+- **claude** — transcript `~/.claude/projects/<cwd slug>/<sessionId>.jsonl`
+  (the slug is the cwd with every non-alphanumeric character replaced by
+  `-`). The input is the `user` record whose content carries the dispatch id
+  (a human-origin row with the bare envelope, as the daemon lane writes it
+  between turns); a `tool_result` row or a meta row is never an input. The
+  turn key is that record's `uuid`, and the turn is followed along the
+  `parentUuid` chain from it: the assistant record with
+  `message.stop_reason == "end_turn"` on that chain is the terminal record,
+  and the final message is the text blocks of the records sharing its
+  `message.id`. Mid-turn the id lands only in a `queued_command` attachment
+  and its queue rows (see "What a delivery leaves in the receiver's
+  transcript"), never in a `user` row: that is `ambiguous`, not a turn.
+- **codex** — rollout `~/.codex/sessions/**/rollout-*-<threadId>.jsonl`.
+  The input is the `response_item` user message whose `input_text` carries
+  the id; its metadata `turn_id` is the turn key, the same id the
+  `task_started` event_msg carries. The terminal record is the `event_msg`
+  `task_complete` with that `turn_id`; its `last_agent_message` is the
+  final message, the same text as the turn's `final_answer` assistant
+  message. A turn that ends with another event for the same `turn_id`
+  keeps that event's own label as the reason.
+- **grok** — two files under
+  `~/.grok/sessions/<urlencode(cwd, safe='')>/<sessionId>/`.
+  `chat_history.jsonl` holds the input: the `user` record whose
+  `<user_query>` carries the id (system-reminder user records are not
+  queries). `events.jsonl` holds `turn_started` (`session_id`,
+  `turn_number`) and `turn_ended` (`outcome`) records, paired in order; the
+  n-th query is the n-th pair, and the turn key is
+  `<session_id>/<turn_number>`. The final message is the last `assistant`
+  record of `chat_history.jsonl` between the bound query and the next one;
+  a `turn_ended` whose `outcome` is not `completed` ends the turn under
+  grok's own outcome label.
 
 ## Runtime fields and their sources
 
