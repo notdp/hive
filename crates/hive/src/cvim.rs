@@ -27,7 +27,7 @@ const PROTOCOL_JSON: &str = include_str!("../assets/cvim/resources/cvim_edit_pro
 /// and return the `cvim-command` path.
 pub fn materialize_assets() -> anyhow::Result<PathBuf> {
     let root = crate::team::hive_home().join("core_assets").join("cvim");
-    crate::core_hooks::materialize_asset_tree(
+    crate::assets::materialize_asset_tree(
         &root,
         &[
             ("bin/cvim-command", CVIM_COMMAND, true),

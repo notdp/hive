@@ -389,7 +389,6 @@ fn reuse_existing_binding(existing: &Map<String, Value>, name: &str) -> Result<b
 /// another team (see [`reuse_existing_binding`]).
 fn create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
     gc_dead_teams();
-    let _ = crate::plugin_manager::cleanup_retired_plugins();
 
     let existing = discover_tmux_binding();
     match reuse_existing_binding(&existing, name) {

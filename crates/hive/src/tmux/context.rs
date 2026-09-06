@@ -185,11 +185,6 @@ pub fn run_shell_detached(command: &str) {
     let _ = run(&["run-shell", "-b", command], false, 5);
 }
 
-/// Source a tmux conf; false on missing tmux, timeout, or nonzero exit.
-pub fn source_file(path: &str) -> bool {
-    matches!(run(&["source-file", path], false, 5), Ok(r) if r.returncode == 0)
-}
-
 pub fn get_most_recent_client_tty(session_name: Option<&str>) -> Option<String> {
     let rows = list_terminal_clients(session_name);
     rows.into_iter().next().map(|row| row.1)

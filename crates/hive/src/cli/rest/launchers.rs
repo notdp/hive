@@ -416,16 +416,6 @@ fn claude_raw(args: &[String]) -> ! {
 fn exec_claude_managed(args: &[String]) -> ! {
     use crate::adapters::claude_bg;
 
-    if args.len() == 1 && args[0] == "channel-server" {
-        // Tombstone for the retired hive-channel plugin's MCP entry: exec'ing
-        // this into claude would feed it a garbage subcommand every session.
-        eprintln!(
-            "Error: the hive-channel plugin is retired (claude delivery now \
-             uses the session's own cross-session inbox). Remove it with: \
-             claude plugin uninstall hive-channel@hive"
-        );
-        std::process::exit(1);
-    }
     let pane = env_string("TMUX_PANE");
     if pane.is_empty() || env_string("TMUX").is_empty() {
         claude_raw(args); // hive needs a real tmux pane to bind a job to

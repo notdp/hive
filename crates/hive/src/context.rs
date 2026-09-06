@@ -18,12 +18,6 @@ pub fn context_dir() -> PathBuf {
     hive_home().join("contexts")
 }
 
-/// Legacy single-file path: read as a fallback whenever no per-pane file
-/// exists (never migrated into one); removed by `clear_current_context`.
-pub fn current_context_file() -> PathBuf {
-    hive_home().join("current.json")
-}
-
 fn pane_slug(pane_id: &str) -> String {
     if pane_id.is_empty() {
         "default".to_string()
@@ -97,13 +91,6 @@ fn read_context_map(path: &Path) -> Option<HashMap<String, String>> {
 pub fn load_current_context() -> HashMap<String, String> {
     let path = context_file();
     if !path.exists() {
-        // Migrate from legacy single-file if it exists
-        let legacy = current_context_file();
-        if legacy.exists() {
-            if let Some(map) = read_context_map(&legacy) {
-                return map;
-            }
-        }
         return HashMap::new();
     }
     read_context_map(&path).unwrap_or_default()
@@ -206,11 +193,6 @@ pub fn clear_current_context() -> Result<()> {
     if path.exists() {
         fs::remove_file(&path)?;
     }
-    // Also clean up legacy file
-    let legacy = current_context_file();
-    if legacy.exists() {
-        fs::remove_file(&legacy)?;
-    }
     Ok(())
 }
 
@@ -305,25 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_current_context_uses_legacy_file_when_pane_file_missing() {
-        let (tmp, _guard) = setup(None);
-        fs::write(
-            tmp.path().join("current.json"),
-            r#"{"team": "team-a", "workspace": "/tmp/ws", "agent": "gpt"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            load_current_context(),
-            map(&[
-                ("team", "team-a"),
-                ("workspace", "/tmp/ws"),
-                ("agent", "gpt")
-            ])
-        );
-    }
-
-    #[test]
     fn test_load_current_context_returns_empty_on_invalid_json() {
         let (tmp, _guard) = setup(None);
         let dir = tmp.path().join("contexts");
@@ -348,17 +311,15 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_current_context_removes_pane_and_legacy_files() {
+    fn test_clear_current_context_removes_the_pane_file() {
         let (tmp, _guard) = setup(Some("%9"));
         let pane_file = tmp.path().join("contexts").join("pane-9.json");
         fs::create_dir_all(pane_file.parent().unwrap()).unwrap();
         fs::write(&pane_file, "{}").unwrap();
-        fs::write(tmp.path().join("current.json"), "{}").unwrap();
 
         clear_current_context().unwrap();
 
         assert!(!pane_file.exists());
-        assert!(!tmp.path().join("current.json").exists());
     }
 
     #[test]

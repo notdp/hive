@@ -83,7 +83,7 @@ pub(crate) fn config_dir() -> PathBuf {
     // a disposable tree); CLAUDE_CONFIG_DIR is Claude Code's relocation knob.
     // Honour both so a sandboxed run never reads — or messages — the
     // developer's real sessions. Every other reader of the tree
-    // (`claude::claude_home`, `core_hooks::claude_home`) delegates here.
+    // (`claude::claude_home`) delegates here.
     for key in ["CLAUDE_HOME", "CLAUDE_CONFIG_DIR"] {
         if let Ok(v) = env::var(key) {
             if !v.is_empty() {
