@@ -80,7 +80,7 @@ review the spec
 `<HIVE>` 的到达形态分两轴,任何组合都是正常队内投递:
 
 - **什么时候到**:空闲时它自己开启新一轮;干活时折进当前这一轮,出现在某个工具结果旁——折进来的一样要办。
-- **外面包没包**:claude 成员通常看到上面那样的裸信封;主投递道不可用、退回 inbox socket 时,宿主(Claude Code)才在 block 上方加一行 `Another Claude session sent a message:`(途中到达是 `Another Claude session sent a message while you were working:`),下方加一段以 `This came from another Claude session` 开头的说明,末尾可能提示用 SendMessage 回复。codex / grok 从来没有这层包装。
+- **外面包没包**:claude 成员通常看到上面那样的裸信封;主投递道不可用、退回 inbox socket 时,宿主(Claude Code)才在 block 上方加一行 `Another Claude session sent a message:`(途中到达是 `Another Claude session sent a message while you were working:`),下方加一段以 `This came from another Claude session` 开头的说明,末尾可能提示用 SendMessage 回复;信封外面还会套一层 `<cross-session-message from="…">…</cross-session-message>`,那是给 human 的消息卡片看的,`<HIVE>` 信封本身不变。codex / grok 从来没有这层包装。
 
 两条硬规则:
 

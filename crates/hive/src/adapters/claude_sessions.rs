@@ -370,7 +370,7 @@ fn send_with_write_timeout(
         "type": "user",
         "priority": "next",
         "from": sender,
-        "message": {"role": "user", "content": text},
+        "message": {"role": "user", "content": peer_card_envelope(sender, text)},
     });
     if !session_id.is_empty() {
         frame["session_id"] = json!(session_id);
@@ -387,6 +387,67 @@ fn send_with_write_timeout(
         }
         Err(_) => None,
     }
+}
+
+/// The tag Claude Code's own `SendMessage` wraps a cross-session body in.
+const PEER_TAG: &str = "cross-session-message";
+
+/// *text* as the receiving Claude Code draws it like one of its own peer
+/// messages: `<cross-session-message from="…">\n<body>\n</cross-session-message>`.
+///
+/// The receiver's message card (terminal `UserCrossSessionMessage`, the
+/// desktop's peer card; observed on 2.1.263) parses the row's text for this
+/// exact shape and, when it parses, draws `@ <from>` over the inner body
+/// alone — the "Another Claude session sent a message" lead line and the
+/// safety paragraph the receiver appends stay out of view. A body it cannot
+/// parse (a bare `<HIVE>` envelope) is drawn whole, wrapper included. Only
+/// the display changes: the model still reads the receiver's wrapper, and
+/// the frame's `from` field (the origin) still names the sender, which the
+/// desktop card requires to equal the tag's `from`. The parse is strict, so
+/// the shape follows the receiver's own builder: `from` restricted to
+/// `[A-Za-z0-9%:_/.\-]` with everything else percent-encoded, one `\n`
+/// either side of the body, and a `<` opening the closing tag inside the
+/// body spelled `<\` so the body cannot end the wrapper early.
+pub fn peer_card_envelope(sender: &str, text: &str) -> String {
+    format!(
+        "<{PEER_TAG} from=\"{}\">\n{}\n</{PEER_TAG}>",
+        peer_from_attr(sender),
+        escape_peer_body(text)
+    )
+}
+
+fn peer_from_attr(sender: &str) -> String {
+    let mut out = String::with_capacity(sender.len());
+    for b in sender.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b':' | b'_' | b'/' | b'.' | b'-' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// ponytail: the receiver's escaper also catches lookalike glyphs and filler
+// characters spelling the closing tag; a hive body is an envelope plus a
+// member's prose, so only the literal spelling is covered here. A body that
+// slips past leaves the card drawing the whole row, never a lost message.
+fn escape_peer_body(text: &str) -> String {
+    let close = format!("</{PEER_TAG}");
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&close) {
+        let at = from + i;
+        out.push_str(&text[last..at]);
+        out.push_str("<\\");
+        last = at + 1;
+        from = at + close.len();
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 fn daemon_control_sock() -> PathBuf {
@@ -857,9 +918,34 @@ mod tests {
                 "type": "user",
                 "priority": "next",
                 "from": "t.w",
-                "message": {"role": "user", "content": "hello there"},
+                "message": {
+                    "role": "user",
+                    "content": "<cross-session-message from=\"t.w\">\nhello there\n</cross-session-message>",
+                },
             })
         );
+    }
+
+    #[test]
+    fn test_peer_card_envelope_follows_the_receivers_own_shape() {
+        // the exact bytes claude's SendMessage writes for the same sender and
+        // body: this is what the receiver's card parses, and a byte off falls
+        // back to drawing the whole wrapped row
+        assert_eq!(
+            peer_card_envelope("hornet.sage", "<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>"),
+            "<cross-session-message from=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>\n</cross-session-message>"
+        );
+    }
+
+    #[test]
+    fn test_peer_card_envelope_percent_encodes_the_sender_and_escapes_a_closing_tag_in_the_body() {
+        assert_eq!(peer_from_attr("ccd.my session#1"), "ccd.my%20session%231");
+        assert_eq!(peer_from_attr("hornet.sage"), "hornet.sage");
+        assert_eq!(
+            escape_peer_body("a </cross-session-message> b </CROSS-SESSION-MESSAGE>"),
+            "a <\\/cross-session-message> b <\\/CROSS-SESSION-MESSAGE>"
+        );
+        assert_eq!(escape_peer_body("<HIVE>\nx\n</HIVE>"), "<HIVE>\nx\n</HIVE>");
     }
 
     #[test]

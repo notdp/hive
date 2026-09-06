@@ -69,8 +69,26 @@ fn strip_channel_wrapper(text: &str) -> &str {
     inner.strip_suffix("</channel>").unwrap_or(inner).trim()
 }
 
+/// Peel the `<cross-session-message from="…">` tag hive's inbox sender puts
+/// around an envelope so the receiver's own message card draws it clean
+/// (`claude_sessions::peer_card_envelope`). Anything else passes through.
+fn strip_peer_card_tag(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("<cross-session-message") else {
+        return text;
+    };
+    let Some(gt) = rest.find('>') else {
+        return text;
+    };
+    let inner = rest[gt + 1..].trim();
+    inner
+        .strip_suffix("</cross-session-message>")
+        .unwrap_or(inner)
+        .trim()
+}
+
 /// Peel claude's peer-message wrapper: the lead line above the envelope and
-/// the safety paragraph below it. Returns the core plus (injected, mid_turn).
+/// the safety paragraph below it, then the peer-card tag inside them.
+/// Returns the core plus (injected, mid_turn).
 fn strip_injection_wrapper(text: &str) -> (&str, bool, bool) {
     let trimmed = strip_channel_wrapper(text.trim());
     for (lead, mid) in [(INJECT_LEAD_MID, true), (INJECT_LEAD, false)] {
@@ -80,10 +98,10 @@ fn strip_injection_wrapper(text: &str) -> (&str, bool, bool) {
                 Some(i) => &rest[..i],
                 None => rest,
             };
-            return (core.trim(), true, mid);
+            return (strip_peer_card_tag(core.trim()), true, mid);
         }
     }
-    (trimmed, false, false)
+    (strip_peer_card_tag(trimmed), false, false)
 }
 
 /// Parse a user row's text as one HIVE envelope, in any of its carriers.

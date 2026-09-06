@@ -477,6 +477,20 @@ mid-turn it folds in at the next tool boundary as a bare `❯` line; a blocked
 worker takes it on its rv channel. Protocol details live in
 [daemon-control-socket.md](daemon-control-socket.md).
 
+On the inbox lane hive writes the envelope inside Claude Code's own
+peer-message tag, `<cross-session-message from="<sender>">` … `</cross-session-message>`
+(`claude_sessions::peer_card_envelope`), byte-for-byte the shape the
+receiver's `SendMessage` builds. The receiver's message card — the terminal's
+`UserCrossSessionMessage`, the desktop's peer card — parses the row's text for
+that shape and, when it parses, draws `@ <sender>` over the inner envelope
+alone; a bare `<HIVE>` body does not parse and is drawn whole, lead line and
+safety paragraph included (which is why a hive message used to show its
+wrapper on screen while a native one did not). This changes what a human
+sees and nothing else: the row still stores the wrapper, the model still
+reads it, and the frame's `from` (the origin) still names the sender — the
+desktop card requires it to equal the tag's `from`. The transcript viewer
+peels the tag the same way it peels the wrapper.
+
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
 running turn at the next tool boundary, everything else lands as its own turn
