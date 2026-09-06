@@ -21,7 +21,7 @@ use super::base::{
     SessionMeta,
 };
 
-const HISTORY_NAME: &str = "chat_history.jsonl";
+pub(crate) const HISTORY_NAME: &str = "chat_history.jsonl";
 const META_SCAN_LIMIT: usize = 20;
 
 fn role_by_type(record_type: &str) -> Option<&'static str> {
