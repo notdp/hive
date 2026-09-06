@@ -875,8 +875,8 @@ fn test_control_mode_payload_activity_accepts_visible_text_between_dcs_and_osc()
 #[test]
 fn test_control_mode_monitor_ignores_repaint_only_output() {
     // Repaint-only control sequences never mark a pane busy; the monitor
-    // keeps no payload buffer (the pane-content msgId oracle is gone — delivery
-    // confirmation is transcript-only).
+    // keeps no payload buffer (the pane-content delivery oracle is gone —
+    // delivery confirmation is transcript-only).
     let monitor = ControlModeOutputMonitor::new("613");
     let payload = "\x1b[?2026h\x1b[49;2H\x1b[K\x1b[?2026l";
 

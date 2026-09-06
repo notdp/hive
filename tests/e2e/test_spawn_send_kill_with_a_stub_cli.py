@@ -7,7 +7,7 @@ tmux session of the test's own and the real hived. Only the agent CLI is a
 stand-in (`_stub_claude.py`), so no LLM is in the loop. The oracles are
 causal, never screen text: the stub's recorded argv (what `claude --bg` was
 asked to run), the bus row the member's send left behind, the frame that
-landed in the orch engine's inbox (nonce and msgId round trip), the
+landed in the orch engine's inbox (nonce round trip), the
 registry roster, and the `claude stop` the kill issued. A second spawn
 runs from outside tmux entirely (no client, no engine identity) and must
 land in the same team window.
@@ -66,7 +66,7 @@ def _bus_rows(db: Path) -> list[tuple]:
     if not db.exists():
         return []
     return sqlite3.connect(db).execute(
-        "select msg_id, from_agent, to_agent, in_reply_to, body from messages"
+        "select seq, from_agent, to_agent, body from messages"
     ).fetchall()
 
 
@@ -238,7 +238,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         # the ledger receipt, the frame in the orch engine's inbox is the
         # delivery.
         def nonce_rows() -> list[tuple]:
-            return [r for r in _bus_rows(bus_db) if r[4] == nonce]
+            return [r for r in _bus_rows(bus_db) if r[3] == nonce]
 
         try:
             wait_for(lambda: len(nonce_rows()) == 1, timeout=60.0)
@@ -247,9 +247,9 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
                 f"no bus row carried the nonce; member outcome: "
                 f"{_stub_json(config_dir, f'send-{worker_job}.json')}"
             ) from exc
-        (msg_id, from_agent, to_agent, in_reply_to, _body), = nonce_rows()
-        assert (from_agent, to_agent, in_reply_to) == ("worker", "orch", "")
-        assert msg_id
+        (seq, from_agent, to_agent, _body), = nonce_rows()
+        assert (from_agent, to_agent) == ("worker", "orch")
+        assert seq > 0
 
         wait_for(lambda: _stub_json(config_dir, f"send-{worker_job}.json") is not None, timeout=30.0)
         outcome = _stub_json(config_dir, f"send-{worker_job}.json")
@@ -262,7 +262,9 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert frame["from"] == f"{team}.worker"
         assert frame["session_id"] == orch_engine["sessionId"]
         assert nonce in frame["message"]["content"]
-        assert f"msgId={msg_id}" in frame["message"]["content"]
+        # The envelope carries the sender and nothing to quote back.
+        assert "<HIVE from=worker to=orch>" in frame["message"]["content"]
+        assert "msgId=" not in frame["message"]["content"]
 
         kill_result = orch(["kill", "worker"])
         assert kill_result.returncode == 0, kill_result.stderr
@@ -302,7 +304,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert roster()["runner"]["sessionId"] == runner_job
 
         def outside_rows() -> list[tuple]:
-            return [r for r in _bus_rows(bus_db) if r[4] == outside_nonce]
+            return [r for r in _bus_rows(bus_db) if r[3] == outside_nonce]
 
         try:
             wait_for(lambda: len(outside_rows()) == 1, timeout=60.0)
@@ -311,7 +313,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
                 f"no bus row carried the outside-spawn nonce; member outcome: "
                 f"{_stub_json(config_dir, f'send-{runner_job}.json')}"
             ) from exc
-        (_msg_id, from_agent, to_agent, _in_reply_to, _body), = outside_rows()
+        (_seq, from_agent, to_agent, _body), = outside_rows()
         assert (from_agent, to_agent) == ("runner", "orch")
         wait_for(
             lambda: any(outside_nonce in f.get("message", {}).get("content", "")

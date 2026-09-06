@@ -464,11 +464,6 @@ pub(crate) fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("thread")
-                .about("Show a reply thread rooted at a msgId.")
-                .arg(Arg::new("message_id").required(true)),
-        )
-        .subcommand(
             Command::new("doctor")
                 .about("Diagnose agent connectivity and session state.")
                 .arg(Arg::new("agent_name").default_value("")),
@@ -653,7 +648,6 @@ const KNOWN_COMMANDS: &[&str] = &[
     "attach",
     "ls",
     "send",
-    "thread",
     "doctor",
     "capture",
     "interrupt",
@@ -1058,7 +1052,6 @@ fn dispatch(matches: &ArgMatches) {
             arg_str(m, "body"),
             arg_str(m, "artifact"),
         ),
-        Some(("thread", m)) => member::thread(arg_str(m, "message_id")),
         Some(("doctor", m)) => team::doctor(arg_str(m, "agent_name")),
         Some(("capture", m)) => member::capture(
             arg_str(m, "member_name"),

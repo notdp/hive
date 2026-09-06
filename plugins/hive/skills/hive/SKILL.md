@@ -61,10 +61,10 @@ Hive 是 push 模型:新消息由 runtime 注入 `<HIVE>` 并唤醒你,当前 tu
 
 ### 收活:任务以派发 artifact 为准
 
-队友消息以三行 `<HIVE>` 信封注入你的对话:开标签、正文、闭标签;`from` / `to` 必有,`msgId`、`reply-to`(回复才有)、`artifact` 按需出现。
+队友消息以三行 `<HIVE>` 信封注入你的对话:开标签、正文、闭标签;`from` / `to` 必有,`artifact` 按需出现。
 
 ```text
-<HIVE from=comb.dodo to=comb.rex msgId=a1b2 artifact=/tmp/spec.md>
+<HIVE from=comb.dodo to=comb.rex artifact=/tmp/spec.md>
 review the spec
 </HIVE>
 ```
@@ -95,10 +95,9 @@ review the spec
 
 只有一个动词:`hive send <addr> "<内容>"`。
 
-- 线程自动锚定:对方最近一条来信你还没回时,下一条 send 记为它的回复;否则开新线程。不用管 msgId。
 - 发送成功零输出(exit 0)= 对方 runtime 已收帧;非零才是没送到,错误带原因。对方何时读是它队列的事——没有可轮询的回执,也别去要。
 - 唯一例外是 `flow.run`:成功打一行 `delivered to flow mailbox …`,这就是全部确认,不会再有 HIVE 回执,发完就停。
-- 新线程 body 只放短摘要,详情走 `--artifact`;超 500 字符、3 行及以上、含 `` ``` ``、任一行以 `# ` / `- ` / `* ` 开头,任一条即拒收。回复不受此限。
+- body 只放短摘要,详情走 `--artifact`;超 500 字符、3 行及以上、含 `` ``` ``、任一行以 `# ` / `- ` / `* ` 开头,stderr 会提醒你改走 artifact。
 
 ```bash
 hive send dodo "done: see artifact" --artifact /tmp/result.md
@@ -116,7 +115,7 @@ shell 纪律:多行、反引号、`$(...)` 的内容先落地成文件,不在双
 
 回报纪律:
 
-- 成果、blocked、失败,一切终态 `hive send` 回派发人,自动锚回派发线程。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
+- 成果、blocked、失败,一切终态 `hive send` 回派发人。body=短摘要,详情落 Markdown artifact(agent 读源码,渲染是给 human 的)。
 - **收到任务不回执。**回派发线程的第一条就该是终态(或阻断求助)——派发人把它当回报读。禁令双向:也不期待对方(尤其 `flow.run`)回「收到了」。
 - 交付走派发人,不越过他向 human 宣布完成;human 问起时给状态。
 

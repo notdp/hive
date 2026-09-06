@@ -4,7 +4,7 @@
 //! Everything it shows is truth the flow machinery already writes: the
 //! roster (`Team::load`, whose pane groups carry each node's phase), the
 //! hived's liveness answer, and the `flow.run` mailbox on the team bus —
-//! a dispatch row and the reply anchored to it by `in_reply_to` give each
+//! a dispatch row and the member's first send back after it give each
 //! node its state and elapsed time. Phases come from the pane groups the
 //! spawns set, so serial/parallel structure needs no sidecar.
 //!
@@ -65,15 +65,25 @@ fn iso_to_epoch(s: &str) -> Option<u64> {
 /// Join the roster with the flow.run mailbox into per-node rows, in roster
 /// order. Pure — the state machine lives here and under test.
 pub fn derive_rows(roster: &[RosterRow], events: &[Event], now_epoch: u64) -> Vec<NodeRow> {
-    // latest dispatch per member, and the reply anchored to that dispatch
-    let mut dispatch: HashMap<&str, (&str, u64)> = HashMap::new();
-    let mut replied: HashMap<&str, u64> = HashMap::new(); // by dispatch msg_id
+    // latest dispatch per member, then the member's first send back to the
+    // mailbox after it — the reply, by bus order
+    let mut dispatch: HashMap<&str, (i64, u64)> = HashMap::new();
     for ev in events {
-        let ts = iso_to_epoch(&ev.created_at).unwrap_or(now_epoch);
         if ev.from == FLOW_SENDER {
-            dispatch.insert(ev.to.as_str(), (ev.msg_id.as_str(), ts));
-        } else if ev.to == FLOW_SENDER && !ev.in_reply_to.is_empty() {
-            replied.entry(ev.in_reply_to.as_str()).or_insert(ts);
+            let ts = iso_to_epoch(&ev.created_at).unwrap_or(now_epoch);
+            dispatch.insert(ev.to.as_str(), (ev.seq, ts));
+        }
+    }
+    let mut replied: HashMap<i64, u64> = HashMap::new(); // by dispatch seq
+    for ev in events {
+        if ev.to != FLOW_SENDER {
+            continue;
+        }
+        if let Some((seq, _)) = dispatch.get(ev.from.as_str()) {
+            if ev.seq > *seq {
+                let ts = iso_to_epoch(&ev.created_at).unwrap_or(now_epoch);
+                replied.entry(*seq).or_insert(ts);
+            }
         }
     }
     roster
@@ -85,7 +95,7 @@ pub fn derive_rows(roster: &[RosterRow], events: &[Event], now_epoch: u64) -> Ve
                 format!("{} · {}", r.cli, r.model)
             };
             let (state, elapsed) = match dispatch.get(r.name.as_str()) {
-                Some((msg_id, sent)) => match replied.get(msg_id) {
+                Some((seq, sent)) => match replied.get(seq) {
                     Some(got) => (NodeState::Done, Some(got.saturating_sub(*sent))),
                     None if r.alive => (NodeState::Working, Some(now_epoch.saturating_sub(*sent))),
                     None => (NodeState::Gone, Some(now_epoch.saturating_sub(*sent))),
@@ -368,15 +378,12 @@ mod tests {
     use super::*;
     use serde_json::Map;
 
-    fn ev(from: &str, to: &str, msg_id: &str, in_reply_to: &str, created_at: &str) -> Event {
+    fn ev(from: &str, to: &str, seq: i64, created_at: &str) -> Event {
         Event {
+            seq,
             from: from.to_string(),
             to: to.to_string(),
-            intent: "send".to_string(),
-            metadata: Map::new(),
             created_at: created_at.to_string(),
-            msg_id: msg_id.to_string(),
-            in_reply_to: in_reply_to.to_string(),
             body: String::new(),
             artifact: String::new(),
         }
@@ -454,17 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_rows_uses_in_reply_to_and_liveness() {
+    fn test_derive_rows_uses_reply_order_and_liveness() {
         let t0 = "2026-09-02T00:00:00Z";
         let t1 = "2026-09-02T00:05:00Z";
         let now = iso_to_epoch("2026-09-02T00:10:00Z").unwrap();
         let events = vec![
-            ev("flow.run", "done-node", "d1", "", t0),
-            ev("done-node", "flow.run", "r1", "d1", t1),
-            ev("flow.run", "working-node", "d2", "", t0),
-            ev("flow.run", "gone-node", "d3", "", t0),
-            // a bystander row to flow.run not anchored to a dispatch counts for nothing
-            ev("working-node", "flow.run", "x", "", t1),
+            // an old send to the mailbox, before any dispatch, counts for nothing
+            ev("working-node", "flow.run", 1, t0),
+            ev("flow.run", "done-node", 2, t0),
+            ev("done-node", "flow.run", 3, t1),
+            ev("flow.run", "working-node", 4, t0),
+            ev("flow.run", "gone-node", 5, t0),
         ];
         let roster = vec![
             roster("done-node", "Review", false), // retired after replying: still done
@@ -512,7 +519,7 @@ mod tests {
                 elapsed: None,
             },
         ];
-        let mut dispatch = ev("flow.run", "v", "d1", "", "2026-09-02T00:00:00Z");
+        let mut dispatch = ev("flow.run", "v", 1, "2026-09-02T00:00:00Z");
         dispatch.body =
             format!("{DISPATCH_BODY_PREFIX}v.md (not a member; hive send flow.run, then stop)");
         let s = render("t", &rows, &[&dispatch], 120, 40, 0);

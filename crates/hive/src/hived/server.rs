@@ -133,7 +133,6 @@ pub(crate) fn handle_request(
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),
-                &map_get_str(request, "replyTo"),
             )
             .unwrap_or_else(err_response);
             (response, true)
@@ -158,11 +157,6 @@ pub(crate) fn handle_request(
         }
         "runtime-snapshot" => {
             let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
-            (response, true)
-        }
-        "thread" => {
-            let response = thread_payload(workspace, &map_get_str(request, "msgId"))
-                .unwrap_or_else(err_response);
             (response, true)
         }
         "connect-codex" => {

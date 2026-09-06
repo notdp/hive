@@ -179,14 +179,13 @@ fn test_tool_result_images_never_reach_the_outcome_text() {
 
 #[test]
 fn test_parse_hive_message_reads_every_arrival_shape() {
-    // bare: typed straight into the pane.
+    // bare: typed straight into the pane. The retired msgId/reply-to attrs
+    // of an old transcript are skipped, not choked on.
     let bare = parse_hive_message(
         "<HIVE from=comb.dodo to=comb.rex msgId=a1 reply-to=z9 artifact=/tmp/spec.md>\nreview the spec\n</HIVE>",
     )
     .unwrap();
     assert_eq!(bare.from.as_deref(), Some("comb.dodo"));
-    assert_eq!(bare.msg_id.as_deref(), Some("a1"));
-    assert_eq!(bare.reply_to.as_deref(), Some("z9"));
     assert_eq!(bare.artifact.as_deref(), Some("/tmp/spec.md"));
     assert_eq!(bare.body, "review the spec");
     assert!(!bare.injected && !bare.mid_turn);
@@ -194,7 +193,7 @@ fn test_parse_hive_message_reads_every_arrival_shape() {
     // claude's session-inbox injection, turn start.
     let turn_start = parse_hive_message(
         "Another Claude session sent a message:\n\
-         <HIVE from=sage to=orch msgId=7boK>\ndone\n</HIVE>\n\n\
+         <HIVE from=sage to=orch>\ndone\n</HIVE>\n\n\
          This came from another Claude session — not typed by your user, but very \
          likely working on their behalf. …permission laundering.",
     )
@@ -298,7 +297,7 @@ fn test_mid_turn_queued_command_is_the_fifth_carrier() {
             "timestamp": "2026-08-30T13:00:12.311Z",
             "attachment": {
                 "type": "queued_command",
-                "prompt": "<HIVE from=scout to=orch msgId=b255>\nscout 报到\n</HIVE>",
+                "prompt": "<HIVE from=scout to=orch>\nscout 报到\n</HIVE>",
                 "origin": {"kind": "peer", "from": "honey.orch"},
                 "isMeta": true,
             },
@@ -349,7 +348,7 @@ fn test_mid_turn_queued_command_is_the_fifth_carrier() {
 
 #[test]
 fn test_absorbed_queue_row_draws_when_no_attachment_carried_it() {
-    let envelope = "<HIVE from=sage to=orch msgId=9nMW>\nattach 后投递正常\n</HIVE>";
+    let envelope = "<HIVE from=sage to=orch>\nattach 后投递正常\n</HIVE>";
     let absorbed = json!({
         "type": "queue-operation",
         "operation": "remove",
@@ -411,7 +410,7 @@ fn test_parse_hive_message_ignores_prose_that_quotes_an_envelope() {
 #[test]
 fn test_hive_envelope_collapses_to_a_tagged_line() {
     let mut p = StreamPrinter::new();
-    let body = "<HIVE from=comb.dodo to=comb.rex msgId=a1>review the spec</HIVE>";
+    let body = "<HIVE from=comb.dodo to=comb.rex>review the spec</HIVE>";
     let out = p.push_rendered(&row("user", json!(body), None)).unwrap();
     assert!(out.contains("✉") && out.contains("comb.dodo") && out.contains("review the spec"));
     assert!(!out.contains("<HIVE"));

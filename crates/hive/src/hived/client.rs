@@ -118,7 +118,6 @@ pub fn request_send(
     target_agent: &str,
     body: &str,
     artifact: &str,
-    reply_to: &str,
 ) -> Option<Map<String, Value>> {
     let timeout = send_request_timeout();
     let mut payload = action_payload("send");
@@ -127,7 +126,6 @@ pub fn request_send(
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
-    payload.insert("replyTo".to_string(), Value::from(reply_to));
     request_hived(workspace, &payload, timeout)
 }
 
@@ -153,11 +151,5 @@ pub fn request_team_runtime(workspace: &str, team: &str) -> Option<Map<String, V
 pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("runtime-snapshot");
     payload.insert("pane".to_string(), Value::from(pane_id));
-    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
-}
-
-pub fn request_thread(workspace: &str, message_id: &str) -> Option<Map<String, Value>> {
-    let mut payload = action_payload("thread");
-    payload.insert("msgId".to_string(), Value::from(message_id));
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
