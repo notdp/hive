@@ -532,6 +532,9 @@ impl Verdict {
             TurnOutcome::SessionChanged { reason } => {
                 Verdict::reason(STATUS_SESSION_CHANGED, reason)
             }
+            // ponytail: the flush budget is not wired yet; the core slice
+            // turns this into "keep polling, then ambiguous".
+            TurnOutcome::Flushing { reason } => Verdict::reason(STATUS_AMBIGUOUS, reason),
         }
     }
 }

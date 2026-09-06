@@ -64,6 +64,12 @@ pub enum TurnOutcome {
     /// The transcript now belongs to a different session (clear, resume
     /// into another id, fork): the anchor is void.
     SessionChanged { reason: String },
+    /// The engine has closed the turn but the final message is not on disk
+    /// yet (grok writes `turn_ended` before the history line; claude writes
+    /// one block per record). Not a result: the core keeps polling under
+    /// its flush budget and ends `ambiguous` when the text never lands.
+    /// `reason` names what is still missing.
+    Flushing { reason: String },
 }
 
 /// Why a reader could not read at all.
