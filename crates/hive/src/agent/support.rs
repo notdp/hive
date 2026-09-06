@@ -10,6 +10,17 @@ pub const AGENT_STARTUP_TIMEOUT: f64 = 90.0;
 pub(super) const TMUX_REQUIRED_MESSAGE: &str =
     "Hive requires tmux. Start or attach to a tmux session first.";
 
+/// Where a workflow node's task landed, as the engine handed it back:
+/// the id the engine's own turn-end signal is read under. `Untracked` is
+/// a task the engine took but handed no id back for — running, with
+/// nothing to read its result under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnHandle {
+    Codex { thread_id: String, turn_id: String },
+    Grok { key: String, rid: u64 },
+    Untracked(String),
+}
+
 /// Escape a string for safe shell use.
 pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

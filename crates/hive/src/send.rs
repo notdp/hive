@@ -73,11 +73,18 @@ pub(crate) fn request_node_dispatch(
     target_agent: &str,
     body: &str,
     artifact: &str,
+    dispatch_id: &str,
 ) -> Result<Map<String, Value>, DispatchFailure> {
     ensure_team_hived(team, std::path::Path::new(workspace))
         .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
-    let answer =
-        crate::hived::request_node_dispatch(workspace, &team.name, target_agent, body, artifact);
+    let answer = crate::hived::request_node_dispatch(
+        workspace,
+        &team.name,
+        target_agent,
+        body,
+        artifact,
+        dispatch_id,
+    );
     hived_answer(workspace, answer, "node dispatch")
 }
 

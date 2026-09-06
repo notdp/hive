@@ -143,10 +143,16 @@ pub(crate) fn handle_request(
             (response, true)
         }
         "node-dispatch" => {
+            let dispatch_id = map_get_str(request, "dispatchId");
+            if dispatch_id.is_empty() {
+                return (err_response("node-dispatch needs a dispatchId"), true);
+            }
             let response = send_payload(
                 workspace,
                 &team_in_request(),
-                SendOrigin::Node,
+                SendOrigin::Node {
+                    dispatch_id: &dispatch_id,
+                },
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),
@@ -175,6 +181,13 @@ pub(crate) fn handle_request(
         "runtime-snapshot" => {
             let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
             (response, true)
+        }
+        "node-result" => {
+            let dispatch_id = map_get_str(request, "dispatchId");
+            if dispatch_id.is_empty() {
+                return (err_response("node-result needs a dispatchId"), true);
+            }
+            (node_result_payload(&dispatch_id), true)
         }
         "turn-open" => {
             let response = turn_open_payload(

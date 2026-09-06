@@ -13,7 +13,9 @@ use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::agent::{Agent, DeliveryError};
+use crate::adapters::codex_app_server::TurnResult;
+use crate::adapters::grok_leader::PromptResult;
+use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 
 use super::*;
@@ -365,6 +367,14 @@ pub(super) fn hooked_cas_turn_open_for_thread(thread_id: &str) -> Option<bool> {
     crate::adapters::codex_app_server::turn_open_for_thread(thread_id)
 }
 
+pub(super) fn hooked_cas_turn_result(turn_id: &str) -> Option<TurnResult> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_turn_result.clone()).flatten() {
+        return f(turn_id);
+    }
+    crate::adapters::codex_app_server::turn_result(turn_id)
+}
+
 pub(super) fn hooked_cas_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_session_id_for_pane.clone()).flatten() {
@@ -477,6 +487,14 @@ pub(super) fn hooked_gl_turn_open_for_key(key: &str) -> Option<Option<bool>> {
         return f(key);
     }
     crate::adapters::grok_leader::turn_open_for_key(key)
+}
+
+pub(super) fn hooked_gl_prompt_result(key: &str, rid: u64) -> Option<PromptResult> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_prompt_result.clone()).flatten() {
+        return f(key, rid);
+    }
+    crate::adapters::grok_leader::prompt_result_for_key(key, rid)
 }
 
 pub(super) fn hooked_gl_session_id_for_pane(pane: &str) -> Option<String> {
@@ -614,6 +632,17 @@ pub(super) fn hooked_agent_send(
         return f(agent, text, sender);
     }
     agent.send_from(text, sender)
+}
+
+pub(super) fn hooked_agent_dispatch_turn(
+    agent: &Agent,
+    text: &str,
+) -> std::result::Result<TurnHandle, DeliveryError> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.agent_dispatch_turn.clone()).flatten() {
+        return f(agent, text);
+    }
+    agent.dispatch_turn(text)
 }
 
 // --- self seams (this module's own entry points, replaceable in tests) ----

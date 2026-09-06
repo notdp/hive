@@ -635,27 +635,9 @@ pub(crate) fn team_runtime_payload(team_name: &str) -> Result<Map<String, Value>
     Ok(payload)
 }
 
-/// Whether a claude bg engine has a turn open, read off the runtime fields
-/// `claude_bg::runtime_from_engine` folds its registry status into: the
-/// `busy` flag, unless the status is stale (`inputReason: stale_status`),
-/// which is a wedged engine's last word and no answer. `Err` is why there
-/// is no answer.
-pub(super) fn claude_bg_turn_open(fields: &Map<String, Value>) -> Result<bool, String> {
-    if fields.get("inputReason").and_then(Value::as_str) == Some("stale_status") {
-        return Err("stale status: the engine's status stopped advancing".to_string());
-    }
-    fields
-        .get("busy")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "engine record carries no busy flag".to_string())
-}
-
 /// Whether the named member has a turn open, asked of its engine directly
 /// — no tick cache in between. codex: the shared app-server's
-/// `thread/read` on the roster thread id. claude: the bg job's engine
-/// record (the roster row's session field is the job id when it is
-/// job-id shaped), whose `busy` flag is no answer once its status is
-/// stale. grok: the member's ACP connection is held by the hived's leader
+/// `thread/read` on the roster thread id. grok: the member's ACP connection is held by the hived's leader
 /// pool (a second process must not `session/load` the same session), and
 /// the pool client's `turn_open` is push-fed by the turn's own
 /// notifications, the load replay included — not the display `busy` flag,
@@ -693,18 +675,6 @@ pub(crate) fn turn_open_payload(
             .and_then(|sid| {
                 hooked_cas_turn_open_for_thread(sid)
                     .ok_or_else(|| format!("codex app-server unreachable or thread {sid} unknown"))
-            }),
-        "claude" => sid
-            .ok_or_else(|| "no session id on the roster row".to_string())
-            .and_then(|sid| {
-                if !crate::adapters::claude_bg::looks_like_job_id(sid) {
-                    return Err(format!("roster session {sid} is not a bg job id"));
-                }
-                let engine = hooked_cb_engine_session_for_job(sid)
-                    .ok_or_else(|| format!("no engine entry for job {sid}"))?;
-                claude_bg_turn_open(&crate::adapters::claude_bg::runtime_from_engine(
-                    &engine, None,
-                ))
             }),
         "grok" => {
             let key = crate::adapters::grok_leader::member_key(team_name, agent_name);

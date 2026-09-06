@@ -193,10 +193,12 @@ pub(crate) fn request_node_dispatch(
     target_agent: &str,
     body: &str,
     artifact: &str,
+    dispatch_id: &str,
 ) -> Result<Map<String, Value>, RequestFailure> {
     let timeout = send_request_timeout();
     let mut payload = action_payload("node-dispatch");
     payload.insert("team".to_string(), Value::from(team));
+    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
@@ -229,6 +231,15 @@ pub fn request_turn_open(workspace: &str, team: &str, agent: &str) -> Option<Map
     let mut payload = action_payload("turn-open");
     payload.insert("team".to_string(), Value::from(team));
     payload.insert("agent".to_string(), Value::from(agent));
+    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+}
+
+/// Ask the hived what became of a node dispatch (`node-result`): the
+/// answer's `state` is `running`, `ended` (with `status`, `text`, `error`)
+/// or `unknown` (with `reason`).
+pub fn request_node_result(workspace: &str, dispatch_id: &str) -> Option<Map<String, Value>> {
+    let mut payload = action_payload("node-result");
+    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 

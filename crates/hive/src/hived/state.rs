@@ -58,6 +58,15 @@ pub(super) fn transcript_path_cache() -> &'static Mutex<HashMap<String, (String,
     CELL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Where each workflow node's task landed, by dispatch id: the engine
+/// handle `node-result` reads the turn's end and text under. Held only by
+/// the hived that dispatched — a restarted hived knows no handles, and
+/// answers `unknown` for every dispatch before it.
+pub(super) fn node_turns() -> &'static Mutex<HashMap<String, crate::agent::TurnHandle>> {
+    static CELL: OnceLock<Mutex<HashMap<String, crate::agent::TurnHandle>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub(super) fn runtime_snapshots() -> &'static Mutex<RuntimeSnapshotStore> {
     static CELL: OnceLock<Mutex<RuntimeSnapshotStore>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(RuntimeSnapshotStore::default()))

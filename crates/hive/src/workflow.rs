@@ -1,15 +1,20 @@
-//! hive::workflow — one task on one live member, returned explicitly.
+//! hive::workflow — one task on one live member, one turn, its result read
+//! off the engine.
 //!
 //! A workflow node is one task placed on one live member, the way a
 //! Claude Code Workflow subagent takes one: spawn a real pane (or reuse a
-//! live member of that name), wait until it is ready and between turns,
-//! dispatch the task as a `<HIVE>` envelope with no sender, and wait for
-//! the member's own return. The return is explicit: the member ends its
-//! task with `hive workflow done "<summary>" [--artifact FILE]`, which
-//! writes `<workspace>/run/workflow/<name>.done.json` against the one
-//! dispatch its pending record names. Nothing is inferred from an engine
-//! transcript; a member that ends its turn without returning is reported
-//! as such (`no_result`), never guessed at.
+//! live member of that name), wait until it is between turns, dispatch the
+//! task as a `<HIVE>` envelope with no sender as one tracked turn, and wait
+//! for that turn to end. The engine says when: codex `turn/completed` on
+//! the client that started the turn, grok the `session/prompt` response
+//! (ACP returns it when the turn ends) — both reach the hived's own
+//! adapter client, which collected the turn's text meanwhile, and the
+//! runner polls the hived's `node-result` for it. The result is the last
+//! thing the member said in that turn; a member has nothing to run to
+//! return, and the task is the turn: a member that stops to ask has ended
+//! its turn, and that question is its result. A workflow node runs codex
+//! or grok — a claude bg job reports no turn end over any RPC, and Claude
+//! Code runs its own subagents natively.
 //!
 //! One run is one record, `<workspace>/run/workflow/<name>.json`, written
 //! pending before the dispatch has any side effect and again at its end,
@@ -19,13 +24,12 @@
 //! exit 1 means "not dispatched", so a record write that fails later is
 //! logged and the run still ends in a verdict. A dispatch the hived
 //! refused is not dispatched; one whose answer was lost may be, is never
-//! repeated, and keeps its pending record until the member returns, ends
-//! its turn, or is killed.
+//! repeated, and is read back like any other — the hived keeps the turn
+//! under the dispatch id whether or not its answer arrived.
 //!
 //! `WorkflowOp` is the typed vocabulary of one hive interaction, `run_op`
 //! executes one, and `run_workflow` (`hive workflow run`) strings them
-//! together for an external orchestrator; `record_done` is the member's
-//! side (`hive workflow done`). `WorkflowEnv` is the seam over
+//! together for an external orchestrator. `WorkflowEnv` is the seam over
 //! cli/bus/team; tests inject a fake.
 
 use std::collections::HashSet;
@@ -52,22 +56,33 @@ const BUSY_SIGHTING_SECONDS: f64 = 60.0;
 /// How long a dispatch waits for the member to be between turns; past it
 /// the run ends `member_busy` without dispatching.
 const IDLE_WAIT_SECONDS: f64 = 600.0;
-/// Consecutive polls the daemon must answer "no turn open" after the
-/// dispatch, with no return on disk, before the run ends `no_result`: a
+/// Consecutive polls the hived must answer `unknown` for the dispatch
+/// while the member's turn is closed before the run ends `no_result`: the
+/// hived holds nothing for the turn (restarted since, or never told of
+/// the dispatch) and the turn is not running, so nothing will arrive. A
 /// single closed reading can be the gap before the task's turn opens.
-const TURN_CLOSED_POLLS: u32 = 5;
-/// How long a dispatch whose answer was lost (`DispatchFailure::Unknown`)
-/// may go without a return or a closed turn, counted in polls from the
-/// dispatch; past it the run ends `ambiguous` with the record left
-/// pending, since the member may be on the task.
-const DISPATCH_UNKNOWN_SECONDS: f64 = 120.0;
+const UNKNOWN_CLOSED_POLLS: u32 = 5;
+/// Consecutive polls with no answer at all from the hived after the
+/// dispatch before the run ends `no_result`: the turn may run to its end,
+/// but nothing is there to read it.
+const UNANSWERED_POLLS: u32 = 120;
 const ATTEMPTS: usize = 3;
 const RETRY_GAP: f64 = 3.0;
 
 pub const STATUS_PENDING: &str = "pending";
+/// The turn ended the engine's normal way (codex `completed`, grok
+/// `end_turn`): `body` is the member's last message of the turn.
 pub const STATUS_COMPLETED: &str = "completed";
+/// The turn was cut short (codex `interrupted`, grok `cancelled`): `body`
+/// is what the member had said by then.
+pub const STATUS_INTERRUPTED: &str = "interrupted";
+/// The engine ended the turn on an error (codex `failed`, grok an error
+/// response or `max_tokens`/`refusal`/…): `reason` carries the engine's
+/// word, `body` what was said.
+pub const STATUS_FAILED: &str = "failed";
+/// The turn is not running and nothing can read its end: the hived holds
+/// no turn for the dispatch, or never answered.
 pub const STATUS_NO_RESULT: &str = "no_result";
-pub const STATUS_AMBIGUOUS: &str = "ambiguous";
 pub const STATUS_MEMBER_GONE: &str = "member_gone";
 pub const STATUS_MEMBER_BUSY: &str = "member_busy";
 
@@ -76,10 +91,10 @@ pub const STATUS_MEMBER_BUSY: &str = "member_busy";
 // name claim inside Team::spawn is the guard.)
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
-/// The run could not reach a dispatch (bad team, spawn, ready gate, the
-/// dispatch itself refused by the hived), or a `hive workflow done` with
-/// nothing to return to. Everything after a dispatch — including one whose
-/// answer was lost — is a verdict in the result, never an error.
+/// The run could not reach a dispatch (bad team, a claude member, spawn,
+/// ready gate, the dispatch itself refused by the hived). Everything after
+/// a dispatch — including one whose answer was lost — is a verdict in the
+/// result, never an error.
 #[derive(Debug)]
 pub struct WorkflowError(pub String);
 
@@ -111,6 +126,51 @@ pub struct MemberInfo {
     pub cli: String,
 }
 
+/// The hived's `node-result` answer: the engine's own word on the turn
+/// the dispatch became. `Unknown` is the hived holding nothing for the
+/// dispatch (restarted since, the engine handed back no id, the adapter
+/// client replaced) — not a verdict on the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeResult {
+    Running,
+    Ended {
+        status: String,
+        text: String,
+        error: Option<String>,
+    },
+    Unknown(String),
+}
+
+impl NodeResult {
+    /// The `node-result` payload as the enum; None for an error envelope
+    /// or a shape that is none of the three states.
+    pub fn from_answer(answer: &Map<String, Value>) -> Option<NodeResult> {
+        if answer.get("ok") != Some(&Value::Bool(true)) {
+            return None;
+        }
+        let text = |key: &str| {
+            answer
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        match answer.get("state").and_then(Value::as_str) {
+            Some("running") => Some(NodeResult::Running),
+            Some("ended") => Some(NodeResult::Ended {
+                status: text("status"),
+                text: text("text"),
+                error: answer
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }),
+            Some("unknown") => Some(NodeResult::Unknown(text("reason"))),
+            _ => None,
+        }
+    }
+}
+
 /// The seams a run reaches through. `Err(String)` from `spawn` and
 /// `DispatchFailure::Refused` from `dispatch` are transient failures the
 /// retry loops absorb; `DispatchFailure::Unknown` is never retried.
@@ -124,7 +184,13 @@ pub trait WorkflowEnv: Send + Sync {
     /// Dispatch the task with no sender; returns the ledger seq of the row.
     /// `Refused` means the task is not with the member; `Unknown` means
     /// the hived gave no usable answer and the task may have landed.
-    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, DispatchFailure>;
+    fn dispatch(
+        &self,
+        target: &str,
+        body: &str,
+        artifact: &str,
+        dispatch_id: &str,
+    ) -> Result<i64, DispatchFailure>;
     /// Runtime liveness (`Team::member_alive`): can this member still take a
     /// dispatch and run a turn.
     fn alive(&self, name: &str) -> bool;
@@ -135,6 +201,9 @@ pub trait WorkflowEnv: Send + Sync {
     /// engine directly by the hived; None when the engine could not be
     /// asked. Never a guess: an unreachable engine is not an idle member.
     fn turn_open(&self, name: &str) -> Option<bool>;
+    /// What became of a dispatch, asked of the hived (`node-result`);
+    /// None when the hived gave no answer.
+    fn node_result(&self, dispatch_id: &str) -> Option<NodeResult>;
     /// `Team::retire`: no-op when the member is not on the roster.
     fn retire(&self, name: &str);
     fn sleep(&self, seconds: f64);
@@ -178,11 +247,8 @@ pub fn mint_dispatch_id() -> String {
 /// The name is owned while the record is pending (`is_pending`) and free
 /// under any terminal status. That is a v1 narrowing: a terminal verdict
 /// says the runner stopped waiting, not that the member stopped working —
-/// after `no_result` the member may still be on the task, and the next run
-/// of that name is allowed to dispatch on top of it. The one verdict that
-/// leaves the record pending is a dispatch whose answer was lost and that
-/// neither returned nor closed its turn (`await_return`): there the run
-/// ends `ambiguous` with the name still owned.
+/// after `no_result` on an unanswering hived the turn may still run, and
+/// the next run of that name is allowed to dispatch on top of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRecord {
     pub dispatch_id: String,
@@ -248,54 +314,12 @@ impl WorkflowRecord {
     }
 }
 
-/// The member's return, `<workspace>/run/workflow/<name>.done.json`:
-/// written by `hive workflow done` against the pending record's dispatch
-/// id, consumed by the runner that waits on that id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DoneRecord {
-    pub dispatch_id: String,
-    pub body: String,
-    pub artifact: String,
-    pub done_at: u64,
-}
-
-impl DoneRecord {
-    fn to_json(&self) -> Value {
-        let mut map = Map::new();
-        map.insert("dispatchId".into(), Value::from(self.dispatch_id.as_str()));
-        map.insert("body".into(), Value::from(self.body.as_str()));
-        map.insert("artifact".into(), Value::from(self.artifact.as_str()));
-        map.insert("doneAt".into(), Value::from(self.done_at));
-        Value::Object(map)
-    }
-
-    fn from_json(value: &Value) -> Option<DoneRecord> {
-        let map = value.as_object()?;
-        let text = |key: &str| {
-            map.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        Some(DoneRecord {
-            dispatch_id: text("dispatchId"),
-            body: text("body"),
-            artifact: text("artifact"),
-            done_at: map.get("doneAt").and_then(Value::as_u64).unwrap_or(0),
-        })
-    }
-}
-
 fn workflow_dir(workspace: &str) -> PathBuf {
     Path::new(workspace).join("run").join("workflow")
 }
 
 pub fn record_path(workspace: &str, name: &str) -> PathBuf {
     workflow_dir(workspace).join(format!("{name}.json"))
-}
-
-pub fn done_path(workspace: &str, name: &str) -> PathBuf {
-    workflow_dir(workspace).join(format!("{name}.done.json"))
 }
 
 fn lock_path(workspace: &str, name: &str) -> PathBuf {
@@ -309,10 +333,6 @@ fn read_json(path: &Path) -> Option<Value> {
 
 pub fn read_record(workspace: &str, name: &str) -> Option<WorkflowRecord> {
     WorkflowRecord::from_json(&read_json(&record_path(workspace, name))?)
-}
-
-pub fn read_done(workspace: &str, name: &str) -> Option<DoneRecord> {
-    DoneRecord::from_json(&read_json(&done_path(workspace, name))?)
 }
 
 /// Atomic replace: a reader never sees a half-written file.
@@ -346,48 +366,13 @@ fn update_record(workspace: &str, name: &str, record: &WorkflowRecord) {
     }
 }
 
-fn remove_done(workspace: &str, name: &str) {
-    let _ = fs::remove_file(done_path(workspace, name));
-}
-
-/// Drop a member's run record and any return it left: the member is
-/// retired (`hive kill`, `hive delete --down`, a run's own dead-row retire
-/// before it spawns), so no run can own it any more. The lock file stays:
-/// a flock lives on the inode, so unlinking it under a runner that holds
-/// it would hand the next runner a fresh file and a second lock on the
-/// same member.
+/// Drop a member's run record: the member is retired (`hive kill`, `hive
+/// delete --down`, a run's own dead-row retire before it spawns), so no
+/// run can own it any more. The lock file stays: a flock lives on the
+/// inode, so unlinking it under a runner that holds it would hand the
+/// next runner a fresh file and a second lock on the same member.
 pub fn remove_record(workspace: &str, name: &str) {
     let _ = fs::remove_file(record_path(workspace, name));
-    remove_done(workspace, name);
-}
-
-/// `hive workflow done`: the member's return statement. The one pending
-/// dispatch of the member's record is what it answers; with no pending
-/// record there is nothing to return to, and a return already on disk for
-/// that dispatch is not overwritten.
-pub fn record_done(
-    workspace: &str,
-    name: &str,
-    body: &str,
-    artifact: &str,
-) -> Result<DoneRecord, WorkflowError> {
-    let record = read_record(workspace, name)
-        .filter(WorkflowRecord::is_pending)
-        .ok_or_else(|| WorkflowError(format!("no workflow task is waiting for {name}")))?;
-    if read_done(workspace, name).is_some_and(|done| done.dispatch_id == record.dispatch_id) {
-        return Err(WorkflowError(format!(
-            "{name} already returned for {}",
-            record.dispatch_id
-        )));
-    }
-    let done = DoneRecord {
-        dispatch_id: record.dispatch_id,
-        body: body.to_string(),
-        artifact: artifact.to_string(),
-        done_at: epoch_seconds(),
-    };
-    write_atomic(workspace, &done_path(workspace, name), &done.to_json())?;
-    Ok(done)
 }
 
 /// The per-member run lock, held for the whole `run_workflow`; dropping it
@@ -437,7 +422,6 @@ pub enum WorkflowOp {
     },
     Ready {
         name: String,
-        cli: String,
     },
     /// The task: the prompt rides a task artifact named after the dispatch
     /// id, the body opens with the id, the envelope has no sender.
@@ -480,7 +464,8 @@ fn dispatch_body(dispatch_id: &str, prompt: &str) -> String {
 
 /// What a dispatch left behind: the ledger seq of a delivered task, or
 /// the reason the hived's answer never arrived — the task may be with
-/// the member all the same, so it is not sent again.
+/// the member all the same, so it is not sent again, and the hived keeps
+/// its turn under the dispatch id either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Dispatched {
     Delivered(i64),
@@ -497,10 +482,11 @@ fn dispatch(
     name: &str,
     body: &str,
     artifact: &str,
+    dispatch_id: &str,
 ) -> Result<Dispatched, WorkflowError> {
     let mut last = String::new();
     for attempt in 0..ATTEMPTS {
-        match env.dispatch(name, body, artifact) {
+        match env.dispatch(name, body, artifact, dispatch_id) {
             Ok(seq) => return Ok(Dispatched::Delivered(seq)),
             Err(DispatchFailure::Unknown(reason)) => return Ok(Dispatched::AnswerLost(reason)),
             Err(DispatchFailure::Refused(exc)) => {
@@ -551,16 +537,27 @@ fn spawn_member(
     )))
 }
 
-fn ready_gate(env: &dyn WorkflowEnv, name: &str, cli: &str) -> Result<(), WorkflowError> {
+/// A node runs codex or grok; anything else has no turn-end signal hive
+/// can read, and a claude node is Claude Code's own subagent.
+fn node_cli(cli: &str) -> Result<(), WorkflowError> {
+    match cli {
+        "codex" | "grok" => Ok(()),
+        "" => Err(WorkflowError(
+            "a workflow node runs codex or grok: pass --cli".to_string(),
+        )),
+        other => Err(WorkflowError(format!(
+            "a workflow node runs codex or grok, not {other}; a claude node is Claude Code's own subagent"
+        ))),
+    }
+}
+
+fn ready_gate(env: &dyn WorkflowEnv, name: &str) -> Result<(), WorkflowError> {
     env.ensure_hived().map_err(WorkflowError)?;
-    if cli != "claude" {
-        // claude inboxes queue; only TUI-injected CLIs need the ready gate.
-        let not_ready = env.wait_ready(&HashSet::from([name.to_string()]));
-        if !not_ready.is_empty() {
-            return Err(WorkflowError(format!(
-                "member '{name}' did not reach ready within the gate; inspect its pane"
-            )));
-        }
+    let not_ready = env.wait_ready(&HashSet::from([name.to_string()]));
+    if !not_ready.is_empty() {
+        return Err(WorkflowError(format!(
+            "member '{name}' did not reach ready within the gate; inspect its pane"
+        )));
     }
     Ok(())
 }
@@ -574,14 +571,20 @@ pub fn run_op(env: &dyn WorkflowEnv, op: &WorkflowOp) -> Result<Map<String, Valu
             result.insert("pane".to_string(), Value::String(spawned.pane_id));
             result.insert("cli".to_string(), Value::String(spawned.cli));
         }
-        WorkflowOp::Ready { name, cli } => ready_gate(env, name, cli)?,
+        WorkflowOp::Ready { name } => ready_gate(env, name)?,
         WorkflowOp::DispatchTask {
             name,
             prompt,
             dispatch_id,
         } => {
             let artifact = task_artifact(env, name, dispatch_id, prompt)?;
-            match dispatch(env, name, &dispatch_body(dispatch_id, prompt), &artifact)? {
+            match dispatch(
+                env,
+                name,
+                &dispatch_body(dispatch_id, prompt),
+                &artifact,
+                dispatch_id,
+            )? {
                 Dispatched::Delivered(seq) => {
                     result.insert("seq".to_string(), Value::from(seq));
                 }
@@ -628,12 +631,32 @@ impl Verdict {
         }
     }
 
-    fn completed(done: DoneRecord) -> Verdict {
+    /// The engine's terminal word mapped onto the run's: codex
+    /// `completed` and grok `end_turn` are `completed`; codex
+    /// `interrupted` and grok `cancelled` are `interrupted`; everything
+    /// else (`failed`, `error`, `max_tokens`, `refusal`, …) is `failed`
+    /// with the engine's word and error as the reason. The text is the
+    /// body in every case — what the member had said by then.
+    fn ended(status: &str, text: String, error: Option<String>) -> Verdict {
+        let (status, reason) = match status {
+            "completed" | "end_turn" => (STATUS_COMPLETED, None),
+            "interrupted" | "cancelled" => (
+                STATUS_INTERRUPTED,
+                Some(format!("the turn was cut short ({status})")),
+            ),
+            other => (
+                STATUS_FAILED,
+                Some(match error {
+                    Some(error) => format!("the engine ended the turn: {other} ({error})"),
+                    None => format!("the engine ended the turn: {other}"),
+                }),
+            ),
+        };
         Verdict {
-            status: STATUS_COMPLETED,
-            body: Some(done.body),
-            artifact: Some(done.artifact),
-            reason: None,
+            status,
+            body: Some(text),
+            artifact: None,
+            reason,
         }
     }
 }
@@ -725,77 +748,61 @@ fn wait_turn_closed(env: &dyn WorkflowEnv, name: &str, spawned: bool) -> Result<
     ))
 }
 
-/// How a wait ended: the verdict, and whether it settles the record. The
-/// one verdict that does not (`terminal: false`) is a dispatch whose
-/// answer was lost and that neither returned nor closed its turn: the
-/// member may be on the task, so the record stays pending and the name
-/// owned until `hive kill`.
-struct Ending {
-    verdict: Verdict,
-    terminal: bool,
-}
-
-impl Ending {
-    fn terminal(verdict: Verdict) -> Ending {
-        Ending {
-            verdict,
-            terminal: true,
-        }
-    }
-}
-
-/// Wait for the member's return. Every poll reads the done file first — a
-/// return for this dispatch wins over anything else that poll sees — then
-/// the member's liveness, then its turn: `TURN_CLOSED_POLLS` consecutive
-/// "no turn open" answers with no return is `no_result`. A done file for
-/// another dispatch is not this run's and is ignored. A dispatch whose
-/// answer was lost (`answer_lost`) is waited on the same way, and given
-/// up on under `DISPATCH_UNKNOWN_SECONDS` when neither a return nor a
-/// closed turn shows — with the record left pending, since the member
-/// may be on the task.
-fn await_return(
-    env: &dyn WorkflowEnv,
-    workspace: &str,
-    name: &str,
-    record: &WorkflowRecord,
-    answer_lost: bool,
-) -> Ending {
-    let unobserved_polls = (DISPATCH_UNKNOWN_SECONDS / POLL_SECONDS) as u32;
-    let mut closed = 0u32;
-    let mut polls = 0u32;
+/// Wait for the turn to end. Every poll asks the hived for the dispatch's
+/// result first — an `Ended` answer is the verdict, whatever else the poll
+/// sees — then the member's liveness. `Unknown` answers are read against
+/// the member's turn: `UNKNOWN_CLOSED_POLLS` consecutive unknowns with the
+/// turn closed is `no_result` (nothing holds the turn and it is not
+/// running); an unknown with the turn open or unanswered keeps waiting,
+/// since the hived may be the one that restarted and the turn may still
+/// end in front of a client that never saw it start. `UNANSWERED_POLLS`
+/// consecutive polls with no answer at all is `no_result` too. A
+/// dispatch whose answer was lost is waited on exactly the same way: the
+/// hived keeps the turn under the dispatch id whether or not its answer
+/// arrived.
+fn await_result(env: &dyn WorkflowEnv, name: &str, dispatch_id: &str) -> Verdict {
+    let mut unknown_closed = 0u32;
+    let mut unanswered = 0u32;
     loop {
-        if let Some(done) = read_done(workspace, name) {
-            if done.dispatch_id == record.dispatch_id {
-                remove_done(workspace, name);
-                return Ending::terminal(Verdict::completed(done));
+        match env.node_result(dispatch_id) {
+            Some(NodeResult::Ended {
+                status,
+                text,
+                error,
+            }) => return Verdict::ended(&status, text, error),
+            Some(NodeResult::Running) => {
+                unknown_closed = 0;
+                unanswered = 0;
             }
-            log(&format!(
-                "{name} has a return for {} on disk, not this run's {}; ignored",
-                done.dispatch_id, record.dispatch_id
-            ));
+            Some(NodeResult::Unknown(reason)) => {
+                unanswered = 0;
+                if !env.alive(name) {
+                    return gone(name, "before its turn ended");
+                }
+                unknown_closed = match env.turn_open(name) {
+                    Some(false) => unknown_closed + 1,
+                    _ => 0,
+                };
+                if unknown_closed >= UNKNOWN_CLOSED_POLLS {
+                    return Verdict::reason(
+                        STATUS_NO_RESULT,
+                        format!("the turn is not running and nothing holds its result ({reason})"),
+                    );
+                }
+            }
+            None => {
+                unknown_closed = 0;
+                unanswered += 1;
+                if unanswered >= UNANSWERED_POLLS {
+                    return Verdict::reason(
+                        STATUS_NO_RESULT,
+                        format!("the hived did not answer for {UNANSWERED_POLLS} polls"),
+                    );
+                }
+            }
         }
         if !env.alive(name) {
-            return Ending::terminal(gone(name, "before it returned"));
-        }
-        closed = match env.turn_open(name) {
-            Some(false) => closed + 1,
-            _ => 0,
-        };
-        if closed >= TURN_CLOSED_POLLS {
-            return Ending::terminal(Verdict::reason(
-                STATUS_NO_RESULT,
-                "the member ended its turn without hive workflow done",
-            ));
-        }
-        polls += 1;
-        if answer_lost && polls >= unobserved_polls {
-            return Ending {
-                verdict: Verdict::reason(
-                    STATUS_AMBIGUOUS,
-                    "dispatch answer lost and no return".to_string(),
-                ),
-                terminal: false,
-            };
+            return gone(name, "before its turn ended");
         }
         env.sleep(POLL_SECONDS);
     }
@@ -845,9 +852,11 @@ pub fn run_workflow(
     let reused = env.alive(name);
     let (pane, cli) = if reused {
         let member = env.member(name).unwrap_or_default();
+        node_cli(&member.cli)?;
         log(&format!("{name} alive in {}; reusing", member.pane_id));
         (member.pane_id, member.cli)
     } else {
+        node_cli(spec.cli.as_deref().unwrap_or_default())?;
         env.retire(name);
         let spawned = run_op(
             env,
@@ -872,7 +881,6 @@ pub fn run_workflow(
             env,
             &WorkflowOp::Ready {
                 name: name.to_string(),
-                cli: cli.clone(),
             },
         ) {
             env.retire(name);
@@ -904,11 +912,9 @@ pub fn run_workflow(
 
     // The pending record goes down before the dispatch has any side effect
     // (task artifact, hived delivery): a runner killed in between leaves
-    // the name owned, never a delivered task with no record. A return left
-    // on disk by an earlier run cannot be this dispatch's — the id is
-    // fresh — and goes with the old record. A refused dispatch takes the
-    // record back with it; one whose answer was lost keeps it, since the
-    // task may be with the member.
+    // the name owned, never a delivered task with no record. A refused
+    // dispatch takes the record back with it; one whose answer was lost
+    // keeps it, since the task may be with the member.
     let mut record = WorkflowRecord {
         dispatch_id: dispatch_id.clone(),
         cli,
@@ -919,7 +925,6 @@ pub fn run_workflow(
         seq: None,
         started_at: epoch_seconds(),
     };
-    remove_done(workspace, name);
     if let Err(err) = write_record(workspace, name, &record) {
         rollback();
         return Err(err);
@@ -939,35 +944,26 @@ pub fn run_workflow(
             return Err(err);
         }
     };
-    let answer_lost = dispatched.get("answerLost").and_then(Value::as_str);
-    match answer_lost {
+    match dispatched.get("answerLost").and_then(Value::as_str) {
         Some(reason) => log(&format!(
-            "{name} dispatch answer lost ({reason}); the task may have landed, waiting for the return of {dispatch_id}"
+            "{name} dispatch answer lost ({reason}); the task may have landed, waiting for the turn of {dispatch_id}"
         )),
         None => {
             record.seq = dispatched.get("seq").and_then(Value::as_i64);
             update_record(workspace, name, &record);
             log(&format!(
-                "{name} dispatched {dispatch_id}; waiting for its return"
+                "{name} dispatched {dispatch_id}; waiting for its turn to end"
             ));
         }
     }
 
-    let Ending { verdict, terminal } =
-        await_return(env, workspace, name, &record, answer_lost.is_some());
-    if terminal {
-        record.status = verdict.status.to_string();
-        record.body = verdict.body.clone();
-        record.artifact = verdict.artifact.clone();
-        record.reason = verdict.reason.clone();
-        update_record(workspace, name, &record);
-        log(&format!("{name} {}", verdict.status));
-    } else {
-        log(&format!(
-            "{name} {}; the record stays pending and the name owned until `hive kill {name}`",
-            verdict.status
-        ));
-    }
+    let verdict = await_result(env, name, &dispatch_id);
+    record.status = verdict.status.to_string();
+    record.body = verdict.body.clone();
+    record.artifact = verdict.artifact.clone();
+    record.reason = verdict.reason.clone();
+    update_record(workspace, name, &record);
+    log(&format!("{name} {}", verdict.status));
     Ok(WorkflowResult {
         name,
         pane,
@@ -1101,10 +1097,23 @@ impl WorkflowEnv for RealEnv {
         }
     }
 
-    fn dispatch(&self, target: &str, body: &str, artifact: &str) -> Result<i64, DispatchFailure> {
+    fn dispatch(
+        &self,
+        target: &str,
+        body: &str,
+        artifact: &str,
+        dispatch_id: &str,
+    ) -> Result<i64, DispatchFailure> {
         self.with_ctx(|c| {
-            crate::send::request_node_dispatch(&c.workspace, &c.team, target, body, artifact)
-                .map(|payload| payload.get("seq").and_then(Value::as_i64).unwrap_or(0))
+            crate::send::request_node_dispatch(
+                &c.workspace,
+                &c.team,
+                target,
+                body,
+                artifact,
+                dispatch_id,
+            )
+            .map(|payload| payload.get("seq").and_then(Value::as_i64).unwrap_or(0))
         })
         .map_err(|e| DispatchFailure::Refused(e.0))
         .and_then(|inner| inner)
@@ -1135,6 +1144,16 @@ impl WorkflowEnv for RealEnv {
             &ctx.team_name,
             name,
         ))
+    }
+
+    /// One question to the hived (`node-result`): the turn it holds under
+    /// the dispatch id, as its adapter client saw it end.
+    fn node_result(&self, dispatch_id: &str) -> Option<NodeResult> {
+        let ctx = self.context().ok()?;
+        NodeResult::from_answer(&crate::hived::request_node_result(
+            &ctx.workspace,
+            dispatch_id,
+        )?)
     }
 
     fn retire(&self, name: &str) {

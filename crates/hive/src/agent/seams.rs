@@ -12,6 +12,7 @@ use anyhow::bail;
 
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
+use crate::adapters::codex_app_server::TurnStartFailure;
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -620,6 +621,35 @@ pub(super) fn hooked_codex_send_to_thread(thread_id: &str, text: &str) -> Option
     crate::adapters::codex_app_server::send_to_thread(thread_id, text)
 }
 
+pub(super) fn hooked_codex_dispatch_to_pane(
+    pane_id: &str,
+    text: &str,
+) -> Result<(String, String), TurnStartFailure> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.codex_sent.push((pane_id.to_string(), text.to_string()));
+        h.codex_dispatch.clone()
+    }) {
+        return v.map(|turn_id| (format!("thread-of-{pane_id}"), turn_id));
+    }
+    crate::adapters::codex_app_server::dispatch_to_pane(pane_id, text)
+}
+
+pub(super) fn hooked_codex_dispatch_to_thread(
+    thread_id: &str,
+    text: &str,
+) -> Result<String, TurnStartFailure> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.codex_sent_thread
+            .push((thread_id.to_string(), text.to_string()));
+        h.codex_dispatch.clone()
+    }) {
+        return v;
+    }
+    crate::adapters::codex_app_server::dispatch_to_thread(thread_id, text)
+}
+
 pub(super) fn hooked_codex_interrupt_pane(pane_id: &str) -> Option<&'static str> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
@@ -729,6 +759,31 @@ pub(super) fn hooked_grok_send_to_key(key: &str, text: &str) -> Option<&'static 
         return v;
     }
     crate::adapters::grok_leader::send_to_key(key, text)
+}
+
+pub(super) fn hooked_grok_dispatch_to_pane(
+    pane_id: &str,
+    text: &str,
+) -> Result<(String, u64), String> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.grok_sent.push((pane_id.to_string(), text.to_string()));
+        h.grok_dispatch.clone()
+    }) {
+        return v.map(|rid| (format!("key-of-{pane_id}"), rid));
+    }
+    crate::adapters::grok_leader::dispatch_to_pane(pane_id, text)
+}
+
+pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<u64, String> {
+    #[cfg(test)]
+    if let Some(v) = testhook::with(|h| {
+        h.grok_sent_key.push((key.to_string(), text.to_string()));
+        h.grok_dispatch.clone()
+    }) {
+        return v;
+    }
+    crate::adapters::grok_leader::dispatch_to_key(key, text)
 }
 
 pub(super) fn hooked_grok_interrupt_pane(pane_id: &str) -> Option<&'static str> {

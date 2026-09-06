@@ -34,9 +34,8 @@ const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on a
 // Verbs that never need a tmux context — plus the team verbs, which read the
 // registry (the truth layer) and address the team's window by id, so a
 // caller outside tmux or in another session reaches it the same way.
-// `workflow` rides the same doctrine: `workflow run --team` exists for
-// callers without a pane identity (a workflow proxy subagent, a desktop
-// session), and `workflow done` resolves the member the way `send` does.
+// `workflow run --team` rides the same doctrine: it exists for callers
+// without a pane identity (a workflow proxy subagent, a desktop session).
 const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "plugin",
     "config",
@@ -372,27 +371,16 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("workflow")
-                .about("One task on one live member, returned explicitly.")
+                .about("One task on one live codex or grok member, one turn, its result read off the engine.")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new("run")
-                        .about("Place the task on stdin onto member NAME and block for its return.")
+                        .about("Place the task on stdin onto member NAME and block until its turn ends.")
                         .arg(Arg::new("name").long("name").required(true))
                         .arg(Arg::new("cli").long("cli"))
                         .arg(Arg::new("model").long("model"))
                         .arg(Arg::new("team").long("team")),
-                )
-                .subcommand(
-                    Command::new("done")
-                        .about("Return SUMMARY as the result of the workflow task you are on.")
-                        .arg(Arg::new("summary").required(true).allow_hyphen_values(true))
-                        .arg(
-                            Arg::new("artifact")
-                                .long("artifact")
-                                .default_value("")
-                                .help("Artifact path for the full result (- reads stdin)"),
-                        ),
                 ),
         )
         .subcommand(
@@ -652,7 +640,7 @@ const KNOWN_COMMANDS: &[&str] = &[
 const HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["ccd"], &["ls"]),
     (&["config"], &["get", "set", "unset"]),
-    (&["workflow"], &["done", "run"]),
+    (&["workflow"], &["run"]),
     (
         &["plugin"],
         &["disable", "enable", "list", "ls", "setup", "sync"],
@@ -990,7 +978,6 @@ fn dispatch(matches: &ArgMatches) {
                     .unwrap_or(""),
                 m.get_one::<String>("team").map(String::as_str),
             ),
-            Some(("done", m)) => workflow::done_cmd(arg_str(m, "summary"), arg_str(m, "artifact")),
             _ => unreachable!("subcommand required"),
         },
         Some(("pr", m)) => match m.subcommand() {
@@ -1137,10 +1124,6 @@ mod tests {
         assert_eq!(
             help_path("workflow", &tail(&["run", "--name", "x", "--help"])),
             Some(vec!["workflow", "run"])
-        );
-        assert_eq!(
-            help_path("workflow", &tail(&["done", "--help"])),
-            Some(vec!["workflow", "done"])
         );
         assert_eq!(
             help_path("workflow", &tail(&["-h", "run"])),
