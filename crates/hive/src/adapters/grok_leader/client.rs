@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -222,6 +222,42 @@ struct ClientShared {
     /// Session id of the `session/load` in flight: the one whose replayed
     /// history is turn evidence until the load response binds it.
     loading: Option<String>,
+    /// Every prompt sent through `prompt_tracked`, by request id.
+    tracked: HashMap<u64, PromptResult>,
+    /// Ended tracked rids oldest first, so the map stays bounded.
+    ended: VecDeque<u64>,
+    /// Text of the turns running while a tracked prompt is: per promptId,
+    /// the `agent_message_chunk`s as segments split at each `tool_call`.
+    segments: HashMap<String, Vec<String>>,
+}
+
+/// Ended results kept for `prompt_result` after the turn.
+const ENDED_KEEP: usize = 64;
+
+impl ClientShared {
+    fn tracking(&self) -> bool {
+        self.tracked
+            .values()
+            .any(|result| *result == PromptResult::Running)
+    }
+
+    /// Close *rid*'s tracked prompt; a no-op unless it is still running.
+    fn end_tracked(&mut self, rid: u64, ended: PromptResult) {
+        match self.tracked.get(&rid) {
+            Some(PromptResult::Running) => {}
+            _ => return,
+        }
+        self.tracked.insert(rid, ended);
+        self.ended.push_back(rid);
+        while self.ended.len() > ENDED_KEEP {
+            if let Some(old) = self.ended.pop_front() {
+                self.tracked.remove(&old);
+            }
+        }
+        if !self.tracking() {
+            self.segments.clear();
+        }
+    }
 }
 
 pub(super) struct ClientInner {
@@ -259,6 +295,23 @@ fn fail_pending(inner: &ClientInner) {
     for slot in slots {
         *slot.msg.lock().unwrap() = Some(json!({"error": "closed"}));
         slot.event.set();
+    }
+    let mut state = inner.state.lock().unwrap();
+    let running: Vec<u64> = state
+        .tracked
+        .iter()
+        .filter(|(_rid, result)| **result == PromptResult::Running)
+        .map(|(rid, _result)| *rid)
+        .collect();
+    for rid in running {
+        state.end_tracked(
+            rid,
+            PromptResult::Ended {
+                stop_reason: "error".to_string(),
+                text: String::new(),
+                error: Some("closed".to_string()),
+            },
+        );
     }
 }
 
@@ -318,6 +371,7 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
         "session/update" => {
             let update = params.get("update").cloned().unwrap_or_else(|| json!({}));
             apply_update(&mut state, &update);
+            collect_prompt_text(&mut state, &update, params.get("_meta"));
         }
         "_x.ai/session_notification" => {
             let kind = params
@@ -442,6 +496,76 @@ fn note_ack(state: &ClientShared, text: Option<&Value>) {
     }
 }
 
+/// Keep a running turn's text while a tracked prompt is open. Chunks are
+/// grouped by `_meta.promptId` — the human's own prompt can run first, and
+/// only the response says which id was ours — and a chunk with no id (the
+/// user echo, a bare `tool_call_update`) is not the member speaking.
+fn collect_prompt_text(state: &mut ClientShared, update: &Value, meta: Option<&Value>) {
+    if !state.tracking() {
+        return;
+    }
+    let Some(prompt_id) = meta
+        .and_then(|meta| meta.get("promptId"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("agent_message_chunk") => {
+            let text = update
+                .get("content")
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let segments = state.segments.entry(prompt_id.to_string()).or_default();
+            if segments.is_empty() {
+                segments.push(String::new());
+            }
+            segments.last_mut().unwrap().push_str(text);
+        }
+        Some("tool_call") => {
+            if let Some(segments) = state.segments.get_mut(prompt_id) {
+                if segments.last().is_some_and(|segment| !segment.is_empty()) {
+                    segments.push(String::new());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fold the `session/prompt` response of a tracked rid: the turn's end.
+fn end_tracked_response(state: &mut ClientShared, rid: u64, msg: &Value) {
+    let ended = match (msg.get("error"), msg.get("result")) {
+        (Some(error), _) => PromptResult::Ended {
+            stop_reason: "error".to_string(),
+            text: String::new(),
+            error: Some(error.to_string()),
+        },
+        (None, result) => {
+            let result = result.cloned().unwrap_or(Value::Null);
+            let prompt_id = result
+                .get("_meta")
+                .and_then(|meta| meta.get("promptId"))
+                .and_then(Value::as_str);
+            let text = prompt_id
+                .and_then(|prompt_id| state.segments.remove(prompt_id))
+                .and_then(|segments| segments.into_iter().rev().find(|s| !s.is_empty()))
+                .unwrap_or_default();
+            PromptResult::Ended {
+                stop_reason: result
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                text,
+                error: None,
+            }
+        }
+    };
+    state.end_tracked(rid, ended);
+}
+
 fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
     let mut reader = BufReader::new(stdout);
     while !inner.closed.load(Ordering::SeqCst) {
@@ -471,10 +595,8 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
                 // Pop atomically: a `call()` that timed out concurrently may have
                 // removed this rid already, and a missing slot only means the
                 // waiter is gone — drop the late response instead of raising.
-                let slot = msg
-                    .get("id")
-                    .and_then(Value::as_u64)
-                    .and_then(|rid| inner.pending.lock().unwrap().remove(&rid));
+                let rid = msg.get("id").and_then(Value::as_u64);
+                let slot = rid.and_then(|rid| inner.pending.lock().unwrap().remove(&rid));
                 if let Some(slot) = slot {
                     if let Some(session_id) = slot.loads.as_ref() {
                         let mut state = inner.state.lock().unwrap();
@@ -483,6 +605,9 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
                             state.runtime.session_id = Some(session_id.clone());
                             state.loaded = true;
                         }
+                    }
+                    if let Some(rid) = rid {
+                        end_tracked_response(&mut inner.state.lock().unwrap(), rid, &msg);
                     }
                     *slot.msg.lock().unwrap() = Some(msg);
                     slot.event.set();
@@ -836,14 +961,55 @@ impl GrokStdioClient {
     /// the response is the accept and the end in one. `Err` is nothing
     /// written (no loaded session, dead leader).
     pub fn prompt_tracked(&self, text: &str) -> Result<u64, String> {
-        let _ = text;
-        unimplemented!("prompt_tracked")
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("closed".to_string());
+        }
+        let rid = self.inner.next_rid();
+        let session_id = {
+            let mut state = self.inner.state.lock().unwrap();
+            let session_id = state
+                .runtime
+                .session_id
+                .clone()
+                .ok_or_else(|| "no loaded session".to_string())?;
+            state.tracked.insert(rid, PromptResult::Running);
+            session_id
+        };
+        let slot = Arc::new(Slot {
+            event: Event::new(),
+            msg: Mutex::new(None),
+            loads: None,
+        });
+        self.inner.pending.lock().unwrap().insert(rid, slot);
+        let sent = self.inner.write(&json!({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": text}],
+            },
+        }));
+        if sent {
+            // A leader that died mid-write may have run fail_pending before
+            // this rid was registered; a second pass ends it like the rest.
+            if self.inner.closed.load(Ordering::SeqCst) {
+                fail_pending(&self.inner);
+            }
+            return Ok(rid);
+        }
+        self.inner.pending.lock().unwrap().remove(&rid);
+        let mut state = self.inner.state.lock().unwrap();
+        state.tracked.remove(&rid);
+        if !state.tracking() {
+            state.segments.clear();
+        }
+        Err("write failed".to_string())
     }
 
     /// What this client has seen of the prompt sent as *rid*; None when
     /// it never sent it (a fresh client since).
     pub fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
-        let _ = rid;
-        unimplemented!("prompt_result")
+        self.inner.state.lock().unwrap().tracked.get(&rid).cloned()
     }
 }
