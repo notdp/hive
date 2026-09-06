@@ -395,6 +395,8 @@ mod tests {
     #[test]
     fn test_plan_none_below_two_panes_or_a_tiny_window() {
         assert_eq!(plan((220, 60), &window(1, false)), None);
+        // a mirror with no member is a one-pane window too
+        assert_eq!(plan((220, 60), &window(0, true)), None);
         assert_eq!(plan((220, 60), &[]), None);
         assert_eq!(plan((3, 60), &window(2, false)), None);
         assert_eq!(plan((220, 5), &window(2, false)), None);

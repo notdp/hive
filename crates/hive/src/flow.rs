@@ -113,10 +113,6 @@ pub enum FlowOp {
         name: String,
         prompt: String,
     },
-    WaitReply {
-        name: String,
-        seq: i64,
-    },
 }
 
 fn task_artifact(env: &dyn FlowEnv, name: &str, text: &str) -> Result<String, FlowError> {
@@ -262,9 +258,6 @@ pub fn run_op(env: &dyn FlowEnv, op: &FlowOp) -> Result<Map<String, Value>, Flow
             )?;
             result.insert("seq".to_string(), Value::from(seq));
             result.insert("artifact".to_string(), Value::String(artifact));
-        }
-        FlowOp::WaitReply { name, seq } => {
-            result = reply_map(await_reply(env, name, *seq)?);
         }
     }
     Ok(result)
@@ -731,14 +724,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(1, reply_row("done", "/tmp/f.md", 2));
-        let r = run_op(
-            &env,
-            &FlowOp::WaitReply {
-                name: "impl".into(),
-                seq: 1,
-            },
-        )
-        .unwrap();
+        let r = reply_map(await_reply(&env, "impl", 1).unwrap());
         assert_eq!(r["body"], "done");
         assert_eq!(r["artifact"], "/tmp/f.md");
         assert!(r.get("msgId").is_none());
@@ -751,28 +737,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = fake_env(tmp.path());
         // not on the roster, no reply: gone, not an eternal poll
-        let err = run_op(
-            &env,
-            &FlowOp::WaitReply {
-                name: "impl".into(),
-                seq: 9,
-            },
-        )
-        .unwrap_err();
+        let err = await_reply(&env, "impl", 9).unwrap_err();
         assert!(err.0.contains("gone without replying"), "{err}");
         // replied then retired still delivers
         env.replies
             .lock()
             .unwrap()
             .insert(9, reply_row("late", "", 10));
-        let r = run_op(
-            &env,
-            &FlowOp::WaitReply {
-                name: "impl".into(),
-                seq: 9,
-            },
-        )
-        .unwrap();
+        let r = reply_map(await_reply(&env, "impl", 9).unwrap());
         assert_eq!(r["body"], "late");
     }
 

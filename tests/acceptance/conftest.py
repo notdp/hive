@@ -23,6 +23,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -58,7 +59,8 @@ class Rig:
     team: str
     workspace: Path
     flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
-    flow_rc: int = 0  # the worst node exit code
+    flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
+    node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
     node_results: dict[str, dict] = field(default_factory=dict)  # member -> node run JSON
     bus_rows: list[tuple] = field(default_factory=list)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
@@ -148,6 +150,10 @@ def rig():
         env["TMUX_PANE"] = pane
         env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
         env.pop("CODEX_THREAD_ID", None)
+        # One node per CLI, all started before any is awaited. The task is
+        # handed over by communicate(input=…) on a thread per node: writing
+        # then closing stdin by hand and calling communicate() afterwards
+        # raises "I/O operation on closed file" on Python 3.12.
         procs = {
             r.member(c): subprocess.Popen(
                 ["hive", "node", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
@@ -156,18 +162,25 @@ def rig():
             )
             for c in r.clis
         }
-        for c in r.clis:
-            procs[r.member(c)].stdin.write(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)))
-            procs[r.member(c)].stdin.close()
         deadline = time.time() + int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420"))
-        for member, proc in procs.items():
-            out, err, rc = _wait_node(proc, deadline)
+        waits = {
+            r.member(c): _NodeWait(
+                procs[r.member(c)],
+                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)),
+                deadline,
+            )
+            for c in r.clis
+        }
+        for member, wait in waits.items():
+            out, err, rc = wait.result()
             # progress rides stderr; stdout is the one JSON result line
             result = _last_json_object(out)
             r.node_results[member] = result
-            r.flow_rc = max(r.flow_rc, rc)
+            r.node_rcs[member] = rc
             r.flow_stdout += f"--- {member} (rc {rc}) ---\n{err[-3000:]}\n"
             r.flow_stdout += f"RESULT {member} {str(result.get('body', ''))[:100]}\n"
+        # A signal kill is a negative code; max() with 0 would hide it.
+        r.flow_rc = next((rc for rc in r.node_rcs.values() if rc != 0), 0)
 
         db = r.workspace / "hive.db"
         if db.exists():
@@ -199,16 +212,28 @@ def rig():
         subprocess.run(["rm", "-rf", str(r.root)], timeout=15)
 
 
-def _wait_node(proc: subprocess.Popen, deadline: float) -> tuple[str, str, int]:
-    """Drain one node run; a node still running at the deadline is killed
-    and reported with what it wrote so far."""
-    try:
-        out, err = proc.communicate(timeout=max(1.0, deadline - time.time()))
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate()
-        err += f"\n[rig] node run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
-    return out, err, proc.returncode
+class _NodeWait:
+    """Feed one node its task and drain it on a thread, so every node is
+    fed and running concurrently; a node still running at the deadline is
+    killed and reported with what it wrote so far."""
+
+    def __init__(self, proc: subprocess.Popen, task: str, deadline: float):
+        self.proc = proc
+        self.out = self.err = ""
+        self.thread = threading.Thread(target=self._run, args=(task, deadline), daemon=True)
+        self.thread.start()
+
+    def _run(self, task: str, deadline: float) -> None:
+        try:
+            self.out, self.err = self.proc.communicate(task, timeout=max(1.0, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.out, self.err = self.proc.communicate()
+            self.err += f"\n[rig] node run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
+
+    def result(self) -> tuple[str, str, int]:
+        self.thread.join()
+        return self.out, self.err, self.proc.returncode
 
 
 def _last_json_object(stdout: str) -> dict:

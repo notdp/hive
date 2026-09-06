@@ -68,7 +68,12 @@ pub(crate) fn delete_team(
             bail!("no team named '{name}' (no registry entry, no tmux session)");
         }
         if let Ok(mut team) = Team::load(name, "") {
-            let names: Vec<String> = team.agents.iter().map(|a| a.name.clone()).collect();
+            // The caller may be a member of this very team (an orch running
+            // the teardown): retire it last so the retirements before it,
+            // and the delete itself, are not cut off with its engine.
+            let me = crate::identity::default_agent();
+            let mut names: Vec<String> = team.agents.iter().map(|a| a.name.clone()).collect();
+            names.sort_by_key(|n| Some(n) == me.as_ref());
             for member in names {
                 if team.retire(&member) {
                     println!("retired {member}");

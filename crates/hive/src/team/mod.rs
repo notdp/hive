@@ -749,7 +749,7 @@ impl Team {
 
     /// Retire a member: kill its engine/pane, drop the roster row here and
     /// in the registry, re-tile the display. The one retirement path —
-    /// `hive kill`, flow's `kill()`, and a failed node start all come here.
+    /// `hive kill`, `hive delete --down`, and a failed node start all come here.
     /// Returns whether the member was on the roster.
     pub fn retire(&mut self, name: &str) -> bool {
         let Some(pos) = self.agents.iter().position(|a| a.name == name) else {

@@ -96,7 +96,7 @@ const reply = await agent(`hive node run --team ${run} --name impl-auth --cli co
 
 代理定义里已固定 `model: haiku`,不用在调用处写。Workflow 面板的 Model 列显示的是**代理**的模型,成员真身的 CLI/模型没有任何接口能注入该列——唯一的显示杠杆是 label 自由文本。约定:`⬡ <name> 「<cli>」`,显式指定了成员模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`。
 
-成员生命周期归你:workflow 结束后成员还活着,同名节点再跑一次会复用活成员(带上下文);不要了就 `hive kill <name>`。跑完 `hive delete <run> --down`(kill 全部成员 + 删 team + 杀 session),或留团供追问、拆时再清。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的三步(后台起命令、循环等 exit 文件、原样返回 JSON)直接内联进 prompt 也一样跑。
+成员生命周期归你:workflow 结束后成员还活着,同名节点再跑一次会复用活成员(带上下文);不要了就 `hive kill <name>`。跑完 `hive delete <run> --down`(kill 全部成员 + 删 team + 杀 session),或留团供追问、拆时再清。agent 定义是 session 启动时注册的——本 session 中途才装上插件的话,把同样的四步(mktemp 落任务文件、后台起命令、循环等 exit 文件、原样返回 JSON)直接内联进 prompt 也一样跑。
 
 ## git / 集成纪律
 
