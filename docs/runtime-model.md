@@ -164,7 +164,7 @@ viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
 detection (`view_theme.rs`), resolved once at install, so a theme change
 shows at the next session build — and the bar is rendered from tmux options
 alone, with no `#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
-▸ parked / ◂ open, absent while unset); per pane `@hive-role`, `@hive-agent`,
+▴ parked / ▾ open, absent while unset); per pane `@hive-role`, `@hive-agent`,
 `@hive-busy`, `@hive-unread` and `@hive-notify-active` (✱, the attention
 mark); `@hive-pr`; on the second line `@hive-notify-text`, then
 `@hive-ticker`. The chips are `range=pane|<id>` click targets and the orch

@@ -1,11 +1,14 @@
 //! tmux control-mode output parsing and the pane-activity monitor.
 
 use std::collections::HashMap;
+use std::os::unix::io::RawFd;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::run::run;
 
 const CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
 
@@ -348,6 +351,28 @@ fn terminate_child(child: &mut std::process::Child) {
     }
 }
 
+/// This control client is the one tmux would answer OSC 10/11 from — with
+/// black, never having been told a colour (`tmux/appearance.rs`). Hand it
+/// the real answer for every pane of the session through its own stdin,
+/// so `refresh-client -r` runs as the control client itself.
+fn report_session_pane_colours(master: RawFd, session_target: &str) {
+    let panes = match run(
+        &["list-panes", "-s", "-t", session_target, "-F", "#{pane_id}"],
+        false,
+        5,
+    ) {
+        Ok(r) if r.returncode == 0 => r.stdout,
+        _ => return,
+    };
+    for pane in panes.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        for line in super::pane_colour_report_lines(pane) {
+            let bytes = line.as_bytes();
+            let _ =
+                unsafe { libc::write(master, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+        }
+    }
+}
+
 fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<()> {
     let (master, slave) = monitor_openpty()?;
     let mut cmd = Command::new("tmux");
@@ -388,6 +413,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
     };
     *inner.master_fd.lock().unwrap() = Some(master);
+    report_session_pane_colours(master, session_target);
 
     let mut buffer: Vec<u8> = Vec::new();
     while !inner.stop.load(Ordering::SeqCst) {
@@ -422,6 +448,11 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
             let (pane_id, payload) = parse_control_mode_output(decoded);
             if !pane_id.is_empty() {
                 record_control_mode_output(inner, &pane_id, &payload);
+            } else if decoded.starts_with("%layout-change ") || decoded.starts_with("%window-add ")
+            {
+                // A new pane in the session: tell it its colours before
+                // the engine in it asks.
+                report_session_pane_colours(master, session_target);
             }
         }
     }

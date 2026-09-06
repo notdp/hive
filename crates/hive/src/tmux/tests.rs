@@ -548,7 +548,7 @@ fn test_mirror_run_shell_escapes_a_dollar_in_the_binary_path_for_tmux() {
 
 #[test]
 fn test_status_click_binding_ends_in_the_stock_status_click() {
-    let binding = status_click_binding("/x/hive");
+    let binding = status_click_binding("/x/hive", STOCK_STATUS_CLICK);
     assert_eq!(binding.len(), 9);
     assert_eq!(
         binding[..4],
@@ -596,6 +596,17 @@ fn test_bound_command_reads_the_list_keys_line() {
         bound_command("bind-key -T prefix m select-pane -m\n"),
         Some("select-pane -m".to_string())
     );
+    // Off a whole table (what 3.7 makes necessary): the `m` line, not `mm`.
+    let table = "bind-key -T prefix M send-keys -X other\nbind-key -T prefix mm select-pane -M\nbind-key    -T prefix m       select-pane -m\n";
+    assert_eq!(bound_command(table), Some("select-pane -m".to_string()));
+    assert_eq!(
+        bound_command_for(
+            "bind-key    -T root MouseDown1Status          switch-client -t =\n",
+            "root",
+            "MouseDown1Status"
+        ),
+        Some("switch-client -t =".to_string())
+    );
     // `-r` drops, tmux's `\;` separator becomes the ` ; ` an if-shell
     // branch string splits on, quoting stays verbatim.
     assert_eq!(
@@ -640,7 +651,7 @@ fn test_prefix_m_fallback_remembers_the_command_the_key_had() {
     assert_eq!(
         argvs(&calls),
         vec![
-            v(&["list-keys", "-T", "prefix", "m"]),
+            v(&["list-keys", "-T", "prefix"]),
             v(&[
                 "set-option",
                 "-s",
@@ -662,7 +673,7 @@ fn test_prefix_m_fallback_reads_the_remembered_command_behind_hives_own_binding(
     assert_eq!(
         argvs(&calls),
         vec![
-            v(&["list-keys", "-T", "prefix", "m"]),
+            v(&["list-keys", "-T", "prefix"]),
             v(&["show-options", "-s", "-v", PREFIX_M_FALLBACK_OPTION]),
         ]
     );
@@ -674,7 +685,7 @@ fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
 
     assert_eq!(prefix_m_fallback(), "");
 
-    assert_eq!(argvs(&calls), vec![v(&["list-keys", "-T", "prefix", "m"])]);
+    assert_eq!(argvs(&calls), vec![v(&["list-keys", "-T", "prefix"])]);
 }
 
 #[test]
@@ -685,10 +696,13 @@ fn test_install_team_status_runs_options_then_bindings() {
 
     install_team_status("$3");
 
-    // The prefix+m probe comes first (the rows are built before they run),
-    // then the session options, then the two bindings.
+    // The two fallback probes come first (the rows are built before they
+    // run) — the root table carries no status click here, so the stock
+    // click stands in without a look at the option — then the session
+    // options, then the two bindings.
     let mut expected = vec![
-        v(&["list-keys", "-T", "prefix", "m"]),
+        v(&["list-keys", "-T", "root"]),
+        v(&["list-keys", "-T", "prefix"]),
         v(&[
             "set-option",
             "-s",
@@ -700,7 +714,7 @@ fn test_install_team_status_runs_options_then_bindings() {
         "$3",
         crate::view_theme::active_theme_kind(),
     ));
-    expected.push(status_click_binding("/x/hive"));
+    expected.push(status_click_binding("/x/hive", STOCK_STATUS_CLICK));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
     assert_eq!(argvs(&calls), expected);
 }
@@ -1065,4 +1079,39 @@ fn test_run_shell_detached_passes_command_byte_for_byte() {
 fn test_display_value_none_on_failure() {
     capture_run(1, "");
     assert_eq!(display_value("%5", "#{pane_left}"), None);
+}
+
+#[test]
+fn test_pane_colour_report_lines_follow_the_theme_and_the_tmux_version() {
+    let mut env =
+        crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    env.set("HOME", tmp.path());
+    env.set("HIVE_VIEW_THEME", "dark");
+    set_run_override(|args, _check, _timeout| {
+        Ok(match args[0].as_str() {
+            "-V" => ok_run(0, "tmux 3.7c\n", ""),
+            _ => ok_run(0, "", ""),
+        })
+    });
+    assert_eq!(
+        pane_colour_report_lines("%7"),
+        vec![
+            "refresh-client -r '%7:\x1b]10;rgb:ffff/ffff/ffff\x1b\\\\'\n".to_string(),
+            "refresh-client -r '%7:\x1b]11;rgb:0000/0000/0000\x1b\\\\'\n".to_string(),
+        ]
+    );
+
+    set_run_override(|args, _check, _timeout| {
+        Ok(match args[0].as_str() {
+            "-V" => ok_run(0, "tmux 3.4\n", ""),
+            _ => ok_run(0, "", ""),
+        })
+    });
+    assert!(pane_colour_report_lines("%7").is_empty());
+    assert_eq!(
+        stale_version_warning().map(|w| w.starts_with("warning: tmux 3.4 answers")),
+        Some(true)
+    );
 }

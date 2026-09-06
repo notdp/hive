@@ -127,6 +127,9 @@ pub(crate) fn create(
     }
     remember_context(&name, &ws_str, LEAD_AGENT_NAME);
     println!("Team '{name}' created.");
+    if let Some(warning) = tmux::stale_version_warning() {
+        eprintln!("{warning}");
+    }
     println!("Workspace initialized: {ws_str}");
 }
 
@@ -352,6 +355,9 @@ fn create_detached_team(
     }
     remember_context(name, &ws_str, LEAD_AGENT_NAME);
     println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
+    if let Some(warning) = tmux::stale_version_warning() {
+        eprintln!("{warning}");
+    }
     if orch_member.is_some() {
         println!("You are {name}.{LEAD_AGENT_NAME}.");
         println!("{}", title_badge_hint(&format!("[{name}] ")));
@@ -896,6 +902,15 @@ pub(crate) fn team_cmd(team_arg: &str) {
         .collect();
     tmux_payload.insert("panes".to_string(), Value::Array(pane_rows));
     tmux_payload.insert("paneCount".to_string(), Value::from(panes.len()));
+    if let Some((major, minor)) = tmux::version() {
+        tmux_payload.insert(
+            "version".to_string(),
+            Value::from(format!("{major}.{minor}")),
+        );
+    }
+    if let Some(warning) = tmux::stale_version_warning() {
+        tmux_payload.insert("warning".to_string(), Value::from(warning));
+    }
     result.insert("tmux".to_string(), Value::Object(tmux_payload));
     result.insert(
         "hint".to_string(),

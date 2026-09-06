@@ -477,7 +477,7 @@ Options:
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
   the display; `on` joins the same pane back as the window's first pane —
   or rebuilds it when the hidden pane is gone — and records `on`. No
-  argument toggles. The status bar's orch chip (▸ closed, ◂ open) and
+  argument toggles. The status bar's orch chip (▴ closed, ▾ open) and
   prefix+m run the same verb on the current window; --window names the
   window when the caller has no pane (a tmux run-shell job). prefix+m is
   bound server-wide when a team session is built, gated on a team window:

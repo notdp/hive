@@ -376,9 +376,10 @@ fn assert_status_bar_installed(argv: &Argv) {
         let row: Vec<&str> = row.iter().map(String::as_str).collect();
         assert!(has_row(argv, &row), "{row:?}");
     }
-    // The double answers `list-keys` with nothing: no prefix+m fallback.
+    // The double answers `list-keys` with nothing: no prefix+m fallback,
+    // and the stock click stands in for the status click's else branch.
     for row in [
-        crate::tmux::status_click_binding("/x/hive"),
+        crate::tmux::status_click_binding("/x/hive", crate::tmux::STOCK_STATUS_CLICK),
         crate::tmux::mirror_key_binding("/x/hive", ""),
     ] {
         let row: Vec<&str> = row.iter().map(String::as_str).collect();

@@ -274,6 +274,24 @@ pub fn resolve_kind(pref: ThemePref, detected: Option<Appearance>) -> ThemeKind 
     }
 }
 
+/// The appearance hive vouches for on behalf of a pane it creates
+/// (`tmux::report_pane_appearance`): the explicit theme setting, else the
+/// environment's stamp — never the OSC 11 probe, which asks the terminal
+/// this process sits on, not the pane's. Light when nothing says
+/// otherwise, the same fallback as the viewer.
+pub fn configured_appearance() -> Appearance {
+    let env_val = std::env::var("HIVE_VIEW_THEME").ok();
+    let config_val =
+        crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
+    match resolve_pref(env_val.as_deref(), config_val.as_deref()) {
+        ThemePref::Light => Appearance::Light,
+        ThemePref::Dark => Appearance::Dark,
+        ThemePref::Auto => parse_appearance_var(std::env::var("HIVE_APPEARANCE").ok().as_deref())
+            .or_else(|| parse_colorfgbg(std::env::var("COLORFGBG").ok().as_deref()))
+            .unwrap_or(Appearance::Light),
+    }
+}
+
 /// Full startup resolution. Runs the detection chain only when no explicit
 /// setting decided the theme; MUST be called before crossterm owns the
 /// terminal (the OSC 11 probe reads raw stdin).
