@@ -239,6 +239,17 @@ fn test_parse_hive_message_reads_every_arrival_shape() {
     assert_eq!(carded_bare.body, "done");
     assert!(!carded_bare.injected);
 
+    // a lookalike tag name or a missing closing tag is not the card tag:
+    // the row stays ordinary text, never a peeled envelope.
+    assert!(
+        parse_hive_message("<cross-session-message-not-a-tag>\n<HIVE from=x>hello</HIVE>")
+            .is_none()
+    );
+    assert!(
+        parse_hive_message("<cross-session-message from=\"x\">\n<HIVE from=x>hello</HIVE>")
+            .is_none()
+    );
+
     // attribute-less envelope still parses; the body is what matters.
     let bald = parse_hive_message("<HIVE>hi</HIVE>").unwrap();
     assert_eq!(bald.from, None);

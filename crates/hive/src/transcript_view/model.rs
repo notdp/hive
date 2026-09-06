@@ -76,14 +76,20 @@ fn strip_peer_card_tag(text: &str) -> &str {
     let Some(rest) = text.strip_prefix("<cross-session-message") else {
         return text;
     };
+    // the tag name must end here: `<cross-session-message-x>` is not it
+    if !rest.starts_with('>') && !rest.starts_with(char::is_whitespace) {
+        return text;
+    }
     let Some(gt) = rest.find('>') else {
         return text;
     };
-    let inner = rest[gt + 1..].trim();
-    inner
-        .strip_suffix("</cross-session-message>")
-        .unwrap_or(inner)
+    let Some(inner) = rest[gt + 1..]
         .trim()
+        .strip_suffix("</cross-session-message>")
+    else {
+        return text;
+    };
+    inner.trim()
 }
 
 /// Peel claude's peer-message wrapper: the lead line above the envelope and

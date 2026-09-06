@@ -441,10 +441,19 @@ fn escape_peer_body(text: &str) -> String {
     let mut from = 0;
     while let Some(i) = lower[from..].find(&close) {
         let at = from + i;
-        out.push_str(&text[last..at]);
-        out.push_str("<\\");
-        last = at + 1;
-        from = at + close.len();
+        let end = at + close.len();
+        // the receiver's pattern ends the tag name here: `</cross-session-messages`
+        // is some other tag and stays as written
+        let name_goes_on = text[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !name_goes_on {
+            out.push_str(&text[last..at]);
+            out.push_str("<\\");
+            last = at + 1;
+        }
+        from = end;
     }
     out.push_str(&text[last..]);
     out
@@ -946,6 +955,15 @@ mod tests {
             "a <\\/cross-session-message> b <\\/CROSS-SESSION-MESSAGE>"
         );
         assert_eq!(escape_peer_body("<HIVE>\nx\n</HIVE>"), "<HIVE>\nx\n</HIVE>");
+        // a longer tag name is another tag: the receiver's escaper leaves it
+        assert_eq!(
+            escape_peer_body("</cross-session-message-extra> </cross-session-messageX>"),
+            "</cross-session-message-extra> </cross-session-messageX>"
+        );
+        assert_eq!(
+            escape_peer_body("</cross-session-message"),
+            "<\\/cross-session-message"
+        );
     }
 
     #[test]

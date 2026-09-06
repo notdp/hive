@@ -487,9 +487,10 @@ alone; a bare `<HIVE>` body does not parse and is drawn whole, lead line and
 safety paragraph included (which is why a hive message used to show its
 wrapper on screen while a native one did not). This changes what a human
 sees and nothing else: the row still stores the wrapper, the model still
-reads it, and the frame's `from` (the origin) still names the sender — the
-desktop card requires it to equal the tag's `from`. The transcript viewer
-peels the tag the same way it peels the wrapper.
+reads it, and the frame's `from` (the origin) still names the sender, the
+same name the tag carries (the desktop card checks the two agree for a
+`local_…` origin). The transcript viewer peels the tag the same way it
+peels the wrapper.
 
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
