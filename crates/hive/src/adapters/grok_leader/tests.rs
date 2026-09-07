@@ -2619,6 +2619,39 @@ fn set_listening_daemon_spawn() -> Arc<Mutex<usize>> {
 }
 
 #[test]
+fn test_new_session_accepts_a_reply_after_the_load_budget_without_retrying() {
+    let _bed = setup();
+    let (client, proc) = make(
+        Some(Box::new(|msg| match msg["method"].as_str() {
+            Some("initialize") => vec![ok(msg, json!({"protocolVersion": 1}))],
+            _ => Vec::new(),
+        })),
+        None,
+        "%19",
+    );
+    let delayed = proc.clone();
+    let reply = thread::spawn(move || {
+        let request = settle_sent(&delayed, |msg| msg["method"] == "session/new");
+        thread::sleep(Duration::from_secs_f64(LOAD_TIMEOUT + 1.0));
+        delayed.feed(&ok(&request, json!({"sessionId": SID})));
+    });
+
+    let created = client.new_session(SID, CWD);
+    reply.join().unwrap();
+    teardown(&client, &proc);
+
+    assert!(created);
+    assert_eq!(client.session_id().as_deref(), Some(SID));
+    assert_eq!(
+        proc.sent()
+            .iter()
+            .filter(|msg| msg["method"] == "session/new")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn test_create_member_session_mints_on_the_identity_key_before_any_pane() {
     let _bed = setup();
     let _spawns = set_listening_daemon_spawn();
