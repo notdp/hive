@@ -22,7 +22,7 @@ Hive is one Rust binary. Prebuilt binaries ship on [GitHub Releases](https://git
 curl -fsSL https://raw.githubusercontent.com/notdp/hive/main/install.sh | sh
 ```
 
-This installs the binary and registers the bundled plugin for claude and codex on PATH. Plugin registration failures return a nonzero exit code; a CLI missing from PATH is skipped.
+This installs the binary and registers the bundled plugin for claude and codex on PATH. Plugin registration failures return a nonzero exit code; a CLI missing from PATH is skipped. If Claude's plugin registration fails inside a Claude Code session, run `hive plugin setup` from your own terminal, outside Claude Code.
 
 With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
 

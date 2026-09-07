@@ -27,7 +27,7 @@ pub(crate) fn run(target: &Path, force: bool, purge: bool) -> Result<bool> {
     if purge && (home.as_os_str().is_empty() || home.parent().is_none()) {
         bail!("refusing to purge {}: not a hive directory", home.display());
     }
-    if purge && std::env::var_os("HOME").is_some_and(|user_home| home == PathBuf::from(user_home)) {
+    if purge && std::env::var_os("HOME").is_some_and(|user_home| home == Path::new(&user_home)) {
         bail!("refusing to purge the user home {}", home.display());
     }
 

@@ -79,9 +79,9 @@ Extensions:
   Manage hive itself: user settings, the hive skill plugin for claude and
   codex, and the binary on disk.
 
-  config  Read / write user-level settings (~/.hive/settings.json).
-  plugin  Install the hive skill plugin into claude and codex.
-  update  Update hive to the latest GitHub release.
+  config     Read / write user-level settings (~/.hive/settings.json).
+  plugin     Install the hive skill plugin into claude and codex.
+  update     Update hive to the latest GitHub release.
   uninstall  Remove hive and its plugin registrations.
 
 Launchers:
@@ -685,9 +685,9 @@ Options:
   Remove any hive shell-init line from your shell rc file manually.
 
 Options:
-  --force    Delete every registered team with --down before uninstalling
-  --purge    Also remove $HIVE_HOME and its saved data
-  -h, --help Show this message and exit.
+  --force     Delete every registered team with --down before uninstalling
+  --purge     Also remove $HIVE_HOME and its saved data
+  -h, --help  Show this message and exit.
 "#
         }
         ["update"] => {

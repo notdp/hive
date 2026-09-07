@@ -150,6 +150,8 @@ fn setup_plugins() -> bool {
         println!("setup: claude: not on PATH, skipped");
     }
 
+    let claude_failed = !success;
+
     if which_on_path("codex") {
         let dir = marketplace.join("codex");
         success &= setup_step(
@@ -165,6 +167,13 @@ fn setup_plugins() -> bool {
         success &= setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
     } else {
         println!("setup: codex: not on PATH, skipped");
+    }
+    if claude_failed
+        && ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+    {
+        println!("setup: claude: run hive plugin setup from your own terminal, outside a Claude Code session");
     }
     success
 }

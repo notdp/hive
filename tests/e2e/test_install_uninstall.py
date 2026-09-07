@@ -43,6 +43,9 @@ if [ "${{FAIL_PLUGIN:-}}" = 1 ] && [ "{cli} $*" = 'claude plugin install hive@hi
     echo 'registration denied' >&2
     exit 1
 fi
+if [ "${{FAIL_CODEX_PLUGIN:-}}" = 1 ] && [ "{cli} $*" = 'codex plugin add hive@hive' ]; then
+    exit 1
+fi
 ''')
     installer = tmp_path / "installer.sh"
     script(installer, '''
@@ -186,4 +189,27 @@ def test_uninstall_refuses_teams_without_running_plugin_commands(installation):
     assert result.returncode == 1
     assert "probe" in result.stderr and "--down" in result.stderr
     assert binary.exists() and team_dir.exists()
+    assert_setup(env)
+
+
+@pytest.mark.parametrize("marker,failure,hint", [
+    ("CLAUDECODE", "FAIL_PLUGIN", True),
+    ("CLAUDE_CODE_CHILD_SESSION", "FAIL_PLUGIN", True),
+    ("CLAUDECODE", None, False),
+    ("CLAUDECODE", "FAIL_CODEX_PLUGIN", False),
+    (None, "FAIL_PLUGIN", False),
+])
+def test_setup_explains_claude_session_failures_without_changing_status(installation, marker, failure, hint):
+    env, _ = installation
+    if marker:
+        env[marker] = "1"
+    if failure:
+        env[failure] = "1"
+    result = install(env)
+    assert result.returncode == (1 if failure else 0), result.stdout + result.stderr
+    lines = [line for line in result.stdout.splitlines() if "own terminal" in line]
+    assert bool(lines) is hint, result.stdout
+    if hint:
+        assert result.stdout.splitlines()[-1] == lines[0]
+        assert "hive plugin setup" in lines[0]
     assert_setup(env)
