@@ -1,22 +1,14 @@
-//! Optional plugin enable/disable lifecycle, plus the local marketplace
-//! that ships the Claude/Codex plugin payload with the binary.
+//! The local marketplace that ships the Claude/Codex plugin payload with
+//! the binary.
 //!
-//! Three source trees are embedded at compile time via `include_str!`:
-//! `crates/hive/assets/plugins/` (the shipped hive plugins, `BUILTIN_PLUGINS`),
-//! `crates/hive/assets/marketplace/` (the two marketplace manifests), and
+//! Two source trees are embedded at compile time via `include_str!`:
+//! `crates/hive/assets/marketplace/` (the two marketplace manifests) and
 //! the repo-level `plugins/hive/` (the plugin payload: its two manifests,
-//! the skill with its references, and the `hive-node` agent). Enabled state
-//! lives on disk under `$HIVE_HOME/plugins/`. The one shipped
-//! plugin (`notify`) is a manifest-only toggle the hived reads through
-//! `is_plugin_enabled`, so enabling copies the manifest under
-//! `installed/<name>/` and records the state entry, nothing more.
+//! the skill with its references, and the `hive-node` agent).
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
-use serde_json::{json, Map, Value};
+use anyhow::Result;
 
 // ---------------------------------------------------------------------------
 // local marketplace (skills ride the binary)
@@ -125,234 +117,12 @@ pub fn materialize_marketplace() -> Result<PathBuf> {
     Ok(root.join(PAYLOAD_SUBDIR))
 }
 
-#[derive(Debug, Clone)]
-pub struct PluginManifest {
-    pub name: String,
-    pub description: String,
-}
-
-/// One shipped plugin: package-relative file paths and their contents.
-struct BuiltinPlugin {
-    name: &'static str,
-    files: &'static [(&'static str, &'static str)],
-}
-
-// The shipped plugins, embedded from `crates/hive/assets/plugins/<name>/`.
-static BUILTIN_PLUGINS: &[BuiltinPlugin] = &[BuiltinPlugin {
-    name: "notify",
-    files: &[(
-        "plugin.json",
-        include_str!("../assets/plugins/notify/plugin.json"),
-    )],
-}];
-
-fn state_path() -> PathBuf {
-    crate::paths::hive_home().join("plugins").join("state.json")
-}
-
-fn installed_root() -> PathBuf {
-    crate::paths::hive_home().join("plugins").join("installed")
-}
-
-fn default_state() -> Map<String, Value> {
-    let mut m = Map::new();
-    m.insert("plugins".to_string(), Value::Object(Map::new()));
-    m
-}
-
-fn load_state() -> Map<String, Value> {
-    let path = state_path();
-    if !path.exists() {
-        return default_state();
-    }
-    match fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-    {
-        Some(Value::Object(m)) => m,
-        _ => default_state(),
-    }
-}
-
-fn save_json_file(path: &Path, data: &Map<String, Value>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, format!("{}\n", serde_json::to_string_pretty(data)?))?;
-    Ok(())
-}
-
-fn save_state(data: &Map<String, Value>) -> Result<()> {
-    save_json_file(&state_path(), data)
-}
-
-fn remove_path(path: &Path) {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
-            let _ = fs::remove_file(path);
-        }
-        Ok(meta) if meta.is_dir() => {
-            let _ = fs::remove_dir_all(path);
-        }
-        _ => {}
-    }
-}
-
-/// Write the embedded plugin files under `dst`.
-fn copy_tree(files: &[(&str, &str)], dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for (rel, content) in files {
-        let target = dst.join(rel);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&target, content)?;
-    }
-    Ok(())
-}
-
-fn plugin_resource_dir(name: &str) -> Result<&'static BuiltinPlugin> {
-    BUILTIN_PLUGINS
-        .iter()
-        .find(|p| p.name == name && p.files.iter().any(|(rel, _)| *rel == "plugin.json"))
-        .ok_or_else(|| anyhow!("plugin '{}' not found", name))
-}
-
-pub fn load_manifest(name: &str) -> Result<PluginManifest> {
-    let plugin = plugin_resource_dir(name)?;
-    let raw = plugin
-        .files
-        .iter()
-        .find(|(rel, _)| *rel == "plugin.json")
-        .map(|(_, content)| *content)
-        .expect("checked by plugin_resource_dir");
-    let data: Value = serde_json::from_str(raw)?;
-    let manifest_name = data
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("plugin.json for '{}' missing 'name'", name))?;
-    Ok(PluginManifest {
-        name: manifest_name.to_string(),
-        description: data
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
-}
-
-pub fn is_plugin_enabled(name: &str) -> bool {
-    load_state()
-        .get("plugins")
-        .and_then(|v| v.as_object())
-        .map(|m| m.contains_key(name))
-        .unwrap_or(false)
-}
-
-pub fn list_plugins() -> Result<Vec<Value>> {
-    let state = load_state();
-    let empty = Map::new();
-    let enabled = state
-        .get("plugins")
-        .and_then(|v| v.as_object())
-        .unwrap_or(&empty);
-    let mut names: Vec<&str> = BUILTIN_PLUGINS
-        .iter()
-        .filter(|p| p.files.iter().any(|(rel, _)| *rel == "plugin.json"))
-        .map(|p| p.name)
-        .collect();
-    names.sort_unstable();
-    let mut rows = Vec::new();
-    for name in names {
-        let manifest = load_manifest(name)?;
-        rows.push(json!({
-            "name": manifest.name,
-            "description": manifest.description,
-            "enabled": enabled.contains_key(&manifest.name),
-        }));
-    }
-    Ok(rows)
-}
-
-pub fn disable_plugin(name: &str, missing_ok: bool) -> Result<Value> {
-    let mut state = load_state();
-    if !state.get("plugins").is_some_and(|v| v.is_object()) {
-        state.insert("plugins".to_string(), Value::Object(Map::new()));
-    }
-    let plugin_state = state
-        .get("plugins")
-        .and_then(|v| v.as_object())
-        .and_then(|m| m.get(name))
-        .cloned();
-    let Some(plugin_state) = plugin_state else {
-        if missing_ok {
-            return Ok(json!({"name": name, "enabled": false}));
-        }
-        return Err(anyhow!("plugin '{}' is not enabled", name));
-    };
-    let plugin_state = plugin_state.as_object().cloned().unwrap_or_default();
-
-    let install_root = plugin_state
-        .get("installRoot")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    if let Some(install_root) = &install_root {
-        remove_path(install_root);
-    }
-    if let Some(plugins) = state.get_mut("plugins").and_then(|v| v.as_object_mut()) {
-        plugins.remove(name);
-    }
-    save_state(&state)?;
-    Ok(json!({"name": name, "enabled": false}))
-}
-
-pub fn enable_plugin(name: &str) -> Result<Value> {
-    let manifest = load_manifest(name)?;
-    disable_plugin(name, true)?;
-
-    let install_dir = installed_root().join(name);
-    remove_path(&install_dir);
-    if let Some(parent) = install_dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    copy_tree(plugin_resource_dir(name)?.files, &install_dir)?;
-
-    let mut state = load_state();
-    let mut plugin_state = Map::new();
-    plugin_state.insert(
-        "installRoot".to_string(),
-        json!(install_dir.to_string_lossy()),
-    );
-    plugin_state.insert(
-        "enabledAt".to_string(),
-        json!(SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)),
-    );
-    if !state.get("plugins").is_some_and(|v| v.is_object()) {
-        state.insert("plugins".to_string(), Value::Object(Map::new()));
-    }
-    state
-        .get_mut("plugins")
-        .and_then(|v| v.as_object_mut())
-        .expect("plugins ensured above")
-        .insert(name.to_string(), Value::Object(plugin_state));
-    save_state(&state)?;
-
-    Ok(json!({
-        "name": manifest.name,
-        "description": manifest.description,
-        "enabled": true,
-        "installRoot": install_dir.to_string_lossy(),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testenv::EnvGuard;
+    use serde_json::{json, Value};
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     fn setup() -> (tempfile::TempDir, EnvGuard) {

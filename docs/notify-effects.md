@@ -5,7 +5,8 @@ is `notify_ui.rs`; hive draws nothing itself.
 
 ## Fire time
 
-`notify` (the hived's idle watcher, or a manual `hive notify`) resolves the
+`notify` (the hived's idle watcher — on unless the `notify.idle` setting is
+`false` — or a manual `hive notify`) resolves the
 pane's window — the team window when the pane is a parked mirror in a hidden
 window (`@hive-hidden`), since nobody looks at that one and its select hook
 would never fire — and, unless that window is the one the most recent client

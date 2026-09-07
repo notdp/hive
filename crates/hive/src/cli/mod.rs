@@ -490,31 +490,18 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("plugin")
-                .about("Manage first-party Hive plugins.")
+                .about("Install the hive skill plugin into claude and codex.")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(json_default_options(
-                    Command::new("list").about("List available plugins and whether they are enabled."),
-                ))
-                .subcommand(json_default_options(
-                    Command::new("ls")
-                        .about("Hidden alias of `hive plugin list`.")
+                .subcommand(
+                    Command::new("sync")
+                        .about(
+                            "Materialize the embedded plugin marketplace and print the \
+                             payload directory (the command source Claude re-runs each \
+                             session).",
+                        )
                         .hide(true),
-                ))
-                .subcommand(json_default_options(
-                    Command::new("enable")
-                        .about("Enable a plugin and materialize its commands.")
-                        .arg(Arg::new("name").required(true)),
-                ))
-                .subcommand(json_default_options(
-                    Command::new("disable")
-                        .about("Disable a plugin and remove its commands.")
-                        .arg(Arg::new("name").required(true)),
-                ))
-                .subcommand(Command::new("sync").about(
-                    "Materialize the embedded plugin marketplace and print the payload \
-                     directory (the command source Claude re-runs each session).",
-                ))
+                )
                 .subcommand(Command::new("setup").about(
                     "One-time install: sync the marketplace, then register and install \
                      the hive plugin for claude and codex on PATH.",
@@ -662,10 +649,7 @@ const HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["ccd"], &["ls"]),
     (&["config"], &["get", "set", "unset"]),
     (&["workflow"], &["run"]),
-    (
-        &["plugin"],
-        &["disable", "enable", "list", "ls", "setup", "sync"],
-    ),
+    (&["plugin"], &["setup", "sync"]),
     (&["pr"], &["clear", "set"]),
     (&["worktree"], &["done", "set-base", "start", "status"]),
 ];
@@ -1026,10 +1010,6 @@ fn dispatch(matches: &ArgMatches) {
         Some(("kill", m)) => member::kill(arg_str(m, "agent_name"), arg_str(m, "team_arg")),
         Some(("notify", m)) => setup::notify_cmd(arg_str(m, "message")),
         Some(("plugin", m)) => match m.subcommand() {
-            Some(("list", m)) => setup::plugin_list(m.get_flag("plain")),
-            Some(("ls", m)) => setup::plugin_ls(m.get_flag("plain")),
-            Some(("enable", m)) => setup::plugin_enable(arg_str(m, "name"), m.get_flag("plain")),
-            Some(("disable", m)) => setup::plugin_disable(arg_str(m, "name"), m.get_flag("plain")),
             Some(("sync", _)) => setup::plugin_sync(),
             Some(("setup", _)) => setup::plugin_setup(),
             _ => unreachable!("subcommand required"),
@@ -1209,7 +1189,7 @@ mod tests {
 
     /// Root help lists a command exactly when its clap node is not hidden:
     /// every `KNOWN_COMMANDS` entry has a `  <name>  <about>` line unless
-    /// `.hide(true)` marks it (resume-hint today; `plugin ls` is hidden too
+    /// `.hide(true)` marks it (resume-hint today; `plugin sync` is hidden too
     /// but is a subcommand, outside the root table), and no hidden one leaks.
     #[test]
     fn test_root_help_lists_every_visible_command_and_no_hidden_one() {
