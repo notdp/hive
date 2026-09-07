@@ -636,24 +636,11 @@ fn require_daemon_backed(pane: &str) {
     ));
 }
 
-/// Refuse a bare interactive claude pane: hive claude members run as bg jobs.
+/// Refuse a bare interactive claude pane: hive claude pane members run as
+/// bg jobs (`team::claude_pane_job_gate`). Shared by create (the orch pane)
+/// and join (the target pane).
 fn require_claude_job_backed(pane: &str) {
-    if crate::adapters::claude_bg::job_id_for_pane(pane).is_some() {
-        return;
-    }
-    fail(&format!(
-        "this claude is not hive-managed; hive claude members run as \
-         background jobs (`claude --bg`) with the pane attached as a viewer, \
-         so it can't join yet.\n\
-         for future launches use hclaude (one-time setup, any shell):\n  \
-         grep -q 'hive shell-init' ~/.zshrc || \
-         echo 'eval \"$(hive shell-init zsh)\"' >> ~/.zshrc\n\
-         for this session now (your session is preserved):\n  \
-         1) note your session id (`claude --resume` lists it), exit claude\n  \
-         2) run: hive claude -r <session-id>\n\
-         then re-run {}.",
-        hive_skill_entry("claude")
-    ));
+    ok_or_fail(crate::team::claude_pane_job_gate(pane));
 }
 
 /// Refuse a plain grok pane: hive delivers only through the pane leader.
@@ -759,6 +746,11 @@ pub(crate) fn join_cmd(
         fail(&format!(
             "pane '{pane_id}' is not running an agent CLI; only agent panes can be registered"
         ));
+    }
+    // The target pane's own binding, never the caller's, and before any
+    // tag, context or roster write; `--no-notify` does not reach past it.
+    if pane_cli == "claude" {
+        require_claude_job_backed(&pane_id);
     }
     let agent_name = if name_override.is_empty() {
         crate::naming::derive_agent_name(&mut seen_names)

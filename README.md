@@ -56,6 +56,8 @@ $ hclaude      # or: hcodex / hgrok
 /hive:hive
 ```
 
+A claude pane member starts with `hclaude` (or `hive claude`): a bare interactive `claude` in a tmux pane is refused by `hive create` / `hive join`. A claude session outside tmux (the desktop app, a standalone terminal) can join as it is, with a read-only mirror in the team window.
+
 The agent makes the current pane the team's orch and spawns members as tasks call for them. From that point the conversation is with the agent, and the agent runs the team.
 
 ## Binding `hive fork` to a key

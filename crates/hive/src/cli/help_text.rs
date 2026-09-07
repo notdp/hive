@@ -377,8 +377,9 @@ Options:
   --pane TEXT             Register another pane instead of the current one
                           (tmux only)
   --notify / --no-notify  Deliver the join message over the native transport
-                          (doubles as a reachability check; --no-notify
-                          registers without proving the pane deliverable)
+                          (doubles as a reachability check; --no-notify skips
+                          that message and check, not the membership
+                          requirements)
   --group TEXT            Cross-team group tag for display and namespace
                           reservation (optional; qualified-name routing works
                           without it).
