@@ -79,9 +79,8 @@ pub(crate) fn plugin_sync() {
 
 // `hive plugin setup` — the one human-run install step. Registers the
 // materialized marketplace and installs the plugin for claude and codex on
-// PATH; each sub-step tolerates "already done" failures so re-running is
-// safe, and re-running is also how an install is repaired.
-fn setup_step(label: &str, argv: &[&str]) {
+// PATH. Every step runs; any failed step makes the command exit nonzero.
+fn setup_step(label: &str, argv: &[&str]) -> bool {
     let out = match std::process::Command::new(argv[0])
         .args(&argv[1..])
         .output()
@@ -89,7 +88,7 @@ fn setup_step(label: &str, argv: &[&str]) {
         Ok(out) => out,
         Err(e) => {
             println!("setup: {label}: failed to run ({e})");
-            return;
+            return false;
         }
     };
     if out.status.success() {
@@ -107,9 +106,14 @@ fn setup_step(label: &str, argv: &[&str]) {
         .to_string();
         println!("setup: {label}: {text}");
     }
+    out.status.success()
 }
 
 pub(crate) fn plugin_setup() {
+    std::process::exit(i32::from(!setup_plugins()));
+}
+
+fn setup_plugins() -> bool {
     let root = ok_or_fail(crate::plugin_manager::materialize_marketplace());
     let marketplace = root
         .ancestors()
@@ -121,9 +125,10 @@ pub(crate) fn plugin_setup() {
         eprintln!("setup: {warning}");
     }
 
+    let mut success = true;
     if which_on_path("claude") {
         let dir = marketplace.join("claude");
-        setup_step(
+        success &= setup_step(
             "claude marketplace",
             &[
                 "claude",
@@ -133,11 +138,11 @@ pub(crate) fn plugin_setup() {
                 &dir.to_string_lossy(),
             ],
         );
-        setup_step(
+        success &= setup_step(
             "claude plugin",
             &["claude", "plugin", "install", "hive@hive", "--yes"],
         );
-        setup_step(
+        success &= setup_step(
             "claude plugin refresh",
             &["claude", "plugin", "update", "hive@hive", "--yes"],
         );
@@ -145,9 +150,11 @@ pub(crate) fn plugin_setup() {
         println!("setup: claude: not on PATH, skipped");
     }
 
+    let claude_failed = !success;
+
     if which_on_path("codex") {
         let dir = marketplace.join("codex");
-        setup_step(
+        success &= setup_step(
             "codex marketplace",
             &[
                 "codex",
@@ -157,10 +164,18 @@ pub(crate) fn plugin_setup() {
                 &dir.to_string_lossy(),
             ],
         );
-        setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
+        success &= setup_step("codex plugin", &["codex", "plugin", "add", "hive@hive"]);
     } else {
         println!("setup: codex: not on PATH, skipped");
     }
+    if claude_failed
+        && ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+    {
+        println!("setup: claude: run hive plugin setup from your own terminal, outside a Claude Code session");
+    }
+    success
 }
 
 fn which_on_path(name: &str) -> bool {
@@ -339,7 +354,7 @@ mod tests {
         }
         env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
 
-        plugin_setup();
+        assert!(setup_plugins());
 
         let mp = tmp.path().join(".hive/core_assets/marketplace");
         let calls: Vec<String> = std::fs::read_to_string(&log)
@@ -363,6 +378,46 @@ mod tests {
                 "codex plugin add hive@hive".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_plugin_setup_reports_failure_and_runs_later_steps() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("HIVE_HOME", tmp.path().join("hive"));
+        env.set("CLAUDE_HOME", tmp.path().join("claude"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        env.set("CODEX_HOME", tmp.path().join("codex"));
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = tmp.path().join("calls");
+        for cli in ["claude", "codex"] {
+            let path = bin.join(cli);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho '{cli}' >> {}\nexit 1\n",
+                    crate::shell::shlex_quote(log.to_str().unwrap())
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        assert!(!setup_plugins());
+        assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 5);
+    }
+
+    #[test]
+    fn test_plugin_setup_without_agent_clis_succeeds() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("HIVE_HOME", tmp.path().join("hive"));
+        env.set("CLAUDE_HOME", tmp.path().join("claude"));
+        env.set("CODEX_HOME", tmp.path().join("codex"));
+        env.set("PATH", tmp.path());
+        assert!(setup_plugins());
     }
 
     /// The launcher script must be sourceable by both shells it claims and leave

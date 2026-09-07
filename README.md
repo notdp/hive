@@ -19,8 +19,10 @@ Dispatching tasks, sending messages, and reading runtime state happen inside the
 Hive is one Rust binary. Prebuilt binaries ship on [GitHub Releases](https://github.com/notdp/hive/releases) for macOS and Linux (aarch64 and x86_64):
 
 ```bash
-curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
+curl -fsSL https://raw.githubusercontent.com/notdp/hive/main/install.sh | sh
 ```
+
+This installs the binary and registers the bundled plugin for claude and codex on PATH. Plugin registration failures return a nonzero exit code; a CLI missing from PATH is skipped. If Claude's plugin registration fails inside a Claude Code session, run `hive plugin setup` from your own terminal, outside Claude Code.
 
 With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
 
@@ -30,19 +32,31 @@ cargo binstall --git https://github.com/notdp/hive hive
 cargo install --git https://github.com/notdp/hive hive
 ```
 
-The plugin — the skill that teaches an agent the protocol — ships inside the binary and is served from a local marketplace that `hive` materializes under `$HIVE_HOME`. One command registers and installs it for every agent CLI on PATH (re-running it repairs an install):
+After `cargo binstall` or `cargo install`, register the plugin separately. The plugin ships inside the binary and is served from a local marketplace under `$HIVE_HOME`. You can also rerun this command to repair registration:
 
 ```bash
 hive plugin setup
 ```
 
-Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. Nothing is fetched from a remote and no settings are touched.
+Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The plugin payload is local; registration updates the agent CLIs' plugin settings.
 
 Requires:
 
 - `tmux` 3.5+ — hive keeps a control-mode client (the hived's pane monitor) on every team session, and tmux answers a pane's OSC 10/11 colour query from that client, which it never gave real colours: on tmux 3.4 codex and `hive view` in a team pane are told the background is black and draw dark on a light terminal. From 3.5 hive reports the pane's colours itself (`refresh-client -r`, following `view.theme`, then `HIVE_APPEARANCE` / `COLORFGBG`, light by default). `hive create`, `hive doctor` and `hive plugin setup` warn on an older tmux. The `hive cvim` / `hive vim` popups need 3.2+
 - a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries
 - at least one agent CLI: `claude`, `codex`, or `grok`
+
+## Uninstall
+
+```bash
+hive uninstall
+```
+
+This removes the running binary, the dist receipt, and Hive's user plugin registrations, and stops Hive's shared codex daemon. It keeps `$HIVE_HOME` data by default; add `--purge` to remove it. External team workspaces are kept.
+
+If teams are still registered, run `hive delete <team> --down` for each, or use `hive uninstall --force` to tear them all down. Agent CLIs missing from PATH are skipped. Cleanup continues after individual failures and returns a nonzero exit code if any step failed.
+
+Remove any `hive shell-init` line from your shell rc file manually. As with `hive update`, the binary path returned by `current_exe()` must be a regular file; use your package manager to remove installations it owns.
 
 ## Start in your agent session
 

@@ -2,7 +2,7 @@
 //! `pub fn main()`, the root gates every subcommand passes (tmux, codex
 //! native), the help interception, and the dispatch into one module per
 //! domain — `team`, `member`, `attach`, `fork`, `workflow`, `launch`, `setup`,
-//! `update`, `worktree`. The handlers print and exit; the logic they call lives in
+//! `update`, `uninstall`, `worktree`. The handlers print and exit; the logic they call lives in
 //! the crate (`team`, `naming`, `send`, `identity`, `team_display`).
 
 mod attach;
@@ -12,6 +12,7 @@ mod launch;
 mod member;
 mod setup;
 mod team;
+mod uninstall;
 mod update;
 mod util;
 mod workflow;
@@ -58,6 +59,7 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "view",
     "workflow",
     "update",
+    "uninstall",
 ];
 
 const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
@@ -71,6 +73,7 @@ const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
     "resume-hint",
     "shell-init",
     "update",
+    "uninstall",
 ];
 
 // ---------------------------------------------------------------------------
@@ -545,6 +548,12 @@ pub(crate) fn build_cli() -> Command {
                 .arg(Arg::new("shell").default_value("")),
         )
         .subcommand(
+            Command::new("uninstall")
+                .about("Remove hive and its plugin registrations.")
+                .arg(Arg::new("force").long("force").action(ArgAction::SetTrue))
+                .arg(Arg::new("purge").long("purge").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
             Command::new("update")
                 .about("Update hive to the latest GitHub release.")
                 .arg(
@@ -639,6 +648,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "resume-hint",
     "shell-init",
     "update",
+    "uninstall",
     "worktree",
 ];
 
@@ -1020,6 +1030,9 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("resume-hint", m)) => launch::resume_hint_cmd(arg_str(m, "cli_name")),
         Some(("shell-init", m)) => setup::shell_init_cmd(arg_str(m, "shell")),
+        Some(("uninstall", m)) => {
+            uninstall::uninstall_cmd(m.get_flag("force"), m.get_flag("purge"))
+        }
         Some(("update", m)) => update::update_cmd(m.get_flag("check"), m.get_flag("force")),
         Some(("worktree", m)) => match m.subcommand() {
             Some(("set-base", m)) => {

@@ -556,14 +556,7 @@ fn install(
         )
     })?;
     let target = io.current_exe()?;
-    let meta = fs::symlink_metadata(&target)
-        .map_err(|e| format!("cannot stat the running binary {}: {e}", target.display()))?;
-    if !meta.file_type().is_file() {
-        return Err(format!(
-            "the running binary {} is not a regular file; update it the way it was installed",
-            target.display()
-        ));
-    }
+    crate::paths::regular_binary_metadata(&target)?;
     let parent = target
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", target.display()))?
