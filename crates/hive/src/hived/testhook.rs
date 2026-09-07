@@ -8,7 +8,7 @@ use crate::adapters::base::GateResult;
 use crate::adapters::claude_bg::{EngineSession, PaneJob};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::{ThreadRuntime, TurnResult};
+use crate::adapters::codex_app_server::{AuthVerdict, ThreadRuntime, TurnResult};
 use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::{PromptResult, SessionRecord, SessionRuntime};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
@@ -96,7 +96,7 @@ pub struct Hook {
     pub cas_session_id_for_pane: Option<S1<Option<String>>>,
     pub cas_shared_socket_path: Option<F0<PathBuf>>,
     pub cas_daemon_alive: Option<F0<bool>>,
-    pub cas_daemon_auth_stale: Option<F0<bool>>,
+    pub cas_daemon_auth_verdict: Option<F0<AuthVerdict>>,
     pub cas_thread_id_for_pane: Option<S1<Option<String>>>,
     pub cas_list_recorded_panes: Option<F0<Vec<String>>>,
     pub cas_pane_thread_socket: Option<S1<Option<String>>>,

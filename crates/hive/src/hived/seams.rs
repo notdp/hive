@@ -427,12 +427,12 @@ pub(super) fn hooked_cas_daemon_alive() -> bool {
     crate::adapters::codex_app_server::daemon_alive()
 }
 
-pub(super) fn hooked_cas_daemon_auth_stale() -> bool {
+pub(super) fn hooked_cas_daemon_auth_verdict() -> crate::adapters::codex_app_server::AuthVerdict {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.cas_daemon_auth_stale.clone()).flatten() {
+    if let Some(f) = hookget(|h| h.cas_daemon_auth_verdict.clone()).flatten() {
         return f();
     }
-    crate::adapters::codex_app_server::daemon_auth_stale()
+    crate::adapters::codex_app_server::auth_verdict()
 }
 
 pub(super) fn hooked_cas_thread_id_for_pane(pane: &str) -> Option<String> {

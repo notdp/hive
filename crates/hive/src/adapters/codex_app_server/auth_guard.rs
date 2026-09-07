@@ -21,6 +21,13 @@
 // is asked for its account over `account/rateLimits/read` — the backend
 // names the account of the token the daemon holds — so the baseline is
 // the running process's identity, never a disk snapshot taken later.
+//
+// Every baseline write happens under the daemon lock (`daemon.rs`), in
+// the same critical section that may replace the daemon: `auth_verdict`
+// is the lock-free read that the hived's tick takes, and it never writes,
+// so a daemon's answer that arrives after another process already
+// replaced the daemon can never be written over the replacement's
+// baseline.
 
 use std::fs;
 
@@ -75,17 +82,42 @@ pub fn clear_auth_baseline() {
     let _ = fs::remove_file(shared_auth_baseline_path());
 }
 
-/// Whether the live daemon's account no longer matches the disk. A daemon
-/// without a baseline is asked (`daemon_account`): its answer becomes the
-/// baseline, a daemon that cannot authenticate at all is stale outright,
-/// and no answer leaves the question for the next look.
-pub fn daemon_auth_stale() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthVerdict {
+    /// Baseline and disk agree, or the disk is unreadable right now.
+    Fresh,
+    /// The disk moved away from the account the daemon holds.
+    Stale,
+    /// No baseline: only the locked path can settle this.
+    Unknown,
+}
+
+/// The lock-free read: baseline against disk, writing nothing.
+pub fn auth_verdict() -> AuthVerdict {
+    let Some(disk) = disk_account_id() else {
+        return AuthVerdict::Fresh;
+    };
+    match baseline_account_id() {
+        Some(baseline) if baseline == disk => AuthVerdict::Fresh,
+        Some(_) => AuthVerdict::Stale,
+        None => AuthVerdict::Unknown,
+    }
+}
+
+/// Whether the live daemon's account no longer matches the disk; the
+/// caller holds the daemon lock. A daemon without a baseline is asked
+/// (`daemon_account`): its answer becomes the baseline, a daemon that
+/// cannot authenticate at all is stale outright, and no answer leaves the
+/// question for the next look.
+pub(super) fn daemon_auth_stale_locked() -> bool {
+    match auth_verdict() {
+        AuthVerdict::Fresh => return false,
+        AuthVerdict::Stale => return true,
+        AuthVerdict::Unknown => {}
+    }
     let Some(disk) = disk_account_id() else {
         return false;
     };
-    if let Some(baseline) = baseline_account_id() {
-        return baseline != disk;
-    }
     match daemon_account() {
         DaemonAccount::Account(account) => {
             write_auth_baseline(Some(&account));
@@ -169,22 +201,24 @@ mod tests {
         write_auth(tmp.path(), &auth_json("acct-a"));
         assert!(write_auth_baseline(Some("acct-a")));
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
-        assert!(!daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Fresh);
+        assert!(!daemon_auth_stale_locked());
 
         // A same-account refresh rewrites the file: not stale.
         write_auth(
             tmp.path(),
             &auth_json("acct-a").replace("13:16:24", "14:00:00"),
         );
-        assert!(!daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Fresh);
 
         // Another account or workspace on disk: stale.
         write_auth(tmp.path(), &auth_json("acct-b"));
-        assert!(daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Stale);
+        assert!(daemon_auth_stale_locked());
 
         // Logged out on disk: also a change the daemon cannot follow.
         fs::remove_file(tmp.path().join("auth.json")).unwrap();
-        assert!(daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Stale);
     }
 
     #[test]
@@ -196,8 +230,26 @@ mod tests {
         write_auth(tmp.path(), &auth_json("acct-a"));
         assert!(write_auth_baseline(Some("acct-a")));
         write_auth(tmp.path(), "{\"tokens\": {\"account_id\": \"acct");
-        assert!(!daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Fresh);
+        assert!(!daemon_auth_stale_locked());
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
+    }
+
+    #[test]
+    fn test_lock_free_verdict_never_writes_a_baseline() {
+        // The hived's pre-check runs outside the daemon lock: a missing
+        // baseline is Unknown to it, and it leaves the file alone for the
+        // locked path — a daemon answer written here could land after
+        // another process replaced the daemon and overwrite its baseline.
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("CODEX_HOME", tmp.path());
+        fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
+        write_auth(tmp.path(), &auth_json("acct-b"));
+        daemon_answers(json!({"result": {"accountId": "acct-a"}}));
+        assert_eq!(auth_verdict(), AuthVerdict::Unknown);
+        assert_eq!(auth_verdict(), AuthVerdict::Unknown);
+        assert!(!shared_auth_baseline_path().exists());
     }
 
     #[test]
@@ -210,7 +262,7 @@ mod tests {
         write_auth(tmp.path(), &auth_json("acct-b"));
         daemon_answers(json!({"result": {"accountId": "acct-a"}}));
         assert_eq!(baseline_account_id(), None);
-        assert!(daemon_auth_stale());
+        assert!(daemon_auth_stale_locked());
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
     }
 
@@ -222,10 +274,10 @@ mod tests {
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
         write_auth(tmp.path(), &auth_json("acct-a"));
         daemon_answers(json!({"result": {"accountId": "acct-a"}}));
-        assert!(!daemon_auth_stale());
+        assert!(!daemon_auth_stale_locked());
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
         write_auth(tmp.path(), &auth_json("acct-b"));
-        assert!(daemon_auth_stale());
+        assert!(daemon_auth_stale_locked());
     }
 
     #[test]
@@ -237,14 +289,14 @@ mod tests {
         write_auth(tmp.path(), &auth_json("acct-a"));
         daemon_answers(json!({"__rejected__": true, "__error__": {"code": -32600,
             "message": "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again."}}));
-        assert!(daemon_auth_stale());
+        assert!(daemon_auth_stale_locked());
         assert_eq!(baseline_account_id(), None);
         // A transport failure or a network error is not a verdict.
         daemon_answers(json!({"__timeout__": true}));
-        assert!(!daemon_auth_stale());
+        assert!(!daemon_auth_stale_locked());
         daemon_answers(json!({"__rejected__": true, "__error__": {"code": -32603,
             "message": "failed to fetch codex rate limits: connection reset"}}));
-        assert!(!daemon_auth_stale());
+        assert!(!daemon_auth_stale_locked());
         assert_eq!(baseline_account_id(), None);
     }
 
@@ -256,9 +308,9 @@ mod tests {
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
         assert!(write_auth_baseline(None));
         assert_eq!(baseline_account_id(), Some(None));
-        assert!(!daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Fresh);
         write_auth(tmp.path(), &auth_json("acct-a"));
-        assert!(daemon_auth_stale());
+        assert_eq!(auth_verdict(), AuthVerdict::Stale);
         clear_auth_baseline();
         assert_eq!(baseline_account_id(), None);
     }

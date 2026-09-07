@@ -691,13 +691,17 @@ reverse-engineering it from the transcript.
   token) and replace the daemon on a change (`codex.daemon.auth_stale`,
   then the ordinary `codex.daemon.respawn`). A daemon without a baseline
   is asked over `account/rateLimits/read`, whose answer names the account
-  of the token the daemon holds; an unreadable `auth.json` (a login
-  mid-write) is never a change. The replacement runs under one flock per
-  CODEX_HOME (`hive-shared.lock`) across every process that may do it, the
-  recorded pid is signalled only while it is still this socket's `codex
-  app-server`, and the records are cleared only once the process is gone
-  (codex stops listening before it finishes shutting down, so a silent
-  socket is not a gone daemon). Attached TUIs reconnect on their own.
+  of the token the daemon holds (`codex.daemon.auth_settle`); an
+  unreadable `auth.json` (a login mid-write) is never a change. The
+  replacement runs under one flock per CODEX_HOME (`hive-shared.lock`)
+  across every process that may do it, and every baseline write is inside
+  that same critical section — the hived's tick reads the verdict
+  lock-free and writes nothing, so a daemon's answer cannot land over a
+  replacement another process just committed. The recorded pid is
+  signalled only while it is still this socket's `codex app-server`, and
+  the records are cleared only once the process is gone (codex stops
+  listening before it finishes shutting down, so a silent socket is not a
+  gone daemon). Attached TUIs reconnect on their own.
 - **State is event-sourced with no time-based staleness gate.** It stays valid
   until the next event. On a shared daemon a client that does not own the turn
   receives only status events, since turn and item events go to the turn's

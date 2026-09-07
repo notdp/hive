@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::auth_guard::{
-    clear_auth_baseline, daemon_auth_stale, disk_account_id, write_auth_baseline,
+    clear_auth_baseline, daemon_auth_stale_locked, disk_account_id, write_auth_baseline,
 };
 use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnResult, TurnStartFailure};
 use super::records::{
@@ -106,8 +106,10 @@ pub(super) fn lock_daemon() -> Option<DaemonLock> {
 /// teams go away, and the hived re-spawns it if it dies while codex members
 /// live. The one kill is a live daemon whose auth went stale
 /// (`auth_guard.rs`): it is replaced here, so a member is never minted on a
-/// daemon that cannot run a turn. The whole sequence holds the daemon lock.
-/// Returns false if the daemon fails to bind or dies before ready.
+/// daemon that cannot run a turn. The whole sequence — probe, the auth
+/// verdict including a missing baseline settled by asking the daemon,
+/// stop, start, record — holds the daemon lock. Returns false if the
+/// daemon fails to bind or dies before ready.
 pub fn spawn_daemon() -> bool {
     crate::plugin_manager::ensure_codex_plugin_current();
     let sock = shared_socket_path();
@@ -121,7 +123,7 @@ pub fn spawn_daemon() -> bool {
     };
     if sock.exists() {
         if probe_socket(&sock) {
-            if !daemon_auth_stale() {
+            if !daemon_auth_stale_locked() {
                 return true; // reuse the live daemon
             }
             if !stop_daemon() {
