@@ -168,7 +168,15 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
         return;
     }
 
-    if !hooked_cas_daemon_alive() {
+    // A live daemon whose account no longer matches auth.json cannot run
+    // a turn again (auth_guard.rs); spawn_daemon replaces it. Attached
+    // TUIs reconnect on their own, so no reattach follows from this.
+    let alive = hooked_cas_daemon_alive();
+    let auth_stale = alive && hooked_cas_daemon_auth_stale();
+    if auth_stale {
+        hooked_notify_debug_emit(workspace, "codex.daemon.auth_stale", &[]);
+    }
+    if !alive || auth_stale {
         hooked_cas_drop_client();
         let respawned = hooked_cas_spawn_daemon();
         hooked_notify_debug_emit(

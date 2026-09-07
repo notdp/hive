@@ -2037,6 +2037,7 @@ struct SuperState {
     own_socket: Option<String>,
     threads: HashMap<String, String>,
     daemon_alive: bool,
+    auth_stale: bool,
     spawn_ok: bool,
     cli_process: HashMap<String, String>, // pane -> live CLI name
     pane_command: HashMap<String, String>,
@@ -2055,6 +2056,7 @@ fn super_state() -> SuperState {
         ),
         threads: HashMap::from([("%1".to_string(), "tid-1".to_string())]),
         daemon_alive: true,
+        auth_stale: false,
         spawn_ok: true,
         cli_process: HashMap::from([("%1".to_string(), "codex".to_string())]),
         pane_command: HashMap::from([("%1".to_string(), "zsh".to_string())]),
@@ -2094,6 +2096,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let s_own = Arc::clone(&state);
     let s_threads = Arc::clone(&state);
     let s_alive = Arc::clone(&state);
+    let s_stale = Arc::clone(&state);
     let s_spawn = Arc::clone(&state);
     let s_cli = Arc::clone(&state);
     let s_cmd = Arc::clone(&state);
@@ -2109,6 +2112,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
         })),
         cas_thread_id_for_pane: Some(Arc::new(move |pane| s_threads.threads.get(pane).cloned())),
         cas_daemon_alive: Some(Arc::new(move || s_alive.daemon_alive)),
+        cas_daemon_auth_stale: Some(Arc::new(move || s_stale.auth_stale)),
         cas_drop_client: Some(Arc::new(move || {
             drop_sink.lock().unwrap().push("drop_client".to_string())
         })),
@@ -2190,6 +2194,38 @@ fn test_supervisor_respawns_dead_daemon_with_live_member() {
     assert!(calls.contains(&"drop_client".to_string()));
     assert!(calls.contains(&"spawn".to_string()));
     assert!(calls.contains(&"emit codex.daemon.respawn {\"ok\":true}".to_string()));
+}
+
+#[test]
+fn test_supervisor_replaces_live_daemon_with_stale_auth() {
+    let mut state = super_state();
+    state.auth_stale = true;
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        *calls,
+        vec![
+            "emit codex.daemon.auth_stale {}".to_string(),
+            "drop_client".to_string(),
+            "spawn".to_string(),
+            "emit codex.daemon.respawn {\"ok\":true}".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_supervisor_ignores_auth_baseline_of_a_dead_daemon() {
+    // Dead is dead: the respawn path runs once, without an auth_stale
+    // verdict on a daemon that is not there to be stale.
+    let mut state = super_state();
+    state.daemon_alive = false;
+    state.auth_stale = true;
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert!(!calls.iter().any(|c| c.contains("auth_stale")));
+    assert_eq!(calls.iter().filter(|c| *c == "spawn").count(), 1);
 }
 
 #[test]

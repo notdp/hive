@@ -670,10 +670,25 @@ reverse-engineering it from the transcript.
 - **Trust in remote mode.** It is read from the daemon's config on disk, not
   from the client, so every new cwd gets its trust entry written before its
   thread starts.
-- **The daemon is machine-level shared state.** Hive does not kill it: a dead
-  daemon takes every attached TUI down with it within seconds. The hived
-  supervises instead, respawning while live codex members exist and typing one
-  guarded resume into a member's retained shell.
+- **The daemon is machine-level shared state.** Hive does not kill it for
+  pane or team lifecycle: a dead daemon takes every attached TUI down with
+  it within seconds. The hived supervises instead, respawning while live
+  codex members exist and typing one guarded resume into a member's
+  retained shell.
+- **Auth is loaded once and only reloaded for the same account.** codex's
+  auth manager reloads `auth.json` only when the on-disk account id equals
+  the cached one (`reload_if_account_id_matches`, verified on codex
+  0.153.4); a login to another account or workspace, or a login while the
+  daemon holds no account, leaves every turn ending with "Your access token
+  could not be refreshed because you have since logged out or signed in to
+  another account", and no RPC reloads unconditionally. Hive records the
+  account id the daemon was spawned with beside the pidfile
+  (`hive-shared.auth`, `auth_guard.rs`); the supervisor tick and
+  `spawn_daemon` compare it with the disk's `tokens.account_id` (never a
+  token) and replace the daemon on a change (`codex.daemon.auth_stale`, then
+  the ordinary `codex.daemon.respawn`). Attached TUIs reconnect on their
+  own. A daemon without a baseline adopts the disk as its own, and an
+  unreadable `auth.json` (a login mid-write) is never a change.
 - **State is event-sourced with no time-based staleness gate.** It stays valid
   until the next event. On a shared daemon a client that does not own the turn
   receives only status events, since turn and item events go to the turn's

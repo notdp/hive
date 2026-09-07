@@ -24,6 +24,7 @@ const CALL_TIMEOUT: f64 = 10.0;
 /// from this so a valid slow acceptance can never outlive the caller's timeout.
 pub const SUBMIT_TIMEOUT: f64 = HANDSHAKE_TIMEOUT + CALL_TIMEOUT;
 const DAEMON_START_TIMEOUT: f64 = 8.0;
+const DAEMON_STOP_TIMEOUT: f64 = 8.0;
 const CONNECT_COOLDOWN: f64 = 5.0;
 const RESUME_COOLDOWN: f64 = 5.0;
 
@@ -36,6 +37,7 @@ pub const TURN_START_ACCEPTED: &str = "turnStartAccepted";
 pub const TURN_INTERRUPT_ACCEPTED: &str = "turnInterruptAccepted";
 pub const NO_RUNNING_TURN: &str = "noRunningTurn";
 
+mod auth_guard;
 mod client;
 mod daemon;
 mod records;
@@ -43,6 +45,7 @@ mod records;
 pub(crate) mod tests;
 mod transport;
 
+pub use auth_guard::*;
 pub use client::*;
 pub use daemon::*;
 pub use records::*;

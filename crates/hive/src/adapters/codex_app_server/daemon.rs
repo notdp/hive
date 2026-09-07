@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::auth_guard::{clear_auth_baseline, daemon_auth_stale, record_auth_baseline};
 use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnResult, TurnStartFailure};
 use super::records::{codex_home, shared_pidfile_path, shared_socket_path, thread_id_for_pane};
 use super::transport::WsConn;
 use super::{
-    CONNECT_COOLDOWN, DAEMON_START_TIMEOUT, NO_RUNNING_TURN, TURN_INTERRUPT_ACCEPTED,
-    TURN_START_ACCEPTED,
+    CONNECT_COOLDOWN, DAEMON_START_TIMEOUT, DAEMON_STOP_TIMEOUT, NO_RUNNING_TURN,
+    TURN_INTERRUPT_ACCEPTED, TURN_START_ACCEPTED,
 };
 use crate::adapters::base::washed_spawner_env;
 
@@ -69,7 +70,10 @@ pub(crate) fn daemon_env() -> HashMap<String, String> {
 /// Shares the real CODEX_HOME (auth/model/permission defaults stay correct).
 /// The daemon is machine-level state: nothing in hive kills it when panes or
 /// teams go away, and the hived re-spawns it if it dies while codex members
-/// live. Returns false if the daemon fails to bind or dies before ready.
+/// live. The one kill is a live daemon whose auth went stale
+/// (`auth_guard.rs`): it is replaced here, so a member is never minted on a
+/// daemon that cannot run a turn. Returns false if the daemon fails to bind
+/// or dies before ready.
 pub fn spawn_daemon() -> bool {
     crate::plugin_manager::ensure_codex_plugin_current();
     let sock = shared_socket_path();
@@ -80,7 +84,12 @@ pub fn spawn_daemon() -> bool {
     }
     if sock.exists() {
         if probe_socket(&sock) {
-            return true; // reuse the live daemon
+            if !daemon_auth_stale() {
+                return true; // reuse the live daemon
+            }
+            if !kill_daemon() {
+                return false;
+            }
         }
         let _ = fs::remove_file(&sock); // stale socket from a dead daemon
     }
@@ -125,6 +134,7 @@ pub fn spawn_daemon() -> bool {
         }
         if probe_socket(&sock) {
             let _ = fs::write(shared_pidfile_path(), child.id().to_string());
+            record_auth_baseline();
             return true;
         }
         thread::sleep(Duration::from_millis(200));
@@ -133,6 +143,60 @@ pub fn spawn_daemon() -> bool {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
     false
+}
+
+/// The pid hive recorded for the daemon, only while a process by that pid
+/// is still a `codex app-server`: a recycled pid is never signalled.
+fn recorded_daemon_pid() -> Option<libc::pid_t> {
+    let text = fs::read_to_string(shared_pidfile_path()).ok()?;
+    let pid: libc::pid_t = text.trim().parse().ok()?;
+    if pid <= 1 {
+        return None;
+    }
+    let out = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let command = String::from_utf8_lossy(&out.stdout);
+    command.contains("app-server").then_some(pid)
+}
+
+/// Stop the live daemon and clear its socket, pidfile and auth baseline.
+///
+/// SIGTERM goes to the daemon's process group: `spawn_daemon` made it a
+/// session leader, and the npm launcher is a node wrapper whose native
+/// child sits in the same group (the wrapper forwards SIGTERM itself; the
+/// group is the belt to that brace). Waits for the socket to stop
+/// answering, then escalates to SIGKILL. Attached TUIs (`codex --remote`)
+/// reconnect to the replacement on their own. False when hive never
+/// recorded the daemon's pid or the pid is no longer a codex app-server.
+pub fn kill_daemon() -> bool {
+    let Some(pid) = recorded_daemon_pid() else {
+        return false;
+    };
+    let target = if unsafe { libc::getpgid(pid) } == pid {
+        -pid
+    } else {
+        pid
+    };
+    unsafe {
+        libc::kill(target, libc::SIGTERM);
+    }
+    let sock = shared_socket_path();
+    let deadline = Instant::now() + Duration::from_secs_f64(DAEMON_STOP_TIMEOUT);
+    while Instant::now() < deadline && probe_socket(&sock) {
+        thread::sleep(Duration::from_millis(200));
+    }
+    if probe_socket(&sock) {
+        unsafe {
+            libc::kill(target, libc::SIGKILL);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let _ = fs::remove_file(&sock);
+    let _ = fs::remove_file(shared_pidfile_path());
+    clear_auth_baseline();
+    true
 }
 
 // --------------------------------------------------------------------------

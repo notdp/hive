@@ -427,6 +427,14 @@ pub(super) fn hooked_cas_daemon_alive() -> bool {
     crate::adapters::codex_app_server::daemon_alive()
 }
 
+pub(super) fn hooked_cas_daemon_auth_stale() -> bool {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_daemon_auth_stale.clone()).flatten() {
+        return f();
+    }
+    crate::adapters::codex_app_server::daemon_auth_stale()
+}
+
 pub(super) fn hooked_cas_thread_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_thread_id_for_pane.clone()).flatten() {

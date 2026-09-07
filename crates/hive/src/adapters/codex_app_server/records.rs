@@ -30,6 +30,11 @@ pub fn shared_pidfile_path() -> PathBuf {
     shared_socket_path().with_extension("pid")
 }
 
+/// The account id the daemon was spawned with (`auth_guard.rs`).
+pub fn shared_auth_baseline_path() -> PathBuf {
+    shared_socket_path().with_extension("auth")
+}
+
 /// Per-pane record of the thread hive bound to this pane.
 pub fn pane_thread_path(pane: &str) -> PathBuf {
     let slug = pane.replace('%', "");
