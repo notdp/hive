@@ -290,6 +290,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             codex_supervisor_tick(workspace, team);
             claude_supervisor_tick(workspace);
             write_registry_backfill(workspace, team);
+            super::succession::reconcile_successions(workspace, team);
         }
 
         if now - last_owner_check >= HIVED_OWNER_CHECK_SECONDS {

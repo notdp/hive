@@ -1,6 +1,7 @@
 pub mod base;
 pub mod claude;
 pub mod claude_bg;
+pub mod claude_desktop;
 pub mod claude_sessions;
 pub mod claude_view;
 pub mod codex;

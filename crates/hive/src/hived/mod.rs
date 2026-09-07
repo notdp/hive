@@ -20,6 +20,7 @@ mod seams;
 mod server;
 mod state;
 mod status;
+mod succession;
 mod supervisors;
 
 #[cfg(test)]

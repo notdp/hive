@@ -40,7 +40,13 @@ behavior is documented in the modules themselves.
   by the engine's own session id, then the saved context file. It is the
   only module that reads an engine marker (`CODEX_THREAD_ID`,
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
-  takes explicit targets, and reads neither markers nor the registry.
+  takes explicit targets, and reads neither markers nor the registry. The
+  one host marker, the desktop app's `CLAUDE_CODE_HOST_SESSION_ID`, is read
+  by `adapters/claude_desktop.rs` at enrol alone and never as identity: it
+  stamps `hostSessionId` on the roster row so the hived can follow the
+  conversation when the desktop restarts the CLI under a new session id
+  (`hived/succession.rs`); the who-am-I ladder still matches the session
+  id exactly.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
   `fork`, `node`, `launch`, `setup`, `worktree`) that parse, print and
   exit; the logic they call lives in the crate and is what `run_node`

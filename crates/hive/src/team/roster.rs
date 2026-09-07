@@ -113,6 +113,24 @@ pub(crate) fn session_member_row(name: &str, cli: &str, session_id: &str) -> Map
     row
 }
 
+/// *row* with the desktop conversation *session* runs under, when the
+/// desktop launched it and names it as that conversation's current CLI
+/// session (`claude_desktop::enrol_host_session_id`); the hived follows
+/// that conversation across the CLI sessions the desktop restarts it as
+/// (`hived/succession`). Any other session leaves the row as it is.
+pub(crate) fn with_host_session(
+    mut row: Map<String, Value>,
+    session: &crate::adapters::claude_sessions::ClaudeSession,
+) -> Map<String, Value> {
+    if let Some(host) = crate::adapters::claude_desktop::enrol_host_session_id(session) {
+        row.insert(
+            crate::registry::HOST_SESSION_FIELD.to_string(),
+            Value::String(host),
+        );
+    }
+    row
+}
+
 /// Registry roster row for *agent*, resolving its engine identity.
 pub(crate) fn member_registry_row(agent: &Agent) -> Map<String, Value> {
     let mut session_id = agent.session_id.clone().unwrap_or_default();
