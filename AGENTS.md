@@ -262,10 +262,15 @@ When bumping, scan all commits since the last version bump commit and determine 
    - **Patch traps**(这些看起来像 minor,实则是 patch):修 bug 顺带加的 override / escape-hatch flag、重命名 scheme、tag key 翻新、新 debug 子命令。即使单 commit 带 `feat:` 前缀也不自动提级
    - When in doubt, default to **patch**
 4. **Never auto-bump major.** If any commit has breaking changes (`!` suffix or `BREAKING CHANGE`), ask the user.
-5. Edit the version in `crates/hive/Cargo.toml` (plugin manifests are
-   version-locked to it), commit as `chore: bump version to X.Y.Z`, push,
-   then tag that commit `vX.Y.Z` and push the tag: `release.yml` builds the
-   GitHub release only from a tag push, so a bump without a tag ships nothing.
+5. Write the `## X.Y.Z` section at the top of `CHANGELOG.md` from the
+   headers collected in step 2, grouped Features / Fixes / Internal, one
+   line per change with its PR number; `release-notes.yml` makes that
+   section the GitHub release body.
+6. Edit the version in `crates/hive/Cargo.toml` (plugin manifests are
+   version-locked to it), commit the bump and the changelog together as
+   `chore: bump version to X.Y.Z`, push, then tag that commit `vX.Y.Z` and
+   push the tag: `release.yml` builds the GitHub release only from a tag
+   push, so a bump without a tag ships nothing.
 
 ## Security & runtime notes
 

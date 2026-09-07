@@ -1,0 +1,34 @@
+# Runs after cargo-dist publishes a release (dist-workspace.toml
+# `post-announce-jobs`): the release body becomes this version's
+# CHANGELOG.md section plus the install one-liner README uses, in place of
+# the asset table dist writes.
+name: release-notes
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  notes:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write the release body from CHANGELOG.md
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          awk -v v="$version" '$0 == "## " v { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section '## $version'" >&2
+            exit 1
+          fi
+          printf '\n## Install\n\n```sh\ncurl -fsSL https://github.com/%s/releases/download/%s/hive-installer.sh | sh\n```\n' \
+            "$GITHUB_REPOSITORY" "$tag" >> notes.md
+          gh release edit "$tag" --notes-file notes.md
