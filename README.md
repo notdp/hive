@@ -88,7 +88,14 @@ A team session hive builds — `hive create` outside tmux, `hive attach` rebuild
 
 ## Upgrade
 
-Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release, whose notes are that version's section of [CHANGELOG.md](CHANGELOG.md).
+```bash
+hive update          # replace this binary with the latest release
+hive update --check  # only look: exit 1 when a newer release exists
+```
+
+`hive update` replaces the binary the command is running — `current_exe()`, not a search of PATH — with the release archive for its own target triple: it resolves `releases/latest`, downloads the archive and its `.sha256` pinned to that tag, checks the digest and the archive's entries, runs the unpacked candidate's `--version`, and only then renames it over the target. The binary is locked and fingerprinted before the network is asked, and the file under the lock must report the version this process is. It refuses a path that is not a regular file (a symlink is refused with the path printed; hive does not recognise every symlink or package-manager entry, and an install a package manager owns updates through that channel), a second `hive update` on the same binary, and a target whose bytes changed while the update ran. Nothing else moves: no receipt, no PATH edit, no plugin sync, no hived or member restart. `--force` reinstalls the release build of the version already running; a local build ahead of the latest release is never downgraded.
+
+If that path is not available — no release asset for the platform, or an install some package manager owns — re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release, whose notes are that version's section of [CHANGELOG.md](CHANGELOG.md).
 
 Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin sync` each session and picks up changed content automatically; on codex hive's launch path re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
 

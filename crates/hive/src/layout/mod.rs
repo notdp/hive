@@ -141,9 +141,7 @@ enum LockState {
 }
 
 fn lock_dir() -> Option<PathBuf> {
-    let dir = crate::paths::hive_home().join("state").join("locks");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    crate::paths::locks_dir().ok()
 }
 
 fn window_lock(key: &str, wait: bool) -> LockState {

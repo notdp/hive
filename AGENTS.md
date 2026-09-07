@@ -48,7 +48,7 @@ behavior is documented in the modules themselves.
   (`hived/succession.rs`); the who-am-I ladder still matches the session
   id exactly.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
-  `fork`, `node`, `launch`, `setup`, `worktree`) that parse, print and
+  `fork`, `workflow`, `launch`, `setup`, `update`, `worktree`) that parse, print and
   exit; the logic they call lives in the crate and is what `run_node`
   reaches for too: `team/` (`scope` for which team a verb acts
   on, `roster` for membership writes, `delete`), `naming.rs` (the name
