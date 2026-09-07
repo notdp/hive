@@ -4,6 +4,17 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.3
+
+### Features
+
+- one-command install: `install.sh` (served from `raw.githubusercontent.com/notdp/hive/main/install.sh`) downloads the dist installer to a file, runs it, then runs `hive plugin setup` from the directory the installer chose (the same precedence as dist: `HIVE_INSTALL_DIR`, `CARGO_DIST_FORCE_INSTALL_DIR`, `HIVE_UNMANAGED_INSTALL`, `CARGO_HOME`), never falling back to a binary already on PATH; `hive plugin setup` now exits 1 when any registration step fails (a CLI missing from PATH is skipped, not a failure), and says so when Claude refused the command-source review because the command ran inside a Claude Code session (#188)
+- `hive uninstall`: removes the running binary, the dist receipt and the user-scope plugin registrations in claude and codex, stops hive's shared codex app-server; refuses while teams are registered unless `--force` (which runs `hive delete --down` on each), keeps `$HIVE_HOME` unless `--purge`, leaves external workspaces and the shell rc alone (#188)
+
+### Internal
+
+- `hive plugin` is the skill install alone (`setup`, and the hidden `sync` Claude re-runs each session): the plugin lifecycle hive kept for itself (`list` / `enable` / `disable`, an install dir and a state file) and its one plugin `notify` are gone; the hived's idle watcher is the user setting `notify.idle` instead, on unless set to `false` (#187)
+
 ## 0.19.2
 
 ### Fixes
