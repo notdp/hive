@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -14,9 +15,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::auth_guard::{clear_auth_baseline, daemon_auth_stale, record_auth_baseline};
+use super::auth_guard::{
+    clear_auth_baseline, daemon_auth_stale, disk_account_id, write_auth_baseline,
+};
 use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnResult, TurnStartFailure};
-use super::records::{codex_home, shared_pidfile_path, shared_socket_path, thread_id_for_pane};
+use super::records::{
+    codex_home, shared_lock_path, shared_pidfile_path, shared_socket_path, thread_id_for_pane,
+};
 use super::transport::WsConn;
 use super::{
     CONNECT_COOLDOWN, DAEMON_START_TIMEOUT, DAEMON_STOP_TIMEOUT, NO_RUNNING_TURN,
@@ -63,6 +68,35 @@ pub(crate) fn daemon_env() -> HashMap<String, String> {
     washed_spawner_env(&["TMUX_PANE", "HIVE_CODEX_PANE"])
 }
 
+/// The exclusive lock on the shared daemon's lifecycle, released on drop.
+///
+/// Every caller that may replace the daemon — a `hive spawn`, a `hive
+/// codex` launch, each team's hived tick — is a separate process, so the
+/// probe → stale verdict → stop → start → record sequence runs under one
+/// flock per CODEX_HOME. Without it a late caller stops the replacement,
+/// or clears the replacement's socket and records after its own stop.
+pub(super) struct DaemonLock(fs::File);
+
+impl Drop for DaemonLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+pub(super) fn lock_daemon() -> Option<DaemonLock> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(shared_lock_path())
+        .ok()?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    Some(DaemonLock(file))
+}
+
 /// Ensure the shared app-server daemon is listening; return true if ready.
 ///
 /// Reuses a live daemon if one already answers on the shared socket
@@ -72,8 +106,8 @@ pub(crate) fn daemon_env() -> HashMap<String, String> {
 /// teams go away, and the hived re-spawns it if it dies while codex members
 /// live. The one kill is a live daemon whose auth went stale
 /// (`auth_guard.rs`): it is replaced here, so a member is never minted on a
-/// daemon that cannot run a turn. Returns false if the daemon fails to bind
-/// or dies before ready.
+/// daemon that cannot run a turn. The whole sequence holds the daemon lock.
+/// Returns false if the daemon fails to bind or dies before ready.
 pub fn spawn_daemon() -> bool {
     crate::plugin_manager::ensure_codex_plugin_current();
     let sock = shared_socket_path();
@@ -82,17 +116,24 @@ pub fn spawn_daemon() -> bool {
             return false;
         }
     }
+    let Some(_lock) = lock_daemon() else {
+        return false;
+    };
     if sock.exists() {
         if probe_socket(&sock) {
             if !daemon_auth_stale() {
                 return true; // reuse the live daemon
             }
-            if !kill_daemon() {
+            if !stop_daemon() {
                 return false;
             }
         }
         let _ = fs::remove_file(&sock); // stale socket from a dead daemon
     }
+    // The account the child is about to load, read before it starts: a
+    // login that lands during startup then shows as a change on the next
+    // look instead of being recorded as the daemon's own.
+    let born_with = disk_account_id();
     let stderr_path = codex_home()
         .join("app-server-control")
         .join("daemon.stderr");
@@ -134,7 +175,12 @@ pub fn spawn_daemon() -> bool {
         }
         if probe_socket(&sock) {
             let _ = fs::write(shared_pidfile_path(), child.id().to_string());
-            record_auth_baseline();
+            match born_with {
+                Some(account) => {
+                    write_auth_baseline(account.as_deref());
+                }
+                None => clear_auth_baseline(),
+            }
             return true;
         }
         thread::sleep(Duration::from_millis(200));
@@ -146,7 +192,8 @@ pub fn spawn_daemon() -> bool {
 }
 
 /// The pid hive recorded for the daemon, only while a process by that pid
-/// is still a `codex app-server`: a recycled pid is never signalled.
+/// is still a `codex app-server` listening on this CODEX_HOME's socket: a
+/// recycled pid, or another CODEX_HOME's daemon, is never signalled.
 fn recorded_daemon_pid() -> Option<libc::pid_t> {
     let text = fs::read_to_string(shared_pidfile_path()).ok()?;
     let pid: libc::pid_t = text.trim().parse().ok()?;
@@ -158,19 +205,62 @@ fn recorded_daemon_pid() -> Option<libc::pid_t> {
         .output()
         .ok()?;
     let command = String::from_utf8_lossy(&out.stdout);
-    command.contains("app-server").then_some(pid)
+    let listen = format!("unix://{}", shared_socket_path().display());
+    (command.contains("app-server") && command.contains(&listen)).then_some(pid)
 }
 
-/// Stop the live daemon and clear its socket, pidfile and auth baseline.
+/// Whether a live process answers to *target* (a pid, or `-pgid`), by the
+/// process table rather than `kill(0)`: an exited daemon stays a zombie
+/// of whichever hive process spawned it (a hived that respawned it, most
+/// often) until that parent reaps it, and a zombie still answers
+/// `kill(0)` and still counts in its group. Reaps first when the zombie
+/// is this process's own.
+fn target_alive(pid: libc::pid_t, target: libc::pid_t) -> bool {
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let Ok(out) = Command::new("ps")
+        .args(["-axo", "pid=,pgid=,stat="])
+        .output()
+    else {
+        // No process table: fall back to the signal probe.
+        return unsafe { libc::kill(target, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    };
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        let (Some(row_pid), Some(row_pgid), Some(stat)) = (cols.next(), cols.next(), cols.next())
+        else {
+            return false;
+        };
+        if stat.starts_with('Z') {
+            return false;
+        }
+        if target < 0 {
+            row_pgid.parse::<libc::pid_t>().ok() == Some(-target)
+        } else {
+            row_pid.parse::<libc::pid_t>().ok() == Some(target)
+        }
+    })
+}
+
+/// Stop the live daemon; clear its socket, pidfile and auth baseline only
+/// once it is gone. Caller holds the daemon lock.
 ///
 /// SIGTERM goes to the daemon's process group: `spawn_daemon` made it a
 /// session leader, and the npm launcher is a node wrapper whose native
 /// child sits in the same group (the wrapper forwards SIGTERM itself; the
-/// group is the belt to that brace). Waits for the socket to stop
-/// answering, then escalates to SIGKILL. Attached TUIs (`codex --remote`)
-/// reconnect to the replacement on their own. False when hive never
-/// recorded the daemon's pid or the pid is no longer a codex app-server.
-pub fn kill_daemon() -> bool {
+/// group is the belt to that brace). Exit is the process's, not the
+/// socket's: codex stops listening before it finishes shutting down, so
+/// a silent socket is not a gone daemon. Escalates to SIGKILL after the
+/// stop budget; a daemon that survives that keeps its records, and false
+/// says so. Attached TUIs (`codex --remote`) reconnect to the replacement
+/// on their own. False also when hive never recorded the daemon's pid or
+/// the pid is no longer this socket's codex app-server.
+fn stop_daemon() -> bool {
+    stop_daemon_within(DAEMON_STOP_TIMEOUT)
+}
+
+pub(super) fn stop_daemon_within(term_budget: f64) -> bool {
     let Some(pid) = recorded_daemon_pid() else {
         return false;
     };
@@ -179,24 +269,69 @@ pub fn kill_daemon() -> bool {
     } else {
         pid
     };
-    unsafe {
-        libc::kill(target, libc::SIGTERM);
+    if unsafe { libc::kill(target, libc::SIGTERM) } != 0 && target_alive(pid, target) {
+        return false; // not ours to signal
     }
-    let sock = shared_socket_path();
-    let deadline = Instant::now() + Duration::from_secs_f64(DAEMON_STOP_TIMEOUT);
-    while Instant::now() < deadline && probe_socket(&sock) {
+    let deadline = Instant::now() + Duration::from_secs_f64(term_budget);
+    while Instant::now() < deadline && target_alive(pid, target) {
         thread::sleep(Duration::from_millis(200));
     }
-    if probe_socket(&sock) {
+    if target_alive(pid, target) {
         unsafe {
             libc::kill(target, libc::SIGKILL);
         }
-        thread::sleep(Duration::from_millis(200));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && target_alive(pid, target) {
+            thread::sleep(Duration::from_millis(200));
+        }
     }
-    let _ = fs::remove_file(&sock);
+    if target_alive(pid, target) {
+        return false;
+    }
+    let _ = fs::remove_file(shared_socket_path());
     let _ = fs::remove_file(shared_pidfile_path());
     clear_auth_baseline();
     true
+}
+
+/// What the live daemon says its account is, asked over
+/// `account/rateLimits/read`: the backend answers that call with the
+/// account of the token the daemon actually holds. `Unauthorized` is the
+/// daemon failing that call on its auth (the cross-account recovery
+/// error, or no auth at all); `Unknown` is no daemon client, a transport
+/// failure, or an answer without an account.
+pub(super) enum DaemonAccount {
+    Account(String),
+    Unauthorized,
+    Unknown,
+}
+
+pub(super) fn daemon_account() -> DaemonAccount {
+    let Some(client) = shared_client() else {
+        return DaemonAccount::Unknown;
+    };
+    let response = client.account_rate_limits();
+    if let Some(account) = response
+        .get("result")
+        .and_then(|r| r.get("accountId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        return DaemonAccount::Account(account.to_string());
+    }
+    if response.get("__rejected__").is_some() {
+        let text = response
+            .get("__error__")
+            .map(Value::to_string)
+            .unwrap_or_default();
+        if text.contains("signed in to another account")
+            || text.contains("authentication required")
+            || text.contains("401")
+        {
+            return DaemonAccount::Unauthorized;
+        }
+    }
+    DaemonAccount::Unknown
 }
 
 // --------------------------------------------------------------------------

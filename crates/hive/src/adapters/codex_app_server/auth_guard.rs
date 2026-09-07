@@ -17,12 +17,16 @@
 // and restarts the daemon when the disk moves away from it. A same-account
 // refresh or re-login keeps the id and is the daemon's own business: it
 // reloads that itself. Only `tokens.account_id` is read from auth.json,
-// never a token.
+// never a token. A daemon without a baseline (spawned by an older hive)
+// is asked for its account over `account/rateLimits/read` — the backend
+// names the account of the token the daemon holds — so the baseline is
+// the running process's identity, never a disk snapshot taken later.
 
 use std::fs;
 
 use serde_json::{json, Value};
 
+use super::daemon::{daemon_account, DaemonAccount};
 use super::records::{codex_home, shared_auth_baseline_path};
 
 /// The on-disk auth's account id: `Some(None)` is a logged-out CODEX_HOME
@@ -61,16 +65,10 @@ pub fn baseline_account_id() -> Option<Option<String>> {
     }
 }
 
-/// Record the on-disk account id as the running daemon's. A disk that
-/// cannot be read leaves no baseline (rather than a wrong one).
-pub fn record_auth_baseline() -> bool {
-    let path = shared_auth_baseline_path();
-    let Some(account) = disk_account_id() else {
-        let _ = fs::remove_file(&path);
-        return false;
-    };
+/// Record *account* (`None`: logged out) as the running daemon's.
+pub fn write_auth_baseline(account: Option<&str>) -> bool {
     let record = json!({ "accountId": account });
-    fs::write(&path, record.to_string()).is_ok()
+    fs::write(shared_auth_baseline_path(), record.to_string()).is_ok()
 }
 
 pub fn clear_auth_baseline() {
@@ -78,26 +76,49 @@ pub fn clear_auth_baseline() {
 }
 
 /// Whether the live daemon's account no longer matches the disk. A daemon
-/// without a baseline adopts the current disk as its own: the daemon that
-/// predates the baseline is assumed to agree with the disk it was reading
-/// when hive first looked, which is the only reading available.
+/// without a baseline is asked (`daemon_account`): its answer becomes the
+/// baseline, a daemon that cannot authenticate at all is stale outright,
+/// and no answer leaves the question for the next look.
 pub fn daemon_auth_stale() -> bool {
     let Some(disk) = disk_account_id() else {
         return false;
     };
-    match baseline_account_id() {
-        Some(baseline) => baseline != disk,
-        None => {
-            record_auth_baseline();
-            false
+    if let Some(baseline) = baseline_account_id() {
+        return baseline != disk;
+    }
+    match daemon_account() {
+        DaemonAccount::Account(account) => {
+            write_auth_baseline(Some(&account));
+            Some(account) != disk
         }
+        DaemonAccount::Unauthorized => true,
+        DaemonAccount::Unknown => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::codex_app_server::client::DaemonClient;
+    use crate::adapters::codex_app_server::tests::set_shared_client_override;
     use crate::testenv::EnvGuard;
+    use std::sync::Arc;
+
+    struct AccountClient(Value);
+
+    impl DaemonClient for AccountClient {
+        fn account_rate_limits(&self) -> Value {
+            self.0.clone()
+        }
+    }
+
+    fn daemon_answers(answer: Value) {
+        let answer = Arc::new(answer);
+        set_shared_client_override(move || {
+            let client: Arc<dyn DaemonClient> = Arc::new(AccountClient((*answer).clone()));
+            Some(client)
+        });
+    }
 
     fn write_auth(codex_home: &std::path::Path, body: &str) {
         fs::create_dir_all(codex_home).unwrap();
@@ -146,7 +167,7 @@ mod tests {
         env.set("CODEX_HOME", tmp.path());
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
         write_auth(tmp.path(), &auth_json("acct-a"));
-        assert!(record_auth_baseline());
+        assert!(write_auth_baseline(Some("acct-a")));
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
         assert!(!daemon_auth_stale());
 
@@ -173,24 +194,58 @@ mod tests {
         env.set("CODEX_HOME", tmp.path());
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
         write_auth(tmp.path(), &auth_json("acct-a"));
-        assert!(record_auth_baseline());
+        assert!(write_auth_baseline(Some("acct-a")));
         write_auth(tmp.path(), "{\"tokens\": {\"account_id\": \"acct");
         assert!(!daemon_auth_stale());
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
     }
 
     #[test]
-    fn test_missing_baseline_adopts_the_disk() {
+    fn test_missing_baseline_takes_the_daemons_own_account() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("CODEX_HOME", tmp.path());
+        fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
+        // Disk already moved to B while the daemon still holds A.
+        write_auth(tmp.path(), &auth_json("acct-b"));
+        daemon_answers(json!({"result": {"accountId": "acct-a"}}));
+        assert_eq!(baseline_account_id(), None);
+        assert!(daemon_auth_stale());
+        assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
+    }
+
+    #[test]
+    fn test_missing_baseline_daemon_on_the_disk_account_is_not_stale() {
         let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("CODEX_HOME", tmp.path());
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
         write_auth(tmp.path(), &auth_json("acct-a"));
-        assert_eq!(baseline_account_id(), None);
+        daemon_answers(json!({"result": {"accountId": "acct-a"}}));
         assert!(!daemon_auth_stale());
         assert_eq!(baseline_account_id(), Some(Some("acct-a".to_string())));
         write_auth(tmp.path(), &auth_json("acct-b"));
         assert!(daemon_auth_stale());
+    }
+
+    #[test]
+    fn test_missing_baseline_unauthorized_daemon_is_stale_and_unknown_waits() {
+        let mut env = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("CODEX_HOME", tmp.path());
+        fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
+        write_auth(tmp.path(), &auth_json("acct-a"));
+        daemon_answers(json!({"__rejected__": true, "__error__": {"code": -32600,
+            "message": "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again."}}));
+        assert!(daemon_auth_stale());
+        assert_eq!(baseline_account_id(), None);
+        // A transport failure or a network error is not a verdict.
+        daemon_answers(json!({"__timeout__": true}));
+        assert!(!daemon_auth_stale());
+        daemon_answers(json!({"__rejected__": true, "__error__": {"code": -32603,
+            "message": "failed to fetch codex rate limits: connection reset"}}));
+        assert!(!daemon_auth_stale());
+        assert_eq!(baseline_account_id(), None);
     }
 
     #[test]
@@ -199,7 +254,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.set("CODEX_HOME", tmp.path());
         fs::create_dir_all(shared_auth_baseline_path().parent().unwrap()).unwrap();
-        assert!(record_auth_baseline());
+        assert!(write_auth_baseline(None));
         assert_eq!(baseline_account_id(), Some(None));
         assert!(!daemon_auth_stale());
         write_auth(tmp.path(), &auth_json("acct-a"));
