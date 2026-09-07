@@ -35,7 +35,7 @@
 //! without a network or a process-global.
 
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -251,6 +251,10 @@ pub trait Io {
     fn tar_extract(&self, archive: &Path, dest: &Path) -> Result<(), String>;
     /// The candidate's own `--version` line, trimmed.
     fn run_version(&self, binary: &Path) -> Result<String, String>;
+    /// One line of progress for the human, as a step starts. stdout stays
+    /// the outcome contract; the real Io writes these to stderr, and a test
+    /// fake keeps the default silence.
+    fn progress(&self, _line: &str) {}
 }
 
 /// The real outside world. The candidate's `--version` timeout is a field
@@ -269,12 +273,13 @@ impl Default for RealIo {
     }
 }
 
-fn curl_base(max_time: &str) -> Command {
+fn curl_base(max_time: &str, silent: bool) -> Command {
     let mut cmd = Command::new("curl");
     // --disable first: a user's .curlrc must not rewrite any of this.
+    // `-s` off keeps curl's own progress meter, for a human at a terminal.
     cmd.args([
         "--disable",
-        "-sSfL",
+        if silent { "-sSfL" } else { "-SfL" },
         "--proto",
         "=https",
         "--proto-redir",
@@ -307,15 +312,32 @@ impl Io for RealIo {
     }
 
     fn fetch_effective_url(&self, url: &str) -> Result<String, String> {
-        let mut cmd = curl_base(LATEST_MAX_TIME);
+        let mut cmd = curl_base(LATEST_MAX_TIME, true);
         cmd.args(["-o", "/dev/null", "-w", "%{url_effective}", url]);
         Ok(run_capture(cmd, "release lookup")?.trim().to_string())
     }
 
     fn download(&self, url: &str, dest: &Path) -> Result<(), String> {
-        let mut cmd = curl_base(DOWNLOAD_MAX_TIME);
-        cmd.arg("-o").arg(dest).arg(url);
-        run_capture(cmd, &format!("download of {url}")).map(|_| ())
+        let what = format!("download of {url}");
+        // A human at a terminal gets curl's progress bar on their stderr;
+        // anything else gets the silent capture and a message on failure.
+        if !std::io::stderr().is_terminal() {
+            let mut cmd = curl_base(DOWNLOAD_MAX_TIME, true);
+            cmd.arg("-o").arg(dest).arg(url);
+            return run_capture(cmd, &what).map(|_| ());
+        }
+        let mut cmd = curl_base(DOWNLOAD_MAX_TIME, false);
+        cmd.arg("--progress-bar").arg("-o").arg(dest).arg(url);
+        let status = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("{what}: {e}"))?;
+        if !status.success() {
+            return Err(format!("{what} failed ({status})"));
+        }
+        Ok(())
     }
 
     fn tar_list(&self, archive: &Path) -> Result<Vec<String>, String> {
@@ -352,6 +374,10 @@ impl Io for RealIo {
             ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn progress(&self, line: &str) {
+        eprintln!("update: {line}");
     }
 }
 
@@ -573,6 +599,7 @@ fn install(
         ));
     }
 
+    io.progress("looking up the latest release");
     let latest = latest_version(io)?;
     if latest < current {
         return Ok(Outcome {
@@ -601,8 +628,10 @@ fn install(
     let name = archive_name(triple);
     let archive = staging.0.join(&name);
     let checksum = staging.0.join(format!("{name}.sha256"));
+    io.progress(&format!("{current} -> {latest}: downloading {name}"));
     io.download(&archive_url(latest, triple), &archive)?;
     io.download(&checksum_url(latest, triple), &checksum)?;
+    io.progress("verifying the checksum");
 
     let expected = parse_sha256_file(
         &fs::read_to_string(&checksum)
@@ -616,6 +645,7 @@ fn install(
         ));
     }
 
+    io.progress("unpacking");
     validate_archive_entries(&io.tar_list(&archive)?, triple)?;
     io.tar_extract(&archive, &staging.0)?;
 
@@ -625,6 +655,7 @@ fn install(
     if !candidate_meta.file_type().is_file() {
         return Err("the unpacked hive is not a regular file".to_string());
     }
+    io.progress("checking the new binary");
     let reported = io.run_version(&candidate)?;
     let wanted = format!("hive, version {latest}");
     if reported != wanted {
@@ -639,6 +670,7 @@ fn install(
             target.display()
         ));
     }
+    io.progress(&format!("installing over {}", target.display()));
     fs::rename(&candidate, &target)
         .map_err(|e| format!("cannot install over {}: {e}", target.display()))?;
 
@@ -896,6 +928,8 @@ mod tests {
         on_version: Option<VersionHook>,
         /// Every URL asked for, in order.
         urls: RefCell<Vec<String>>,
+        /// Every progress line, in order.
+        progress: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -941,12 +975,16 @@ mod tests {
             on_fetch: None,
             on_version: None,
             urls: RefCell::new(Vec::new()),
+            progress: RefCell::new(Vec::new()),
         }
     }
 
     impl Io for Fake {
         fn current_exe(&self) -> Result<PathBuf, String> {
             self.exe.clone()
+        }
+        fn progress(&self, line: &str) {
+            self.progress.borrow_mut().push(line.to_string());
         }
         fn fetch_effective_url(&self, url: &str) -> Result<String, String> {
             self.urls.borrow_mut().push(url.to_string());
@@ -1106,6 +1144,36 @@ mod tests {
             format!("hive {current} -> {current} ({})", bed.target.display())
         );
         assert_intact(&bed.target, NEW_BINARY);
+    }
+
+    #[test]
+    fn test_an_install_narrates_each_step_before_it_runs() {
+        let bed = bed();
+        let latest = newer();
+        let current = current_version();
+        let io = fake(&bed.target, latest);
+        run(&io, false, false).unwrap();
+        assert_eq!(
+            io.progress.borrow().clone(),
+            vec![
+                "looking up the latest release".to_string(),
+                format!(
+                    "{current} -> {latest}: downloading {}",
+                    archive_name(target_triple().unwrap())
+                ),
+                "verifying the checksum".to_string(),
+                "unpacking".to_string(),
+                "checking the new binary".to_string(),
+                format!("installing over {}", bed.target.display()),
+            ]
+        );
+        // Nothing to install narrates nothing past the lookup.
+        let io = fake(&bed.target, older());
+        run(&io, false, false).unwrap();
+        assert_eq!(
+            io.progress.borrow().clone(),
+            vec!["looking up the latest release".to_string()]
+        );
     }
 
     #[test]
