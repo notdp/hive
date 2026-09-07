@@ -359,7 +359,10 @@ fn create_detached_team(
     }
     if orch_member.is_some() {
         println!("You are {name}.{LEAD_AGENT_NAME}.");
-        println!("{}", title_badge_hint(&format!("[{name}] ")));
+        println!(
+            "{}",
+            title_badge_hint(&format!("[{name}.{LEAD_AGENT_NAME}] "))
+        );
     } else if let Some(creator) = creator.as_ref().filter(|c| !c.session_id.is_empty()) {
         if let Some((e_team, e_name)) =
             crate::registry::member_for_session(&creator.session_id, None)
