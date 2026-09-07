@@ -152,7 +152,7 @@ pub(crate) fn build_cli() -> Command {
                         .long("notify")
                         .action(ArgAction::SetTrue)
                         .overrides_with("no_notify")
-                        .help("Deliver the join message over the native transport (doubles as a reachability check; --no-notify registers without proving the pane deliverable)"),
+                        .help("Deliver the join message over the native transport (doubles as a reachability check; --no-notify skips that message and check, not the membership requirements)"),
                 )
                 .arg(
                     Arg::new("no_notify")

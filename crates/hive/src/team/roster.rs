@@ -44,6 +44,30 @@ fn hive_join_message(agent_name: &str, team_name: &str) -> String {
     )
 }
 
+/// A claude TUI enrolled from a tmux pane must be a hive bg job: the pane
+/// carries a pane↔job binding (`hive claude` / `hclaude` / spawn wrote it).
+/// A bare interactive claude on a pane is refused as a pane member — it can
+/// receive over its own inbox, but it has none of the job member's keyboard
+/// lane or park/wake lifecycle, and a pane's human can choose the managed
+/// launcher. This is an enrolment policy on the *target* pane, checked by
+/// `hive create` and `hive join` before anything is written, and
+/// `--no-notify` does not waive it (that flag skips only the join message).
+/// A session joining from outside tmux is the other case and is enrolled by
+/// its session id (`cli/team::join_as_ccd`). Spawn and fork are not gated:
+/// they launch the engine themselves, and the binding lands when it starts.
+pub(crate) fn claude_pane_job_gate(pane_id: &str) -> Result<()> {
+    if crate::adapters::claude_bg::job_id_for_pane(pane_id).is_some() {
+        return Ok(());
+    }
+    bail!(
+        "claude pane {pane_id} has no hive background-job binding. Pane members \
+         must run as a managed background job; --no-notify only skips the \
+         join message. Start a managed claude from your shell with `hclaude` \
+         (or `hive claude`), then run this command there. This does not \
+         convert the current interactive session into a background job."
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_agent_member(
     t: &mut Team,
@@ -85,8 +109,9 @@ pub(crate) fn register_agent_member(
             rollback(t);
             bail!(
                 "pane {pane_id} is not reachable over its native transport ({}); \
-                 nothing was registered. Fix the inbox/daemon and retry, \
-                 or use --no-notify to register without a reachability check.",
+                 nothing was registered. Fix the inbox/daemon and retry. \
+                 --no-notify skips the join message and this reachability \
+                 check; it does not waive membership requirements.",
                 e.0
             );
         }
@@ -287,6 +312,38 @@ mod tests {
                 v
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_claude_pane_job_gate_refuses_a_pane_without_a_job_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut env = iso(tmp.path());
+        // The pane→job records live under claude's config dir; a throwaway
+        // one has none for any pane.
+        env.set("CLAUDE_HOME", tmp.path().join("claude"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+
+        let err = claude_pane_job_gate("%7").unwrap_err().to_string();
+        assert!(err.contains("%7"), "{err}");
+        assert!(err.contains("background-job binding"), "{err}");
+        assert!(err.contains("--no-notify"), "{err}");
+        assert!(err.contains("hclaude"), "{err}");
+    }
+
+    #[test]
+    fn test_claude_pane_job_gate_passes_a_pane_bound_to_a_job() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut env = iso(tmp.path());
+        env.set("CLAUDE_HOME", tmp.path().join("claude"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        // A binding with no session id yet (a `--resume` whose wake failed)
+        // still names a job: the gate asks for the binding, not a live
+        // engine, so a parked job's pane passes.
+        crate::adapters::claude_bg::write_pane_job("%7", "abc123", "", "/w").unwrap();
+
+        assert!(claude_pane_job_gate("%7").is_ok());
+        // Another pane's binding does not vouch for this one.
+        assert!(claude_pane_job_gate("%8").is_err());
     }
 
     #[test]

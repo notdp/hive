@@ -633,15 +633,24 @@ composer belongs to whichever session it is displaying. A member whose job
 record went missing therefore fails loudly instead of quietly typing into a
 stranger's turn.
 
-An unmanaged claude pane is deliberately unsupported as a member: `hive
-create` run from one refuses it and prints the managed-launch fix, and
-delivery to a record-less claude pane fails loudly. `hive spawn` does not meet
-one, since it launches the engine itself. A claude session that is not on a
-pane is the opposite case and is supported: run outside tmux, `hive join`
-enrols the calling session with its own sessionId as engine identity, delivery
-takes the same two lanes (daemon reply, then the session's own inbox socket),
-and its pane is a read-only mirror. Such a member has no bg job, no ledger row,
-and none of the keyboard path above applies to it.
+When hive enrols a claude TUI from a tmux pane, that pane must have a hive
+background-job binding. Both `hive create` and `hive join` enforce this on the
+target pane before anything is written (`team::claude_pane_job_gate`);
+`--no-notify` skips only the join message and its reachability check. A bare
+interactive claude TUI is not supported as a pane member: it can receive over
+its own inbox, but it has none of the keyboard lane above and no park/wake
+lifecycle, and a pane's human can choose the managed launcher instead.
+Delivery to a claude pane with neither a job binding nor a deliverable
+session id fails loudly. `hive spawn` and `hive fork` are not gated, since
+they launch the engine themselves and the binding lands when it starts.
+
+An interactive claude session joining from outside tmux, such as the desktop
+app or a standalone terminal session, is enrolled by its session id instead.
+Hive gives it a read-only mirror pane; that display does not turn it into a
+background-job member. It receives session messages over the same two lanes
+(daemon reply, then the session's own inbox socket), has no bg job and no
+ledger row, and none of the keyboard path above applies to it. This is an
+enrolment policy, not a limitation of the session's inbox transport.
 
 ## Codex: one shared app-server daemon
 
