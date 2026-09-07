@@ -1,6 +1,7 @@
 use super::attach::{
     attach_pipe, close_pipe, engine_screen_size, wait_client_ready, wait_engine_behind, Client,
 };
+use super::lifecycle::pane_env;
 use super::testhook::{FakePipe, Hook};
 use super::*;
 use crate::testenv::EnvGuard;
@@ -24,6 +25,15 @@ struct Home {
 }
 
 fn claude_home() -> Home {
+    let mut env = EnvGuard::cleared(&crate::testenv::CLAUDE_VARS);
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("claude-home");
+    env.set("CLAUDE_HOME", &config);
+    Home { config, dir, env }
+}
+
+fn engine_home() -> Home {
+    let home = claude_home();
     crate::tmux::set_run_override(|args, _, _| {
         assert_eq!(
             args,
@@ -31,11 +41,7 @@ fn claude_home() -> Home {
         );
         Ok(crate::tmux::ok_run(0, "tmux-256color\n", ""))
     });
-    let mut env = EnvGuard::cleared(&crate::testenv::CLAUDE_VARS);
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("claude-home");
-    env.set("CLAUDE_HOME", &config);
-    Home { config, dir, env }
+    home
 }
 
 fn write_registry_entry(home: &Home, file_pid: i64, fields: &Value) {
@@ -318,9 +324,12 @@ fn test_job_row_separates_asleep_from_gone() {
 
 #[test]
 fn test_spawn_job_parses_the_backgrounded_announcement() {
-    let mut home = claude_home();
+    let mut home = engine_home();
     home.env.set("CLAUDE_CODE_CHILD_SESSION", "1");
     home.env.set("ANTHROPIC_MODEL", "x");
+    home.env.set("TERM", "dumb");
+    home.env.set("NO_COLOR", "1");
+    home.env.set("FORCE_COLOR", "3");
     let out = home.dir.path();
     fs::write(
         out.join("stdout.bin"),
@@ -370,11 +379,15 @@ fn test_spawn_job_parses_the_backgrounded_announcement() {
         .lines()
         .any(|l| l == format!("CLAUDE_CONFIG_DIR={}", home.config.display())));
     assert!(envdump.lines().any(|l| l == "K=V"));
+    assert!(envdump.lines().any(|l| l == "TERM=tmux-256color"));
+    assert!(envdump.lines().any(|l| l == "COLORTERM=truecolor"));
+    assert!(envdump.lines().any(|l| l == "FORCE_COLOR=3"));
+    assert!(!envdump.lines().any(|l| l.starts_with("NO_COLOR=")));
 }
 
 #[test]
 fn test_spawn_job_returns_none_on_failure() {
-    let home = claude_home();
+    let home = engine_home();
     let bin = stdout_bin(home.dir.path(), b"", 1);
     assert_eq!(
         spawn_job(
@@ -399,7 +412,7 @@ fn test_spawn_job_refuses_an_announcement_that_is_not_a_job_id() {
         b"started probe in the background\n",                    // no announcement at all
     ];
     for stdout in cases {
-        let home = claude_home();
+        let home = engine_home();
         let bin = stdout_bin(home.dir.path(), stdout, 0);
         assert_eq!(
             spawn_job(
@@ -754,13 +767,12 @@ fn test_bg_env_carries_no_identity_of_the_spawner_or_of_hive() {
     assert!(!env.contains_key("CODEX_THREAD_ID"));
     assert!(!env.contains_key("GROK_SESSION_ID"));
     // and hive pins nothing of its own beyond the config tree and the
-    // caller's extras and pane terminal: the engine's identity is the
-    // sessionId it mints.
+    // caller's extras: the engine's identity is the sessionId it mints.
     let inherited: std::collections::HashSet<String> =
         std::env::vars().map(|(key, _)| key).collect();
     let mut pinned: Vec<&str> = env
         .keys()
-        .filter(|key| !inherited.contains(*key) && !matches!(key.as_str(), "TERM" | "COLORTERM"))
+        .filter(|key| !inherited.contains(*key))
         .map(String::as_str)
         .collect();
     pinned.sort_unstable();
@@ -1495,6 +1507,7 @@ fn test_the_registry_name_is_read_into_the_engine_session() {
 #[test]
 fn test_list_jobs_parses_colored_json() {
     let home = claude_home();
+    crate::tmux::set_run_override(|_, _, _| panic!("ledger queries must not call tmux"));
     let bin = stdout_bin(
         home.dir.path(),
         b"\x1b[32m[{\"jobId\": \"abcd1234\"}]\x1b[39m",
@@ -1512,7 +1525,7 @@ fn test_list_jobs_parses_colored_json() {
 fn test_spawn_job_parses_colored_output() {
     // Regression: an ANSI-wrapped jobId polled a job that does not exist,
     // so every engine-parented spawn timed out as 'never registered'.
-    let home = claude_home();
+    let home = engine_home();
     let bin = stdout_bin(
         home.dir.path(),
         b"opus backgrounded \xc2\xb7 \x1b[36mce5de22a\x1b[39m\n",
@@ -1530,4 +1543,61 @@ fn test_spawn_job_parses_colored_output() {
         .as_deref(),
         Some("ce5de22a")
     );
+}
+
+#[test]
+fn test_pane_env_uses_the_pane_terminal_and_keeps_color_forcing() {
+    // The engine renders into a hive pane; the pane's terminal, not
+    // the spawner's tool shell, is what it gets.
+    let inherited = HashMap::from([
+        ("TERM".to_string(), "dumb".to_string()),
+        ("COLORTERM".to_string(), "limited".to_string()),
+        ("NO_COLOR".to_string(), "1".to_string()),
+        ("FORCE_COLOR".to_string(), "3".to_string()),
+        ("CLICOLOR".to_string(), "1".to_string()),
+    ]);
+    let env = pane_env(inherited, "screen-256color");
+    assert_eq!(env["TERM"], "screen-256color");
+    assert_eq!(env["COLORTERM"], "truecolor");
+    assert!(!env.contains_key("NO_COLOR"));
+    assert_eq!(env["FORCE_COLOR"], "3");
+    assert_eq!(env["CLICOLOR"], "1");
+}
+
+#[test]
+fn test_pane_env_fills_missing_terminal() {
+    let env = pane_env(HashMap::new(), "tmux-256color");
+    assert_eq!(env["TERM"], "tmux-256color");
+    assert_eq!(env["COLORTERM"], "truecolor");
+    assert!(!env.contains_key("FORCE_COLOR"));
+    assert_eq!(env.len(), 2, "only TERM and COLORTERM are added");
+}
+
+#[test]
+fn test_wake_job_uses_the_pane_terminal() {
+    let mut home = engine_home();
+    home.env.set("TERM", "dumb");
+    home.env.set("NO_COLOR", "1");
+    let bin = fake_bin(
+        home.dir.path(),
+        r#"#!/bin/sh
+[ "$1" = attach ] && [ "$2" = cafe1234 ] &&
+[ "$TERM" = tmux-256color ] && [ "$COLORTERM" = truecolor ] &&
+[ "${NO_COLOR+x}" != x ]
+"#,
+    );
+    assert!(wake_job("cafe1234", &bin));
+}
+
+#[test]
+fn test_bg_env_keeps_inherited_terminal_without_querying_tmux() {
+    let mut home = claude_home();
+    home.env.set("TERM", "dumb");
+    home.env.set("NO_COLOR", "1");
+    home.env.remove("COLORTERM");
+    crate::tmux::set_run_override(|_, _, _| panic!("bg_env must not call tmux"));
+    let env = bg_env(None);
+    assert_eq!(env["TERM"], "dumb");
+    assert_eq!(env["NO_COLOR"], "1");
+    assert!(!env.contains_key("COLORTERM"));
 }

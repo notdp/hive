@@ -55,12 +55,21 @@ pub fn bg_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String
             env.insert(k.clone(), v.clone());
         }
     }
-    pane_env(env, &crate::tmux::default_terminal())
+    env
+}
+
+/// Only engine birth and wake need the pane's terminal. Ledger queries and
+/// viewer clients keep bg_env, so they do not query tmux on every call.
+fn engine_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
+    pane_env(bg_env(extra), &crate::tmux::default_terminal())
 }
 
 // The engine renders into a hive pane: it gets the pane's terminal, not
 // the spawner's tool shell. Cold spawn and wake use the same environment.
-fn pane_env(mut env: HashMap<String, String>, terminal: &str) -> HashMap<String, String> {
+pub(super) fn pane_env(
+    mut env: HashMap<String, String>,
+    terminal: &str,
+) -> HashMap<String, String> {
     env.insert("TERM".to_string(), terminal.to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.remove("NO_COLOR");
@@ -228,7 +237,7 @@ pub fn spawn_job(
         argv.push(prompt.to_string());
     }
     let cwd = if cwd.is_empty() { None } else { Some(cwd) };
-    let (code, stdout, _stderr) = run_capture(&argv, SPAWN_TIMEOUT, cwd, &bg_env(extra_env))?;
+    let (code, stdout, _stderr) = run_capture(&argv, SPAWN_TIMEOUT, cwd, &engine_env(extra_env))?;
     if code != 0 {
         return None;
     }
@@ -258,7 +267,7 @@ pub fn wake_job(job_id: &str, claude_bin: &str) -> bool {
         "attach".to_string(),
         job_id.to_string(),
     ];
-    match run_capture(&argv, WAKE_TIMEOUT, None, &bg_env(None)) {
+    match run_capture(&argv, WAKE_TIMEOUT, None, &engine_env(None)) {
         Some((code, _out, _err)) => code == 0,
         None => false,
     }
@@ -320,36 +329,4 @@ pub fn ensure_engine(
         return None;
     }
     wait_engine_entry(job_id, timeout.unwrap_or(WAKE_ENTRY_TIMEOUT))
-}
-
-#[cfg(test)]
-mod env_tests {
-    use super::*;
-
-    #[test]
-    fn test_bg_env_uses_the_pane_terminal_and_keeps_color_forcing() {
-        // The engine renders into a hive pane; the pane's terminal, not
-        // the spawner's tool shell, is what it gets.
-        let inherited = HashMap::from([
-            ("TERM".to_string(), "dumb".to_string()),
-            ("COLORTERM".to_string(), "limited".to_string()),
-            ("NO_COLOR".to_string(), "1".to_string()),
-            ("FORCE_COLOR".to_string(), "3".to_string()),
-            ("CLICOLOR".to_string(), "1".to_string()),
-        ]);
-        let env = pane_env(inherited, "screen-256color");
-        assert_eq!(env["TERM"], "screen-256color");
-        assert_eq!(env["COLORTERM"], "truecolor");
-        assert!(!env.contains_key("NO_COLOR"));
-        assert_eq!(env["FORCE_COLOR"], "3");
-        assert_eq!(env["CLICOLOR"], "1");
-    }
-
-    #[test]
-    fn test_bg_env_fills_missing_terminal() {
-        let env = pane_env(HashMap::new(), "tmux-256color");
-        assert_eq!(env["TERM"], "tmux-256color");
-        assert_eq!(env["COLORTERM"], "truecolor");
-        assert!(!env.contains_key("FORCE_COLOR"));
-    }
 }
