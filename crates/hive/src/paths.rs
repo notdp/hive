@@ -15,6 +15,19 @@ pub fn hive_home() -> PathBuf {
     PathBuf::from(home)
 }
 
+/// Check the path returned by `current_exe` before replacing or removing it.
+pub(crate) fn regular_binary_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat the running binary {}: {e}", path.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "the running binary {} is not a regular file; manage it the way it was installed",
+            path.display()
+        ));
+    }
+    Ok(meta)
+}
+
 /// The hive binary that tmux hooks and the cvim asset call back into. HIVE_BIN overrides `current_exe` — `hive cvim` exports it for
 /// the bash asset, and integration tests (whose current_exe is the test
 /// harness) point hooks at the real binary with it.

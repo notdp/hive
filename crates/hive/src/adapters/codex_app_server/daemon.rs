@@ -279,6 +279,48 @@ fn stop_daemon() -> bool {
     stop_daemon_within(DAEMON_STOP_TIMEOUT)
 }
 
+/// Uninstall only stops the process recorded for this CODEX_HOME's socket.
+/// A stale pid pointing at another process is an error, never a signal target.
+pub(crate) fn uninstall_daemon() -> Result<(), String> {
+    let pidfile = shared_pidfile_path();
+    if !pidfile.exists() {
+        return if shared_socket_path().exists() {
+            Err("shared socket exists without a recorded pid".into())
+        } else {
+            Ok(())
+        };
+    }
+    let _lock = lock_daemon().ok_or("cannot lock the shared codex daemon")?;
+    let text = fs::read_to_string(&pidfile).map_err(|e| e.to_string())?;
+    let pid = text
+        .trim()
+        .parse::<libc::pid_t>()
+        .map_err(|e| e.to_string())?;
+    if pid <= 1 {
+        return Err("invalid shared codex daemon pid".into());
+    }
+    if unsafe { libc::kill(pid, 0) } == -1
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        for path in [
+            shared_pidfile_path(),
+            shared_socket_path(),
+            super::shared_auth_baseline_path(),
+        ] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        return Ok(());
+    }
+    if !stop_daemon() {
+        return Err("could not stop this socket's recorded codex daemon; records kept".into());
+    }
+    Ok(())
+}
+
 pub(super) fn stop_daemon_within(term_budget: f64) -> bool {
     let Some(pid) = recorded_daemon_pid() else {
         return false;

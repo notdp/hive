@@ -82,6 +82,7 @@ Extensions:
   config  Read / write user-level settings (~/.hive/settings.json).
   plugin  Install the hive skill plugin into claude and codex.
   update  Update hive to the latest GitHub release.
+  uninstall  Remove hive and its plugin registrations.
 
 Launchers:
   hive-managed launchers behind the `hcodex` / `hclaude` / `hgrok` shell
@@ -669,6 +670,26 @@ Options:
   -h, --help       Show this message and exit.
 "#
         }
+        ["uninstall"] => {
+            r#"Usage: hive uninstall [OPTIONS]
+
+  Remove the running hive binary, its dist receipt, and its user plugin
+  registrations in claude and codex. Stop hive's shared codex app-server.
+  Agent CLIs missing from PATH are skipped. Already-absent registrations
+  are accepted; other cleanup failures produce exit 1 after later steps run.
+
+  Registered teams block uninstall. Delete each with hive delete <team>
+  --down first, or use --force to do that during uninstall. Data under
+  $HIVE_HOME is kept unless --purge is given; external workspaces are kept.
+  The path returned by current_exe() must be a regular file, as for update.
+  Remove any hive shell-init line from your shell rc file manually.
+
+Options:
+  --force    Delete every registered team with --down before uninstalling
+  --purge    Also remove $HIVE_HOME and its saved data
+  -h, --help Show this message and exit.
+"#
+        }
         ["update"] => {
             r#"Usage: hive update [OPTIONS]
 
@@ -879,7 +900,8 @@ Options:
             r#"Usage: hive plugin setup [OPTIONS]
 
   One-time install: sync the marketplace, then register and install the hive
-  plugin for claude and codex on PATH.
+  plugin for claude and codex on PATH. Run every step; exit 1 if any
+  registration step fails. A CLI missing from PATH is skipped.
 
 Options:
   -h, --help  Show this message and exit.
