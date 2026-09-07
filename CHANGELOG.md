@@ -4,6 +4,16 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.18.2
+
+### Features
+
+- The GitHub release body is the version's CHANGELOG.md section plus the README-style install one-liner, written by a cargo-dist post-announce job; the bump step writes the section (#179)
+
+### Internal
+
+- Skill text: commands a human runs go in a bash fence (#180)
+
 ## 0.18.1
 
 ### Features
