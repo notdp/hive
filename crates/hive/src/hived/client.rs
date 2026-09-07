@@ -81,13 +81,13 @@ pub(super) fn action_payload(action: &str) -> Map<String, Value> {
     payload
 }
 
-pub fn request_ping_impl(workspace: &str) -> Option<Map<String, Value>> {
-    request_hived(workspace, &action_payload("ping"), SOCKET_RETRY_INTERVAL)
+pub fn request_ping_impl(workspace: &str, timeout: f64) -> Option<Map<String, Value>> {
+    request_hived(workspace, &action_payload("ping"), timeout)
 }
 
 #[cfg(test)]
 pub(crate) fn socket_alive(workspace: &str) -> bool {
-    let response = hooked_request_ping(workspace);
+    let response = hooked_request_ping(workspace, SOCKET_RETRY_INTERVAL);
     match response {
         Some(map) => {
             map.get("ok") == Some(&Value::Bool(true))

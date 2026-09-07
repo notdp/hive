@@ -436,7 +436,9 @@ Two spawn-time requirements, neither visible at the call site:
   skip registration entirely, which produces a member that exists and cannot
   be seen; an inherited `CODEX_THREAD_ID` or `GROK_SESSION_ID` keys the
   *spawner's* roster row, so every hive call the new member makes would sign
-  as whoever spawned it.
+  as whoever spawned it. Cold spawn and wake use the pane's terminal:
+  `TERM` is tmux's `default-terminal` (fallback `tmux-256color`),
+  `COLORTERM=truecolor`, and inherited `NO_COLOR` is removed.
 - Path-valued spawn flags must be absolute: they persist verbatim as the job's
   respawn flags.
 

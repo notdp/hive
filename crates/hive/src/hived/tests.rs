@@ -3021,14 +3021,16 @@ fn test_serve_requests_still_retires_the_loop_on_shutdown() {
 #[test]
 fn test_socket_alive_requires_matching_api_version() {
     let hook = Hook {
-        request_ping: Some(Arc::new(|_ws| Some(json_obj(&[("ok", Value::Bool(true))])))),
+        request_ping: Some(Arc::new(|_ws, _timeout| {
+            Some(json_obj(&[("ok", Value::Bool(true))]))
+        })),
         ..Default::default()
     };
     let _guard = testhook::install(hook);
     assert!(!socket_alive("/tmp/ws"));
 
     testhook::update(|h| {
-        h.request_ping = Some(Arc::new(|_ws| {
+        h.request_ping = Some(Arc::new(|_ws, _timeout| {
             Some(json_obj(&[
                 ("ok", Value::Bool(true)),
                 ("apiVersion", Value::from(HIVED_API_VERSION)),
@@ -3161,10 +3163,12 @@ fn ensure_hived_against(
     let cleanup_count = Arc::clone(&cleanups);
     let _guard = testhook::install(Hook {
         run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
-        request_ping: Some(Arc::new(move |_ws| {
+        request_ping: Some(Arc::new(move |_ws, timeout| {
             if ping_started.load(Ordering::SeqCst) {
+                assert_eq!(timeout, SOCKET_RETRY_INTERVAL);
                 Some(after_start.clone())
             } else {
+                assert_eq!(timeout, IDENTITY_PING_TIMEOUT);
                 Some(identity.clone())
             }
         })),
@@ -3184,6 +3188,102 @@ fn ensure_hived_against(
         spawns.load(Ordering::SeqCst),
         cleanups.load(Ordering::SeqCst),
     )
+}
+
+// Exercise the actual socket read budget while keeping restart side effects hooked.
+fn ensure_hived_with_delayed_ping(delay: Option<Duration>) -> (Option<i32>, usize, usize) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let tmp = tempfile::Builder::new()
+        .prefix("hping")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = tmp.path().to_path_buf();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let identity = json_obj(&[
+        ("ok", Value::Bool(true)),
+        ("apiVersion", Value::from(HIVED_API_VERSION)),
+        ("buildHash", Value::from(hived_build_hash())),
+        ("team", Value::from("team-a")),
+    ]);
+    let ping_started = Arc::clone(&started);
+    let popen_spawns = Arc::clone(&spawns);
+    let cleanup_count = Arc::clone(&cleanups);
+    let ready_identity = identity.clone();
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        request_ping: Some(Arc::new(move |ws, timeout| {
+            if ping_started.load(Ordering::SeqCst) {
+                assert_eq!(timeout, SOCKET_RETRY_INTERVAL);
+                Some(ready_identity.clone())
+            } else {
+                assert_eq!(timeout, IDENTITY_PING_TIMEOUT);
+                request_ping_impl(ws, timeout)
+            }
+        })),
+        cleanup_socket: Some(Arc::new(move |_ws| {
+            cleanup_count.fetch_add(1, Ordering::SeqCst);
+        })),
+        popen: Some(Arc::new(move |_command, _stderr| {
+            started.store(true, Ordering::SeqCst);
+            popen_spawns.fetch_add(1, Ordering::SeqCst);
+            4242
+        })),
+        ..Default::default()
+    });
+    let workspace = tmp.path().to_str().unwrap();
+    let server = delay.map(|delay| {
+        assert!(delay.as_secs_f64() > SOCKET_RETRY_INTERVAL);
+        assert!(delay.as_secs_f64() < IDENTITY_PING_TIMEOUT);
+        let listener = UnixListener::bind(socket_path(workspace)).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&request).unwrap()["action"],
+                "ping"
+            );
+            std::thread::sleep(delay);
+            stream
+                .write_all(serde_json::to_string(&identity).unwrap().as_bytes())
+                .unwrap();
+        })
+    });
+    if delay.is_none() {
+        assert!(matches!(
+            request_hived_answer(workspace, &action_payload("ping"), IDENTITY_PING_TIMEOUT),
+            Err(RequestFailure::NotSent(_))
+        ));
+    }
+    let result = ensure_hived(workspace, "team-a", "dev:3", "@99").unwrap();
+    if let Some(server) = server {
+        server.join().unwrap();
+    }
+    (
+        result,
+        spawns.load(Ordering::SeqCst),
+        cleanups.load(Ordering::SeqCst),
+    )
+}
+
+#[test]
+fn test_ensure_hived_does_not_restart_when_ping_takes_longer_than_retry_interval() {
+    let (pid, spawns, cleanups) = ensure_hived_with_delayed_ping(Some(Duration::from_millis(250)));
+    assert_eq!(pid, None);
+    assert_eq!(spawns, 0);
+    assert_eq!(cleanups, 0);
+}
+
+#[test]
+fn test_ensure_hived_starts_when_identity_ping_is_not_sent() {
+    let (pid, spawns, cleanups) = ensure_hived_with_delayed_ping(None);
+    assert_eq!(pid, Some(4242));
+    assert_eq!(spawns, 1);
+    assert_eq!(cleanups, 1);
 }
 
 #[test]

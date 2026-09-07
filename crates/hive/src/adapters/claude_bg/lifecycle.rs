@@ -58,6 +58,24 @@ pub fn bg_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String
     env
 }
 
+/// Only engine birth and wake need the pane's terminal. Ledger queries and
+/// viewer clients keep bg_env, so they do not query tmux on every call.
+fn engine_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
+    pane_env(bg_env(extra), &crate::tmux::default_terminal())
+}
+
+// The engine renders into a hive pane: it gets the pane's terminal, not
+// the spawner's tool shell. Cold spawn and wake use the same environment.
+pub(super) fn pane_env(
+    mut env: HashMap<String, String>,
+    terminal: &str,
+) -> HashMap<String, String> {
+    env.insert("TERM".to_string(), terminal.to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    env.remove("NO_COLOR");
+    env
+}
+
 /// `subprocess.run(argv, capture_output=True, timeout=...)`: (returncode,
 /// stdout, stderr), or None when the call itself failed or timed out.
 pub(super) fn run_capture(
@@ -219,7 +237,7 @@ pub fn spawn_job(
         argv.push(prompt.to_string());
     }
     let cwd = if cwd.is_empty() { None } else { Some(cwd) };
-    let (code, stdout, _stderr) = run_capture(&argv, SPAWN_TIMEOUT, cwd, &bg_env(extra_env))?;
+    let (code, stdout, _stderr) = run_capture(&argv, SPAWN_TIMEOUT, cwd, &engine_env(extra_env))?;
     if code != 0 {
         return None;
     }
@@ -249,7 +267,7 @@ pub fn wake_job(job_id: &str, claude_bin: &str) -> bool {
         "attach".to_string(),
         job_id.to_string(),
     ];
-    match run_capture(&argv, WAKE_TIMEOUT, None, &bg_env(None)) {
+    match run_capture(&argv, WAKE_TIMEOUT, None, &engine_env(None)) {
         Some((code, _out, _err)) => code == 0,
         None => false,
     }

@@ -46,7 +46,7 @@ pub fn ensure_hived(
     }
     unsafe { libc::flock(lock_fd, libc::LOCK_EX) };
     let result = (|| {
-        let response = hooked_request_ping(workspace);
+        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
         match hived_identity(response.as_ref(), team) {
             HivedIdentity::Matches => return Ok(None),
             HivedIdentity::ForeignHome(served) => bail!(
@@ -62,7 +62,7 @@ pub fn ensure_hived(
         let pid = start_hived(workspace, team, tmux_window, tmux_window_id);
         let deadline = monotonic() + SOCKET_READY_TIMEOUT;
         while monotonic() < deadline {
-            let response = hooked_request_ping(workspace);
+            let response = hooked_request_ping(workspace, SOCKET_RETRY_INTERVAL);
             if hived_identity_matches(response.as_ref(), team) {
                 return Ok(pid);
             }

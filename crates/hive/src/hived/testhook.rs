@@ -29,6 +29,7 @@ pub type FindSessionFile = Arc<dyn Fn(&str, Option<&str>) -> Option<PathBuf> + S
 pub type SessionStatus = Arc<dyn Fn(Option<i32>) -> Option<(String, String)> + Send + Sync>;
 pub type WriteHivedOwner = Arc<dyn Fn(&str, i64, &str, &str) + Send + Sync>;
 pub type Popen = Arc<dyn Fn(&[String], &Path) -> i32 + Send + Sync>;
+pub type RequestPing = Arc<dyn Fn(&str, f64) -> Option<Map<String, Value>> + Send + Sync>;
 pub type JobRows = Vec<Map<String, Value>>;
 
 /// The two adapter methods the hived consumes
@@ -152,7 +153,7 @@ pub struct Hook {
     >,
     pub fresh_snapshot_session_id: Option<S1<String>>,
     // sockets / lifecycle
-    pub request_ping: Option<S1<Option<Map<String, Value>>>>,
+    pub request_ping: Option<RequestPing>,
     pub cleanup_socket: Option<S1<()>>,
     pub run_dir: Option<S1<PathBuf>>,
     pub write_hived_owner: Option<WriteHivedOwner>,

@@ -427,7 +427,7 @@ pub(crate) fn has_row(argv: &Argv, row: &[&str]) -> bool {
 /// answered by `fake_hived` when a test binds it.
 pub(crate) fn hived_answering_ping(team: &str) -> crate::hived::testhook::Guard {
     let team = team.to_string();
-    let request_ping = std::sync::Arc::new(move |_ws: &str| {
+    let request_ping = std::sync::Arc::new(move |_ws: &str, _timeout: f64| {
         let mut identity = Map::new();
         identity.insert("ok".to_string(), Value::Bool(true));
         identity.insert(
