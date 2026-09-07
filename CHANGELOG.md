@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.0
+
+### Features
+
+- `hive update` replaces the running binary with the latest GitHub release: `--check` only looks (exit 1 when newer exists, 2 on a failed query), `--force` reinstalls the running version, never a downgrade. hive downloads the archive and its `.sha256` itself, verifies the digest and the archive entries, runs the candidate's `--version`, then renames it over `current_exe()`; the target is locked and fingerprinted before any network call (#181)
+
 ## 0.18.2
 
 ### Features
