@@ -33,6 +33,7 @@ pub(crate) mod testkit;
 pub mod tmux;
 pub mod transcript_tui;
 pub mod transcript_view;
+pub mod update;
 pub mod view_theme;
 pub mod workflow;
 pub mod worktree;

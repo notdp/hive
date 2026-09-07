@@ -76,10 +76,12 @@ Debug:
   kill       Kill an agent pane and remove it from the team.
 
 Extensions:
-  Manage first-party Hive plugins (Claude Code, Codex).
+  Manage hive itself: user settings, the first-party plugins (Claude Code,
+  Codex), and the binary on disk.
 
   config  Read / write user-level settings (~/.hive/settings.json).
   plugin  Manage first-party Hive plugins.
+  update  Update hive to the latest GitHub release.
 
 Launchers:
   hive-managed launchers behind the `hcodex` / `hclaude` / `hgrok` shell
@@ -664,6 +666,41 @@ Options:
 Options:
   -t, --team TEXT  Explicit team (default: the pane's binding)
   -h, --help       Show this message and exit.
+"#
+        }
+        ["update"] => {
+            r#"Usage: hive update [OPTIONS]
+
+  Update hive to the latest GitHub release.
+
+  Replaces the binary this process is running — `current_exe()`, not a
+  search of PATH — with the release archive for its own target triple:
+  hive resolves `releases/latest`, downloads the archive and its `.sha256`
+  pinned to that tag, checks the digest and the archive's entries, runs the
+  unpacked candidate's `--version`, and only then renames it over the
+  target. A second `hive update` on the same binary is refused while one
+  runs, and a target whose bytes changed during the download (another
+  install landing on it) is left alone: rerun instead.
+
+  The running binary must be a regular file. A symlink, or a path a package
+  manager owns, is refused with the path printed — update it the way it was
+  installed. The version already running installs again only under
+  --force, and a local build ahead of the latest release never downgrades.
+
+  Nothing else moves: no receipt, no PATH edit, no plugin sync, no restart
+  of the hived or of any member. An already-running hived keeps its own
+  image until it picks the new bytes up on its own.
+
+  Exit codes: without --check, 0 whenever nothing is wrong (installed,
+  already latest, ahead of the release) and non-zero on failure. With
+  --check, 0 = no update, 1 = update available, 2 = the release could not
+  be queried or parsed.
+
+Options:
+  --check     Only report: exit 1 when a newer release exists, 2 when the
+              query fails
+  --force     Reinstall the release build of the version already running
+  -h, --help  Show this message and exit.
 "#
         }
         ["vfork"] => {

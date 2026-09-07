@@ -2,7 +2,7 @@
 //! `pub fn main()`, the root gates every subcommand passes (tmux, codex
 //! native), the help interception, and the dispatch into one module per
 //! domain — `team`, `member`, `attach`, `fork`, `workflow`, `launch`, `setup`,
-//! `worktree`. The handlers print and exit; the logic they call lives in
+//! `update`, `worktree`. The handlers print and exit; the logic they call lives in
 //! the crate (`team`, `naming`, `send`, `identity`, `team_display`).
 
 mod attach;
@@ -12,6 +12,7 @@ mod launch;
 mod member;
 mod setup;
 mod team;
+mod update;
 mod util;
 mod workflow;
 mod worktree;
@@ -56,6 +57,7 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "attach",
     "view",
     "workflow",
+    "update",
 ];
 
 const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
@@ -68,6 +70,7 @@ const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
     "plugin",
     "resume-hint",
     "shell-init",
+    "update",
 ];
 
 // ---------------------------------------------------------------------------
@@ -555,6 +558,23 @@ pub(crate) fn build_cli() -> Command {
                 .arg(Arg::new("shell").default_value("")),
         )
         .subcommand(
+            Command::new("update")
+                .about("Update hive to the latest GitHub release.")
+                .arg(
+                    Arg::new("check")
+                        .long("check")
+                        .action(ArgAction::SetTrue)
+                        .help("Only report: exit 1 when a newer release exists, 2 when the query fails"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("check")
+                        .help("Reinstall the release build of the version already running"),
+                ),
+        )
+        .subcommand(
             Command::new("worktree")
                 .about("Per-feature worktree pool: start a feature, finish it, inspect state.")
                 .subcommand_required(true)
@@ -631,6 +651,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "ccd",
     "resume-hint",
     "shell-init",
+    "update",
     "worktree",
 ];
 
@@ -1019,6 +1040,7 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("resume-hint", m)) => launch::resume_hint_cmd(arg_str(m, "cli_name")),
         Some(("shell-init", m)) => setup::shell_init_cmd(arg_str(m, "shell")),
+        Some(("update", m)) => update::update_cmd(m.get_flag("check"), m.get_flag("force")),
         Some(("worktree", m)) => match m.subcommand() {
             Some(("set-base", m)) => {
                 worktree::worktree_set_base_cmd(arg_str(m, "ref"), m.get_flag("plain"))
