@@ -78,7 +78,11 @@ pub struct Hook {
     pub desktop_record: Option<S1<Option<crate::adapters::claude_desktop::DesktopRecord>>>,
     #[allow(clippy::type_complexity)]
     pub commit_succession: Option<
-        Arc<dyn Fn(&str, &str, &str, &str, &str) -> anyhow::Result<&'static str> + Send + Sync>,
+        Arc<
+            dyn Fn(&str, &str, &str, &str, &str, &str) -> anyhow::Result<&'static str>
+                + Send
+                + Sync,
+        >,
     >,
     // claude_view
     pub cv_journal_signature: Option<F0<Vec<String>>>,

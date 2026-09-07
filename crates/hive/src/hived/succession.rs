@@ -37,6 +37,7 @@ pub(super) const EVENT_REFUSED: &str = "member.session_refused";
 /// A roster row this tick considers: a claude member with a host session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Row {
+    pub team: String,
     pub name: String,
     pub session_id: String,
     pub host_session_id: String,
@@ -45,11 +46,14 @@ pub(super) struct Row {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Plan {
     Move {
+        team: String,
         name: String,
         from: String,
+        host: String,
         to: String,
     },
     Refused {
+        team: String,
         name: String,
         to: String,
         reason: &'static str,
@@ -57,8 +61,10 @@ pub(super) enum Plan {
 }
 
 /// What each row's desktop record says, against the live sessions and the
-/// sessions members already hold. Rows whose conversation has not moved,
-/// or whose record is unknown, produce nothing.
+/// sessions members already hold. *rows* is every team's, so two rows of
+/// different teams resolving to one session are seen converging. Rows
+/// whose conversation has not moved, or whose record is unknown, produce
+/// nothing.
 pub(super) fn plan_successions(
     rows: &[Row],
     record: impl Fn(&str) -> Option<DesktopRecord>,
@@ -74,23 +80,27 @@ pub(super) fn plan_successions(
         if to == row.session_id || !rec.prior_cli_session_ids.contains(&row.session_id) {
             continue;
         }
-        let name = row.name.clone();
+        let (team, name) = (row.team.clone(), row.name.clone());
         if !live.iter().any(|s| s.session_id == to) {
             plans.push(Plan::Refused {
+                team,
                 name,
                 to,
                 reason: "target_not_live",
             });
         } else if taken(&to) {
             plans.push(Plan::Refused {
+                team,
                 name,
                 to,
                 reason: "target_taken",
             });
         } else {
             plans.push(Plan::Move {
+                team,
                 name,
                 from: row.session_id.clone(),
+                host: row.host_session_id.clone(),
                 to,
             });
         }
@@ -106,10 +116,11 @@ pub(super) fn plan_successions(
     plans
         .into_iter()
         .map(|p| match p {
-            Plan::Move { name, from: _, to }
+            Plan::Move { team, name, to, .. }
                 if targets.iter().filter(|t| **t == to).count() > 1 =>
             {
                 Plan::Refused {
+                    team,
                     name,
                     to,
                     reason: "converge",
@@ -128,12 +139,12 @@ fn created_at_key(entry: &serde_json::Map<String, Value>) -> String {
     }
 }
 
-/// The tick: plan against *team*'s registry entry, commit each move, emit.
-pub(super) fn reconcile_successions(workspace: &str, team: &str) {
-    let Some(entry) = crate::registry::load(team) else {
-        return;
-    };
-    let rows: Vec<Row> = entry
+fn rows_of(entry: &serde_json::Map<String, Value>) -> Vec<Row> {
+    let team = entry
+        .get("team")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    entry
         .get("members")
         .and_then(Value::as_array)
         .map(|a| {
@@ -150,27 +161,48 @@ pub(super) fn reconcile_successions(workspace: &str, team: &str) {
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
-                    (!host.is_empty() && !sid.is_empty() && !name.is_empty()).then(|| Row {
-                        name: name.to_string(),
-                        session_id: sid.to_string(),
-                        host_session_id: host.to_string(),
-                    })
+                    (!team.is_empty() && !host.is_empty() && !sid.is_empty() && !name.is_empty())
+                        .then(|| Row {
+                            team: team.to_string(),
+                            name: name.to_string(),
+                            session_id: sid.to_string(),
+                            host_session_id: host.to_string(),
+                        })
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    if rows.is_empty() {
+        .unwrap_or_default()
+}
+
+/// The tick: plan over every team's rows (so a target two teams' rows
+/// converge on is refused for both), commit and report only *team*'s.
+pub(super) fn reconcile_successions(workspace: &str, team: &str) {
+    let entries = crate::registry::list_entries();
+    let Some(own) = entries
+        .iter()
+        .find(|e| e.get("team").and_then(Value::as_str) == Some(team))
+    else {
+        return;
+    };
+    let created_at = created_at_key(own);
+    let rows: Vec<Row> = entries.iter().flat_map(rows_of).collect();
+    if !rows.iter().any(|r| r.team == team) {
         return;
     }
     let live = hooked_cs_list_sessions();
-    let created_at = created_at_key(&entry);
     let plans = plan_successions(&rows, hooked_desktop_record, &live, |sid| {
         crate::registry::member_for_session(sid, None).is_some()
     });
     for plan in plans {
         match plan {
-            Plan::Move { name, from, to } => {
-                let outcome = hooked_commit_succession(team, &name, &from, &to, &created_at)
+            Plan::Move {
+                team: t,
+                name,
+                from,
+                host,
+                to,
+            } if t == team => {
+                let outcome = hooked_commit_succession(team, &name, &from, &host, &to, &created_at)
                     .unwrap_or("error");
                 let event = if outcome == "written" {
                     EVENT_SUCCEEDED
@@ -185,11 +217,17 @@ pub(super) fn reconcile_successions(workspace: &str, team: &str) {
                         ("member", Value::from(name.as_str())),
                         ("from", Value::from(from.as_str())),
                         ("to", Value::from(to.as_str())),
+                        ("hostSessionId", Value::from(host.as_str())),
                         ("reason", Value::from(outcome)),
                     ],
                 );
             }
-            Plan::Refused { name, to, reason } => hooked_notify_debug_emit(
+            Plan::Refused {
+                team: t,
+                name,
+                to,
+                reason,
+            } if t == team => hooked_notify_debug_emit(
                 workspace,
                 EVENT_REFUSED,
                 &[
@@ -199,6 +237,7 @@ pub(super) fn reconcile_successions(workspace: &str, team: &str) {
                     ("reason", Value::from(reason)),
                 ],
             ),
+            _ => {} // another team's row: its own hived reports it
         }
     }
 }
@@ -233,6 +272,7 @@ mod tests {
 
     fn row(name: &str, sid: &str, host: &str) -> Row {
         Row {
+            team: "honey".to_string(),
             name: name.to_string(),
             session_id: sid.to_string(),
             host_session_id: host.to_string(),
@@ -258,8 +298,10 @@ mod tests {
         assert_eq!(
             plans,
             vec![Plan::Move {
+                team: "honey".to_string(),
                 name: "orch".to_string(),
                 from: "A".to_string(),
+                host: "local_h".to_string(),
                 to: "C".to_string(),
             }]
         );
@@ -288,6 +330,7 @@ mod tests {
         assert_eq!(
             plans,
             vec![Plan::Refused {
+                team: "honey".to_string(),
                 name: "m1".to_string(),
                 to: "C".to_string(),
                 reason: "target_not_live",
@@ -298,6 +341,7 @@ mod tests {
         assert_eq!(
             plans,
             vec![Plan::Refused {
+                team: "honey".to_string(),
                 name: "m1".to_string(),
                 to: "C".to_string(),
                 reason: "target_taken",
@@ -395,5 +439,71 @@ mod tests {
         assert_eq!(got[1].0, EVENT_REFUSED);
         assert_eq!(got[1].1["reason"], "target_taken");
         assert_eq!(json!(got[1].1["to"]), json!("D"));
+    }
+    #[test]
+    fn test_reconcile_refuses_a_target_two_teams_rows_converge_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::testenv::iso(tmp.path());
+        record_team(
+            "honey",
+            "/ws",
+            "1.0",
+            &[m(&[
+                ("name", "orch"),
+                ("cli", "claude"),
+                ("sessionId", "A"),
+                (HOST_SESSION_FIELD, "local_h"),
+            ])],
+            "",
+        )
+        .unwrap();
+        record_team(
+            "comb",
+            "/ws2",
+            "2.0",
+            &[m(&[
+                ("name", "ant"),
+                ("cli", "claude"),
+                ("sessionId", "B"),
+                (HOST_SESSION_FIELD, "local_h"),
+            ])],
+            "",
+        )
+        .unwrap();
+        type Events = Arc<Mutex<Vec<(String, Map<String, Value>)>>>;
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let hook = testhook::Hook {
+            cs_list_sessions: Some(Arc::new(|| vec![live("C")])),
+            desktop_record: Some(Arc::new(|h: &str| {
+                (h == "local_h").then(|| rec("C", &["A", "B"]))
+            })),
+            notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
+                let map: Map<String, Value> = fields
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), v.clone()))
+                    .collect();
+                sink.lock().unwrap().push((event.to_string(), map));
+            })),
+            ..testhook::Hook::default()
+        };
+        let _guard = testhook::install(hook);
+        reconcile_successions("/ws", "honey");
+        reconcile_successions("/ws2", "comb");
+        assert_eq!(
+            crate::registry::load("honey").unwrap()["members"][0]["sessionId"],
+            "A"
+        );
+        assert_eq!(
+            crate::registry::load("comb").unwrap()["members"][0]["sessionId"],
+            "B"
+        );
+        let got = events.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got
+            .iter()
+            .all(|(e, f)| e == EVENT_REFUSED && f["reason"] == "converge"));
+        assert_eq!(got[0].1["team"], "honey");
+        assert_eq!(got[1].1["team"], "comb");
     }
 }

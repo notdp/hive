@@ -260,17 +260,20 @@ fn member_row(member: &Map<String, Value>) -> Map<String, Value> {
 /// hived's one roster write that changes an identity key, so it is a
 /// compare-and-set under the store lock. Writes only when *name* on
 /// *team* (the instance *created_at* names) still carries *expected_old*
-/// and a host session id, and no member anywhere carries *new* — a row
-/// rebound or recreated since the observation is `stale`, a target another
-/// member holds is `taken`. Never adds or removes a name.
+/// under *expected_host* — the pair the observation was made against — and
+/// no member anywhere carries *new*; a row rebound or recreated since the
+/// observation is `stale`, a target another member holds is `taken`. Never
+/// adds or removes a name.
 pub fn commit_succession(
     team: &str,
     name: &str,
     expected_old: &str,
+    expected_host: &str,
     new: &str,
     created_at: &str,
 ) -> Result<&'static str> {
-    if expected_old.is_empty() || new.is_empty() || expected_old == new {
+    if expected_old.is_empty() || expected_host.is_empty() || new.is_empty() || expected_old == new
+    {
         return Ok("rejected");
     }
     let path = match entry_path(team) {
@@ -298,7 +301,7 @@ pub fn commit_succession(
     };
     if field_str(row, "cli") != "claude"
         || field_str(row, "sessionId") != expected_old
-        || field_str(row, HOST_SESSION_FIELD).is_empty()
+        || field_str(row, HOST_SESSION_FIELD) != expected_host
     {
         return Ok("stale");
     }
@@ -1089,28 +1092,28 @@ mod tests {
 
         // a target any member anywhere holds is refused
         assert_eq!(
-            commit_succession("honey", "orch", "sid-a", "sid-taken", "1.0").unwrap(),
+            commit_succession("honey", "orch", "sid-a", "local_h", "sid-taken", "1.0").unwrap(),
             "taken"
         );
         // the observation must still describe the row
         assert_eq!(
-            commit_succession("honey", "orch", "sid-old", "sid-c", "1.0").unwrap(),
+            commit_succession("honey", "orch", "sid-old", "local_h", "sid-c", "1.0").unwrap(),
             "stale"
         );
         assert_eq!(
-            commit_succession("honey", "orch", "sid-a", "sid-c", "9.9").unwrap(),
+            commit_succession("honey", "orch", "sid-a", "local_h", "sid-c", "9.9").unwrap(),
             "missing"
         );
         assert_eq!(
-            commit_succession("honey", "ghost", "sid-a", "sid-c", "1.0").unwrap(),
+            commit_succession("honey", "ghost", "sid-a", "local_h", "sid-c", "1.0").unwrap(),
             "missing"
         );
         assert_eq!(
-            commit_succession("honey", "orch", "sid-a", "sid-a", "1.0").unwrap(),
+            commit_succession("honey", "orch", "sid-a", "local_h", "sid-a", "1.0").unwrap(),
             "rejected"
         );
         assert_eq!(
-            commit_succession("honey", "orch", "sid-a", "sid-c", "1.0").unwrap(),
+            commit_succession("honey", "orch", "sid-a", "local_h", "sid-c", "1.0").unwrap(),
             "written"
         );
         let entry = load("honey").unwrap();
@@ -1123,7 +1126,13 @@ mod tests {
         );
         // a second observation of the old id finds a rebound row: stale
         assert_eq!(
-            commit_succession("honey", "orch", "sid-a", "sid-d", "1.0").unwrap(),
+            commit_succession("honey", "orch", "sid-a", "local_h", "sid-d", "1.0").unwrap(),
+            "stale"
+        );
+        // same session, but the row now belongs to another conversation:
+        // the observation's evidence is not this row's
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-c", "local_other", "sid-e", "1.0").unwrap(),
             "stale"
         );
         // a row without a host session id is never moved
@@ -1140,7 +1149,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            commit_succession("wasp", "orch", "sid-w", "sid-x", "3.0").unwrap(),
+            commit_succession("wasp", "orch", "sid-w", "local_w", "sid-x", "3.0").unwrap(),
             "stale"
         );
     }

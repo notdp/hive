@@ -44,9 +44,12 @@ Consequences across modules:
   reads as gone. Every 30s the hived (`hived/succession.rs`) moves such a
   row to the record's current session when, and only when, that record
   lists the row's session as a prior, the current one is live, no member
-  anywhere holds it, and no other row resolves to it; the write is a
-  compare-and-set under the store lock (`registry::commit_succession`), so a
-  row rebound or recreated since the observation is left alone, and
+  anywhere holds it, and no other row of any team resolves to it (the tick
+  plans over every team's rows and commits its own); the write is a
+  compare-and-set under the store lock (`registry::commit_succession`) on
+  the observed session *and* host id, so a row rebound or recreated since
+  the observation is left alone, and a desktop record the app keeps under
+  another account that cannot be listed makes the whole read unknown, and
   `member.session_succeeded` is emitted only for a write that landed
   (`member.session_refused` names the reason otherwise). A conversation the
   human forked has a stable id of its own and never matches — a fork is a

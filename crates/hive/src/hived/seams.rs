@@ -333,14 +333,15 @@ pub(super) fn hooked_commit_succession(
     team: &str,
     name: &str,
     expected_old: &str,
+    expected_host: &str,
     new: &str,
     created_at: &str,
 ) -> anyhow::Result<&'static str> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.commit_succession.clone()).flatten() {
-        return f(team, name, expected_old, new, created_at);
+        return f(team, name, expected_old, expected_host, new, created_at);
     }
-    crate::registry::commit_succession(team, name, expected_old, new, created_at)
+    crate::registry::commit_succession(team, name, expected_old, expected_host, new, created_at)
 }
 
 // --- claude_view seams -----------------------------------------------------

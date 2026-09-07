@@ -80,18 +80,17 @@ pub fn desktop_record(host_session_id: &str) -> Option<DesktopRecord> {
         return None;
     }
     let root = sessions_root();
-    let Ok(accounts) = fs::read_dir(&root) else {
-        return None;
-    };
     let mut found: Option<DesktopRecord> = None;
-    for account in accounts.flatten() {
-        let Ok(orgs) = fs::read_dir(account.path()) else {
-            continue;
-        };
-        for org in orgs.flatten() {
-            let path = org.path().join(format!("{host_session_id}.json"));
-            if !path.is_file() {
-                continue;
+    // a directory that cannot be listed may hold a copy that disagrees:
+    // unknown, never "absent"
+    for account in list_dirs(&root)? {
+        for org in list_dirs(&account)? {
+            let path = org.join(format!("{host_session_id}.json"));
+            match fs::metadata(&path) {
+                Ok(m) if m.is_file() => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
             }
             let record = read_json_object(&path).and_then(|o| parse_record(&o))?;
             match &found {
@@ -101,6 +100,25 @@ pub fn desktop_record(host_session_id: &str) -> Option<DesktopRecord> {
         }
     }
     found
+}
+
+/// The subdirectories of *dir*; an absent *dir* is no directories, any
+/// other failure to list it is None.
+fn list_dirs(dir: &std::path::Path) -> Option<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        if entry.file_type().ok()?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort();
+    Some(dirs)
 }
 
 /// The host session id a roster row may carry for *session*: only for an
@@ -200,6 +218,26 @@ mod tests {
             json!({"cliSessionId": "other", "priorCliSessionIds": ["old"]}),
         );
         assert_eq!(desktop_record("local_x"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_desktop_record_is_unknown_when_a_copy_cannot_be_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let mut env = EnvGuard::new();
+        env.set("HOME", tmp.path());
+        let same = json!({"cliSessionId": "new", "priorCliSessionIds": ["old"]});
+        write_record(tmp.path(), "a1", "o1", "local_y", same.clone());
+        write_record(tmp.path(), "a2", "o2", "local_y", same);
+        let sealed = tmp
+            .path()
+            .join("Library/Application Support/Claude/claude-code-sessions/a2");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = desktop_record("local_y");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got, None);
+        assert!(desktop_record("local_y").is_some());
     }
 
     #[test]
