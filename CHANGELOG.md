@@ -4,6 +4,14 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.1
+
+### Fixes
+
+- claude bg engines are born and woken with the pane's terminal — `TERM` from tmux's `default-terminal`, `COLORTERM=truecolor`, inherited `NO_COLOR` dropped — so a member spawned from a desktop Claude session or a `TERM=dumb` tool shell renders in color; `ensure_hived`'s identity ping waits 5s through a hived tick instead of 0.1s, so a busy hived is no longer killed and restarted with the caller's env (#184)
+- the hived's control-mode client attaches with the server's `default-terminal`, not the hived's own `TERM`, so codex draws when the team was created from an agent's tool shell (#182)
+- grok session creation is separated from the replay timeout (#183)
+
 ## 0.19.0
 
 ### Features
