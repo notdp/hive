@@ -373,12 +373,14 @@ fn report_session_pane_colours(master: RawFd, session_target: &str) {
     }
 }
 
-/// The `TERM` the control client attaches with. tmux answers a pane's
-/// terminal queries from an attached client's terminal, so a control client
-/// that inherits the hived's own `TERM` — `dumb` when the team was created
-/// from an agent's tool shell — makes every engine on that server, codex
-/// first, see a dumb terminal and refuse to draw. The client presents the
-/// terminal the panes are given: the server's `default-terminal`.
+/// The `TERM` the control client attaches with. Under tmux, codex asks
+/// `tmux display-message` for the client's terminal type (`client_termname`
+/// when `client_termtype` is empty), and tmux picks the client by the
+/// session's most recent activity, control clients included. A control
+/// client that inherits the hived's own `TERM` — `dumb` when the team was
+/// created from an agent's tool shell — is then reported as the terminal,
+/// and codex refuses to draw. The client presents the terminal the panes
+/// are given: the server's `default-terminal`.
 fn control_client_term() -> String {
     match run(&["show-options", "-gv", "default-terminal"], false, 5) {
         Ok(r) if r.returncode == 0 && !r.stdout.trim().is_empty() => r.stdout.trim().to_string(),
