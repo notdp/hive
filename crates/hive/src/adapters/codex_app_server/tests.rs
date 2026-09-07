@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -78,6 +79,182 @@ fn test_shared_pidfile_path() {
     assert_eq!(
         shared_pidfile_path().file_name().unwrap(),
         "hive-shared.pid"
+    );
+}
+
+// --- daemon stop & lock ----------------------------------------------------
+
+/// A process whose command line carries *args*, so `ps` shows them; a
+/// session of its own like the real daemon, so `kill_group` can clear it.
+fn fake_daemon(args: &[&str], ignore_term: bool) -> std::process::Child {
+    // A loop of short sleeps: sh stays the process `ps` shows (a single
+    // command would be exec'd), and its last sleep ends within a second
+    // of sh going.
+    let script = if ignore_term {
+        "trap '' TERM; while :; do sleep 0.2; done"
+    } else {
+        "while :; do sleep 0.2; done"
+    };
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(script).arg("fake").args(args);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().unwrap()
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+fn daemon_records(tmp: &Path, pid: u32) {
+    fs::create_dir_all(shared_socket_path().parent().unwrap()).unwrap();
+    fs::write(shared_pidfile_path(), pid.to_string()).unwrap();
+    fs::write(shared_socket_path(), "").unwrap();
+    assert!(write_auth_baseline(Some("acct-a")));
+    let _ = tmp;
+}
+
+/// Gone: exited, or already reaped by `stop_daemon` (then ECHILD).
+fn exited(child: &mut std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Ok(Some(_)) | Err(_) => return true,
+        }
+    }
+    false
+}
+
+#[test]
+fn test_stop_daemon_ignores_a_pid_that_is_not_this_sockets_app_server() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    // Says app-server, but listens nowhere hive knows: a recycled pid.
+    let mut child = fake_daemon(&["app-server", "--listen", "unix:///elsewhere.sock"], false);
+    daemon_records(tmp.path(), child.id());
+    assert!(!daemon::stop_daemon_within(0.2));
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "unrelated process was signalled"
+    );
+    assert!(shared_pidfile_path().exists());
+    assert!(shared_auth_baseline_path().exists());
+    kill_group(&mut child);
+}
+
+#[test]
+fn test_stop_daemon_takes_a_dead_pid_as_nothing_to_stop() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    let mut child = fake_daemon(&["app-server"], false);
+    let pid = child.id();
+    kill_group(&mut child);
+    daemon_records(tmp.path(), pid);
+    assert!(!daemon::stop_daemon_within(0.2));
+}
+
+#[test]
+fn test_stop_daemon_terminates_the_session_group_and_clears_records() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    let listen = format!("unix://{}", shared_socket_path().display());
+    let mut child = fake_daemon(&["app-server", "--listen", &listen], false);
+    daemon_records(tmp.path(), child.id());
+    assert!(daemon::stop_daemon_within(2.0));
+    assert!(exited(&mut child));
+    assert!(!shared_socket_path().exists());
+    assert!(!shared_pidfile_path().exists());
+    assert!(!shared_auth_baseline_path().exists());
+}
+
+#[test]
+fn test_stop_daemon_escalates_to_sigkill_when_term_is_ignored() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    let listen = format!("unix://{}", shared_socket_path().display());
+    let mut child = fake_daemon(&["app-server", "--listen", &listen], true);
+    thread::sleep(Duration::from_millis(200)); // let the trap install
+    daemon_records(tmp.path(), child.id());
+    assert!(daemon::stop_daemon_within(0.3));
+    assert!(exited(&mut child));
+    assert!(!shared_pidfile_path().exists());
+}
+
+#[test]
+fn test_stop_daemon_sees_through_a_zombie_left_by_another_parent() {
+    // The daemon's parent is a hived that will never reap it; the stopping
+    // process must read the process table, not `kill(0)`.
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    let listen = format!("unix://{}", shared_socket_path().display());
+    // A parent that spawns the fake daemon, prints its pid, then sleeps
+    // without ever waiting on it.
+    let mut parent = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("/bin/sh -c 'while :; do sleep 0.2; done' fake \"$@\" & echo $!; while :; do sleep 0.2; done")
+        .arg("outer")
+        .args(["app-server", "--listen", &listen])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(parent.stdout.take().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    daemon_records(tmp.path(), pid);
+    assert!(daemon::stop_daemon_within(2.0));
+    let stat = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&stat.stdout).trim().to_string();
+    assert!(
+        stat.is_empty() || stat.starts_with('Z'),
+        "fake daemon still running: {stat}"
+    );
+    assert!(!shared_pidfile_path().exists());
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+}
+
+#[test]
+fn test_lock_daemon_is_exclusive_per_codex_home() {
+    use std::os::unix::io::AsRawFd;
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CODEX_HOME", tmp.path());
+    fs::create_dir_all(shared_socket_path().parent().unwrap()).unwrap();
+    let held = daemon::lock_daemon().unwrap();
+    let other = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(shared_lock_path())
+        .unwrap();
+    assert_ne!(
+        unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    drop(held);
+    assert_eq!(
+        unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
     );
 }
 

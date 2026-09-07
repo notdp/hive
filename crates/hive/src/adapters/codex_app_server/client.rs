@@ -681,6 +681,10 @@ pub trait DaemonClient: Send + Sync {
     fn fork_thread(&self, _thread_id: &str, _name: &str) -> Option<String> {
         unimplemented!("fork_thread")
     }
+    /// Raw `account/rateLimits/read` answer (`call` shape).
+    fn account_rate_limits(&self) -> Value {
+        unimplemented!("account_rate_limits")
+    }
 }
 
 impl DaemonClient for CodexDaemonClient {
@@ -710,6 +714,9 @@ impl DaemonClient for CodexDaemonClient {
     }
     fn fork_thread(&self, thread_id: &str, name: &str) -> Option<String> {
         CodexDaemonClient::fork_thread(self, thread_id, name)
+    }
+    fn account_rate_limits(&self) -> Value {
+        self.call("account/rateLimits/read", json!({}))
     }
 }
 

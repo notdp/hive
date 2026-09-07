@@ -7,6 +7,7 @@ use std::fs;
 
 use serde_json::{Map, Value};
 
+use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome};
 use crate::agent::Agent;
 
 use super::*;
@@ -168,15 +169,40 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
         return;
     }
 
-    if !hooked_cas_daemon_alive() {
-        hooked_cas_drop_client();
-        let respawned = hooked_cas_spawn_daemon();
+    // A live daemon whose account no longer matches auth.json cannot run
+    // a turn again (auth_guard.rs); ensure_daemon replaces it under the
+    // daemon lock. The verdict read here is lock-free and writes nothing:
+    // a daemon without a baseline (Unknown) is handed to ensure_daemon,
+    // which settles it under the lock and mostly keeps the daemon. This
+    // process's client is dropped only when a daemon was actually
+    // started — the client of a reused daemon holds the tracked turns
+    // whose results the workflow runner still reads back. Attached TUIs
+    // reconnect on their own, so no reattach follows from a replacement.
+    let alive = hooked_cas_daemon_alive();
+    let verdict = if alive {
+        hooked_cas_daemon_auth_verdict()
+    } else {
+        AuthVerdict::Fresh
+    };
+    if !alive || verdict != AuthVerdict::Fresh {
+        if verdict == AuthVerdict::Stale {
+            hooked_notify_debug_emit(workspace, "codex.daemon.auth_stale", &[]);
+        }
+        let outcome = hooked_cas_ensure_daemon();
+        if outcome == DaemonOutcome::Started {
+            hooked_cas_drop_client();
+        }
+        let event = if alive && verdict == AuthVerdict::Unknown {
+            "codex.daemon.auth_settle"
+        } else {
+            "codex.daemon.respawn"
+        };
         hooked_notify_debug_emit(
             workspace,
-            "codex.daemon.respawn",
-            &[("ok", Value::Bool(respawned))],
+            event,
+            &[("ok", Value::Bool(outcome != DaemonOutcome::Failed))],
         );
-        if !respawned {
+        if outcome == DaemonOutcome::Failed {
             return;
         }
     }

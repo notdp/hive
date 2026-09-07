@@ -679,10 +679,41 @@ reverse-engineering it from the transcript.
 - **Trust in remote mode.** It is read from the daemon's config on disk, not
   from the client, so every new cwd gets its trust entry written before its
   thread starts.
-- **The daemon is machine-level shared state.** Hive does not kill it: a dead
-  daemon takes every attached TUI down with it within seconds. The hived
-  supervises instead, respawning while live codex members exist and typing one
-  guarded resume into a member's retained shell.
+- **The daemon is machine-level shared state.** Hive does not kill it for
+  pane or team lifecycle: a dead daemon takes every attached TUI down with
+  it within seconds. The hived supervises instead, respawning while live
+  codex members exist and typing one guarded resume into a member's
+  retained shell.
+- **Auth is loaded once and only reloaded for the same account.** For
+  managed ChatGPT auth, codex's auth manager reloads `auth.json` only when
+  the on-disk account id equals the cached one
+  (`reload_if_account_id_matches`, on the pre-refresh reload and on the
+  401 recovery; verified on codex 0.153.4). A login to another account or
+  workspace, or a login while the daemon holds no account, leaves the
+  daemon unable to recover once its token needs a refresh or is refused:
+  every turn ends with "Your access token could not be refreshed because
+  you have since logged out or signed in to another account", and no RPC
+  reloads unconditionally. Hive records the account id the daemon was
+  spawned with beside the pidfile (`hive-shared.auth`, `auth_guard.rs`,
+  read from the disk before the child starts); the supervisor tick and
+  `spawn_daemon` compare it with the disk's `tokens.account_id` (never a
+  token) and replace the daemon on a change (`codex.daemon.auth_stale`,
+  then the ordinary `codex.daemon.respawn`). A daemon without a baseline
+  is asked over `account/rateLimits/read`, whose answer names the account
+  of the token the daemon holds (`codex.daemon.auth_settle`); an
+  unreadable `auth.json` (a login mid-write) is never a change. The
+  replacement runs under one flock per CODEX_HOME (`hive-shared.lock`)
+  across every process that may do it, and every baseline write is inside
+  that same critical section — the hived's tick reads the verdict
+  lock-free and writes nothing, so a daemon's answer cannot land over a
+  replacement another process just committed. The hived drops its own
+  daemon client only when a daemon was actually started: the client of a
+  reused daemon holds the tracked turns whose results a workflow runner
+  still reads back (`node-result`). The recorded pid is
+  signalled only while it is still this socket's `codex app-server`, and
+  the records are cleared only once the process is gone (codex stops
+  listening before it finishes shutting down, so a silent socket is not a
+  gone daemon). Attached TUIs reconnect on their own.
 - **State is event-sourced with no time-based staleness gate.** It stays valid
   until the next event. On a shared daemon a client that does not own the turn
   receives only status events, since turn and item events go to the turn's

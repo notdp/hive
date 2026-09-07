@@ -427,6 +427,14 @@ pub(super) fn hooked_cas_daemon_alive() -> bool {
     crate::adapters::codex_app_server::daemon_alive()
 }
 
+pub(super) fn hooked_cas_daemon_auth_verdict() -> crate::adapters::codex_app_server::AuthVerdict {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_daemon_auth_verdict.clone()).flatten() {
+        return f();
+    }
+    crate::adapters::codex_app_server::auth_verdict()
+}
+
 pub(super) fn hooked_cas_thread_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_thread_id_for_pane.clone()).flatten() {
@@ -471,12 +479,12 @@ pub(super) fn hooked_cas_drop_client() {
     crate::adapters::codex_app_server::drop_client()
 }
 
-pub(super) fn hooked_cas_spawn_daemon() -> bool {
+pub(super) fn hooked_cas_ensure_daemon() -> crate::adapters::codex_app_server::DaemonOutcome {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.cas_spawn_daemon.clone()).flatten() {
+    if let Some(f) = hookget(|h| h.cas_ensure_daemon.clone()).flatten() {
         return f();
     }
-    crate::adapters::codex_app_server::spawn_daemon()
+    crate::adapters::codex_app_server::ensure_daemon()
 }
 
 pub(super) fn hooked_cas_connect() -> bool {
