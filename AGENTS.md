@@ -263,7 +263,9 @@ When bumping, scan all commits since the last version bump commit and determine 
    - When in doubt, default to **patch**
 4. **Never auto-bump major.** If any commit has breaking changes (`!` suffix or `BREAKING CHANGE`), ask the user.
 5. Edit the version in `crates/hive/Cargo.toml` (plugin manifests are
-   version-locked to it), commit as `chore: bump version to X.Y.Z`, then push.
+   version-locked to it), commit as `chore: bump version to X.Y.Z`, push,
+   then tag that commit `vX.Y.Z` and push the tag: `release.yml` builds the
+   GitHub release only from a tag push, so a bump without a tag ships nothing.
 
 ## Security & runtime notes
 
