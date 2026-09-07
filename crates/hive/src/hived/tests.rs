@@ -27,7 +27,7 @@ use super::testhook::{self, FakeAdapter, Hook};
 use super::*;
 use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::{AuthVerdict, ThreadRuntime, TurnResult};
+use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
 use crate::adapters::grok_leader::{PromptResult, SessionRuntime};
 
 /// Collectors the hook closures push into: `(target, option, value)` tmux
@@ -2038,7 +2038,7 @@ struct SuperState {
     threads: HashMap<String, String>,
     daemon_alive: bool,
     auth: AuthVerdict,
-    spawn_ok: bool,
+    spawn: DaemonOutcome,
     cli_process: HashMap<String, String>, // pane -> live CLI name
     pane_command: HashMap<String, String>,
 }
@@ -2057,7 +2057,7 @@ fn super_state() -> SuperState {
         threads: HashMap::from([("%1".to_string(), "tid-1".to_string())]),
         daemon_alive: true,
         auth: AuthVerdict::Fresh,
-        spawn_ok: true,
+        spawn: DaemonOutcome::Started,
         cli_process: HashMap::from([("%1".to_string(), "codex".to_string())]),
         pane_command: HashMap::from([("%1".to_string(), "zsh".to_string())]),
     }
@@ -2116,9 +2116,9 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
         cas_drop_client: Some(Arc::new(move || {
             drop_sink.lock().unwrap().push("drop_client".to_string())
         })),
-        cas_spawn_daemon: Some(Arc::new(move || {
+        cas_ensure_daemon: Some(Arc::new(move || {
             spawn_sink.lock().unwrap().push("spawn".to_string());
-            s_spawn.spawn_ok
+            s_spawn.spawn
         })),
         team_load: Some(Arc::new(team_agents)),
         detect_cli_process_for_pane: Some(Arc::new(move |pane| {
@@ -2207,8 +2207,8 @@ fn test_supervisor_replaces_live_daemon_with_stale_auth() {
         *calls,
         vec![
             "emit codex.daemon.auth_stale {}".to_string(),
-            "drop_client".to_string(),
             "spawn".to_string(),
+            "drop_client".to_string(),
             "emit codex.daemon.respawn {\"ok\":true}".to_string(),
         ]
     );
@@ -2217,21 +2217,55 @@ fn test_supervisor_replaces_live_daemon_with_stale_auth() {
 #[test]
 fn test_supervisor_hands_an_unknown_baseline_to_the_locked_spawn() {
     // No baseline: the tick itself writes nothing and asks nothing; the
-    // locked spawn_daemon settles it (and replaces the daemon if the
-    // daemon's own answer says so).
+    // locked ensure_daemon settles it and keeps the daemon. The client
+    // stays: it holds the tracked turns a workflow runner still reads.
     let mut state = super_state();
     state.auth = AuthVerdict::Unknown;
+    state.spawn = DaemonOutcome::Reused;
     let (_guard, calls) = super_env(state);
     codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
     assert_eq!(
         *calls,
         vec![
-            "drop_client".to_string(),
             "spawn".to_string(),
             "emit codex.daemon.auth_settle {\"ok\":true}".to_string(),
         ]
     );
+}
+
+#[test]
+fn test_supervisor_drops_its_client_only_when_settling_started_a_daemon() {
+    // The daemon's own answer under the lock said another account: it
+    // was replaced, so the client of the old one is dropped.
+    let mut state = super_state();
+    state.auth = AuthVerdict::Unknown;
+    state.spawn = DaemonOutcome::Started;
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        *calls,
+        vec![
+            "spawn".to_string(),
+            "drop_client".to_string(),
+            "emit codex.daemon.auth_settle {\"ok\":true}".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_supervisor_keeps_its_client_when_a_stale_verdict_finds_nothing_to_replace() {
+    // The lock-free verdict said stale, but under the lock the daemon had
+    // already been replaced by another process and is reused: no drop.
+    let mut state = super_state();
+    state.auth = AuthVerdict::Stale;
+    state.spawn = DaemonOutcome::Reused;
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert!(!calls.contains(&"drop_client".to_string()));
+    assert!(calls.contains(&"emit codex.daemon.respawn {\"ok\":true}".to_string()));
 }
 
 #[test]

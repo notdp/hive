@@ -697,7 +697,10 @@ reverse-engineering it from the transcript.
   across every process that may do it, and every baseline write is inside
   that same critical section — the hived's tick reads the verdict
   lock-free and writes nothing, so a daemon's answer cannot land over a
-  replacement another process just committed. The recorded pid is
+  replacement another process just committed. The hived drops its own
+  daemon client only when a daemon was actually started: the client of a
+  reused daemon holds the tracked turns whose results a workflow runner
+  still reads back (`node-result`). The recorded pid is
   signalled only while it is still this socket's `codex app-server`, and
   the records are cleared only once the process is gone (codex stops
   listening before it finishes shutting down, so a silent socket is not a

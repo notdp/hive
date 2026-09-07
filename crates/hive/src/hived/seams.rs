@@ -479,12 +479,12 @@ pub(super) fn hooked_cas_drop_client() {
     crate::adapters::codex_app_server::drop_client()
 }
 
-pub(super) fn hooked_cas_spawn_daemon() -> bool {
+pub(super) fn hooked_cas_ensure_daemon() -> crate::adapters::codex_app_server::DaemonOutcome {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.cas_spawn_daemon.clone()).flatten() {
+    if let Some(f) = hookget(|h| h.cas_ensure_daemon.clone()).flatten() {
         return f();
     }
-    crate::adapters::codex_app_server::spawn_daemon()
+    crate::adapters::codex_app_server::ensure_daemon()
 }
 
 pub(super) fn hooked_cas_connect() -> bool {

@@ -97,7 +97,24 @@ pub(super) fn lock_daemon() -> Option<DaemonLock> {
     Some(DaemonLock(file))
 }
 
-/// Ensure the shared app-server daemon is listening; return true if ready.
+/// What `ensure_daemon` did: kept the daemon that was answering, started
+/// a new one (after stopping a stale one, or on no daemon at all), or
+/// could not get one up. Only `Started` invalidates a client of the
+/// daemon that was there before — a reused daemon keeps every tracked
+/// turn its clients hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonOutcome {
+    Reused,
+    Started,
+    Failed,
+}
+
+/// `ensure_daemon` as a plain readiness bool.
+pub fn spawn_daemon() -> bool {
+    ensure_daemon() != DaemonOutcome::Failed
+}
+
+/// Ensure the shared app-server daemon is listening.
 ///
 /// Reuses a live daemon if one already answers on the shared socket
 /// (idempotent spawn); a stale socket from a dead daemon is removed first.
@@ -110,24 +127,24 @@ pub(super) fn lock_daemon() -> Option<DaemonLock> {
 /// verdict including a missing baseline settled by asking the daemon,
 /// stop, start, record — holds the daemon lock. Returns false if the
 /// daemon fails to bind or dies before ready.
-pub fn spawn_daemon() -> bool {
+pub fn ensure_daemon() -> DaemonOutcome {
     crate::plugin_manager::ensure_codex_plugin_current();
     let sock = shared_socket_path();
     if let Some(parent) = sock.parent() {
         if fs::create_dir_all(parent).is_err() {
-            return false;
+            return DaemonOutcome::Failed;
         }
     }
     let Some(_lock) = lock_daemon() else {
-        return false;
+        return DaemonOutcome::Failed;
     };
     if sock.exists() {
         if probe_socket(&sock) {
             if !daemon_auth_stale_locked() {
-                return true; // reuse the live daemon
+                return DaemonOutcome::Reused;
             }
             if !stop_daemon() {
-                return false;
+                return DaemonOutcome::Failed;
             }
         }
         let _ = fs::remove_file(&sock); // stale socket from a dead daemon
@@ -145,7 +162,7 @@ pub fn spawn_daemon() -> bool {
         .open(stderr_path)
     {
         Ok(file) => file,
-        Err(_) => return false,
+        Err(_) => return DaemonOutcome::Failed,
     };
     let mut cmd = Command::new("codex");
     cmd.arg("app-server")
@@ -168,12 +185,12 @@ pub fn spawn_daemon() -> bool {
     }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(_) => return DaemonOutcome::Failed,
     };
     let deadline = Instant::now() + Duration::from_secs_f64(DAEMON_START_TIMEOUT);
     while Instant::now() < deadline {
         if let Ok(Some(_status)) = child.try_wait() {
-            return false; // died before binding
+            return DaemonOutcome::Failed; // died before binding
         }
         if probe_socket(&sock) {
             let _ = fs::write(shared_pidfile_path(), child.id().to_string());
@@ -183,14 +200,14 @@ pub fn spawn_daemon() -> bool {
                 }
                 None => clear_auth_baseline(),
             }
-            return true;
+            return DaemonOutcome::Started;
         }
         thread::sleep(Duration::from_millis(200));
     }
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
-    false
+    DaemonOutcome::Failed
 }
 
 /// The pid hive recorded for the daemon, only while a process by that pid
