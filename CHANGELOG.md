@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.4
+
+### Features
+
+- `hive update` narrates each step on stderr as it starts (release lookup, download, checksum, unpack, the candidate's own `--version`, the install) and, on a terminal, shows curl's progress bar for the archive download; a pipe still gets the silent download and stdout keeps its one-line outcome (#189)
+
 ## 0.19.3
 
 ### Features
