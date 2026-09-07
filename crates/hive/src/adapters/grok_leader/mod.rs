@@ -49,6 +49,10 @@ pub use pool::*;
 
 const INIT_TIMEOUT: f64 = 10.0; // initialize answers ~2 s after process start
 const LOAD_TIMEOUT: f64 = 5.0; // session/load ~0.8 s plus the notification replay
+
+// Creating a session includes workspace and actor setup; cold starts can
+// exceed the replay budget used for session/load.
+const NEW_SESSION_TIMEOUT: f64 = 30.0;
 const HANDSHAKE_TIMEOUT: f64 = INIT_TIMEOUT + LOAD_TIMEOUT;
 const ACK_TIMEOUT: f64 = 10.0;
 const CALL_TIMEOUT: f64 = 10.0;

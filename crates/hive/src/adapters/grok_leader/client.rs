@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
-use super::{ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS};
+use super::{
+    ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, NEW_SESSION_TIMEOUT,
+};
 
 // --------------------------------------------------------------------------
 // per-session runtime state, kept current by the reader thread
@@ -768,7 +770,7 @@ impl GrokStdioClient {
                 "mcpServers": [],
                 "_meta": {"sessionId": session_id},
             }),
-            LOAD_TIMEOUT,
+            NEW_SESSION_TIMEOUT,
             Some(session_id),
         );
         created
