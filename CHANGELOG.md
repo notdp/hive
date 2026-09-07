@@ -4,6 +4,13 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.2
+
+### Fixes
+
+- the shared codex app-server daemon is replaced when `auth.json` moves to another account or workspace: codex reloads auth only for the same account id (`reload_if_account_id_matches`), so after a cross-account login every member's turn ended with "you have since logged out or signed in to another account". hive records the account the daemon was spawned with (`hive-shared.auth`), asks a daemon without a baseline for its own account over `account/rateLimits/read`, and the hived's tick and `spawn_daemon` replace a stale daemon under one flock per CODEX_HOME, signalling only a pid that is still this socket's app-server and clearing records only once the process is gone; attached TUIs reconnect on their own, and the hived keeps its daemon client (and the workflow turns it tracks) whenever the daemon is reused (#185)
+- `hive join` runs the same claude pane↔job gate as `hive create` before any tag, context or roster write, so a bare interactive claude pane is refused up front instead of enrolled with an empty session id when `--no-notify` skipped the delivery check; the refusal points at the managed launcher for a fresh session (#186)
+
 ## 0.19.1
 
 ### Fixes
