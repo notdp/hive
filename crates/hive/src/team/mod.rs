@@ -1135,7 +1135,7 @@ mod scope;
 pub(crate) use delete::delete_team;
 pub(crate) use roster::{
     gc_dead_teams, live_member_pids, member_registry_row, register_agent_member,
-    session_member_row, sorted_member_rows, spawn_team_agent,
+    session_member_row, sorted_member_rows, spawn_team_agent, with_host_session,
 };
 pub(crate) use scope::{
     add_runtime_location_fields, ensure_pane_in_scope, ensure_team_hived, load_team,

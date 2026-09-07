@@ -238,12 +238,78 @@ fn field_str(member: &Map<String, Value>, field: &str) -> String {
         .to_string()
 }
 
+/// The desktop conversation a Claude session member belongs to
+/// (`claude_desktop`), carried only when the enrolling CLI proved it; a
+/// row without one is any other member.
+pub const HOST_SESSION_FIELD: &str = "hostSessionId";
+
 fn member_row(member: &Map<String, Value>) -> Map<String, Value> {
     let mut row = Map::new();
     for field in MEMBER_FIELDS {
         row.insert(field.to_string(), Value::String(field_str(member, field)));
     }
+    let host = field_str(member, HOST_SESSION_FIELD);
+    if !host.is_empty() {
+        row.insert(HOST_SESSION_FIELD.to_string(), Value::String(host));
+    }
     row
+}
+
+/// Move a Claude session member from the session it was enrolled under to
+/// the one its desktop conversation now runs (`hived/succession`): the
+/// hived's one roster write that changes an identity key, so it is a
+/// compare-and-set under the store lock. Writes only when *name* on
+/// *team* (the instance *created_at* names) still carries *expected_old*
+/// and a host session id, and no member anywhere carries *new* — a row
+/// rebound or recreated since the observation is `stale`, a target another
+/// member holds is `taken`. Never adds or removes a name.
+pub fn commit_succession(
+    team: &str,
+    name: &str,
+    expected_old: &str,
+    new: &str,
+    created_at: &str,
+) -> Result<&'static str> {
+    if expected_old.is_empty() || new.is_empty() || expected_old == new {
+        return Ok("rejected");
+    }
+    let path = match entry_path(team) {
+        Some(p) => p,
+        None => return Ok("rejected"),
+    };
+    let _lock = locked()?;
+    let entry = match load(team) {
+        Some(e) => e,
+        None => return Ok("missing"),
+    };
+    if !created_at_matches(entry.get("createdAt"), created_at) {
+        return Ok("missing");
+    }
+    if member_for_session(new, None).is_some() {
+        return Ok("taken");
+    }
+    let mut members: Vec<Map<String, Value>> = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|m| m.as_object().cloned()).collect())
+        .unwrap_or_default();
+    let Some(row) = members.iter_mut().find(|m| field_str(m, "name") == name) else {
+        return Ok("missing");
+    };
+    if field_str(row, "cli") != "claude"
+        || field_str(row, "sessionId") != expected_old
+        || field_str(row, HOST_SESSION_FIELD).is_empty()
+    {
+        return Ok("stale");
+    }
+    row.insert("sessionId".to_string(), Value::String(new.to_string()));
+    let mut updated = entry.clone();
+    updated.insert(
+        "members".to_string(),
+        Value::Array(members.into_iter().map(Value::Object).collect()),
+    );
+    write_atomic(&path, &updated)?;
+    Ok("written")
 }
 
 /// Register a team at creation time (CLI write lane), overwriting any
@@ -973,5 +1039,109 @@ mod tests {
         assert_eq!(outcomes.iter().filter(|v| **v == "reserved").count(), 1);
         assert_eq!(outcomes.iter().filter(|v| **v == "exists").count(), 7);
         assert_eq!(member_names(&load("honey").unwrap()), names(&["impl"]));
+    }
+    #[test]
+    fn test_member_row_keeps_a_host_session_id_only_when_set() {
+        let (_tmp, _store, _guard) = store();
+        let desk = m(&[
+            ("name", "orch"),
+            ("cli", "claude"),
+            ("sessionId", "sid-a"),
+            (HOST_SESSION_FIELD, "local_h"),
+        ]);
+        let plain = m(&[("name", "rex"), ("cli", "codex"), ("sessionId", "t1")]);
+        record_team("honey", "/ws", "1.0", &[desk, plain], "").unwrap();
+        let entry = load("honey").unwrap();
+        let rows = entry["members"].as_array().unwrap();
+        assert_eq!(rows[0][HOST_SESSION_FIELD], "local_h");
+        assert!(rows[1].get(HOST_SESSION_FIELD).is_none());
+        // the hived's field backfill never touches it
+        let merged = backfill_members(
+            &[rows[0].as_object().unwrap().clone()],
+            &[m(&[("name", "orch"), ("sessionId", "sid-b")])],
+        );
+        assert_eq!(merged[0][HOST_SESSION_FIELD], "local_h");
+        assert_eq!(merged[0]["sessionId"], "sid-b");
+    }
+
+    #[test]
+    fn test_commit_succession_is_a_compare_and_set_on_the_old_session() {
+        let (_tmp, _store, _guard) = store();
+        let desk = m(&[
+            ("name", "orch"),
+            ("cli", "claude"),
+            ("sessionId", "sid-a"),
+            (HOST_SESSION_FIELD, "local_h"),
+        ]);
+        record_team("honey", "/ws", "1.0", &[desk], "").unwrap();
+        record_team(
+            "comb",
+            "/ws2",
+            "2.0",
+            &[m(&[
+                ("name", "ant"),
+                ("cli", "claude"),
+                ("sessionId", "sid-taken"),
+            ])],
+            "",
+        )
+        .unwrap();
+
+        // a target any member anywhere holds is refused
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-a", "sid-taken", "1.0").unwrap(),
+            "taken"
+        );
+        // the observation must still describe the row
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-old", "sid-c", "1.0").unwrap(),
+            "stale"
+        );
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-a", "sid-c", "9.9").unwrap(),
+            "missing"
+        );
+        assert_eq!(
+            commit_succession("honey", "ghost", "sid-a", "sid-c", "1.0").unwrap(),
+            "missing"
+        );
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-a", "sid-a", "1.0").unwrap(),
+            "rejected"
+        );
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-a", "sid-c", "1.0").unwrap(),
+            "written"
+        );
+        let entry = load("honey").unwrap();
+        let row = entry["members"][0].as_object().unwrap();
+        assert_eq!(row["sessionId"], "sid-c");
+        assert_eq!(row[HOST_SESSION_FIELD], "local_h");
+        assert_eq!(
+            member_for_session("sid-c", None),
+            Some(("honey".to_string(), "orch".to_string()))
+        );
+        // a second observation of the old id finds a rebound row: stale
+        assert_eq!(
+            commit_succession("honey", "orch", "sid-a", "sid-d", "1.0").unwrap(),
+            "stale"
+        );
+        // a row without a host session id is never moved
+        record_team(
+            "wasp",
+            "/ws3",
+            "3.0",
+            &[m(&[
+                ("name", "orch"),
+                ("cli", "claude"),
+                ("sessionId", "sid-w"),
+            ])],
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            commit_succession("wasp", "orch", "sid-w", "sid-x", "3.0").unwrap(),
+            "stale"
+        );
     }
 }

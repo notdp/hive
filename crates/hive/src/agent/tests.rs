@@ -2078,6 +2078,7 @@ fn test_headless_claude_session_send_uses_inbox_socket_fallback() {
             pid: 1,
             cwd: String::new(),
             kind: String::new(),
+            entrypoint: String::new(),
             socket_path: "/tmp/ccd.sock".to_string(),
             session_id: "ccd-sid-1".to_string(),
             title: String::new(),

@@ -252,10 +252,9 @@ fn create_detached_team(
             if !creator.session_id.is_empty()
                 && crate::registry::member_for_session(&creator.session_id, None).is_none() =>
         {
-            Some(session_member_row(
-                LEAD_AGENT_NAME,
-                "claude",
-                &creator.session_id,
+            Some(crate::team::with_host_session(
+                session_member_row(LEAD_AGENT_NAME, "claude", &creator.session_id),
+                creator,
             ))
         }
         _ => None,
@@ -829,7 +828,10 @@ fn join_as_ccd(team_name: &str, name_override: &str) {
     } else {
         name_override.to_string()
     };
-    let row = session_member_row(&member_name, "claude", &guest.session_id);
+    let row = crate::team::with_host_session(
+        session_member_row(&member_name, "claude", &guest.session_id),
+        &guest,
+    );
     let _ = crate::registry::record_member(team_name, &row, "");
     // Eager display: the joined session gets its mirror pane now, not at
     // the next attach.

@@ -5015,6 +5015,7 @@ fn live_session(session_id: &str, pid: i32) -> crate::adapters::claude_sessions:
         pid,
         cwd: "/repo".to_string(),
         kind: String::new(),
+        entrypoint: String::new(),
         socket_path: "/tmp/desk.sock".to_string(),
         session_id: session_id.to_string(),
         title: String::new(),

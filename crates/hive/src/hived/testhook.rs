@@ -74,6 +74,12 @@ pub struct Hook {
     // claude_sessions
     pub cs_session_status: Option<SessionStatus>,
     pub cs_list_sessions: Option<F0<Vec<ClaudeSession>>>,
+    // claude_desktop / registry succession
+    pub desktop_record: Option<S1<Option<crate::adapters::claude_desktop::DesktopRecord>>>,
+    #[allow(clippy::type_complexity)]
+    pub commit_succession: Option<
+        Arc<dyn Fn(&str, &str, &str, &str, &str) -> anyhow::Result<&'static str> + Send + Sync>,
+    >,
     // claude_view
     pub cv_journal_signature: Option<F0<Vec<String>>>,
     pub cv_view_for_pane: Option<S1<PaneView>>,

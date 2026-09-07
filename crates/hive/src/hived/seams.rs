@@ -317,6 +317,32 @@ pub(super) fn hooked_cs_list_sessions() -> Vec<crate::adapters::claude_sessions:
     crate::adapters::claude_sessions::list_sessions()
 }
 
+// --- claude_desktop / registry succession seams ------------------------------
+
+pub(super) fn hooked_desktop_record(
+    host_session_id: &str,
+) -> Option<crate::adapters::claude_desktop::DesktopRecord> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.desktop_record.clone()).flatten() {
+        return f(host_session_id);
+    }
+    crate::adapters::claude_desktop::desktop_record(host_session_id)
+}
+
+pub(super) fn hooked_commit_succession(
+    team: &str,
+    name: &str,
+    expected_old: &str,
+    new: &str,
+    created_at: &str,
+) -> anyhow::Result<&'static str> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.commit_succession.clone()).flatten() {
+        return f(team, name, expected_old, new, created_at);
+    }
+    crate::registry::commit_succession(team, name, expected_old, new, created_at)
+}
+
 // --- claude_view seams -----------------------------------------------------
 
 pub(super) fn hooked_cv_journal_signature() -> Vec<String> {

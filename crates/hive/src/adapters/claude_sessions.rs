@@ -63,6 +63,9 @@ pub struct ClaudeSession {
     pub pid: i32,
     pub cwd: String,
     pub kind: String,
+    /// What launched the session (`cli`, `claude-desktop`; observed on
+    /// 2.1.263), empty when the registry entry does not say.
+    pub entrypoint: String,
     pub socket_path: String,
     pub session_id: String,
     pub title: String,
@@ -223,6 +226,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
             pid,
             cwd: truthy_str(obj.get("cwd")),
             kind: truthy_str(obj.get("kind")),
+            entrypoint: truthy_str(obj.get("entrypoint")),
             socket_path: sock,
             session_id,
             title,

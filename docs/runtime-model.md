@@ -31,6 +31,29 @@ Consequences across modules:
 - **Roster writers.** The CLI adds and removes roster names; the hived only
   backfills fields of names already there. An observation racing a `hive kill`
   must not resurrect the killed member.
+- **A desktop conversation is followed across its CLI sessions.** A Claude
+  session member the desktop app launched enrols with the conversation's
+  stable id (`hostSessionId`, from `CLAUDE_CODE_HOST_SESSION_ID`; taken only
+  when the session is interactive, desktop-launched, and the desktop's own
+  record `claude-code-sessions/<account>/<org>/<id>.json` names it as the
+  conversation's current CLI session — a child CLI that merely inherited the
+  variable gets none). A rewind-and-resend, a `/clear` or a return to the
+  pre-clear session makes the desktop restart the CLI under a new session id
+  and move its record's `cliSessionId` on, listing the old id under
+  `priorCliSessionIds`; the roster row still names the old id, so the member
+  reads as gone. Every 30s the hived (`hived/succession.rs`) moves such a
+  row to the record's current session when, and only when, that record
+  lists the row's session as a prior, the current one is live, no member
+  anywhere holds it, and no other row resolves to it; the write is a
+  compare-and-set under the store lock (`registry::commit_succession`), so a
+  row rebound or recreated since the observation is left alone, and
+  `member.session_succeeded` is emitted only for a write that landed
+  (`member.session_refused` names the reason otherwise). A conversation the
+  human forked has a stable id of its own and never matches — a fork is a
+  new session, not the member. A CLI's own rewind keeps its session id and
+  needs nothing. Out of scope: a bg job member's `/clear` (its roster
+  session id is also its job address; following it needs a job id on the
+  row first), and hosts other than the desktop app.
 - **The `display` window id.** It is a cache: authority checks do not read
   it, and hived identity is `(workspace socket, team, hive home)`, so a dead
   window does not retire a hived on its own; a missing registry entry with
