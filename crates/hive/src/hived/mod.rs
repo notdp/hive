@@ -51,6 +51,11 @@ pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
 const HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
 pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
+// Identity checks must wait strictly longer than the worst tick phase:
+// the main loop cannot accept requests during that phase. Five seconds
+// gives headroom over observed idle ticks up to 616ms and spawn bursts;
+// revisit this budget if tick latency grows. Startup polling stays short.
+pub(crate) const IDENTITY_PING_TIMEOUT: f64 = 5.0;
 pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // The CLI's socket budget must be strictly longer than the work it asks the
 // hived to perform: worst-case native transport submission (claude inbox

@@ -831,15 +831,15 @@ pub(super) fn hooked_fresh_snapshot_session_id(pane_id: &str, now: Option<f64>) 
 }
 
 pub fn request_ping(workspace: &str) -> Option<Map<String, Value>> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.request_ping.clone()).flatten() {
-        return f(workspace);
-    }
-    request_ping_impl(workspace)
+    hooked_request_ping(workspace, SOCKET_RETRY_INTERVAL)
 }
 
-pub(super) fn hooked_request_ping(workspace: &str) -> Option<Map<String, Value>> {
-    request_ping(workspace)
+pub(super) fn hooked_request_ping(workspace: &str, timeout: f64) -> Option<Map<String, Value>> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.request_ping.clone()).flatten() {
+        return f(workspace, timeout);
+    }
+    request_ping_impl(workspace, timeout)
 }
 
 fn cleanup_socket(workspace: &str) {
