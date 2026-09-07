@@ -253,7 +253,21 @@ pub trait Io {
     fn run_version(&self, binary: &Path) -> Result<String, String>;
 }
 
-pub struct RealIo;
+/// The real outside world. The candidate's `--version` timeout is a field
+/// rather than a constant read inside the method, so a test can drive
+/// [`Io::run_version`] itself against a candidate that never answers
+/// without waiting [`VERSION_TIMEOUT`] out.
+pub struct RealIo {
+    version_timeout: Duration,
+}
+
+impl Default for RealIo {
+    fn default() -> Self {
+        Self {
+            version_timeout: VERSION_TIMEOUT,
+        }
+    }
+}
 
 fn curl_base(max_time: &str) -> Command {
     let mut cmd = Command::new("curl");
@@ -327,7 +341,7 @@ impl Io for RealIo {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("candidate could not run: {e}"))?;
-        let out = wait_with_timeout(child, VERSION_TIMEOUT)?;
+        let out = wait_with_timeout(child, self.version_timeout)?;
         if !out.status.success() {
             return Err(format!(
                 "candidate --version failed: {}",
@@ -359,8 +373,7 @@ fn wait_with_timeout(
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "candidate --version did not answer within {}s",
-                timeout.as_secs()
+                "candidate --version did not answer within {timeout:?}"
             ));
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -526,12 +539,20 @@ pub fn run(io: &dyn Io, check: bool, force: bool) -> Result<Outcome, Failure> {
             code: 0,
         });
     }
-    install(io, current, latest).map_err(|e| fail(1, e))
+    install(io, current, latest, target_triple()).map_err(|e| fail(1, e))
 }
 
-/// Download, verify and commit *latest* over the running binary.
-fn install(io: &dyn Io, current: Version, latest: Version) -> Result<Outcome, String> {
-    let triple = target_triple().ok_or_else(|| {
+/// Download, verify and commit *latest* over the running binary. The
+/// running build's release triple is a parameter, not a call to
+/// [`target_triple`]: the `None` lane belongs to this function and a test
+/// cannot recompile itself for an unpublished target.
+fn install(
+    io: &dyn Io,
+    current: Version,
+    latest: Version,
+    triple: Option<&str>,
+) -> Result<Outcome, String> {
+    let triple = triple.ok_or_else(|| {
         format!(
             "no release binary is published for this target ({} {}); \
              build from source instead",
@@ -640,6 +661,7 @@ pub fn print_and_exit(outcome: Outcome) -> ! {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -677,6 +699,10 @@ mod tests {
         }
         // the crate's own version is one, or `current_version` panics
         current_version();
+        // and the fixtures the decision tests hang off straddle it, at
+        // every crate version — including a `.0` patch
+        assert!(older() < current_version(), "{} is not older", older());
+        assert!(newer() > current_version(), "{} is not newer", newer());
     }
 
     #[test]
@@ -852,6 +878,14 @@ mod tests {
         version: Result<String, String>,
         /// The last moment before the fingerprint re-check and the rename.
         on_version: Option<VersionHook>,
+        /// Every URL asked for, in order.
+        urls: RefCell<Vec<String>>,
+    }
+
+    impl Fake {
+        fn urls(&self) -> Vec<String> {
+            self.urls.borrow().clone()
+        }
     }
 
     /// Runs where the real `--version` call sits, on (candidate, target).
@@ -886,6 +920,7 @@ mod tests {
             extract: Extract::File,
             version: Ok(format!("hive, version {latest}")),
             on_version: None,
+            urls: RefCell::new(Vec::new()),
         }
     }
 
@@ -893,10 +928,12 @@ mod tests {
         fn current_exe(&self) -> Result<PathBuf, String> {
             self.exe.clone()
         }
-        fn fetch_effective_url(&self, _url: &str) -> Result<String, String> {
+        fn fetch_effective_url(&self, url: &str) -> Result<String, String> {
+            self.urls.borrow_mut().push(url.to_string());
             self.effective.clone()
         }
         fn download(&self, url: &str, dest: &Path) -> Result<(), String> {
+            self.urls.borrow_mut().push(url.to_string());
             if let Some(err) = &self.download_err {
                 return Err(err.clone());
             }
@@ -968,13 +1005,29 @@ mod tests {
         Version(major, minor, patch + 1)
     }
 
+    /// A release strictly older than this build. Decrementing the patch
+    /// alone would land on the current version whenever it ends in `.0`.
+    fn older() -> Version {
+        let Version(major, minor, patch) = current_version();
+        if patch > 0 {
+            Version(major, minor, patch - 1)
+        } else if minor > 0 {
+            Version(major, minor - 1, 999)
+        } else {
+            Version(
+                major.checked_sub(1).expect("the crate is past 0.0.0"),
+                999,
+                999,
+            )
+        }
+    }
+
     // --- decisions ---
 
     #[test]
     fn test_check_reports_three_states_without_touching_the_disk() {
         let bed = bed();
         let current = current_version();
-        let Version(major, minor, patch) = current;
 
         let mut io = fake(&bed.target, newer());
         let out = run(&io, true, false).unwrap();
@@ -987,9 +1040,10 @@ mod tests {
         assert_eq!(out.code, 0);
         assert_eq!(out.lines[2], "status  up to date");
 
-        io.effective = Ok(format!("{TAG_PREFIX}v{major}.{minor}.{}", patch.max(1) - 1));
+        io.effective = Ok(format!("{TAG_PREFIX}v{}", older()));
         let out = run(&io, true, false).unwrap();
         assert_eq!(out.code, 0);
+        assert_eq!(out.lines[1], format!("latest  {}", older()));
         assert_eq!(out.lines[2], "status  ahead of the latest release");
 
         // nothing was created: no lock, no staging
@@ -1000,9 +1054,7 @@ mod tests {
     #[test]
     fn test_a_local_build_ahead_of_the_release_is_never_downgraded() {
         let bed = bed();
-        let Version(major, minor, patch) = current_version();
-        let mut io = fake(&bed.target, Version(major, minor, patch.max(1) - 1));
-        io.effective = Ok(format!("{TAG_PREFIX}v{major}.{minor}.{}", patch.max(1) - 1));
+        let io = fake(&bed.target, older());
         let out = run(&io, false, false).unwrap();
         assert_eq!(out.code, 0);
         assert!(out.lines[0].contains("is ahead of the latest release"));
@@ -1034,7 +1086,32 @@ mod tests {
     fn test_a_newer_release_replaces_the_running_binary() {
         let bed = bed();
         let latest = newer();
-        let io = fake(&bed.target, latest);
+        let triple = target_triple().expect("this build has a release triple");
+        let mut io = fake(&bed.target, latest);
+        // the candidate is staged beside the target, so the commit rename
+        // stays inside one filesystem
+        io.on_version = Some(Box::new(|candidate: &Path, target: &Path| {
+            let staging = candidate
+                .parent()
+                .expect("the candidate has a staging directory");
+            assert_eq!(
+                staging.parent(),
+                target.parent(),
+                "{} is not beside {}",
+                staging.display(),
+                target.display()
+            );
+            assert!(
+                staging
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("hive-update-"),
+                "{}",
+                staging.display()
+            );
+        }));
+
         let out = run(&io, false, false).unwrap();
         assert_eq!(out.code, 0);
         assert_eq!(
@@ -1046,6 +1123,21 @@ mod tests {
             )
         );
         assert_intact(&bed.target, NEW_BINARY);
+
+        // the release it went and got: the latest tag, this triple, spelled
+        // out rather than rebuilt from the same helpers the code uses
+        assert_eq!(
+            io.urls(),
+            vec![
+                "https://github.com/notdp/hive/releases/latest".to_string(),
+                format!(
+                    "https://github.com/notdp/hive/releases/download/v{latest}/hive-{triple}.tar.xz"
+                ),
+                format!(
+                    "https://github.com/notdp/hive/releases/download/v{latest}/hive-{triple}.tar.xz.sha256"
+                ),
+            ]
+        );
     }
 
     // --- the failure matrix: every branch leaves the target's bytes alone ---
@@ -1224,16 +1316,47 @@ mod tests {
     }
 
     #[test]
-    fn test_check_needs_neither_a_target_nor_a_release_asset() {
-        // The install lane owns `current_exe` and the release triple, so a
-        // target it cannot resolve — and, the same way, a build with no
-        // published archive — leaves `--check` working.
+    fn test_check_needs_no_target_it_can_resolve() {
+        // `current_exe` is read in the install lane alone, so a target that
+        // cannot be resolved leaves `--check` working.
         let bed = bed();
         let mut io = fake(&bed.target, newer());
         io.exe = Err("no current_exe on this platform".into());
         assert_eq!(run(&io, true, false).unwrap().code, EXIT_UPDATE_AVAILABLE);
         assert_eq!(run(&io, false, false).unwrap_err().code, 1);
         assert_intact(&bed.target, OLD);
+    }
+
+    #[test]
+    fn test_a_target_with_no_published_archive_refuses_before_anything_else() {
+        // `target_triple()` is decided at compile time, so the unpublished
+        // lane is driven through `install`'s parameter: a machine running
+        // this suite always has a triple of its own.
+        let bed = bed();
+        let latest = newer();
+        let current = current_version();
+        let mut io = fake(&bed.target, latest);
+        io.exe = Err("no current_exe on this platform".into());
+
+        let err = install(&io, current, latest, None).unwrap_err();
+        assert!(
+            err.contains("no release binary is published for this target")
+                && err.contains(std::env::consts::ARCH)
+                && err.contains(std::env::consts::OS),
+            "{err}"
+        );
+        // before the running binary is even looked up, and before any fetch
+        assert!(!err.contains("current_exe"), "{err}");
+        assert!(io.urls().is_empty(), "an unsupported target still fetched");
+        assert_intact(&bed.target, OLD);
+
+        // given a triple, the same run gets past that check
+        let err = install(&io, current, latest, Some("aarch64-apple-darwin")).unwrap_err();
+        assert!(err.contains("no current_exe"), "{err}");
+        assert_intact(&bed.target, OLD);
+
+        // and `--check`, which never enters `install`, still answers
+        assert_eq!(run(&io, true, false).unwrap().code, EXIT_UPDATE_AVAILABLE);
     }
 
     // --- the real thing, offline: real tar, real sha2, real rename ---
@@ -1271,13 +1394,21 @@ mod tests {
             fs::copy(from, dest).map(|_| ()).map_err(|e| e.to_string())
         }
         fn tar_list(&self, archive: &Path) -> Result<Vec<String>, String> {
-            RealIo.tar_list(archive)
+            RealIo::default().tar_list(archive)
         }
         fn tar_extract(&self, archive: &Path, dest: &Path) -> Result<(), String> {
-            RealIo.tar_extract(archive, dest)
+            RealIo::default().tar_extract(archive, dest)
         }
         fn run_version(&self, binary: &Path) -> Result<String, String> {
-            RealIo.run_version(binary)
+            // real tar unpacked it beside the target, on one filesystem
+            assert_eq!(
+                binary.parent().and_then(Path::parent),
+                self.target.parent(),
+                "{} is not staged beside {}",
+                binary.display(),
+                self.target.display()
+            );
+            RealIo::default().run_version(binary)
         }
     }
 
@@ -1348,7 +1479,7 @@ mod tests {
             0o111
         );
         assert_eq!(
-            RealIo.run_version(&bed.target).unwrap(),
+            RealIo::default().run_version(&bed.target).unwrap(),
             format!("hive, version {latest}")
         );
 
@@ -1369,20 +1500,19 @@ mod tests {
         let script = tmp.path().join("hive");
         fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let child = Command::new(&script)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        // the method the command itself calls, with only the wait shortened
+        let io = RealIo {
+            version_timeout: Duration::from_millis(200),
+        };
         let started = Instant::now();
-        let err = wait_with_timeout(child, Duration::from_millis(200)).unwrap_err();
-        assert!(err.contains("did not answer"), "{err}");
+        let err = io.run_version(&script).unwrap_err();
+        assert!(err.contains("did not answer within 200ms"), "{err}");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "waited too long"
         );
+        // and what it waits in production
+        assert_eq!(RealIo::default().version_timeout, VERSION_TIMEOUT);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::update::{self, RealIo};
 /// any failure; with it, 0 = no update, 1 = update available, 2 = the
 /// query or the tag could not be read.
 pub(crate) fn update_cmd(check: bool, force: bool) -> ! {
-    match update::run(&RealIo, check, force) {
+    match update::run(&RealIo::default(), check, force) {
         Ok(outcome) => update::print_and_exit(outcome),
         Err(failure) => {
             eprintln!("Error: {}", failure.message);
