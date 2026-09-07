@@ -91,7 +91,7 @@ hive update          # このバイナリを最新 release に置き換える
 hive update --check  # 確認のみ: 新しい release があれば exit 1
 ```
 
-`hive update` は、いま実行中のバイナリ（PATH 検索ではなく `current_exe()`）を、自分の target triple 向け release アーカイブで置き換えます。`releases/latest` を解決し、その tag に固定したアーカイブと `.sha256` を取得してダイジェストとアーカイブの中身を検証し、展開した候補の `--version` を実行してから、ようやく target に rename します。target が通常ファイルでない場合（symlink やパッケージマネージャ管理のパス: 入れた方法で更新してください）、同じバイナリに対する 2 つ目の `hive update`、ダウンロード中に中身が変わった target は拒否します。それ以外は何も動かしません: receipt も PATH も plugin sync も、hived やメンバーの再起動もありません。`--force` は実行中と同じバージョンの release ビルドを入れ直します。最新 release より進んだローカルビルドをダウングレードすることはありません。
+`hive update` は、いま実行中のバイナリ（PATH 検索ではなく `current_exe()`）を、自分の target triple 向け release アーカイブで置き換えます。`releases/latest` を解決し、その tag に固定したアーカイブと `.sha256` を取得してダイジェストとアーカイブの中身を検証し、展開した候補の `--version` を実行してから、ようやく target に rename します。ネットワークに問い合わせる前にバイナリをロックして指紋を取り、ロック下のファイルはこのプロセスと同じバージョンを報告しなければなりません。target が通常ファイルでない場合（symlink はパスを表示して拒否。すべての symlink やパッケージマネージャの入口を識別するわけではなく、パッケージマネージャが所有するインストールはその経路で更新してください）、同じバイナリに対する 2 つ目の `hive update`、更新の実行中に中身が変わった target は拒否します。それ以外は何も動かしません: receipt も PATH も plugin sync も、hived やメンバーの再起動もありません。`--force` は実行中と同じバージョンの release ビルドを入れ直します。最新 release より進んだローカルビルドをダウングレードすることはありません。
 
 この経路が使えない場合（プラットフォーム向けの release asset がない、パッケージマネージャが所有するインストール）は、[インストール](#インストール)のインストーラ 1 行を再実行します。常に最新の release を取得します。リリースは crate のバージョンに一致する `v*` タグを push することで切られ、CI（cargo-dist）が各プラットフォームのバイナリをビルドして GitHub Release を公開します。
 

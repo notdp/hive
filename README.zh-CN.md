@@ -90,7 +90,7 @@ hive update          # 把这个二进制换成最新 release
 hive update --check  # 只查：有更新时退出 1
 ```
 
-`hive update` 替换的是正在运行的这个二进制（`current_exe()`，不是搜 PATH），换成它自己 target triple 的 release 归档：解析 `releases/latest`，按该 tag 下载归档和 `.sha256`，校验摘要和归档条目，运行解出来的候选的 `--version`，然后才 rename 覆盖目标。以下情况拒绝：目标不是普通文件（symlink 或包管理器的路径：按当初的安装方式更新）、同一个二进制上的第二个 `hive update`、下载期间内容变了的目标。别的一概不动：不写 receipt、不改 PATH、不做 plugin sync、不重启 hived 或成员。`--force` 重装当前版本的 release 构建；领先于最新 release 的本地构建绝不降级。
+`hive update` 替换的是正在运行的这个二进制（`current_exe()`，不是搜 PATH），换成它自己 target triple 的 release 归档：解析 `releases/latest`，按该 tag 下载归档和 `.sha256`，校验摘要和归档条目，运行解出来的候选的 `--version`，然后才 rename 覆盖目标。问网络之前先锁住并记下二进制的指纹，锁下的文件必须报告和本进程相同的版本。以下情况拒绝：目标不是普通文件（symlink 打印路径拒绝；hive 不识别所有 symlink 或包管理器入口，包管理器所有的安装走它自己的渠道更新）、同一个二进制上的第二个 `hive update`、更新运行期间内容变了的目标。别的一概不动：不写 receipt、不改 PATH、不做 plugin sync、不重启 hived 或成员。`--force` 重装当前版本的 release 构建；领先于最新 release 的本地构建绝不降级。
 
 这条路走不通时（平台没有 release asset，或安装由包管理器所有），重跑[安装](#安装)里的 installer 一行命令，它总是拉取最新 release。发版方式是推一个与 crate 版本一致的 `v*` tag；CI（cargo-dist）编译各平台二进制并发布 GitHub Release。
 

@@ -506,10 +506,8 @@ fn latest_version(io: &dyn Io) -> Result<Version, String> {
 /// `--force` and a newer local version never downgrades.
 pub fn run(io: &dyn Io, check: bool, force: bool) -> Result<Outcome, Failure> {
     let current = current_version();
-    let query_exit = if check { EXIT_QUERY_FAILED } else { 1 };
-    let latest = latest_version(io).map_err(|e| fail(query_exit, e))?;
-
     if check {
+        let latest = latest_version(io).map_err(|e| fail(EXIT_QUERY_FAILED, e))?;
         let status = if latest > current {
             "update available"
         } else if latest == current {
@@ -532,31 +530,21 @@ pub fn run(io: &dyn Io, check: bool, force: bool) -> Result<Outcome, Failure> {
         });
     }
 
-    if latest < current {
-        return Ok(Outcome {
-            lines: vec![format!(
-                "hive {current} is ahead of the latest release {latest}; nothing to install"
-            )],
-            code: 0,
-        });
-    }
-    if latest == current && !force {
-        return Ok(Outcome {
-            lines: vec![format!("hive {current} is the latest release")],
-            code: 0,
-        });
-    }
-    install(io, current, latest, target_triple()).map_err(|e| fail(1, e))
+    install(io, current, force, target_triple()).map_err(|e| fail(1, e))
 }
 
-/// Download, verify and commit *latest* over the running binary. The
-/// running build's release triple is a parameter, not a call to
+/// Pin the running binary, then ask what the latest release is, then
+/// download, verify and commit it over that binary. The target is locked
+/// and fingerprinted before the network is touched, and the file under the
+/// lock must report the version this process is: an install that landed
+/// before or during the query is never overwritten with an older release.
+/// The running build's release triple is a parameter, not a call to
 /// [`target_triple`]: the `None` lane belongs to this function and a test
 /// cannot recompile itself for an unpublished target.
 fn install(
     io: &dyn Io,
     current: Version,
-    latest: Version,
+    force: bool,
     triple: Option<&str>,
 ) -> Result<Outcome, String> {
     let triple = triple.ok_or_else(|| {
@@ -583,6 +571,30 @@ fn install(
 
     let _lock = take_lock(&target)?;
     let before = fingerprint(&target)?;
+    let on_disk = io.run_version(&target)?;
+    let running = format!("hive, version {current}");
+    if on_disk != running {
+        return Err(format!(
+            "{} reports {on_disk:?} but this process is {running:?}: another install landed, run hive update again",
+            target.display()
+        ));
+    }
+
+    let latest = latest_version(io)?;
+    if latest < current {
+        return Ok(Outcome {
+            lines: vec![format!(
+                "hive {current} is ahead of the latest release {latest}; nothing to install"
+            )],
+            code: 0,
+        });
+    }
+    if latest == current && !force {
+        return Ok(Outcome {
+            lines: vec![format!("hive {current} is the latest release")],
+            code: 0,
+        });
+    }
 
     let staging = Staging(
         crate::paths::mkdtemp_in(&parent, "hive-update-").map_err(|e| {
@@ -630,7 +642,7 @@ fn install(
 
     if fingerprint(&target)? != before {
         return Err(format!(
-            "{} changed while this update was downloading; nothing was installed, run hive update again",
+            "{} changed while this update was running; nothing was installed, run hive update again",
             target.display()
         ));
     }
@@ -883,6 +895,10 @@ mod tests {
         list: Result<Vec<String>, String>,
         extract: Extract,
         version: Result<String, String>,
+        /// What the target itself answers to `--version` under the lock.
+        disk_version: Result<String, String>,
+        /// Runs inside the latest query, on the target: the network wait.
+        on_fetch: Option<FetchHook>,
         /// The last moment before the fingerprint re-check and the rename.
         on_version: Option<VersionHook>,
         /// Every URL asked for, in order.
@@ -897,6 +913,8 @@ mod tests {
 
     /// Runs where the real `--version` call sits, on (candidate, target).
     type VersionHook = Box<dyn Fn(&Path, &Path)>;
+    /// Runs where the latest query waits on the network, on the target.
+    type FetchHook = Box<dyn Fn(&Path)>;
     /// One knob of a [`Fake`], turned to break one step.
     type Breakage = Box<dyn Fn(&mut Fake)>;
 
@@ -926,6 +944,8 @@ mod tests {
                 .collect()),
             extract: Extract::File,
             version: Ok(format!("hive, version {latest}")),
+            disk_version: Ok(format!("hive, version {}", current_version())),
+            on_fetch: None,
             on_version: None,
             urls: RefCell::new(Vec::new()),
         }
@@ -937,6 +957,9 @@ mod tests {
         }
         fn fetch_effective_url(&self, url: &str) -> Result<String, String> {
             self.urls.borrow_mut().push(url.to_string());
+            if let Some(hook) = &self.on_fetch {
+                hook(&self.target);
+            }
             self.effective.clone()
         }
         fn download(&self, url: &str, dest: &Path) -> Result<(), String> {
@@ -965,6 +988,9 @@ mod tests {
             }
         }
         fn run_version(&self, binary: &Path) -> Result<String, String> {
+            if binary == self.target {
+                return self.disk_version.clone();
+            }
             if let Some(hook) = &self.on_version {
                 hook(binary, &self.target);
             }
@@ -1264,12 +1290,51 @@ mod tests {
         assert!(
             failure
                 .message
-                .contains("changed while this update was downloading"),
+                .contains("changed while this update was running"),
             "{}",
             failure.message
         );
         // the other install's bytes survive; the staging is gone
         assert_intact(&bed.target, b"a newer install\n");
+    }
+
+    #[test]
+    fn test_a_target_replaced_during_the_latest_query_is_refused() {
+        let bed = bed();
+        let mut io = fake(&bed.target, newer());
+        // another installer lands while this run waits on the network
+        io.on_fetch = Some(Box::new(|target: &Path| {
+            fs::write(target, b"a newer install\n").unwrap();
+        }));
+        let failure = run(&io, false, false).unwrap_err();
+        assert!(
+            failure
+                .message
+                .contains("changed while this update was running"),
+            "{}",
+            failure.message
+        );
+        assert_intact(&bed.target, b"a newer install\n");
+    }
+
+    #[test]
+    fn test_a_disk_binary_that_is_not_this_process_is_refused_before_any_fetch() {
+        let bed = bed();
+        let mut io = fake(&bed.target, newer());
+        // an install landed before this process took the lock
+        io.disk_version = Ok("hive, version 100.0.0".to_string());
+        let failure = run(&io, false, false).unwrap_err();
+        assert!(
+            failure.message.contains("100.0.0")
+                && failure.message.contains("another install landed"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            io.urls().is_empty(),
+            "the network was asked before the disk was checked"
+        );
+        assert_intact(&bed.target, OLD);
     }
 
     #[test]
@@ -1345,7 +1410,7 @@ mod tests {
         let mut io = fake(&bed.target, latest);
         io.exe = Err("no current_exe on this platform".into());
 
-        let err = install(&io, current, latest, None).unwrap_err();
+        let err = install(&io, current, false, None).unwrap_err();
         assert!(
             err.contains("no release binary is published for this target")
                 && err.contains(std::env::consts::ARCH)
@@ -1358,7 +1423,7 @@ mod tests {
         assert_intact(&bed.target, OLD);
 
         // given a triple, the same run gets past that check
-        let err = install(&io, current, latest, Some("aarch64-apple-darwin")).unwrap_err();
+        let err = install(&io, current, false, Some("aarch64-apple-darwin")).unwrap_err();
         assert!(err.contains("no current_exe"), "{err}");
         assert_intact(&bed.target, OLD);
 
@@ -1407,6 +1472,11 @@ mod tests {
             RealIo::default().tar_extract(archive, dest)
         }
         fn run_version(&self, binary: &Path) -> Result<String, String> {
+            if binary == self.target {
+                // the on-disk check under the lock: the target is a stand-in
+                // file, not a hive build, so answer for it
+                return Ok(format!("hive, version {}", current_version()));
+            }
             // real tar unpacked it beside the target, on one filesystem
             assert_eq!(
                 binary.parent().and_then(Path::parent),

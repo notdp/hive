@@ -679,12 +679,15 @@ Options:
   pinned to that tag, checks the digest and the archive's entries, runs the
   unpacked candidate's `--version`, and only then renames it over the
   target. A second `hive update` on the same binary is refused while one
-  runs, and a target whose bytes changed during the download (another
-  install landing on it) is left alone: rerun instead.
+  runs; the binary is locked and fingerprinted before the network is
+  asked, the file under the lock must report the version this process is,
+  and a target whose bytes changed while the update ran (another install
+  landing on it) is left alone: rerun instead.
 
-  The running binary must be a regular file. A symlink, or a path a package
-  manager owns, is refused with the path printed — update it the way it was
-  installed. The version already running installs again only under
+  The path current_exe() resolves to must be a regular file; a symlink is
+  refused with the path printed. hive does not recognise every symlink or
+  package-manager entry — an install a package manager owns updates through
+  that channel. The version already running installs again only under
   --force, and a local build ahead of the latest release never downgrades.
 
   Nothing else moves: no receipt, no PATH edit, no plugin sync, no restart
