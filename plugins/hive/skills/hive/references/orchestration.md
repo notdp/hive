@@ -160,6 +160,7 @@ gh pr merge <PR号> --match-head-commit <验过的head> --squash
 ## 对 human
 
 - 只给已收敛结论、单个阻断问题、建议下一步——human 的注意力留给拍板。拍板用所在 CLI 的阻塞提问工具(claude 是 `AskUserQuestion`)。
+- 给 human 的可执行命令(`hive attach <team>`、`hive view` 等)单独放 ```bash 围栏块,一条命令一块,不带 `$` 和输出——Claude Code Desktop 只给 shell 块加 Run 按钮,行内反引号只是文字。
 - 成员越过你直接向 human 交付时,回它「终态发我」——交付线走你,验收才有着落。
 - human 直接对某个成员改了方向:以 human 为准,更新你手里的验收标准;成员回报时会说明。
 - stage 汇报和最终交付要有自包含 HTML,Markdown 源同目录,发 human 时给 HTML 绝对路径;agent 间 artifact 一律 Markdown——human 看渲染,agent 读源码。
