@@ -88,7 +88,7 @@ A team session hive builds — `hive create` outside tmux, `hive attach` rebuild
 
 ## Upgrade
 
-Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release.
+Re-run the installer one-liner from [Install](#install); it always fetches the latest release. Releases are cut by pushing a `v*` tag matching the crate version; CI (cargo-dist) builds the platform binaries and publishes the GitHub Release, whose notes are that version's section of [CHANGELOG.md](CHANGELOG.md).
 
 Skill updates ride the binary: on claude the marketplace's command source re-runs `hive plugin sync` each session and picks up changed content automatically; on codex hive's launch path re-adds the plugin when the cache has no entry for the running binary's version. Plugin manifest versions stay locked to the CLI version — that lock is what keys the codex cache.
 
