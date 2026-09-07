@@ -20,3 +20,11 @@ pub use status::*;
 
 #[cfg(test)]
 mod tests;
+
+/// Terminal type assigned to panes, independent of the caller's tool shell.
+pub(crate) fn default_terminal() -> String {
+    match run(&["show-options", "-gv", "default-terminal"], false, 5) {
+        Ok(r) if r.returncode == 0 && !r.stdout.trim().is_empty() => r.stdout.trim().to_string(),
+        _ => "tmux-256color".to_string(),
+    }
+}

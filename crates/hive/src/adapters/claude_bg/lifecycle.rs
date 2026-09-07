@@ -55,6 +55,15 @@ pub fn bg_env(extra: Option<&HashMap<String, String>>) -> HashMap<String, String
             env.insert(k.clone(), v.clone());
         }
     }
+    pane_env(env, &crate::tmux::default_terminal())
+}
+
+// The engine renders into a hive pane: it gets the pane's terminal, not
+// the spawner's tool shell. Cold spawn and wake use the same environment.
+fn pane_env(mut env: HashMap<String, String>, terminal: &str) -> HashMap<String, String> {
+    env.insert("TERM".to_string(), terminal.to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    env.remove("NO_COLOR");
     env
 }
 
@@ -311,4 +320,36 @@ pub fn ensure_engine(
         return None;
     }
     wait_engine_entry(job_id, timeout.unwrap_or(WAKE_ENTRY_TIMEOUT))
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn test_bg_env_uses_the_pane_terminal_and_keeps_color_forcing() {
+        // The engine renders into a hive pane; the pane's terminal, not
+        // the spawner's tool shell, is what it gets.
+        let inherited = HashMap::from([
+            ("TERM".to_string(), "dumb".to_string()),
+            ("COLORTERM".to_string(), "limited".to_string()),
+            ("NO_COLOR".to_string(), "1".to_string()),
+            ("FORCE_COLOR".to_string(), "3".to_string()),
+            ("CLICOLOR".to_string(), "1".to_string()),
+        ]);
+        let env = pane_env(inherited, "screen-256color");
+        assert_eq!(env["TERM"], "screen-256color");
+        assert_eq!(env["COLORTERM"], "truecolor");
+        assert!(!env.contains_key("NO_COLOR"));
+        assert_eq!(env["FORCE_COLOR"], "3");
+        assert_eq!(env["CLICOLOR"], "1");
+    }
+
+    #[test]
+    fn test_bg_env_fills_missing_terminal() {
+        let env = pane_env(HashMap::new(), "tmux-256color");
+        assert_eq!(env["TERM"], "tmux-256color");
+        assert_eq!(env["COLORTERM"], "truecolor");
+        assert!(!env.contains_key("FORCE_COLOR"));
+    }
 }

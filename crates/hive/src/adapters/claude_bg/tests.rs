@@ -24,6 +24,13 @@ struct Home {
 }
 
 fn claude_home() -> Home {
+    crate::tmux::set_run_override(|args, _, _| {
+        assert_eq!(
+            args,
+            &crate::tmux::v(&["show-options", "-gv", "default-terminal"])
+        );
+        Ok(crate::tmux::ok_run(0, "tmux-256color\n", ""))
+    });
     let mut env = EnvGuard::cleared(&crate::testenv::CLAUDE_VARS);
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("claude-home");
@@ -747,12 +754,13 @@ fn test_bg_env_carries_no_identity_of_the_spawner_or_of_hive() {
     assert!(!env.contains_key("CODEX_THREAD_ID"));
     assert!(!env.contains_key("GROK_SESSION_ID"));
     // and hive pins nothing of its own beyond the config tree and the
-    // caller's extras: the engine's identity is the sessionId it mints
+    // caller's extras and pane terminal: the engine's identity is the
+    // sessionId it mints.
     let inherited: std::collections::HashSet<String> =
         std::env::vars().map(|(key, _)| key).collect();
     let mut pinned: Vec<&str> = env
         .keys()
-        .filter(|key| !inherited.contains(*key))
+        .filter(|key| !inherited.contains(*key) && !matches!(key.as_str(), "TERM" | "COLORTERM"))
         .map(String::as_str)
         .collect();
     pinned.sort_unstable();
@@ -1482,18 +1490,6 @@ fn test_the_registry_name_is_read_into_the_engine_session() {
     });
     let engine = entry_to_engine(entry.as_object().unwrap()).unwrap();
     assert_eq!(engine.name, "honey.worker");
-}
-
-#[test]
-fn test_bg_env_keeps_color_forcing_for_the_renderer() {
-    // Color is the engine's to keep — a cold-spawned engine renders its
-    // TUI with this env for its whole life. Safety against colored output
-    // lives at the parse sites (ANSI strip), never in the env.
-    let mut home = claude_home();
-    home.env.set("FORCE_COLOR", "3");
-    let env = bg_env(None);
-    assert_eq!(env.get("FORCE_COLOR").map(String::as_str), Some("3"));
-    assert!(!env.contains_key("NO_COLOR"));
 }
 
 #[test]

@@ -381,18 +381,11 @@ fn report_session_pane_colours(master: RawFd, session_target: &str) {
 /// created from an agent's tool shell — is then reported as the terminal,
 /// and codex refuses to draw. The client presents the terminal the panes
 /// are given: the server's `default-terminal`.
-fn control_client_term() -> String {
-    match run(&["show-options", "-gv", "default-terminal"], false, 5) {
-        Ok(r) if r.returncode == 0 && !r.stdout.trim().is_empty() => r.stdout.trim().to_string(),
-        _ => "tmux-256color".to_string(),
-    }
-}
-
 fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<()> {
     let (master, slave) = monitor_openpty()?;
     let mut cmd = Command::new("tmux");
     cmd.args(["-C", "attach", "-t", session_target]);
-    cmd.env("TERM", control_client_term());
+    cmd.env("TERM", super::default_terminal());
     unsafe {
         use std::os::unix::io::FromRawFd;
         use std::os::unix::process::CommandExt;
