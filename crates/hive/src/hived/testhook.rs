@@ -123,7 +123,7 @@ pub struct Hook {
     pub notify_ui_notify: Option<S3<(bool, Option<String>)>>,
     #[allow(clippy::type_complexity)]
     pub clear_stale_notify: Option<Arc<dyn Fn(&str, &[String], &str, &str, &str) + Send + Sync>>,
-    pub is_plugin_enabled: Option<S1<bool>>,
+    pub idle_notify_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     // team / agent
     pub team_load: Option<S1<anyhow::Result<Team>>>,
     pub agent_is_alive: Option<A1<bool>>,

@@ -2,11 +2,10 @@
 
 use std::path::Path;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use super::util::{fail, json_pretty, ok_or_fail, resolve_target_pane};
 use crate::identity::env_string;
-use crate::json_fields::{is_set, map_str};
 
 // ---------------------------------------------------------------------------
 // config
@@ -70,105 +69,6 @@ pub(crate) fn notify_cmd(message: &str) {
 // ---------------------------------------------------------------------------
 // plugin
 // ---------------------------------------------------------------------------
-
-fn render_plugin_mutation_result(action: &str, payload: &Map<String, Value>) -> String {
-    let name = map_str(payload, "name");
-    let mut lines = vec![format!("Plugin '{name}' {action}.")];
-    let install_root = map_str(payload, "installRoot");
-    let commands: Vec<String> = payload
-        .get("commands")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| match item {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut command_names: Vec<String> = Vec::new();
-    for item in &commands {
-        let path = Path::new(item);
-        let label = if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        } else {
-            path.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        };
-        if !command_names.contains(&label) {
-            command_names.push(label);
-        }
-    }
-
-    if !install_root.is_empty() {
-        lines.push(format!("  install root: {install_root}"));
-    }
-    if !command_names.is_empty() {
-        lines.push(format!("  commands: {}", command_names.join(", ")));
-    }
-    lines.push(
-        "  note: existing Codex panes may not reload plugin settings dynamically; \
-         restart them if old commands still run."
-            .to_string(),
-    );
-    lines.join("\n")
-}
-
-pub(crate) fn plugin_list(plain: bool) {
-    let rows = ok_or_fail(crate::plugin_manager::list_plugins());
-    if !plain {
-        println!("{}", Value::Array(rows));
-        return;
-    }
-    let enabled_count = rows.iter().filter(|row| is_set(row.get("enabled"))).count();
-    println!("Plugins ({enabled_count}/{} enabled)", rows.len());
-    if rows.is_empty() {
-        return;
-    }
-    let name_of = |row: &Value| {
-        row.get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let name_width = rows.iter().map(|row| name_of(row).len()).max().unwrap_or(0);
-    for row in &rows {
-        let status = if is_set(row.get("enabled")) {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        let description = row.get("description").and_then(Value::as_str).unwrap_or("");
-        println!(
-            "  {:<name_width$}  {status:<8}  {description}",
-            name_of(row)
-        );
-    }
-}
-
-pub(crate) fn plugin_ls(plain: bool) {
-    plugin_list(plain);
-}
-
-pub(crate) fn plugin_enable(name: &str, plain: bool) {
-    match crate::plugin_manager::enable_plugin(name) {
-        Ok(payload) => {
-            if !plain {
-                println!("{}", payload);
-                return;
-            }
-            let empty = Map::new();
-            let map = payload.as_object().unwrap_or(&empty);
-            println!("{}", render_plugin_mutation_result("enabled", map));
-        }
-        Err(e) => fail(&e.to_string()),
-    }
-}
 
 pub(crate) fn plugin_sync() {
     match crate::plugin_manager::materialize_marketplace() {
@@ -269,21 +169,6 @@ fn which_on_path(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-pub(crate) fn plugin_disable(name: &str, plain: bool) {
-    match crate::plugin_manager::disable_plugin(name, false) {
-        Ok(payload) => {
-            if !plain {
-                println!("{}", payload);
-                return;
-            }
-            let empty = Map::new();
-            let map = payload.as_object().unwrap_or(&empty);
-            println!("{}", render_plugin_mutation_result("disabled", map));
-        }
-        Err(e) => fail(&e.to_string()),
-    }
 }
 
 // ---------------------------------------------------------------------------

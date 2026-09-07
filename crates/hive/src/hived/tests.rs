@@ -2397,7 +2397,7 @@ fn idle_setup(
     panes: &[&str],
     active_window: &str,
     pane_windows: &[(&str, &str)],
-    plugin_enabled: bool,
+    idle_notify_enabled: bool,
     notify_suppressed: bool,
     window_options: &[((&str, &str), &str)],
 ) -> IdleSetup {
@@ -2454,7 +2454,7 @@ fn idle_setup(
                 workspace: workspace.to_string(),
             })
         })),
-        is_plugin_enabled: Some(Arc::new(move |_name| plugin_enabled)),
+        idle_notify_enabled: Some(Arc::new(move || idle_notify_enabled)),
         // Both busy oracles answered here: an unhooked native_daemon_busy
         // resolves "%1" through the real codex pane record and asks the
         // live daemon, so the verdict would follow whatever member sits on
@@ -2771,7 +2771,7 @@ fn test_idle_notify_clears_notify_when_target_window_is_selected() {
 }
 
 #[test]
-fn test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled() {
+fn test_idle_notify_reconciles_selected_notify_even_when_setting_off() {
     let env = idle_setup(
         &["%1"],
         WINDOW,
@@ -2799,7 +2799,24 @@ fn test_idle_notify_reconciles_selected_notify_even_when_plugin_disabled() {
 }
 
 #[test]
-fn test_idle_notify_skips_and_clears_state_when_plugin_disabled() {
+fn test_idle_notify_enabled_follows_the_notify_idle_setting_and_defaults_on() {
+    // No hook installed: the seam reads `$HIVE_HOME/settings.json`.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut env = crate::testenv::EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+
+    assert!(super::seams::hooked_idle_notify_enabled());
+    crate::settings::set_setting("notify.idle", serde_json::Value::Bool(false)).unwrap();
+    assert!(!super::seams::hooked_idle_notify_enabled());
+    crate::settings::set_setting("notify.idle", serde_json::Value::Bool(true)).unwrap();
+    assert!(super::seams::hooked_idle_notify_enabled());
+    // Only a literal false turns it off; a stray value is not a switch.
+    crate::settings::set_setting("notify.idle", serde_json::Value::from("off")).unwrap();
+    assert!(super::seams::hooked_idle_notify_enabled());
+}
+
+#[test]
+fn test_idle_notify_skips_and_clears_state_when_setting_off() {
     let env = idle_setup(&["%1"], "", &[], false, false, &[]);
     let mut state = HashMap::from([(WINDOW.to_string(), seeded(80.0, false, true))]);
 

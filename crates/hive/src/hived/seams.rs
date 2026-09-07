@@ -632,12 +632,15 @@ pub(super) fn hooked_clear_stale_notify(
     crate::notify_ui::clear_stale_notify(window_target, panes, token, source, workspace)
 }
 
-pub(super) fn hooked_is_plugin_enabled(name: &str) -> bool {
+/// The `notify.idle` user setting: the hived's idle watcher is on unless
+/// the human set it to `false` (`hive config set notify.idle false`).
+/// Manual `hive notify` stays available either way.
+pub(super) fn hooked_idle_notify_enabled() -> bool {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.is_plugin_enabled.clone()).flatten() {
-        return f(name);
+    if let Some(f) = hookget(|h| h.idle_notify_enabled.clone()).flatten() {
+        return f();
     }
-    crate::plugin_manager::is_plugin_enabled(name)
+    crate::settings::get_setting("notify.idle") != Some(serde_json::Value::Bool(false))
 }
 
 // --- team / agent seams ----------------------------------------------------

@@ -76,11 +76,11 @@ Debug:
   kill       Kill an agent pane and remove it from the team.
 
 Extensions:
-  Manage hive itself: user settings, the first-party plugins (Claude Code,
-  Codex), and the binary on disk.
+  Manage hive itself: user settings, the hive skill plugin for claude and
+  codex, and the binary on disk.
 
   config  Read / write user-level settings (~/.hive/settings.json).
-  plugin  Manage first-party Hive plugins.
+  plugin  Install the hive skill plugin into claude and codex.
   update  Update hive to the latest GitHub release.
 
 Launchers:
@@ -194,6 +194,10 @@ Options:
             r#"Usage: hive config [OPTIONS] COMMAND [ARGS]...
 
   Read / write user-level settings (~/.hive/settings.json).
+
+  Keys hive reads: `view.theme` (dark/light for `hive view` and team panes),
+  `notify.idle` (false turns the hived's idle watcher off; manual
+  `hive notify` stays available).
 
 Options:
   -h, --help  Show this message and exit.
@@ -495,17 +499,13 @@ Options:
         ["plugin"] => {
             r#"Usage: hive plugin [OPTIONS] COMMAND [ARGS]...
 
-  Manage first-party Hive plugins.
+  Install the hive skill plugin into claude and codex.
 
 Options:
   -h, --help  Show this message and exit.
 
 Commands:
-  disable  Disable a plugin and remove its commands.
-  enable   Enable a plugin and materialize its commands.
-  list     List available plugins and whether they are enabled.
-  setup    One-time install: sync the marketplace, register + install for claude and codex.
-  sync     Materialize the embedded plugin marketplace and print the payload directory.
+  setup  One-time install: sync the marketplace, register + install for claude and codex.
 "#
         }
         ["pr"] => {
@@ -875,46 +875,6 @@ Options:
   -h, --help  Show this message and exit.
 "#
         }
-        ["plugin", "disable"] => {
-            r#"Usage: hive plugin disable [OPTIONS] NAME
-
-  Disable a plugin and remove its commands.
-
-Options:
-  --plain     Human-readable output instead of the default JSON
-  -h, --help  Show this message and exit.
-"#
-        }
-        ["plugin", "enable"] => {
-            r#"Usage: hive plugin enable [OPTIONS] NAME
-
-  Enable a plugin and materialize its commands.
-
-Options:
-  --plain     Human-readable output instead of the default JSON
-  -h, --help  Show this message and exit.
-"#
-        }
-        ["plugin", "list"] => {
-            r#"Usage: hive plugin list [OPTIONS]
-
-  List available plugins and whether they are enabled.
-
-Options:
-  --plain     Human-readable output instead of the default JSON
-  -h, --help  Show this message and exit.
-"#
-        }
-        ["plugin", "ls"] => {
-            r#"Usage: hive plugin ls [OPTIONS]
-
-  Hidden alias of `hive plugin list`.
-
-Options:
-  --plain     Human-readable output instead of the default JSON
-  -h, --help  Show this message and exit.
-"#
-        }
         ["plugin", "setup"] => {
             r#"Usage: hive plugin setup [OPTIONS]
 
@@ -929,7 +889,7 @@ Options:
             r#"Usage: hive plugin sync [OPTIONS]
 
   Materialize the embedded plugin marketplace and print the payload directory
-  (the command source Claude re-runs each session).
+  (the command source Claude re-runs each session; hidden, not for hands).
 
 Options:
   -h, --help  Show this message and exit.

@@ -202,8 +202,8 @@ with all call sites instead of leaving an empty body.
   not cover and what would justify widening it. Grep for it before treating
   a gap as an oversight.
 - `crates/hive/assets/` ships as data, embedded at compile time, never
-  transliterated into Rust: the cvim toolkit and the notify plugin manifest
-  are run by something that is not this binary, and the grok `.tmTheme`
+  transliterated into Rust: the cvim toolkit is run by something that is
+  not this binary, and the grok `.tmTheme`
   palettes are parsed by the linked-in markdown engine byte-verbatim.
 
 ## Testing guidelines

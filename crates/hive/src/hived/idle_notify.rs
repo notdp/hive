@@ -120,11 +120,11 @@ pub(crate) fn idle_notify_tick(
     emit_topology_changes(&ctx, debug_state, &windows);
     clear_active_window_token(&ctx, &windows);
 
-    if !hooked_is_plugin_enabled("notify") {
+    if !hooked_idle_notify_enabled() {
         if !idle_notify.is_empty() {
             hooked_notify_debug_emit(
                 workspace,
-                "plugin.disabled",
+                "idle_notify.disabled",
                 &[
                     ("team", Value::from(team_name)),
                     ("records_cleared", Value::from(idle_notify.len())),
