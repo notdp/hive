@@ -86,7 +86,14 @@ hive 自身が作るチームセッション (tmux の外での `hive create`、
 
 ## アップグレード
 
-[インストール](#インストール)のインストーラ 1 行を再実行します。常に最新の release を取得します。リリースは crate のバージョンに一致する `v*` タグを push することで切られ、CI（cargo-dist）が各プラットフォームのバイナリをビルドして GitHub Release を公開します。
+```bash
+hive update          # このバイナリを最新 release に置き換える
+hive update --check  # 確認のみ: 新しい release があれば exit 1
+```
+
+`hive update` は、いま実行中のバイナリ（PATH 検索ではなく `current_exe()`）を、自分の target triple 向け release アーカイブで置き換えます。`releases/latest` を解決し、その tag に固定したアーカイブと `.sha256` を取得してダイジェストとアーカイブの中身を検証し、展開した候補の `--version` を実行してから、ようやく target に rename します。target が通常ファイルでない場合（symlink やパッケージマネージャ管理のパス: 入れた方法で更新してください）、同じバイナリに対する 2 つ目の `hive update`、ダウンロード中に中身が変わった target は拒否します。それ以外は何も動かしません: receipt も PATH も plugin sync も、hived やメンバーの再起動もありません。`--force` は実行中と同じバージョンの release ビルドを入れ直します。最新 release より進んだローカルビルドをダウングレードすることはありません。
+
+この経路が使えない場合（プラットフォーム向けの release asset がない、パッケージマネージャが所有するインストール）は、[インストール](#インストール)のインストーラ 1 行を再実行します。常に最新の release を取得します。リリースは crate のバージョンに一致する `v*` タグを push することで切られ、CI（cargo-dist）が各プラットフォームのバイナリをビルドして GitHub Release を公開します。
 
 スキルの更新はバイナリに乗って届きます。claude 側では marketplace の command source がセッションごとに `hive plugin sync` を再実行し、変更内容を自動で拾います。codex 側では、稼働中のバイナリのバージョンに対応するエントリがキャッシュにないとき、hive の起動パスがプラグインを再 add します。プラグインの manifest バージョンは CLI のバージョンに固定されており、その固定が codex キャッシュのキーになっています。
 

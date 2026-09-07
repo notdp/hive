@@ -85,7 +85,14 @@ hive 自己建的团 session——tmux 外 `hive create`、`hive attach` 重建�
 
 ## 升级
 
-重跑[安装](#安装)里的 installer 一行命令，它总是拉取最新 release。发版方式是推一个与 crate 版本一致的 `v*` tag；CI（cargo-dist）编译各平台二进制并发布 GitHub Release。
+```bash
+hive update          # 把这个二进制换成最新 release
+hive update --check  # 只查：有更新时退出 1
+```
+
+`hive update` 替换的是正在运行的这个二进制（`current_exe()`，不是搜 PATH），换成它自己 target triple 的 release 归档：解析 `releases/latest`，按该 tag 下载归档和 `.sha256`，校验摘要和归档条目，运行解出来的候选的 `--version`，然后才 rename 覆盖目标。以下情况拒绝：目标不是普通文件（symlink 或包管理器的路径：按当初的安装方式更新）、同一个二进制上的第二个 `hive update`、下载期间内容变了的目标。别的一概不动：不写 receipt、不改 PATH、不做 plugin sync、不重启 hived 或成员。`--force` 重装当前版本的 release 构建；领先于最新 release 的本地构建绝不降级。
+
+这条路走不通时（平台没有 release asset，或安装由包管理器所有），重跑[安装](#安装)里的 installer 一行命令，它总是拉取最新 release。发版方式是推一个与 crate 版本一致的 `v*` tag；CI（cargo-dist）编译各平台二进制并发布 GitHub Release。
 
 skill 更新随二进制走：claude 侧 marketplace 的 command source 每个 session 重跑 `hive plugin sync`，自动拿到变更内容；codex 侧当缓存里没有当前二进制版本的条目时，hive 的启动路径会重新 add 插件。插件 manifest 的版本号与 CLI 版本锁在一起——codex 缓存正是以这把锁为键。
 

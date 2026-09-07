@@ -277,6 +277,8 @@ fn curl_base(max_time: &str) -> Command {
         "-sSfL",
         "--proto",
         "=https",
+        "--proto-redir",
+        "=https",
         "--max-redirs",
         "5",
         "--connect-timeout",
@@ -325,11 +327,12 @@ impl Io for RealIo {
 
     fn tar_extract(&self, archive: &Path, dest: &Path) -> Result<(), String> {
         let mut cmd = Command::new("tar");
-        cmd.arg("-xf")
-            .arg(archive)
-            .arg("-C")
+        // Options before the archive operand: GNU tar under POSIXLY_CORRECT
+        // stops parsing options at the first operand.
+        cmd.args(["-x", "--strip-components", "1", "-C"])
             .arg(dest)
-            .args(["--strip-components", "1"]);
+            .arg("-f")
+            .arg(archive);
         run_capture(cmd, "archive extract").map(|_| ())
     }
 
@@ -445,10 +448,14 @@ fn take_lock(target: &Path) -> Result<UpdateLock, String> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(UpdateLock(file));
     }
-    Err(format!(
-        "another hive update is already running on {}",
-        target.display()
-    ))
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        return Err(format!(
+            "another hive update is already running on {}",
+            target.display()
+        ));
+    }
+    Err(format!("cannot lock {}: {err}", path.display()))
 }
 
 /// The staging directory, removed on every exit path.
