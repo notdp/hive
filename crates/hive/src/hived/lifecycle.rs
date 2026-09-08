@@ -177,7 +177,10 @@ fn hooked_hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window
     hived_loop(workspace, team, tmux_window, tmux_window_id);
 }
 
-fn hooked_make_busy_monitor(session_target: &str) -> Option<Arc<dyn OutputMonitor>> {
+fn hooked_make_busy_monitor(
+    session_target: &str,
+    workspace: &str,
+) -> Option<Arc<dyn OutputMonitor>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.make_busy_monitor.clone()).flatten() {
         return f(session_target);
@@ -187,6 +190,7 @@ fn hooked_make_busy_monitor(session_target: &str) -> Option<Arc<dyn OutputMonito
     }
     Some(Arc::new(crate::tmux::ControlModeOutputMonitor::new(
         session_target,
+        workspace,
     )))
 }
 
@@ -252,7 +256,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         .unwrap_or(tmux_window)
         .trim()
         .to_string();
-    let busy_monitor = hooked_make_busy_monitor(&session_target);
+    let busy_monitor = hooked_make_busy_monitor(&session_target, workspace);
     set_output_busy_monitor(busy_monitor.clone());
     if let Some(monitor) = busy_monitor.as_ref() {
         monitor.start();

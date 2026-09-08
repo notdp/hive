@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::run::run;
+use super::appearance::{session_colour_snapshot, PaneColourReports};
 
 const CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
+const COLOUR_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Decode tmux control-mode escape: control bytes and '\' are encoded as \NNN (3 octal digits).
 fn decode_output_payload(raw: &str) -> String {
@@ -180,6 +181,7 @@ pub(crate) fn control_mode_payload_has_activity(payload: &str) -> bool {
 }
 
 pub(super) struct MonitorInner {
+    workspace: String,
     stop: AtomicBool,
     pub(super) last_output_at: Mutex<HashMap<String, Instant>>,
     master_fd: Mutex<Option<i32>>,
@@ -193,10 +195,11 @@ pub struct ControlModeOutputMonitor {
 }
 
 impl ControlModeOutputMonitor {
-    pub fn new(session_target: &str) -> Self {
+    pub fn new(session_target: &str, workspace: &str) -> Self {
         ControlModeOutputMonitor {
             session_target: session_target.to_string(),
             inner: Arc::new(MonitorInner {
+                workspace: workspace.to_string(),
                 stop: AtomicBool::new(false),
                 last_output_at: Mutex::new(HashMap::new()),
                 master_fd: Mutex::new(None),
@@ -231,9 +234,9 @@ impl ControlModeOutputMonitor {
         self.request_detach();
         let handle = self.thread.lock().unwrap().take();
         if let Some(h) = handle {
-            // ponytail: unbounded join; the loop
-            // re-checks the stop flag every <=0.5s select tick plus the 1s
-            // restart delay, so this is bounded in practice.
+            // ponytail: unbounded join; the loop polls every 0.5s. A colour
+            // snapshot may add its 1s query timeout; startup also checks the
+            // tmux version before entering the loop.
             let _ = h.join();
         }
     }
@@ -351,26 +354,79 @@ fn terminate_child(child: &mut std::process::Child) {
     }
 }
 
-/// This control client is the one tmux would answer OSC 10/11 from — with
-/// black, never having been told a colour (`tmux/appearance.rs`). Hand it
-/// the real answer for every pane of the session through its own stdin,
-/// so `refresh-client -r` runs as the control client itself.
-fn report_session_pane_colours(master: RawFd, session_target: &str) {
-    let panes = match run(
-        &["list-panes", "-s", "-t", session_target, "-F", "#{pane_id}"],
-        false,
-        5,
-    ) {
-        Ok(r) if r.returncode == 0 => r.stdout,
-        _ => return,
+/// Return whether the snapshot was read; failed pane enumeration is retried
+/// at the next sample. Reports travel over the existing control connection.
+fn report_session_pane_colours(
+    master: RawFd,
+    session_target: &str,
+    workspace: &str,
+    reports: &mut PaneColourReports,
+    refresh_panes: bool,
+) -> bool {
+    let Some(snapshot) = session_colour_snapshot(session_target, refresh_panes) else {
+        return false;
     };
-    for pane in panes.lines().map(str::trim).filter(|p| !p.is_empty()) {
-        for line in super::pane_colour_report_lines(pane) {
-            let bytes = line.as_bytes();
-            let _ =
-                unsafe { libc::write(master, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-        }
+    if let Some(panes) = &snapshot.panes {
+        reports.set_panes(panes);
     }
+    let selected = snapshot.selected;
+    if reports.selected.as_ref() != Some(&selected) {
+        crate::notify_debug::emit(
+            workspace,
+            "pane-colours.selected",
+            &[
+                ("session", serde_json::json!(session_target)),
+                (
+                    "appearance",
+                    serde_json::json!(match selected.appearance {
+                        crate::view_theme::Appearance::Light => "light",
+                        crate::view_theme::Appearance::Dark => "dark",
+                    }),
+                ),
+                ("source", serde_json::json!(selected.source)),
+                ("client", serde_json::json!(selected.client)),
+            ],
+        );
+        reports.selected = Some(selected);
+    }
+    // Failed writes stay pending for the next sample.
+    let _ = reports.write_pending(|lines| write_control_command(master, lines.as_bytes()));
+    true
+}
+
+fn write_control_command(master: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[n as usize..];
+    }
+    Ok(())
+}
+
+fn colour_client_changed(line: &str, session_target: &str, client: Option<&str>) -> bool {
+    if let Some(detached) = line.strip_prefix("%client-detached ") {
+        return client == Some(detached);
+    }
+    let Some(changed) = line.strip_prefix("%client-session-changed ") else {
+        return false;
+    };
+    let Some((name, session)) = changed.rsplit_once(" $") else {
+        return false;
+    };
+    let Some((id, target)) = session.split_once(' ') else {
+        return false;
+    };
+    // Switching the selected client away matters as much as attaching one here.
+    client == Some(name) || target == session_target || session_target.strip_prefix('$') == Some(id)
 }
 
 /// The `TERM` the control client attaches with. Under tmux, codex asks
@@ -422,7 +478,19 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
     };
     *inner.master_fd.lock().unwrap() = Some(master);
-    report_session_pane_colours(master, session_target);
+    let supports_colours = super::version().is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
+    let mut colour_reports = PaneColourReports::default();
+    let mut panes_dirty = true;
+    if supports_colours {
+        panes_dirty = !report_session_pane_colours(
+            master,
+            session_target,
+            &inner.workspace,
+            &mut colour_reports,
+            true,
+        );
+    }
+    let mut last_colour_sample = Instant::now();
 
     let mut buffer: Vec<u8> = Vec::new();
     while !inner.stop.load(Ordering::SeqCst) {
@@ -435,19 +503,16 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
             revents: 0,
         };
         let ready = unsafe { libc::poll(&mut pfd, 1, 500) };
-        if ready <= 0 {
-            continue;
+        if ready > 0 {
+            let mut chunk = [0u8; 65536];
+            let nread = unsafe { libc::read(master, chunk.as_mut_ptr().cast(), chunk.len()) };
+            if nread < 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..nread as usize]);
         }
-        let mut chunk = [0u8; 65536];
-        let nread =
-            unsafe { libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
-        if nread < 0 {
-            break;
-        }
-        if nread == 0 {
-            continue;
-        }
-        buffer.extend_from_slice(&chunk[..nread as usize]);
+        let mut refresh_panes = false;
+        let mut refresh_clients = false;
         while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
             let raw_line: Vec<u8> = buffer.drain(..=pos).collect();
             // Drop invalid UTF-8 bytes.
@@ -459,10 +524,35 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
                 record_control_mode_output(inner, &pane_id, &payload);
             } else if decoded.starts_with("%layout-change ") || decoded.starts_with("%window-add ")
             {
-                // A new pane in the session: tell it its colours before
-                // the engine in it asks.
-                report_session_pane_colours(master, session_target);
+                refresh_panes = true;
+                panes_dirty = true;
+            } else if colour_client_changed(
+                decoded,
+                session_target,
+                colour_reports
+                    .selected
+                    .as_ref()
+                    .and_then(|s| s.client.as_deref()),
+            ) {
+                refresh_clients = true;
             }
+        }
+        if supports_colours
+            && (refresh_panes
+                || refresh_clients
+                || last_colour_sample.elapsed() >= COLOUR_SAMPLE_INTERVAL)
+        {
+            let sampled = report_session_pane_colours(
+                master,
+                session_target,
+                &inner.workspace,
+                &mut colour_reports,
+                panes_dirty,
+            );
+            if sampled {
+                panes_dirty = false;
+            }
+            last_colour_sample = Instant::now();
         }
     }
     terminate_child(&mut child);
@@ -471,4 +561,160 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         libc::close(master);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod colour_tests {
+    use super::*;
+    use crate::tmux::run::{ok_run, set_run_override};
+    use std::cell::RefCell;
+    use std::os::fd::AsRawFd;
+    use std::rc::Rc;
+
+    #[test]
+    fn test_colour_events_filter_other_sessions_and_include_selected_client_departure() {
+        assert!(colour_client_changed(
+            "%client-session-changed human $1 team",
+            "team",
+            None
+        ));
+        assert!(colour_client_changed(
+            "%client-session-changed human $1 team",
+            "$1",
+            None
+        ));
+        assert!(!colour_client_changed(
+            "%client-session-changed other $2 elsewhere",
+            "team",
+            Some("human")
+        ));
+        assert!(colour_client_changed(
+            "%client-session-changed human $2 elsewhere",
+            "team",
+            Some("human")
+        ));
+        assert!(colour_client_changed(
+            "%client-detached human",
+            "team",
+            Some("human")
+        ));
+        assert!(!colour_client_changed(
+            "%client-detached other",
+            "team",
+            Some("human")
+        ));
+        assert!(!colour_client_changed(
+            "%output %1 client-session-changed",
+            "team",
+            None
+        ));
+        assert!(!colour_client_changed(
+            "%client-session-changed malformed",
+            "team",
+            None
+        ));
+    }
+
+    #[test]
+    fn test_colour_sampling_uses_one_process_and_preserves_state_after_query_failure() {
+        let mut env =
+            crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set("HOME", temp.path());
+        env.set("HIVE_HOME", temp.path().join("home"));
+        let workspace = temp.path().to_str().unwrap();
+        let output = std::fs::File::create(temp.path().join("commands")).unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&calls);
+        let snapshot = Rc::new(RefCell::new(ok_run(
+            0,
+            "C\t1\t\tcontrol\nP\t%1\nP\t%2\n",
+            "",
+        )));
+        let response = Rc::clone(&snapshot);
+        set_run_override(move |args, _, _| {
+            seen.borrow_mut().push(args.to_vec());
+            Ok(response.borrow().clone())
+        });
+        let mut reports = PaneColourReports::default();
+        let fd = output.as_raw_fd();
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            true
+        ));
+        assert_eq!(calls.borrow().len(), 1);
+        assert!(calls.borrow()[0].iter().any(|a| a == "list-panes"));
+        let initial = output.metadata().unwrap().len();
+        assert!(initial > 0);
+        *snapshot.borrow_mut() = ok_run(0, "C\t0\tdark\thuman\n", "");
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            false
+        ));
+        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(
+            calls.borrow()[1],
+            vec![
+                "-u",
+                "list-clients",
+                "-t",
+                "team",
+                "-F",
+                "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}"
+            ]
+        );
+        let changed = output.metadata().unwrap().len();
+        assert!(changed > initial);
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            false
+        ));
+        assert_eq!(output.metadata().unwrap().len(), changed);
+        *snapshot.borrow_mut() = ok_run(1, "", "query failed");
+        assert!(!report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            true
+        ));
+        assert_eq!(
+            reports.selected.as_ref().unwrap().appearance,
+            crate::view_theme::Appearance::Dark
+        );
+        assert_eq!(output.metadata().unwrap().len(), changed);
+        *snapshot.borrow_mut() = ok_run(0, "C\t0\tdark\thuman\nP\t%1\nP\t%2\nP\t%3", "");
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            true
+        ));
+        let commands = std::fs::read_to_string(temp.path().join("commands")).unwrap();
+        assert_eq!(
+            commands[changed as usize..],
+            super::super::pane_colour_report_lines("%3", crate::view_theme::Appearance::Dark)
+                .concat()
+        );
+        let log = std::fs::read_to_string(crate::notify_debug::log_path(workspace)).unwrap();
+        let events: Vec<serde_json::Value> = log
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["source"], "fallback");
+        assert_eq!(events[1]["source"], "client");
+        assert_eq!(events[1]["client"], "human");
+        assert_eq!(events[1]["appearance"], "dark");
+    }
 }
