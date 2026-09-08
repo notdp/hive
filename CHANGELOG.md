@@ -4,6 +4,20 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.6
+
+### Features
+
+- The hive skill drops the humanDirective/source authorization relay: a member acts on the task sender's task and asks the task sender before going outside it, never a human provenance; "派发人" becomes "任务发送者" throughout, and `references/worktree.md` no longer gates push/PR on human authorization. Verified against the previous text on claude and codex: same pass profile except the new `directive-relay` situation, which the old text fails by asking for provenance (#193)
+
+### Fixes
+
+- Team panes are told the attached human terminal's real theme (tmux `client_theme`, mode 2031) instead of hive's own `view.theme` default, so a plain codex started in a team session on a dark terminal no longer flips to a light theme; explicit `HIVE_VIEW_THEME` / `view.theme` still win, sampling backs off to 60s once every client's theme is known, and headless sessions keep a provisional light answer (#192)
+
+### Internal
+
+- `tests/skill-evals/`: `check_benchmark.py` filters expectations per engine like `grade.py`, the entry situations drop the rule-location criterion that penalised ending the turn, and `directive-sourced` is replaced by `directive-relay` (#193)
+
 ## 0.19.5
 
 ### Features
