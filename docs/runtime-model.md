@@ -203,11 +203,14 @@ Auto chooses the first non-control client in the same session whose
 `COLORFGBG`, and light. A headless session with no explicit preference or
 environment hint therefore starts with a provisional light answer.
 
-The monitor samples once at attachment and every two seconds, and also
-when clients enter the session or the selected client leaves. Theme hooks
-are not control-mode notifications: periodic sampling catches an initially
-empty `client_theme` after the terminal reports mode 2031. Each sample uses
-one tmux process for `list-clients`; after layout changes the same process
+The monitor samples on attachment and relevant client events. It samples
+every two seconds while any non-control client has an empty `client_theme`
+or a client event occurred within the last 30 seconds; otherwise it samples
+every 60 seconds. Events from other sessions do not extend that fast period;
+known clients leaving this session count even if they were not the selected
+source. Theme hooks are not control-mode notifications: sampling catches an
+initially empty `client_theme` after the terminal reports mode 2031. Each
+sample uses one tmux process for `list-clients`; after layout changes the same process
 also enumerates panes. One resolved appearance applies to the whole round.
 Only a new pane or a different appearance writes new reports. Failed
 queries retain the previous snapshot and retry; `pane-colours.selected` in
@@ -218,10 +221,11 @@ exact RGB. A dark terminal attached after hived gets a dark answer once its
 997 response has been sampled and the report processed. An application
 querying before that point can still read provisional light: there is no
 startup barrier and no hot refresh for a running Codex. Updating the cache
-does not itself notify applications, and terminals without mode 2031 may
-leave `client_theme` empty. Linked windows share pane overrides across
-sessions, so sessions with different themes can overwrite each other's
-reports; resolving that conflict is outside this policy. The viewer's
+does not itself notify applications. Terminals without mode 2031 may leave
+`client_theme` empty indefinitely and therefore keep the two-second cadence.
+Linked windows share pane overrides across sessions, so sessions with
+different themes can overwrite each other's reports; resolving that conflict
+is outside this policy. The viewer's
 `active_theme_kind` detection chain is unchanged.
 
 The team session hive builds — `hive create` outside tmux, `hive attach`

@@ -9,8 +9,9 @@
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
 //! non-control client in this session with a known `client_theme`, then
 //! `HIVE_APPEARANCE`, `COLORFGBG`, and finally a provisional light fallback.
-//! The monitor samples clients every two seconds and on client attachment;
-//! only new panes or a changed appearance receive colour reports.
+//! The monitor samples every two seconds while a client theme is unknown or
+//! for 30 seconds after a client event, otherwise every 60 seconds. Only new
+//! panes or a changed appearance receive colour reports.
 //!
 //! ponytail: these are black/white approximations, not the terminal's RGB.
 //! Linked windows share their overrides across sessions; differently themed
@@ -147,6 +148,8 @@ fn resolve_pane_appearance(
 pub(super) struct PaneColourSnapshot {
     pub selected: PaneAppearance,
     pub panes: Option<String>,
+    pub clients: Vec<String>,
+    pub has_unknown_client: bool,
 }
 
 /// One subprocess per sample, regardless of pane count. Layout events add
@@ -185,6 +188,18 @@ pub(super) fn session_colour_snapshot(
         .filter_map(|line| line.strip_prefix("C\t"))
         .collect::<Vec<_>>()
         .join("\n");
+    let human_clients: Vec<_> = clients
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            if fields.next() != Some("0") {
+                return None;
+            }
+            let theme = fields.next()?;
+            let name = fields.next().filter(|name| !name.is_empty())?;
+            Some((name, theme.is_empty()))
+        })
+        .collect();
     let panes = refresh_panes.then(|| {
         snapshot
             .stdout
@@ -207,6 +222,11 @@ pub(super) fn session_colour_snapshot(
             colorfgbg.as_deref(),
         ),
         panes,
+        has_unknown_client: human_clients.iter().any(|(_, unknown)| *unknown),
+        clients: human_clients
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
     })
 }
 
@@ -216,6 +236,8 @@ pub(super) fn session_colour_snapshot(
 pub(super) struct PaneColourReports {
     panes: BTreeMap<String, Option<Appearance>>,
     pub selected: Option<PaneAppearance>,
+    pub clients: Vec<String>,
+    pub has_unknown_client: bool,
 }
 
 impl PaneColourReports {

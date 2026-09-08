@@ -11,7 +11,37 @@ use std::time::{Duration, Instant};
 use super::appearance::{session_colour_snapshot, PaneColourReports};
 
 const CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
-const COLOUR_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const COLOUR_SAMPLE_FAST_INTERVAL: Duration = Duration::from_secs(2);
+const COLOUR_SAMPLE_IDLE_INTERVAL: Duration = Duration::from_secs(60);
+
+struct ColourSampling {
+    last_sample: Instant,
+    last_client_event: Option<Instant>,
+}
+
+impl ColourSampling {
+    fn sample_if_due(
+        &mut self,
+        now: Instant,
+        has_unknown_client: bool,
+        force: bool,
+        sample: impl FnOnce() -> bool,
+    ) -> Option<bool> {
+        let recent_client_event = self
+            .last_client_event
+            .is_some_and(|event| now.duration_since(event) < Duration::from_secs(30));
+        let interval = if has_unknown_client || recent_client_event {
+            COLOUR_SAMPLE_FAST_INTERVAL
+        } else {
+            COLOUR_SAMPLE_IDLE_INTERVAL
+        };
+        if !force && now.duration_since(self.last_sample) < interval {
+            return None;
+        }
+        self.last_sample = now;
+        Some(sample())
+    }
+}
 
 /// Decode tmux control-mode escape: control bytes and '\' are encoded as \NNN (3 octal digits).
 fn decode_output_payload(raw: &str) -> String {
@@ -369,6 +399,8 @@ fn report_session_pane_colours(
     if let Some(panes) = &snapshot.panes {
         reports.set_panes(panes);
     }
+    reports.clients = snapshot.clients;
+    reports.has_unknown_client = snapshot.has_unknown_client;
     let selected = snapshot.selected;
     if reports.selected.as_ref() != Some(&selected) {
         crate::notify_debug::emit(
@@ -412,9 +444,9 @@ fn write_control_command(master: RawFd, mut bytes: &[u8]) -> std::io::Result<()>
     Ok(())
 }
 
-fn colour_client_changed(line: &str, session_target: &str, client: Option<&str>) -> bool {
+fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -> bool {
     if let Some(detached) = line.strip_prefix("%client-detached ") {
-        return client == Some(detached);
+        return clients.iter().any(|client| client == detached);
     }
     let Some(changed) = line.strip_prefix("%client-session-changed ") else {
         return false;
@@ -425,8 +457,10 @@ fn colour_client_changed(line: &str, session_target: &str, client: Option<&str>)
     let Some((id, target)) = session.split_once(' ') else {
         return false;
     };
-    // Switching the selected client away matters as much as attaching one here.
-    client == Some(name) || target == session_target || session_target.strip_prefix('$') == Some(id)
+    // A known client leaving matters even when it was not the selected source.
+    clients.iter().any(|client| client == name)
+        || target == session_target
+        || session_target.strip_prefix('$') == Some(id)
 }
 
 /// The `TERM` the control client attaches with. Under tmux, codex asks
@@ -490,7 +524,10 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
             true,
         );
     }
-    let mut last_colour_sample = Instant::now();
+    let mut colour_sampling = ColourSampling {
+        last_sample: Instant::now(),
+        last_client_event: None,
+    };
 
     let mut buffer: Vec<u8> = Vec::new();
     while !inner.stop.load(Ordering::SeqCst) {
@@ -526,33 +563,29 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
             {
                 refresh_panes = true;
                 panes_dirty = true;
-            } else if colour_client_changed(
-                decoded,
-                session_target,
-                colour_reports
-                    .selected
-                    .as_ref()
-                    .and_then(|s| s.client.as_deref()),
-            ) {
+            } else if colour_client_changed(decoded, session_target, &colour_reports.clients) {
                 refresh_clients = true;
+                colour_sampling.last_client_event = Some(Instant::now());
             }
         }
-        if supports_colours
-            && (refresh_panes
-                || refresh_clients
-                || last_colour_sample.elapsed() >= COLOUR_SAMPLE_INTERVAL)
-        {
-            let sampled = report_session_pane_colours(
-                master,
-                session_target,
-                &inner.workspace,
-                &mut colour_reports,
-                panes_dirty,
+        if supports_colours {
+            let sampled = colour_sampling.sample_if_due(
+                Instant::now(),
+                colour_reports.has_unknown_client,
+                refresh_panes || refresh_clients,
+                || {
+                    report_session_pane_colours(
+                        master,
+                        session_target,
+                        &inner.workspace,
+                        &mut colour_reports,
+                        panes_dirty,
+                    )
+                },
             );
-            if sampled {
+            if sampled == Some(true) {
                 panes_dirty = false;
             }
-            last_colour_sample = Instant::now();
         }
     }
     terminate_child(&mut child);
@@ -572,46 +605,180 @@ mod colour_tests {
     use std::rc::Rc;
 
     #[test]
-    fn test_colour_events_filter_other_sessions_and_include_selected_client_departure() {
+    fn test_colour_events_filter_other_sessions_and_include_known_client_departure() {
         assert!(colour_client_changed(
             "%client-session-changed human $1 team",
             "team",
-            None
+            &[]
         ));
         assert!(colour_client_changed(
             "%client-session-changed human $1 team",
             "$1",
-            None
+            &[]
         ));
         assert!(!colour_client_changed(
             "%client-session-changed other $2 elsewhere",
             "team",
-            Some("human")
+            &["human".into()]
         ));
         assert!(colour_client_changed(
             "%client-session-changed human $2 elsewhere",
             "team",
-            Some("human")
+            &["human".into()]
         ));
         assert!(colour_client_changed(
             "%client-detached human",
             "team",
-            Some("human")
+            &["human".into()]
         ));
         assert!(!colour_client_changed(
             "%client-detached other",
             "team",
-            Some("human")
+            &["human".into()]
         ));
         assert!(!colour_client_changed(
             "%output %1 client-session-changed",
             "team",
-            None
+            &[]
         ));
         assert!(!colour_client_changed(
             "%client-session-changed malformed",
             "team",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn test_known_clients_do_not_spawn_queries_between_idle_samples() {
+        let mut env =
+            crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set("HOME", temp.path());
+        env.set("HIVE_HOME", temp.path().join("home"));
+        let calls = Rc::new(RefCell::new(0));
+        let seen = Rc::clone(&calls);
+        set_run_override(move |_, _, _| {
+            *seen.borrow_mut() += 1;
+            Ok(ok_run(0, "C\t1\t\tcontrol\nC\t0\tdark\thuman\nP\t%1", ""))
+        });
+        let output = std::fs::File::create(temp.path().join("commands")).unwrap();
+        let mut reports = PaneColourReports::default();
+        let sample = |reports: &mut PaneColourReports| {
+            report_session_pane_colours(
+                output.as_raw_fd(),
+                "team",
+                temp.path().to_str().unwrap(),
+                reports,
+                true,
+            )
+        };
+        assert!(sample(&mut reports));
+        assert!(!reports.has_unknown_client);
+        let start = Instant::now();
+        let mut sampling = ColourSampling {
+            last_sample: start,
+            last_client_event: None,
+        };
+        for second in [2, 4, 30, 59] {
+            assert_eq!(
+                sampling.sample_if_due(
+                    start + Duration::from_secs(second),
+                    reports.has_unknown_client,
+                    false,
+                    || sample(&mut reports),
+                ),
+                None
+            );
+        }
+        assert_eq!(*calls.borrow(), 1);
+        assert_eq!(
+            sampling.sample_if_due(
+                start + Duration::from_secs(60),
+                reports.has_unknown_client,
+                false,
+                || sample(&mut reports),
+            ),
+            Some(true)
+        );
+        assert_eq!(*calls.borrow(), 2);
+        assert_eq!(
+            sampling.sample_if_due(
+                start + Duration::from_secs(62),
+                reports.has_unknown_client,
+                false,
+                || sample(&mut reports),
+            ),
             None
+        );
+        assert_eq!(*calls.borrow(), 2);
+    }
+
+    #[test]
+    fn test_unknown_clients_and_recent_events_keep_fast_sampling() {
+        let start = Instant::now();
+        let mut sampling = ColourSampling {
+            last_sample: start,
+            last_client_event: None,
+        };
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(1), true, false, || true),
+            None
+        );
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(2), true, false, || true),
+            Some(true)
+        );
+        // The theme is now known, but a fresh client event keeps the fast window.
+        sampling.last_client_event = Some(start + Duration::from_secs(5));
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(5), false, true, || true),
+            Some(true)
+        );
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(7), false, false, || true),
+            Some(true)
+        );
+        // At 30 seconds after the event, the interval becomes 60 seconds.
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(35), false, false, || true),
+            None
+        );
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(66), false, false, || true),
+            None
+        );
+        assert_eq!(
+            sampling.sample_if_due(start + Duration::from_secs(67), false, false, || true),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_any_unknown_human_client_keeps_fast_sampling_even_if_not_selected() {
+        let mut env =
+            crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set("HOME", temp.path());
+        env.set("HIVE_HOME", temp.path().join("home"));
+        set_run_override(|_, _, _| {
+            Ok(ok_run(
+                0,
+                "C\t1\t\tcontrol\nC\t0\tdark\tselected\nC\t0\t\tpending",
+                "",
+            ))
+        });
+        let snapshot = session_colour_snapshot("team", false).unwrap();
+        assert_eq!(snapshot.selected.client.as_deref(), Some("selected"));
+        assert!(snapshot.has_unknown_client);
+        assert!(colour_client_changed(
+            "%client-detached pending",
+            "team",
+            &snapshot.clients
+        ));
+        assert!(!colour_client_changed(
+            "%client-detached elsewhere",
+            "team",
+            &snapshot.clients
         ));
     }
 
