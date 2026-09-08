@@ -832,7 +832,7 @@ fn test_parse_control_mode_output_matches_output_notifications() {
 
 #[test]
 fn test_control_mode_monitor_is_busy_uses_threshold() {
-    let monitor = ControlModeOutputMonitor::new("613");
+    let monitor = ControlModeOutputMonitor::new("613", "");
     monitor.inner.last_output_at.lock().unwrap().insert(
         "%9".to_string(),
         Instant::now() - Duration::from_secs_f64(1.0),
@@ -891,7 +891,7 @@ fn test_control_mode_monitor_ignores_repaint_only_output() {
     // Repaint-only control sequences never mark a pane busy; the monitor
     // keeps no payload buffer (the pane-content delivery oracle is gone —
     // delivery confirmation is transcript-only).
-    let monitor = ControlModeOutputMonitor::new("613");
+    let monitor = ControlModeOutputMonitor::new("613", "");
     let payload = "\x1b[?2026h\x1b[49;2H\x1b[K\x1b[?2026l";
 
     monitor.record_control_mode_output("%9", payload);
@@ -901,7 +901,7 @@ fn test_control_mode_monitor_ignores_repaint_only_output() {
 
 #[test]
 fn test_control_mode_monitor_marks_visible_text_busy() {
-    let monitor = ControlModeOutputMonitor::new("613");
+    let monitor = ControlModeOutputMonitor::new("613", "");
 
     monitor.record_control_mode_output("%9", "\x1b[2mhello\x1b[0m");
 
@@ -1079,41 +1079,6 @@ fn test_run_shell_detached_passes_command_byte_for_byte() {
 fn test_display_value_none_on_failure() {
     capture_run(1, "");
     assert_eq!(display_value("%5", "#{pane_left}"), None);
-}
-
-#[test]
-fn test_pane_colour_report_lines_follow_the_theme_and_the_tmux_version() {
-    let mut env =
-        crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
-    let tmp = tempfile::tempdir().unwrap();
-    env.set("HIVE_HOME", tmp.path().join(".hive"));
-    env.set("HOME", tmp.path());
-    env.set("HIVE_VIEW_THEME", "dark");
-    set_run_override(|args, _check, _timeout| {
-        Ok(match args[0].as_str() {
-            "-V" => ok_run(0, "tmux 3.7c\n", ""),
-            _ => ok_run(0, "", ""),
-        })
-    });
-    assert_eq!(
-        pane_colour_report_lines("%7"),
-        vec![
-            "refresh-client -r '%7:\x1b]10;rgb:ffff/ffff/ffff\x1b\\\\'\n".to_string(),
-            "refresh-client -r '%7:\x1b]11;rgb:0000/0000/0000\x1b\\\\'\n".to_string(),
-        ]
-    );
-
-    set_run_override(|args, _check, _timeout| {
-        Ok(match args[0].as_str() {
-            "-V" => ok_run(0, "tmux 3.4\n", ""),
-            _ => ok_run(0, "", ""),
-        })
-    });
-    assert!(pane_colour_report_lines("%7").is_empty());
-    assert_eq!(
-        stale_version_warning().map(|w| w.starts_with("warning: tmux 3.4 answers")),
-        Some(true)
-    );
 }
 
 #[test]

@@ -189,6 +189,45 @@ pane, because `break-pane` on a lone pane renames the window in place. The
 status bar's orch chip and `prefix+m` run the same verb with `--window`: a
 `run-shell` job carries no `TMUX_PANE`.
 
+The hived's control client also supplies each pane's OSC 10/11 colour
+answers (`tmux/appearance.rs`, tmux 3.5+). Without a report, tmux can answer
+black when the control client is the first eligible client and the pane
+has a default background. A stored report takes precedence over pane style
+while any control client exists on the server; it is not owned by the
+client that wrote it.
+
+Reports resolve `HIVE_VIEW_THEME`, then `view.theme`. Auto/system keeps its
+existing meaning: an env value of auto bypasses a fixed config preference.
+Auto chooses the first non-control client in the same session whose
+`client_theme` is dark or light (tmux 3.6+), then falls back to `HIVE_APPEARANCE`,
+`COLORFGBG`, and light. A headless session with no explicit preference or
+environment hint therefore starts with a provisional light answer.
+
+The monitor samples on attachment and relevant client events. It samples
+every two seconds while any non-control client has an empty `client_theme`
+or a client event occurred within the last 30 seconds; otherwise it samples
+every 60 seconds. Events from other sessions do not extend that fast period;
+known clients leaving this session count even if they were not the selected
+source. Theme hooks are not control-mode notifications: sampling catches an
+initially empty `client_theme` after the terminal reports mode 2031. Each
+sample uses one tmux process for `list-clients`; after layout changes the same process
+also enumerates panes. One resolved appearance applies to the whole round.
+Only a new pane or a different appearance writes new reports. Failed
+queries retain the previous snapshot and retry; `pane-colours.selected` in
+`run/notify.jsonl` records the source, appearance and selected client.
+
+These reports approximate dark/light with black/white, not the terminal's
+exact RGB. A dark terminal attached after hived gets a dark answer once its
+997 response has been sampled and the report processed. An application
+querying before that point can still read provisional light: there is no
+startup barrier and no hot refresh for a running Codex. Updating the cache
+does not itself notify applications. Terminals without mode 2031 may leave
+`client_theme` empty indefinitely and therefore keep the two-second cadence.
+Linked windows share pane overrides across sessions, so sessions with
+different themes can overwrite each other's reports; resolving that conflict
+is outside this policy. The viewer's
+`active_theme_kind` detection chain is unchanged.
+
 The team session hive builds — `hive create` outside tmux, `hive attach`
 rebuilding a lost window — carries hive's own two-line
 status bar, installed by session id at build (`tmux/status.rs`; `status*`
