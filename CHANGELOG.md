@@ -4,6 +4,16 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.19.5
+
+### Features
+
+- The hive skill (`plugins/hive/skills/hive/`) is rewritten from behavioral evals: same protocol facts, shorter text (SKILL.md 153 → 94 lines), guest orchestration spawns into the new team with `-t`, `hive team` is re-run only after `join` or to check a member, send failures split by cause, authorization is its own rule, and the message after create/spawn hands the human a runnable ```bash `hive attach <team>` block. Verified on claude and codex: identical pass profile to the previous text at 23% (claude) / 5% (codex) fewer tokens (#191)
+
+### Internal
+
+- `tests/skill-evals/`: a behavioral eval standard for the skill (16 situations, 152 expectations graded from an offline `hive` stub's call log plus an LLM grader) and headless executors for `claude -p` and `codex exec` with isolation gates; not wired into cargo/pytest because every run is a real model call (#191)
+
 ## 0.19.4
 
 ### Features
