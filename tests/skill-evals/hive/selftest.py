@@ -125,7 +125,7 @@ def main():
     team_rule=next(e['rule'] for e in case_by_name['workflow-final']['expectations'] if e.get('rule',{}).get('prefix')==['team'])
     assert check(team_rule,[{'argv':['team']},{'argv':['team']}],'final',flow)[0] is False
 
-    aliases=prepare('directive-sourced',output/'aliases',args.skill)
+    aliases=prepare('directive-relay',output/'aliases',args.skill)
     invoke(aliases,'send','checker','授权已备好');invoke(aliases,'send','wasp.orch','完成')
     synthetic(aliases)
     assert grade(aliases)['expectations'][2]['passed'] is True
