@@ -225,9 +225,19 @@ them.
 
 Of the send address kinds, only a member names an engine with a transport.
 `ccd.<name>` reaches a Claude session outside any team over that session's
-own inbox. A `hive workflow run` dispatch has no reply address at all: the
-member is never asked to send anything back, and the roster holds engines
-only.
+own inbox. `ext.<label>` names an external client — a process that is no
+engine and no Claude session (a dashboard, a bot, a script) and therefore
+has no inbox: inbound, `hive send --as ext.<label> <team>.<member>` takes the
+guest lane, so the hived writes the ledger row with `from_agent =
+ext.<label>` and the member receives `<HIVE from=ext.<label> …>`; outbound,
+a member's `hive send ext.<label>` is the ledger row alone (`to_agent =
+ext.<label>`, written by the CLI, no hived round trip, no transport verdict
+to wait for), and the client reads it off the bus. `--as` is refused for a
+process that already is somebody on hive (a bound pane, a rostered engine
+session, an engine marker, a live Claude session): identity is never
+overridden, only supplied where the ladder resolves nothing. A `hive
+workflow run` dispatch has no reply address at all: the member is never
+asked to send anything back, and the roster holds engines only.
 
 ### Workflow node: the result is the turn's end, read off the engine
 

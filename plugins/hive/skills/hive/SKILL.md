@@ -47,6 +47,7 @@ tmux 外的 Claude session(桌面或独立终端)入册后,若宿主支持改 se
 - tmux pane 成员发队友用裸名(`hive send dodo …`);本队前缀等价裸名。自己拼的别队前缀会被拒——照抄 from 不受此限(guest 编排者的回信地址就是别队前缀,照抄即达)。
 - tmux 外(joined session、guest、引擎的工具进程)用 `<team>.<member>`;裸名全局唯一时也行。
 - team 外的 Claude session 用 `ccd.<name>`(见「互通」)。
+- 外部客户端(看板、bot、脚本,既不是引擎也不是 Claude session)用 `ext.<label>`:它的来信 `from=ext.<label>`,照抄回 `hive send ext.<label> "<回复>"` 即可——这条只落总线不投递,对方自己读总线,发完就停。
 
 其余字段怎么用:
 

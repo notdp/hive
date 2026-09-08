@@ -18,15 +18,23 @@ use crate::team::{
 };
 
 /// Send a message to another agent — the only message verb.
-pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
+pub(crate) fn send(to_agent: &str, body: &str, artifact: &str, sign_as: &str) {
     if let Some(label) = to_agent.strip_prefix("ccd.") {
         send_to_ccd_session(label, body, artifact);
+        return;
+    }
+    if let Some(label) = crate::send::ext_label(to_agent) {
+        send_to_ext_client(label, body, artifact);
         return;
     }
     // A dot splits the address only when the prefix names an existing team
     // (`honey.worker`); otherwise the address stays whole for qualified-name
     // resolution across pane tags.
     let (explicit_team, to_agent) = crate::send::split_team_address(to_agent);
+    if !sign_as.is_empty() {
+        send_as_ext_client(sign_as, &explicit_team, &to_agent, body, artifact);
+        return;
+    }
     // The root gate admitted this call because the process runs inside a
     // Claude session (that session is the sender and its inbox socket is its
     // identity), or a codex/grok member's tool whose own session id keys
@@ -86,6 +94,103 @@ pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
         fail(&e.to_string());
     }
     // Peer sends stay silent (rule of silence).
+}
+
+/// True when this process already is somebody on hive: a bound pane, a
+/// roster row keyed by its engine's session, an engine marker in its
+/// environment, or a live Claude session. Such a process signs as itself
+/// and never as an external client.
+fn is_somebody_on_hive() -> bool {
+    identity::default_agent().is_some()
+        || !identity::session_member_binding().is_empty()
+        || identity::engine_marker_env()
+        || crate::adapters::claude_sessions::self_session().is_some()
+}
+
+/// `hive send --as ext.<label> <team>.<member>`: an external client — a
+/// process that is no engine and no Claude session — sends into a team.
+/// The send takes the guest lane the desktop app already uses: the hived
+/// writes the ledger row with `from_agent = ext.<label>` and injects a
+/// `<HIVE from=ext.<label> to=<team>.<member>>` envelope, so the member
+/// answers by copying `from` verbatim (`hive send ext.<label>`), which
+/// lands on the same ledger the client reads.
+fn send_as_ext_client(
+    sign_as: &str,
+    explicit_team: &str,
+    to_agent: &str,
+    body: &str,
+    artifact: &str,
+) {
+    let label = match crate::send::ext_label(sign_as) {
+        Some(label) => label,
+        None => fail("`--as` takes an external client address, `ext.<label>`"),
+    };
+    if let Err(e) = crate::send::validate_ext_label(label) {
+        fail(&e.to_string());
+    }
+    if is_somebody_on_hive() {
+        fail(
+            "`--as` is for a process that is nobody on hive; a member, a guest \
+             session or an engine's tool signs as itself",
+        );
+    }
+    if explicit_team.is_empty() {
+        fail("an external client addresses a member as `<team>.<member>` (see `hive ls`)");
+    }
+    let (_team_name, t) = ok_or_fail(crate::send::resolve_guest_send_target(
+        to_agent,
+        explicit_team,
+    ));
+    let ws = ok_or_fail(resolve_workspace(Some(&t), true));
+    if body.trim().is_empty() {
+        fail("message body required");
+    }
+    let resolved_artifact = resolve_artifact_path(artifact, &ws);
+    if let Err(e) = crate::send::request_send_payload(
+        &ws,
+        &t,
+        sign_as,
+        to_agent,
+        body,
+        &resolved_artifact,
+        "send",
+        true,
+    ) {
+        fail(&e.to_string());
+    }
+}
+
+/// `hive send ext.<label>`: a member answers an external client. The client
+/// has no engine and no inbox, so there is no transport and nothing to
+/// refuse: the send is the ledger row (`to_agent = ext.<label>`) and the
+/// client reads it off the bus. Silent on success like every peer send.
+fn send_to_ext_client(label: &str, message: &str, artifact: &str) {
+    if let Err(e) = crate::send::validate_ext_label(label) {
+        fail(&e.to_string());
+    }
+    let (team, agent) = match (identity::default_team(), identity::default_agent()) {
+        (Some(team), Some(agent)) => (team, agent),
+        _ => fail(
+            "`ext.<label>` is a team member's outbound address; an external \
+             client sends into a team with `hive send --as ext.<label>`",
+        ),
+    };
+    if message.trim().is_empty() {
+        fail("message body required");
+    }
+    let t = ok_or_fail(load_team(&team, ""));
+    let ws = ok_or_fail(resolve_workspace(Some(&t), true));
+    let resolved_artifact = resolve_artifact_path(artifact, &ws);
+    crate::send::maybe_warn_long_body(message, "send");
+    if let Err(e) = crate::bus::write_send_event(
+        &ws,
+        &agent,
+        &format!("{}{label}", crate::send::EXT_PREFIX),
+        message,
+        &resolved_artifact,
+    ) {
+        fail(&format!("ledger write failed: {e}"));
+    }
 }
 
 /// `hive send ccd.<session>`: a member pushes into an outside Claude
@@ -584,6 +689,81 @@ mod tests {
             }
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn test_send_as_ext_client_takes_the_guest_lane_signed_with_the_ext_address() {
+        // Outside tmux, no engine marker, no Claude session: nobody on hive,
+        // which is the one shape `--as ext.<label>` is for.
+        let env = crate::testkit::display_env_outside();
+        let ws = env._tmp.path().join("ws").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&ws).unwrap();
+        crate::registry::record_team(
+            "honey",
+            &ws,
+            "100.0",
+            &[member_row("orch", "claude", "sid-orch")],
+            "",
+        )
+        .unwrap();
+        assert!(!is_somebody_on_hive());
+        let _hived = hived_answering_ping("honey");
+        let fake_hived = FakeHived::bind(&ws);
+
+        send("honey.orch", "new task, see artifact", "", "ext.tower");
+
+        // One send reached the hived on the team's workspace, signed by the
+        // external address: that is what the ledger row's `from_agent` and
+        // the envelope's `from=` become, so orch answers `hive send ext.tower`.
+        let requests = fake_hived.requests();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let sent = &requests[0];
+        assert_eq!(sent["action"], Value::from("send"));
+        assert_eq!(sent["team"], Value::from("honey"));
+        assert_eq!(sent["senderAgent"], Value::from("ext.tower"));
+        assert_eq!(sent["targetAgent"], Value::from("orch"));
+        assert_eq!(sent["body"], Value::from("new task, see artifact"));
+    }
+
+    #[test]
+    fn test_is_somebody_on_hive_reads_the_identity_ladder_and_the_engine_markers() {
+        let mut env = crate::testkit::display_env_outside();
+        assert!(!is_somebody_on_hive());
+        // an engine's own marker makes the process that engine's tool, which
+        // signs as itself (or is told it is unrostered) — never as `ext.`
+        env.env.set("GROK_SESSION_ID", "s-anyone");
+        assert!(is_somebody_on_hive());
+    }
+
+    #[test]
+    fn test_send_to_ext_client_is_a_ledger_row_with_no_hived_round_trip() {
+        let env = display_env();
+        let ws = env._tmp.path().join("ws").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&ws).unwrap();
+        crate::bus::init_workspace(&ws).unwrap();
+        crate::registry::record_team(
+            "honey",
+            &ws,
+            "100.0",
+            &[member_row("orch", "claude", "sid-orch")],
+            "@7",
+        )
+        .unwrap();
+        // The caller's own pane is orch's; no hived is bound on the workspace,
+        // so any round trip would fail the send.
+        let _argv = fake_tmux_tagged(
+            "dev:2\t@7\thoney\t\t\t\n",
+            &[],
+            &[("%0", "hive-team", "honey"), ("%0", "hive-agent", "orch")],
+        );
+
+        send("ext.tower", "done: see artifact", "", "");
+
+        let events = crate::bus::read_all_events(&ws).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].from, "orch");
+        assert_eq!(events[0].to, "ext.tower");
+        assert_eq!(events[0].body, "done: see artifact");
     }
 
     #[test]

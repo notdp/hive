@@ -250,6 +250,35 @@ pub(crate) fn split_team_address(addr: &str) -> (String, String) {
     (String::new(), addr.to_string())
 }
 
+/// The address prefix of an external client: a process that is no engine and
+/// no Claude session — a dashboard, a bot, a script — reading the bus on its
+/// own. `ext.<label>` is the third address kind beyond the roster, next to
+/// `ccd.<name>`: inbound it signs a `hive send --as ext.<label>`, outbound
+/// it is a member's `hive send ext.<label>` that lands on the ledger only.
+pub(crate) const EXT_PREFIX: &str = "ext.";
+
+/// The label of an `ext.<label>` address, `None` for any other address.
+pub(crate) fn ext_label(addr: &str) -> Option<&str> {
+    addr.strip_prefix(EXT_PREFIX)
+}
+
+/// An external client's label: one word of `[A-Za-z0-9_-]`, at most 32
+/// bytes. No dot (the address splits on it), no space (the envelope's
+/// `from=` attribute tokenizes on it), nothing a shell or a status line
+/// would interpret.
+pub(crate) fn validate_ext_label(label: &str) -> Result<()> {
+    if label.is_empty() || label.len() > 32 {
+        bail!("an external client label is 1-32 characters of [A-Za-z0-9_-]");
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("an external client label is 1-32 characters of [A-Za-z0-9_-]");
+    }
+    Ok(())
+}
+
 /// Resolve the team that owns *to_agent* for a send.
 ///
 /// Qualified names (`<group>.<name>`) bypass the current-window check and
@@ -340,7 +369,7 @@ fn existing_team_agent(t: &Team, agent_name: &str) -> Option<Agent> {
     t.get(agent_name).ok()
 }
 
-fn maybe_warn_long_body(body: &str, command: &str) {
+pub(crate) fn maybe_warn_long_body(body: &str, command: &str) {
     if let Some(hint) = crate::message::body_warning_hint(body) {
         eprintln!("{}", crate::message::format_body_warning(command, &hint));
     }
@@ -361,6 +390,24 @@ mod tests {
             cli: String::new(),
             group: group.to_string(),
         }
+    }
+
+    #[test]
+    fn test_ext_label_is_the_ext_prefix_alone_and_vets_one_shell_safe_word() {
+        assert_eq!(ext_label("ext.tower"), Some("tower"));
+        assert_eq!(ext_label("ext."), Some(""));
+        assert_eq!(ext_label("ccd.tower"), None);
+        assert_eq!(ext_label("honey.orch"), None);
+        assert_eq!(ext_label("tower"), None);
+
+        assert!(validate_ext_label("tower").is_ok());
+        assert!(validate_ext_label("my-bot_2").is_ok());
+        assert!(validate_ext_label("").is_err());
+        assert!(validate_ext_label("a b").is_err());
+        assert!(validate_ext_label("a.b").is_err());
+        assert!(validate_ext_label("a/b").is_err());
+        assert!(validate_ext_label(&"x".repeat(33)).is_err());
+        assert!(validate_ext_label(&"x".repeat(32)).is_ok());
     }
 
     #[test]

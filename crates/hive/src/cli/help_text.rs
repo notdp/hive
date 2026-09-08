@@ -557,9 +557,14 @@ Options:
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
   outside any team is `ccd.<name or title or pid>` (how a member reaches out).
-  An envelope with no `from=` is a `hive workflow run` task: its result is
-  the last thing you say in that turn, read off your engine — nothing to
-  send back.
+  An external client — a dashboard, a bot, a script that is no engine and no
+  Claude session — is `ext.<label>`: it sends in with `--as ext.<label>`
+  (addressing `<team>.<member>`; refused for a process that already is
+  somebody on hive), its message arrives as `from=ext.<label>`, and a member's
+  `hive send ext.<label>` is the ledger row alone — the client reads the bus,
+  nothing is pushed. An envelope with no `from=` is a `hive workflow run`
+  task: its result is the last thing you say in that turn, read off your
+  engine — nothing to send back.
 
   New-thread sends must keep `body` to a short summary and put details in
   `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,
@@ -574,12 +579,16 @@ Options:
   Examples:
     hive send dodo "review this diff" --artifact /tmp/diff.md
     hive send "ccd.PR review" "build is green"    # session by desktop title
+    hive send --as ext.tower comb.orch "new task, see artifact" --artifact /tmp/task.md
+    hive send ext.tower "done: see artifact" --artifact /tmp/report.md
     hive send dodo "see report" --artifact - <<'EOF'
     # Findings
     - item
     EOF
 
 Options:
+  --as ADDRESS     Sign as an external client (`ext.<label>`); only for a
+                   process that is nobody on hive
   --artifact TEXT  Artifact path for large payloads
   -h, --help       Show this message and exit.
 "#

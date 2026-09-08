@@ -430,6 +430,16 @@ pub(crate) fn build_cli() -> Command {
                         .allow_hyphen_values(true),
                 )
                 .arg(
+                    Arg::new("sign_as")
+                        .long("as")
+                        .value_name("ADDRESS")
+                        .default_value("")
+                        .help(
+                            "Sign as an external client (`ext.<label>`); only for a \
+                             process that is nobody on hive",
+                        ),
+                )
+                .arg(
                     Arg::new("artifact")
                         .long("artifact")
                         .default_value("")
@@ -745,7 +755,7 @@ fn arg_vec(m: &ArgMatches, key: &str) -> Vec<String> {
 /// name — that is the shape a killed member's leftover subprocess arrives
 /// in, and the tmux line would send it hunting for a terminal it is never
 /// going to have.
-fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
+fn no_tmux_refusal(invoked: &str, tail: &[String]) -> Option<&'static str> {
     if TMUX_OPTIONAL_ROOT_COMMANDS.contains(&invoked) || identity::is_inside_tmux() {
         return None;
     }
@@ -755,6 +765,11 @@ fn no_tmux_refusal(invoked: &str) -> Option<&'static str> {
     if crate::adapters::claude_sessions::self_session().is_some()
         || !identity::session_member_binding().is_empty()
     {
+        return None;
+    }
+    // An external client (`--as ext.<label>`) is by definition outside tmux
+    // and no engine; the send verb itself vets the label and the identity.
+    if signs_as_ext_client(tail) {
         return None;
     }
     if identity::engine_marker_env() {
@@ -789,10 +804,28 @@ fn require_codex_native(invoked: Option<&str>) {
     fail(&codex_relaunch_message());
 }
 
+/// True when a `send` tail carries `--as ext.<label>` (either spelling:
+/// `--as ext.x` or `--as=ext.x`). Only the gate reads argv this early; the
+/// value is vetted again when clap has parsed it.
+fn signs_as_ext_client(tail: &[String]) -> bool {
+    let mut args = tail.iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--as" {
+            args.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--as=")
+        };
+        if let Some(value) = value {
+            return value.starts_with(crate::send::EXT_PREFIX);
+        }
+    }
+    false
+}
+
 /// Root-group gates, run before any subcommand.
-fn run_root_gates(invoked: &str) {
+fn run_root_gates(invoked: &str, tail: &[String]) {
     require_codex_native(Some(invoked));
-    if let Some(message) = no_tmux_refusal(invoked) {
+    if let Some(message) = no_tmux_refusal(invoked, tail) {
         fail(message);
     }
 }
@@ -864,7 +897,7 @@ fn main_with_argv(argv: Vec<String>) {
 
     let help_requested = args.iter().any(|a| a == "-h" || a == "--help");
     if KNOWN_COMMANDS.contains(&invoked.as_str()) && !help_requested {
-        run_root_gates(&invoked);
+        run_root_gates(&invoked, &tail);
     }
 
     // Click group with no subcommand: `no_args_is_help` — stderr, exit 2.
@@ -1010,6 +1043,7 @@ fn dispatch(matches: &ArgMatches) {
             arg_str(m, "to_agent"),
             arg_str(m, "body"),
             arg_str(m, "artifact"),
+            arg_str(m, "sign_as"),
         ),
         Some(("doctor", m)) => team::doctor(arg_str(m, "agent_name")),
         Some(("capture", m)) => member::capture(
@@ -1181,23 +1215,45 @@ mod tests {
         crate::registry::record_team("hornet", "/tmp/ws-hn", "1.0", &[member], "").unwrap();
 
         // no identity at all: the generic tmux refusal
-        assert_eq!(no_tmux_refusal("send"), Some(TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("send", &[]), Some(TMUX_REQUIRED_MESSAGE));
+        // ... unless the send signs as an external client, which is exactly
+        // a process with no identity; the verb vets the label itself
+        let as_ext = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            no_tmux_refusal("send", &as_ext(&["--as", "ext.tower"])),
+            None
+        );
+        assert_eq!(no_tmux_refusal("send", &as_ext(&["--as=ext.tower"])), None);
+        assert_eq!(
+            no_tmux_refusal("send", &as_ext(&["--as", "orch"])),
+            Some(TMUX_REQUIRED_MESSAGE)
+        );
+        assert_eq!(
+            no_tmux_refusal("interrupt", &as_ext(&["--as", "ext.tower"])),
+            Some(TMUX_REQUIRED_MESSAGE)
+        );
 
         env.set("GROK_SESSION_ID", "s-bee");
-        assert_eq!(no_tmux_refusal("send"), None);
+        assert_eq!(no_tmux_refusal("send", &[]), None);
 
         // the leader's env outlived the member it names
         env.set("GROK_SESSION_ID", "s-ant");
-        assert_eq!(no_tmux_refusal("send"), Some(UNROSTERED_ENGINE_MESSAGE));
+        assert_eq!(
+            no_tmux_refusal("send", &[]),
+            Some(UNROSTERED_ENGINE_MESSAGE)
+        );
 
         // the session lane is a send lane only; other verbs still need tmux
         env.set("GROK_SESSION_ID", "s-bee");
-        assert_eq!(no_tmux_refusal("interrupt"), Some(TMUX_REQUIRED_MESSAGE));
+        assert_eq!(
+            no_tmux_refusal("interrupt", &[]),
+            Some(TMUX_REQUIRED_MESSAGE)
+        );
         // ... and the tmux-optional verbs never reach the gate
-        assert_eq!(no_tmux_refusal("config"), None);
+        assert_eq!(no_tmux_refusal("config", &[]), None);
         // `mirror` moves panes on the server: tmux-only (a run-shell job
         // carries TMUX)
-        assert_eq!(no_tmux_refusal("mirror"), Some(TMUX_REQUIRED_MESSAGE));
+        assert_eq!(no_tmux_refusal("mirror", &[]), Some(TMUX_REQUIRED_MESSAGE));
     }
 
     /// Root help lists a command exactly when its clap node is not hidden:
