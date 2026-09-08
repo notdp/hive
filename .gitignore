@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 .DS_Store
 /target/
+
+# hive skill eval self-test residue
+tests/skill-evals/hive/.selftest/

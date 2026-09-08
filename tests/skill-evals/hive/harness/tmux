@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Record attempted display inspection without contacting a tmux server."""
+import json
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ["HIVE_EVAL_HOST_LOG"]).open("a") as stream:
+    stream.write(json.dumps({"tool": "tmux", "argv": sys.argv[1:]}) + "\n")
+print("[offline host] tmux display is unavailable", file=sys.stderr)
+sys.exit(1)

@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Offline SendMessage stand-in. Native adapters should emit the same event row."""
+import json
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ['HIVE_EVAL_HOST_LOG']).open('a') as stream:
+    stream.write(json.dumps({'tool': 'SendMessage', 'argv': sys.argv[1:]}) + '\n')
+print('[offline host] message recorded; no transport called')

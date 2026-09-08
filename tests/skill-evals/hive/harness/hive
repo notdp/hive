@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Offline CLI fixture runner. Never invokes Hive, hived or tmux."""
+import datetime
+import fcntl
+import json
+import os
+from pathlib import Path
+import select
+import sys
+import time
+from protocol import KNOWN_COMMANDS, body_warning, canonical_address, command_key, fixture_path, parse_args, parse_send
+
+
+def read_stdin(eof_required):
+    chunks = []
+    deadline = time.monotonic() + 2.0
+    if sys.stdin.isatty() and not eof_required:
+        return '', False
+    while True:
+        remaining = max(0, deadline - time.monotonic()) if eof_required else 0
+        ready = select.select([sys.stdin], [], [], remaining)[0]
+        if not ready:
+            return b''.join(chunks).decode('utf-8', errors='replace'), eof_required
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        if not chunk:
+            return b''.join(chunks).decode('utf-8', errors='replace'), False
+        chunks.append(chunk)
+        if eof_required and time.monotonic() >= deadline:
+            return b''.join(chunks).decode('utf-8', errors='replace'), True
+
+
+def snapshot(path, stdin):
+    if path == '-':
+        return {'path': '-', 'exists': True, 'text': stdin}
+    p = Path(path).resolve()
+    return {'path': str(p), 'exists': p.is_file(),
+            'text': p.read_text() if p.is_file() else None}
+
+
+def scripted(args, fixture, previous, row):
+    for rule_id, rule in enumerate(fixture.get('rules', [])):
+        prefix = rule.get('prefix')
+        expected = rule.get('argv')
+        keyed = command_key(args)
+        exact_match = expected is not None and keyed == command_key(expected)
+        prefix_match = prefix is not None and keyed[:len(command_key(prefix))] == command_key(prefix)
+        if exact_match or prefix_match:
+            used = sum(r.get('rule_id') == rule_id for r in previous)
+            response = rule['responses'][min(used, len(rule['responses']) - 1)].copy()
+            row['rule_id'] = rule_id
+            return response
+    return None
+
+
+def main():
+    fixture = json.loads(fixture_path(os.environ['HIVE_EVAL_RUN']).read_text())
+    log = Path(os.environ['HIVE_EVAL_LOG'])
+    args = sys.argv[1:]
+    pos, options = parse_args(args)
+    stdin, stdin_timeout = read_stdin(options.get('--artifact') == '-')
+    row = {'argv': args, 'stdin': stdin, 'cwd': os.getcwd(),
+           'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'artifacts': {}}
+    for flag in ('--artifact', '--task'):
+        if options.get(flag) is not None:
+            row['artifacts'][flag] = snapshot(options[flag], stdin)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('a+') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        previous = [json.loads(line) for line in stream if line.strip()]
+        cmd = args[0] if args else ''
+        response = None
+        if stdin_timeout:
+            row['stdin_timeout'] = True
+            response = {'exit_code': 1, 'stderr': 'Error: --artifact - expects EOF-terminated stdin\n'}
+        help_requested = any(h in args for h in ('--help', '-h'))
+        if response is None and help_requested:
+            helps = json.loads(fixture_path(os.environ['HIVE_EVAL_RUN']).with_name('help.json').read_text())
+            before = args[:next(i for i, a in enumerate(args) if a in ('--help', '-h'))]
+            candidates = [' '.join(before[:n]) for n in range(len(before), -1, -1)]
+            matched = next((key for key in candidates if key in helps and (key or not before)), None)
+            if matched is not None:
+                response = {'stdout': helps[matched]}
+                row['help'] = True
+        if response is None and cmd == 'team' and pos:
+            response = {'exit_code': 2, 'stderr': "error: unexpected argument '" + pos[0] + "' found\n\nUsage: hive team [OPTIONS]\n\nFor more information, try '--help'.\n"}
+        created = any(c.get('exit_code') == 0 and not c.get('help') and c['argv'][:1] == ['create'] for c in previous)
+        if response is None and cmd == 'team' and fixture.get('entry_state') and not created and not any(k in options for k in ('-t', '--team')):
+            response = {'exit_code': 1, 'stderr': 'Error: no team in scope — pass -t <team> (see `hive ls`)\n'}
+        scoped_team = options.get('-t', options.get('--team'))
+        if response is None and cmd == 'team' and scoped_team:
+            roster = fixture.get('team') if scoped_team == fixture.get('team', {}).get('name') else fixture.get('teams', {}).get(scoped_team)
+            if fixture.get('entry_state') and not created:
+                roster = None
+            response = {'json': roster} if roster is not None else {'exit_code': 1, 'stderr': f"Error: team '{scoped_team}' not found\n"}
+        if response is None:
+            response = scripted(args, fixture, previous, row)
+        if response is None and cmd == 'team' and not any(options.get(h) for h in ('-h', '--help')):
+            response = {'json': fixture['team']}
+        if response is None and cmd == 'ls':
+            response = {'json': fixture.get('ls', {'teams': [], 'tmux': 'no-server'})}
+        if response is None and cmd == 'send' and not any(options.get(h) for h in ('-h', '--help')):
+            send = parse_send(args)
+            addr = canonical_address(send['address'], fixture)
+            row['send'] = dict(send, canonical_address=addr)
+            response = {}
+            if not send['body']:
+                response = {'exit_code': 1, 'stderr': 'Error: message body required\n'}
+            elif send['address'].startswith('ccd.') and send['artifact'] is not None:
+                response = {'exit_code': 1, 'stderr': 'Error: a session push carries no --artifact; put the path in the body\n'}
+            elif addr.startswith('ambiguous:ccd.'):
+                label = send['address'][4:]
+                matches = [s for s in fixture.get('ccd', {}).get('sessions', [])
+                           if label in {str(s.get(k, '')) for k in ('name', 'title', 'pid')}]
+                locations = ', '.join(f"{s['name']} (pid {s['pid']}, {s.get('cwd') or '?'})" for s in matches)
+                response = {'exit_code': 1, 'stderr': f"Error: {len(matches)} live sessions answer to '{label}': {locations}; use the name or pid\n"}
+            elif addr in {canonical_address(a, fixture) for a in fixture.get('waiting_user', [])}:
+                response = {'exit_code': 1, 'stderr': 'Error: target agent is waiting for a user answer; answer it in the target pane\n'}
+            elif fixture.get('outside_tmux') and '.' not in send['address']:
+                teams = sorted({t['team'] for t in fixture.get('ls', {}).get('teams', [])
+                                if any(m['name'] == send['address'] for m in t.get('members', []))})
+                if len(teams) > 1:
+                    addresses = ', '.join(t + '.' + send['address'] for t in teams)
+                    response = {'exit_code': 1, 'stderr': f"Error: agent '{send['address']}' exists in {len(teams)} teams; address one of: {addresses}\n"}
+            if send['body'] and not send['address'].startswith('ccd.'):
+                warning = body_warning(send['body'])
+                if warning:
+                    row['body_warning'] = True
+                    response['stderr'] = warning + response.get('stderr', '')
+        if response is None and args[:2] == ['ccd', 'ls']:
+            response = {'json': fixture.get('ccd', {'sessions': []})}
+        if response is None and cmd == 'spawn' and pos:
+            name = pos[0]
+            team_name = options.get('-t', options.get('--team', fixture.get('team', {}).get('name', '')))
+            row['spawn_team'] = team_name
+            initial = {m['name'] for m in fixture.get('team', {}).get('members', [])} if team_name == fixture.get('team', {}).get('name') else set()
+            alive = set(initial)
+            for old in previous:
+                if old.get('exit_code') != 0:
+                    continue
+                old_pos, _ = parse_args(old['argv'])
+                if old_pos and old['argv'][:1] == ['spawn'] and old.get('spawn_team') == team_name:
+                    alive.add(old_pos[0])
+                if old_pos and old['argv'][:1] == ['kill']:
+                    alive.discard(old_pos[0])
+            task = row['artifacts'].get('--task')
+            if name in alive:
+                response = {'exit_code': 1, 'stderr': f"Error: Agent '{name}' already exists in team '{team_name}'\n"}
+            elif task and not task['exists']:
+                response = {'exit_code': 2, 'stderr': f"Error: Invalid value for '--task': Path '{task['path']}' does not exist.\n"}
+            elif task:
+                response = {'json': {'agent': name, 'pane': '%900', 'task': task['path'], 'dispatched': True}}
+            else:
+                response = {'stdout': f"Agent '{name}' spawned in pane %900\n"}
+        if response is None and cmd == 'kill' and pos:
+            response = {'json': {'member': pos[0], 'action': 'kill', 'pane': '%900', 'removedFromTeam': True, 'success': True}}
+        if response is None:
+            if cmd in KNOWN_COMMANDS or not cmd or cmd.startswith('-'):
+                row['unmodelled'] = True
+                response = {'exit_code': 1, 'stderr': f"[offline stub] {cmd or 'hive'} not modelled\n"}
+            else:
+                row['unsupported'] = True
+                response = {'exit_code': 2, 'stderr': f"Usage: hive [OPTIONS] COMMAND [ARGS]...\nTry 'hive -h' for help.\n\nError: No such command '{cmd}'.\n"}
+        row.update({'exit_code': response.get('exit_code', 0),
+                    'stdout': json.dumps(response['json'], ensure_ascii=False, indent=2) + '\n' if 'json' in response else response.get('stdout', ''),
+                    'stderr': response.get('stderr', '')})
+        stream.write(json.dumps(row, ensure_ascii=False) + '\n')
+        stream.flush()
+    sys.stdout.write(row['stdout'])
+    sys.stderr.write(row['stderr'])
+    return row['exit_code']
+
+
+if __name__ == '__main__':
+    sys.exit(main())

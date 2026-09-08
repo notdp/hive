@@ -1,0 +1,81 @@
+{
+  "team": {
+    "name": "birch",
+    "self": "bridge",
+    "members": [
+      {
+        "name": "bridge",
+        "role": "agent",
+        "pane": "",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      },
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%903",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{RUN}}/workspace-birch",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "birch",
+    "tmuxWindow": "birch:1"
+  },
+  "rules": [
+    {
+      "argv": [
+        "create",
+        "spruce"
+      ],
+      "responses": [
+        {
+          "stdout": "Team 'spruce' created (tmux window spruce:1 — `hive attach spruce` opens it).\nYou are already birch.bridge — orchestrating 'spruce' as a guest.\nWorkspace initialized: {{RUN}}/workspace-spruce\n"
+        }
+      ]
+    }
+  ],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "birch",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "bridge",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": false
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  },
+  "outside_tmux": true,
+  "teams": {
+    "spruce": {
+      "name": "spruce",
+      "self": null,
+      "members": [],
+      "runtimeWorkspace": "{{RUN}}/workspace-spruce",
+      "cwd": "{{RUN}}/shared",
+      "tmuxSession": "spruce",
+      "tmuxWindow": "spruce:1"
+    }
+  }
+}

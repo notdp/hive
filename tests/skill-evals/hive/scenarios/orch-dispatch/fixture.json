@@ -1,0 +1,41 @@
+{
+  "team": {
+    "name": "wasp",
+    "self": "orch",
+    "members": [
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%901",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "wasp",
+    "tmuxWindow": "wasp:1"
+  },
+  "rules": [],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "wasp",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  }
+}

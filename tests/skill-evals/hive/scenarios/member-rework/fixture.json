@@ -1,0 +1,76 @@
+{
+  "team": {
+    "name": "fir",
+    "self": "tabulate",
+    "members": [
+      {
+        "name": "tabulate",
+        "role": "agent",
+        "pane": "%901",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      },
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%903",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      },
+      {
+        "name": "controller",
+        "role": "agent",
+        "pane": "%904",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "fir",
+    "tmuxWindow": "fir:1"
+  },
+  "rules": [],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "fir",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "tabulate",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "controller",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  },
+  "initial_files": {
+    "outputs/stock.csv": "item,units\noats,17\nberries,7\n"
+  }
+}

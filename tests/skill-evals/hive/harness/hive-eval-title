@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Simulated host title capability, deliberately not a Hive subcommand."""
+import json
+import os
+from pathlib import Path
+import sys
+
+if len(sys.argv) != 2:
+    sys.exit("usage: hive-eval-title TITLE")
+run = Path(os.environ["HIVE_EVAL_RUN"])
+(run / "title.txt").write_text(sys.argv[1])
+with Path(os.environ["HIVE_EVAL_HOST_LOG"]).open("a") as stream:
+    stream.write(json.dumps({"tool": "set_session_title", "title": sys.argv[1]}) + "\n")

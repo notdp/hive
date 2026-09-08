@@ -1,0 +1,68 @@
+{
+  "team": {
+    "name": "linden",
+    "self": "proof",
+    "members": [
+      {
+        "name": "proof",
+        "role": "agent",
+        "pane": "%901",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      },
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%903",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "linden",
+    "tmuxWindow": "linden:1"
+  },
+  "rules": [],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "linden",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "proof",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  },
+  "ccd": {
+    "sessions": [
+      {
+        "name": "desk",
+        "title": "Archive Desk",
+        "pid": 24680,
+        "kind": "desktop",
+        "cwd": "{{RUN}}/shared"
+      }
+    ]
+  }
+}
