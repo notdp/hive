@@ -6,7 +6,8 @@
 
 orch 拆任务、写 task artifact、spawn/派发、收回信、集成终验、向 human 汇报。你不写业务代码——context 要留给验收。
 
-- 建团者即 orch,tmux 内外一样:你以 `<team>.orch` 入册,成员直接寻址 `orch`。唯一例外是 tmux 外、已是别团成员的 session 再 `hive create <新团>`:你不入册,以 guest 编排新团(tmux pane 成员做不到——已绑定的 pane 跑 `hive create <别名>` 只会幂等返回本团)。guest 有两个地址:**回信地址**仍是你原队的 `<原team>.<你>`;**派发作用域**不会自动切到新团——每个动词缺省作用在你自己绑定的团,`hive create <新团>` 不改这个绑定,所以对新团的每条 `spawn` / `kill` / `team` 都显式 `-t <新团>`,看新团名册用 `hive team -t <新团>`(裸 `hive team` 回的仍是原队):
+- 建团者的 orch 身份按 SKILL.md 的入口规则确定:入册地址为 `<team>.orch`,成员直接寻址 `orch`。tmux 外、已是别团成员的 session 再 `hive create <新团>` 时不入册,而是以 guest 编排新团。已绑定的 tmux pane 做不到这一点:`hive create <别名>` 只会幂等返回本团。
+- guest 对新团的每条 `spawn` / `kill` / `team` 都要显式加 `-t <新团>`。**派发作用域**默认仍是自己绑定的团,`hive create <新团>` 不改变绑定。看新团名册用 `hive team -t <新团>`,裸 `hive team` 仍返回原队。**回信地址**也仍是原队的 `<原team>.<你>`。例如:
 
 ```bash
 hive spawn lint-docs -t maple --task <新团workspace>/artifacts/tasks/lint-docs.md
@@ -26,7 +27,7 @@ runtime 没有角色:spawn 时起的名字(`explore`、`impl-auth`、`review`)�
 1. **scope**:做什么、不做什么。
 2. **交付物**:形态与产出路径(报告、commit 还是 PR)。
 3. **验收标准**:你终验按什么判,写成能执行的检查。
-4. **材料**:上游产出、输入数据的绝对路径。成员是全盲的,不知道 workflow 长什么样——它需要的一切都在这份文件里给路径,别指望它自己发现。
+4. **材料**:上游产出、输入数据的绝对路径。成员看不到 workflow,也不知道别人在做什么;它需要的每份材料都在这份文件里给绝对路径。
 
 ## spawn + 派发
 
@@ -43,7 +44,7 @@ hive spawn review --cli codex --task <workspace>/artifacts/tasks/review.md
 
 ## 进度只来自回信
 
-成员进度只有三个来源:回报消息、notify 事件、`hive team` 的 runtime 字段。前两个是推送;`hive team` 只在收到消息后核对,不是轮询工具。`spawn` exit 0 且输出 `dispatched: true` 就是派发落地的凭据——不跑 `hive team` 复核名册,名册不是回执。不 `tmux capture-pane` 或任何读屏手段观察成员——残屏和中间态不是真相,还烧你的 context。已派发的任务不自己再做一遍:你的产出没人验收,还烧掉终验要用的 context。
+成员进度只看回报消息、notify 事件和 `hive team` 的 runtime 字段。前两个由 runtime 推送;收到消息后才用 `hive team` 核对状态,不用它轮询。`spawn` exit 0 且输出 `dispatched: true` 就是派发落地的凭据——不跑 `hive team` 复核名册,名册不是回执。不 `tmux capture-pane` 或任何读屏手段观察成员——残屏和中间态不是真相,还烧你的 context。已派发的任务不自己再做一遍:你的产出没人验收,还烧掉终验要用的 context。
 
 ## 成员生命周期
 
@@ -55,7 +56,7 @@ hive spawn review --cli codex --task <workspace>/artifacts/tasks/review.md
 
 建议模式,按任务自由组合;stage 划分、数量、顺序都是你的编排决定。
 
-**① producer + 异构 reviewer**:改动需要独立审时,reviewer 用不同家族的 CLI,`--cli` 必须显式写——忘了就是同构 review,白审。review 的 task 要求 verdict `pass`/`fail` + evidence + required-changes,并给 reviewer 和 producer 同样的原始材料路径——只让它读 producer 的报告,它就只能复述;关键结论从 diff、日志、材料自己核。
+**① producer + 异构 reviewer**:改动需要独立审时,reviewer 用不同家族的 CLI,`--cli` 必须显式写。review 的 task 要求 verdict `pass`/`fail` + evidence + required-changes,并给 reviewer 和 producer 同样的原始材料路径——只让它读 producer 的报告,它就只能复述;关键结论从 diff、日志、材料自己核。
 
 **② solo 快任务**:一个成员闭环一件小事。spawn → 回报 → 验收 → kill。
 
@@ -69,7 +70,11 @@ hive spawn review --cli codex --task <workspace>/artifacts/tasks/review.md
 
 开工:编排的 Claude session 里 `hive create <run>`,你以 `<run>.orch` 入册,团窗口首格是你的只读镜像;session=team=run 名;human `hive attach <run>` 看全场。
 
-节点是一条阻塞命令:`hive workflow run --team <run> --name <member> --cli codex|grok [--model]`,task 从 stdin 进,结果一行 JSON 从 stdout 出。成员收到的是没有 `from` 的信封(`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,首行 `task nd-…`),不被要求回信、不跑任何返回命令;runner 等引擎自己报的这一轮结束(codex `turn/completed`,grok `session/prompt` 的响应),`body` 就是成员这一轮最后说的那段话,中途提问就以那个问题结束。所以 task 里写明最后那段话该有什么(commit sha、报告路径、verdict),不写「完成后回报」。节点只能 codex 或 grok;claude 节点用 Workflow 自己的子代理(`agent(...)` 不带 `agentType`),hive 不提供。
+节点用一条阻塞命令运行:`hive workflow run --team <run> --name <member> --cli codex|grok [--model]`,task 从 stdin 进,结果一行 JSON 从 stdout 出。
+
+成员收到的是没有 `from` 的信封(`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,首行 `task nd-…`),不需要回信,也不跑任何返回命令。`body` 是成员这一轮最后说的那段话,中途提问就以那个问题结束。runner 只等引擎自己报的这一轮结束:codex `turn/completed`,grok `session/prompt` 的响应。所以 task 要写明最后那段话该有什么(例如 commit sha、报告路径、verdict),不写「完成后回报」。
+
+节点只能用 codex 或 grok;hive 不提供 claude 节点。claude 节点用 Workflow 自己的子代理(`agent(...)` 不带 `agentType`)。
 
 JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头);这一轮结束了就有 `body`(可能为空串),`completed` 以外都有 `reason`。`status` 取值:
 
@@ -81,9 +86,13 @@ JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头);�
 - `member_gone`:等待期间成员死了。
 - `member_busy`:没派发——上一跑 pending/unknown 仍未决且成员活着、名字被别的 runner 锁着、或成员 600 次轮询还在一轮里(runner 不往进行中的一轮里塞任务)。
 
-非 `completed` 一样是节点的返回值,由脚本决定重派、改任务还是升级 human;代理不重试、不解读。exit 1 = 任务没派发(team 不对、指定了 claude、spawn/ready 失败、hived 明确拒收三次),可直接重跑;`member_busy` 也是没派发,但 exit 0 + JSON;派出去的任务一定 exit 0 + 一行 JSON,turn 本身没有超时。派发请求发出去了但应答没回来时 runner 绝不重发——任务可能已注入——记录留在 pending,照常去 hived 读结果;同名重跑先查旧 dispatchId:已结束的先存结果,turn 明确关闭的视为陈旧,仍在跑或问不到的返回 `member_busy`。记录在 `<workspace>/run/workflow/<member>.json`,`hive kill` 成员会删掉它;`no_result` 不说明任务有没有产生副作用。
+非 `completed` 也是节点返回值。由脚本决定重派、改任务还是升级 human,代理不重试、不解读。
 
-插件的 `hive-node` 代理只做一件事:把命令挂后台跑、循环等它的 exit 文件(单次 Bash 有十分钟上限,所以是同一条等待命令反复调用,不是"待会再看")、完成后把 JSON 原样交回。写法:prompt 第一行是命令,其余是 task:
+exit 1 = 任务没派发(team 不对、指定了 claude、spawn/ready 失败、hived 明确拒收三次),可直接重跑;`member_busy` 也是没派发,但 exit 0 + JSON;派出去的任务一定 exit 0 + 一行 JSON,turn 本身没有超时。
+
+派发请求已发出但应答没回来时,runner 不重发,因为任务可能已注入。记录留在 pending,照常向 hived 读结果。同名重跑先查旧 dispatchId:已结束的先存结果;turn 明确关闭的视为陈旧;仍在跑或问不到的返回 `member_busy`。记录在 `<workspace>/run/workflow/<member>.json`,`hive kill` 成员会删掉它;`no_result` 不说明任务有没有产生副作用。
+
+插件的 `hive-node` 代理把命令挂后台跑,循环等 exit 文件,完成后原样交回 JSON。单次 Bash 有十分钟上限,所以反复调用同一条等待命令,不能停在「待会再看」。prompt 第一行写命令,其余写 task:
 
 ```js
 const result = await agent(`hive workflow run --team ${run} --name impl-auth --cli codex
@@ -107,7 +116,7 @@ hive worktree set-base <team>-integration   # 写在团窗口上:在团窗口的
 
 漏 push 时成员开 PR 会报 base 不存在,它会报给你,你补 push。
 
-merge 串行一次一条,只由你做,且在该任务验收通过、human 批准后:`gh pr merge <PR号> --match-head-commit <验过的head> --squash`——必须带 PR 号和 head,免得 pass 后又 push 的 commit 被误合。每合一条,通知 in-flight 写码成员 rebase(它们重跑 start 会拿到 `needs-rebase`)。冲突在 PR / 集成点处理,worktree 只隔离工作区,不消除冲突。首个 sub-PR 合入后可开 main PR(集成分支 → main),human review / merge 它才是最终交付。
+merge 只由你串行执行,一次一条。该任务验收通过且 human 批准后再运行:`gh pr merge <PR号> --match-head-commit <验过的head> --squash`——必须带 PR 号和 head,免得 pass 后又 push 的 commit 被误合。每合一条,通知 in-flight 写码成员 rebase(它们重跑 start 会拿到 `needs-rebase`)。冲突在 PR / 集成点处理,worktree 只隔离工作区,不消除冲突。首个 sub-PR 合入后可开 main PR(集成分支 → main),human review / merge 它才是最终交付。
 
 ## 对 human
 
