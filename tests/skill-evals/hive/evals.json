@@ -1650,14 +1650,6 @@
           "id": "13.7a"
         },
         {
-          "text": "知道编排规则位置或已读取其承载文件",
-          "check": "llm",
-          "signal": "low",
-          "critical": false,
-          "criterion": "读取候选 SKILL.md 后能定位其编排规则（可以内联），或有读取承载规则文件的工具证据；不要求无任务时读完单独手册。",
-          "id": "13.7b"
-        },
-        {
           "text": "创建后保留原标题并添加徽章",
           "check": "auto",
           "signal": "high",
@@ -1838,14 +1830,6 @@
           "critical": false,
           "criterion": "没有 human 任务时结束本轮；不自行查找任务、创造需求或派发成员。",
           "id": "14.7a"
-        },
-        {
-          "text": "知道编排规则位置或已读取其承载文件",
-          "check": "llm",
-          "signal": "low",
-          "critical": false,
-          "criterion": "读取候选 SKILL.md 后能定位其编排规则（可以内联），或有读取承载规则文件的工具证据；不要求无任务时读完单独手册。",
-          "id": "14.7b"
         },
         {
           "text": "创建后保留原标题并添加徽章",

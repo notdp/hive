@@ -156,9 +156,6 @@ def add(name, category, prompt, expected, expectations, files=None, fx=None, hel
         original = exp[6]
         original.update(text='没有需求时不凭空派活', criterion='没有 human 任务时结束本轮；不自行查找任务、创造需求或派发成员。')
         original['id'] += 'a'
-        location = llm('知道编排规则位置或已读取其承载文件', '读取候选 SKILL.md 后能定位其编排规则（可以内联），或有读取承载规则文件的工具证据；不要求无任务时读完单独手册。')
-        location.update(id=f'{case_id}.7b', signal='low')
-        exp.insert(7, location)
         badge = next(e for e in exp if e['id'] == f'{case_id}.8')
         badge['high_signal_engines'] = ['claude']
     if name == 'guest-orchestration':

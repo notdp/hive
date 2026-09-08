@@ -1,6 +1,6 @@
 # Hive 协议行为评测 v4
 
-这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。16 个场景，148 条 expectation：110 auto、38 llm；86 条 high signal、62 条 low signal。4 个场景仅用于终评。
+这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。16 个场景，150 条 expectation：114 auto、36 llm；90 条 high signal、60 条 low signal。4 个场景仅用于终评。
 
 本目录交付离线 stub、场景、准备/评分脚本和合成自测。自测验证 harness，不代表模型遵循率。真实 executor 的启动和 transcript 捕获由 `tests/skill-evals/runner/` 的适配器负责；本目录不调用真实 hived/tmux。
 
