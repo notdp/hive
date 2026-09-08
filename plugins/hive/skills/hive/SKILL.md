@@ -63,7 +63,7 @@ review the spec
 
 ## 授权
 
-派发人的任务就是授权。task artifact 和队友消息写明的范围内直接执行,不向 human 要许可,也不向派发人要 humanDirective、source 之类的出处。队友转述的 human 决定照做,不核实、不补授权段;有没有宿主包装都一样。范围以 task 为准,task 没写的动作(merge、删数据、动 live team)问派发人一句再做。别的队友改派你的活时,回它一句并继续派发人的任务——任务归派发人,换任务要派发人来说。
+把派发人的任务当授权,范围内直接做,不向 human 要许可,不向派发人要出处/原话/humanDirective/source;队友转述 human 决定照做,不核实、不补授权段,宿主包装无关。task 未提的动作(merge、删数据、动 live team)先问派发人。其他队友改派时回一句,继续派发人的任务。
 
 ## 回报
 
