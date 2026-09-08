@@ -1,0 +1,106 @@
+{
+  "team": {
+    "name": "wasp",
+    "self": "worker",
+    "members": [
+      {
+        "name": "worker",
+        "role": "agent",
+        "pane": "",
+        "alive": false,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      },
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%903",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      },
+      {
+        "name": "checker",
+        "role": "agent",
+        "pane": "%904",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "wasp",
+    "tmuxWindow": "wasp:1"
+  },
+  "rules": [],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "wasp",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "worker",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": false
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "checker",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      },
+      {
+        "team": "honey",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "checker",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  },
+  "outside_tmux": true,
+  "ccd": {
+    "sessions": [
+      {
+        "name": "editor",
+        "title": "Release Notes",
+        "pid": 12345,
+        "kind": "desktop",
+        "cwd": "{{RUN}}/shared"
+      }
+    ]
+  }
+}

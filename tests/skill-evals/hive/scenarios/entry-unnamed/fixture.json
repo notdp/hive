@@ -1,0 +1,39 @@
+{
+  "team": {
+    "name": "wasp",
+    "self": "orch",
+    "members": [
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "wasp",
+    "tmuxWindow": "wasp:1"
+  },
+  "rules": [
+    {
+      "argv": [
+        "create"
+      ],
+      "responses": [
+        {
+          "stdout": "Team 'wasp' created (tmux window wasp:1 — `hive attach wasp` opens it).\nYou are wasp.orch.\nRename this session now: prefix its title with `[wasp.orch] ` (set_session_title or your host's rename), and drop the prefix when you leave the team.\nWorkspace initialized: {{WORKSPACE}}\n"
+        }
+      ]
+    }
+  ],
+  "ls": {
+    "tmux": "no-server",
+    "teams": []
+  },
+  "outside_tmux": true,
+  "entry_state": true
+}

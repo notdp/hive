@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import runpy
+
+run = Path(os.environ['HIVE_EVAL_RUN']).resolve()
+runpy.run_path(str(run.parent / ('.' + run.name + '.control') / 'checkpoint.py'), run_name='__main__')

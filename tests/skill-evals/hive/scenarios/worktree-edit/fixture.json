@@ -1,0 +1,151 @@
+{
+  "team": {
+    "name": "wasp",
+    "self": "worker",
+    "members": [
+      {
+        "name": "worker",
+        "role": "agent",
+        "pane": "%901",
+        "alive": true,
+        "cliAlive": true,
+        "busy": true,
+        "inputState": "ready"
+      },
+      {
+        "name": "orch",
+        "role": "agent",
+        "pane": "%903",
+        "alive": true,
+        "cliAlive": true,
+        "busy": false,
+        "inputState": "ready"
+      }
+    ],
+    "runtimeWorkspace": "{{WORKSPACE}}",
+    "cwd": "{{RUN}}/shared",
+    "tmuxSession": "wasp",
+    "tmuxWindow": "wasp:1"
+  },
+  "rules": [
+    {
+      "prefix": [
+        "worktree",
+        "start"
+      ],
+      "responses": [
+        {
+          "json": {
+            "feature": "repair-value",
+            "branch": "repair-value",
+            "path": "{{RUN}}/isolated",
+            "mode": "created",
+            "owner": "worker",
+            "team": "wasp",
+            "base": "main",
+            "base_oid": "0000000000000000000000000000000000000000",
+            "worktree_root": "{{RUN}}",
+            "git_common_dir": "{{RUN}}/isolated/.git",
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "prefix": [
+        "worktree",
+        "done"
+      ],
+      "responses": [
+        {
+          "json": {
+            "feature": "repair-value",
+            "branch": "repair-value",
+            "removed_path": "{{RUN}}/isolated",
+            "branch_kept": true,
+            "cleared_config_keys": [],
+            "forced": false,
+            "status_summary": "",
+            "warnings": []
+          }
+        }
+      ]
+    },
+    {
+      "argv": [
+        "worktree",
+        "status"
+      ],
+      "responses": [
+        {
+          "json": [
+            {
+              "feature": "repair-value",
+              "branch_exists": true,
+              "worktree_path": "{{RUN}}/isolated",
+              "owner": "worker",
+              "base": "main",
+              "base_oid": "0000000000000000000000000000000000000000",
+              "current_base_oid": "0000000000000000000000000000000000000000",
+              "state": "active",
+              "dirty": false,
+              "in_progress": [],
+              "stale": false,
+              "warnings": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": [
+        "worktree",
+        "status"
+      ],
+      "responses": [
+        {
+          "json": {
+            "feature": "repair-value",
+            "branch_exists": true,
+            "worktree_path": "{{RUN}}/isolated",
+            "owner": "worker",
+            "base": "main",
+            "base_oid": "0000000000000000000000000000000000000000",
+            "current_base_oid": "0000000000000000000000000000000000000000",
+            "state": "active",
+            "dirty": false,
+            "in_progress": [],
+            "stale": false,
+            "warnings": []
+          }
+        }
+      ]
+    }
+  ],
+  "ls": {
+    "tmux": "ok",
+    "teams": [
+      {
+        "team": "wasp",
+        "workspace": "{{WORKSPACE}}",
+        "state": "live-complete",
+        "members": [
+          {
+            "name": "worker",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          },
+          {
+            "name": "orch",
+            "cli": "claude",
+            "model": "",
+            "session": true,
+            "live": true
+          }
+        ]
+      }
+    ]
+  }
+}
