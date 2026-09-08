@@ -170,6 +170,14 @@ def add(name, category, prompt, expected, expectations, files=None, fx=None, hel
     for e in exp:
         if e['id'] in ('8.5', '13.8', '14.8'):
             e['engines'] = ['claude']
+    attach_rules = {4: ('4.11', 'spruce'), 13: ('13.12', 'wasp'),
+                    14: ('14.12', 'wasp'), 15: ('15.10', 'wasp')}
+    if case_id in attach_rules:
+        rule_id, target = attach_rules[case_id]
+        command = auto('给 human 的最终消息含可运行的 attach 命令块',
+                       'final_fenced_command', command=['hive', 'attach', target])
+        command['id'] = rule_id
+        exp.append(command)
     d = ROOT / 'scenarios' / name
     (d / 'files').mkdir(parents=True, exist_ok=True)
     files = files or {'context.txt': '此处境没有额外任务材料。\n'}
@@ -354,7 +362,7 @@ for old in ('task-old.md','data.json','compute.py'):
     p=ROOT/'scenarios/workflow-folded/files'/old
     if p.exists():
         p.unlink()
-(ROOT/'evals.json').write_text(json.dumps({'skill_name':'hive','schema_version':4,
+(ROOT/'evals.json').write_text(json.dumps({'skill_name':'hive','schema_version':5,
     'schema_note':'expectations extend skill-creator rows with id/check/signal/critical and rule or criterion; grading rows remain text/passed/evidence.',
     'evals':CASES},ensure_ascii=False,indent=2)+'\n')
 print(f'{len(CASES)} scenarios; {sum(c["held_out"] for c in CASES)} held out; {sum(len(c["expectations"]) for c in CASES)} expectations')

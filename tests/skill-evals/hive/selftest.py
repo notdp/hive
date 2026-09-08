@@ -238,7 +238,7 @@ def main():
     guest=prepare('guest-orchestration',output/'guest',args.skill)
     invoke(guest,'team');invoke(guest,'create','spruce')
     gt=guest/'workspace/artifacts/tasks/normalize-tags.md';gt.write_text('只读标签去重排序；交 outputs/tags.txt；按字典序验收；材料 files/tags.txt；回 birch.bridge。\n')
-    invoke(guest,'spawn','normalize-tags','-t','spruce','--task',str(gt));synthetic(guest)
+    invoke(guest,'spawn','normalize-tags','-t','spruce','--task',str(gt));synthetic(guest,'```bash\nhive attach spruce\n```')
     assert grade(guest)['summary']['failed']==0
     rework=prepare('member-rework',output/'rework',args.skill)
     out=rework/'outputs/stock.csv';out.write_text('item,units\noats,19\nberries,7\n')
@@ -337,8 +337,38 @@ def main():
         run_file(legacy,filename).rename(legacy/filename)
     invoke(legacy,'send','checker','done');synthetic(legacy)
     assert grade(legacy)['expectations'][2]['passed']
+    command_rule={'kind':'final_fenced_command','command':['hive','attach','wasp']}
+    positive_commands=[
+        '```bash\nhive attach wasp\n```',
+        '```sh\nhive attach wasp --help\n```',
+        '说明\n```bash\n# 打开团队\n  hive attach "wasp"; echo done\n```\n结束',
+        '````bash\nhive attach wasp\n````',
+        '```text\nnot a command\n```\n```sh\nhive attach wasp\n```',
+    ]
+    negative_commands=[
+        '`hive attach wasp`', 'hive attach wasp',
+        '```\nhive attach wasp\n```',
+        '```python\nhive attach wasp\n```',
+        '```bash\n$ hive attach wasp\n```',
+        '```bash\n# hive attach wasp\n```',
+        '```bash\necho hive attach wasp\n```',
+        '```bash\nhive attach wasp-other\n```',
+        '```bash\nhive attach spruce\n```',
+        '```bash\nhive attach wasp',
+        '````markdown\n```bash\nhive attach wasp\n```\n````',
+        '~~~markdown\n```bash\nhive attach wasp\n```\n~~~',
+        '```bash\nhive attach wasp\n~~~',
+        '```bash\n"hive attach wasp"\n```',
+    ]
+    for final in positive_commands:
+        assert check(command_rule,[],final,good)[0], final
+    for final in negative_commands:
+        assert not check(command_rule,[],final,good)[0], final
+    guest_command=next(e for e in case_by_name['guest-orchestration']['expectations'] if e.get('rule',{}).get('kind')=='final_fenced_command')
+    assert guest_command['rule']['command']==['hive','attach','spruce']
+    assert guest_command['signal']=='high' and not guest_command['critical']
     used={e['rule']['kind'] for case in cases for e in case['expectations'] if e['check']=='auto'}
-    expected_kinds={'count','sequence','destinations','short_artifact','dispatch','file_equals','final_contains','no_artifact','supported','delivery_contains','host_calls_absent','count_attempts','artifact_or_path'}
+    expected_kinds={'count','sequence','destinations','short_artifact','dispatch','file_equals','final_contains','no_artifact','supported','delivery_contains','host_calls_absent','count_attempts','artifact_or_path','final_fenced_command'}
     assert used==expected_kinds
     test_benchmark_gate(output,cases)
     public=output/'public'

@@ -2,6 +2,8 @@
 """Deterministic checks plus explicit pending transcript judgments."""
 import argparse
 import json
+import re
+import shlex
 from pathlib import Path
 from harness.protocol import (body_warning, canonical_address, command_key, equivalent,
                               load_fixture, run_file, logical_sends, modelled_calls, parse_args,
@@ -17,6 +19,42 @@ def arg_value(argv, flag):
         if arg.startswith(flag + "="):
             return arg.split("=", 1)[1]
     return None
+
+
+def final_fenced_command(final, command):
+    """Find a command line in a closed bash/sh backtick fence.
+
+    Track other fences too, so a quoted example nested in a Markdown/code
+    fence is not mistaken for a runnable shell block.
+    """
+    fence_char, fence_size, shell_block, matching_line = None, 0, False, None
+    for line in final.splitlines():
+        marker = re.fullmatch(r' {0,3}(`{3,}|~{3,})(.*)', line)
+        if fence_char is not None:
+            if (marker and marker[1][0] == fence_char and len(marker[1]) >= fence_size
+                    and not marker[2].strip()):
+                if matching_line is not None:
+                    return True, f'closed bash/sh fence contains command: {matching_line!r}'
+                fence_char, shell_block = None, False
+                continue
+            if shell_block:
+                try:
+                    lexer = shlex.shlex(line.strip(), posix=True, punctuation_chars=';&|<>()')
+                    lexer.whitespace_split = True
+                    words = list(lexer)
+                except ValueError:
+                    continue
+                if words[:len(command)] == command:
+                    matching_line = line.strip()
+            continue
+        if marker:
+            info = marker[2].strip()
+            if marker[1][0] == '`' and '`' in info:
+                continue
+            fence_char, fence_size = marker[1][0], len(marker[1])
+            shell_block = fence_char == '`' and info in ('bash', 'sh')
+            matching_line = None
+    return False, f'no closed bash/sh fence with command prefix {command!r}'
 
 
 def check(rule, calls, final, run):
@@ -85,6 +123,8 @@ def check(rule, calls, final, run):
         path = run / rule["path"]
         actual = path.read_text() if path.is_file() else None
         return actual == rule["value"], f"{path}: actual={actual!r}"
+    if kind == "final_fenced_command":
+        return final_fenced_command(final, rule["command"])
     if kind == "final_contains":
         value = rule["value"].replace("{{RUN}}", str(run))
         return value in final, f"final contains {value!r}: {value in final}"
