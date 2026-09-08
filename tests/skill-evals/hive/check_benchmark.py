@@ -47,7 +47,9 @@ def main():
                     p.error(f'skill changed within configuration {config}: {run}')
                 frozen_skills[config] = hashes
                 rows = data["expectations"]
-                if [r["text"] for r in rows] != [e["text"] for e in case["expectations"]]:
+                inherited = case.get('engines', ['claude', 'codex', 'grok'])
+                applicable = [e for e in case["expectations"] if engine in e.get('engines', inherited)]
+                if [r["text"] for r in rows] != [e["text"] for e in applicable]:
                     p.error(f"expectations differ from frozen suite: {run}")
                 if data.get("status") != "complete" or any(type(r["passed"]) is not bool or not r["evidence"].strip() for r in rows):
                     p.error(f"pending/incomplete grading: {run}")

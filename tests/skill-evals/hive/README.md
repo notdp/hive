@@ -1,6 +1,6 @@
 # Hive 协议行为评测 v4
 
-这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。16 个场景，148 条 expectation：110 auto、38 llm；86 条 high signal、62 条 low signal。4 个场景仅用于终评。
+这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。16 个场景，150 条 expectation：114 auto、36 llm；90 条 high signal、60 条 low signal。4 个场景仅用于终评。
 
 本目录交付离线 stub、场景、准备/评分脚本和合成自测。自测验证 harness，不代表模型遵循率。真实 executor 的启动和 transcript 捕获由 `tests/skill-evals/runner/` 的适配器负责；本目录不调用真实 hived/tmux。
 
@@ -33,7 +33,7 @@
 | 7 | pane-address | tmux 同队寻址、发完停止 | 否 |
 | 8 | desktop-address-title | 标题、跨团重名与 ccd 别名 | 否 |
 | 9 | missing-material | 有 from 但材料不足 | 否 |
-| 10 | directive-sourced | 有 source 的授权接力 | 否 |
+| 10 | directive-relay | 派发人转述的 human 决定不要出处 | 否 |
 | 11 | member-rework | 成员被打回后在原上下文续做 | 是 |
 | 12 | worktree-edit | 首次修改前进入返回的隔离路径 | 否 |
 | 13 | entry-named | 无队带参 join/not-found/create | 否 |
@@ -162,7 +162,7 @@ python3 "$EVAL_ROOT/selftest.py" --skill plugins/hive/skills/hive
 
 ## 未覆盖
 
-本轮没有新增 join-existing，仍缺 join 成功后定位名册与 workspace 的场景。其他未覆盖项：grok 真实运行；成员向跨团 guest 回信的真实寻址；验收/fix/kill/集成分支的完整生命周期；worktree done 时机；interrupt；humanDirective 缺 source；tmux 内 agent pane 建团；真实同名 spawn 冲突；desktop hostSessionId 接续；多消息并发、二次打回和 human 改方向后的回报。合成探针对部分错误路径有测试，不等于模型场景覆盖。
+本轮没有新增 join-existing，仍缺 join 成功后定位名册与 workspace 的场景。其他未覆盖项：grok 真实运行；成员向跨团 guest 回信的真实寻址；验收/fix/kill/集成分支的完整生命周期；worktree done 时机；interrupt；队友(非派发人)转述 human 决定的场景；tmux 内 agent pane 建团；真实同名 spawn 冲突；desktop hostSessionId 接续；多消息并发、二次打回和 human 改方向后的回报。合成探针对部分错误路径有测试，不等于模型场景覆盖。
 
 guest 场景已改为 tmux 外 Claude joined session，birch/spruce workspace 不同，目标名册初始为空且没有 orch。用 Codex/Grok 执行该 Claude 身份处境仍是代理实验。entry 的 Codex/Grok create 不会生成 orch 名册行或身份/徽章提示；self=orch 仅来自 create 保存的上下文，不表示已经以成员入册。静态名册在 spawn 后尚未模拟完整动态读回。
 
