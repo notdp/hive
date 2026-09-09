@@ -702,6 +702,7 @@ const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "clone",
     "completions",
     "dashboard",
+    "disk-usage",
     "doctor",
     "du",
     "export",
@@ -719,6 +720,7 @@ const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "trace",
     "update",
     "usage",
+    "v",
     "version",
     "worktree",
     "wrap",
@@ -787,7 +789,11 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
     // A packed short flag (`-r<id>`, `-r=<id>`, `-s<id>`, `-p<prompt>`,
     // `-c<x>`) is clap's to parse; hive does not second-guess it.
     let packed = |a: &str| {
-        !a.starts_with("--") && a.len() > 2 && ["-r", "-s", "-p", "-c", "-w"].contains(&&a[..2])
+        !a.starts_with("--")
+            && a.len() > 2
+            && ["-r", "-s", "-p", "-c", "-w"]
+                .iter()
+                .any(|flag| a.starts_with(flag))
     };
     if args.iter().any(|a| {
         RAW.contains(&a.as_str())
@@ -1229,8 +1235,12 @@ mod tests {
         ] {
             assert!(grok_outside_launch(&args(&form)).is_none(), "{form:?}");
         }
-        // a packed model flag is not one of the raw shapes
+        // a packed model flag is not one of the raw shapes; a prompt in any
+        // script is a prompt (the packed check must not slice bytes)
         assert!(grok_outside_launch(&args(&["-mgrok-4"])).is_some());
+        assert!(grok_outside_launch(&args(&["你好，帮我看看"])).is_some());
+        assert!(grok_outside_launch(&args(&["é"])).is_some());
+        assert!(grok_outside_launch(&args(&["-", "x"])).is_some());
         // values and everything after `--` are never rewritten
         assert_eq!(
             grok_args_with_cwd(&args(&["--rules", "--cwd", "--", "--cwd", "x"]), "/abs"),
@@ -1238,6 +1248,8 @@ mod tests {
         );
         assert!(grok_raw_shape(&args(&["clone", "x"])));
         assert!(grok_raw_shape(&args(&["usage"])));
+        assert!(grok_raw_shape(&args(&["disk-usage"])));
+        assert!(grok_raw_shape(&args(&["v"])));
         assert!(grok_raw_shape(&args(&["-v"])));
         // the launch's args carry the canonical cwd, whatever the spelling
         assert_eq!(
