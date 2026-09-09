@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::keys::{
-    daemon_env_for_pane, key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
+    alias_path_for_key, daemon_env_for_pane, key_from_alias_name, key_from_socket_name, member_key,
+    resolve_pane_key, socket_path_for_key,
 };
 use super::{grok_home, DAEMON_START_TIMEOUT};
 use crate::adapters::base::washed_spawner_env;
@@ -188,6 +189,16 @@ pub fn spawn_daemon(pane: &str) -> bool {
         "grok",
         DAEMON_START_TIMEOUT,
     )
+}
+
+/// Ensure a launch leader is listening on *key* (`l-<id>`, `handoff.rs`):
+/// the engine of an `hgrok` at a terminal outside tmux. No pane exists
+/// and none is pinned; the leader exports its own session id into the
+/// tools it runs, and once a create or join binds it to a member those
+/// tools resolve to that member's roster row.
+pub fn spawn_launch_daemon(key: &str) -> bool {
+    let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
+    spawn_daemon_key(key, env, "grok", DAEMON_START_TIMEOUT)
 }
 
 /// Ensure the member's leader daemon is listening — keyed by identity,
@@ -455,7 +466,8 @@ pub fn list_daemon_keys() -> Vec<String> {
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if let Some(key) = key_from_socket_name(name) {
+                if let Some(key) = key_from_socket_name(name).or_else(|| key_from_alias_name(name))
+                {
                     keys.push(key);
                 }
             }
@@ -518,7 +530,13 @@ fn terminate_process_group(pid: libc::pid_t) {
 /// record naming a dead or recycled pid is removed without touching the
 /// process.
 pub fn kill_daemon_key(key: &str) {
-    let sock = socket_path_for_key(key);
+    // The alias this kill resolved through, read once up front: the reap
+    // below takes seconds, and a join could bind the member to another
+    // launch meanwhile — that alias is not this kill's to remove.
+    let bound_launch = super::alias_target(key);
+    let sock = grok_home()
+        .join("hive")
+        .join(format!("{}.sock", bound_launch.as_deref().unwrap_or(key)));
     let mut signalled: Vec<libc::pid_t> = Vec::new();
     reap_socket_once(&sock, &mut signalled);
     reap_socket_once(&sock, &mut signalled);
@@ -529,5 +547,17 @@ pub fn kill_daemon_key(key: &str) {
         sock.with_extension("session"),
     ] {
         let _ = fs::remove_file(path);
+    }
+    // The member's alias goes under the same lock a bind or rollback holds,
+    // and only while it still names the launch this kill reaped; the lock
+    // file itself stays — flock is by inode, and a lock file unlinked under
+    // a holder lets the next join lock a fresh one beside it.
+    let Some(bound_launch) = bound_launch else {
+        return;
+    };
+    if let Ok(_lock) = super::alias_lock(key) {
+        if super::alias_target(key).as_deref() == Some(bound_launch.as_str()) {
+            let _ = fs::remove_file(alias_path_for_key(key));
+        }
     }
 }

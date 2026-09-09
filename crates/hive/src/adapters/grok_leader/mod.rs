@@ -39,11 +39,13 @@ use std::path::PathBuf;
 
 mod client;
 mod daemon;
+mod handoff;
 mod keys;
 mod pool;
 
 pub use client::*;
 pub use daemon::*;
+pub use handoff::*;
 pub use keys::*;
 pub use pool::*;
 

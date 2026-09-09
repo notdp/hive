@@ -24,6 +24,12 @@ use crate::tmux;
 // codex subcommands that are not an interactive TUI launch: hive leaves these
 // completely untouched (raw codex). Kept in sync with `codex --help`.
 const CODEX_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
+    "agents",
+    "queue",
+    "archive",
+    "delete",
+    "migrate-rollouts",
+    "unarchive",
     "exec",
     "e",
     "review",
@@ -55,6 +61,10 @@ const CODEX_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
 // subcommand scan does not mistake that value for the subcommand. `--opt=value`
 // and `-Cvalue` are self-contained and handled separately.
 const CODEX_VALUE_OPTS: &[&str] = &[
+    "-i",
+    "--image",
+    "--local-provider",
+    "--add-dir",
     "-c",
     "--config",
     "-m",
@@ -124,14 +134,16 @@ fn codex_positional_after(args: &[String], sub_index: usize) -> Option<String> {
 /// A following token starting with `-` is the next flag, not this option's
 /// value: the option is read as bare (None) rather than swallowing it.
 fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
-    for (i, a) in args.iter().enumerate() {
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        if a == "--" {
+            break;
+        }
         if names.contains(&a.as_str()) {
-            let next = args.get(i + 1).map(String::as_str).unwrap_or("");
-            return if !next.is_empty() && !next.starts_with('-') {
-                Some(next.to_string())
-            } else {
-                None
-            };
+            return args
+                .get(i + 1)
+                .filter(|next| !next.is_empty() && !next.starts_with('-'))
+                .cloned();
         }
         for name in names {
             let prefix = if name.starts_with("--") {
@@ -143,6 +155,11 @@ fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
                 return Some(a[prefix.len()..].to_string());
             }
         }
+        i += if CODEX_VALUE_OPTS.contains(&a.as_str()) {
+            2
+        } else {
+            1
+        };
     }
     None
 }
@@ -183,8 +200,7 @@ fn codex_pane_thread_name(pane: &str) -> String {
 
 /// True when the user already passed codex's cwd flag (-C / --cd, any form).
 fn codex_args_set_cwd(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--cd" || a.starts_with("--cd=") || a.starts_with("-C"))
+    codex_opt_value(args, &["--cd", "-C"]).is_some()
 }
 
 fn codex_raw(args: &[String]) -> ! {
@@ -223,7 +239,7 @@ fn exec_codex_managed(args: &[String]) -> ! {
         }
     };
     if pane.is_empty() || !identity::is_inside_tmux() {
-        codex_raw(args); // hive needs a tmux pane to bind a thread to
+        exec_codex_outside(args);
     }
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
@@ -325,6 +341,139 @@ fn exec_codex_managed(args: &[String]) -> ! {
     let _ = codex_app_server::clear_pane_thread(&pane);
     argv.extend(args.iter().cloned());
     execvp("codex", &argv);
+}
+
+fn normalize_codex_cwd(args: &mut [String], cwd: &str) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if args[i] == "--cd" || args[i] == "-C" {
+            if let Some(value) = args.get_mut(i + 1) {
+                *value = cwd.into();
+            }
+            i += 2;
+        } else if CODEX_VALUE_OPTS.contains(&args[i].as_str()) {
+            i += 2;
+        } else {
+            if args[i].starts_with("--cd=") {
+                args[i] = format!("--cd={cwd}");
+            } else if args[i].starts_with("-C") {
+                args[i] = format!("-C{cwd}");
+            }
+            i += 1;
+        }
+    }
+}
+
+fn codex_launch_cwd(args: &[String], source: Option<&str>) -> String {
+    use crate::adapters::base::SessionAdapter;
+    codex_opt_value(args, &["--cd", "-C"])
+        .or_else(|| {
+            let adapter = crate::adapters::codex::CodexAdapter;
+            let path = adapter.find_session_file(source?, None)?;
+            adapter.read_meta(&path).and_then(|meta| meta.cwd)
+        })
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or_else(getcwd)
+}
+
+fn exec_codex_outside(args: &[String]) -> ! {
+    use crate::adapters::codex_app_server;
+    if !env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty() {
+        codex_raw(args);
+    }
+    let sub_index = codex_subcommand_index(args);
+    let sub = sub_index.map(|i| args[i].as_str());
+    let source = if matches!(sub, Some("resume" | "fork")) {
+        let source = codex_positional_after(args, sub_index.unwrap());
+        match source.filter(|s| is_uuid(s)) {
+            Some(source) => Some(source),
+            None => codex_raw(args),
+        }
+    } else {
+        None
+    };
+    if sub == Some("resume") {
+        if let Some((team, _)) =
+            crate::registry::member_for_session(source.as_deref().unwrap(), Some("codex"))
+        {
+            super::attach::attach_cmd(&team);
+            std::process::exit(0);
+        }
+    }
+    let cwd = codex_launch_cwd(args, source.as_deref());
+    let cwd = std::path::Path::new(&cwd)
+        .canonicalize()
+        .unwrap_or_else(|error| {
+            eprintln!("hive: invalid Codex working directory: {error}");
+            std::process::exit(1);
+        })
+        .to_string_lossy()
+        .into_owned();
+    if !codex_app_server::spawn_daemon() {
+        codex_raw(args);
+    }
+    let _ = codex_app_server::ensure_dir_trusted(&cwd);
+    let name = format!("hive-{}", &uuid4()[..8]);
+    let thread = match sub {
+        Some("resume") => source.clone(),
+        Some("fork") => codex_app_server::fork_member_thread(source.as_deref().unwrap(), &name),
+        _ => codex_app_server::start_member_thread(
+            &cwd,
+            &name,
+            &codex_opt_value(args, &["--model", "-m"]).unwrap_or_default(),
+        ),
+    }
+    .unwrap_or_else(|| {
+        eprintln!("hive: could not create Codex thread");
+        std::process::exit(1);
+    });
+    let session = crate::terminal_handoff::Session {
+        cli: "codex",
+        id: thread.clone(),
+        cwd: cwd.clone(),
+        data: Value::Null,
+    };
+    let mut launch_args = args.to_vec();
+    normalize_codex_cwd(&mut launch_args, &cwd);
+    let mut argv = vec![
+        "-c".into(),
+        "check_for_update_on_startup=false".into(),
+        "--remote".into(),
+        format!(
+            "unix://{}",
+            codex_app_server::shared_socket_path().display()
+        ),
+    ];
+    if !codex_args_set_cwd(args) {
+        argv.extend(["--cd".into(), cwd]);
+    }
+    if let Some(source) = source {
+        let mut rewritten = launch_args;
+        let index = sub_index.unwrap();
+        rewritten[index] = "resume".into();
+        let offset = rewritten[index + 1..]
+            .iter()
+            .position(|s| s == &source)
+            .unwrap();
+        rewritten[index + 1 + offset] = thread;
+        argv.extend(rewritten);
+    } else {
+        argv.extend(["resume".into(), thread]);
+        argv.extend(launch_args);
+    }
+    match crate::terminal_handoff::run(&session, &argv) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!(
+                "hive: {error}; resume with `hive codex resume {}`",
+                session.id
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn codex_cmd(args: &[String]) {
@@ -523,7 +672,12 @@ fn exec_claude_managed(args: &[String]) -> ! {
 }
 
 fn run_outside_claude(job: &str) -> ! {
-    match crate::claude_handoff::run(job) {
+    let engine = crate::adapters::claude_bg::wait_engine_entry(job, 10.0).unwrap_or_else(|| {
+        eprintln!("hive: Claude job has no live engine; resume {job}");
+        std::process::exit(1)
+    });
+    let session = crate::terminal_handoff::Session::claude(engine);
+    match crate::terminal_handoff::run(&session, &session.resume_args()) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("hive: {error}; resume with `hive claude --resume {job}`");
@@ -545,8 +699,10 @@ pub(crate) fn claude_cmd(args: &[String]) {
 // prompt is the only other thing that can sit there.
 const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "agent",
+    "clone",
     "completions",
     "dashboard",
+    "disk-usage",
     "doctor",
     "du",
     "export",
@@ -563,13 +719,15 @@ const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "setup",
     "trace",
     "update",
+    "usage",
+    "v",
     "version",
     "worktree",
     "wrap",
 ];
 
 // Non-interactive surfaces: --help/--version never start a session.
-const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
+const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-v", "-V", "--version"];
 
 /// Value of the first `--opt value` / `--opt=value` occurrence in `args`.
 ///
@@ -593,6 +751,121 @@ fn grok_opt_value(args: &[String], names: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// What an `hgrok` outside tmux can hold: an interactive launch whose
+/// session id is knowable up front — a fresh session hive names, or one
+/// resumed by id. A continue, a resume by title or from the picker, a
+/// non-interactive run (`-p`, a prompt file) and an explicit leader
+/// socket all belong to plain grok. Returns (session id, whether hive must
+/// pass `--session-id`, the launch cwd, whether this resumes a session);
+/// None is the raw shape.
+fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String, bool)> {
+    // --fork-session: grok mints the fork's id itself, so neither a resumed
+    // nor an explicit id names the session that will run.
+    // --worktree: grok moves the session's directory itself, so the cwd
+    // recorded here would not be the one the session runs in.
+    const RAW: &[&str] = &[
+        "-c",
+        "--continue",
+        "-p",
+        "--single",
+        "--prompt-file",
+        "--prompt-json",
+        "--leader-socket",
+        "--fork-session",
+        "-w",
+        "--worktree",
+        "--worktree-ref",
+    ];
+    // A packed short flag (`-r<id>`, `-r=<id>`, `-s<id>`, `-p<prompt>`,
+    // `-c<x>`) is clap's to parse; hive does not second-guess it.
+    let packed = |a: &str| {
+        !a.starts_with("--")
+            && a.len() > 2
+            && ["-r", "-s", "-p", "-c", "-w"]
+                .iter()
+                .any(|flag| a.starts_with(flag))
+    };
+    if args.iter().any(|a| {
+        RAW.contains(&a.as_str())
+            || RAW.iter().any(|flag| a.starts_with(&format!("{flag}=")))
+            || packed(a)
+    }) {
+        return None;
+    }
+    let cwd = match grok_opt_value(args, &["--cwd"]) {
+        Some(dir) => dir,
+        None if args.iter().any(|a| a == "--cwd" || a.starts_with("--cwd=")) => return None,
+        None => getcwd(),
+    };
+    let cwd = std::fs::canonicalize(&cwd)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let resume_present = args
+        .iter()
+        .any(|a| a == "-r" || a == "--resume" || a.starts_with("--resume="));
+    if resume_present {
+        let value = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--resume=").map(str::to_string))
+            .or_else(|| grok_opt_value(args, &["--resume", "-r"]))
+            .filter(|v| !v.is_empty())?;
+        return is_uuid(&value).then_some((value, false, cwd, true));
+    }
+    if let Some(explicit) = grok_opt_value(args, &["--session-id", "-s"]) {
+        return is_uuid(&explicit).then_some((explicit, false, cwd, false));
+    }
+    Some((uuid4(), true, cwd, false))
+}
+
+/// *args* with any `--cwd` spelling replaced by the canonical *cwd* the
+/// launch runs in: the viewer's own working directory is that path already
+/// (`Session::command`), and a relative value would resolve a second time.
+fn grok_args_with_cwd(args: &[String], cwd: &str) -> Vec<String> {
+    // options whose next token is a value, never a flag to rewrite
+    const VALUE_OPTS: &[&str] = &[
+        "--rules",
+        "-m",
+        "--model",
+        "--worktree-ref",
+        "-s",
+        "--session-id",
+    ];
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--" {
+            out.extend(args[i..].iter().cloned());
+            break;
+        }
+        if a == "--cwd" {
+            out.push("--cwd".to_string());
+            out.push(cwd.to_string());
+            i += 2;
+        } else if a.starts_with("--cwd=") {
+            out.push(format!("--cwd={cwd}"));
+            i += 1;
+        } else if VALUE_OPTS.contains(&a.as_str()) {
+            out.extend(args[i..(i + 2).min(args.len())].iter().cloned());
+            i += 2;
+        } else {
+            out.push(a.clone());
+            i += 1;
+        }
+    }
+    out
 }
 
 /// (session id this launch will run, whether hive must pass --session-id).
@@ -649,8 +922,12 @@ fn exec_grok_managed(args: &[String]) -> ! {
             identity::current_pane_id().unwrap_or_default()
         }
     };
-    if pane.is_empty() || !identity::is_inside_tmux() {
-        grok_raw(args); // hive needs a tmux pane to bind a daemon to
+    let outside = pane.is_empty() || !identity::is_inside_tmux();
+    if outside && (!env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty()) {
+        grok_raw(args); // no terminal to hold a viewer, or a nested client
+    }
+    if outside {
+        run_outside_grok(args);
     }
     if !grok_leader::spawn_daemon(&pane) {
         // A raw grok drives whatever session it likes; leaving an earlier
@@ -676,6 +953,58 @@ fn exec_grok_managed(args: &[String]) -> ! {
     }
     argv.extend(args.iter().cloned());
     execvp("grok", &argv);
+}
+
+/// `hgrok` at a terminal outside tmux: a leader on a launch key serving
+/// the session hive minted, the TUI held by the terminal handoff, and the
+/// leader's own stop once the terminal is done with it — unless a create or
+/// join bound it to a member meanwhile (`grok_leader::stop_launch`).
+fn run_outside_grok(args: &[String]) -> ! {
+    use crate::adapters::grok_leader;
+
+    let Some((session_id, pass_flag, cwd, resumed)) = grok_outside_launch(args) else {
+        grok_raw(args); // a shape whose session hive cannot name, or plain grok's own
+    };
+    // Only a resume of an enrolled session opens its team; `--session-id`
+    // names a new session, and one that exists is grok's own error to raise.
+    if resumed {
+        if let Some((team, _)) = crate::registry::member_for_session(&session_id, Some("grok")) {
+            super::attach::attach_cmd(&team);
+            std::process::exit(0);
+        }
+    }
+    let key = grok_leader::mint_launch_key();
+    if !grok_leader::spawn_launch_daemon(&key) {
+        eprintln!("hive: grok leader did not start; launching plain grok");
+        grok_raw(args);
+    }
+    if let Err(error) = grok_leader::write_session_key(&key, &session_id, &cwd) {
+        grok_leader::stop_launch(&key, "");
+        eprintln!("hive: {error}; launching plain grok");
+        grok_raw(args);
+    }
+    let session = crate::terminal_handoff::Session::grok(&key, &session_id, &cwd);
+    let mut initial: Vec<String> = vec![
+        "--leader".to_string(),
+        "--leader-socket".to_string(),
+        grok_leader::socket_path_for_key(&key)
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    if pass_flag {
+        initial.push("--session-id".to_string());
+        initial.push(session_id.clone());
+    }
+    initial.extend(grok_args_with_cwd(args, &cwd));
+    let result = crate::terminal_handoff::run(&session, &initial);
+    grok_leader::stop_launch(&key, &session_id);
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("hive: {error}; resume with `hive grok --resume {session_id}`");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn grok_cmd(args: &[String]) {
@@ -774,6 +1103,49 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_codex_cwd_flags_ignore_option_values_and_literal_prompts() {
+        for input in [vec!["--", "--cd=/prompt"], vec!["-c", "--cd=/config"]] {
+            let input = args(&input);
+            assert!(!codex_args_set_cwd(&input));
+            assert_eq!(codex_opt_value(&input, &["--cd", "-C"]), None);
+        }
+    }
+
+    #[test]
+    fn test_codex_resume_uses_recorded_cwd_unless_overridden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("CODEX_HOME", tmp.path());
+        let sessions = tmp.path().join("sessions/2026/04/02");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let id = "11111111-2222-4333-8444-555555555555";
+        std::fs::write(
+            sessions.join(format!("rollout-2026-04-02T00-00-00-{id}.jsonl")),
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"/original"}})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(super::codex_launch_cwd(&[], Some(id)), "/original");
+        assert_eq!(
+            super::codex_launch_cwd(&["--cd".into(), "/override".into()], Some(id)),
+            "/override"
+        );
+    }
+
+    #[test]
+    fn test_codex_cwd_rewrite_keeps_option_values_and_prompt_literal() {
+        let mut args: Vec<String> = ["-c", "-Cvalue", "-C", "relative", "--", "--cd=prompt"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        super::normalize_codex_cwd(&mut args, "/absolute");
+        assert_eq!(
+            args,
+            ["-c", "-Cvalue", "-C", "/absolute", "--", "--cd=prompt"]
+        );
+    }
+
     use super::*;
     use crate::testkit::{args, display_env, fake_tmux_tagged};
 
@@ -816,6 +1188,96 @@ mod tests {
         assert!(!grok_raw_shape(&args(&["--resume"])));
         assert!(!grok_raw_shape(&args(&["-m", "grok-4"])));
         assert!(!grok_raw_shape(&[]));
+    }
+
+    #[test]
+    fn test_grok_outside_launch_names_the_session_or_hands_the_shape_to_plain_grok() {
+        let _env = crate::testenv::EnvGuard::new();
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let sid = "0f0f0f0f-1111-4222-8333-444444444444";
+        // fresh: hive names the session and passes it
+        let (id, pass, dir, resumed) = grok_outside_launch(&args(&["-m", "grok-4"])).unwrap();
+        assert!(is_uuid(&id) && pass && dir == cwd && !resumed);
+        // resumed by id, either spelling
+        for form in [
+            vec!["-r", sid],
+            vec!["--resume", sid],
+            vec![&format!("--resume={sid}")],
+        ] {
+            let (id, pass, _, resumed) = grok_outside_launch(&args(&form)).unwrap();
+            assert_eq!((id.as_str(), pass, resumed), (sid, false, true), "{form:?}");
+        }
+        // an explicit id is a new session, never a resume
+        let (id, pass, _, resumed) = grok_outside_launch(&args(&["--session-id", sid])).unwrap();
+        assert_eq!((id.as_str(), pass, resumed), (sid, false, false));
+        // plain grok's: picker, title, continue, non-interactive, own socket
+        for form in [
+            vec!["--resume"],
+            vec!["-r"],
+            vec!["-r", "-m", "grok-4"],
+            vec!["--resume", "my chat"],
+            vec!["-c"],
+            vec!["--continue"],
+            vec!["-p", "hi"],
+            vec!["--single"],
+            vec!["--prompt-file", "x"],
+            vec!["--prompt-json=x"],
+            vec!["--leader-socket", "/tmp/s"],
+            vec!["--session-id", "not-a-uuid"],
+            vec!["--cwd"],
+            vec!["--cwd", "/definitely/not/a/dir"],
+            vec!["--resume", sid, "--fork-session"],
+            vec!["--session-id", sid, "--fork-session"],
+            vec![&format!("-r{sid}")],
+            vec![&format!("-r={sid}")],
+            vec![&format!("-s{sid}")],
+            vec!["-phello"],
+            vec!["-w"],
+            vec!["--worktree", "feat"],
+            vec!["--worktree-ref", "main"],
+        ] {
+            assert!(grok_outside_launch(&args(&form)).is_none(), "{form:?}");
+        }
+        // a packed model flag is not one of the raw shapes; a prompt in any
+        // script is a prompt (the packed check must not slice bytes)
+        assert!(grok_outside_launch(&args(&["-mgrok-4"])).is_some());
+        assert!(grok_outside_launch(&args(&["你好，帮我看看"])).is_some());
+        assert!(grok_outside_launch(&args(&["é"])).is_some());
+        assert!(grok_outside_launch(&args(&["-", "x"])).is_some());
+        // values and everything after `--` are never rewritten
+        assert_eq!(
+            grok_args_with_cwd(&args(&["--rules", "--cwd", "--", "--cwd", "x"]), "/abs"),
+            args(&["--rules", "--cwd", "--", "--cwd", "x"])
+        );
+        assert!(grok_raw_shape(&args(&["clone", "x"])));
+        assert!(grok_raw_shape(&args(&["usage"])));
+        assert!(grok_raw_shape(&args(&["disk-usage"])));
+        assert!(grok_raw_shape(&args(&["v"])));
+        assert!(grok_raw_shape(&args(&["-v"])));
+        // the launch's args carry the canonical cwd, whatever the spelling
+        assert_eq!(
+            grok_args_with_cwd(&args(&["-m", "x", "--cwd", "../rel", "-y"]), "/abs"),
+            args(&["-m", "x", "--cwd", "/abs", "-y"])
+        );
+        assert_eq!(
+            grok_args_with_cwd(&args(&["--cwd=../rel"]), "/abs"),
+            args(&["--cwd=/abs"])
+        );
+        assert_eq!(
+            grok_args_with_cwd(&args(&["-m", "x"]), "/abs"),
+            args(&["-m", "x"])
+        );
+        // --cwd is the launch's directory, canonical
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, _, dir, _) =
+            grok_outside_launch(&args(&["--cwd", tmp.path().to_str().unwrap()])).unwrap();
+        assert_eq!(
+            dir,
+            std::fs::canonicalize(tmp.path()).unwrap().to_string_lossy()
+        );
     }
 
     #[test]

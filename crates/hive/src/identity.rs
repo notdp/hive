@@ -202,6 +202,7 @@ pub(crate) fn codex_thread_is_hive_managed(thread_id: &str) -> bool {
         return true;
     }
     codex_thread_member(thread_id).is_some()
+        || crate::terminal_handoff::launcher_registered("codex", thread_id)
 }
 
 /// `codex_thread_is_hive_managed` for this process's own tool thread.
@@ -239,6 +240,17 @@ fn grok_session_member_env() -> Option<(String, String)> {
 // ---------------------------------------------------------------------------
 // Binding discovery
 // ---------------------------------------------------------------------------
+
+/// Session identity before a Codex/Grok tool has joined any team.
+pub(crate) fn unbound_engine_session() -> Option<(&'static str, String)> {
+    for (cli, marker) in [("codex", "CODEX_THREAD_ID"), ("grok", "GROK_SESSION_ID")] {
+        let id = env_string(marker).trim().to_string();
+        if !id.is_empty() {
+            return Some((cli, id));
+        }
+    }
+    None
+}
 
 /// Roster identity of the engine session this process runs inside.
 ///

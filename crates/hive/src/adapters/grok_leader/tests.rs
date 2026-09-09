@@ -2914,3 +2914,255 @@ fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
     );
     teardown(&replacement, &replacement_proc);
 }
+
+// ----------------------------------------------------------------------
+// launch leaders and their member alias (handoff.rs)
+// ----------------------------------------------------------------------
+
+#[test]
+fn test_launch_keys_parse_and_list_beside_pane_and_member_keys() {
+    assert!(is_launch_key("l-ab12"));
+    assert!(!is_launch_key("l-"));
+    assert!(!is_launch_key("l-a.b"));
+    assert!(!is_launch_key("p19"));
+    assert_eq!(
+        key_from_socket_name("l-ab12.sock").as_deref(),
+        Some("l-ab12")
+    );
+    assert_eq!(key_from_socket_name("l-.sock"), None);
+    assert_eq!(
+        key_from_alias_name("m-honey.orch.alias").as_deref(),
+        Some("m-honey.orch")
+    );
+    assert_eq!(key_from_alias_name("l-ab12.alias"), None);
+    assert!(is_launch_key(&mint_launch_key()));
+    assert_ne!(mint_launch_key(), mint_launch_key());
+
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    fs::create_dir_all(&hive_dir).unwrap();
+    fs::write(hive_dir.join("l-ab12.sock"), "").unwrap();
+    fs::write(hive_dir.join("m-honey.orch.alias"), "l-ab12").unwrap();
+    fs::write(hive_dir.join("p7.sock"), "").unwrap();
+    let mut keys = list_daemon_keys();
+    keys.sort();
+    // the bound member is listed under its own key: kill, delete and the
+    // hived's reap reach the launch leader through the alias
+    assert_eq!(keys, vec!["l-ab12", "m-honey.orch", "p7"]);
+}
+
+#[test]
+fn test_a_member_alias_redirects_every_path_lookup_to_the_launch_key() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    fs::create_dir_all(&hive_dir).unwrap();
+    assert_eq!(canonical_key("m-honey.orch"), "m-honey.orch");
+    assert_eq!(
+        socket_path_for_key("m-honey.orch"),
+        hive_dir.join("m-honey.orch.sock")
+    );
+    fs::write(hive_dir.join("m-honey.orch.alias"), "l-ab12\n").unwrap();
+    assert_eq!(canonical_key("m-honey.orch"), "l-ab12");
+    assert_eq!(
+        socket_path_for_key("m-honey.orch"),
+        hive_dir.join("l-ab12.sock")
+    );
+    assert_eq!(
+        session_path_for_key("m-honey.orch"),
+        hive_dir.join("l-ab12.session")
+    );
+    write_session_key("l-ab12", "sid-1", "/w").unwrap();
+    assert_eq!(
+        read_session_key("m-honey.orch").map(|r| r.session_id),
+        Some("sid-1".to_string())
+    );
+    // a launch key and a pane key never follow an alias
+    assert_eq!(canonical_key("l-ab12"), "l-ab12");
+    assert_eq!(canonical_key("p7"), "p7");
+    // an alias naming something that is not a launch key is ignored
+    fs::write(hive_dir.join("m-honey.rex.alias"), "p7").unwrap();
+    assert_eq!(canonical_key("m-honey.rex"), "m-honey.rex");
+}
+
+#[test]
+fn test_bind_launch_needs_a_listening_leader_serving_that_session() {
+    let bed = setup();
+    let sock = bed.tmp.path().join("hive").join("l-ab12.sock");
+    let err = bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap_err();
+    assert!(err.to_string().contains("not listening"), "{err}");
+    let _listener = bind_leader_socket(&sock);
+    write_session_key("l-ab12", "sid-other", "/w").unwrap();
+    let err = bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap_err();
+    assert!(err.to_string().contains("sid-other"), "{err}");
+    assert!(alias_target("m-honey.orch").is_none());
+    assert!(bind_launch("p7", "sid-1", "/w", "honey", "orch", "%3").is_err());
+    assert!(bind_launch("l-ab12", "", "/w", "honey", "orch", "%3").is_err());
+}
+
+#[test]
+fn test_bind_launch_writes_the_alias_once_and_refuses_a_second_engine() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    // no record yet (a launcher restart): written from the arguments
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-ab12"));
+    assert_eq!(
+        read_session_key("l-ab12"),
+        Some(SessionRecord {
+            session_id: "sid-1".to_string(),
+            cwd: "/w".to_string()
+        })
+    );
+    assert!(launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
+    assert!(!launch_is_bound("l-ab12", "sid-2", "honey", "orch", "%3"));
+    assert_eq!(bound_member("l-ab12").as_deref(), Some("m-honey.orch"));
+    assert_eq!(bound_member("l-zz99"), None);
+    // idempotent from either side
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    // the member is taken: another launch is refused
+    let _other = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
+    let err = bind_launch("l-cd34", "sid-9", "/w", "honey", "orch", "%3").unwrap_err();
+    assert!(err.to_string().contains("already bound"), "{err}");
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-ab12"));
+    // a member with a leader of its own is never aliased over
+    let _own = bind_leader_socket(&hive_dir.join("m-honey.rex.sock"));
+    let err = bind_launch("l-cd34", "sid-9", "/w", "honey", "rex", "%4").unwrap_err();
+    assert!(err.to_string().contains("leader of its own"), "{err}");
+}
+
+#[test]
+fn test_rollback_launch_removes_only_its_own_alias_and_keeps_the_leader() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    rollback_launch("l-cd34", "sid-9", "honey", "orch", "%3").unwrap();
+    assert!(launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
+    rollback_launch("l-ab12", "sid-1", "honey", "orch", "%3").unwrap();
+    assert!(!launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
+    assert!(!hive_dir.join("m-honey.orch.alias").exists());
+    // the leader's socket and record are the launcher's, untouched
+    assert!(hive_dir.join("l-ab12.sock").exists());
+    assert_eq!(
+        read_session_key("l-ab12").map(|r| r.session_id),
+        Some("sid-1".to_string())
+    );
+    rollback_launch("l-ab12", "sid-1", "honey", "orch", "%3").unwrap();
+}
+
+#[test]
+fn test_stop_launch_steps_back_once_a_member_owns_the_leader() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    set_process_listing(Vec::new);
+    let listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    write_session_key("l-ab12", "sid-1", "/w").unwrap();
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    // bound: the launcher's stop is a no-op
+    stop_launch("l-ab12", "sid-1");
+    assert!(hive_dir.join("l-ab12.sock").exists());
+    assert!(hive_dir.join("l-ab12.session").exists());
+    // the member's kill reaches the leader through the alias and takes the
+    // alias with it
+    kill_daemon_key("m-honey.orch");
+    assert!(!hive_dir.join("l-ab12.sock").exists());
+    assert!(!hive_dir.join("l-ab12.session").exists());
+    assert!(!hive_dir.join("m-honey.orch.alias").exists());
+    // the lock file stays: flock is by inode, a later join must lock the
+    // same one
+    assert!(hive_dir.join("m-honey.orch.alias-lock").exists());
+    drop(listener);
+    // unbound: the launcher's stop removes the key's files
+    let _listener = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
+    write_session_key("l-cd34", "sid-2", "/w").unwrap();
+    stop_launch("l-cd34", "sid-2");
+    assert!(!hive_dir.join("l-cd34.sock").exists());
+    assert!(!hive_dir.join("l-cd34.session").exists());
+    // a pane key is not a launch: untouched
+    let _pane = bind_leader_socket(&hive_dir.join("p7.sock"));
+    stop_launch("p7", "sid-3");
+    assert!(hive_dir.join("p7.sock").exists());
+}
+
+#[test]
+fn test_two_launches_racing_for_one_member_bind_at_most_one() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _a = bind_leader_socket(&hive_dir.join("l-aaaa.sock"));
+    let _b = bind_leader_socket(&hive_dir.join("l-bbbb.sock"));
+    let home = bed.tmp.path().to_path_buf();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut hands = Vec::new();
+    for key in ["l-aaaa", "l-bbbb"] {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let home = home.clone();
+        hands.push(std::thread::spawn(move || {
+            // the env var is process-global; the racing threads read the
+            // same GROK_HOME the bed pinned
+            assert_eq!(
+                std::env::var("GROK_HOME").ok().map(PathBuf::from),
+                Some(home)
+            );
+            barrier.wait();
+            bind_launch(key, "sid-1", "/w", "honey", "orch", "%3").map_err(|e| e.to_string())
+        }));
+    }
+    let results: Vec<Result<(), String>> = hands.into_iter().map(|h| h.join().unwrap()).collect();
+    let wins = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(wins, 1, "{results:?}");
+    let winner = alias_target("m-honey.orch").unwrap();
+    assert!(winner == "l-aaaa" || winner == "l-bbbb");
+    let loser = results
+        .iter()
+        .find(|r| r.is_err())
+        .unwrap()
+        .as_ref()
+        .unwrap_err();
+    assert!(
+        loser.contains(&format!("already bound to launch {winner}")),
+        "{loser}"
+    );
+    // no staging file left behind
+    assert!(fs::read_dir(&hive_dir)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().ends_with(".alias-tmp")));
+}
+
+#[test]
+fn test_a_corrupt_alias_is_refused_never_overwritten() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _a = bind_leader_socket(&hive_dir.join("l-aaaa.sock"));
+    fs::write(hive_dir.join("m-honey.orch.alias"), "not a key").unwrap();
+    let err = bind_launch("l-aaaa", "sid-1", "/w", "honey", "orch", "%3").unwrap_err();
+    assert!(err.to_string().contains("names no launch"), "{err}");
+    assert_eq!(
+        fs::read_to_string(hive_dir.join("m-honey.orch.alias")).unwrap(),
+        "not a key"
+    );
+}
+
+#[test]
+fn test_a_member_kill_leaves_an_alias_rebound_to_another_launch_meanwhile() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    // the kill resolves through l-ab12; a concurrent join rebinds the member
+    // to l-cd34 before the alias removal runs (the process listing seam is
+    // where the reap spends its time)
+    let _a = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    let _b = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
+    write_session_key("l-ab12", "sid-1", "/w").unwrap();
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    let alias = hive_dir.join("m-honey.orch.alias");
+    set_process_listing(move || {
+        fs::write(&alias, "l-cd34").unwrap();
+        Vec::new()
+    });
+    kill_daemon_key("m-honey.orch");
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-cd34"));
+    // l-ab12's own files went, l-cd34 is untouched
+    assert!(!hive_dir.join("l-ab12.session").exists());
+    assert!(hive_dir.join("l-cd34.sock").exists());
+}

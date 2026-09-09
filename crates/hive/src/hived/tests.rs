@@ -2027,6 +2027,35 @@ fn test_cleanup_member_daemon_missing_registry_reaps_after_grace() {
         .contains(&"kill m-honey.rex".to_string()));
 }
 
+#[test]
+fn test_cleanup_reads_a_bound_launchs_grace_from_its_alias_not_the_leaders_pidfile() {
+    // A terminal handoff binds a launch leader to the member by alias
+    // before the roster row lands. The leader may have run for hours: its
+    // pidfile is no newborn clock, the alias is.
+    let mut env = reap_env(true);
+    env._env.set("GROK_HOME", env.tmp.path());
+    let hive_dir = env.tmp.path().join("hive");
+    fs::create_dir_all(&hive_dir).unwrap();
+    *env.keys.lock().unwrap() = vec!["m-honey.rex".to_string()];
+    write_pidfile(env.tmp.path(), "m-honey.rex", 999.0);
+    write_pidfile(env.tmp.path(), "l-ab12", 999.0);
+    let alias = hive_dir.join("m-honey.rex.alias");
+    fs::write(&alias, "l-ab12").unwrap();
+
+    // the bind is fresh and the roster write is in flight: kept
+    cleanup_dead_daemons("/tmp/ws", "honey");
+    assert!(env.calls.lock().unwrap().is_empty());
+
+    // the bind is old and the roster never listed the member: orphan
+    backdate(&alias, 999.0);
+    cleanup_dead_daemons("/tmp/ws", "honey");
+    assert!(env
+        .calls
+        .lock()
+        .unwrap()
+        .contains(&"kill m-honey.rex".to_string()));
+}
+
 // ---- codex shared-daemon supervisor ------------------------------------
 
 #[derive(Clone)]

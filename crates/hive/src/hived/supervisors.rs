@@ -77,9 +77,16 @@ pub(crate) fn cleanup_dead_daemons(workspace: &str, team: &str) {
                 }
                 // Missing registry file, or a valid roster without this
                 // member: the engine is an orphan — but never a newborn one.
-                let pidfile = hooked_gl_socket_path_for_key(&key).with_extension("pid");
-                let Ok(metadata) = fs::metadata(&pidfile) else {
-                    continue; // no pidfile yet: daemon mid-start
+                // A launch leader bound to this member (a terminal handoff)
+                // may be hours old: its alias is written at the bind, before
+                // the roster row lands, so the alias's age is the newborn
+                // clock there, never the leader's pidfile.
+                let newborn = match crate::adapters::grok_leader::alias_target(&key) {
+                    Some(_) => crate::adapters::grok_leader::alias_path_for_key(&key),
+                    None => hooked_gl_socket_path_for_key(&key).with_extension("pid"),
+                };
+                let Ok(metadata) = fs::metadata(&newborn) else {
+                    continue; // no pidfile yet: daemon mid-start (or a bind just rolled back)
                 };
                 let Ok(mtime) = metadata.modified() else {
                     continue;

@@ -273,6 +273,15 @@ fn create_detached_team(
     if let Err(e) = check_explicit_workspace(name, workspace) {
         fail(&e.to_string());
     }
+    if let Some((cli, id)) = identity::unbound_engine_session() {
+        let client = ok_or_fail(crate::terminal_handoff::Client::for_engine(cli, &id));
+        if !workspace.is_empty() || reset_workspace || !state_entries.is_empty() {
+            fail("an orch create uses the team directory; run from a shell pane for --workspace");
+        }
+        let result = ok_or_fail(handoff::create(client, name, desc));
+        println!("{}", json_pretty(&result));
+        return;
+    }
     // The creator is the orch when it is the desktop app's session: it joins
     // its own roster, same as an agent pane does inside tmux. A session
     // already on another team's roster stays a guest here. The gate runs
@@ -284,7 +293,7 @@ fn create_detached_team(
         fail("this engine has no managed team channel; start hclaude, or use a managed tmux pane");
     }
     if let Some(session) = creator.as_ref() {
-        if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(session)) {
+        if let Some(client) = ok_or_fail(crate::terminal_handoff::Client::for_session(session)) {
             if !workspace.is_empty() || reset_workspace || !state_entries.is_empty() {
                 fail(
                     "an orch create uses the team directory; run from a shell pane for --workspace",
@@ -845,6 +854,12 @@ fn join_as_ccd(team_name: &str, name_override: &str, notify: bool, group: &str) 
         Some(entry) => entry,
         None => fail(&format!("team '{team_name}' not found (see `hive ls`)")),
     };
+    if let Some((cli, id)) = identity::unbound_engine_session() {
+        let client = ok_or_fail(crate::terminal_handoff::Client::for_engine(cli, &id));
+        let result = ok_or_fail(handoff::join(client, &entry, name_override, notify, group));
+        println!("{}", json_pretty(&result));
+        return;
+    }
     let guest = crate::adapters::claude_sessions::self_session();
     let guest = match guest {
         Some(guest) if !guest.session_id.is_empty() => guest,
@@ -853,7 +868,7 @@ fn join_as_ccd(team_name: &str, name_override: &str, notify: bool, group: &str) 
              codex/grok TUIs have none — join from a team pane instead",
         ),
     };
-    if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(&guest)) {
+    if let Some(client) = ok_or_fail(crate::terminal_handoff::Client::for_session(&guest)) {
         let result = ok_or_fail(handoff::join(client, &entry, name_override, notify, group));
         println!("{}", json_pretty(&result));
         return;
