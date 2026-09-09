@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.20.0
+
+### Features
+
+- Terminal handoff: `hclaude`, `hcodex` and `hgrok` in a plain terminal look and behave like the bare CLI, and `/hive:hive` (create or join) is the moment the conversation moves into the team window. The launcher stays in the original terminal owning the TUI, create/join stop the local viewer over a local control socket, bind the pane to the same engine (Claude bg job, Codex shared daemon thread, Grok launch leader via a member alias) and commit the roster, then the terminal attaches to the team session. Resuming an enrolled session opens its team; bare `claude`/`codex`/`grok` are not enrolled, the desktop app stays the one read-only mirror member; `hive attach` is only offered from the desktop app (#194, #195)
+
 ## 0.19.6
 
 ### Features
