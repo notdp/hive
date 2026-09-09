@@ -799,8 +799,12 @@ fn exec_grok_managed(args: &[String]) -> ! {
             identity::current_pane_id().unwrap_or_default()
         }
     };
-    if pane.is_empty() || !identity::is_inside_tmux() {
-        grok_raw(args); // hive needs a tmux pane to bind a daemon to
+    let outside = pane.is_empty() || !identity::is_inside_tmux();
+    if outside && (!env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty()) {
+        grok_raw(args); // no terminal to hold a viewer, or a nested client
+    }
+    if outside {
+        run_outside_grok(args);
     }
     if !grok_leader::spawn_daemon(&pane) {
         // A raw grok drives whatever session it likes; leaving an earlier
@@ -826,6 +830,56 @@ fn exec_grok_managed(args: &[String]) -> ! {
     }
     argv.extend(args.iter().cloned());
     execvp("grok", &argv);
+}
+
+/// `hgrok` at a terminal outside tmux: a leader on a launch key serving
+/// the session hive minted, the TUI held by the terminal handoff, and the
+/// leader's own stop once the terminal is done with it — unless a create or
+/// join bound it to a member meanwhile (`grok_leader::stop_launch`).
+fn run_outside_grok(args: &[String]) -> ! {
+    use crate::adapters::grok_leader;
+
+    let (session_id, pass_flag) = grok_launch_session(args);
+    let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
+        grok_raw(args); // picker: the chosen session is unknowable up front
+    };
+    if let Some((team, _)) = crate::registry::member_for_session(&session_id, Some("grok")) {
+        super::attach::attach_cmd(&team);
+        std::process::exit(0);
+    }
+    let key = grok_leader::mint_launch_key();
+    if !grok_leader::spawn_launch_daemon(&key) {
+        eprintln!("hive: grok leader did not start; launching plain grok");
+        grok_raw(args);
+    }
+    let cwd = getcwd();
+    if let Err(error) = grok_leader::write_session_key(&key, &session_id, &cwd) {
+        grok_leader::stop_launch(&key, "");
+        eprintln!("hive: {error}; launching plain grok");
+        grok_raw(args);
+    }
+    let session = crate::terminal_handoff::Session::grok(&key, &session_id, &cwd);
+    let mut initial: Vec<String> = vec![
+        "--leader".to_string(),
+        "--leader-socket".to_string(),
+        grok_leader::socket_path_for_key(&key)
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    if pass_flag {
+        initial.push("--session-id".to_string());
+        initial.push(session_id.clone());
+    }
+    initial.extend(args.iter().cloned());
+    let result = crate::terminal_handoff::run(&session, &initial);
+    grok_leader::stop_launch(&key, &session_id);
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("hive: {error}; resume with `hive grok --resume {session_id}`");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn grok_cmd(args: &[String]) {

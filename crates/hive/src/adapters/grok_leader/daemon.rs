@@ -202,6 +202,16 @@ pub fn spawn_daemon(pane: &str) -> bool {
 /// by the `GROK_SESSION_ID` the leader exports, matched against the roster,
 /// and find their pane from that row (`identity::current_pane_id`) — the
 /// pane is display resolved on top of identity, never the other way round.
+/// Ensure a launch leader is listening on *key* (`l-<id>`, `handoff.rs`):
+/// the engine of an `hgrok` at a terminal outside tmux. No pane exists
+/// and none is pinned; the leader exports its own session id into the
+/// tools it runs, and once a create or join binds it to a member those
+/// tools resolve to that member's roster row.
+pub fn spawn_launch_daemon(key: &str) -> bool {
+    let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
+    spawn_daemon_key(key, env, "grok", DAEMON_START_TIMEOUT)
+}
+
 pub fn spawn_member_daemon(team: &str, member: &str) -> bool {
     let env = washed_spawner_env(&["CODEX_THREAD_ID", "GROK_SESSION_ID", "TMUX_PANE", "TMUX"]);
     spawn_daemon_key(&member_key(team, member), env, "grok", DAEMON_START_TIMEOUT)

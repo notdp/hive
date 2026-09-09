@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
-use crate::adapters::{claude_bg, claude_sessions, codex_app_server};
+use crate::adapters::{claude_bg, claude_sessions, codex_app_server, grok_leader};
 use crate::shell::shlex_quote;
 
 use super::Target;
@@ -28,10 +28,23 @@ impl Session {
         }
     }
 
+    /// A grok launch: the leader on *launch_key* serving *session_id*
+    /// (`grok_leader::handoff`). The roster id is the session id, the
+    /// launch key rides `data`.
+    pub(crate) fn grok(launch_key: &str, session_id: &str, cwd: &str) -> Self {
+        Self {
+            cli: "grok",
+            id: session_id.to_string(),
+            cwd: cwd.to_string(),
+            data: json!({"launchKey": launch_key}),
+        }
+    }
+
     pub(crate) fn control_dir(cli: &str) -> Result<PathBuf> {
         match cli {
             "claude" => Ok(claude_sessions::config_dir().join("hive-control")),
             "codex" => Ok(codex_app_server::codex_home().join("hive-control")),
+            "grok" => Ok(grok_leader::grok_home().join("hive-control")),
             _ => bail!("unsupported terminal handoff engine: {cli}"),
         }
     }
@@ -51,6 +64,7 @@ impl Session {
         let cli = match super::field(value, "cli")? {
             "claude" => "claude",
             "codex" => "codex",
+            "grok" => "grok",
             other => bail!("unsupported terminal handoff engine: {other}"),
         };
         let id = super::field(value, "id")?.to_string();
@@ -77,6 +91,7 @@ impl Session {
                 "resume".into(),
                 self.id.clone(),
             ],
+            "grok" => super::grok::resume_args(self),
             _ => unreachable!("validated engine"),
         }
     }
@@ -111,6 +126,7 @@ impl Session {
                 &self.cwd,
                 crate::tmux::own_socket_path().as_deref(),
             ),
+            "grok" => super::grok::bind(self, target),
             _ => Err(anyhow!("unsupported engine")),
         }
     }
@@ -121,6 +137,7 @@ impl Session {
             "codex" => {
                 codex_app_server::thread_id_for_pane(&target.pane).as_deref() == Some(&self.id)
             }
+            "grok" => super::grok::binding_matches(self, target),
             _ => false,
         }
     }
@@ -134,6 +151,7 @@ impl Session {
             "codex" => {
                 let _ = codex_app_server::clear_pane_thread(&target.pane);
             }
+            "grok" => super::grok::clear_binding(self, target),
             _ => {}
         }
     }
@@ -142,6 +160,7 @@ impl Session {
         let args = match self.cli {
             "claude" => vec!["claude", "--resume", &self.id],
             "codex" => vec!["codex", "resume", &self.id],
+            "grok" => vec!["grok", "--resume", &self.id],
             _ => unreachable!("validated engine"),
         };
         args.iter()

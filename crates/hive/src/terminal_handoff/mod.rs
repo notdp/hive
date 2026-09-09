@@ -6,6 +6,7 @@
 //! a handoff from a viewer exit, and a committed job never reopens outside
 //! the team's pane. Team membership remains in the registry.
 
+mod grok;
 mod session;
 mod terminal;
 pub(crate) use session::Session;
