@@ -142,7 +142,16 @@ impl Session {
         }
     }
 
-    pub(crate) fn clear_binding(&self, target: &Target) {
+    pub(crate) fn clear_binding(&self, target: &Target, pane_owned: bool) {
+        // A Grok alias belongs to the launch key, not to a pane. A pane
+        // disappearing before commit must not leave the local leader aliased
+        // to an absent member that the hived will later reap.
+        if !pane_owned
+            && (self.cli != "grok"
+                || crate::registry::member_for_session(&self.id, Some(self.cli)).is_some())
+        {
+            return;
+        }
         if !self.binding_matches(target) {
             return;
         }

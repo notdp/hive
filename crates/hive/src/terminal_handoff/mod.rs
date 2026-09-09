@@ -152,10 +152,14 @@ impl Target {
     }
 
     pub(crate) fn rollback(&self, session: &Session) {
-        if self.committed(session) || !self.owned() {
+        if self.committed(session) {
             return;
         }
-        session.clear_binding(self);
+        let owned = self.owned();
+        session.clear_binding(self, owned);
+        if !owned {
+            return;
+        }
         crate::context::clear_context_for_pane(&self.pane);
         if self.owns_window {
             tmux::kill_window(&self.window);

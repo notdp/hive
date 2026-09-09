@@ -86,6 +86,31 @@ mod tests {
     }
 
     #[test]
+    fn test_rollback_removes_uncommitted_alias_after_its_pane_disappears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("GROK_HOME", tmp.path().join("g"));
+        env.set("HIVE_HOME", tmp.path().join("h"));
+        let s = Session::grok("l-ab12", "sid-1", "/w");
+        grok_leader::write_session_key("l-ab12", "sid-1", "/w").unwrap();
+        let alias = grok_leader::alias_path_for_key("m-honey.rex");
+        std::fs::write(&alias, "l-ab12").unwrap();
+        let target = Target {
+            team: "honey".into(),
+            member: "rex".into(),
+            created_at: "1".into(),
+            pane: "%7".into(),
+            window: "@1".into(),
+            token: "test".into(),
+            owns_window: false,
+            new_session: false,
+        };
+        s.clear_binding(&target, false);
+        assert!(!alias.exists());
+        assert!(grok_leader::read_session_key("l-ab12").is_some());
+    }
+
+    #[test]
     fn test_grok_session_carries_its_launch_key_in_data() {
         let _env = crate::testenv::EnvGuard::new();
         let s = Session::grok("l-ab12", "sid-1", "/w");
