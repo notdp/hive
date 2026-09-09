@@ -327,18 +327,6 @@ fn exec_codex_managed(args: &[String]) -> ! {
     execvp("codex", &argv);
 }
 
-/// Only explicit native IDs can be bound before the resume picker runs.
-fn codex_thread_id(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| {
-            if [8, 13, 18, 23].contains(&i) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
-}
-
 fn normalize_codex_cwd(args: &mut [String], cwd: &str) {
     let mut i = 0;
     while i < args.len() {
@@ -384,7 +372,7 @@ fn exec_codex_outside(args: &[String]) -> ! {
     let sub = sub_index.map(|i| args[i].as_str());
     let source = if matches!(sub, Some("resume" | "fork")) {
         let source = codex_positional_after(args, sub_index.unwrap());
-        match source.filter(|s| codex_thread_id(s)) {
+        match source.filter(|s| is_uuid(s)) {
             Some(source) => Some(source),
             None => codex_raw(args),
         }
