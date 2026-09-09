@@ -14,6 +14,7 @@
 //! so every step is idempotent.
 
 use std::fs;
+use std::os::unix::io::AsRawFd;
 
 use anyhow::{bail, Result};
 
@@ -66,23 +67,65 @@ pub fn bind_launch(
         None => write_session_key(key, session, cwd)?,
     }
     let member_key = member_key(team, member);
-    match alias_target(&member_key) {
-        Some(existing) if existing == key => return Ok(()),
-        Some(existing) => bail!("{member_key} is already bound to launch {existing}"),
-        None => {}
-    }
+    let _lock = alias_lock(&member_key)?;
     let own_sock = super::grok_home()
         .join("hive")
         .join(format!("{member_key}.sock"));
     if own_sock.exists() {
         bail!("{member_key} already has a leader of its own");
     }
-    let alias = alias_path_for_key(&member_key);
-    if let Some(parent) = alias.parent() {
+    publish_alias(&member_key, key)
+}
+
+/// The member's alias lock, held across every alias read-then-write: a
+/// bind and a rollback from the launcher's and the client's side can
+/// interleave, and two joins can race for one member name.
+fn alias_lock(member_key: &str) -> Result<fs::File> {
+    let path = alias_path_for_key(member_key).with_extension("alias-lock");
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(alias, key)?;
-    Ok(())
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(file)
+}
+
+/// Publish `member_key.alias` -> *key* without ever overwriting: the
+/// alias is written whole into a private file and hard-linked into place,
+/// which fails when an alias already exists. Two joins racing for one
+/// member name therefore bind at most one launch; the loser sees whose.
+/// The same key already published is idempotent; anything else there —
+/// another launch, or garbage — is refused.
+fn publish_alias(member_key: &str, key: &str) -> Result<()> {
+    let alias = alias_path_for_key(member_key);
+    let Some(parent) = alias.parent() else {
+        bail!("alias path has no directory");
+    };
+    fs::create_dir_all(parent)?;
+    let staged = parent.join(format!(
+        ".{member_key}.{}.{}.alias-tmp",
+        std::process::id(),
+        crate::agent::uuid4()
+    ));
+    fs::write(&staged, key)?;
+    let linked = fs::hard_link(&staged, &alias);
+    let _ = fs::remove_file(&staged);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match alias_target(member_key) {
+            Some(existing) if existing == key => Ok(()),
+            Some(existing) => bail!("{member_key} is already bound to launch {existing}"),
+            None => bail!("{member_key} carries an alias that names no launch"),
+        },
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Undo `bind_launch`: the member's alias goes when it names *key*. The
@@ -96,6 +139,7 @@ pub fn rollback_launch(
 ) -> Result<()> {
     check_launch(key, session)?;
     let member_key = member_key(team, member);
+    let _lock = alias_lock(&member_key)?;
     if alias_target(&member_key).as_deref() == Some(key) {
         fs::remove_file(alias_path_for_key(&member_key))?;
     }

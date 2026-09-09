@@ -745,6 +745,62 @@ fn grok_opt_value(args: &[String], names: &[&str]) -> Option<String> {
     None
 }
 
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// What an `hgrok` outside tmux can hold: an interactive launch whose
+/// session id is knowable up front — a fresh session hive names, or one
+/// resumed by id. A continue, a resume by title or from the picker, a
+/// non-interactive run (`-p`, a prompt file) and an explicit leader
+/// socket all belong to plain grok. Returns (session id, whether hive must
+/// pass `--session-id`, the launch cwd); None is the raw shape.
+fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
+    const RAW: &[&str] = &[
+        "-c",
+        "--continue",
+        "-p",
+        "--single",
+        "--prompt-file",
+        "--prompt-json",
+        "--leader-socket",
+    ];
+    if args.iter().any(|a| {
+        RAW.contains(&a.as_str()) || RAW.iter().any(|flag| a.starts_with(&format!("{flag}=")))
+    }) {
+        return None;
+    }
+    let cwd = match grok_opt_value(args, &["--cwd"]) {
+        Some(dir) => dir,
+        None if args.iter().any(|a| a == "--cwd" || a.starts_with("--cwd=")) => return None,
+        None => getcwd(),
+    };
+    let cwd = std::fs::canonicalize(&cwd)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let resume_present = args
+        .iter()
+        .any(|a| a == "-r" || a == "--resume" || a.starts_with("--resume="));
+    if resume_present {
+        let value = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--resume=").map(str::to_string))
+            .or_else(|| grok_opt_value(args, &["--resume", "-r"]))
+            .filter(|v| !v.is_empty())?;
+        return is_uuid(&value).then_some((value, false, cwd));
+    }
+    if let Some(explicit) = grok_opt_value(args, &["--session-id", "-s"]) {
+        return is_uuid(&explicit).then_some((explicit, false, cwd));
+    }
+    Some((uuid4(), true, cwd))
+}
+
 /// (session id this launch will run, whether hive must pass --session-id).
 fn grok_launch_session(args: &[String]) -> (Option<String>, bool) {
     let explicit = grok_opt_value(args, &["--session-id", "-s"]);
@@ -839,9 +895,8 @@ fn exec_grok_managed(args: &[String]) -> ! {
 fn run_outside_grok(args: &[String]) -> ! {
     use crate::adapters::grok_leader;
 
-    let (session_id, pass_flag) = grok_launch_session(args);
-    let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
-        grok_raw(args); // picker: the chosen session is unknowable up front
+    let Some((session_id, pass_flag, cwd)) = grok_outside_launch(args) else {
+        grok_raw(args); // a shape whose session hive cannot name, or plain grok's own
     };
     if let Some((team, _)) = crate::registry::member_for_session(&session_id, Some("grok")) {
         super::attach::attach_cmd(&team);
@@ -852,7 +907,6 @@ fn run_outside_grok(args: &[String]) -> ! {
         eprintln!("hive: grok leader did not start; launching plain grok");
         grok_raw(args);
     }
-    let cwd = getcwd();
     if let Err(error) = grok_leader::write_session_key(&key, &session_id, &cwd) {
         grok_leader::stop_launch(&key, "");
         eprintln!("hive: {error}; launching plain grok");
@@ -1054,6 +1108,57 @@ mod tests {
         assert!(!grok_raw_shape(&args(&["--resume"])));
         assert!(!grok_raw_shape(&args(&["-m", "grok-4"])));
         assert!(!grok_raw_shape(&[]));
+    }
+
+    #[test]
+    fn test_grok_outside_launch_names_the_session_or_hands_the_shape_to_plain_grok() {
+        let _env = crate::testenv::EnvGuard::new();
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let sid = "0f0f0f0f-1111-4222-8333-444444444444";
+        // fresh: hive names the session and passes it
+        let (id, pass, dir) = grok_outside_launch(&args(&["-m", "grok-4"])).unwrap();
+        assert!(is_uuid(&id) && pass && dir == cwd);
+        // resumed by id, either spelling
+        for form in [
+            vec!["-r", sid],
+            vec!["--resume", sid],
+            vec![&format!("--resume={sid}")],
+        ] {
+            let (id, pass, _) = grok_outside_launch(&args(&form)).unwrap();
+            assert_eq!((id.as_str(), pass), (sid, false), "{form:?}");
+        }
+        let (id, pass, _) = grok_outside_launch(&args(&["--session-id", sid])).unwrap();
+        assert_eq!((id.as_str(), pass), (sid, false));
+        // plain grok's: picker, title, continue, non-interactive, own socket
+        for form in [
+            vec!["--resume"],
+            vec!["-r"],
+            vec!["-r", "-m", "grok-4"],
+            vec!["--resume", "my chat"],
+            vec!["-c"],
+            vec!["--continue"],
+            vec!["-p", "hi"],
+            vec!["--single"],
+            vec!["--prompt-file", "x"],
+            vec!["--prompt-json=x"],
+            vec!["--leader-socket", "/tmp/s"],
+            vec!["--session-id", "not-a-uuid"],
+            vec!["--cwd"],
+            vec!["--cwd", "/definitely/not/a/dir"],
+        ] {
+            assert!(grok_outside_launch(&args(&form)).is_none(), "{form:?}");
+        }
+        // --cwd is the launch's directory, canonical
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, _, dir) =
+            grok_outside_launch(&args(&["--cwd", tmp.path().to_str().unwrap()])).unwrap();
+        assert_eq!(
+            dir,
+            std::fs::canonicalize(tmp.path()).unwrap().to_string_lossy()
+        );
     }
 
     #[test]

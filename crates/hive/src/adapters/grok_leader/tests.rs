@@ -3081,3 +3081,62 @@ fn test_stop_launch_steps_back_once_a_member_owns_the_leader() {
     stop_launch("p7", "sid-3");
     assert!(hive_dir.join("p7.sock").exists());
 }
+
+#[test]
+fn test_two_launches_racing_for_one_member_bind_at_most_one() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _a = bind_leader_socket(&hive_dir.join("l-aaaa.sock"));
+    let _b = bind_leader_socket(&hive_dir.join("l-bbbb.sock"));
+    let home = bed.tmp.path().to_path_buf();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut hands = Vec::new();
+    for key in ["l-aaaa", "l-bbbb"] {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let home = home.clone();
+        hands.push(std::thread::spawn(move || {
+            // the env var is process-global; the racing threads read the
+            // same GROK_HOME the bed pinned
+            assert_eq!(
+                std::env::var("GROK_HOME").ok().map(PathBuf::from),
+                Some(home)
+            );
+            barrier.wait();
+            bind_launch(key, "sid-1", "/w", "honey", "orch", "%3").map_err(|e| e.to_string())
+        }));
+    }
+    let results: Vec<Result<(), String>> = hands.into_iter().map(|h| h.join().unwrap()).collect();
+    let wins = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(wins, 1, "{results:?}");
+    let winner = alias_target("m-honey.orch").unwrap();
+    assert!(winner == "l-aaaa" || winner == "l-bbbb");
+    let loser = results
+        .iter()
+        .find(|r| r.is_err())
+        .unwrap()
+        .as_ref()
+        .unwrap_err();
+    assert!(
+        loser.contains(&format!("already bound to launch {winner}")),
+        "{loser}"
+    );
+    // no staging file left behind
+    assert!(fs::read_dir(&hive_dir)
+        .unwrap()
+        .flatten()
+        .all(|e| !e.file_name().to_string_lossy().ends_with(".alias-tmp")));
+}
+
+#[test]
+fn test_a_corrupt_alias_is_refused_never_overwritten() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _a = bind_leader_socket(&hive_dir.join("l-aaaa.sock"));
+    fs::write(hive_dir.join("m-honey.orch.alias"), "not a key").unwrap();
+    let err = bind_launch("l-aaaa", "sid-1", "/w", "honey", "orch", "%3").unwrap_err();
+    assert!(err.to_string().contains("names no launch"), "{err}");
+    assert_eq!(
+        fs::read_to_string(hive_dir.join("m-honey.orch.alias")).unwrap(),
+        "not a key"
+    );
+}
