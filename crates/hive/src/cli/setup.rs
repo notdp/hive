@@ -193,19 +193,16 @@ fn which_on_path(name: &str) -> bool {
 const SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, at a terminal, they open
-# a tmux session of their own around the launch (the status is then the tmux
-# client's, and the hint has no pane to find); for management subcommands /
-# non-interactive flags, or without a terminal or tmux, they run the plain
-# binary. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
+# locally until create/join moves it into the team window; hcodex/hgrok run
+# the plain CLI. Management commands and launches without a terminal pass
+# through. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hcodex: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed, raw, or the tmux client
-  # around a launch outside tmux), so the status here is that process's own
-  # — never a fallback signal. The if-condition keeps errexit
-  # shells from bailing before the status is saved.
+  # Preserve the launcher's status; the condition keeps errexit shells
+  # from bailing before it is saved.
   if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # print a cd-ready resume hint for the session that just ended.
   hive resume-hint codex 2>/dev/null || true
@@ -216,10 +213,8 @@ function hclaude {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hclaude: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed, raw, or the tmux client
-  # around a launch outside tmux), so the status here is that process's own
-  # — never a fallback signal. The if-condition keeps errexit
-  # shells from bailing before the status is saved.
+  # Preserve the launcher's status; the condition keeps errexit shells
+  # from bailing before it is saved.
   if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # claude's own resume hint omits the directory; print a cd-ready one.
   hive resume-hint claude 2>/dev/null || true
@@ -230,10 +225,8 @@ function hgrok {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hgrok: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed, raw, or the tmux client
-  # around a launch outside tmux), so the status here is that process's own
-  # — never a fallback signal. The if-condition keeps errexit
-  # shells from bailing before the status is saved.
+  # Preserve the launcher's status; the condition keeps errexit shells
+  # from bailing before it is saved.
   if hive grok "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # print a cd-ready resume hint for the session that just ended.
   hive resume-hint grok 2>/dev/null || true
@@ -244,11 +237,10 @@ function hgrok {
 const SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, at a terminal, they open
-# a tmux session of their own around the launch (the status is then the tmux
-# client's, and the hint has no pane to find); for management subcommands /
-# non-interactive flags, or without a terminal or tmux, they run the plain
-# binary. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
+# locally until create/join moves it into the team window; hcodex/hgrok run
+# the plain CLI. Management commands and launches without a terminal pass
+# through. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive
         echo "hcodex: hive is not on PATH" >&2

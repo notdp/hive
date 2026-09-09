@@ -1,9 +1,8 @@
 //! The managed launchers — `hive claude` / `hive codex` / `hive grok` —
 //! that replace this process with the engine bound to the pane (a bg job,
-//! the shared app-server daemon, the pane leader); outside tmux, at a
-//! terminal, with a tmux session of their own around the launch, so the
-//! engine is still born on a pane. Plus `ccd ls` and the `resume-hint` the
-//! shell wrappers print after a launch ends.
+//! the shared app-server daemon, the pane leader). Outside tmux, Claude
+//! starts a background job with a local viewer; create/join later hands it
+//! to the team window. Plus `ccd ls` and the wrappers' `resume-hint`.
 
 use std::os::unix::process::CommandExt;
 
@@ -17,155 +16,6 @@ use crate::paths::getcwd;
 use crate::shell::shlex_quote;
 use crate::team::live_member_pids;
 use crate::tmux;
-
-// ---------------------------------------------------------------------------
-// outside tmux: a session of the launcher's own
-// ---------------------------------------------------------------------------
-
-/// hive's root variables, mirrored from the caller into the session a
-/// launcher opens outside tmux: a set one rides `-e`, an unset one is marked
-/// removed (`set-environment -r`), so a pre-existing server's global value
-/// never reaches the panes `hive spawn` splits there later — the hived and
-/// the engine daemons those panes start read their roots from this
-/// environment (`paths::hive_home`, `codex_home`, `grok_home`,
-/// `claude_sessions::config_dir`), and an empty value is a value to them.
-const SESSION_ENV_VARS: [&str; 5] = [
-    "HIVE_HOME",
-    "CLAUDE_HOME",
-    "CLAUDE_CONFIG_DIR",
-    "CODEX_HOME",
-    "GROK_HOME",
-];
-
-/// What a launcher does with no tmux pane to bind an engine to.
-#[derive(Debug, PartialEq, Eq)]
-enum OutsideTmux {
-    /// A terminal with tmux at hand: a session around the launch.
-    NewSession,
-    /// No terminal to attach (a pipe, a member engine's tool subprocess),
-    /// or `$TMUX` set with no pane (a run-shell job — tmux refuses to
-    /// nest): the raw CLI, silently.
-    Raw,
-    /// A terminal without tmux: the raw CLI, said out loud.
-    RawNoTmux,
-}
-
-fn outside_tmux_launch(
-    tmux_env_set: bool,
-    interactive_tty: bool,
-    tmux_present: bool,
-) -> OutsideTmux {
-    if tmux_env_set || !interactive_tty {
-        OutsideTmux::Raw
-    } else if !tmux_present {
-        OutsideTmux::RawNoTmux
-    } else {
-        OutsideTmux::NewSession
-    }
-}
-
-/// `tmux` argv opening an attached session in *cwd* that runs this launch
-/// again — *exe* `<cli>` *args* — where it will find a pane. tmux joins a
-/// shell-command's words with spaces and hands them to the default shell,
-/// so the launch is one quoted string. *path* rides an `env` prefix, not
-/// `-e`: a login shell's path_helper (macOS) rebuilds PATH, so a session
-/// PATH never reaches a pane's shell — later `hive spawn` panes keep the
-/// server's PATH, as every in-tmux team does. *env* is the root variables
-/// in three states: `Some` (an empty value included) is set with `-e`;
-/// `None` is unset in the first pane (`env -u`) and marked removed for
-/// every later one, over whatever the server's globals say. The session is
-/// marked `@hive-launcher`: a team created in it gets the team status bar
-/// (`team_display::dress_launcher_session`), while the window stays the
-/// human's — their engine runs on its pane.
-fn tmux_wrap_argv(
-    exe: &str,
-    cli: &str,
-    args: &[String],
-    cwd: &str,
-    path: &str,
-    env: &[(&str, Option<String>)],
-) -> Vec<String> {
-    let mut argv = vec!["new-session".to_string(), "-c".to_string(), cwd.to_string()];
-    let mut command = vec!["env".to_string()];
-    let mut removed = Vec::new();
-    for (key, value) in env {
-        match value {
-            Some(value) => {
-                argv.push("-e".to_string());
-                argv.push(format!("{key}={value}"));
-            }
-            None => {
-                command.push("-u".to_string());
-                command.push((*key).to_string());
-                removed.push(*key);
-            }
-        }
-    }
-    command.push(format!("PATH={}", shlex_quote(path)));
-    command.push(shlex_quote(exe));
-    command.push(cli.to_string());
-    command.extend(args.iter().map(|a| shlex_quote(a)));
-    argv.push(command.join(" "));
-    for word in [";", "set-option", "@hive-launcher", "1"] {
-        argv.push(word.to_string());
-    }
-    for key in removed {
-        argv.push(";".to_string());
-        argv.push("set-environment".to_string());
-        argv.push("-r".to_string());
-        argv.push(key.to_string());
-    }
-    argv
-}
-
-fn session_env() -> Vec<(&'static str, Option<String>)> {
-    SESSION_ENV_VARS
-        .iter()
-        .map(|key| (*key, std::env::var(key).ok()))
-        .collect()
-}
-
-/// This binary, so the launch inside the session is the same hive that
-/// opened it, whatever the session's PATH resolves.
-fn hive_exe() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_string))
-        .unwrap_or_else(|| "hive".to_string())
-}
-
-/// No pane to bind to: a tmux session of the launcher's own running this
-/// launch again, or the raw CLI. Known edges, accepted: `env -u TMUX` with
-/// a `TMUX_PANE` still set, and an engine tool subprocess handed a pty
-/// with no `$TMUX`, both read as a terminal and get a session.
-fn launch_without_pane(cli: &str, args: &[String]) -> ! {
-    let choice = outside_tmux_launch(
-        !env_string("TMUX").is_empty(),
-        stdin_isatty() && stdout_isatty(),
-        tmux::version().is_some(),
-    );
-    match choice {
-        OutsideTmux::NewSession => {
-            let argv = tmux_wrap_argv(
-                &hive_exe(),
-                cli,
-                args,
-                &getcwd(),
-                &env_string("PATH"),
-                &session_env(),
-            );
-            // Only an exec that never started tmux comes back here.
-            if let Err(e) = tmux::exec_tmux(&argv) {
-                eprintln!("hive: tmux did not start ({e}); launching plain {cli}");
-            }
-        }
-        OutsideTmux::RawNoTmux => {
-            eprintln!("hive: tmux not found; launching plain {cli} with no hive pane");
-        }
-        OutsideTmux::Raw => {}
-    }
-    execvp(cli, args)
-}
 
 // ---------------------------------------------------------------------------
 // codex managed launch
@@ -356,7 +206,6 @@ fn codex_raw_shape(args: &[String]) -> bool {
 
 /// Replace this process with codex on the shared app-server daemon.
 ///
-/// Outside tmux, `launch_without_pane` (a session of its own at a terminal).
 /// Degrades to raw `codex` (embedded, status quo) whenever the managed path
 /// cannot apply — the caller never ends up worse than plain codex.
 fn exec_codex_managed(args: &[String]) -> ! {
@@ -374,7 +223,7 @@ fn exec_codex_managed(args: &[String]) -> ! {
         }
     };
     if pane.is_empty() || !identity::is_inside_tmux() {
-        launch_without_pane("codex", args); // hive needs a tmux pane to bind a thread to
+        codex_raw(args); // hive needs a tmux pane to bind a thread to
     }
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
@@ -599,7 +448,6 @@ fn claude_raw_shape(args: &[String]) -> bool {
 
 /// Run claude as a hive-managed background job with this pane attached.
 ///
-/// Outside tmux, `launch_without_pane` (a session of its own at a terminal).
 /// Degrades to raw `claude` whenever the managed path cannot apply — the
 /// caller never ends up worse than plain claude.
 fn exec_claude_managed(args: &[String]) -> ! {
@@ -609,10 +457,19 @@ fn exec_claude_managed(args: &[String]) -> ! {
         claude_raw(args);
     }
     let pane = env_string("TMUX_PANE");
-    if pane.is_empty() || env_string("TMUX").is_empty() {
-        launch_without_pane("claude", args); // hive needs a real tmux pane to bind a job to
+    let outside = pane.is_empty() || env_string("TMUX").is_empty();
+    if outside && (!env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty()) {
+        claude_raw(args);
     }
     let (_, resume_val) = claude_resume_arg(args);
+    if outside {
+        if let Some(job) = resume_val.as_deref() {
+            if let Some((team, _)) = crate::registry::member_for_session(job, Some("claude")) {
+                super::attach::attach_cmd(&team);
+                std::process::exit(0);
+            }
+        }
+    }
     let cwd = getcwd();
 
     if let Some(resume_val) = resume_val
@@ -624,6 +481,9 @@ fn exec_claude_managed(args: &[String]) -> ! {
             engine = claude_bg::ensure_engine(resume_val, None, "claude");
         }
         if engine.is_some() || claude_bg::job_exists(resume_val, "claude") {
+            if outside {
+                run_outside_claude(resume_val);
+            }
             let session_id = engine.map(|e| e.session_id).unwrap_or_default();
             let _ = claude_bg::write_pane_job(&pane, resume_val, &session_id, &cwd);
             claude_attach_loop(resume_val);
@@ -636,6 +496,8 @@ fn exec_claude_managed(args: &[String]) -> ! {
         .any(|a| a == "--name" || a.starts_with("--name="));
     let name = if user_named {
         String::new()
+    } else if outside {
+        format!("hive-{}", &uuid4()[..8])
     } else {
         claude_pane_job_name(&pane)
     };
@@ -647,6 +509,9 @@ fn exec_claude_managed(args: &[String]) -> ! {
             claude_raw(args);
         }
     };
+    if outside {
+        run_outside_claude(&job_id);
+    }
     let engine = claude_bg::wait_engine_entry(&job_id, 10.0);
     let _ = claude_bg::write_pane_job(
         &pane,
@@ -655,6 +520,16 @@ fn exec_claude_managed(args: &[String]) -> ! {
         &cwd,
     );
     claude_attach_loop(&job_id);
+}
+
+fn run_outside_claude(job: &str) -> ! {
+    match crate::claude_handoff::run(job) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("hive: {error}; resume with `hive claude --resume {job}`");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn claude_cmd(args: &[String]) {
@@ -758,7 +633,6 @@ fn grok_raw_shape(args: &[String]) -> bool {
 /// pane — a raw `hive grok` outside any team — is the one place a leader is
 /// born from a pane, keyed `p<slug>` with the pane's lifecycle.
 ///
-/// Outside tmux, `launch_without_pane` (a session of its own at a terminal).
 /// Degrades to raw `grok` whenever the managed path cannot apply — the
 /// caller never ends up worse than plain grok.
 fn exec_grok_managed(args: &[String]) -> ! {
@@ -776,7 +650,7 @@ fn exec_grok_managed(args: &[String]) -> ! {
         }
     };
     if pane.is_empty() || !identity::is_inside_tmux() {
-        launch_without_pane("grok", args); // hive needs a tmux pane to bind a daemon to
+        grok_raw(args); // hive needs a tmux pane to bind a daemon to
     }
     if !grok_leader::spawn_daemon(&pane) {
         // A raw grok drives whatever session it likes; leaving an earlier
@@ -902,88 +776,6 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 mod tests {
     use super::*;
     use crate::testkit::{args, display_env, fake_tmux_tagged};
-
-    #[test]
-    fn test_outside_tmux_launch_opens_a_session_only_for_a_terminal_with_tmux() {
-        // (TMUX set, terminal, tmux present)
-        assert_eq!(
-            outside_tmux_launch(false, true, true),
-            OutsideTmux::NewSession
-        );
-        // a run-shell job or a nested client: TMUX set, no pane
-        assert_eq!(outside_tmux_launch(true, true, true), OutsideTmux::Raw);
-        // a pipe or an engine's tool subprocess
-        assert_eq!(outside_tmux_launch(false, false, true), OutsideTmux::Raw);
-        assert_eq!(outside_tmux_launch(false, false, false), OutsideTmux::Raw);
-        // a terminal without tmux
-        assert_eq!(
-            outside_tmux_launch(false, true, false),
-            OutsideTmux::RawNoTmux
-        );
-    }
-
-    #[test]
-    fn test_tmux_wrap_argv_folds_the_launch_into_one_quoted_shell_command() {
-        let env = [
-            ("HIVE_HOME", Some("/lane home".to_string())),
-            ("CLAUDE_HOME", Some(String::new())),
-            ("CODEX_HOME", None),
-            ("GROK_HOME", None),
-        ];
-        let a = args(&["--model", "it's $x `y`\nz", ""]);
-        let argv = tmux_wrap_argv(
-            "/opt/hi ve/hive",
-            "claude",
-            &a,
-            "/w d",
-            "/usr/bin:/b in",
-            &env,
-        );
-        assert_eq!(
-            argv,
-            vec![
-                "new-session",
-                "-c",
-                "/w d",
-                "-e",
-                "HIVE_HOME=/lane home",
-                "-e",
-                "CLAUDE_HOME=",
-                "env -u CODEX_HOME -u GROK_HOME PATH='/usr/bin:/b in' '/opt/hi ve/hive' claude \
-                 --model 'it'\"'\"'s $x `y`\nz' ''",
-                ";",
-                "set-option",
-                "@hive-launcher",
-                "1",
-                ";",
-                "set-environment",
-                "-r",
-                "CODEX_HOME",
-                ";",
-                "set-environment",
-                "-r",
-                "GROK_HOME",
-            ]
-        );
-        // Every variable set (an empty one included): no removal at all.
-        let all_set = [("HIVE_HOME", Some("/h".to_string()))];
-        let argv = tmux_wrap_argv("hive", "codex", &[], "/w", "/bin", &all_set);
-        assert_eq!(
-            argv,
-            vec![
-                "new-session",
-                "-c",
-                "/w",
-                "-e",
-                "HIVE_HOME=/h",
-                "env PATH=/bin hive codex",
-                ";",
-                "set-option",
-                "@hive-launcher",
-                "1"
-            ]
-        );
-    }
 
     #[test]
     fn test_raw_shapes_cover_every_passthrough_constant() {

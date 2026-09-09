@@ -462,7 +462,7 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
         &["honey"],
     );
 
-    join_as_ccd("honey", "");
+    join_as_ccd("honey", "", true, "");
 
     let joined = joined_session_row("honey");
     assert_eq!(joined["cli"], Value::from("claude"));
@@ -499,7 +499,7 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
     .unwrap();
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    join_as_ccd("honey", "");
+    join_as_ccd("honey", "", true, "");
 
     joined_session_row("honey");
     assert!(has_row(

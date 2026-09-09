@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
+mod handoff;
+
 use super::util::{fail, json_pretty, ok_or_fail, parse_entries, resolve_sender};
 use crate::identity;
 use crate::json_fields::map_str;
@@ -22,7 +24,8 @@ use crate::tmux;
 /// NAME is optional everywhere (pool-picked by default). Outside tmux: the
 /// session named after the team (created detached when missing) holds its
 /// window, and the desktop app's Claude session as creator is its orch (a
-/// terminal's claude is refused: `hclaude` gives it a pane). Inside tmux on an agent pane: that pane
+/// raw terminal Claude is refused; hclaude transfers its job to a pane).
+/// Inside tmux on an agent pane: that pane
 /// becomes the orch. Inside tmux on a shell pane: the window binds the team
 /// without an orch.
 ///
@@ -103,9 +106,6 @@ pub(crate) fn create(
             std::process::exit(1);
         }
     };
-    if !current_pane.is_empty() {
-        crate::team_display::dress_launcher_session(&current_pane);
-    }
     // The lead joins the roster only when its pane actually runs an
     // agent — a shell-pane create has no engine to register (same
     // authority the pane tagging uses).
@@ -228,8 +228,8 @@ fn title_badge_hint(badge: &str) -> String {
 
 /// The Claude session a create or join outside tmux may enrol: the desktop
 /// app's own. Its mirror pane is how the desktop conversation shows in the
-/// team window; a terminal's claude is refused — `hclaude` opens a tmux
-/// session around it and gives it a real pane. The registry entry's
+/// team window; raw terminal Claude is refused. An hclaude-managed job
+/// takes the separate launcher-handoff path before this gate. The registry entry's
 /// `entrypoint` is the signal; an entry without one is not called a
 /// terminal, only unconfirmed.
 fn enrolable_session(
@@ -248,8 +248,7 @@ fn enrolable_session(
     };
     Err(format!(
         "{what}; the read-only mirror lane is the desktop app's only. \
-         Exit and start it with `hclaude`, which opens a tmux session and \
-         binds a pane the team can address."
+         Start with `hclaude` for a managed job that can move into the team window."
     ))
 }
 
@@ -279,9 +278,24 @@ fn create_detached_team(
     // already on another team's roster stays a guest here. The gate runs
     // before either branch, so nothing a terminal's claude does here is
     // written anywhere.
-    let creator = crate::adapters::claude_sessions::self_session()
-        .filter(|c| !c.session_id.is_empty())
-        .map(|c| enrolable_session(c).unwrap_or_else(|e| fail(&e)));
+    let creator =
+        crate::adapters::claude_sessions::self_session().filter(|c| !c.session_id.is_empty());
+    if creator.is_none() && identity::engine_marker_env() {
+        fail("this engine has no managed team channel; start hclaude, or use a managed tmux pane");
+    }
+    if let Some(session) = creator.as_ref() {
+        if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(session)) {
+            if !workspace.is_empty() || reset_workspace || !state_entries.is_empty() {
+                fail(
+                    "an orch create uses the team directory; run from a shell pane for --workspace",
+                );
+            }
+            let result = ok_or_fail(handoff::create(client, name, desc));
+            println!("{}", json_pretty(&result));
+            return;
+        }
+    }
+    let creator = creator.map(|c| enrolable_session(c).unwrap_or_else(|e| fail(&e)));
     let orch_member: Option<Map<String, Value>> = match creator.as_ref() {
         Some(creator)
             if !creator.session_id.is_empty()
@@ -522,7 +536,6 @@ fn create_orch_team(current_pane: &str, name: &str) -> Map<String, Value> {
 
     tmux::rename_window(&window, &t.name);
     tmux::configure_hive_window(&window);
-    crate::team_display::dress_launcher_session(&orch_pane);
     tmux::set_pane_option(&orch_pane, "hive-role", "agent");
     tmux::set_pane_option(&orch_pane, "hive-agent", LEAD_AGENT_NAME);
     tmux::set_pane_option(&orch_pane, "hive-team", &t.name);
@@ -721,7 +734,7 @@ pub(crate) fn join_cmd(
         if !pane_override.is_empty() {
             fail("--pane needs tmux; outside tmux `hive join <team>` joins this session");
         }
-        join_as_ccd(team_arg, name_override);
+        join_as_ccd(team_arg, name_override, notify, group_name);
         return;
     }
 
@@ -824,7 +837,7 @@ pub(crate) fn join_cmd(
 /// The session's own id becomes the member's engine identity; delivery
 /// rides the same session channel `ccd.<name>` already uses. Idempotent:
 /// an already-joined session reports its membership.
-fn join_as_ccd(team_name: &str, name_override: &str) {
+fn join_as_ccd(team_name: &str, name_override: &str, notify: bool, group: &str) {
     if team_name.is_empty() {
         fail("join outside tmux needs a team: hive join <team> (see `hive ls`)");
     }
@@ -840,6 +853,11 @@ fn join_as_ccd(team_name: &str, name_override: &str) {
              codex/grok TUIs have none — join from a team pane instead",
         ),
     };
+    if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(&guest)) {
+        let result = ok_or_fail(handoff::join(client, &entry, name_override, notify, group));
+        println!("{}", json_pretty(&result));
+        return;
+    }
     let guest = enrolable_session(guest).unwrap_or_else(|e| fail(&e));
     if let Some((e_team, e_name)) = crate::registry::member_for_session(&guest.session_id, None) {
         if e_team == team_name {

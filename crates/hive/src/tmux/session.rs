@@ -194,15 +194,6 @@ pub fn exec_attach(session: &str, window_target: &str) -> anyhow::Result<()> {
     Err(err.into())
 }
 
-/// Replace this process with `tmux <argv>`: a launcher's own attached
-/// session (`cli/launch`), the argv already built. Only returns on exec
-/// failure — once tmux runs, its errors are tmux's to print.
-pub fn exec_tmux(argv: &[String]) -> anyhow::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let err = Command::new("tmux").args(argv).exec();
-    Err(err.into())
-}
-
 pub fn select_window(window_target: &str) {
     let _ = run(&["select-window", "-t", window_target], false, 5);
 }

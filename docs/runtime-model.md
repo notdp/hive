@@ -86,9 +86,9 @@ Consequences across modules:
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
-  missing) and enrols the caller only when it is the desktop app's Claude
-  session (`join` likewise; a terminal's claude is refused and pointed at
-  `hclaude`), `spawn` splits
+  missing). Desktop Claude joins with a mirror; an hclaude-managed job
+  transfers its viewer into a pane; raw terminal Claude is refused (`join`
+  follows the same boundary). `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
   these verbs do not require the caller to have one. `workflow run` rides the
@@ -696,22 +696,42 @@ none of the keyboard path above applies to it. This is an enrolment policy,
 not a limitation of the session's inbox transport: a terminal's claude still
 reaches a team as a `ccd.<name>` guest over the same socket.
 
-A terminal is where the managed launchers meet the same boundary from the
-other side: `hive claude` / `codex` / `grok` run outside tmux at a terminal
-open a tmux session around the launch (`cli/launch.rs`), so the engine is
-still born on a pane. That session is marked `@hive-launcher`: a team
-created in it wears the team status bar (`team_display::
-dress_launcher_session`), while its window is the human's — their engine
-runs on its pane — so it is never `@hive-built` and `hive delete` leaves it
-as it leaves any lent window. The session mirrors the caller's root variables
-(`HIVE_HOME`, `CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`)
-in three states — set with `-e`, an empty value included; unset kept unset
-in the first pane (`env -u`) and marked removed (`set-environment -r`) for
-every later pane and window hook, over a pre-existing server's globals —
-and carries the caller's PATH only into the first pane's launcher (a login
-shell rebuilds PATH). Without a terminal (a pipe, an engine's tool
-subprocess), with `$TMUX` set but no pane (a run-shell job), or without
-tmux, the launcher runs the raw CLI, the last case saying so on stderr.
+At a terminal outside tmux, `hive claude` starts a background job and a
+local `claude attach` viewer, with no tmux session (`cli/launch.rs`,
+`claude_handoff/`). The launcher owns the viewer process and advertises a
+private control socket through a record in the Claude config tree's
+`hive-control/`.
+A per-job lock admits one local launcher; its per-launch token authenticates
+create/join requests. A raw Claude or unrelated background job has no such
+launcher and cannot enter this lane.
+
+On create/join, the CLI validates membership and prepares a team pane before
+asking the launcher to release its viewer. The launcher stops and reaps its
+own child, then the CLI writes the pane-job binding and commits the roster
+row. The registry row is the boundary: a disconnected request before that
+write removes the prepared pane and restores the local viewer; after that
+write, it starts the team viewer and keeps the membership. The launcher
+restores its terminal and runs a tmux client. Scheduling a viewer command is
+not evidence that Claude has painted a frame; a later viewer failure leaves
+the enrolled job recoverable through the team's display. A client attach
+failure reports recovery and does not reopen a competing local viewer.
+
+The new team session wears the existing team status bar and its window is
+Hive-built. Its launcher roots (`HIVE_HOME`, `CLAUDE_HOME`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`) preserve set, empty and unset
+values over an existing server's globals; unset values are removed with
+`set-environment -r`. The viewer command carries those roots and PATH
+explicitly across a login shell. Join leaves an existing session's environment
+alone. The engine is not restarted; identity resolves its job to the new pane
+through the ordinary pane-job record, rather than changing its environment.
+
+Detaching the tmux client returns to the shell. Outside tmux, resuming an
+already-enrolled job opens its team display instead of starting a second
+Claude viewer. Kill and delete retain managed-member semantics (`--down`
+stops the job); moving a conversation back to a standalone viewer on team
+teardown is not implemented. Codex and Grok launchers outside tmux remain raw;
+management commands, non-interactive launch shapes, and Claude launches
+without an interactive terminal are raw too.
 
 ## Codex: one shared app-server daemon
 
