@@ -1,13 +1,14 @@
 //! The managed launchers — `hive claude` / `hive codex` / `hive grok` —
 //! that replace this process with the engine bound to the pane (a bg job,
-//! the shared app-server daemon, the pane leader), plus `ccd ls` and the
-//! `resume-hint` the shell wrappers print after a launch ends.
+//! the shared app-server daemon, the pane leader). Outside tmux, Claude
+//! starts a background job with a local viewer; create/join later hands it
+//! to the team window. Plus `ccd ls` and the wrappers' `resume-hint`.
 
 use std::os::unix::process::CommandExt;
 
 use serde_json::{json, Map, Value};
 
-use super::util::{execvp, is_printable, json_pretty, stdout_isatty};
+use super::util::{execvp, is_printable, json_pretty, stdin_isatty, stdout_isatty};
 use crate::agent::uuid4;
 use crate::identity;
 use crate::identity::env_string;
@@ -190,6 +191,19 @@ fn codex_raw(args: &[String]) -> ! {
     execvp("codex", args)
 }
 
+/// Launch shapes hive leaves untouched wherever they run: a management
+/// subcommand (not an interactive TUI launch), --help/--version, and a
+/// caller who already chose a `--remote` endpoint.
+fn codex_raw_shape(args: &[String]) -> bool {
+    let sub = codex_subcommand_index(args).map(|i| args[i].as_str());
+    sub.is_some_and(|s| CODEX_PASSTHROUGH_SUBCOMMANDS.contains(&s))
+        || args.iter().any(|a| {
+            CODEX_PASSTHROUGH_FLAGS.contains(&a.as_str())
+                || a == "--remote"
+                || a.starts_with("--remote=")
+        })
+}
+
 /// Replace this process with codex on the shared app-server daemon.
 ///
 /// Degrades to raw `codex` (embedded, status quo) whenever the managed path
@@ -197,6 +211,9 @@ fn codex_raw(args: &[String]) -> ! {
 fn exec_codex_managed(args: &[String]) -> ! {
     use crate::adapters::codex_app_server;
 
+    if codex_raw_shape(args) {
+        codex_raw(args);
+    }
     let pane = {
         let env_pane = env_string("TMUX_PANE");
         if !env_pane.is_empty() {
@@ -210,23 +227,6 @@ fn exec_codex_managed(args: &[String]) -> ! {
     }
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
-    if let Some(sub) = sub {
-        if CODEX_PASSTHROUGH_SUBCOMMANDS.contains(&sub) {
-            codex_raw(args); // a management subcommand, not an interactive TUI launch
-        }
-    }
-    if args
-        .iter()
-        .any(|a| CODEX_PASSTHROUGH_FLAGS.contains(&a.as_str()))
-    {
-        codex_raw(args); // --help/--version never start a session
-    }
-    if args
-        .iter()
-        .any(|a| a == "--remote" || a.starts_with("--remote="))
-    {
-        codex_raw(args); // caller already chose an endpoint
-    }
     if !codex_app_server::spawn_daemon() {
         codex_raw(args); // daemon would not bind — fall back to embedded codex
     }
@@ -432,6 +432,20 @@ fn claude_raw(args: &[String]) -> ! {
     execvp("claude", args)
 }
 
+/// Launch shapes hive leaves untouched wherever they run: a management
+/// subcommand (not an interactive TUI launch), --help/--version, the raw
+/// modes the bg mapping cannot represent, and a bare -r/--resume (the
+/// picker's choice is unknowable up front).
+fn claude_raw_shape(args: &[String]) -> bool {
+    args.first()
+        .is_some_and(|f| CLAUDE_PASSTHROUGH_SUBCOMMANDS.contains(&f.as_str()))
+        || args.iter().any(|a| {
+            CLAUDE_PASSTHROUGH_FLAGS.contains(&a.as_str())
+                || CLAUDE_RAW_MODE_FLAGS.contains(&a.as_str())
+        })
+        || matches!(claude_resume_arg(args), (true, None))
+}
+
 /// Run claude as a hive-managed background job with this pane attached.
 ///
 /// Degrades to raw `claude` whenever the managed path cannot apply — the
@@ -439,31 +453,22 @@ fn claude_raw(args: &[String]) -> ! {
 fn exec_claude_managed(args: &[String]) -> ! {
     use crate::adapters::claude_bg;
 
+    if claude_raw_shape(args) {
+        claude_raw(args);
+    }
     let pane = env_string("TMUX_PANE");
-    if pane.is_empty() || env_string("TMUX").is_empty() {
-        claude_raw(args); // hive needs a real tmux pane to bind a job to
+    let outside = pane.is_empty() || env_string("TMUX").is_empty();
+    if outside && (!env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty()) {
+        claude_raw(args);
     }
-    if let Some(first) = args.first() {
-        if CLAUDE_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
-            claude_raw(args); // a management subcommand, not an interactive TUI launch
+    let (_, resume_val) = claude_resume_arg(args);
+    if outside {
+        if let Some(job) = resume_val.as_deref() {
+            if let Some((team, _)) = crate::registry::member_for_session(job, Some("claude")) {
+                super::attach::attach_cmd(&team);
+                std::process::exit(0);
+            }
         }
-    }
-    if args
-        .iter()
-        .any(|a| CLAUDE_PASSTHROUGH_FLAGS.contains(&a.as_str()))
-    {
-        claude_raw(args);
-    }
-    if args
-        .iter()
-        .any(|a| CLAUDE_RAW_MODE_FLAGS.contains(&a.as_str()))
-    {
-        claude_raw(args);
-    }
-
-    let (resume_present, resume_val) = claude_resume_arg(args);
-    if resume_present && resume_val.is_none() {
-        claude_raw(args); // picker: the chosen session is unknowable up front
     }
     let cwd = getcwd();
 
@@ -476,6 +481,9 @@ fn exec_claude_managed(args: &[String]) -> ! {
             engine = claude_bg::ensure_engine(resume_val, None, "claude");
         }
         if engine.is_some() || claude_bg::job_exists(resume_val, "claude") {
+            if outside {
+                run_outside_claude(resume_val);
+            }
             let session_id = engine.map(|e| e.session_id).unwrap_or_default();
             let _ = claude_bg::write_pane_job(&pane, resume_val, &session_id, &cwd);
             claude_attach_loop(resume_val);
@@ -488,6 +496,8 @@ fn exec_claude_managed(args: &[String]) -> ! {
         .any(|a| a == "--name" || a.starts_with("--name="));
     let name = if user_named {
         String::new()
+    } else if outside {
+        format!("hive-{}", &uuid4()[..8])
     } else {
         claude_pane_job_name(&pane)
     };
@@ -499,6 +509,9 @@ fn exec_claude_managed(args: &[String]) -> ! {
             claude_raw(args);
         }
     };
+    if outside {
+        run_outside_claude(&job_id);
+    }
     let engine = claude_bg::wait_engine_entry(&job_id, 10.0);
     let _ = claude_bg::write_pane_job(
         &pane,
@@ -507,6 +520,16 @@ fn exec_claude_managed(args: &[String]) -> ! {
         &cwd,
     );
     claude_attach_loop(&job_id);
+}
+
+fn run_outside_claude(job: &str) -> ! {
+    match crate::claude_handoff::run(job) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("hive: {error}; resume with `hive claude --resume {job}`");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn claude_cmd(args: &[String]) {
@@ -592,6 +615,16 @@ fn grok_raw(args: &[String]) -> ! {
     execvp("grok", args)
 }
 
+/// Launch shapes hive leaves untouched wherever they run: a management
+/// subcommand (not an interactive TUI launch) and --help/--version.
+fn grok_raw_shape(args: &[String]) -> bool {
+    args.first()
+        .is_some_and(|f| GROK_PASSTHROUGH_SUBCOMMANDS.contains(&f.as_str()))
+        || args
+            .iter()
+            .any(|a| GROK_PASSTHROUGH_FLAGS.contains(&a.as_str()))
+}
+
 /// Replace this process with grok, attached to the pane's leader daemon.
 ///
 /// A pane tagged as a team member resolves to the member's identity-keyed
@@ -605,6 +638,9 @@ fn grok_raw(args: &[String]) -> ! {
 fn exec_grok_managed(args: &[String]) -> ! {
     use crate::adapters::grok_leader;
 
+    if grok_raw_shape(args) {
+        grok_raw(args);
+    }
     let pane = {
         let env_pane = env_string("TMUX_PANE");
         if !env_pane.is_empty() {
@@ -615,17 +651,6 @@ fn exec_grok_managed(args: &[String]) -> ! {
     };
     if pane.is_empty() || !identity::is_inside_tmux() {
         grok_raw(args); // hive needs a tmux pane to bind a daemon to
-    }
-    if let Some(first) = args.first() {
-        if GROK_PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
-            grok_raw(args); // a management subcommand, not an interactive TUI launch
-        }
-    }
-    if args
-        .iter()
-        .any(|a| GROK_PASSTHROUGH_FLAGS.contains(&a.as_str()))
-    {
-        grok_raw(args); // --help/--version never start a session
     }
     if !grok_leader::spawn_daemon(&pane) {
         // A raw grok drives whatever session it likes; leaving an earlier
@@ -751,6 +776,47 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 mod tests {
     use super::*;
     use crate::testkit::{args, display_env, fake_tmux_tagged};
+
+    #[test]
+    fn test_raw_shapes_cover_every_passthrough_constant() {
+        for sub in CLAUDE_PASSTHROUGH_SUBCOMMANDS {
+            assert!(claude_raw_shape(&args(&[sub, "x"])), "{sub}");
+        }
+        for flag in CLAUDE_PASSTHROUGH_FLAGS.iter().chain(CLAUDE_RAW_MODE_FLAGS) {
+            assert!(claude_raw_shape(&args(&["--model", "m", flag])), "{flag}");
+        }
+        assert!(claude_raw_shape(&args(&["--resume"])));
+        assert!(claude_raw_shape(&args(&["-r", "--model", "m"])));
+        assert!(claude_raw_shape(&args(&["--resume="])));
+        assert!(!claude_raw_shape(&args(&["--resume", "job-1"])));
+        assert!(!claude_raw_shape(&args(&["--model", "m"])));
+        assert!(!claude_raw_shape(&args(&["a prompt mentioning help"])));
+        assert!(!claude_raw_shape(&[]));
+
+        for sub in CODEX_PASSTHROUGH_SUBCOMMANDS {
+            assert!(codex_raw_shape(&args(&["-m", "gpt", sub])), "{sub}");
+        }
+        for flag in CODEX_PASSTHROUGH_FLAGS {
+            assert!(codex_raw_shape(&args(&[flag])), "{flag}");
+        }
+        assert!(codex_raw_shape(&args(&["--remote", "unix:///s"])));
+        assert!(codex_raw_shape(&args(&["--remote=unix:///s"])));
+        assert!(!codex_raw_shape(&args(&["resume", "t-1"])));
+        assert!(!codex_raw_shape(&args(&["fork", "t-1"])));
+        // a value that happens to name a subcommand is a value
+        assert!(!codex_raw_shape(&args(&["-m", "exec"])));
+        assert!(!codex_raw_shape(&[]));
+
+        for sub in GROK_PASSTHROUGH_SUBCOMMANDS {
+            assert!(grok_raw_shape(&args(&[sub])), "{sub}");
+        }
+        for flag in GROK_PASSTHROUGH_FLAGS {
+            assert!(grok_raw_shape(&args(&["-m", "grok-4", flag])), "{flag}");
+        }
+        assert!(!grok_raw_shape(&args(&["--resume"])));
+        assert!(!grok_raw_shape(&args(&["-m", "grok-4"])));
+        assert!(!grok_raw_shape(&[]));
+    }
 
     #[test]
     fn test_a_following_flag_is_not_the_value() {

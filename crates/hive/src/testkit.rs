@@ -451,9 +451,11 @@ pub(crate) fn team_dir(env: &DisplayEnv, team: &str) -> std::path::PathBuf {
     env._tmp.path().join(".hive").join("teams").join(team)
 }
 
-/// This process is a live Claude session `me` (sessionId `s-me`): its
-/// inbox socket names its registration, whose sessionId is an interactive
-/// one — no bg job row, so the mirror lane is `hive view`.
+/// This process is the desktop app's live Claude session `me` (sessionId
+/// `s-me`): its inbox socket names its registration, whose sessionId is an
+/// interactive one — no bg job row, so the mirror lane is `hive view` —
+/// and whose `entrypoint` is the desktop's, the one origin create and join
+/// outside tmux enrol.
 pub(crate) fn claude_session_me(
     env: &mut DisplayEnv,
 ) -> crate::adapters::claude_bg::testhook::Guard {
@@ -466,6 +468,8 @@ pub(crate) fn claude_session_me(
             "pid": std::process::id(),
             "messagingSocketPath": "/tmp/me.sock",
             "sessionId": "s-me",
+            "kind": "interactive",
+            "entrypoint": "claude-desktop",
         })
         .to_string(),
     )

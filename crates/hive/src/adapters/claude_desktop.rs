@@ -121,6 +121,15 @@ fn list_dirs(dir: &std::path::Path) -> Option<Vec<PathBuf>> {
     Some(dirs)
 }
 
+/// Whether the desktop app launched *session*: the registry entry's own
+/// `entrypoint`, the one signal that tells a desktop conversation from a
+/// terminal's claude. The mirror lane (`cli/team` create and join outside
+/// tmux) is the desktop's alone; the host-session enrolment below is the
+/// stricter, best-effort follow-up that also needs the desktop's record.
+pub fn is_desktop_launched(session: &ClaudeSession) -> bool {
+    session.entrypoint == DESKTOP_ENTRYPOINT
+}
+
 /// The host session id a roster row may carry for *session*: only for an
 /// interactive session the desktop launched, and only when the desktop's
 /// record names this very CLI session as the conversation's current one.
@@ -128,8 +137,7 @@ fn list_dirs(dir: &std::path::Path) -> Option<Vec<PathBuf>> {
 /// so the id on a roster row always means "this desktop conversation".
 pub fn enrol_host_session_id(session: &ClaudeSession) -> Option<String> {
     let host = host_session_id_env();
-    if host.is_empty() || session.kind != "interactive" || session.entrypoint != DESKTOP_ENTRYPOINT
-    {
+    if host.is_empty() || session.kind != "interactive" || !is_desktop_launched(session) {
         return None;
     }
     let record = desktop_record(&host)?;
@@ -238,6 +246,19 @@ mod tests {
         fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(got, None);
         assert!(desktop_record("local_y").is_some());
+    }
+
+    #[test]
+    fn test_is_desktop_launched_reads_the_entrypoint_alone() {
+        assert!(is_desktop_launched(&session(
+            "interactive",
+            "claude-desktop",
+            "s1"
+        )));
+        // kind is not part of the question
+        assert!(is_desktop_launched(&session("", "claude-desktop", "s1")));
+        assert!(!is_desktop_launched(&session("interactive", "cli", "s1")));
+        assert!(!is_desktop_launched(&session("interactive", "", "s1")));
     }
 
     #[test]

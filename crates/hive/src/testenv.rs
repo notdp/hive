@@ -16,13 +16,16 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 /// The engine-identity vars a headless or out-of-tmux test must not inherit
 /// from the developer's shell: the tmux client and pane, the codex thread,
-/// the grok session, the claude inbox socket.
-pub(crate) const IDENTITY_VARS: [&str; 5] = [
+/// the grok session, the claude inbox socket, and the desktop app's host
+/// session id (a fixture that reads as a desktop session would otherwise
+/// have `with_host_session` read the developer's real desktop record).
+pub(crate) const IDENTITY_VARS: [&str; 6] = [
     "TMUX",
     "TMUX_PANE",
     "CODEX_THREAD_ID",
     "GROK_SESSION_ID",
     "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_HOST_SESSION_ID",
 ];
 
 /// The claude config-tree knobs (`claude_sessions::config_dir`) plus the

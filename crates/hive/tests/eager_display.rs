@@ -14,13 +14,16 @@ use serde_json::Value;
 mod common;
 use common::require_tmux;
 
-/// Env markers that would give the binary an engine or tmux identity.
+/// Env markers that would give the binary an engine or tmux identity — or,
+/// for a fixture registered as a desktop session, the developer's real
+/// desktop record to read.
 const IDENTITY_VARS: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
     "CODEX_THREAD_ID",
     "GROK_SESSION_ID",
     "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_HOST_SESSION_ID",
 ];
 
 struct Rig {
@@ -160,12 +163,35 @@ impl Rig {
         self.hive_cmd(args, inside).output().expect("hive runs")
     }
 
-    /// `hive` run by a live Claude session `me` (sessionId `s-me`): its
-    /// registration names the inbox socket the process carries, and this
-    /// test process is the pid behind it. `claude` on PATH is a stub whose
-    /// job ledger is empty, so `s-me` reads as an interactive session — a
-    /// mirror, never a resume — without the real CLI being asked.
-    fn hive_as_claude(&self, args: &[&str], inside: Option<(&str, &str)>) -> Output {
+    /// A stub `claude` on a private bin dir, *script* being its body after
+    /// the shebang; returns the PATH that resolves it first.
+    fn stub_claude(&self, script: &str) -> String {
+        let bin = self.tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("stub bin dir");
+        let stub = bin.join("claude");
+        std::fs::write(&stub, format!("#!/bin/sh\n{script}")).expect("stub claude");
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("stub claude mode");
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    /// `hive` run by a live Claude session `me` (sessionId `s-me`) that
+    /// *entrypoint* launched (`claude-desktop` for the desktop app, `cli`
+    /// for a terminal): its registration names the inbox socket the
+    /// process carries, and this test process is the pid behind it.
+    /// `claude` on PATH is a stub whose job ledger is empty, so `s-me`
+    /// reads as an interactive session — a mirror, never a resume —
+    /// without the real CLI being asked.
+    fn hive_as_claude(
+        &self,
+        args: &[&str],
+        inside: Option<(&str, &str)>,
+        entrypoint: &str,
+    ) -> Output {
         // `CLAUDE_HOME` outranks `CLAUDE_CONFIG_DIR` in hive's config-dir
         // ladder, so the registration goes where the binary will look.
         let sessions = self.tmp.path().join("claude-home").join("sessions");
@@ -179,21 +205,13 @@ impl Rig {
                 "messagingSocketPath": socket,
                 "sessionId": "s-me",
                 "cwd": self.tmp.path(),
+                "kind": "interactive",
+                "entrypoint": entrypoint,
             })
             .to_string(),
         )
         .expect("session registration");
-        let bin = self.tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("stub bin dir");
-        let stub = bin.join("claude");
-        std::fs::write(&stub, "#!/bin/sh\necho '[]'\n").expect("stub claude");
-        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("stub claude mode");
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = self.stub_claude("echo '[]'\n");
         self.hive_cmd(args, inside)
             .env("CLAUDE_CODE_MESSAGING_SOCKET", &socket)
             .env("PATH", path)
@@ -202,7 +220,7 @@ impl Rig {
     }
 
     fn hive_as_claude_ok(&self, args: &[&str], inside: Option<(&str, &str)>) -> String {
-        let out = self.hive_as_claude(args, inside);
+        let out = self.hive_as_claude(args, inside, "claude-desktop");
         assert!(
             out.status.success(),
             "hive {args:?} failed: stdout={} stderr={}",
@@ -900,4 +918,103 @@ fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
         "pane was told its background is {reply:?}"
     );
     rig.delete();
+}
+
+#[test]
+fn test_create_and_join_refuse_a_terminal_claude_session() {
+    let rig = Rig::new("terminal");
+    let ws = rig.ws();
+    let team_json = rig.home().join("teams").join(&rig.team).join("team.json");
+
+    // A terminal's claude: refused before any tmux or registry write. The
+    // socket-dir check must come before any `rig.tmux` call, which makes
+    // that directory itself.
+    let out = rig.hive_as_claude(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+        "cli",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("terminal") && stderr.contains("hclaude"),
+        "stderr: {stderr}"
+    );
+    assert!(!team_json.exists());
+    assert!(!rig.socket_dir().exists());
+
+    // An entry without an entrypoint: unconfirmed, not called a terminal.
+    let out = rig.hive_as_claude(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+        "",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unconfirmed") && stderr.contains("hclaude"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("from a terminal"), "stderr: {stderr}");
+    assert!(!team_json.exists());
+    assert!(!rig.socket_dir().exists());
+
+    // A shell's create, then the terminal claude asks to join: the
+    // registry entry and the window are exactly as they were.
+    let window_id = rig.create_outside_tmux();
+    let entry_before = std::fs::read(&team_json).expect("team.json");
+    let panes_before = rig.panes(&window_id);
+    let out = rig.hive_as_claude(&["join", &rig.team], None, "cli");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("hclaude"), "stderr: {stderr}");
+    assert_eq!(std::fs::read(&team_json).expect("team.json"), entry_before);
+    assert_eq!(rig.panes(&window_id), panes_before);
+    rig.tmux(&["kill-server"]);
+}
+
+#[test]
+fn test_launchers_outside_tmux_without_a_terminal_run_the_raw_cli() {
+    let rig = Rig::new("rawcli");
+    let marker = rig.tmp.path().join("claude.args");
+    let path = rig.stub_claude(&format!("echo \"$*\" >> {}\n", marker.display()));
+    for args in [
+        vec!["claude", "--help"],
+        vec!["claude"],
+        vec!["claude", "-p", "hi"],
+    ] {
+        // `hive_cmd` has stdin at /dev/null and stdout piped: no terminal.
+        let out = rig
+            .hive_cmd(&args, None)
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let seen = std::fs::read_to_string(&marker).expect("the stub ran");
+    assert_eq!(seen, "--help\n\n-p hi\n");
+    // The raw path started no server (it only ever asked `tmux -V`).
+    assert!(!rig.socket_dir().exists());
+}
+
+#[test]
+fn test_unmanaged_engine_cannot_create_a_shell_team_outside_tmux() {
+    let rig = Rig::new("rawengine");
+    for marker in [
+        "CODEX_THREAD_ID",
+        "GROK_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+    ] {
+        let out = rig
+            .hive_cmd(&["create", &rig.team], None)
+            .env(marker, "unknown-engine-session")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(!rig.socket_dir().exists());
+    }
 }

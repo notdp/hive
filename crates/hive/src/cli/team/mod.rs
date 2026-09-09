@@ -1,10 +1,12 @@
-//! Team verbs: `create` (an orch pane, a shell pane, or a Claude session
-//! outside tmux), `join`, `delete`, `team`, `ls`, `doctor`.
+//! Team verbs: `create` (an orch pane, a shell pane, or the desktop app's
+//! Claude session outside tmux), `join`, `delete`, `team`, `ls`, `doctor`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
+
+mod handoff;
 
 use super::util::{fail, json_pretty, ok_or_fail, parse_entries, resolve_sender};
 use crate::identity;
@@ -21,7 +23,9 @@ use crate::tmux;
 ///
 /// NAME is optional everywhere (pool-picked by default). Outside tmux: the
 /// session named after the team (created detached when missing) holds its
-/// window, and a Claude session creator is its orch. Inside tmux on an agent pane: that pane
+/// window, and the desktop app's Claude session as creator is its orch (a
+/// raw terminal Claude is refused; hclaude transfers its job to a pane).
+/// Inside tmux on an agent pane: that pane
 /// becomes the orch. Inside tmux on a shell pane: the window binds the team
 /// without an orch.
 ///
@@ -222,6 +226,32 @@ fn title_badge_hint(badge: &str) -> String {
     )
 }
 
+/// The Claude session a create or join outside tmux may enrol: the desktop
+/// app's own. Its mirror pane is how the desktop conversation shows in the
+/// team window; raw terminal Claude is refused. An hclaude-managed job
+/// takes the separate launcher-handoff path before this gate. The registry entry's
+/// `entrypoint` is the signal; an entry without one is not called a
+/// terminal, only unconfirmed.
+fn enrolable_session(
+    session: crate::adapters::claude_sessions::ClaudeSession,
+) -> Result<crate::adapters::claude_sessions::ClaudeSession, String> {
+    if crate::adapters::claude_desktop::is_desktop_launched(&session) {
+        return Ok(session);
+    }
+    let what = if session.entrypoint == "cli" {
+        "this claude was started from a terminal".to_string()
+    } else {
+        format!(
+            "this claude session's origin is unconfirmed (entrypoint {:?})",
+            session.entrypoint
+        )
+    };
+    Err(format!(
+        "{what}; the read-only mirror lane is the desktop app's only. \
+         Start with `hclaude` for a managed job that can move into the team window."
+    ))
+}
+
 /// Create a team from outside tmux: its window in the session named after
 /// it (created detached when missing), a registry entry, its workspace.
 fn create_detached_team(
@@ -243,10 +273,29 @@ fn create_detached_team(
     if let Err(e) = check_explicit_workspace(name, workspace) {
         fail(&e.to_string());
     }
-    // The creator is the orch when it is an agent: a Claude session outside
-    // tmux joins its own roster, same as an agent pane does inside tmux.
-    // A session already on another team's roster stays a guest here.
-    let creator = crate::adapters::claude_sessions::self_session();
+    // The creator is the orch when it is the desktop app's session: it joins
+    // its own roster, same as an agent pane does inside tmux. A session
+    // already on another team's roster stays a guest here. The gate runs
+    // before either branch, so nothing a terminal's claude does here is
+    // written anywhere.
+    let creator =
+        crate::adapters::claude_sessions::self_session().filter(|c| !c.session_id.is_empty());
+    if creator.is_none() && identity::engine_marker_env() {
+        fail("this engine has no managed team channel; start hclaude, or use a managed tmux pane");
+    }
+    if let Some(session) = creator.as_ref() {
+        if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(session)) {
+            if !workspace.is_empty() || reset_workspace || !state_entries.is_empty() {
+                fail(
+                    "an orch create uses the team directory; run from a shell pane for --workspace",
+                );
+            }
+            let result = ok_or_fail(handoff::create(client, name, desc));
+            println!("{}", json_pretty(&result));
+            return;
+        }
+    }
+    let creator = creator.map(|c| enrolable_session(c).unwrap_or_else(|e| fail(&e)));
     let orch_member: Option<Map<String, Value>> = match creator.as_ref() {
         Some(creator)
             if !creator.session_id.is_empty()
@@ -324,7 +373,7 @@ fn create_detached_team(
     };
     match orch_member.as_ref() {
         Some(orch) => {
-            // The ccd creator's read-only mirror is the first pane (a fresh
+            // The desktop creator's read-only mirror is the first pane (a fresh
             // window records no `off`, so `pane_role` is `mirror`); an
             // orch that will send needs the hived up, as in
             // `create_orch_team`.
@@ -685,7 +734,7 @@ pub(crate) fn join_cmd(
         if !pane_override.is_empty() {
             fail("--pane needs tmux; outside tmux `hive join <team>` joins this session");
         }
-        join_as_ccd(team_arg, name_override);
+        join_as_ccd(team_arg, name_override, notify, group_name);
         return;
     }
 
@@ -788,7 +837,7 @@ pub(crate) fn join_cmd(
 /// The session's own id becomes the member's engine identity; delivery
 /// rides the same session channel `ccd.<name>` already uses. Idempotent:
 /// an already-joined session reports its membership.
-fn join_as_ccd(team_name: &str, name_override: &str) {
+fn join_as_ccd(team_name: &str, name_override: &str, notify: bool, group: &str) {
     if team_name.is_empty() {
         fail("join outside tmux needs a team: hive join <team> (see `hive ls`)");
     }
@@ -804,6 +853,12 @@ fn join_as_ccd(team_name: &str, name_override: &str) {
              codex/grok TUIs have none — join from a team pane instead",
         ),
     };
+    if let Some(client) = ok_or_fail(crate::claude_handoff::Client::for_session(&guest)) {
+        let result = ok_or_fail(handoff::join(client, &entry, name_override, notify, group));
+        println!("{}", json_pretty(&result));
+        return;
+    }
+    let guest = enrolable_session(guest).unwrap_or_else(|e| fail(&e));
     if let Some((e_team, e_name)) = crate::registry::member_for_session(&guest.session_id, None) {
         if e_team == team_name {
             println!("already a member: {e_team}.{e_name}");

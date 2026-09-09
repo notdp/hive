@@ -63,14 +63,14 @@ Remove any `hive shell-init` line from your shell rc file manually. As with `hiv
 ```bash
 # one-time setup: add eval "$(hive shell-init zsh)" to your shell rc,
 # after the PATH line the installer already wrote there
-# Inside tmux, start your agent through hive's launcher
+# Start Claude here; hcodex / hgrok need an existing tmux pane
 $ hclaude      # or: hcodex / hgrok
 
 # In the agent session, type:
 /hive:hive
 ```
 
-A claude pane member starts with `hclaude` (or `hive claude`): a bare interactive `claude` in a tmux pane is refused by `hive create` / `hive join`. A claude session outside tmux (the desktop app, a standalone terminal) can join as it is, with a read-only mirror in the team window.
+A claude pane member starts with `hclaude` (or `hive claude`): a bare interactive `claude` in a tmux pane is refused by `hive create` / `hive join`. Outside tmux, `hclaude` starts a background job and shows it in the current terminal. Creating or joining a team moves that same job's viewer into the team window and opens the window here; chatting alone creates no tmux session. Detaching the team window returns to the shell; `hive claude --resume <job>` returns to its team while it is still enrolled. The desktop app's claude session is the one that joins as it is, with a read-only mirror in the team window; a terminal's bare `claude` is refused and pointed at `hclaude`.
 
 The agent makes the current pane the team's orch and spawns members as tasks call for them. From that point the conversation is with the agent, and the agent runs the team.
 

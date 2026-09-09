@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agent_cli;
 pub mod assets;
 pub mod bus;
+pub(crate) mod claude_handoff;
 pub mod cli;
 pub mod clock;
 pub mod context;

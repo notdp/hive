@@ -11,8 +11,12 @@ use crate::team::{Team, LEAD_AGENT_NAME};
 use crate::tmux;
 use crate::tmux::PaneInfo;
 
-const TEAM_NAME_POOL: [&str; 10] = [
+const TEAM_NAME_POOL: &[&str] = &[
     "honey", "comb", "wasp", "bumble", "hornet", "nectar", "pollen", "amber", "clover", "sage",
+    "birch", "cedar", "maple", "willow", "aspen", "elm", "oak", "pine", "spruce", "alder", "fern",
+    "moss", "ivy", "reed", "rush", "aster", "daisy", "iris", "lily", "lotus", "poppy", "rose",
+    "tulip", "violet", "dahlia", "basil", "mint", "thyme", "dill", "fennel", "brook", "creek",
+    "delta", "dune", "glade", "grove", "meadow", "ridge", "vale", "dawn",
 ];
 
 const RANDOM_AGENT_NAMES: [&str; 10] = [
@@ -101,12 +105,37 @@ pub(crate) fn pick_team_name(session_name: &str, window_id: &str, window_index: 
             used.insert(team);
         }
     }
-    for candidate in TEAM_NAME_POOL {
+    available_team_name(&used, session_name, window_id, window_index)
+}
+
+fn available_team_name(
+    used: &HashSet<String>,
+    session_name: &str,
+    window_id: &str,
+    window_index: &str,
+) -> String {
+    for &candidate in TEAM_NAME_POOL {
         if !used.contains(candidate) {
             return candidate.to_string();
         }
     }
-    default_team_name_for_window(session_name, window_id, window_index)
+    let window_name = default_team_name_for_window(session_name, window_id, window_index);
+    let base = if crate::team::validate_team_name(&window_name).is_empty() {
+        window_name
+    } else {
+        "hive".to_string()
+    };
+    if !used.contains(&base) {
+        return base;
+    }
+    let mut suffix = 1;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 fn names_used_in_window(panes: &[PaneInfo]) -> HashSet<String> {
@@ -210,6 +239,43 @@ mod tests {
     fn test_default_team_name_for_window_uses_slug() {
         assert_eq!(default_team_name_for_window("dev", "@7", "1"), "dev-w7");
         assert_eq!(default_team_name_for_window("dev", "", "5"), "dev-w5");
+    }
+
+    #[test]
+    fn test_team_name_overflow_respects_detached_registry_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = iso(tmp.path());
+        let _tmux = crate::testkit::fake_tmux("", &[]);
+        for &name in TEAM_NAME_POOL.iter().chain([&"hive", &"hive-1"]) {
+            crate::registry::record_team(name, "", "1", &[], "").unwrap();
+        }
+        assert_eq!(pick_team_name("", "", "0"), "hive-2");
+    }
+
+    #[test]
+    fn test_team_pool_contains_distinct_valid_registry_names() {
+        let mut seen = HashSet::new();
+        for &name in TEAM_NAME_POOL {
+            assert!(seen.insert(name));
+            assert!(crate::team::validate_team_name(name).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_exhausted_team_pool_outside_tmux_skips_occupied_fallbacks() {
+        let mut used: HashSet<String> = TEAM_NAME_POOL.iter().map(|s| s.to_string()).collect();
+        assert_eq!(available_team_name(&used, "", "", "0"), "hive");
+        used.extend(["hive".into(), "hive-1".into()]);
+        assert_eq!(available_team_name(&used, "", "", "0"), "hive-2");
+    }
+
+    #[test]
+    fn test_exhausted_team_pool_checks_window_names_for_validity_and_conflicts() {
+        let mut used: HashSet<String> = TEAM_NAME_POOL.iter().map(|s| s.to_string()).collect();
+        assert_eq!(available_team_name(&used, "dev", "@7", "0"), "dev-w7");
+        used.insert("dev-w7".into());
+        assert_eq!(available_team_name(&used, "dev", "@7", "0"), "dev-w7-1");
+        assert_eq!(available_team_name(&used, "a.b", "@7", "0"), "hive");
     }
 
     #[test]

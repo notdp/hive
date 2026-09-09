@@ -324,6 +324,28 @@ pub fn record_team(
     members: &[Map<String, Value>],
     display: &str,
 ) -> Result<&'static str> {
+    write_team(team, workspace, created_at, members, display, false)
+}
+
+/// Publish a prepared team without overwriting a concurrent creator.
+pub(crate) fn create_team(
+    team: &str,
+    workspace: &str,
+    created_at: &str,
+    members: &[Map<String, Value>],
+    display: &str,
+) -> Result<&'static str> {
+    write_team(team, workspace, created_at, members, display, true)
+}
+
+fn write_team(
+    team: &str,
+    workspace: &str,
+    created_at: &str,
+    members: &[Map<String, Value>],
+    display: &str,
+    only_new: bool,
+) -> Result<&'static str> {
     let path = match entry_path(team) {
         Some(p) => p,
         None => return Ok("rejected"),
@@ -346,6 +368,9 @@ pub fn record_team(
         .collect();
     entry.insert("members".to_string(), Value::Array(rows));
     let _lock = locked()?;
+    if only_new && path.exists() {
+        return Ok("exists");
+    }
     write_atomic(&path, &entry)?;
     Ok("written")
 }

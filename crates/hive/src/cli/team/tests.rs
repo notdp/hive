@@ -15,6 +15,35 @@ fn test_hive_skill_entry_is_each_clis_own_form() {
 }
 
 #[test]
+fn test_enrolable_session_takes_the_desktop_app_and_refuses_a_terminal_claude() {
+    let session = |entrypoint: &str| crate::adapters::claude_sessions::ClaudeSession {
+        name: "me".to_string(),
+        pid: 1,
+        cwd: "/w".to_string(),
+        kind: "interactive".to_string(),
+        entrypoint: entrypoint.to_string(),
+        socket_path: "/tmp/me.sock".to_string(),
+        session_id: "s-me".to_string(),
+        title: String::new(),
+    };
+    assert_eq!(
+        enrolable_session(session("claude-desktop")).map(|s| s.session_id),
+        Ok("s-me".to_string())
+    );
+    let terminal = enrolable_session(session("cli")).unwrap_err();
+    assert!(
+        terminal.contains("terminal") && terminal.contains("hclaude"),
+        "{terminal}"
+    );
+    let unknown = enrolable_session(session("")).unwrap_err();
+    assert!(
+        unknown.contains("unconfirmed") && unknown.contains("hclaude"),
+        "{unknown}"
+    );
+    assert!(!unknown.contains("from a terminal"), "{unknown}");
+}
+
+#[test]
 fn test_team_workspace_is_the_team_dir_under_the_registry_store() {
     let mut env = EnvGuard::new();
     let tmp = tempfile::TempDir::new().unwrap();
@@ -433,7 +462,7 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
         &["honey"],
     );
 
-    join_as_ccd("honey", "");
+    join_as_ccd("honey", "", true, "");
 
     let joined = joined_session_row("honey");
     assert_eq!(joined["cli"], Value::from("claude"));
@@ -470,7 +499,7 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
     .unwrap();
     let argv = fake_tmux_sessions("", &[], &[], &[]);
 
-    join_as_ccd("honey", "");
+    join_as_ccd("honey", "", true, "");
 
     joined_session_row("honey");
     assert!(has_row(

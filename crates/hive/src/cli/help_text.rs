@@ -438,8 +438,8 @@ Options:
 
   Show or hide the team's read-only orch mirror pane.
 
-  The mirror is the `hive view` pane of a session member (a Claude session
-  that created or joined the team). `off` moves it
+  The mirror is the `hive view` pane of a session member (the desktop app's
+  Claude session that created or joined the team). `off` moves it
   with break-pane into a hidden window of the team session (tagged
   `@hive-hidden`), the viewer keeps running, and the window records
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
@@ -598,8 +598,11 @@ Options:
     # ~/.config/fish/config.fish
     hive shell-init fish | source
 
-  Outside tmux, and for management subcommands and non-interactive flags, the
-  launchers run the plain binary.
+  Outside tmux, hclaude shows a background job in the current terminal.
+  Creating or joining a team moves the same conversation into its team
+  window. Detach returns to the shell; resuming an enrolled job opens its
+  team window. hcodex/hgrok outside tmux, management subcommands,
+  non-interactive flags and launches without a terminal run the plain CLI.
 
 Options:
   -h, --help  Show this message and exit.
