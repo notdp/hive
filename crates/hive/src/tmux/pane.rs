@@ -294,3 +294,9 @@ pub fn respawn_pane(pane_id: &str, command: &str) -> anyhow::Result<()> {
 pub fn swap_pane(src: &str, dst: &str) {
     let _ = run(&["swap-pane", "-d", "-s", src, "-t", dst], false, 5);
 }
+
+/// Move an existing viewer across windows without replacing its process.
+pub(crate) fn swap_pane_checked(src: &str, dst: &str) -> anyhow::Result<()> {
+    run(&["swap-pane", "-d", "-s", src, "-t", dst], true, 5)?;
+    Ok(())
+}

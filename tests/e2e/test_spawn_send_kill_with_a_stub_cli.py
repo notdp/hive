@@ -145,7 +145,9 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         "new-session", "-d", "-s", session, "-x", "160", "-y", "48", "-c", str(workdir),
         *env_flags, "-P", "-F", "#{pane_id}", shell,
     ], env=tmux_env).stdout.strip()
-    run_tmux(["set-option", "-t", session, "default-command", shell], env=tmux_env)
+    # Create moves the orch into a new session; every session on this
+    # private server must use the stub launchers, including later splits.
+    run_tmux(["set-option", "-g", "default-command", shell], env=tmux_env)
 
     try:
         # The orch: a human's `hive claude` in the pane. The managed launcher
@@ -212,7 +214,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert "spawned in pane" in spawn_result.stdout, spawn_result.stdout
         # The member got a pane of its own, tagged with its name — so the
         # single-pane check after kill below is about a pane that existed.
-        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
+        tagged = run_tmux(["list-panes", "-t", created["window"], "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
         tagged = [line for line in tagged if line.strip()]
         assert len(tagged) == 2, tagged
         assert tagged[0].startswith(pane_a), tagged
@@ -274,7 +276,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert ["stop", worker_job] in _stub_calls(config_dir)
         wait_for(lambda: not _pid_alive(worker_engine_pid), timeout=10.0)
         assert "worker" not in roster()
-        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"], env=tmux_env).stdout.split()
+        panes = run_tmux(["list-panes", "-t", created["window"], "-F", "#{pane_id}"], env=tmux_env).stdout.split()
         assert panes == [pane_a]
 
         # The same spawn from outside tmux altogether — no client, no engine
@@ -289,7 +291,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         )
         assert outside_spawn.returncode == 0, outside_spawn.stderr
         assert "spawned in pane" in outside_spawn.stdout, outside_spawn.stdout
-        tagged = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
+        tagged = run_tmux(["list-panes", "-t", created["window"], "-F", "#{pane_id} #{@hive-agent}"], env=tmux_env).stdout.split("\n")
         tagged = [line for line in tagged if line.strip()]
         assert len(tagged) == 2, tagged
         assert tagged[0].startswith(pane_a), tagged
@@ -326,7 +328,7 @@ def _run_stub_flow(workdir: Path, config_dir: Path, bindir: Path, session: str) 
         assert ["stop", runner_job] in _stub_calls(config_dir)
         wait_for(lambda: not _pid_alive(runner_engine_pid), timeout=10.0)
         assert "runner" not in roster()
-        panes = run_tmux(["list-panes", "-t", session, "-F", "#{pane_id}"], env=tmux_env).stdout.split()
+        panes = run_tmux(["list-panes", "-t", created["window"], "-F", "#{pane_id}"], env=tmux_env).stdout.split()
         assert panes == [pane_a]
 
         delete_result = orch(["delete", team, "--delete-workspace"])

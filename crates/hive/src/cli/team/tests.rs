@@ -525,3 +525,5 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
         .iter()
         .any(|a| a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view s-me"))));
 }
+
+mod orch;

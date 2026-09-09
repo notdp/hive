@@ -12,26 +12,31 @@ pub fn has_session(name: &str) -> bool {
 }
 
 /// Create a detached tmux session. Returns the initial pane id.
-pub fn new_session(name: &str, width: u32, height: u32) -> anyhow::Result<String> {
+pub fn new_session(
+    name: &str,
+    width: u32,
+    height: u32,
+    command: Option<&str>,
+) -> anyhow::Result<String> {
     let w = width.to_string();
     let h = height.to_string();
-    let r = run(
-        &[
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-x",
-            &w,
-            "-y",
-            &h,
-            "-P",
-            "-F",
-            "#{pane_id}",
-        ],
-        true,
-        5,
-    )?;
+    let mut args = vec![
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-x",
+        &w,
+        "-y",
+        &h,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ];
+    if let Some(command) = command {
+        args.push(command);
+    }
+    let r = run(&args, true, 5)?;
     Ok(r.stdout.trim().to_string())
 }
 
@@ -49,6 +54,7 @@ pub fn new_window(
     name: &str,
     cwd: Option<&str>,
     detach: bool,
+    command: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
     // Force `-t` to reference a session, not a window index. Bare numeric
     // session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
@@ -72,6 +78,9 @@ pub fn new_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"]);
+    if let Some(command) = command {
+        args.push(command);
+    }
     let r = run(&args, true, 5)?;
     let out = r.stdout.trim().to_string();
     match out.split_once('\t') {
@@ -205,4 +214,19 @@ pub fn select_window(window_target: &str) {
 /// attached to another session stays where it is.
 pub fn switch_client(window_target: &str) {
     let _ = run(&["switch-client", "-t", window_target], false, 5);
+}
+
+/// Session names on this server, for name allocation only.
+pub(crate) fn session_names() -> Vec<String> {
+    run(&["list-sessions", "-F", "#{session_name}"], false, 5)
+        .ok()
+        .filter(|r| r.returncode == 0)
+        .map(|r| r.stdout.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Switch one explicitly selected client, reporting a failed jump.
+pub(crate) fn switch_named_client(client: &str, window: &str) -> anyhow::Result<()> {
+    run(&["switch-client", "-c", client, "-t", window], true, 5)?;
+    Ok(())
 }

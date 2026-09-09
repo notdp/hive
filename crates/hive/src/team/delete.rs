@@ -46,8 +46,8 @@ fn sweep_team_grok_daemons(team: &str) {
 /// without the flag.
 ///
 /// With `down`, every member is retired before the entry goes and the
-/// team's tmux session (the one `hive create` built outside tmux, named
-/// after the team) is killed after it — the teardown of a workflow run.
+/// team's owned tmux session (named after the team) is killed after it —
+/// the teardown of a workflow run.
 /// Every session target is exact (`=<name>`): once the team window has
 /// closed, and with it the session, a bare `-t <name>` would prefix-match
 /// a stranger's `<name>-x` session and kill that instead.
@@ -62,7 +62,7 @@ pub(crate) fn delete_team(
         bail!("cannot delete: {error}");
     }
     let session = format!("={name}");
-    let had_session = down && tmux::has_session(&session);
+    let had_session = down && crate::team_display::owns_team_session(name);
     // The caller may be a member of this very team (an orch running the
     // teardown). Its engine is this process's host: kill it here and the
     // rest of the delete dies with it. It is held aside and stopped after
@@ -180,7 +180,7 @@ pub(crate) fn delete_team(
     sweep_team_grok_daemons(name);
 
     println!("Team '{name}' deleted.");
-    if down && tmux::has_session(&session) {
+    if had_session && tmux::has_session(&session) {
         tmux::kill_session(&session);
     }
     if had_session {
@@ -477,6 +477,17 @@ mod tests {
         crate::team::delete_team("honey", "", true, false).unwrap();
         assert!(!external.exists());
         assert!(!team_dir(&env, "honey").exists());
+    }
+
+    #[test]
+    fn test_delete_down_leaves_a_same_named_user_session() {
+        let _env = display_env_outside();
+        crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
+        let argv = fake_tmux_sessions("honey:1\t@7\thoney\t\t\t\n", &[], &[], &["honey"]);
+        delete_team("honey", "", false, true).unwrap();
+        assert!(crate::registry::load("honey").is_none());
+        assert_eq!(count(&argv, "kill-session"), 0);
+        assert_eq!(count(&argv, "kill-window"), 0);
     }
 
     #[test]

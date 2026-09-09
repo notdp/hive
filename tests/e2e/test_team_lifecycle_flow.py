@@ -31,7 +31,8 @@ def test_e2e_create_team_inspect_and_delete():
     session = f"hive-e2e-{uuid.uuid4().hex[:8]}"
     workspace = workdir / "ws"
 
-    pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}"], env=env).stdout.strip()
+    # This exercises shell-pane verbs, independent of the user's shell rc.
+    pane_a = run_tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-P", "-F", "#{pane_id}", "/bin/sh"], env=env).stdout.strip()
 
     def run_in_pane(args: list[str]) -> subprocess.CompletedProcess[str]:
         return run_hive_in_tmux_pane(pane_a, args, env=env, cwd=workdir)

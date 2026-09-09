@@ -85,7 +85,7 @@ fn test_session_helpers_delegate_to_tmux() {
     });
 
     assert!(has_session("dev"));
-    assert_eq!(new_session("dev", 200, 50).unwrap(), "%9");
+    assert_eq!(new_session("dev", 200, 50, None).unwrap(), "%9");
     kill_session("dev");
     kill_window("@7");
 

@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use super::run::{exec_capture, run};
+use super::run::{exec_capture, run, run_output};
 
 /// The socket of the tmux server this process's tmux commands reach.
 ///
@@ -261,4 +261,22 @@ pub fn get_window_id(target: &str) -> Option<String> {
 
 pub fn get_pane_session_name(pane_id: &str) -> Option<String> {
     display_value(pane_id, "#{session_name}")
+}
+
+/// The sole terminal client viewing this window, if there is exactly one.
+/// Background engine tools have no client of their own to switch.
+pub(crate) fn sole_window_client(window_id: &str) -> Option<String> {
+    let rows = run_output(&[
+        "list-clients",
+        "-F",
+        "#{client_name}\t#{client_control_mode}\t#{window_id}",
+    ])
+    .ok()?;
+    let mut matches = rows.lines().filter_map(|row| {
+        let fields: Vec<_> = row.split('\t').collect();
+        (fields.len() == 3 && !fields[0].is_empty() && fields[1] == "0" && fields[2] == window_id)
+            .then(|| fields[0].to_string())
+    });
+    let client = matches.next()?;
+    matches.next().is_none().then_some(client)
 }

@@ -97,6 +97,8 @@ pub(crate) fn pick_team_name(session_name: &str, window_id: &str, window_index: 
         .map(|p| p.team)
         .collect();
     used.extend(claimed_group_namespaces());
+    // A team session must not take over a human session of the same name.
+    used.extend(tmux::session_names());
     // The registry is the name authority: a team whose window is gone owns
     // its name until `hive delete` — a pool pick must never clobber it.
     for entry in crate::registry::list_entries() {
@@ -250,6 +252,14 @@ mod tests {
             crate::registry::record_team(name, "", "1", &[], "").unwrap();
         }
         assert_eq!(pick_team_name("", "", "0"), "hive-2");
+    }
+
+    #[test]
+    fn test_team_pool_skips_user_session_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = iso(tmp.path());
+        let _tmux = crate::testkit::fake_tmux_sessions("", &[], &[], &["honey", "comb"]);
+        assert_eq!(pick_team_name("dev", "@7", "0"), "wasp");
     }
 
     #[test]

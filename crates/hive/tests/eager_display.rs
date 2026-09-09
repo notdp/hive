@@ -444,7 +444,7 @@ fn test_create_outside_tmux_then_delete_closes_the_team_session() {
 }
 
 #[test]
-fn test_attach_inside_tmux_rebuilds_a_missing_window_in_the_callers_session() {
+fn test_attach_inside_tmux_rebuilds_a_missing_window_in_the_team_session() {
     let rig = Rig::new("attach-in");
     let first_window = rig.create_outside_tmux();
 
@@ -467,8 +467,8 @@ fn test_attach_inside_tmux_rebuilds_a_missing_window_in_the_callers_session() {
     assert_eq!(windows.len(), 1, "team windows after heal: {windows:?}");
     let (session, healed_window) = windows.into_iter().next().unwrap();
     assert_eq!(
-        session, human,
-        "inside tmux the window is rebuilt in the caller's session"
+        session, rig.team,
+        "inside tmux the window is rebuilt in the team's session"
     );
     let healed_target = rig.tmux_ok(&[
         "display-message",
@@ -480,8 +480,11 @@ fn test_attach_inside_tmux_rebuilds_a_missing_window_in_the_callers_session() {
     assert_eq!(stdout.trim_end(), format!("built {healed_target}"));
     let entry = rig.registry_entry().expect("registry entry");
     assert_eq!(entry["display"], Value::String(healed_window.clone()));
-    // A fresh team session is not the answer inside tmux.
-    assert!(!session_alive(&rig, &rig.team));
+    assert!(session_alive(&rig, &rig.team));
+    assert_eq!(
+        rig.tmux_ok(&["show-options", "-t", &rig.team, "-v", "status"]),
+        "2"
+    );
 
     rig.delete();
     // hive built that window itself, so delete closes it — but only the
@@ -1017,4 +1020,42 @@ fn test_unmanaged_engine_cannot_create_a_shell_team_outside_tmux() {
         assert!(!out.status.success());
         assert!(!rig.socket_dir().exists());
     }
+}
+
+#[test]
+fn test_attach_rebuilds_in_the_team_session_when_only_a_parked_mirror_survives() {
+    let rig = Rig::new("parked-heal");
+    let ws = rig.ws();
+    rig.hive_as_claude_ok(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+    );
+    let (_, window) = rig.team_windows().into_iter().next().unwrap();
+    let mirror = rig.panes(&window)[0].0.clone();
+    let pid = rig.pane_pid(&mirror);
+    let plain = rig.tmux_ok(&[
+        "split-window",
+        "-d",
+        "-t",
+        &window,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let socket = rig.socket_path();
+    rig.hive_ok(&["mirror", "off"], Some((&socket, &plain)));
+    rig.tmux_ok(&["kill-window", "-t", &window]);
+    assert!(rig.team_windows().is_empty());
+    assert!(session_alive(&rig, &rig.team));
+    let human = rig.tmux_ok(&["new-session", "-d", "-s", "human", "-P", "-F", "#{pane_id}"]);
+
+    rig.hive_ok(&["attach", &rig.team], Some((&socket, &human)));
+
+    let (session, rebuilt) = rig.team_windows().into_iter().next().unwrap();
+    assert_eq!(session, rig.team);
+    assert_eq!(rig.panes(&rebuilt)[0].0, mirror);
+    assert_eq!(rig.pane_pid(&mirror), pid);
+    assert!(rig.hidden_panes(&rig.team).is_empty());
+    rig.delete();
+    assert!(session_alive(&rig, "human"));
 }

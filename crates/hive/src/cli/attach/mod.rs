@@ -176,6 +176,10 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
             tmux::break_pane(pane, &format!("{team}·mirror"), true, target.as_deref())
                 .map_err(|e| format!("break-pane {pane}: {e}"))?;
         tmux::set_window_option(&hidden, &format!("@{}", tmux::HIDDEN_WINDOW_KEY), &team);
+        // The parked viewer may outlive the main window. Keep the team's
+        // ownership marks so attach can rebuild in this session.
+        tmux::set_window_option(&hidden, "@hive-built", "1");
+        tmux::set_window_option(&hidden, "@hive-team", &team);
     }
     let _ = crate::layout::ensure(&window, false);
     Ok(format!("mirror off ({team})"))
