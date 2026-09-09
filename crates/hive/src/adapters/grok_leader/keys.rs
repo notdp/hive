@@ -32,6 +32,44 @@ pub fn member_key(team: &str, member: &str) -> String {
     format!("m-{team}.{member}")
 }
 
+/// `l-<id>` — a leader a launcher raised outside tmux (`hgrok` at a
+/// terminal, `handoff.rs`). It belongs to that launcher until a create or
+/// join binds it to a member, and to the member from then on.
+pub fn launch_key(id: &str) -> String {
+    format!("l-{id}")
+}
+
+pub fn is_launch_key(key: &str) -> bool {
+    key.strip_prefix("l-")
+        .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// The alias a bound launch leaves for its member: `m-<team>.<member>.alias`
+/// naming the launch key. A leader binds its socket path itself, so the
+/// member cannot take the leader's socket over; every path lookup for the
+/// member follows the alias instead (`canonical_key`).
+pub fn alias_path_for_key(member: &str) -> PathBuf {
+    grok_home().join("hive").join(format!("{member}.alias"))
+}
+
+/// The launch key a member's alias names, when the alias is a valid one.
+pub fn alias_target(member: &str) -> Option<String> {
+    let text = fs::read_to_string(alias_path_for_key(member)).ok()?;
+    let key = text.trim().to_string();
+    is_launch_key(&key).then_some(key)
+}
+
+/// The key whose files serve *key*: a member with an alias resolves to the
+/// launch key it was bound from, everything else to itself.
+pub fn canonical_key(key: &str) -> String {
+    if key.starts_with("m-") {
+        if let Some(target) = alias_target(key) {
+            return target;
+        }
+    }
+    key.to_string()
+}
+
 pub fn pane_key(pane: &str) -> String {
     let slug = pane.replace('%', "");
     if slug.is_empty() {
@@ -97,7 +135,9 @@ pub fn resolve_pane_key(pane: &str) -> String {
 /// Deliberately short (`hive/p19.sock` / `hive/m-honey.rex.sock`):
 /// AF_UNIX paths cap at 104 bytes and the leader binds this path itself.
 pub fn socket_path_for_key(key: &str) -> PathBuf {
-    grok_home().join("hive").join(format!("{key}.sock"))
+    grok_home()
+        .join("hive")
+        .join(format!("{}.sock", canonical_key(key)))
 }
 
 pub fn pane_socket_path(pane: &str) -> PathBuf {
@@ -187,5 +227,16 @@ pub(crate) fn key_from_socket_name(name: &str) -> Option<String> {
             return Some(key.to_string());
         }
     }
+    if is_launch_key(key) {
+        return Some(key.to_string());
+    }
     None
+}
+
+/// `m-honey.rex.alias` -> `m-honey.rex`: a bound launch listed under the
+/// member it serves, so the member's lifecycle (kill, delete, the hived's
+/// reap) reaches the leader through the alias.
+pub(crate) fn key_from_alias_name(name: &str) -> Option<String> {
+    let key = name.strip_suffix(".alias")?;
+    member_from_key(key).map(|_| key.to_string())
 }

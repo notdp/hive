@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::keys::{
-    daemon_env_for_pane, key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
+    alias_path_for_key, daemon_env_for_pane, key_from_alias_name, key_from_socket_name, member_key,
+    resolve_pane_key, socket_path_for_key,
 };
 use super::{grok_home, DAEMON_START_TIMEOUT};
 use crate::adapters::base::washed_spawner_env;
@@ -455,7 +456,8 @@ pub fn list_daemon_keys() -> Vec<String> {
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if let Some(key) = key_from_socket_name(name) {
+                if let Some(key) = key_from_socket_name(name).or_else(|| key_from_alias_name(name))
+                {
                     keys.push(key);
                 }
             }
@@ -527,6 +529,7 @@ pub fn kill_daemon_key(key: &str) {
         sock.with_extension("lock"),
         sock.with_extension("pid"),
         sock.with_extension("session"),
+        alias_path_for_key(key),
     ] {
         let _ = fs::remove_file(path);
     }
