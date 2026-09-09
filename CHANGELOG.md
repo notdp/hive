@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.20.1
+
+### Fixes
+
+- `hive create` from an `hclaude` pane inside tmux moves that pane into a session named after the team with hive's two-line status bar, the same display an outside-tmux create gets. The pane, viewer and engine binding stay; the source window keeps a shell in the pane's place; the one attached client is switched over, otherwise the result carries an attach hint. A same-name non-hive session or a linked source window is refused before anything moves; `hive attach` rebuilds a lost window in the team session from either side of tmux; `delete --down` kills only a session hive marked. The team session's first pane is a placeholder until the registry commit, so no freshly started user shell is ever killed mid-rc (#196)
+
 ## 0.20.0
 
 ### Features
