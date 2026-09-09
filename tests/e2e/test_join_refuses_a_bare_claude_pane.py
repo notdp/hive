@@ -71,7 +71,7 @@ def test_e2e_join_refuses_a_bare_claude_pane_with_and_without_notify():
     registry_entry = workdir / ".hive" / "teams" / team / "team.json"
 
     pane_shell = run_tmux(
-        ["new-session", "-d", "-s", session, "-x", "160", "-y", "48", "-c", str(workdir), "-P", "-F", "#{pane_id}"],
+        ["new-session", "-d", "-s", session, "-x", "160", "-y", "48", "-c", str(workdir), "-P", "-F", "#{pane_id}", "/bin/sh"],
         env=env,
     ).stdout.strip()
 
@@ -85,7 +85,7 @@ def test_e2e_join_refuses_a_bare_claude_pane_with_and_without_notify():
 
         # The bare claude: split into the team window, PATH-first stub.
         pane_claude = run_tmux(
-            ["split-window", "-t", pane_shell, "-d", "-c", str(workdir), "-P", "-F", "#{pane_id}"],
+            ["split-window", "-t", pane_shell, "-d", "-c", str(workdir), "-P", "-F", "#{pane_id}", "/bin/sh"],
             env=env,
         ).stdout.strip()
         send_tmux_command(pane_claude, f"export PATH={bindir}:$PATH; exec claude 300", env=env)
@@ -122,7 +122,7 @@ def test_e2e_join_refuses_a_bare_claude_pane_with_and_without_notify():
         # A shell pane in the same window is still refused as a non-agent
         # pane, not by the claude gate: the gate is claude-specific.
         pane_other = run_tmux(
-            ["split-window", "-t", pane_shell, "-d", "-c", str(workdir), "-P", "-F", "#{pane_id}"],
+            ["split-window", "-t", pane_shell, "-d", "-c", str(workdir), "-P", "-F", "#{pane_id}", "/bin/sh"],
             env=env,
         ).stdout.strip()
         joined = hive(["join", team, "--pane", pane_other, "--no-notify"])

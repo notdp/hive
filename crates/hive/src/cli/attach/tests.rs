@@ -56,40 +56,17 @@ fn test_attach_without_a_window_rebuilds_it_and_records_the_display() {
 
     attach_cmd("honey");
 
-    // One window — in the caller's own session, since the caller is inside
-    // tmux — and one split for the second attachable member; the member
-    // with no engine identity gets no pane.
-    assert_eq!(count(&argv, "new-window"), 1);
-    assert!(has_row(
-        &argv,
-        &[
-            "new-window",
-            "-t",
-            "dev:",
-            "-d",
-            "-n",
-            "honey",
-            "-c",
-            "/tmp",
-            "-P",
-            "-F",
-            "#{session_name}:#{window_index}\t#{pane_id}",
-        ]
-    ));
+    // Rebuild in the team's session even when the caller is inside tmux.
+    assert_eq!(count(&argv, "new-session"), 1);
+    assert_eq!(count(&argv, "new-window"), 0);
     assert_eq!(count(&argv, "split-window"), 1);
-    assert!(has_row(&argv, &["switch-client", "-t", "dev:2"]));
-    // The freshly built window id lands in the registry's display cache.
+    assert!(has_row(&argv, &["switch-client", "-t", "honey:1"]));
     assert_eq!(
         crate::registry::load("honey").unwrap()["display"],
         Value::from("@7")
     );
-    // A window in the caller's own session gets no status bar and no
-    // binding: their status line is theirs.
-    assert_eq!(count(&argv, "bind-key"), 0);
-    assert!(argv
-        .borrow()
-        .iter()
-        .all(|a| !(a[0] == "set-option" && a.get(3).map(String::as_str) == Some("status"))));
+    assert_eq!(count(&argv, "bind-key"), 2);
+    assert!(has_row(&argv, &["set-option", "-t", "$1", "status", "2"]));
 }
 
 #[test]
@@ -277,7 +254,7 @@ fn test_attach_rebuild_hands_the_first_pane_to_the_next_member_when_the_mirror_i
         "",
     )
     .unwrap();
-    let argv = fake_tmux_tagged("", &[], &[("dev:2", "hive-mirror", "off")]);
+    let argv = fake_tmux_tagged("", &[], &[("honey:1", "hive-mirror", "off")]);
 
     attach_cmd("honey");
 

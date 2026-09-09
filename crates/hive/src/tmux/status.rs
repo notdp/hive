@@ -282,16 +282,28 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
     row
 }
 
-/// Install the bar on a team session and the two server-global bindings
+/// Rows for the team session bar and the two server-global bindings
 /// (idempotent: every row is a plain set, and the prefix+m probe reads the
 /// same fallback back from behind hive's own binding).
-pub fn install_team_status(session_id: &str) {
+fn install_status_rows(session_id: &str) -> Vec<Vec<String>> {
     let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive, &status_click_fallback()));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
-    for row in rows {
+    rows
+}
+
+pub fn install_team_status(session_id: &str) {
+    for row in install_status_rows(session_id) {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         let _ = run(&args, false, 5);
     }
+}
+
+pub(crate) fn install_team_status_checked(session_id: &str) -> anyhow::Result<()> {
+    for row in install_status_rows(session_id) {
+        let args: Vec<&str> = row.iter().map(String::as_str).collect();
+        run(&args, true, 5)?;
+    }
+    Ok(())
 }

@@ -708,7 +708,7 @@ mod tests {
 
         // The heal rebuilt the window first, and the member landed on the
         // roster with the new window's id in the display cache.
-        assert_eq!(count(&argv, "new-window"), 1);
+        assert_eq!(count(&argv, "new-session"), 1);
         let entry = crate::registry::load("honey").unwrap();
         assert_eq!(entry["display"], Value::from("@7"));
         assert!(entry["members"]
@@ -717,7 +717,7 @@ mod tests {
             .iter()
             .any(|m| m["name"] == "bee"));
         // The split anchored on the healed window's first pane (`%1`, the pane
-        // `new-window` minted), not on the caller's own `%0`: the re-resolve
+        // `new-session` minted), not on the caller's own `%0`: the re-resolve
         // after the heal is what puts the member in the team window.
         let records = crate::agent::testhook::with(|h| h.records.clone()).unwrap();
         assert_eq!(records.len(), 1, "{records:?}");

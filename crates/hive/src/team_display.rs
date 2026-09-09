@@ -9,12 +9,14 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{Map, Value};
 
-use crate::identity;
 use crate::json_fields::{is_set, map_str};
 use crate::paths::getcwd;
 use crate::shell::shlex_quote;
 use crate::team::sorted_member_rows;
 use crate::tmux;
+
+mod placement;
+pub(crate) use placement::OrchSource;
 
 fn attach_launcher(cli_name: &str, quoted_sid: &str) -> Option<String> {
     match cli_name {
@@ -248,7 +250,7 @@ pub(crate) fn new_team_session_window(team: &str) -> Result<(String, String, boo
     // `=` pins the exact name: a bare `-t <team>` falls back to prefix
     // matching and would put the window into a stranger's `<team>-x`.
     let exact = format!("={team}");
-    if tmux::has_session(&exact) {
+    if checked_team_session(team)? {
         // new_window forces "<team>:" so a numeric name is a session, not an index
         let (window, pane) = tmux::new_window(&exact, team, None, true)?;
         mark_hive_built(&window);
@@ -277,27 +279,26 @@ fn install_team_status(pane: &str) {
     }
 }
 
-/// Where a team window goes for the caller: inside tmux the caller's own
-/// session, outside tmux the team session. Returns (window target, first
-/// pane id).
-fn team_window_for_caller(team: &str, anchor_cwd: &str) -> Result<(String, String)> {
-    if !identity::is_inside_tmux() {
-        let (window, pane, _) = new_team_session_window(team)?;
-        return Ok((window, pane));
+/// A same-name session is reusable only when a window marks it as hive's.
+pub(crate) fn owns_team_session(team: &str) -> bool {
+    let rows = tmux::run_output(&[
+        "list-windows",
+        "-t",
+        &format!("={team}"),
+        "-F",
+        "#{@hive-built}\t#{@hive-team}",
+    ]);
+    rows.is_ok_and(|rows| rows.lines().any(|row| row == format!("1\t{team}")))
+}
+
+pub(crate) fn checked_team_session(team: &str) -> Result<bool> {
+    if !tmux::has_session(&format!("={team}")) {
+        return Ok(false);
     }
-    let session_name = identity::current_session_name()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "hive".to_string());
-    if !tmux::has_session(&session_name) {
-        let _ = tmux::new_session(&session_name, TEAM_SESSION_COLS, TEAM_SESSION_ROWS);
+    if !owns_team_session(team) {
+        bail!("tmux session '{team}' is not owned by Hive; choose another team name");
     }
-    let (window, first_pane) =
-        tmux::new_window(&session_name, team, Some(anchor_cwd), true).unwrap_or_default();
-    if window.is_empty() || first_pane.is_empty() {
-        bail!("failed to create a window for the team");
-    }
-    mark_hive_built(&window);
-    Ok((window, first_pane))
+    Ok(true)
 }
 
 /// Build a window for the team: one attach pane per member, tiled. A team
@@ -324,12 +325,7 @@ fn materialize_team_display(
         .map(|(_, member)| map_str(member, "name"))
         .collect();
 
-    let anchor_cwd = attachable_idx
-        .first()
-        .map(|index| map_str(&members[*index], "cwd"))
-        .filter(|cwd| !cwd.is_empty())
-        .unwrap_or_else(getcwd);
-    let (window, first_pane) = team_window_for_caller(&team, &anchor_cwd)?;
+    let (window, first_pane, _) = new_team_session_window(&team)?;
 
     tmux::configure_hive_window(&window);
     tmux::set_window_option(&window, "@hive-team", &team);
@@ -529,7 +525,15 @@ mod tests {
             "",
         )
         .unwrap();
-        let argv = fake_tmux_sessions("", &[], &[], &["honey"]);
+        let argv = fake_tmux_sessions(
+            "",
+            &[],
+            &[
+                ("honey:0", "hive-built", "1"),
+                ("honey:0", "hive-team", "honey"),
+            ],
+            &["honey"],
+        );
 
         let (_window, built) =
             ensure_team_display(&crate::registry::load("honey").unwrap()).unwrap();
@@ -549,6 +553,26 @@ mod tests {
             &argv,
             &["set-window-option", "-t", "honey:2", "@hive-built", "1"]
         ));
+    }
+
+    #[test]
+    fn test_team_session_ownership_needs_both_window_marks() {
+        let _env = display_env_outside();
+        let argv = fake_tmux_sessions(
+            "",
+            &[],
+            &[
+                ("honey:0", "hive-built", "0"),
+                ("honey:0", "hive-team", "honey"),
+                ("honey:1", "hive-built", "1"),
+                ("honey:1", "hive-team", "other"),
+            ],
+            &["honey"],
+        );
+        let error = new_team_session_window("honey").unwrap_err().to_string();
+        assert!(error.contains("not owned by Hive"));
+        assert_eq!(count(&argv, "new-window"), 0);
+        assert_eq!(count(&argv, "kill-session"), 0);
     }
 
     #[test]
@@ -602,7 +626,7 @@ mod tests {
         // The window exists for the team, not for its members: nobody rides a
         // pane, so the first pane stays a shell and no viewer is launched.
         assert!(built);
-        assert_eq!(count(&argv, "new-window"), 1);
+        assert_eq!(count(&argv, "new-session"), 1);
         assert_eq!(count(&argv, "split-window"), 0);
         assert_eq!(count(&argv, "send-keys"), 0);
         assert_eq!(

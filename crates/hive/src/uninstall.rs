@@ -386,7 +386,15 @@ mod tests {
         let target = display._tmp.path().join("binary");
         fs::write(&target, "binary").unwrap();
         crate::registry::record_team("probe", "", "100", &[], "").unwrap();
-        let argv = crate::testkit::fake_tmux_sessions("", &[], &[], &["probe"]);
+        let argv = crate::testkit::fake_tmux_sessions(
+            "",
+            &[],
+            &[
+                ("probe:1", "hive-built", "1"),
+                ("probe:1", "hive-team", "probe"),
+            ],
+            &["probe"],
+        );
         assert!(run(&target, true, false).unwrap());
         assert!(crate::registry::load("probe").is_none());
         assert!(crate::testkit::has_row(

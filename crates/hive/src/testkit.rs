@@ -240,6 +240,34 @@ pub(crate) fn fake_tmux_sessions(
                     .collect::<Vec<_>>()
                     .join("\n")
             }
+            "list-windows"
+                if args.last().map(String::as_str) == Some("#{@hive-built}\t#{@hive-team}") =>
+            {
+                let session = args
+                    .get(2)
+                    .map(|s| s.trim_start_matches('='))
+                    .unwrap_or_default();
+                let mut rows = Vec::new();
+                for row in listing().lines() {
+                    let fields: Vec<_> = row.split('\t').collect();
+                    if fields.len() >= 3 && fields[0].split(':').next() == Some(session) {
+                        rows.push(format!(
+                            "{}\t{}",
+                            tag_for(fields[0], "hive-built"),
+                            fields[2]
+                        ));
+                    }
+                }
+                // A fixture may mark a window without putting it in the
+                // team's ordinary display listing (e.g. a hidden window).
+                for (target, key, team) in tags.iter().filter(|(_, key, _)| *key == "hive-team") {
+                    if target.split(':').next() == Some(session) && *key == "hive-team" {
+                        rows.push(format!("{}\t{team}", tag_for(target, "hive-built")));
+                    }
+                }
+                rows.join("\n")
+            }
+            "list-sessions" => live_sessions.join("\n"),
             "list-windows" => listing(),
             "has-session" => {
                 let target = args.get(2).cloned().unwrap_or_default();

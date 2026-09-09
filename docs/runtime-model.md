@@ -78,7 +78,8 @@ Consequences across modules:
   directory. `create` always resets the default workspace (a pool name
   recycled after `hive delete` must not inherit the old bus or event log).
   `hive delete` removes `team.json` and leaves the rest; `--down` first
-  retires every member and kills the team's tmux session;
+  retires every member and kills the session named after the team only
+  when it contains a window marked `@hive-built=1` and `@hive-team=<team>`;
   `--delete-workspace` removes the whole directory (or the external
   workspace); an external workspace is never removed without the flag. A
   long `HIVE_HOME` relocates the hived socket under `/tmp/hive-<uid>/` as
@@ -133,15 +134,20 @@ Consequences across modules:
   still lists, so no create lane reuses a name until `hive delete` releases
   it.
 
-The display is eager and never defines membership: every create leaves the
-team bound to a window (the caller's inside tmux, a fresh one in the team
-session outside), every spawn splits a pane into it, and `hive attach` heals
-it, rebuilding a window that is gone and adding a pane for any roster member
-without one. Only a member with a recorded engine identity and an attachable
-cli gets a pane; the rest are named on stderr when the window is rebuilt, and
+The display is eager and never defines membership. Outside-tmux create and
+inside-tmux agent create put the team window in the session named after the
+team. A shell-pane create still borrows its window. A same-name session is
+reusable only when it contains a window marked `@hive-built=1` and
+`@hive-team=<team>`; otherwise create or display rebuild reports a conflict.
+Pool names skip existing sessions. Every spawn splits into the team window.
+`hive attach` reuses an existing display, including a legacy borrowed window,
+and adds panes for missing roster members. When the window is gone, attach
+rebuilds it in the team session whether the caller is inside or outside tmux.
+Only a member with a recorded engine identity and an attachable cli gets a pane; the rest are named on stderr when the window is rebuilt, and
 stay registry-only until they have one. A window hive built itself carries
-`@hive-built`; `hive delete` closes those and leaves a window a human's
-session lent the team (an in-tmux create). A claude member whose sessionId names an interactive session (a
+`@hive-built`; `hive delete` closes those except the caller's current window,
+and leaves a borrowed window (a shell-pane create or a legacy agent create).
+A claude member whose sessionId names an interactive session (a
 creating or joined desktop session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
 steals the member's deliveries. That mirror is an ordinary pane
@@ -180,8 +186,9 @@ team is theirs again, not re-tiled at their next split.
 bar's orch chip appear; unset reads as open — nothing withholds the mirror
 by default. `hive mirror off` parks the pane with `break-pane -d` in a hidden
 window of the team session (the caller's session when the team has none)
-tagged `@hive-hidden <team>`: the viewer keeps running, every team-window
-scan masks that window (`#{?@hive-hidden,,#{@hive-team}}` — a window format
+tagged `@hive-hidden <team>`, `@hive-built=1` and `@hive-team=<team>`:
+the ownership marks allow a rebuild if only the parked mirror survives.
+The viewer keeps running, every team-window scan masks that window (`#{?@hive-hidden,,#{@hive-team}}` — a window format
 reads the parked pane's `@hive-team` through), and `hive delete` closes it.
 `on` joins the same pane back as the first pane with `join-pane -b`, or
 rebuilds it the way a heal would when the parked pane is gone; a heal or
@@ -230,12 +237,13 @@ different themes can overwrite each other's reports; resolving that conflict
 is outside this policy. The viewer's
 `active_theme_kind` detection chain is unchanged.
 
-The team session hive builds — `hive create` outside tmux, `hive attach`
-rebuilding a lost window — carries hive's own two-line
-status bar, installed by session id at build (`tmux/status.rs`; `status*`
-are session options, so a window a human's session lent the team gets none
-and the human's global status is untouched). Its colours follow the
-viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
+The team session hive builds — outside-tmux create, inside-tmux agent create,
+or attach rebuilding a lost window from either location — carries Hive's
+two-line status bar. It is installed by session id (`tmux/status.rs`):
+`status*` and `mouse` are session options, so the source session keeps its
+configuration. Borrowed shell-pane and legacy windows get no Hive bar.
+The two key bindings below are server-wide, with fallbacks for other windows.
+The bar's colours follow the viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
 detection (`view_theme.rs`), resolved once at install, so a theme change
 shows at the next session build — and the bar is rendered from tmux options
 alone, with no `#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
@@ -247,9 +255,9 @@ chip a `range=user|hive-mirror` one (the install also sets the session's
 `mouse on`, so clicks reach them whatever the global setting); the root
 `MouseDown1Status` binding
 installed with the bar routes them to `select-pane -t =` and `hive mirror
---window`, and falls through to tmux's stock `select-window -t =` for every
-other status line. The `prefix+m` binding installed with it is gated on
-`@hive-team` the same way: its else branch is the command the key ran
+--window`, and falls through to the saved `MouseDown1Status` binding for
+other ranges. With no saved binding it uses tmux's stock `select-window -t =`.
+The `prefix+m` binding installed with it is gated on `@hive-team` the same way: its else branch is the command the key ran
 before hive bound it (`list-keys -T prefix m` at install, kept in the
 server option `@hive-prefix-m` so a later install behind hive's own binding
 still has it), so a non-team window keeps tmux's `select-pane -m` or the
@@ -697,6 +705,23 @@ not a limitation of the session's inbox transport: a terminal's claude still
 reaches a team as a `ccd.<name>` guest over the same socket.
 
 ## Terminal launchers and team handoff
+
+Inside tmux, managed agent create moves the existing viewer pane into the
+team session with checked `swap-pane`. The pane id and engine binding stay
+the same. A temporary shell takes its old slot: it stays when the source
+window had one pane, and is removed after commit when other panes remain.
+A source window linked across sessions is refused before moving anything.
+Failures before the registry commit swap the viewer back and remove the
+created shell; an unconfirmed pane location or failed swap back leaves both
+panes for recovery. Once registered, errors are reported without undoing the
+team. New team sessions receive the engine roots listed below.
+
+Before moving, create records the non-control clients displaying the source
+window. With exactly one, it switches that client explicitly to the team
+window. With none or more than one, it leaves clients in place and adds a
+`hive attach <team>` hint to the create result. A failed switch also leaves
+the team registered with the hint. The normal terminal handoff protocol
+below is used only outside tmux; moving a pane does not restart its viewer.
 
 Outside tmux, `hive claude`, `hive codex`, and `hive grok` show a local
 viewer without creating a tmux session (`cli/launch.rs`,

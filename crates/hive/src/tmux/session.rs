@@ -206,3 +206,18 @@ pub fn select_window(window_target: &str) {
 pub fn switch_client(window_target: &str) {
     let _ = run(&["switch-client", "-t", window_target], false, 5);
 }
+
+/// Session names on this server, for name allocation only.
+pub(crate) fn session_names() -> Vec<String> {
+    run(&["list-sessions", "-F", "#{session_name}"], false, 5)
+        .ok()
+        .filter(|r| r.returncode == 0)
+        .map(|r| r.stdout.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Switch one explicitly selected client, reporting a failed jump.
+pub(crate) fn switch_named_client(client: &str, window: &str) -> anyhow::Result<()> {
+    run(&["switch-client", "-c", client, "-t", window], true, 5)?;
+    Ok(())
+}
