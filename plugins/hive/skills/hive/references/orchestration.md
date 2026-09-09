@@ -68,7 +68,7 @@ hive spawn review --cli codex --task <workspace>/artifacts/tasks/review.md
 
 **⑥ hive 节点进 Claude Code Workflow**:用 Workflow 工具编排时,节点可以是活的 hive 成员(可见 pane,human 可介入),Workflow 保留自己的进度树和 journal;循环、fan-out、barrier 由 Workflow 脚本表达,hive 只提供节点。
 
-开工:编排的 Claude session 里 `hive create <run>`,你以 `<run>.orch` 入册,团窗口首格是你的只读镜像;session=team=run 名;human `hive attach <run>` 看全场。
+开工:编排的 Claude session 里 `hive create <run>`,你以 `<run>.orch` 入册,session=team=run 名。hclaude 自动进入团窗口;桌面 Claude 在团窗口显示只读镜像,给 human `hive attach <run>` 看全场。
 
 节点用一条阻塞命令运行:`hive workflow run --team <run> --name <member> --cli codex|grok [--model]`,task 从 stdin 进,结果一行 JSON 从 stdout 出。
 

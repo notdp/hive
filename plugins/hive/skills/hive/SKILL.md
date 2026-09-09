@@ -10,8 +10,8 @@ team 由注册名册和各自运行在引擎里的成员组成。tmux 窗口只�
 ```bash
 hive team [-t <team>]              # 名册 + runtime:self 是你,members 是队友及其状态,runtimeWorkspace 是团目录
 hive send <addr> "<摘要>" [--artifact <file>|-]   # 唯一投递动词,成功零输出
-hive create [name]                 # 建团,缺省池名。tmux 内:建团的 agent pane 即 orch。tmux 外:只有桌面 app 的 Claude session 以 <team>.orch 入册,终端裸 claude 会被拒并指向 hclaude;codex/grok 建的团无 orch。shell 建团无 orch
-hive join <team>                   # 入队:tmux 外=桌面 app 的 Claude session 入册(终端裸 claude 被拒);tmux 内=当前 pane 注册进窗口的 team
+hive create [name]                 # 建团,缺省池名。tmux 内:建团的 agent pane 即 orch。tmux 外:hclaude 把当前对话移入团窗口,桌面 Claude 入册并显示镜像。裸 CLI 被拒;shell 建团无 orch
+hive join <team>                   # 入队:hclaude 把当前对话移入团窗口;桌面 Claude 入册并显示镜像;tmux 内注册当前 pane
 hive spawn <name> [-t <team>] [--cli claude|codex|grok] [--task <file>]   # 造成员,tmux 内外都行;-t 缺省派进你自己绑定的团
 hive attach <team> / hive kill <member> [-t <team>] / hive delete <team> [--down|--delete-workspace] / hive ls
 ```
@@ -29,9 +29,11 @@ hive attach <team> / hive kill <member> [-t <team>] / hive delete <team> [--down
 
 经 2 或 3 建团后,tmux 内的 agent、tmux 外的 Claude session 成为 orch。human 还没给需求就结束 turn,不凭空派活。要拆任务时先读 references/orchestration.md。
 
-仅当系统提示说明你在 Claude desktop app 中运行时,建团、spawn 后向 human 提供独立的 ```bash 命令块 `hive attach <team>`,块内只放命令。
+create/join 返回 `handoff: "transferred"` 时,原终端自动进入团窗口,按 `nextStep` 继续当前任务,省略 `hive attach` 提示。已在 tmux 团窗口中时也直接继续。
 
-只对 claude:tmux 外的 Claude session 入册后,用宿主的改标题能力在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章,退队或删团时摘掉。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
+桌面 Claude 的 human 另开终端看团,此时建团、spawn 后提供独立的 ```bash 命令块 `hive attach <team>`,块内只放命令。交接结果要求恢复,或 human 主动询问如何打开团窗口时,也可提供 attach 命令。
+
+只对桌面 Claude:session 入册后,用宿主的改标题能力在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章,退队或删团时摘掉。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
 
 ## 消息:`<HIVE>` 信封
 

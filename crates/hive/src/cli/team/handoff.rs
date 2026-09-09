@@ -49,24 +49,35 @@ fn bind(
     Ok(row)
 }
 
-fn finish(client: &mut Client, target: &Target, team: &mut Team, workspace: &str) -> String {
+fn finish(
+    client: &mut Client,
+    target: &Target,
+    team: &mut Team,
+    workspace: &str,
+) -> (&'static str, &'static str) {
     // Registry commit is authoritative even if the launcher died before it
     // could acknowledge. Never undo membership or reopen the local viewer.
-    let status = match client.commit() {
-        Ok(()) => "transferred".to_string(),
+    let result = match client.commit() {
+        Ok(()) => (
+            "transferred",
+            "Continue the current task. The original terminal opens the team window automatically; do not ask the user to run hive attach.",
+        ),
         Err(error) => {
             eprintln!("hive: {error}");
             if let Err(error) = crate::claude_handoff::recover_viewer(target, &client.engine.job_id)
             {
                 eprintln!("hive: {error}");
             }
-            "team committed; terminal transfer needs recovery".to_string()
+            (
+                "team committed; terminal transfer needs recovery",
+                "The team is registered, but terminal transfer needs recovery. Use hive attach with this team name to open its window.",
+            )
         }
     };
     crate::team::start_team_hived_or_warn(team, workspace);
     crate::team::remember_context(&target.team, workspace, &target.member);
     let _ = crate::layout::ensure(&target.window, false);
-    status
+    result
 }
 
 pub(super) fn create(mut client: Client, name: &str, description: &str) -> Result<Value> {
@@ -135,10 +146,10 @@ pub(super) fn create(mut client: Client, name: &str, description: &str) -> Resul
         }
     };
     let target = prepared.expect("successful build prepared target");
-    let status = finish(&mut client, &target, &mut team, &workspace);
+    let (status, next_step) = finish(&mut client, &target, &mut team, &workspace);
     Ok(
         json!({"team":name, "window":window, "orch":{"pane":pane,"name":LEAD_AGENT_NAME,"cli":"claude"},
-        "workspace":workspace, "protocol":"/hive:hive", "handoff":status}),
+        "workspace":workspace, "protocol":"/hive:hive", "handoff":status, "nextStep":next_step}),
     )
 }
 
@@ -201,10 +212,10 @@ pub(super) fn join(
         target.rollback(&client.engine.job_id);
         return Err(error);
     }
-    let status = finish(&mut client, &target, &mut team, &workspace);
+    let (status, next_step) = finish(&mut client, &target, &mut team, &workspace);
     // This invocation is the joining engine's own tool. The result gives
     // its identity directly, without sending a second turn into that job.
     Ok(
-        json!({"joined":member,"role":"agent","pane":pane,"team":team_name,"group":group,"handoff":status}),
+        json!({"joined":member,"role":"agent","pane":pane,"team":team_name,"group":group,"handoff":status, "nextStep":next_step}),
     )
 }
