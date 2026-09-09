@@ -219,8 +219,11 @@ Commands:
   its window; a Claude session running the command becomes the orch,
   mirrored read-only in the first pane (`hive mirror`, the status bar's
   orch chip or `prefix+m` park and restore it; the team session gets
-  hive's two-line status bar). Inside tmux on an agent pane: that pane
-  becomes the orch. Inside tmux on a shell pane: the window binds the team
+  hive's two-line status bar). Inside tmux on an agent pane: that pane moves
+  into the team session and becomes the orch, with the same status bar.
+  If it was the window's only pane, a shell stays in its place. The attached
+  client switches to the team session when it is unambiguous.
+  Inside tmux on a shell pane: the window binds the team
   without an orch.
 
   The workspace defaults to the team's own directory, $HIVE_HOME/teams/NAME/

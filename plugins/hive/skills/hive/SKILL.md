@@ -10,7 +10,7 @@ team 由注册名册和各自运行在引擎里的成员组成。tmux 窗口只�
 ```bash
 hive team [-t <team>]              # 名册 + runtime:self 是你,members 是队友及其状态,runtimeWorkspace 是团目录
 hive send <addr> "<摘要>" [--artifact <file>|-]   # 唯一投递动词,成功零输出
-hive create [name]                 # 建团,缺省池名。tmux 内:建团的 agent pane 即 orch。tmux 外:hclaude/hcodex/hgrok 把当前对话移入团窗口,桌面 Claude 入册并显示镜像。裸 CLI 被拒;shell 建团无 orch
+hive create [name]                 # 建团,缺省池名。tmux 内:建团的 agent pane 移入团窗口并成为 orch。tmux 外:hclaude/hcodex/hgrok 把当前对话移入团窗口,桌面 Claude 入册并显示镜像。裸 CLI 被拒;shell 建团无 orch
 hive join <team>                   # 入队:hclaude/hcodex/hgrok 把当前对话移入团窗口;桌面 Claude 入册并显示镜像;tmux 内注册当前 pane
 hive spawn <name> [-t <team>] [--cli claude|codex|grok] [--task <file>]   # 造成员,tmux 内外都行;-t 缺省派进你自己绑定的团
 hive attach <team> / hive kill <member> [-t <team>] / hive delete <team> [--down|--delete-workspace] / hive ls

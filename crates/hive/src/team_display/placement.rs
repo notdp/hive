@@ -78,7 +78,7 @@ impl OrchSource {
                 // This shell stays in the source window if it was the only
                 // pane. Start it with the source cwd and the team's roots.
                 let command = format!(
-                    "cd {} && exec \"$SHELL\"",
+                    "cd {} && exec \"${{SHELL:-/bin/sh}}\"",
                     crate::shell::shlex_quote(&placement.source.cwd)
                 );
                 tmux::respawn_pane(&placement.shell, &command)?;
