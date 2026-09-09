@@ -530,7 +530,13 @@ fn terminate_process_group(pid: libc::pid_t) {
 /// record naming a dead or recycled pid is removed without touching the
 /// process.
 pub fn kill_daemon_key(key: &str) {
-    let sock = socket_path_for_key(key);
+    // The alias this kill resolved through, read once up front: the reap
+    // below takes seconds, and a join could bind the member to another
+    // launch meanwhile — that alias is not this kill's to remove.
+    let bound_launch = super::alias_target(key);
+    let sock = grok_home()
+        .join("hive")
+        .join(format!("{}.sock", bound_launch.as_deref().unwrap_or(key)));
     let mut signalled: Vec<libc::pid_t> = Vec::new();
     reap_socket_once(&sock, &mut signalled);
     reap_socket_once(&sock, &mut signalled);
@@ -539,8 +545,19 @@ pub fn kill_daemon_key(key: &str) {
         sock.with_extension("lock"),
         sock.with_extension("pid"),
         sock.with_extension("session"),
-        alias_path_for_key(key),
     ] {
         let _ = fs::remove_file(path);
+    }
+    // The member's alias goes under the same lock a bind or rollback holds,
+    // and only while it still names the launch this kill reaped; the lock
+    // file itself stays — flock is by inode, and a lock file unlinked under
+    // a holder lets the next join lock a fresh one beside it.
+    let Some(bound_launch) = bound_launch else {
+        return;
+    };
+    if let Ok(_lock) = super::alias_lock(key) {
+        if super::alias_target(key).as_deref() == Some(bound_launch.as_str()) {
+            let _ = fs::remove_file(alias_path_for_key(key));
+        }
     }
 }

@@ -80,7 +80,7 @@ pub fn bind_launch(
 /// The member's alias lock, held across every alias read-then-write: a
 /// bind and a rollback from the launcher's and the client's side can
 /// interleave, and two joins can race for one member name.
-fn alias_lock(member_key: &str) -> Result<fs::File> {
+pub(crate) fn alias_lock(member_key: &str) -> Result<fs::File> {
     let path = alias_path_for_key(member_key).with_extension("alias-lock");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

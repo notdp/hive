@@ -3069,6 +3069,9 @@ fn test_stop_launch_steps_back_once_a_member_owns_the_leader() {
     assert!(!hive_dir.join("l-ab12.sock").exists());
     assert!(!hive_dir.join("l-ab12.session").exists());
     assert!(!hive_dir.join("m-honey.orch.alias").exists());
+    // the lock file stays: flock is by inode, a later join must lock the
+    // same one
+    assert!(hive_dir.join("m-honey.orch.alias-lock").exists());
     drop(listener);
     // unbound: the launcher's stop removes the key's files
     let _listener = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
@@ -3139,4 +3142,27 @@ fn test_a_corrupt_alias_is_refused_never_overwritten() {
         fs::read_to_string(hive_dir.join("m-honey.orch.alias")).unwrap(),
         "not a key"
     );
+}
+
+#[test]
+fn test_a_member_kill_leaves_an_alias_rebound_to_another_launch_meanwhile() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    // the kill resolves through l-ab12; a concurrent join rebinds the member
+    // to l-cd34 before the alias removal runs (the process listing seam is
+    // where the reap spends its time)
+    let _a = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    let _b = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
+    write_session_key("l-ab12", "sid-1", "/w").unwrap();
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "orch", "%3").unwrap();
+    let alias = hive_dir.join("m-honey.orch.alias");
+    set_process_listing(move || {
+        fs::write(&alias, "l-cd34").unwrap();
+        Vec::new()
+    });
+    kill_daemon_key("m-honey.orch");
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-cd34"));
+    // l-ab12's own files went, l-cd34 is untouched
+    assert!(!hive_dir.join("l-ab12.session").exists());
+    assert!(hive_dir.join("l-cd34.sock").exists());
 }
