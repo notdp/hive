@@ -368,3 +368,45 @@ fn test_leaving_the_local_tui_stops_an_unbound_launch_leader() {
     assert!(!r.file(&format!("g/hive/{key}.session")).exists());
     assert!(!r.tmux(&["list-sessions"]).status.success());
 }
+
+#[test]
+fn test_join_binds_same_launch_leader_and_preserves_existing_team_roots() {
+    let mut r = Rig::new();
+    let out = r
+        .command(env!("CARGO_BIN_EXE_hive"))
+        .args(["create", TEAM])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    r.tmux_ok(&[
+        "set-environment",
+        "-t",
+        TEAM,
+        "GROK_HOME",
+        "existing-team-root",
+    ]);
+    r.launch(false);
+    r.ready();
+    let leader = r.leader_pid();
+    let key = r.launch_key();
+    let out = r
+        .engine_command(&["join", TEAM, "--as", "reviewer", "--no-notify"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    r.wait("joined Grok viewer", || r.events("attach").len() == 2);
+    assert_eq!(leader, r.leader_pid());
+    assert_eq!(
+        fs::read_to_string(r.file(&format!("g/hive/m-{TEAM}.reviewer.alias"))).unwrap(),
+        key
+    );
+    assert_eq!(
+        r.tmux_ok(&["show-environment", "-t", TEAM, "GROK_HOME"]),
+        "GROK_HOME=existing-team-root"
+    );
+    assert!(r.events("overlap").is_empty());
+}

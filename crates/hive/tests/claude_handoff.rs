@@ -437,7 +437,15 @@ fn test_launcher_dying_after_release_leaves_a_complete_recoverable_team() {
 
 #[test]
 fn test_join_moves_viewer_into_existing_team_without_replacing_its_roster() {
-    let mut r = Rig::new();
+    check_join(Rig::new());
+}
+
+#[test]
+fn test_codex_join_preserves_existing_team_roots_and_resumes_its_thread() {
+    check_join(Rig::codex());
+}
+
+fn check_join(mut r: Rig) {
     let out = r
         .command(env!("CARGO_BIN_EXE_hive"))
         .args(["create", TEAM])
