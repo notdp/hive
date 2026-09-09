@@ -252,12 +252,12 @@ pub(crate) fn new_team_session_window(team: &str) -> Result<(String, String, boo
     let exact = format!("={team}");
     if checked_team_session(team)? {
         // new_window forces "<team>:" so a numeric name is a session, not an index
-        let (window, pane) = tmux::new_window(&exact, team, None, true)?;
+        let (window, pane) = tmux::new_window(&exact, team, None, true, None)?;
         mark_hive_built(&window);
         install_team_status(&pane);
         return Ok((window, pane, false));
     }
-    let pane = tmux::new_session(team, TEAM_SESSION_COLS, TEAM_SESSION_ROWS)?;
+    let pane = tmux::new_session(team, TEAM_SESSION_COLS, TEAM_SESSION_ROWS, None)?;
     // Never fall back to "<team>:" here — that is a session target, not a
     // window, and the first window's index follows the user's base-index.
     let window = tmux::get_pane_window_target(&pane)

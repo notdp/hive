@@ -125,11 +125,21 @@ def orch():
 
 
 def test_e2e_single_pane_create_keeps_source_and_same_managed_pane(orch):
+    orch.tmux("set-hook", "-g", "after-new-session",
+              'set-option -p -F @initial-command "#{pane_start_command}"')
     payload = orch.create()
     orch.check_team(payload)
     assert "hive attach orch-ui" in payload["nextStep"]
     replacement, = orch.tmux("list-panes", "-t", orch.window, "-F", "#{pane_id}").splitlines()
     assert replacement != orch.pane
+    assert shlex.split(orch.value(replacement, "#{@initial-command}")) == [
+        "/bin/sh -c 'exec sleep 2147483647'"
+    ]
+    # tmux quotes the command and escapes its dollar sign; cwd is canonical.
+    command, = shlex.split(orch.value(replacement, "#{pane_start_command}"))
+    assert command.replace(r"\$", "$") == (
+        f'cd {shlex.quote(str(orch.root.resolve()))} && exec "${{SHELL:-/bin/sh}}"'
+    )
     assert Path(orch.value(replacement, "#{pane_current_path}")).resolve() == orch.root.resolve()
     repeated = orch.create()
     assert repeated["team"] == orch.team

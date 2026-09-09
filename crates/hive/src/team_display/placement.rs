@@ -1,10 +1,12 @@
 //! Move an orch's existing viewer into a team session. Until the registry
-//! commit, the temporary shell keeps its place in the source window so a
+//! commit, the placeholder keeps its place in the source window so a
 //! failed create can swap the viewer back.
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::tmux;
+
+const PLACEHOLDER_COMMAND: &str = "/bin/sh -c 'exec sleep 2147483647'";
 
 pub(crate) struct OrchSource {
     pub(crate) pane: String,
@@ -56,32 +58,38 @@ impl OrchSource {
 
     pub(crate) fn place(self, team: &str) -> Result<OrchPlacement> {
         let new_session = !super::checked_team_session(team)?;
-        let shell = if new_session {
-            tmux::new_session(team, super::TEAM_SESSION_COLS, super::TEAM_SESSION_ROWS)?
+        let placeholder = if new_session {
+            tmux::new_session(
+                team,
+                super::TEAM_SESSION_COLS,
+                super::TEAM_SESSION_ROWS,
+                Some(PLACEHOLDER_COMMAND),
+            )?
         } else {
-            tmux::new_window(&format!("={team}"), team, Some(&self.cwd), true)?.1
+            tmux::new_window(
+                &format!("={team}"),
+                team,
+                Some(&self.cwd),
+                true,
+                Some(PLACEHOLDER_COMMAND),
+            )?
+            .1
         };
-        if shell.is_empty() {
-            bail!("tmux did not report the new team's shell pane");
+        if placeholder.is_empty() {
+            bail!("tmux did not report the new team's placeholder pane");
         }
         let mut placement = OrchPlacement {
             source: self,
-            shell,
+            placeholder,
             window: String::new(),
             window_id: String::new(),
         };
         let prepared = (|| -> Result<()> {
-            placement.window = pane_value(&placement.shell, "#{session_name}:#{window_index}")?;
-            placement.window_id = pane_value(&placement.shell, "#{window_id}")?;
+            placement.window =
+                pane_value(&placement.placeholder, "#{session_name}:#{window_index}")?;
+            placement.window_id = pane_value(&placement.placeholder, "#{window_id}")?;
             if new_session {
-                crate::terminal_handoff::set_session_roots(&placement.shell)?;
-                // This shell stays in the source window if it was the only
-                // pane. Start it with the source cwd and the team's roots.
-                let command = format!(
-                    "cd {} && exec \"${{SHELL:-/bin/sh}}\"",
-                    crate::shell::shlex_quote(&placement.source.cwd)
-                );
-                tmux::respawn_pane(&placement.shell, &command)?;
+                crate::terminal_handoff::set_session_roots(&placement.placeholder)?;
             }
             tmux::run(
                 &["rename-window", "-t", &placement.window_id, team],
@@ -99,9 +107,9 @@ impl OrchSource {
                 true,
                 5,
             )?;
-            let session_id = pane_value(&placement.shell, "#{session_id}")?;
+            let session_id = pane_value(&placement.placeholder, "#{session_id}")?;
             tmux::install_team_status_checked(&session_id)?;
-            tmux::swap_pane_checked(&placement.source.pane, &placement.shell)?;
+            tmux::swap_pane_checked(&placement.source.pane, &placement.placeholder)?;
             if pane_value(&placement.source.pane, "#{window_id}")? != placement.window_id {
                 bail!("orch pane did not arrive in the team window");
             }
@@ -116,7 +124,7 @@ impl OrchSource {
 
 pub(crate) struct OrchPlacement {
     source: OrchSource,
-    shell: String,
+    placeholder: String,
     pub(crate) window: String,
     pub(crate) window_id: String,
 }
@@ -160,11 +168,11 @@ impl OrchPlacement {
 
     fn rollback(&mut self) -> Result<()> {
         // A timed-out swap may already have moved the pane. Read its
-        // location before deciding whether the temporary shell is safe to
+        // location before deciding whether the placeholder is safe to
         // close; an unknown location leaves both panes for recovery.
         let actual = pane_value(&self.source.pane, "#{window_id}")?;
         if actual == self.window_id {
-            tmux::swap_pane_checked(&self.source.pane, &self.shell)
+            tmux::swap_pane_checked(&self.source.pane, &self.placeholder)
                 .context("swap back to the source window")?;
         } else if actual != self.source.window {
             bail!("orch pane is in unexpected window {actual}; both panes were left intact");
@@ -181,7 +189,7 @@ impl OrchPlacement {
         }
         // The only pane we created is back in the new window. Killing it
         // closes that window, and its new session if it is now empty.
-        tmux::run(&["kill-pane", "-t", &self.shell], true, 5)?;
+        tmux::run(&["kill-pane", "-t", &self.placeholder], true, 5)?;
         if self.source.zoomed && pane_value(&self.source.pane, "#{window_zoomed_flag}")? == "0" {
             tmux::run(&["resize-pane", "-Z", "-t", &self.source.pane], true, 5)?;
         }
@@ -192,10 +200,22 @@ impl OrchPlacement {
     /// intact; the human can open the registered window with `hive attach`.
     pub(crate) fn finish(self) -> bool {
         if self.source.panes > 1 {
-            if let Err(error) = tmux::run(&["kill-pane", "-t", &self.shell], true, 5) {
+            if let Err(error) = tmux::run(&["kill-pane", "-t", &self.placeholder], true, 5) {
                 eprintln!(
-                    "hive: team registered; removing temporary shell {} failed: {error}",
-                    self.shell
+                    "hive: team registered; removing placeholder {} failed: {error}",
+                    self.placeholder
+                );
+            }
+        }
+        if self.source.panes == 1 {
+            let command = format!(
+                "cd {} && exec \"${{SHELL:-/bin/sh}}\"",
+                crate::shell::shlex_quote(&self.source.cwd)
+            );
+            if let Err(error) = tmux::respawn_pane(&self.placeholder, &command) {
+                eprintln!(
+                    "hive: team registered; starting source window shell {} failed: {error}",
+                    self.placeholder
                 );
             }
         }

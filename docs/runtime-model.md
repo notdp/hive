@@ -708,11 +708,13 @@ reaches a team as a `ccd.<name>` guest over the same socket.
 
 Inside tmux, managed agent create moves the existing viewer pane into the
 team session with checked `swap-pane`. The pane id and engine binding stay
-the same. A temporary shell takes its old slot: it stays when the source
-window had one pane, and is removed after commit when other panes remain.
+the same. A placeholder running `sleep` takes its old slot. After the
+registry commit, it is replaced with a shell when the source window had
+one pane, or removed when other panes remain. Interactive shell startup
+is deferred until that commit.
 A source window linked across sessions is refused before moving anything.
 Failures before the registry commit swap the viewer back and remove the
-created shell; an unconfirmed pane location or failed swap back leaves both
+placeholder; an unconfirmed pane location or failed swap back leaves both
 panes for recovery. Once registered, errors are reported without undoing the
 team. New team sessions receive the engine roots listed below.
 

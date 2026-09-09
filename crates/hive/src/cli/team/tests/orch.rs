@@ -16,6 +16,7 @@ struct Display {
     panes: usize,
     linked: bool,
     foreign_session: bool,
+    owned_session: bool,
 }
 
 fn setup(panes: usize) -> (crate::testkit::DisplayEnv, Rc<RefCell<Display>>) {
@@ -61,12 +62,31 @@ fn setup(panes: usize) -> (crate::testkit::DisplayEnv, Rc<RefCell<Display>>) {
         let output = match verb {
             "has-session" => {
                 return Ok(tmux::ok_run(
-                    if state.foreign_session { 0 } else { 1 },
+                    if state.foreign_session || state.owned_session {
+                        0
+                    } else {
+                        1
+                    },
                     "",
                     "",
                 ))
             }
+            "list-windows" if state.owned_session => "1\thoney".into(),
             "list-clients" => state.clients.clone(),
+            "new-window" => {
+                state.shell = true;
+                "honey:1\t%1".into()
+            }
+            "respawn-pane" => {
+                assert!(state.moved, "shell must start after swap");
+                assert!(
+                    crate::registry::load("honey").is_some(),
+                    "shell must start after registry commit"
+                );
+                assert_eq!(state.panes, 1, "only a single-pane source needs a shell");
+                assert_eq!(target, "%1");
+                String::new()
+            }
             "new-session" => {
                 state.shell = true;
                 "%1".into()
@@ -169,6 +189,21 @@ fn test_create_orch_preserves_source_window_with_one_pane() {
         .contains("hive attach honey"));
     let state = state.borrow();
     assert!(state.moved && state.shell);
+    let creation = state.calls.iter().find(|a| a[0] == "new-session").unwrap();
+    assert_eq!(
+        creation.last().unwrap(),
+        "/bin/sh -c 'exec sleep 2147483647'"
+    );
+    let respawns: Vec<_> = state
+        .calls
+        .iter()
+        .filter(|a| a[0] == "respawn-pane")
+        .collect();
+    assert_eq!(respawns.len(), 1);
+    assert!(respawns[0]
+        .last()
+        .unwrap()
+        .ends_with("exec \"${SHELL:-/bin/sh}\""));
     assert!(!state
         .calls
         .iter()
@@ -182,6 +217,7 @@ fn test_create_orch_keeps_other_source_panes() {
     create_orch_team("%0", "honey").unwrap();
     let state = state.borrow();
     assert!(state.moved && !state.shell);
+    assert!(!state.calls.iter().any(|a| a[0] == "respawn-pane"));
     assert_eq!(
         state.calls.iter().filter(|a| a[0] == "kill-pane").count(),
         1
@@ -356,5 +392,50 @@ fn test_create_orch_restores_tags_after_a_partial_bind() {
     );
     for key in ["@hive-team", "@hive-agent", "@hive-role"] {
         assert!(!state.tags.contains_key(key));
+    }
+}
+
+#[test]
+fn test_create_orch_existing_team_session_starts_a_placeholder_window() {
+    let (env, state) = setup(1);
+    state.borrow_mut().owned_session = true;
+    let _hived = hived_answering_ping("honey");
+    create_orch_team("%0", "honey").unwrap();
+    let state = state.borrow();
+    assert!(!state.calls.iter().any(|a| a[0] == "new-session"));
+    let creation = state.calls.iter().find(|a| a[0] == "new-window").unwrap();
+    assert_eq!(
+        creation.last().unwrap(),
+        "/bin/sh -c 'exec sleep 2147483647'"
+    );
+    let cwd = creation.iter().position(|v| v == "-c").unwrap();
+    assert_eq!(creation[cwd + 1], env._tmp.path().to_str().unwrap());
+    assert_eq!(
+        state
+            .calls
+            .iter()
+            .filter(|a| a[0] == "respawn-pane")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_create_orch_rollback_never_starts_a_shell() {
+    for failure in [
+        "new-session",
+        "bind-key",
+        "swap-pane",
+        "swap-timeout",
+        "pane-bind",
+        "registry",
+    ] {
+        let (_env, state) = setup(1);
+        state.borrow_mut().failure = failure;
+        assert!(create_orch_team("%0", "honey").is_err(), "{failure}");
+        assert!(
+            !state.borrow().calls.iter().any(|a| a[0] == "respawn-pane"),
+            "{failure}"
+        );
     }
 }
